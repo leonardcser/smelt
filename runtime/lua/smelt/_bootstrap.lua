@@ -229,10 +229,15 @@ if smelt.lifecycle and smelt.cell then
     return out
   end
 
+  ---@class smelt.lifecycle.Guard
+  ---@field alive fun(self:smelt.lifecycle.Guard):boolean Return true while every captured epoch still matches and the guard was not cancelled or superseded.
+  ---@field cancel fun(self:smelt.lifecycle.Guard) Mark the guard stale immediately.
+  ---@field latest fun(self:smelt.lifecycle.Guard,key:string):smelt.lifecycle.Guard Mark this guard as the latest request for `key`; older guards with the same key become stale.
+  ---@field wrap fun(self:smelt.lifecycle.Guard,fn:function):function Return a wrapper that calls `fn` only while the guard is alive.
   ---Create a guard whose `:alive()` flips false when any scoped epoch changes.
   ---Scopes are `"session"`, `"history"`, `"input"`, or a concrete cell name.
   ---Use `:latest(key)` when only the newest request in a family may complete.
-  ---@type fun(scopes: string|string[]|table?): table
+  ---@type fun(scopes: string|string[]|table?): smelt.lifecycle.Guard
   function smelt.lifecycle.guard(scopes)
     local snapshot = {}
     for _, cell_name in ipairs(normalize_guard_scopes(scopes)) do

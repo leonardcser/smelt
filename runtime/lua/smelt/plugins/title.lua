@@ -64,14 +64,8 @@ local function reset_sent_messages()
   sent_messages = {}
 end
 
-smelt.cell("session_started"):subscribe(reset_sent_messages)
-smelt.cell("session_ended"):subscribe(reset_sent_messages)
-
-smelt.cell("history"):subscribe(function(payload)
-  if payload.kind == "cleared" or payload.kind == "rewound" or payload.kind == "loaded" or payload.kind == "forked" then
-    reset_sent_messages()
-  end
-end)
+smelt.cell("session_epoch"):subscribe(reset_sent_messages)
+smelt.cell("history_epoch"):subscribe(reset_sent_messages)
 
 local function update_title(new_text)
 

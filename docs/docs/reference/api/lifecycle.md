@@ -9,8 +9,10 @@ Host-phase hooks keyed by event name. `on(event, fn)` is the general form; `on_r
 ## `smelt.lifecycle.guard`
 
 ```lua
-fun(scopes: string|string[]|table?): table
+fun(scopes: string|string[]|table?): smelt.lifecycle.Guard
 ```
+
+Types: [`smelt.lifecycle.Guard`](types.md#smeltlifecycleguard)
 
 Create a guard whose `:alive()` flips false when any scoped epoch changes.
 Scopes are `"session"`, `"history"`, `"input"`, or a concrete cell name.

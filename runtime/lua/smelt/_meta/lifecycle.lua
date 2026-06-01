@@ -10,7 +10,7 @@ local lifecycle = {}
 --- Create a guard whose `:alive()` flips false when any scoped epoch changes.
 --- Scopes are `"session"`, `"history"`, `"input"`, or a concrete cell name.
 --- Use `:latest(key)` when only the newest request in a family may complete.
----@type fun(scopes: string|string[]|table?): table
+---@type fun(scopes: string|string[]|table?): smelt.lifecycle.Guard
 lifecycle.guard = nil
 
 --- Queue `fn(ctx)` for the lifecycle event named `event`. Multiple hooks per event fire in registration order. Emitted events: `"ready"` (every Lua-context bring-up - cold start and after each `/reload`; `ctx = { kind = "launch" | "reload" }`) and `"shutdown"` (after the TUI tears down, before process exit; `ctx = { session_id, has_messages }`). Returns a `Reg` whose `:remove()` unregisters the hook before it fires; calling `:remove()` after the hook has already fired is a no-op returning `false`.

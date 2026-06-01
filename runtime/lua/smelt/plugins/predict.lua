@@ -23,23 +23,16 @@ end
 -- so only the messages array is compared between calls.
 local sent_messages = {}
 
-smelt.cell("input_submit"):subscribe(clear_prediction)
+smelt.cell("input_epoch"):subscribe(clear_prediction)
 
-smelt.cell("session_started"):subscribe(function()
+smelt.cell("session_epoch"):subscribe(function()
   clear_prediction()
   sent_messages = {}
 end)
 
-smelt.cell("session_ended"):subscribe(function()
+smelt.cell("history_epoch"):subscribe(function()
   clear_prediction()
   sent_messages = {}
-end)
-
-smelt.cell("history"):subscribe(function(payload)
-  if payload.kind == "cleared" or payload.kind == "rewound" or payload.kind == "loaded" or payload.kind == "forked" then
-    clear_prediction()
-    sent_messages = {}
-  end
 end)
 
 smelt.cell("turn_end"):subscribe(function(payload)

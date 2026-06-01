@@ -211,6 +211,12 @@
 ---@field ask? string[] Patterns that always prompt.
 ---@field deny? string[] Patterns that auto-deny.
 
+---@class smelt.lifecycle.Guard
+---@field alive fun(self:smelt.lifecycle.Guard):boolean Return true while every captured epoch still matches and the guard was not cancelled or superseded.
+---@field cancel fun(self:smelt.lifecycle.Guard) Mark the guard stale immediately.
+---@field latest fun(self:smelt.lifecycle.Guard,key:string):smelt.lifecycle.Guard Mark this guard as the latest request for `key`; older guards with the same key become stale.
+---@field wrap fun(self:smelt.lifecycle.Guard,fn:function):function Return a wrapper that calls `fn` only while the guard is alive.
+
 --- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
 --- they own the rendered selection cursor and the backing line buffer;
 --- the rest configure how data is sourced, filtered, and rendered.

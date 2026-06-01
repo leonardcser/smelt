@@ -302,6 +302,15 @@ Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-m
 | `ask` | `string[]` |  | Patterns that always prompt. |
 | `deny` | `string[]` |  | Patterns that auto-deny. |
 
+### `smelt.lifecycle.Guard`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `alive` | `fun(self:smelt.lifecycle.Guard):boolean` | yes | Return true while every captured epoch still matches and the guard was not cancelled or superseded. |
+| `cancel` | `fun(self:smelt.lifecycle.Guard)` | yes | Mark the guard stale immediately. |
+| `latest` | `fun(self:smelt.lifecycle.Guard,key:string):smelt.lifecycle.Guard` | yes | Mark this guard as the latest request for `key`; older guards with the same key become stale. |
+| `wrap` | `fun(self:smelt.lifecycle.Guard,fn:function):function` | yes | Return a wrapper that calls `fn` only while the guard is alive. |
+
 ### `smelt.list.Opts`
 
 Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -

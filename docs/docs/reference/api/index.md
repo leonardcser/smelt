@@ -4,7 +4,7 @@
 
 Reference for every namespace exposed under the global `smelt` table. Signatures are derived from the Rust closure's argument tuple and return type, so the LuaCATS-style annotation always matches what mlua actually marshals.
 
-**Coverage:** 67 namespace(s), 306 function(s), 46 class(es), 8 alias(es).
+**Coverage:** 67 namespace(s), 306 function(s), 47 class(es), 8 alias(es).
 
 ## IDE completion
 
