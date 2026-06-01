@@ -1039,6 +1039,70 @@ impl TestApp {
         }
     }
 
+    fn drain_engine_ask_ids(&mut self) -> Vec<u64> {
+        self.drain_engine_sends()
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                protocol::UiCommand::EngineAsk { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn respond_ask_with_text(&mut self, id: u64, text: &str) {
+        let _g = crate::lua::install_app_ptr(&mut self.app);
+        self.app
+            .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+                id,
+                message: Some(protocol::Message::assistant(
+                    Some(protocol::Content::text(text)),
+                    None,
+                    None,
+                )),
+                error: None,
+            });
+        self.app.drive_lua_tasks();
+    }
+
+    fn publish_turn_end_for_probe(&mut self) {
+        let _g = crate::lua::install_app_ptr(&mut self.app);
+        self.app.core.cells.set_dyn(
+            "turn_end",
+            std::rc::Rc::new(smelt_core::cells::TurnEnd { cancelled: false }),
+        );
+        self.app.pump_lua();
+    }
+
+    fn bump_input_epoch_for_probe(&mut self) {
+        let _g = crate::lua::install_app_ptr(&mut self.app);
+        self.app.bump_epoch("input_epoch");
+        self.app.pump_lua();
+    }
+
+    fn probe_stale_prompt_prediction_response(&mut self, variant: u8) {
+        self.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text(
+                format!("fuzz stale prompt prediction {variant}"),
+            )));
+        self.publish_turn_end_for_probe();
+        let prediction_id = self
+            .drain_engine_ask_ids()
+            .last()
+            .copied()
+            .expect("prediction probe should issue EngineAsk");
+
+        self.bump_input_epoch_for_probe();
+        self.respond_ask_with_text(prediction_id, "stale prompt placeholder");
+        assert_eq!(
+            self.app.placeholder_text(crate::app::PROMPT_WIN),
+            None,
+            "stale prompt prediction response installed a placeholder in probe variant {variant}"
+        );
+    }
+
     /// Side-channel: drive the exact bug class from #15. After a turn lifecycle
     /// transition, typing must advance the prompt cursor; left motion must also
     /// move the insertion point. A stuck cursor reverses "ab" into "ba" and
@@ -1051,8 +1115,18 @@ impl TestApp {
             self.install_prompt_cursor_trap(variant);
         }
 
-        let turn_id = 10_000 + u64::from(variant);
+        let mut turn_id = 10_000 + u64::from(variant);
         self.start_turn(turn_id);
+        if variant & 0x40 != 0 {
+            self.press(KeyCode::Esc);
+            self.press(KeyCode::Esc);
+            if !self.agent_running() {
+                turn_id += 1;
+                self.start_turn(turn_id);
+            }
+        } else if variant & 0x20 != 0 {
+            self.press(KeyCode::Esc);
+        }
         match variant % 4 {
             2 => self.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
                 message: "fuzz turn error".into(),
@@ -1067,8 +1141,15 @@ impl TestApp {
         if variant % 8 >= 4 {
             self.reload_lua();
         }
+        if variant & 0x10 != 0 {
+            self.probe_stale_prompt_prediction_response(variant);
+        }
         self.force_prompt_keyboard_focus();
         self.render_silent();
+        assert!(
+            self.prompt_plain_insert_ready(),
+            "prompt is not ready for plain insertion in probe variant {variant}"
+        );
 
         for (idx, ch) in "ab".chars().enumerate() {
             self.type_char(ch);

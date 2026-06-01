@@ -451,7 +451,8 @@ pub enum FuzzOp {
         question: String,
     },
     /// Side channel: deterministic regression probe for #15. Exercises typing
-    /// and cursor motion after turn completion/error/cancel/reload/traps.
+    /// and cursor motion after turn completion/error/cancel/reload/traps,
+    /// app-level Escape sequences, and stale prompt side-request callbacks.
     ProbePromptCursorAfterTurn {
         variant: u8,
     },

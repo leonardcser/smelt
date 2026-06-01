@@ -1,0 +1,13 @@
+{
+  "_about": "Prompt cursor probe seed: a single Esc during an active turn leaves the app-level Escape sequence pending; completing the turn must not leave the prompt cursor stuck before the next insert.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 32
+      }
+    }
+  ],
+  "vim": true
+}

@@ -1,0 +1,13 @@
+{
+  "_about": "Prompt cursor probe seed: a stale prompt prediction response after input invalidation must not reinstall placeholder state before typing resumes.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 16
+      }
+    }
+  ],
+  "vim": false
+}

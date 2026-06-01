@@ -1,0 +1,13 @@
+{
+  "_about": "Prompt cursor probe seed: double Esc hard-cancels an active turn, then a stale prompt side-request response arrives before a new completed turn; typing must still advance normally.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 80
+      }
+    }
+  ],
+  "vim": true
+}
