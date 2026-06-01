@@ -7,7 +7,7 @@
 ---@class smelt.text
 local text = {}
 
---- Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `"…"`), pad when too short (with `opts.fill`, default `" "`). `opts.align` is `"left"` (default), `"right"`, or `"center"`. Use this for fixed-width UI slots — handles multi-byte and wide chars correctly so the result is always exactly `width` cells wide regardless of content.
+--- Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `"…"`), pad when too short (with `opts.fill`, default `" "`). `opts.align` is `"left"` (default), `"right"`, or `"center"`. Use this for fixed-width UI slots - handles multi-byte and wide chars correctly so the result is always exactly `width` cells wide regardless of content.
 ---@type fun(s: string, width: integer, opts: table?): string
 text.fit = nil
 

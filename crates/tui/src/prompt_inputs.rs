@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[derive(Default)]
 pub struct PromptInputs {
     /// Extra skill search roots from `cfg.skills.paths`. Constant for
-    /// the session — there is no Lua API to mutate this yet.
+    /// the session - there is no Lua API to mutate this yet.
     pub skill_extra_paths: Vec<PathBuf>,
     /// Source file behind `--system-prompt=<path>`. `None` for an
     /// inline string or when the flag was omitted.

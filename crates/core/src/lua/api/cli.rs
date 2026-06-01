@@ -1,9 +1,9 @@
-//! `smelt.cli` — declare and read CLI flags from Lua.
+//! `smelt.cli` - declare and read CLI flags from Lua.
 //!
 //! `register_flag{}` is intended for `early.lua`: it runs *before* the
 //! main binary finalizes clap parsing, so a Lua-declared flag becomes a
 //! real CLI argument. Reading a flag with `get` works at any point after
-//! parse — values are populated by the main binary once argv is parsed.
+//! parse - values are populated by the main binary once argv is parsed.
 //! When called outside the two-pass main binary (e.g. headless test
 //! harness), `get` falls back to the spec's default value.
 
@@ -99,7 +99,7 @@ default) after the binary has parsed argv.",
         let s = shared.clone();
         m.fn_(
             "register_flag",
-            "Register a CLI flag. MUST be called from `early.lua` — the runtime errors loudly if invoked in any later phase, because clap has already parsed argv by then. `opts.kind` is `\"boolean\"`, `\"string\"`, or `\"integer\"`; `opts.default` (optional) sets the value when the flag is absent. Booleans always default to `false` when not provided. Errors if a flag with the same name was already registered.",
+            "Register a CLI flag. MUST be called from `early.lua` - the runtime errors loudly if invoked in any later phase, because clap has already parsed argv by then. `opts.kind` is `\"boolean\"`, `\"string\"`, or `\"integer\"`; `opts.default` (optional) sets the value when the flag is absent. Booleans always default to `false` when not provided. Errors if a flag with the same name was already registered.",
             &["opts"],
             move |_, opts: LuaRegisterFlagOpts| -> LuaResult<()> {
                 if s.phase() != crate::lua::Phase::Early {

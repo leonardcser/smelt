@@ -1,4 +1,4 @@
-//! `smelt.tools` — register/unregister plugin tools and resolve their results to the engine.
+//! `smelt.tools` - register/unregister plugin tools and resolve their results to the engine.
 
 use super::{lua_table_to_args, lua_table_to_json};
 use crate::lua::doc::Tier;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 /// Decision string accepted by `decide` callbacks and
 /// `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}`
-/// — the engine's `Error(_)` variant is not exposed.
+/// - the engine's `Error(_)` variant is not exposed.
 #[derive(Clone, Copy, Debug, LuaAlias)]
 #[lua(name = "smelt.tools.Decision")]
 pub enum LuaDecision {
@@ -44,14 +44,14 @@ pub struct LuaToolPermissionDefaults {
 /// Plugin tool definition passed to `smelt.tools.register`.
 ///
 /// `execute` is required; the remaining hooks are optional and are
-/// invoked at well-defined points during a tool turn — see the field
+/// invoked at well-defined points during a tool turn - see the field
 /// docs for each callback's contract.
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.tools.ToolDef")]
 pub struct LuaToolDef {
     /// Tool name; used as the engine-facing identifier.
     pub name: String,
-    /// Required handler: `execute(args, ctx)` — returns the tool result.
+    /// Required handler: `execute(args, ctx)` - returns the tool result.
     pub execute: mlua::Function,
     /// Human-readable description shown to the model.
     #[lua(default)]
@@ -69,26 +69,26 @@ pub struct LuaToolDef {
     pub modes: Option<mlua::Table>,
     /// `"concurrent"` (default) or `"sequential"`.
     pub execution_mode: Option<String>,
-    /// `summary(args) -> string | styled_lines | nil` — styled label
+    /// `summary(args) -> string | styled_lines | nil` - styled label
     /// rendered in the transcript header AND confirm dialog body header.
     /// Plain string is auto-wrapped as one plain span; the styled-lines
-    /// form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` — same span
+    /// form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` - same span
     /// shape as `buf:styled` plus optional `selectable = false` for chrome text and
     /// `title_suffix = true` for metadata rendered after the live tool timer.
     pub summary: Option<mlua::Function>,
-    /// `approval_patterns(args, ctx) -> string[]` — patterns offered as one-click approvals.
+    /// `approval_patterns(args, ctx) -> string[]` - patterns offered as one-click approvals.
     pub approval_patterns: Option<mlua::Function>,
-    /// `preflight(args, ctx) -> table?` — validation hook; nil result skips.
+    /// `preflight(args, ctx) -> table?` - validation hook; nil result skips.
     pub preflight: Option<mlua::Function>,
-    /// `render(buf, args, result)` — custom transcript render.
+    /// `render(buf, args, result)` - custom transcript render.
     pub render: Option<mlua::Function>,
-    /// `paths_for_workspace(args) -> string[]` — files this invocation will touch.
+    /// `paths_for_workspace(args) -> string[]` - files this invocation will touch.
     pub paths_for_workspace: Option<mlua::Function>,
-    /// `preview(args) -> smelt.layout` — pre-execute preview render. Returns
+    /// `preview(args) -> smelt.layout` - pre-execute preview render. Returns
     /// the same `smelt.layout` value the `render` callback returns; the confirm
     /// dialog renders it directly into the preview pane.
     pub preview: Option<mlua::Function>,
-    /// `decide(args, mode) -> smelt.tools.Decision?` — per-call decision; nil falls through to generic permissions.
+    /// `decide(args, mode) -> smelt.tools.Decision?` - per-call decision; nil falls through to generic permissions.
     pub decide: Option<mlua::Function>,
     /// Replace a core tool of the same name (advanced).
     #[lua(rename = "override", default)]

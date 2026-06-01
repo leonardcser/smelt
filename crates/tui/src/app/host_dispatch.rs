@@ -68,7 +68,7 @@ impl TuiApp {
                 self.dispatch_prepare_request(messages, estimated_tokens, reply);
             }
             // Phase B targets. The engine doesn't emit these on the host
-            // channel yet — they still travel as `EngineEvent::*Request`
+            // channel yet - they still travel as `EngineEvent::*Request`
             // pairs handled in `engine_events.rs`. Once migrated, the
             // existing match arms there get deleted and the logic lands
             // here, sharing the same dispatcher loop.
@@ -217,7 +217,7 @@ impl TuiApp {
     /// call each hook in registration order (passing the previous hook's
     /// returned table as input), and deserialize the final value back
     /// into `T`. Returns `None` when no hook is registered or no hook
-    /// returned a replacement table — caller treats `None` as "no
+    /// returned a replacement table - caller treats `None` as "no
     /// mutation, proceed with the original payload".
     fn run_middleware_chain<T>(
         &self,
@@ -543,7 +543,7 @@ mod tests {
             )),
         ];
         let messages = protocol::history_to_messages(&history);
-        // No context_tokens_history_len — defaults to current_history.len(),
+        // No context_tokens_history_len - defaults to current_history.len(),
         // so the baseline is assumed to cover the full history and no delta
         // is added.
         let estimate =

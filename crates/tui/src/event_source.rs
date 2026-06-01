@@ -1,7 +1,7 @@
 //! Unified event source for the application loop.
 //!
-//! Every input the loop reacts to — terminal keys, engine events, Lua
-//! wakeups, shell-exec output, virtual-clock ticks, OS signals — flows
+//! Every input the loop reacts to - terminal keys, engine events, Lua
+//! wakeups, shell-exec output, virtual-clock ticks, OS signals - flows
 //! through [`SourceEvent`] and an [`EventSource`] implementation.
 //! Production wraps the live `tokio::select!`; tests iterate a scripted
 //! `Vec` via [`ScriptedSource`].
@@ -32,14 +32,14 @@ pub enum SourceEvent {
 }
 
 /// Async iterator over [`SourceEvent`]s. Returns `None` to signal end of
-/// stream (the loop then exits). Implementors are concrete types — the
+/// stream (the loop then exits). Implementors are concrete types - the
 /// trait is not designed for `dyn`-erasure.
 pub trait EventSource: Send {
     fn next(&mut self) -> impl std::future::Future<Output = Option<SourceEvent>> + Send;
 }
 
 /// Drain a fixed sequence of events. Used by tests and the scripted
-/// replay binary — feeds events in order and reports `None` when the
+/// replay binary - feeds events in order and reports `None` when the
 /// script is exhausted.
 pub struct ScriptedSource {
     queue: std::collections::VecDeque<SourceEvent>,

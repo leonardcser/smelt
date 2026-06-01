@@ -1,6 +1,6 @@
 //! Structurally-aware scenario shrinker.
 //!
-//! `cargo fuzz tmin` works at the byte level — it makes the libFuzzer
+//! `cargo fuzz tmin` works at the byte level - it makes the libFuzzer
 //! input shorter but says nothing about which ops in the decoded
 //! scenario are actually load-bearing for the crash. This bin operates
 //! on the **post-decode JSON**, so it can drop whole ops and shrink
@@ -91,7 +91,7 @@ fn main() {
         process::exit(1);
     });
 
-    // Suppress panic output during shrinking — we expect ~hundreds of
+    // Suppress panic output during shrinking - we expect ~hundreds of
     // panics per run. Restore the original hook before the final
     // verification so the user still sees the crash they care about.
     let original_hook = panic::take_hook();

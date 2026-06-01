@@ -1,6 +1,6 @@
 -- Autoupgrade plugin. Two channels:
---   * stable   — latest tagged release (any tag, including prereleases)
---   * unstable — main branch HEAD (needs smelt.build.sha)
+--   * stable   - latest tagged release (any tag, including prereleases)
+--   * unstable - main branch HEAD (needs smelt.build.sha)
 --
 -- Settings:
 --   smelt.settings.autoupgrade          "off" | "notify" (default) | "auto"

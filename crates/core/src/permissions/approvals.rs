@@ -171,7 +171,7 @@ impl RuntimeApprovals {
 
     /// Check whether all given outside-workspace paths are covered by
     /// approved directories.  Stored dirs are always in expanded (absolute)
-    /// form — only the incoming paths need tilde expansion.
+    /// form - only the incoming paths need tilde expansion.
     pub(crate) fn dirs_approved(&self, paths: &[String]) -> bool {
         if paths.is_empty() {
             return true;

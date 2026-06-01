@@ -1,4 +1,4 @@
-//! `smelt.history` bindings — past submitted prompts.
+//! `smelt.history` bindings - past submitted prompts.
 //!   entries()      → array of strings (oldest first)
 //!   search(query)  → [{index, score}] ranked by the
 //!                    history-specific scorer (word-match boosts,

@@ -14,7 +14,7 @@ impl TuiApp {
         use crossterm::event::KeyModifiers as M;
 
         // Ctrl-C with no selection leaves the content pane back to the prompt.
-        // This is transcript-only — the same chord on an overlay viewer is
+        // This is transcript-only - the same chord on an overlay viewer is
         // claimed by the modal-dismiss tier instead.
         if k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('c')) {
             self.app_focus = crate::app::AppFocus::Prompt;

@@ -163,7 +163,7 @@ impl TuiApp {
             } => {
                 // The engine contract is one ToolStarted per call_id per turn.
                 // A duplicate would double-push transcript blocks, active
-                // tools, and pending entries — drop it instead of corrupting
+                // tools, and pending entries - drop it instead of corrupting
                 // state.
                 if pending.iter().any(|p| p.call_id == call_id) {
                     return SessionControl::Continue;
@@ -249,7 +249,7 @@ impl TuiApp {
             })),
             EngineEvent::Retrying { delay_ms, attempt } => {
                 // The retry restarts the turn from the last committed
-                // message — any partial streaming text/thinking captured
+                // message - any partial streaming text/thinking captured
                 // before the failure is obsolete and must not bleed into
                 // the next attempt's stream.
                 self.flush_streaming_thinking();

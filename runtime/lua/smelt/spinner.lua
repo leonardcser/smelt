@@ -1,5 +1,5 @@
 -- Shared spinner glyph and traveling-wave color for plugin animations.
--- Pure Lua — animation logic lives here, not in Rust.
+-- Pure Lua - animation logic lives here, not in Rust.
 
 local M = {}
 

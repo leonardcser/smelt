@@ -10,12 +10,12 @@ pub mod util;
 
 /// How the highlight renderers paint the left margin / gutter.
 ///
-/// The set is closed and exhaustive — each variant corresponds to a real consumer:
-/// - `None` — minimalist render (snippets, inline previews) with no gutter at all.
-/// - `InlineLineNumbers` — paint a single ` N ` line-number column as text inside
+/// The set is closed and exhaustive - each variant corresponds to a real consumer:
+/// - `None` - minimalist render (snippets, inline previews) with no gutter at all.
+/// - `InlineLineNumbers` - paint a single ` N ` line-number column as text inside
 ///   the content area; the host window needs no gutter config. Used by transcript
 ///   tool blocks (`write_file`, `edit_file`, file/diff previews).
-/// - `Stamped` — emits `SourceLine` metadata only; a host window with a
+/// - `Stamped` - emits `SourceLine` metadata only; a host window with a
 ///   `LineNumberGutter` paints the actual column. Used by file-viewer panes
 ///   (`BufFormat::Code`) where the gutter belongs to the window chrome.
 ///
@@ -42,7 +42,7 @@ pub fn warm_up_syntect() {
 }
 
 /// Pick the syntect theme variant matching the active `Theme`'s
-/// `is_light` flag. Reads from `crate::theme::active()` — the TUI
+/// `is_light` flag. Reads from `crate::theme::active()` - the TUI
 /// publishes its theme there on every `apply` / `set`, so syntax
 /// highlighting follows light/dark without a separate global.
 pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {

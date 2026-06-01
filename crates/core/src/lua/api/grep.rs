@@ -1,4 +1,4 @@
-//! `smelt.grep` — ripgrep wrapper. `rg` exit 1 (no match) is not an error; check `exit_code`.
+//! `smelt.grep` - ripgrep wrapper. `rg` exit 1 (no match) is not an error; check `exit_code`.
 
 use crate::grep;
 use crate::lua::doc::Tier;

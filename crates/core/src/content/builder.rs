@@ -188,14 +188,14 @@ impl<'a> LineBuilder<'a> {
 
     /// Emit trailing spaces with `meta` and the currently active style until
     /// the row reaches `layout_width()`. The primitive for "fill row to the
-    /// right edge with the active bg" — callers don't recompute trailing
+    /// right edge with the active bg" - callers don't recompute trailing
     /// widths per row, and the cells inherit whatever style is set (bg, dim,
     /// …). Pass `SpanMeta { selectable: false, copy_as: None }` for chrome
     /// pad so cursor/selection/copy skip it.
     ///
     /// Use this when the row text needs the pad cells *in the buffer* (so
     /// inline highlights/selection cover them). For buffers whose text must
-    /// stay clean — set the bg via `fill_line_bg` and let paint draw it.
+    /// stay clean - set the bg via `fill_line_bg` and let paint draw it.
     pub fn pad_row_to_layout_width(&mut self, meta: SpanMeta) {
         let remaining = self.layout_width.saturating_sub(self.cur_visible_cols) as usize;
         if remaining == 0 {
@@ -289,7 +289,7 @@ impl<'a> LineBuilder<'a> {
 
     /// Stamp `head` on the first visual chunk of a wrapped logical line and
     /// `SourceLine::Synthetic` on every continuation chunk. Used by the syntax
-    /// and diff renderers — `chunk_idx == 0` carries the lineno, the rest fill
+    /// and diff renderers - `chunk_idx == 0` carries the lineno, the rest fill
     /// blank in the gutter so the column stays aligned.
     pub fn stamp_chunk(&mut self, chunk_idx: usize, head: SourceLine) {
         self.set_source_line(if chunk_idx == 0 {

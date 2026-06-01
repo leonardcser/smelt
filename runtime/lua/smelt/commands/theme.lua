@@ -1,4 +1,4 @@
--- `/theme` — change the accent color. Direct with an arg; live-preview picker without.
+-- `/theme` - change the accent color. Direct with an arg; live-preview picker without.
 
 local presets = smelt.theme.presets
 local preset_names, items = {}, {}

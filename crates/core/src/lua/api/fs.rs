@@ -1,4 +1,4 @@
-//! `smelt.fs` — sync filesystem primitives. Errors use `(value, err_string)` convention.
+//! `smelt.fs` - sync filesystem primitives. Errors use `(value, err_string)` convention.
 
 use crate::fs::FlockGuard;
 use crate::lua::doc::Tier;
@@ -338,7 +338,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         // task is armed, drain everything in the same lock.
                         // Decoupling the push from the drain creates a window
                         // where __watch_arm could be re-entered and steal the
-                        // pending list out from under us — keep them atomic.
+                        // pending list out from under us - keep them atomic.
                         let resume = {
                             let Ok(mut st) = state_clone.lock() else {
                                 return;

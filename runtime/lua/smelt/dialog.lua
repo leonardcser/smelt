@@ -14,7 +14,7 @@
 --   5. Coroutine lifecycle: `open(opts)` blocks until `ctx.resolve(v)` is called.
 --
 -- Keymap scoping (important):
---   - `opts.keymaps` are DIALOG-WIDE — installed at overlay scope (tier 1b of
+--   - `opts.keymaps` are DIALOG-WIDE - installed at overlay scope (tier 1b of
 --     the key cascade) so they fire regardless of which panel is focused.
 --     Use these for shortcuts that should always work in the dialog (e.g.
 --     Alt-W, Ctrl-D).
@@ -35,7 +35,7 @@
 -- Dialog context (active dialog introspection):
 --   smelt.dialog.current()                  -> ctx | nil  (resolve/close/panels/focused_leaf)
 --
--- Callable from any handler running while the dialog is open — including
+-- Callable from any handler running while the dialog is open - including
 -- leaf-level `leaf:key(...)` callbacks, which normally don't see the
 -- dialog's resolve handle. Nested dialogs stack; `current()` always
 -- returns the topmost.
@@ -61,7 +61,7 @@ local dialog_stack = {}
 --- Return the topmost active dialog ctx (the same shape passed to
 --- `on_submit`/`keymap` handlers: `{ resolve, close, win, panels,
 --- focused_leaf }`), or `nil` if no dialog is open. Use it inside
---- `leaf:key(...)` callbacks — those normally lack a path to the
+--- `leaf:key(...)` callbacks - those normally lack a path to the
 --- dialog's resolve handle.
 ---@type fun(): table | nil
 function smelt.dialog.current()
@@ -77,7 +77,7 @@ end
 --
 -- Scrollbars: buffer-viewer leaves (`markdown`, `content`) inherit the default
 -- `scrollbar = true` from `smelt.win.new` so a thumb appears when content
--- overflows. Cursor-driven leaves (`input`, `options`, `list`) opt out — the
+-- overflows. Cursor-driven leaves (`input`, `options`, `list`) opt out - the
 -- selection cursor and key nav already convey position.
 
 local GUTTER = 1
@@ -119,7 +119,7 @@ local GUTTER = 1
 --- `smelt.dialog.Opts`; only the picker-specific fields are listed.
 ---@class smelt.dialog.PickerOpts
 ---@field items? any[] | fun(): any[] Eager item table or a lazy producer; re-evaluated by `on_query`.
----@field render fun(item: any): table Per-item `{ text, marks }` table — see `smelt.list.new`.
+---@field render fun(item: any): table Per-item `{ text, marks }` table - see `smelt.list.new`.
 ---@field filter? fun(item: any): boolean Predicate applied during `set_filter` / `refresh`.
 ---@field placeholder? string Input placeholder; defaults to `""`.
 ---@field empty_text? string Shown in the list when nothing matches.
@@ -172,16 +172,16 @@ end
 -- rests on label rows.
 --
 -- Shortcuts (`opts.shortcuts`, default `"submit"`):
---   * `"submit"` — pressing the item's digit moves the cursor to it AND
+--   * `"submit"` - pressing the item's digit moves the cursor to it AND
 --                  fires the submit path (same as Enter on that row).
---   * `"select"` — digit moves the cursor; Enter still submits.
---   * `false`   — no digit handling; consumers can install their own.
+--   * `"select"` - digit moves the cursor; Enter still submits.
+--   * `false`   - no digit handling; consumers can install their own.
 --
 -- Submit path: by default the menu resolves the active dialog with
 -- `{ index = i, item = items[i] }`. Override via `opts.on_submit(ctx)`
--- — `ctx` exposes the standard dialog handles (`resolve`, `close`,
+-- - `ctx` exposes the standard dialog handles (`resolve`, `close`,
 -- `win`, `panels`, `focused_leaf`) plus `ctx.index` (1-based) and
--- `ctx.item` for the selection — to map to a caller-specific payload
+-- `ctx.item` for the selection - to map to a caller-specific payload
 -- (e.g. confirm's `decisions[idx]`) or to defer (focus a sibling leaf
 -- instead of resolving).
 --
@@ -544,9 +544,9 @@ end
 -- the root leaf and the array of leaves.
 --
 -- Dialog height (pick one; setting both is an error):
---   * `opts.height`     — fixed size: integer cells, `"N%"`, `"fill"`. Default `"60%"`.
---   * `opts.max_height` — shrink to content, capped at this size.
---   * `opts.min_height` — floor that pairs with either mode. Fit-mode dialogs
+--   * `opts.height`     - fixed size: integer cells, `"N%"`, `"fill"`. Default `"60%"`.
+--   * `opts.max_height` - shrink to content, capped at this size.
+--   * `opts.min_height` - floor that pairs with either mode. Fit-mode dialogs
 --                         default to `min_height = "30%"` so a placeholder
 --                         body stays visible when content collapses; pass
 --                         `min_height = 0` to opt out.
@@ -554,7 +554,7 @@ end
 -- All three knobs are **body-relative** when given as integer cells: the
 -- wrapper adds the dialog's chrome (top border + title row, 1 cell) before
 -- forwarding to the overlay (which uses total-rect semantics). `"N%"` /
--- `"fill"` / `"fit"` are forwarded verbatim — percentages of the terminal
+-- `"fill"` / `"fit"` are forwarded verbatim - percentages of the terminal
 -- don't compose with absolute chrome offsets, and the extra row is negligible
 -- at typical percentages anyway.
 
@@ -575,7 +575,7 @@ local function open_overlay(opts)
   end
   local fit_mode = opts.max_height ~= nil
   local default_panel_height = fit_mode and "fit" or nil
-  -- Fit-mode dialogs read their natural size — for trivial content (one
+  -- Fit-mode dialogs read their natural size - for trivial content (one
   -- placeholder line) that collapses to just the chrome row. Default to a
   -- 30% terminal-height floor so the placeholder + a comfortable margin stay
   -- visible. Callers can override via `opts.min_height` (including `0` to opt
@@ -603,12 +603,12 @@ local function open_overlay(opts)
   end
 
   -- The wrapper is responsible for the single-cell gutter on each side of the
-  -- title content. Callers MUST NOT pad — pass `"messages"` not `" messages "`,
+  -- title content. Callers MUST NOT pad - pass `"messages"` not `" messages "`,
   -- and for multi-span titles drop the leading space on the first span and the
   -- trailing space on the last span.
   --   - bare string: rendered dim and padded with a space on each side.
   --   - table with `text` key (single span): wrapped between two raw space spans.
-  --   - table sequence (multi-span): same — leading/trailing space spans added.
+  --   - table sequence (multi-span): same - leading/trailing space spans added.
   local title = opts.title
   if type(title) == "string" and title ~= "" then
     title = { { text = " " }, { text = title, dim = true }, { text = " " } }
@@ -687,7 +687,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
     end
     -- Pop our entry off the dialog stack. We scan the stack from the top
     -- in case nested dialogs resolve out of order (a child dialog closes
-    -- last) — only remove our own entry.
+    -- last) - only remove our own entry.
     for i = #dialog_stack, 1, -1 do
       if dialog_stack[i] == ctx then
         table.remove(dialog_stack, i)
@@ -750,7 +750,7 @@ local function setup_lifecycle(opts, leaves, overlay, resolve_fn)
   end
 
   -- Submit: fires `opts.on_submit` if provided. With no handler, the dialog stays
-  -- open — Enter doing nothing is easier to diagnose than Enter mysteriously
+  -- open - Enter doing nothing is easier to diagnose than Enter mysteriously
   -- closing. Esc/Ctrl-C still dismisses via the Dismiss event below.
   if type(opts.on_submit) == "function" then
     register_on_all("submit", function(raw_ctx)
@@ -821,33 +821,33 @@ end
 -- from `on_submit` (or `nil` on dismiss).
 --
 -- Opts:
---   * `items`       — array of arbitrary item tables (passed to `render`).
---   * `render`      — `function(item) -> { text = ..., marks = ... }` (see
+--   * `items`       - array of arbitrary item tables (passed to `render`).
+--   * `render`      - `function(item) -> { text = ..., marks = ... }` (see
 --                     `smelt.list`).
---   * `filter`      — optional predicate `function(item) -> bool` applied
+--   * `filter`      - optional predicate `function(item) -> bool` applied
 --                     to every refilter; the picker re-runs it whenever
 --                     the query changes (so it can close over the live
 --                     query state).
---   * `placeholder` — input prompt text. Defaults to `""`.
---   * `empty_text`  — shown in the list when nothing matches.
---   * `on_open`     — `function(ctx)` fires once before the dialog blocks,
+--   * `placeholder` - input prompt text. Defaults to `""`.
+--   * `empty_text`  - shown in the list when nothing matches.
+--   * `on_open`     - `function(ctx)` fires once before the dialog blocks,
 --                     after the input/list have been built. Use it to seed
 --                     marks on the input buffer or to set an initial cursor
 --                     row on the list.
---   * `on_query`    — `function(query, ctx)` fires on every keystroke.
+--   * `on_query`    - `function(query, ctx)` fires on every keystroke.
 --                     The default is `list:set_filter(opts.filter)`. Pass
 --                     this when you want to swap the filter (e.g. rebuild
 --                     it from a fresh query).
---   * `on_submit`   — `function(ctx)` fires on Enter. `ctx.item` is the
+--   * `on_submit`   - `function(ctx)` fires on Enter. `ctx.item` is the
 --                     highlighted row (nil when the list is empty);
 --                     `ctx.list`/`ctx.input`/`ctx.input_buf` are added
 --                     by the picker. Default resolves with `ctx.item`
 --                     when non-nil.
---   * `keymaps`     — extra dialog-level keymaps merged on top of the
+--   * `keymaps`     - extra dialog-level keymaps merged on top of the
 --                     built-in navigation bindings. Each entry's
 --                     `on_press(ctx)` receives the picker ctx with
 --                     `ctx.list`, `ctx.input`, `ctx.input_buf` added.
---   * `title`, `height`, `max_height`, `min_height`, `blocks_agent` — forwarded to
+--   * `title`, `height`, `max_height`, `min_height`, `blocks_agent` - forwarded to
 --                     `smelt.dialog.open`.
 
 local NAV_KEYS = {
@@ -966,7 +966,7 @@ end
 -- Non-coroutine open. Returns `{ win, panels, close() }` synchronously.
 -- The consumer drives the lifecycle via `on_submit` / `on_dismiss`
 -- callbacks and tears down with `handle:close()`. No value flows back
--- — use `smelt.dialog.open` when you need to read the result.
+-- - use `smelt.dialog.open` when you need to read the result.
 ---@type fun(opts: smelt.dialog.Opts): table
 function smelt.dialog.open_handle(opts)
   if type(opts) ~= "table" then

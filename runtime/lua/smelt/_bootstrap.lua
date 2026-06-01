@@ -10,7 +10,7 @@ local function require_yieldable(name)
 end
 
 -- Yield with a payload and unwrap cancellation uniformly. Internal to the
--- task primitives below — single source for the `__cancelled` check.
+-- task primitives below - single source for the `__cancelled` check.
 local function yield_with_cancel(payload)
   local result = coroutine.yield(payload)
   if type(result) == "table" and result.__cancelled then
@@ -102,7 +102,7 @@ end
 
 -- Run `fn` with an `ms`-millisecond deadline. Returns `(result, nil)` if
 -- `fn` finishes in time, or `(nil, "timeout")` if the deadline fires
--- first — in which case `fn`'s coroutine is cancelled (any in-flight
+-- first - in which case `fn`'s coroutine is cancelled (any in-flight
 -- `smelt.sleep` / `task.wait` raises `cancelled` and the coroutine
 -- unwinds). Must run inside a yielding context.
 ---@type fun(ms: integer, fn: fun(): any): any, string?
@@ -192,7 +192,7 @@ function smelt.task.all(...)
 end
 
 -- Idempotent across `/reload`: cache the raw register in a global so each
--- bootstrap run re-wraps the same raw — never the previous wrap.
+-- bootstrap run re-wraps the same raw - never the previous wrap.
 __smelt_raw_tools_register__ = __smelt_raw_tools_register__ or smelt.tools.register
 smelt.tools.register = function(def)
   if type(def) == "table" and def.summary == nil then
@@ -242,8 +242,8 @@ if smelt.picker and smelt.prompt and smelt.prompt.open_picker then
   -- keystroke, ranked by `smelt.fuzzy.rank`. Accepts string items or
   -- `{ label, description?, ansi_color?, search_terms? }` records. Returns
   -- `{ index, item, action }` on accept or `nil` on dismiss.
-  --   • `opts.on_select(item)` — fires on navigation
-  --   • `opts.placement` — defaults to "prompt_docked"
+  --   • `opts.on_select(item)` - fires on navigation
+  --   • `opts.placement` - defaults to "prompt_docked"
   ---@type fun(opts: table): { index: integer, item: table, action: string }?
   function smelt.picker.fuzzy(opts)
     if type(opts) ~= "table" then
@@ -272,7 +272,7 @@ end
 -- Read `path` off the main thread. Must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
 -- task runtime). Returns `(content, nil)` on success or `(nil, err)` on
--- failure — same convention as `smelt.fs.read`.
+-- failure - same convention as `smelt.fs.read`.
 ---@type fun(path: string): string?, string?
 function smelt.fs.read_async(path)
   local result = smelt.task.external(function(id) smelt.fs.__start_read(id, path) end)
@@ -282,7 +282,7 @@ end
 
 -- Write `contents` to `path` off the main thread. Same yielding rules as
 -- `smelt.fs.read_async`. Returns `(true, nil)` on success or
--- `(false, err)` on failure — mirrors `smelt.fs.write`.
+-- `(false, err)` on failure - mirrors `smelt.fs.write`.
 ---@type fun(path: string, contents: string): boolean, string?
 function smelt.fs.write_async(path, contents)
   local result = smelt.task.external(function(id) smelt.fs.__start_write(id, path, contents) end)
@@ -298,7 +298,7 @@ end
 -- `(nil, err)` on spawn failure. If the calling coroutine is cancelled
 -- (e.g. by `smelt.task.timeout` or by `:remove()` on the parent spawn),
 -- the child process is killed (SIGTERM to its process group) and
--- `smelt.task.external` raises `cancelled` — same shape as every other
+-- `smelt.task.external` raises `cancelled` - same shape as every other
 -- yielding API.
 ---@type fun(cmd: string, args: string[]?, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.process.run(cmd, args, opts)
@@ -350,7 +350,7 @@ end
 -- `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
 -- `(nil, err)` on spawn failure. Cancellation kills the child (SIGKILL)
 -- and `smelt.task.external` raises `cancelled`. Exit code 1 (no match)
--- is not an error — inspect `exit_code` on the result.
+-- is not an error - inspect `exit_code` on the result.
 ---@type fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 function smelt.grep.run(pattern, path, opts)
   return external_or_err(function(id) smelt.grep.__start_run(id, pattern, path, opts) end)
@@ -428,7 +428,7 @@ function smelt.fs.watch(path, handler, opts)
   end))
 end
 
--- Shared spinner — pure Lua, loaded once so plugins see the same table.
+-- Shared spinner - pure Lua, loaded once so plugins see the same table.
 if smelt.clock and smelt.clock.unix_ms then
   smelt.spinner = smelt.spinner or require("smelt.spinner")
 end
@@ -516,7 +516,7 @@ end
 
 -- Plugin scope stack. Each Rust loader (autoload, init.lua, plugin
 -- files) pushes a placeholder frame around the module body via
--- `__smelt_with_scope`. The frame stays unnamed (`false`) by default —
+-- `__smelt_with_scope`. The frame stays unnamed (`false`) by default -
 -- the module body opts in to hot-reload survival by calling
 -- `smelt.plugin("name")`, which promotes its frame to that name.
 -- While the frame is named, `smelt.state()` and the unnamed-resource
@@ -524,7 +524,7 @@ end
 -- `smelt.win.new`, `smelt.buf.new`) auto-name on the plugin's behalf
 -- so survival is implicit for the rest of the body.
 __smelt_scope_stack = __smelt_scope_stack or {}
--- Per-scope per-type counter — minted in declaration order during a
+-- Per-scope per-type counter - minted in declaration order during a
 -- module body run, reset every time `smelt.plugin(name)` promotes a
 -- fresh frame so auto-names stay stable across `/reload` when the
 -- module body runs the same constructors in the same order.
@@ -583,7 +583,7 @@ end
 -- promotion so declaration order is what matters.
 --
 -- The handle deliberately doesn't wrap `smelt.cell` / `smelt.cmd` /
--- `smelt.keymap` / `smelt.lifecycle.*` — those calls would not be
+-- `smelt.keymap` / `smelt.lifecycle.*` - those calls would not be
 -- scope-aware (cell/cmd names are global), so a method facade would
 -- imply encapsulation it can't deliver. Call them directly through
 -- `smelt.*` and namespace your cell/cmd names explicitly.
@@ -616,7 +616,7 @@ setmetatable(smelt.state, {
     if name == nil then
       name = __smelt_current_scope()
       if not name then
-        error("smelt.state(): no plugin scope active — call with an explicit name from outside module body", 2)
+        error("smelt.state(): no plugin scope active - call with an explicit name from outside module body", 2)
       end
     end
     __smelt_state_touched__[name] = true

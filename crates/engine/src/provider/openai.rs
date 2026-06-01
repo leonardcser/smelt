@@ -203,7 +203,7 @@ pub(super) fn build_body(
             "summary": "auto",
         });
         // Ask the server to return encrypted reasoning so we can replay it
-        // on subsequent turns without keeping a `previous_response_id` —
+        // on subsequent turns without keeping a `previous_response_id` -
         // stateless rounds with full history match smelt's design.
         body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
     }
@@ -356,8 +356,8 @@ pub(super) fn apply_sse_event(
             }
         }
         "response.output_item.done" if ev["item"]["type"].as_str() == Some("reasoning") => {
-            // Capture the full reasoning item — `id` + `encrypted_content`
-            // + `summary` — so it can be echoed back on the next request.
+            // Capture the full reasoning item - `id` + `encrypted_content`
+            // + `summary` - so it can be echoed back on the next request.
             state.reasoning_items.push(ev["item"].clone());
         }
         "response.output_text.delta" => {

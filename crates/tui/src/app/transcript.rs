@@ -550,7 +550,7 @@ impl TuiApp {
     /// Main-thread pre-pass: walk every `Block::ToolCall` whose `ToolState.render_cache`
     /// is missing or width-stale, call the plugin's `render` hook (Lua VM is single-
     /// threaded), and stash the resulting owned-buffer tree on the state. Parallel layout
-    /// workers downstream just read those buffers — they never touch `app.ui` or Lua.
+    /// workers downstream just read those buffers - they never touch `app.ui` or Lua.
     fn prerender_tool_blocks(&mut self, width: u16) {
         let jobs: Vec<ToolRenderJob> = {
             let history = &self.transcript.history;
@@ -688,7 +688,7 @@ impl TuiApp {
             return Vec::new();
         }
         // Route through the shared coord helper so the prompt's per-row
-        // selection painting and the transcript's stay one implementation —
+        // selection painting and the transcript's stay one implementation -
         // including the "1-cell virtual span on empty middle rows" rule.
         let first = scroll_top
             .saturating_sub(row_base)

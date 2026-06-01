@@ -1,4 +1,4 @@
-//! `Block::Exec` renderer — one shell-escape command + (optional)
+//! `Block::Exec` renderer - one shell-escape command + (optional)
 //! captured output. Shares the `SmeltUserBg` panel chrome with
 //! `Block::User`; the leading `!` is painted in `SmeltExecPrefix`.
 

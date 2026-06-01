@@ -46,7 +46,7 @@ pub(crate) fn move_right_normal(buf: &str, cpos: usize) -> usize {
     let last_on_line = if eol > line_start(buf, cpos) {
         prev_char_boundary(buf, eol)
     } else {
-        eol // Empty line — stay put.
+        eol // Empty line - stay put.
     };
     if cpos >= last_on_line {
         return cpos;
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn move_right_normal_stays_on_empty_line() {
-        // Cursor on an empty line — the start/end are the same.
+        // Cursor on an empty line - the start/end are the same.
         assert_eq!(move_right_normal("\nabc", 0), 0);
     }
 
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn line_end_normal_lands_on_last_char_not_past_it() {
         assert_eq!(line_end_normal("abc", 0), 2);
-        // Multi-line: "abc\ndef" — at byte 0, end of line 0 is byte 2.
+        // Multi-line: "abc\ndef" - at byte 0, end of line 0 is byte 2.
         assert_eq!(line_end_normal("abc\ndef", 0), 2);
         // On line 1 (byte 4), end is byte 6 ('f').
         assert_eq!(line_end_normal("abc\ndef", 4), 6);
@@ -442,7 +442,7 @@ mod tests {
     fn current_line_range_returns_content_range_for_first_line() {
         // "abc\ndef": line 0 spans bytes 0..3 (not including '\n' at byte 3).
         assert_eq!(current_line_range("abc\ndef", 0), (0, 3));
-        // Cursor anywhere on the line — same answer.
+        // Cursor anywhere on the line - same answer.
         assert_eq!(current_line_range("abc\ndef", 2), (0, 3));
     }
 
@@ -450,7 +450,7 @@ mod tests {
     fn current_line_range_and_content_range_are_currently_identical() {
         // Sibling functions with different doc comments but identical bodies.
         // Pinning the current behaviour; documented intent ("with newline" /
-        // "without newline") disagrees — see audit notes.
+        // "without newline") disagrees - see audit notes.
         let buf = "alpha\nbeta\ngamma";
         assert_eq!(
             current_line_range(buf, 0),
@@ -488,7 +488,7 @@ mod tests {
 
     #[test]
     fn move_down_lands_at_logical_column_past_last_char_for_short_target() {
-        // "abcde\nxy": from col 4 ('e'), down lands at byte 8 — the position
+        // "abcde\nxy": from col 4 ('e'), down lands at byte 8 - the position
         // *past* 'y'. The function returns the "logical" target; callers run
         // `clamp_normal` to pull the cursor back to a valid char.
         assert_eq!(move_down("abcde\nxy", 4), 8);
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn find_char_forward_lands_on_match() {
-        // "abc abc" — f c from byte 0 → byte 2.
+        // "abc abc" - f c from byte 0 → byte 2.
         assert_eq!(find_char("abc abc", 0, FindKind::Forward, 'c'), Some(2));
     }
 
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn find_char_does_not_cross_newline() {
-        // 'z' is on line 2 — forward search on line 0 must not find it.
+        // 'z' is on line 2 - forward search on line 0 must not find it.
         assert_eq!(find_char("abc\ndefz", 0, FindKind::Forward, 'z'), None);
     }
 
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn find_matching_bracket_steps_from_open_to_close_on_same_line() {
-        // "(abc)" — `%` at byte 0 should land on byte 4.
+        // "(abc)" - `%` at byte 0 should land on byte 4.
         assert_eq!(find_matching_bracket("(abc)", 0), Some(4));
         // From the close back to the open.
         assert_eq!(find_matching_bracket("(abc)", 4), Some(0));
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn find_matching_bracket_handles_nested_pairs() {
-        // "((x))" — outer open at 0 matches close at 4.
+        // "((x))" - outer open at 0 matches close at 4.
         assert_eq!(find_matching_bracket("((x))", 0), Some(4));
         // Inner open at 1 matches close at 3.
         assert_eq!(find_matching_bracket("((x))", 1), Some(3));
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn find_matching_bracket_skips_forward_from_non_bracket_char_on_line() {
         // From the 'a' in "(abc)", we scan forward to the first bracket-like
-        // char on this line — that's `)` at byte 4. Vim's `%` matches the
+        // char on this line - that's `)` at byte 4. Vim's `%` matches the
         // opening `(` for it.
         assert_eq!(find_matching_bracket("(abc)", 1), Some(0));
     }
@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn clamp_normal_pulls_cursor_back_from_past_end() {
-        // No trailing newline — cursor at len becomes len-1 (boundary).
+        // No trailing newline - cursor at len becomes len-1 (boundary).
         let mut cpos = 99;
         clamp_normal("abc", &mut cpos);
         assert_eq!(cpos, 2);
@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn clamp_normal_moves_cursor_off_an_interior_newline() {
-        // "abc\ndef" — cursor at byte 3 (the '\n') must shift back to byte 2.
+        // "abc\ndef" - cursor at byte 3 (the '\n') must shift back to byte 2.
         let mut cpos = 3;
         clamp_normal("abc\ndef", &mut cpos);
         assert_eq!(cpos, 2);

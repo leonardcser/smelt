@@ -237,13 +237,13 @@ impl TestAppBuilder {
 
         // Production wires the Tui frontend to `Osc52Sink`, which writes
         // `\x1b]52;c;...` to real stdout on every kill-ring copy. Inside the
-        // harness that's a ring leak — corrupts test stdout, slows the fuzz
+        // harness that's a ring leak - corrupts test stdout, slows the fuzz
         // target, and has no semantic value. Swap to `NullSink` immediately.
         app.core.clipboard.swap_sink(Box::new(smelt_core::NullSink));
 
         // Install the command resolver `user::render` consults to paint
         // registered `/cmd` text with `SmeltAccent`. Production does this
-        // in `TuiApp::run`, which the harness skips — without the hook
+        // in `TuiApp::run`, which the harness skips - without the hook
         // every slash command in stories looks unstyled.
         let command_names = app.lua.command_names_handle();
         smelt_core::commands::set_command_resolver(move |name| {
@@ -535,7 +535,7 @@ impl TestApp {
 
     /// Run an arbitrary Lua snippet against the embedded runtime with
     /// the host pointer installed. Returns whether execution succeeded
-    /// (a Lua-level error is *not* a fuzz failure — many generated
+    /// (a Lua-level error is *not* a fuzz failure - many generated
     /// snippets intentionally hit type errors that the bindings layer
     /// raises as mlua errors). Used by `lua_loop` to feed batched ops
     /// that reference each other via shared locals.
@@ -558,7 +558,7 @@ impl TestApp {
     /// Counts of bound names across the four reload-survival registries:
     /// `(bufs, wins, overlays, paints)`. Reload-survival post-checks
     /// snapshot these before and after `reload_lua()` and assert
-    /// equality — anonymous slots get reaped but every name in the
+    /// equality - anonymous slots get reaped but every name in the
     /// registry must survive with a stable id.
     pub fn named_resource_counts(&self) -> (usize, usize, usize, usize) {
         let (bufs, wins, overlays) = self.app.ui.named_counts();
@@ -584,7 +584,7 @@ impl TestApp {
                 layout = smelt.ui.layout.leaf(w),
             })
             "#,
-            // 1: anonymous leaf — reaped on reload
+            // 1: anonymous leaf - reaped on reload
             r#"
             local b = smelt.buf.new()
             local w = smelt.win.new(b, {})
@@ -770,7 +770,7 @@ impl TestApp {
         &self.app.cwd
     }
 
-    /// Push a `Block::Compacted` summary block into the transcript —
+    /// Push a `Block::Compacted` summary block into the transcript -
     /// the same block the live compact plugin produces between turns.
     /// Stories use this to snapshot the compaction chrome without
     /// running a real `engine.ask` round-trip.
@@ -865,12 +865,12 @@ impl TestApp {
     ///
     /// Composed of four focused groups so a regression points at one
     /// category and so individual groups can be reused in unit tests:
-    /// - [`Self::assert_text_invariants`] — UTF-8 / byte-offset correctness
+    /// - [`Self::assert_text_invariants`] - UTF-8 / byte-offset correctness
     ///   for window cpos, undo/redo entries, kill-ring, completer anchor.
-    /// - [`Self::assert_ui_invariants`] — terminal size, focus reachability.
-    /// - [`Self::assert_session_invariants`] — agent / working / streaming
+    /// - [`Self::assert_ui_invariants`] - terminal size, focus reachability.
+    /// - [`Self::assert_session_invariants`] - agent / working / streaming
     ///   coherence plus pending-tool bookkeeping.
-    /// - [`Self::assert_resource_invariants`] — bounded queues and other
+    /// - [`Self::assert_resource_invariants`] - bounded queues and other
     ///   leak floors.
     pub fn assert_invariants(&self) {
         self.assert_text_invariants();
@@ -891,7 +891,7 @@ impl TestApp {
             // buffers (prompt) maintain `source` as the canonical byte
             // stream and feed `cpos` into it directly; line-based buffers
             // (cmdline, picker, status bar, list overlays) write through
-            // `set_lines` / `set_all_lines` and leave `source` empty —
+            // `set_lines` / `set_all_lines` and leave `source` empty -
             // content lives in `lines` and `cpos` is set via cell-column
             // helpers, not byte arithmetic on `source`. Readonly buffers
             // (transcript) are line-based but vim operates on a scratch
@@ -990,7 +990,7 @@ impl TestApp {
 
         // Kill-ring source range is well-formed even if we can't validate
         // it against a specific buffer (the ring doesn't track which buffer
-        // it came from — yanks happen from prompt edits, transcript visual
+        // it came from - yanks happen from prompt edits, transcript visual
         // mode, and overlay edits alike). `start <= end` is the only sound
         // floor; downstream consumers (`yank_flash_range` callers) snap
         // against the current buffer at read time to absorb stale offsets.
@@ -1007,7 +1007,7 @@ impl TestApp {
         // buffer's text-space. Visual ops snap before reading (see
         // `visual_anchor_at`), but the stored offset can still drift past
         // `text().len()` if the buffer shrinks under the anchor without
-        // the window noticing — that's the trap fuzzing should catch.
+        // the window noticing - that's the trap fuzzing should catch.
         for (wid, win) in self.app.ui.iter_wins() {
             if !win.vim_enabled {
                 continue;
@@ -1038,7 +1038,7 @@ impl TestApp {
 
         // Prompt-buffer attachment_ids must be in 1:1 correspondence with
         // the `\u{FFFC}` markers in the source. A divergence means an
-        // insert/delete path didn't keep them in sync — the next paste or
+        // insert/delete path didn't keep them in sync - the next paste or
         // copy will read off the end of the vec.
         if let Some(prompt) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) {
             let src = prompt.source();
@@ -1071,7 +1071,7 @@ impl TestApp {
 
         // Every live window's `buf` field must resolve to an existing
         // buffer. A dangling buf ref means the rendering pass reads from
-        // a phantom buffer — visually invisible until the cell layout
+        // a phantom buffer - visually invisible until the cell layout
         // tries to query content.
         for (wid, win) in self.app.ui.iter_wins() {
             assert!(
@@ -1152,7 +1152,7 @@ impl TestApp {
                 // sidecar that's still in flight. A missing entry means
                 // the transcript was rebuilt without restoring the tool
                 // state; a terminal status means the pending bookkeeping
-                // wasn't cleared when the tool finished — both corrupt
+                // wasn't cleared when the tool finished - both corrupt
                 // the tool widget.
                 let state = self.app.transcript.history.tool_states.get(&pt.call_id);
                 assert!(
@@ -1194,9 +1194,9 @@ impl TestApp {
         // `begin_agent_turn` / harness `start_turn` flip it on alongside
         // `agent = Some(...)`, and `discard_turn` always calls
         // `working.finish` before nulling `agent`. The reverse direction
-        // (agent.is_some() => working.is_animating) does NOT hold —
+        // (agent.is_some() => working.is_animating) does NOT hold -
         // host-driven recovery hooks (e.g. on_context_limit) can pause
-        // the animation while the turn keeps running — so we only assert
+        // the animation while the turn keeps running - so we only assert
         // one way.
         if self.app.working.is_animating() {
             assert!(
@@ -1242,7 +1242,7 @@ impl TestApp {
         );
 
         // Ask callbacks live in their own map keyed on the same `next_id`
-        // counter as the win/overlay/paint registry — a duplicate id in
+        // counter as the win/overlay/paint registry - a duplicate id in
         // both means some new registration path forgot which map to write
         // to, and `fire_ask_callback` could dispatch an unrelated handler
         // with ask-shaped args.
@@ -1275,7 +1275,7 @@ impl TestApp {
     /// registration time. Returned tuples are `(module, name)`, e.g.
     /// `("smelt.buf", "new")`. The same registry powers
     /// `cargo xtask gen-lua-docs`, so any function visible in the
-    /// reference docs is also fuzzable — and a freshly-added
+    /// reference docs is also fuzzable - and a freshly-added
     /// `smelt.foo.bar` flows into the fuzz target automatically, with
     /// no manual update to a hand-written `LuaOp` table.
     pub fn lua_doc_snapshot(&self) -> Vec<(&'static str, &'static str)> {
@@ -1289,7 +1289,7 @@ impl TestApp {
     /// across the shared registries and assert it still resolves in the
     /// mlua registry. A `Value::Nil` after `gc_collect` means a Rust
     /// path dropped the handle's `RegistryKey` (or the key was wrong
-    /// from the start) — the Rust→Lua reference is dangling. Used by
+    /// from the start) - the Rust→Lua reference is dangling. Used by
     /// `lua_loop` between batches so leaks surface attached to the op
     /// that caused them rather than at scenario teardown.
     pub fn assert_lua_handles_alive(&self) {
@@ -1379,7 +1379,7 @@ impl TestApp {
     /// Reload the Lua context once, snapshot the live handle count,
     /// reload again, and assert the count didn't grow. Compares **two
     /// consecutive** reloads (not pre/post a single reload) because
-    /// cold-start vs first-reload isn't apples-to-apples — lifecycle
+    /// cold-start vs first-reload isn't apples-to-apples - lifecycle
     /// hooks fire with `ctx.kind = "reload"` only on the second-and-
     /// later bring-ups, so plugins legitimately do extra registration
     /// on the first reload. By reload N the system is in steady state;
@@ -1387,7 +1387,7 @@ impl TestApp {
     /// being cleared.
     ///
     /// Intended for one-shot use at the END of a scenario, after the
-    /// scenario's own reload ops have run — calling it inside the
+    /// scenario's own reload ops have run - calling it inside the
     /// segment loop would inflate the reload count and obscure the
     /// scenario semantics.
     pub fn assert_no_handle_leak_across_reload(&mut self) {
@@ -1401,7 +1401,7 @@ impl TestApp {
         let after = smelt_core::lua::lua_handles_live();
         if after > baseline {
             panic!(
-                "FFI-LEDGER: handle leak across reload — count went {baseline} -> {after} on second consecutive reload (steady state should be stable)"
+                "FFI-LEDGER: handle leak across reload - count went {baseline} -> {after} on second consecutive reload (steady state should be stable)"
             );
         }
     }
@@ -1538,7 +1538,7 @@ static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
 /// Initialize `$HOME` + XDG env vars on first call, then wipe the
 /// directory's contents on every call so each `TestApp::build` starts
 /// against an empty filesystem. Without this, session / history / state
-/// files written by one scenario survive into the next — a real source
+/// files written by one scenario survive into the next - a real source
 /// of nondeterminism for libFuzzer, which runs every iteration in the
 /// same process.
 fn ensure_test_home() {
@@ -1561,7 +1561,7 @@ fn ensure_test_home() {
     // filesystem. We can't `remove_dir_all` `home` itself (it'd drop the
     // tempdir backing path), so iterate one level down.
     //
-    // Skip the `cwd` subdirectory — storybook tests pin the process cwd
+    // Skip the `cwd` subdirectory - storybook tests pin the process cwd
     // there so `smelt.os.cwd()` renders as `~/cwd`. On Unix deleting the
     // cwd invalidates it (`getcwd` returns ENOENT), so parallel tests
     // must not remove each other's working directory.
@@ -1669,7 +1669,7 @@ mod tests {
     fn lua_prompt_text_strips_attachment_markers() {
         // Inserting an attachment seeds the prompt with U+FFFC + a backing id.
         // `smelt.prompt.text()` is the Lua-side accessor that history search,
-        // pickers, and similar plugins use to snapshot the input — those
+        // pickers, and similar plugins use to snapshot the input - those
         // callers can't carry attachment ids, so leaking the marker byte
         // lets a marker round-trip back through `set_text` orphan an id.
         let mut app = TestApp::builder().build();
@@ -1707,7 +1707,7 @@ mod tests {
     // ── Resource invariants: per-event allocation tracking ────────────
 
     /// `feed_one` captures a non-negative allocation delta on every event,
-    /// and a `Tick` (pure clock advance) allocates next to nothing — the
+    /// and a `Tick` (pure clock advance) allocates next to nothing - the
     /// floor sanity-check that the counting allocator is actually wired
     /// into the test binary. If `Counting` regresses to `System`, the
     /// snapshots stay zero and this still passes; pair with the keystroke
@@ -1728,7 +1728,7 @@ mod tests {
 
     /// One keystroke through the dispatch chain stays well under the default
     /// budget. If this trips, either we have a real per-keystroke regression
-    /// or the budget needs revisiting — both worth noticing.
+    /// or the budget needs revisiting - both worth noticing.
     #[test]
     fn keystroke_stays_within_default_alloc_budget() {
         let mut app = TestApp::builder().build();
@@ -2079,7 +2079,7 @@ mod tests {
 
     /// Regression: a prompt-docked picker whose `scroll_top` lands at
     /// `max_scroll` (cursor at the bottom in reversed mode) was getting
-    /// clobbered by `Ui::apply_tail_follow` on the first frame — the new
+    /// clobbered by `Ui::apply_tail_follow` on the first frame - the new
     /// leaf has no viewport rect yet, so `max_scroll = total_rows - 0`
     /// snapped `scroll_top` past the end and the picker rendered blank
     /// until the user typed a character to force a re-layout.
@@ -2227,7 +2227,7 @@ mod tests {
     #[test]
     fn vim_typing_in_normal_mode_does_not_append_to_buffer() {
         let mut app = TestApp::builder().with_vim(true).build();
-        // Normal-mode 'h' / 'l' are motions, not characters — should not
+        // Normal-mode 'h' / 'l' are motions, not characters - should not
         // land in the prompt buffer.
         app.press(KeyCode::Esc);
         app.type_text("hl");
@@ -2637,7 +2637,7 @@ mod tests {
 
     /// `apply_window_opts` should only mutate fields that are present in
     /// opts. A named refresh that omits `wrap` must NOT silently reset
-    /// wrap to its default — that would clobber the prior value.
+    /// wrap to its default - that would clobber the prior value.
     #[test]
     fn named_win_refresh_preserves_wrap_when_omitted() {
         let mut app = TestApp::builder().build();
@@ -2713,7 +2713,7 @@ mod tests {
     }
 
     /// Re-opening a named overlay with a structurally different layout
-    /// (leaf → vbox split) should replace the tree in place — not silently
+    /// (leaf → vbox split) should replace the tree in place - not silently
     /// keep the old one.
     #[test]
     fn named_overlay_refresh_replaces_layout_structure() {
@@ -2933,7 +2933,7 @@ mod tests {
 
     /// `_bootstrap.lua` wraps `smelt.tools.register` to inject a default
     /// `summary`. The wrap must remain a *single* layer across many
-    /// reloads — never re-wrap the previous wrap.
+    /// reloads - never re-wrap the previous wrap.
     #[test]
     fn reload_lua_does_not_double_wrap_tools_register() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2948,7 +2948,7 @@ mod tests {
             }
             // Register a tool with no `summary`; the bootstrap wrap should
             // populate it once. If the wrap had compounded across reloads
-            // the call would still succeed — but every reload would add a
+            // the call would still succeed - but every reload would add a
             // closure frame on top. The functional check: registration
             // works and the registered summary handler runs.
             app.app
@@ -2987,7 +2987,7 @@ mod tests {
         // First version opens both a named overlay and a plain
         // anonymous overlay. init.lua doesn't call `smelt.plugin(...)`,
         // so its loader frame is unnamed and anonymous resources stay
-        // anonymous — they get reaped on /reload.
+        // anonymous - they get reaped on /reload.
         std::fs::write(
             &init,
             r#"
@@ -3020,7 +3020,7 @@ mod tests {
 
         let mut app = TestApp::builder().with_init_lua(&init).build();
 
-        // Capture the anonymous overlay's id — we'll assert it's gone
+        // Capture the anonymous overlay's id - we'll assert it's gone
         // after reload while the named one survives. (Total overlay
         // count is noisy: reload_lua emits a `notify(...)` toast which
         // adds its own short-lived overlay.)
@@ -3247,7 +3247,7 @@ mod tests {
     /// **Single ledger** for "what does `/reload` clear?" Touches every
     /// Lua-side surface, triggers reload, asserts each is in the expected
     /// post-reload state. New `LuaShared` registries or TUI-side caches
-    /// that hold Lua handles MUST add a check here — otherwise the
+    /// that hold Lua handles MUST add a check here - otherwise the
     /// reload contract is silently broken.
     #[test]
     fn reload_clears_every_lua_surface() {
@@ -3392,7 +3392,7 @@ mod tests {
 
     /// In-flight `smelt.spawn` coroutines must be cancelled before
     /// `clear_lua_handles` wipes the registries they reference. After
-    /// reload, the parked task should never resume — driving tasks
+    /// reload, the parked task should never resume - driving tasks
     /// produces nothing, the post-sleep side effect never runs.
     #[test]
     fn reload_lua_cancels_in_flight_tasks() {
@@ -3447,7 +3447,7 @@ mod tests {
     /// `/reload` (`smelt.engine.reload()`) used to refuse with
     /// "cannot reload while a modal dialog is open". We now dismiss
     /// the modal first so the parked dialog coroutine joins the rest
-    /// of the in-flight tasks `clear_for_reload` cancels — symmetric
+    /// of the in-flight tasks `clear_for_reload` cancels - symmetric
     /// with how reload already drops any other `smelt.spawn`. After
     /// reload, no modal is open and a fresh dialog opens cleanly.
     #[test]
@@ -3499,7 +3499,7 @@ mod tests {
             "modal must be dismissed after reload"
         );
 
-        // Reload should have re-registered the command — reopen works.
+        // Reload should have re-registered the command - reopen works.
         {
             let _g = crate::lua::install_app_ptr(&mut app.app);
             app.app.apply_lua_command("open_modal");
@@ -3870,7 +3870,7 @@ mod tests {
         assert!(rx.await.expect("recovery reply").is_none());
     }
 
-    /// User-resized overlay (`size_override`) must survive reload —
+    /// User-resized overlay (`size_override`) must survive reload -
     /// the named-refresh path preserves user gesture state.
     #[test]
     fn reload_lua_preserves_user_size_override() {

@@ -166,7 +166,7 @@ fn stderr_supports_color() -> bool {
             return false;
         }
         // Headless processes may have stderr piped to a log file, but
-        // the parent TUI renders the ANSI sequences — so honor FORCE_COLOR.
+        // the parent TUI renders the ANSI sequences - so honor FORCE_COLOR.
         if std::env::var_os("FORCE_COLOR").is_some() {
             return true;
         }

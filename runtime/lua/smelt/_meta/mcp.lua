@@ -7,7 +7,7 @@
 ---@class smelt.mcp
 local mcp = {}
 
---- Snapshot every declared MCP server. Each row is `{ name, config, status, tool_count }` where `status` is `{ kind = "disabled"|"connecting"|"connected"|"error", since_ms?, error?, at_ms? }`. Lifecycle reads are sync — safe to call from a status renderer or keymap.
+--- Snapshot every declared MCP server. Each row is `{ name, config, status, tool_count }` where `status` is `{ kind = "disabled"|"connecting"|"connected"|"error", since_ms?, error?, at_ms? }`. Lifecycle reads are sync - safe to call from a status renderer or keymap.
 ---@type fun(): table
 mcp.list = nil
 

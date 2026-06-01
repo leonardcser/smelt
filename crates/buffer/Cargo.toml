@@ -2,7 +2,7 @@
 name = "smelt-buffer"
 version = "0.5.0-alpha.3"
 edition = "2021"
-description = "Frontend-neutral document model — Buffer (text + extmarks + decorations), Style, Theme, undo, clipboard, attachments. Shared between headless runtimes and the smelt-term renderer."
+description = "Frontend-neutral document model - Buffer (text + extmarks + decorations), Style, Theme, undo, clipboard, attachments. Shared between headless runtimes and the smelt-term renderer."
 license = "MIT"
 repository = "https://github.com/leonardcser/smelt"
 

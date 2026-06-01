@@ -80,7 +80,7 @@ pub struct ToolEnv<'a> {
 /// **Invariant**: the `LuaShared::tasks` mutex guarding this struct must never
 /// be held across a call into Lua code. Lua callbacks can re-enter the runtime
 /// (e.g. `smelt.spawn` from inside a coroutine, `Reg:remove()` cancelling a
-/// sibling task), and `std::sync::Mutex` is non-reentrant — holding the lock
+/// sibling task), and `std::sync::Mutex` is non-reentrant - holding the lock
 /// across a resume would deadlock. `drive_tasks` enforces this by popping a
 /// task out via `take_next_ready`, dropping the lock for the duration of
 /// `step_task_owned`, then reacquiring to `put_back` the parked task.
@@ -184,7 +184,7 @@ impl LuaTaskRuntime {
     }
 
     /// Pop a ready task out of the runtime, returning it by value. `drive_tasks`
-    /// uses this to step a task without holding the `tasks` mutex — so Lua code
+    /// uses this to step a task without holding the `tasks` mutex - so Lua code
     /// that re-enters the runtime (e.g. `smelt.spawn` from inside a coroutine)
     /// can acquire the lock synchronously instead of deadlocking.
     pub(crate) fn take_next_ready(&mut self, now: Instant) -> Option<LuaTask> {
@@ -475,12 +475,12 @@ mod tests {
         assert_eq!(rt.tasks.len(), 1);
         assert!(matches!(rt.tasks[0].wait, TaskWait::Sleep(_)));
 
-        // Second drive before deadline — still parked.
+        // Second drive before deadline - still parked.
         let out = rt.drive(&lua, t0 + Duration::from_millis(50));
         assert!(out.is_empty());
         assert_eq!(rt.tasks.len(), 1);
 
-        // Third drive past deadline — resumes and completes.
+        // Third drive past deadline - resumes and completes.
         let out = rt.drive(&lua, t0 + Duration::from_millis(200));
         assert!(out.is_empty());
         assert_eq!(rt.tasks.len(), 0);

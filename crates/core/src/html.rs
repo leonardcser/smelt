@@ -1,4 +1,4 @@
-//! HTML capability — pure parsing over `scraper`, no I/O. Exposes title,
+//! HTML capability - pure parsing over `scraper`, no I/O. Exposes title,
 //! links, plain text, and a markdown projection for LLM consumption.
 
 use scraper::{ElementRef, Html, Selector};
@@ -722,7 +722,7 @@ mod tests {
         assert!(t.contains("after"));
     }
 
-    // ── to_markdown — headings + paragraphs ───────────────────────
+    // ── to_markdown - headings + paragraphs ───────────────────────
 
     #[test]
     fn to_markdown_renders_headings() {
@@ -747,7 +747,7 @@ mod tests {
         assert_eq!(md.title.as_deref(), Some("Doc"));
     }
 
-    // ── to_markdown — inline formatting ────────────────────────────
+    // ── to_markdown - inline formatting ────────────────────────────
 
     #[test]
     fn to_markdown_emits_bold_for_strong_and_b() {
@@ -772,7 +772,7 @@ mod tests {
         assert!(md.content.contains("`fn x()`"));
     }
 
-    // ── to_markdown — links + images ───────────────────────────────
+    // ── to_markdown - links + images ───────────────────────────────
 
     #[test]
     fn to_markdown_emits_markdown_link_syntax() {
@@ -811,7 +811,7 @@ mod tests {
         assert!(!md.content.contains("!["));
     }
 
-    // ── to_markdown — pre / hr / br ────────────────────────────────
+    // ── to_markdown - pre / hr / br ────────────────────────────────
 
     #[test]
     fn to_markdown_wraps_pre_in_triple_backticks() {
@@ -838,7 +838,7 @@ mod tests {
         assert!(md.content[a..b].contains('\n'));
     }
 
-    // ── to_markdown — lists ────────────────────────────────────────
+    // ── to_markdown - lists ────────────────────────────────────────
 
     #[test]
     fn to_markdown_renders_unordered_list_with_dashes() {
@@ -856,7 +856,7 @@ mod tests {
         assert!(md.content.contains("2. second"));
     }
 
-    // ── to_markdown — blockquote ───────────────────────────────────
+    // ── to_markdown - blockquote ───────────────────────────────────
 
     #[test]
     fn to_markdown_prefixes_blockquote_lines_with_gt() {
@@ -865,7 +865,7 @@ mod tests {
         assert!(md.content.contains("> quoted text"));
     }
 
-    // ── to_markdown — tables ───────────────────────────────────────
+    // ── to_markdown - tables ───────────────────────────────────────
 
     #[test]
     fn to_markdown_renders_table_with_header_separator() {
@@ -887,7 +887,7 @@ mod tests {
         assert!(!md.content.contains("---"));
     }
 
-    // ── to_markdown — links collection ─────────────────────────────
+    // ── to_markdown - links collection ─────────────────────────────
 
     #[test]
     fn to_markdown_collects_outbound_links_when_base_url_given() {

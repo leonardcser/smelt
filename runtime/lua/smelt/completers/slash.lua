@@ -1,4 +1,4 @@
--- `/cmd` completer — opens when the buffer starts with `/` and the cursor sits
+-- `/cmd` completer - opens when the buffer starts with `/` and the cursor sits
 -- inside the unwhitespaced command name. Enter dispatches the command; Tab
 -- accepts the name + trailing space (which shows the dim arg placeholder
 -- when the command declared `args`).

@@ -54,7 +54,7 @@ fn cache_put_with_ttl(key: &str, value: &str, ttl: Duration) {
     }
 }
 
-/// One row in the catalog. New fields slot in here as they're needed —
+/// One row in the catalog. New fields slot in here as they're needed -
 /// new consumers don't pay a separate fetch.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ModelEntry {
@@ -250,7 +250,7 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
         limit: Option<CatalogLimit>,
     }
     // `Option<f64>` (not `#[serde(default)] f64`) so a stray null / string for any single
-    // cost field doesn't fail the whole catalog — fall back to 0.0 per field.
+    // cost field doesn't fail the whole catalog - fall back to 0.0 per field.
     #[derive(serde::Deserialize)]
     struct CatalogCost {
         input: Option<f64>,

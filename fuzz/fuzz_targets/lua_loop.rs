@@ -3,7 +3,7 @@
 //! libFuzzer entry for the Lua-API fuzz target. Drives generated
 //! `smelt.*` calls (resource lifecycle, paint, state, commands,
 //! keymaps, /reload) against a real `TestApp` to attack the
-//! `crates/{core,tui}/src/lua/api/*` surface — currently the
+//! `crates/{core,tui}/src/lua/api/*` surface - currently the
 //! lowest-covered area of the workspace.
 
 use libfuzzer_sys::fuzz_target;

@@ -16,7 +16,7 @@ local grep = {}
 --- `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
 --- `(nil, err)` on spawn failure. Cancellation kills the child (SIGKILL)
 --- and `smelt.task.external` raises `cancelled`. Exit code 1 (no match)
---- is not an error — inspect `exit_code` on the result.
+--- is not an error - inspect `exit_code` on the result.
 ---@see smelt.task.external
 ---@type fun(pattern: string, path: string, opts: table?): { stdout: string, stderr: string, exit_code: integer, timed_out: boolean }?, string?
 grep.run = nil

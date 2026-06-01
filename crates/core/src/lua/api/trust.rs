@@ -1,4 +1,4 @@
-//! `smelt.trust` — query and mutate the per-project content trust store.
+//! `smelt.trust` - query and mutate the per-project content trust store.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

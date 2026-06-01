@@ -14,7 +14,7 @@
 //!    on top of `prev`, the result must be cell-equal to `curr`. This
 //!    catches any future regression in `flush_diff`'s ability to faithfully
 //!    bring a terminal from the previous frame's state to the current
-//!    frame's — which is the property the reported "leftover glyphs"
+//!    frame's - which is the property the reported "leftover glyphs"
 //!    bug violated.
 //!
 //! The op palette intentionally mixes narrow and wide chars so within-frame
@@ -42,7 +42,7 @@ fn pick_char(u: &mut Unstructured<'_>) -> char {
 
 fn pick_style(u: &mut Unstructured<'_>) -> Style {
     let mut s = Style::default();
-    // A handful of common colors — palette covers the SGR code paths that
+    // A handful of common colors - palette covers the SGR code paths that
     // flush_diff distinguishes (named, ANSI palette, default).
     let palette: [Option<Color>; 5] = [
         None,
@@ -147,7 +147,7 @@ struct FuzzInput {
 }
 
 /// Walk every cell and assert the wide-char invariant. Panics inside the
-/// fuzzer surface as a crashing input — exactly what we want.
+/// fuzzer surface as a crashing input - exactly what we want.
 fn assert_invariants(grid: &Grid, label: &str) {
     for y in 0..grid.height() {
         for x in 0..grid.width() {

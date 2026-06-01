@@ -10,7 +10,7 @@ smelt.cmd.register("thinking", function()
   smelt.notify("thinking blocks: " .. (smelt.settings.show_thinking and "on" or "off"))
 end, { desc = "toggle thinking blocks" })
 
--- `/reasoning` — set explicitly or show current effort.
+-- `/reasoning` - set explicitly or show current effort.
 smelt.cmd.register("reasoning", function(arg)
   local valid = { off = true, low = true, medium = true, high = true, max = true }
   if arg then

@@ -1,4 +1,4 @@
-//! `cargo xtask fuzz <subcommand>` — fuzz tooling.
+//! `cargo xtask fuzz <subcommand>` - fuzz tooling.
 
 mod coverage;
 mod replay_regression;
@@ -136,7 +136,7 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Howard Hinnant's `civil_from_days` — convert UNIX seconds (UTC) into
+/// Howard Hinnant's `civil_from_days` - convert UNIX seconds (UTC) into
 /// `(year, month, day, hour, minute, second)` without a dependency.
 fn unix_to_civil(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
     let day = secs.div_euclid(86_400);

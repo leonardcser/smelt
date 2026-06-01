@@ -126,7 +126,7 @@ fn run_inner() -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     let mut metas = snapshot();
     if metas.is_empty() {
-        eprintln!("no Lua functions registered — has any module been migrated to LuaMod::fn_ yet?");
+        eprintln!("no Lua functions registered - has any module been migrated to LuaMod::fn_ yet?");
         std::process::exit(1);
     }
 
@@ -392,7 +392,7 @@ fn render_markdown(
 Do not edit by hand. -->\n\n",
     );
     s.push_str(&format!(
-        "**Tier:** `{}` — {}\n\n",
+        "**Tier:** `{}` - {}\n\n",
         tier.label(),
         tier.description()
     ));
@@ -450,7 +450,7 @@ so the LuaCATS-style annotation always matches what mlua actually marshals.\n\n"
     s.push_str(
         "Stubs land in `runtime/lua/smelt/_meta/` (one file per namespace, plus \
 `_types.lua` for shared records and aliases). Point lua-language-server at that \
-directory — see [`runtime/.luarc.json`](https://github.com/leonardcser/smelt/blob/main/runtime/.luarc.json) \
+directory - see [`runtime/.luarc.json`](https://github.com/leonardcser/smelt/blob/main/runtime/.luarc.json) \
 for a working config.\n\n",
     );
 
@@ -473,7 +473,7 @@ for a working config.\n\n",
         for (module, fns) in rows {
             let stem = module_file_stem(module);
             s.push_str(&format!(
-                "- [`{module}`]({stem}.md) — {} function(s)\n",
+                "- [`{module}`]({stem}.md) - {} function(s)\n",
                 fns.len()
             ));
         }
@@ -481,7 +481,7 @@ for a working config.\n\n",
     }
     if n_classes + n_aliases > 0 {
         s.push_str("## Types\n\n");
-        s.push_str("- [Classes & aliases](types.md) — typed opts records and string-literal unions referenced from the namespace pages.\n");
+        s.push_str("- [Classes & aliases](types.md) - typed opts records and string-literal unions referenced from the namespace pages.\n");
     }
     s
 }
@@ -501,7 +501,7 @@ fn render_types_stub(classes: &[LuaClassDecl], aliases: &[LuaAliasDecl]) -> Stri
         for f in &c.fields {
             // `[string]` marks an index signature (rest-key capture);
             // LuaCATS spells it `---@field [string] V` (no `?` suffix on
-            // the name — the index is always optional by definition).
+            // the name - the index is always optional by definition).
             if f.name == "[string]" {
                 if f.doc.is_empty() {
                     s.push_str(&format!("---@field [string] {}\n", f.ty));
@@ -603,7 +603,7 @@ from `---@class` / `---@alias` blocks in the bundled Lua modules.\n\n",
                 .join(" \\| ");
             if a.open {
                 s.push_str(&format!(
-                    "Open alias — accepts any `string`. Well-known names: {union}.\n\n"
+                    "Open alias - accepts any `string`. Well-known names: {union}.\n\n"
                 ));
             } else {
                 s.push_str(&format!("Variants: {union}\n\n"));
@@ -977,8 +977,8 @@ fn clean_stale_files(
 }
 
 /// Artifacts harvested from one bundled Lua chunk. Every doc surface
-/// the renderer knows about — functions, opts classes, string-literal
-/// aliases — is parsed in a single pass so adding a new bundled module
+/// the renderer knows about - functions, opts classes, string-literal
+/// aliases - is parsed in a single pass so adding a new bundled module
 /// is "drop the file into a bootstrap chunk" with no Rust ceremony.
 /// `warnings` carries human-readable diagnostics for malformed LuaCATS
 /// blocks (bad fields, dangling `@field` outside a class, …) so the
@@ -1050,7 +1050,7 @@ fn parse_bundled_lua(content: &str) -> BundledItems {
                         fields.push(field);
                     } else {
                         out.warnings.push(format!(
-                            "line {lineno}: `---@field` outside any `---@class` block — dropped"
+                            "line {lineno}: `---@field` outside any `---@class` block - dropped"
                         ));
                     }
                     // Stay in class-accumulation mode; don't clobber doc_buf.
@@ -1078,7 +1078,7 @@ fn parse_bundled_lua(content: &str) -> BundledItems {
                     sig_override = Some(sig);
                 }
                 CatsDirective::Ignored => {
-                    // `---@meta`, `---@see`, etc. — pass through silently.
+                    // `---@meta`, `---@see`, etc. - pass through silently.
                 }
             }
             continue;
@@ -1160,7 +1160,7 @@ fn leak(s: impl Into<String>) -> &'static str {
 
 /// LuaCATS directive recognised by [`parse_bundled_lua`]. `Field` and
 /// `Alias` wrap an `Option` so the caller can warn on malformed bodies
-/// without dropping back into the "is this even a directive?" check —
+/// without dropping back into the "is this even a directive?" check -
 /// every recognised keyword produces exactly one variant, and the
 /// fallback `Ignored` covers `---@meta`, `---@see`, `---@return`, …
 /// which we deliberately don't act on (LuaCATS keeps their meaning
@@ -1254,7 +1254,7 @@ fn split_token(s: &str) -> (&str, &str) {
 }
 
 /// Split `<type> <description>` while respecting the LuaCATS depth
-/// rules — spaces inside `()`/`[]`/`<>`/`{}` belong to the type, not
+/// rules - spaces inside `()`/`[]`/`<>`/`{}` belong to the type, not
 /// the description.
 fn split_type_and_doc(s: &str) -> (String, String) {
     let bytes = s.as_bytes();

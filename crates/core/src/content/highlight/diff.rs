@@ -155,7 +155,7 @@ pub(crate) fn build_inline_diff_cache(
 
 /// All-Context cache for a single-file view (write_file, notebook insert,
 /// `smelt.syntax.render_file`). Same IR as the diff renderer so a single
-/// `print_cached_inline_diff` pipeline serves both — line numbers, wrap math,
+/// `print_cached_inline_diff` pipeline serves both - line numbers, wrap math,
 /// and bg-spanning all live in one place.
 pub fn build_file_view_cache(content: &str, ext: Option<&str>) -> CachedInlineDiff {
     let _perf = smelt_perf::perf::begin("render:build_file_view_cache");
@@ -504,7 +504,7 @@ pub fn print_inline_diff(
 
 /// Like [`print_inline_diff`] but with an explicit syntect language/extension token
 /// (bypasses the `path`-based extension sniff) and `indent_cells` of non-selectable
-/// leading indent per row — used by the tool-block worker to align diff content with
+/// leading indent per row - used by the tool-block worker to align diff content with
 /// the tool name's column without a separate replay-time wrapper.
 #[allow(clippy::too_many_arguments)]
 pub fn print_inline_diff_ext(
@@ -643,7 +643,7 @@ pub fn print_cached_inline_diff(
     // Single line-number column (` N `). The body sign ("+ "/"- "/"  ") is always
     // written inline regardless of mode. `Stamped` hands off the line number via
     // `SourceLine`; the host window's `LineNumberGutter` paints the column outside
-    // the content width — so the in-content prefix is just the sign.
+    // the content width - so the in-content prefix is just the sign.
     let lineno_digits = format!("{}", cache.max_display_lineno).len();
     let prefix_cells = match gutter {
         GutterStyle::Stamped => 0,
@@ -799,7 +799,7 @@ pub fn print_cached_inline_diff(
 
 /// Emit the diff row's left-of-content prefix per the chosen gutter style. `Stamped`
 /// hands off via `SourceLine` (host window's `LineNumberGutter` paints the column);
-/// `InlineLineNumbers` writes ` N ` as text — coloured `line_fg` when set (red/green
+/// `InlineLineNumbers` writes ` N ` as text - coloured `line_fg` when set (red/green
 /// for delete/insert rows so the gutter shares the row's diff tint), otherwise the
 /// theme's `Comment` group; `None` writes nothing.
 fn emit_diff_prefix(
@@ -1601,7 +1601,7 @@ mod tests {
         };
         let block = render_test(80, |out| {
             let emitted = print_cached_inline_diff(out, &cache, GutterStyle::Stamped, 0, 0, 0);
-            // 0 means "no limit" — should emit the single line.
+            // 0 means "no limit" - should emit the single line.
             assert_eq!(emitted, 1);
         });
         assert!(block.outcome.line_count >= 1);

@@ -1,4 +1,4 @@
-//! `smelt.frontend` — query which frontend (TUI vs headless) is running.
+//! `smelt.frontend` - query which frontend (TUI vs headless) is running.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

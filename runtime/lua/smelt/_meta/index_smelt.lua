@@ -28,7 +28,7 @@ smelt.ns = nil
 --- promotion so declaration order is what matters.
 --- 
 --- The handle deliberately doesn't wrap `smelt.cell` / `smelt.cmd` /
---- `smelt.keymap` / `smelt.lifecycle.*` — those calls would not be
+--- `smelt.keymap` / `smelt.lifecycle.*` - those calls would not be
 --- scope-aware (cell/cmd names are global), so a method facade would
 --- imply encapsulation it can't deliver. Call them directly through
 --- `smelt.*` and namespace your cell/cmd names explicitly.
@@ -48,7 +48,7 @@ smelt.quit = nil
 ---@type fun(ms: integer): any
 smelt.sleep = nil
 
---- Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task — any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds.
+--- Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task - any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds.
 ---@see smelt.task.wait
 ---@type fun(handler: fun()): smelt.Reg
 smelt.spawn = nil

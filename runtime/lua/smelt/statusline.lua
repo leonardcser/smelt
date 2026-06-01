@@ -1,4 +1,4 @@
--- Statusline window — Lua-allocated, Lua-rendered.
+-- Statusline window - Lua-allocated, Lua-rendered.
 --
 -- This module owns:
 --   * the statusline window (`M.win`)

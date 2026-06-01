@@ -82,7 +82,7 @@ impl TuiApp {
             if let Some(owner) =
                 scrollbar_owner_from_capture_transition(cap_before, self.ui.capture())
             {
-                // While a modal is open, the modal keeps focus — scrolling a
+                // While a modal is open, the modal keeps focus - scrolling a
                 // background pane's scrollbar must not steal it.
                 if is_left_down(me.kind) && self.ui.active_modal().is_none() {
                     if let Some(focus) = app_focus_for_owner(owner) {
@@ -98,7 +98,7 @@ impl TuiApp {
             };
         }
 
-        // Wheel scroll is handled generically by `Ui::dispatch_event` — when it
+        // Wheel scroll is handled generically by `Ui::dispatch_event` - when it
         // falls through here, the wheel didn't land on a scrollable leaf and is
         // safe to drop.
         if is_scroll_event(me.kind) {
@@ -112,7 +112,7 @@ impl TuiApp {
         // visually-grouped chrome (prompt's top/bottom bars) inherits the
         // input's focus naturally.
         //
-        // Skip promotion when an overlay covers the point — overlays paint above
+        // Skip promotion when an overlay covers the point - overlays paint above
         // splits, so clicking a pill / notification / picker should not shift
         // app_focus to the underlying pane even when the overlay leaf is not
         // focusable or selectable.
@@ -143,7 +143,7 @@ impl TuiApp {
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
             let is_drag = matches!(me.kind, MouseEventKind::Drag(MouseButton::Left));
             // Fire Press/Release/Drag on the captured leaf with leaf-relative coords.
-            // Built-in transcript / input / list handling below still runs — pointer
+            // Built-in transcript / input / list handling below still runs - pointer
             // events are purely additive for Lua subscribers.
             let pointer_event = if is_down {
                 Some(crate::smelt_term::WinEvent::Press)
@@ -179,7 +179,7 @@ impl TuiApp {
                 }
             } else if self.ui.win(win).is_some_and(|w| w.selectable) {
                 // Generic selectable leaf: notifications, dialog bodies, future popups.
-                // On Down, promote keyboard focus to this leaf if it's focusable —
+                // On Down, promote keyboard focus to this leaf if it's focusable -
                 // overlays with multiple leaves (e.g. side-by-side panes) need click
                 // to follow keyboard focus, not just the first leaf the overlay opened.
                 // A non-focusable selectable leaf must not steal app_focus.
@@ -290,7 +290,7 @@ impl TuiApp {
 
     /// Generic selectable-leaf path used by notifications, dialog bodies, and any other
     /// leaf that sets `Window::selectable = true`. Skips the snap + word/line-break
-    /// machinery the transcript needs — drag-select only, no double/triple-click
+    /// machinery the transcript needs - drag-select only, no double/triple-click
     /// word/line expansion. Returns the yanked range on `Up` (caller copies it).
     fn handle_selectable_leaf_mouse(
         &mut self,
@@ -323,7 +323,7 @@ impl TuiApp {
 
     /// Drive a transcript-pane mouse event through `Window::handle_mouse`.
     /// Snaps the click column to a selectable cell (hidden-thinking rows route to fold markers).
-    /// On `MouseUp`, returns the yanked range as `CopyOutput` via `Buffer::copy_range` —
+    /// On `MouseUp`, returns the yanked range as `CopyOutput` via `Buffer::copy_range` -
     /// the transcript's `BufferCopy` impl walks the latest snapshot so `copy_as`
     /// substitutions, soft-wrap merging, and non-selectable cells are honored.
     fn handle_content_mouse(
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn region_click_on_empty_transcript_does_not_steal_focus() {
-        // No content means there's nothing to focus into — leave the user
+        // No content means there's nothing to focus into - leave the user
         // in the prompt.
         assert_eq!(focus_for_region_click(HitRegion::Transcript, false), None);
     }

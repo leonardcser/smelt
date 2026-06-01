@@ -1,4 +1,4 @@
-//! `smelt.prompt` bindings — the main editable input surface.
+//! `smelt.prompt` bindings - the main editable input surface.
 //!
 //! `win()` returns a `Win` userdata for the prompt input so plugins can
 //! bind keys / events via the chainable handle API. `text()` snapshots
@@ -25,7 +25,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "text",
-        "Return the prompt input buffer's current text. Internal attachment markers are stripped — plugins see only the user-visible characters.",
+        "Return the prompt input buffer's current text. Internal attachment markers are stripped - plugins see only the user-visible characters.",
         &[],
         |_, ()| {
             Ok(crate::lua::try_with_app(|app| {

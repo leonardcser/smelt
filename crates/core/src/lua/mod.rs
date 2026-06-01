@@ -48,7 +48,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// every `Drop` increments `dropped`. The difference is the net live
 /// count of registry-backed callables.
 ///
-/// Used by the fuzz harness as a leak oracle that survives refactors —
+/// Used by the fuzz harness as a leak oracle that survives refactors -
 /// a per-field walk has to be updated by anyone adding a new
 /// `LuaHandle` field. The drop counter has no such surface and catches
 /// handles that don't live in any tracked field at all (e.g. a closure
@@ -91,7 +91,7 @@ impl Drop for LuaHandle {
 
 /// Serialize a `Serialize` value through JSON into a Lua value. Convenience
 /// for crossing the engine↔Lua boundary without hand-rolling a per-type
-/// converter — used by `host_dispatch` to ship `protocol::Message`
+/// converter - used by `host_dispatch` to ship `protocol::Message`
 /// payloads to provider middleware hooks.
 pub fn serde_to_lua<T: serde::Serialize>(lua: &Lua, value: &T) -> LuaResult<mlua::Value> {
     let json = serde_json::to_value(value).map_err(mlua::Error::external)?;

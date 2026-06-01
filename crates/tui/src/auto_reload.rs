@@ -27,9 +27,9 @@ pub struct AutoReloadHandle {
 /// in `crates/core/src/lua/runtime.rs` (init.lua + plugins) and
 /// `crates/tui/src/instructions.rs` (AGENTS.md walk).
 pub struct WatchPaths {
-    /// `~/.config/smelt/` — recursive.
+    /// `~/.config/smelt/` - recursive.
     pub global_config: Option<PathBuf>,
-    /// `.smelt/` under cwd — recursive. Optional even when the
+    /// `.smelt/` under cwd - recursive. Optional even when the
     /// directory does not yet exist: the watcher silently skips
     /// missing paths so first-time project setup still wires up after
     /// a `/reload`.
@@ -47,7 +47,7 @@ pub struct WatchPaths {
 
 impl WatchPaths {
     /// Resolve every watchable root for the running session. Paths that
-    /// don't exist on disk are still included — `notify` errors are
+    /// don't exist on disk are still included - `notify` errors are
     /// logged and skipped per-path so a missing optional root never
     /// disables the entire watcher.
     pub fn discover(cwd: &Path, skill_extra: &[PathBuf], system_prompt: Option<PathBuf>) -> Self {
@@ -63,7 +63,7 @@ impl WatchPaths {
             dir = d.parent();
         }
         // Extra skill paths from `cfg.skills.paths` aren't covered by
-        // the global/project roots — watch them explicitly so out-of-tree
+        // the global/project roots - watch them explicitly so out-of-tree
         // SKILL.md edits also trigger reload. Strip entries already
         // inside the global/project roots to avoid redundant subscriptions.
         let mut extra_skill_dirs: Vec<PathBuf> = skill_extra.to_vec();

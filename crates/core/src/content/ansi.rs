@@ -50,7 +50,7 @@ pub fn parse_ansi(text: &str) -> Vec<AnsiSpan> {
                     }
                 }
                 Some(']') => {
-                    // OSC sequence — skip until BEL or ST (ESC \).
+                    // OSC sequence - skip until BEL or ST (ESC \).
                     while let Some(c) = chars.next() {
                         if c == '\u{7}' {
                             break;

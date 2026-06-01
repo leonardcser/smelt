@@ -100,9 +100,9 @@ impl TuiApp {
         // the focus context it owns (transcript / prompt). Two cross-cutting cases
         // are decided here, after the layers have spoken, by forcing `Block` only
         // if no layer has already claimed the cursor:
-        //   - Focused overlay leaf (dialog / picker) — leaf's own `cursor_screen_row`
+        //   - Focused overlay leaf (dialog / picker) - leaf's own `cursor_screen_row`
         //     paints the block via `Window::render`.
-        //   - Active mouse drag anywhere — `Ui::active_cursor_leaf` routes the block
+        //   - Active mouse drag anywhere - `Ui::active_cursor_leaf` routes the block
         //     to the dragging leaf so the cursor visibly follows the drag, even on a
         //     non-focusable leaf like a notification.
         if matches!(
@@ -240,7 +240,7 @@ impl TuiApp {
             .win(crate::app::PROMPT_WIN)
             .map(|w| w.config.gutters)
             .unwrap_or_default();
-        // Use the same content width the auto-attach pre-pass will use — both pad
+        // Use the same content width the auto-attach pre-pass will use - both pad
         // gutters AND the reserved scrollbar column. Otherwise `wrap_with_offsets`
         // wraps to a wider width than the renderer paints, so trailing chars get
         // clipped and word wrap fires at the wrong column as the user types.
@@ -278,7 +278,7 @@ impl TuiApp {
                 self.ui
                     .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
             } else {
-                // Cursor is off-screen — hide it so a stale shape from the prior frame
+                // Cursor is off-screen - hide it so a stale shape from the prior frame
                 // doesn't draw a stray glyph.
                 self.ui
                     .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
@@ -339,7 +339,7 @@ impl TuiApp {
     /// Each callback receives its `Win` userdata; the renderer is
     /// expected to write the window's contents into the backing buffer
     /// for the current frame. Renderers whose target window has been
-    /// closed are silently skipped (and not collected — `Win:close()`
+    /// closed are silently skipped (and not collected - `Win:close()`
     /// is the right way to drop a renderer, and the registry entry
     /// stays so a re-opened window keeps its renderer). Errors are
     /// recorded so plugin bugs surface in `/log` without breaking the

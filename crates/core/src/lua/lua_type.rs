@@ -2,7 +2,7 @@
 //!
 //! The impl table is vendored from
 //! [tealr](https://github.com/lenscas/tealr/blob/master/src/type_representation.rs)
-//! (MIT/Apache-2.0). We only need the type-name plumbing — tealr's
+//! (MIT/Apache-2.0). We only need the type-name plumbing - tealr's
 //! richer `Type` enum, the userdata-flavoured `TealData` trait, and
 //! the `tealr_doc_gen` rendering pipeline don't fit smelt's
 //! table-of-functions API shape, so we pulled the impl table inline
@@ -15,7 +15,7 @@
 /// A Rust type that has a single LuaCATS type representation.
 ///
 /// Containers are recursive: `Option<Vec<u64>>` resolves to
-/// `"integer[]?"`. Tuple types are intentionally *not* `LuaType` —
+/// `"integer[]?"`. Tuple types are intentionally *not* `LuaType` -
 /// they're handled by [`LuaTypeTuple`] for parameter lists and by
 /// dedicated multi-return handling for `mlua::IntoLuaMulti` returns.
 pub trait LuaType {
@@ -83,7 +83,7 @@ impl<K: LuaType, V: LuaType> LuaType for std::collections::BTreeMap<K, V> {
 ///
 /// `param_names` is paired with the tuple positionally; entries
 /// shorter than the tuple arity fall back to `argN`. The bound on
-/// each element is just [`LuaType`] — keeping the surface small so
+/// each element is just [`LuaType`] - keeping the surface small so
 /// adding new param types means one `impl_lua_type!` line, no new
 /// tuple impls.
 pub trait LuaTypeTuple {
@@ -340,7 +340,7 @@ impl LuaType for crate::lua::api::layout::LuaBlockLayout {
 pub struct LuaClassField {
     pub name: &'static str,
     /// LuaCATS-rendered type without the trailing `?` for optional
-    /// fields — `optional` carries that information separately so the
+    /// fields - `optional` carries that information separately so the
     /// emitter can place the `?` on the field name.
     pub ty: String,
     pub optional: bool,
@@ -409,7 +409,7 @@ pub struct LuaAliasDecl {
     /// non-exhaustive list of well-known names that surfaces as
     /// IDE autocomplete hints alongside an unconstrained `string`.
     pub variants: Vec<&'static str>,
-    /// When true, the alias accepts any string at runtime — the
+    /// When true, the alias accepts any string at runtime - the
     /// LuaCATS form becomes `string | "literal1" | "literal2" | …`,
     /// which gives lua-language-server autocomplete for the known
     /// names without rejecting plugin-defined ones.

@@ -1,4 +1,4 @@
-//! `smelt.perf` — timing helpers for Lua.
+//! `smelt.perf` - timing helpers for Lua.
 
 use crate::lua::doc::Tier;
 use crate::lua::lua_type::LuaCallback;
@@ -10,7 +10,7 @@ use std::sync::Mutex;
 // `smelt_perf::perf::begin` takes a `&'static str` so the sample map can
 // key labels without copying. We accept labels that look like real
 // identifiers (alphanumeric / `_` / `:` / `-`, ≤ 64 chars) and intern them
-// — a real plugin's bounded set of buckets leaks at most once each. Anything
+// - a real plugin's bounded set of buckets leaks at most once each. Anything
 // else (random binary bytes, oversized labels) buckets into a single static
 // fallback so callers can't make us malloc per call.
 const FALLBACK: &str = "lua:user";

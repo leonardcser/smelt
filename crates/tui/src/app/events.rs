@@ -30,7 +30,7 @@ impl TuiApp {
             code, modifiers, ..
         }) = &ev
         {
-            // Skip when an overlay or cmdline is focused — they get first dibs.
+            // Skip when an overlay or cmdline is focused - they get first dibs.
             if self.ui.focused_overlay().is_none() && self.well_known.cmdline.is_none() {
                 let pctx = crate::input::prompt_ctx_ref(&self.ui);
                 let ctx = self.input.key_context(pctx, self.agent.is_some());
@@ -131,7 +131,7 @@ impl TuiApp {
                 false
             }
             EventOutcome::InterruptWithQueued => {
-                // Save queued messages before cancel — the cancel path dumps them into the input buffer.
+                // Save queued messages before cancel - the cancel path dumps them into the input buffer.
                 let remaining = std::mem::take(&mut self.queued_inputs);
                 self.discard_turn(true);
                 self.queued_inputs = remaining;
@@ -174,7 +174,7 @@ impl TuiApp {
                         self.start_queued_input(queued);
                     }
                 }
-                // Don't restore stash if a dialog opened — it restores on close.
+                // Don't restore stash if a dialog opened - it restores on close.
                 if self.ui.focused_overlay().is_none() {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                     self.input.restore_stash(&mut pctx);
@@ -200,7 +200,7 @@ impl TuiApp {
             return Some(self.handle_mouse(me));
         }
         // Buffer-local Lua keymaps win over global (nvim priority). Skipped when an overlay
-        // owns focus — overlay-leaf dispatch happens upstream.
+        // owns focus - overlay-leaf dispatch happens upstream.
         if let Event::Key(k) = *ev {
             if self.ui.focused_overlay().is_none() {
                 let lua = &self.lua;
@@ -227,7 +227,7 @@ impl TuiApp {
                 let vim_mode = self.current_vim_mode_label();
                 use smelt_core::lua::runtime::KeymapResult;
 
-                // Single-key first — allocation-free common case.
+                // Single-key first - allocation-free common case.
                 match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
                     KeymapResult::Consumed => {
                         self.timers.pending_chord = None;
@@ -351,7 +351,7 @@ impl TuiApp {
             // matching `accept_keys` accept the text into the buffer; matching
             // `dismiss_keys` clear it. Both fire the corresponding win event.
             // Typing past those chords leaves the placeholder intact (the buffer
-            // becoming non-empty just hides it visually — undoing back to empty
+            // becoming non-empty just hides it visually - undoing back to empty
             // restores it).
             if let Some(outcome) =
                 self.dispatch_placeholder_key(self.well_known.prompt, code, modifiers)
@@ -696,7 +696,7 @@ impl TuiApp {
 
         let is_from_paste = self.input.skip_shell_escape();
 
-        // `:` is a vim-style alias for `/` — normalize before command lookup.
+        // `:` is a vim-style alias for `/` - normalize before command lookup.
         let dispatch_input = if let Some(rest) = trimmed.strip_prefix(':') {
             format!("/{rest}")
         } else {
@@ -869,7 +869,7 @@ impl TuiApp {
             }
         }
 
-        // Tier 2: global Lua keymap (single-chord lookup only — overlays
+        // Tier 2: global Lua keymap (single-chord lookup only - overlays
         // don't participate in the chord-buffering path).
         if let Some(token) = crate::lua::chord_string(k) {
             let vim_mode = self.current_vim_mode_label();
@@ -921,7 +921,7 @@ impl TuiApp {
 
     /// Overlay-focus key cascade tier 4. Wraps the shared
     /// [`Self::dispatch_window_viewer_key`] with two overlay-specific gates:
-    ///   * Insert-mode skip — typing inside an editable overlay leaf must
+    ///   * Insert-mode skip - typing inside an editable overlay leaf must
     ///     not bubble nav keys here.
     ///   * Esc-in-idle-Normal falls through so the modal-dismiss tier (5)
     ///     can close the overlay; Visual / pending-sequence Esc stays with vim.
@@ -953,7 +953,7 @@ impl TuiApp {
 
     /// Unified viewer-key dispatcher shared between transcript, overlay leaves,
     /// and any future scrollable window. Resolution order:
-    ///   1. Vim engine (when `vim_enabled`) — handles motions, operators,
+    ///   1. Vim engine (when `vim_enabled`) - handles motions, operators,
     ///      and yanks; falls through with `Passthrough` for chords vim
     ///      doesn't claim (e.g. Shift+Arrow selection-extend).
     ///   2. Shared keymap dispatch via [`Self::dispatch_buffer_action`].
@@ -963,7 +963,7 @@ impl TuiApp {
     ///      Alt-</>, Ctrl-P/N) route correctly.
     ///
     /// Editing actions (kill, delete, yank, etc.) are silently dropped on
-    /// `buf.readonly` buffers — the same dispatcher serves the read-only
+    /// `buf.readonly` buffers - the same dispatcher serves the read-only
     /// transcript and a future read-write Lua-created buffer without
     /// branching the call site.
     pub(crate) fn dispatch_window_viewer_key(
@@ -1005,7 +1005,7 @@ impl TuiApp {
                 return Status::Consumed;
             }
             // Vim Passthrough (Shift+Arrows, etc.) falls through so the
-            // shared keymap layer can claim selection-extend chords —
+            // shared keymap layer can claim selection-extend chords -
             // matches the prompt's behaviour.
         }
 
@@ -1172,7 +1172,7 @@ impl TuiApp {
             let buf = buf.expect("buffer");
             win.cpos = new_cpos;
             // A shift-motion that resolved to no movement (e.g. Shift+End at
-            // EOL) leaves `selection_anchor == cpos` — a degenerate, empty
+            // EOL) leaves `selection_anchor == cpos` - a degenerate, empty
             // selection that downstream code treats as "no selection" but
             // whose anchor still points into the buffer. Clear it so a
             // follow-up source-shrinking edit can't orphan it.

@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn flush_emits_distinct_sgr_for_fg_vs_bg() {
         // A cell that only sets bg must produce different bytes than one
-        // that only sets fg with the same color — fg/bg can't collapse.
+        // that only sets fg with the same color - fg/bg can't collapse.
         let render = |s: Style| {
             let prev = Grid::new(3, 1);
             let mut curr = Grid::new(3, 1);
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn flush_re_emits_sgr_when_style_changes_mid_run() {
         // Two adjacent cells with different styles must not share one SGR
-        // run — there must be an escape between them.
+        // run - there must be an escape between them.
         let prev = Grid::new(3, 1);
         let mut curr = Grid::new(3, 1);
         curr.set(0, 0, 'A', Style::default());

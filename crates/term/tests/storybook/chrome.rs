@@ -1,4 +1,4 @@
-//! Chrome stories — borders + titles painted on container nodes.
+//! Chrome stories - borders + titles painted on container nodes.
 //! Each story paints a dotted backdrop, then layers a bordered subtree
 //! at `(col=1, row=1)` so the rendered chrome glyphs read clearly
 //! against the surrounding fill.

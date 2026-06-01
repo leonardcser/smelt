@@ -5,7 +5,7 @@ use smelt_core::transcript_model::ConfirmChoice;
 
 impl TuiApp {
     /// Run a slash command as if typed into the cmdline. Forwards `Exec` for shell escapes.
-    /// Accepts bare names (`"btw foo"`) — the leading `/` is added automatically so the
+    /// Accepts bare names (`"btw foo"`) - the leading `/` is added automatically so the
     /// dispatcher's sigil requirement applies only to user-typed prompt input.
     pub(crate) fn apply_lua_command(&mut self, line: &str) {
         let trimmed = line.trim_start();
@@ -39,7 +39,7 @@ impl TuiApp {
     /// `lifecycle.on("ready")` hooks fire on every bring-up so plugins
     /// can rehydrate from `smelt.state` once per Lua-context init.
     /// Rust-owned UI state (named overlays, wins, bufs, paint slots)
-    /// survives — plugins re-attach via `opts.name` and `smelt.state`.
+    /// survives - plugins re-attach via `opts.name` and `smelt.state`.
     ///
     /// Phases:
     /// 1. [`Self::clear_tui_for_reload`] wipes TUI-side caches that hold
@@ -109,7 +109,7 @@ impl TuiApp {
     }
 
     /// **Single ledger** of every TUI-side cache that holds Lua handles
-    /// or references resources reload will wipe. Add new caches here —
+    /// or references resources reload will wipe. Add new caches here -
     /// the reload integration tests assert each one is empty/refreshed
     /// after a cycle.
     fn clear_tui_for_reload(&mut self) {
@@ -134,7 +134,7 @@ impl TuiApp {
         // entries until process exit.
         self.busy_stack = crate::app::BusyStack::default();
         // Anonymous overlays/wins/bufs from the previous cycle. Named
-        // resources (`opts.name = "..."`) survive — plugins recover
+        // resources (`opts.name = "..."`) survive - plugins recover
         // them by re-passing the same name on re-open.
         let dropped = self.ui.reap_anonymous(smelt_core::lua::LUA_BUF_ID_BASE);
         for id in dropped {

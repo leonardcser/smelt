@@ -1,4 +1,4 @@
-//! Vim stories — selection paint, motions, operators.
+//! Vim stories - selection paint, motions, operators.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui::smelt_term::layout::{Constraint, Gutters};

@@ -174,7 +174,7 @@ smelt.tools.register({
       lock:release()
       return {
         content = string.format(
-          "old_string found %d times — must be unique, or set replace_all to true",
+          "old_string found %d times - must be unique, or set replace_all to true",
           count
         ),
         is_error = true,

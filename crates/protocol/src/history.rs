@@ -8,7 +8,7 @@
 //! by discipline: **an assistant turn that invoked tools carries every tool
 //! result inline**. There is no way to construct an `AssistantTurn` with a
 //! `ToolInvocation` whose `result` is missing, so the engine cannot leave the
-//! history in a half-applied state mid-tool — the bug pattern that produced
+//! history in a half-applied state mid-tool - the bug pattern that produced
 //! "tool_call_id … did not have response messages" errors on resumed
 //! sessions.
 //!
@@ -48,7 +48,7 @@ pub struct AssistantTurn {
 }
 
 impl AssistantTurn {
-    /// Terminal turn — no tool calls. The conversation continues with the
+    /// Terminal turn - no tool calls. The conversation continues with the
     /// next user message (or ends if the user does nothing).
     pub fn terminal(
         content: Option<Content>,
@@ -63,7 +63,7 @@ impl AssistantTurn {
         }
     }
 
-    /// Tool turn — every `ToolCall` in `calls` is paired with the matching
+    /// Tool turn - every `ToolCall` in `calls` is paired with the matching
     /// `ToolOutcome` from `results`. Panics in debug if the lengths or
     /// call_ids don't line up; that's a bug in the caller.
     pub fn with_invocations(
@@ -226,7 +226,7 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                 i = j;
             }
             Role::Tool => {
-                // Stray tool message with no preceding assistant tool_call —
+                // Stray tool message with no preceding assistant tool_call -
                 // drop it. (This can happen in synthetic test fixtures; real
                 // sessions never see it.)
                 i += 1;
@@ -314,7 +314,7 @@ pub fn message_to_history_positions(messages: &[Message]) -> Vec<usize> {
                 i = j;
             }
             Role::Tool => {
-                // Stray Tool with no preceding assistant — dropped by
+                // Stray Tool with no preceding assistant - dropped by
                 // history_from_messages. Map to the current hist_idx so
                 // the caller can still use the table without panicking.
                 out.push(hist_idx);

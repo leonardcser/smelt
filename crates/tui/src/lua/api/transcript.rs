@@ -1,4 +1,4 @@
-//! `smelt.transcript` bindings — read the rendered transcript display
+//! `smelt.transcript` bindings - read the rendered transcript display
 //! text. Thin live-state surface over `TuiApp`.
 
 use mlua::prelude::*;

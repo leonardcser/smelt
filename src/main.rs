@@ -521,7 +521,7 @@ async fn main() {
         println!();
         app.run(startup_http_client.clone(), args.message).await;
         // Fire `smelt.lifecycle.on("shutdown", fn)` hooks. The TUI is torn
-        // down at this point so stdout is in cooked mode — plugins (e.g.
+        // down at this point so stdout is in cooked mode - plugins (e.g.
         // the bundled resume-hint banner) can `print(...)` straight to the
         // user's terminal scrollback.
         let session_id = app.core.session.id.clone();
@@ -541,7 +541,7 @@ async fn main() {
 /// so `smelt.cli.get(name)` can read it later.
 ///
 /// On parse error / `--help` / `--version` clap exits the process via
-/// `get_matches()` — matching the original `Args::parse()` behavior.
+/// `get_matches()` - matching the original `Args::parse()` behavior.
 fn parse_with_lua_flags(
     specs: &[tui::CliFlagSpec],
 ) -> (Args, std::collections::HashMap<String, tui::CliFlagValue>) {

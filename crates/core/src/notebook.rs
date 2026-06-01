@@ -1,4 +1,4 @@
-//! Jupyter `.ipynb` helpers — pure JSON parse + editing, no I/O beyond
+//! Jupyter `.ipynb` helpers - pure JSON parse + editing, no I/O beyond
 //! the `apply_edit` write path.
 
 use serde_json::Value;
@@ -1107,7 +1107,7 @@ mod edit_tests {
 
     #[test]
     fn strip_ansi_handles_bare_esc_without_bracket() {
-        // Unknown escape — consume up to next alpha char.
+        // Unknown escape - consume up to next alpha char.
         assert_eq!(strip_ansi("a\x1bMb"), "ab");
     }
 
@@ -1594,7 +1594,7 @@ mod edit_tests {
         let dir = tempdir().unwrap();
         let path = write_nb(dir.path(), "a.ipynb", sample_nb());
         let files = FileStateCache::new();
-        // No prime_cache — staleness check should reject.
+        // No prime_cache - staleness check should reject.
         let err = apply_edit(
             &args_for(&[
                 ("notebook_path", json!(path)),

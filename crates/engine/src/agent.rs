@@ -178,7 +178,7 @@ pub(crate) struct AskTask {
 /// every site that drains `cmd_rx` (the outer engine loop, the
 /// turn-control loop, `call_llm`, `execute_concurrent`,
 /// `wait_for_tool_result`) route background commands through a single
-/// function — and lets `execute_concurrent` in particular do so without
+/// function - and lets `execute_concurrent` in particular do so without
 /// colliding with its long-held `&mut self.cmd_rx` borrow in the select.
 pub(crate) struct BackgroundCtx<'a> {
     pub config: &'a EngineConfig,
@@ -255,7 +255,7 @@ fn spawn_engine_ask(
     // path). When present, merge the engine's MCP defs in too so the
     // tools section matches the main turn byte-for-byte. Plain callers
     // (predict, title) pass an empty list and get an empty `tools`
-    // field — sending MCP defs to them would waste tokens and break
+    // field - sending MCP defs to them would waste tokens and break
     // their own cache prefix.
     let mut messages = supplied_messages;
     let tools = supplied_tools;
@@ -421,7 +421,7 @@ struct ToolExecutionPlan<'a> {
     sequential_tools: Vec<(&'a protocol::ToolCall, HashMap<String, Value>, Instant)>,
     pending_tool_hooks: Vec<(u64, PendingToolCall<'a>)>,
     pending_tool_perms: Vec<(u64, PendingToolCall<'a>)>,
-    /// Synthetic outcomes produced inside `classify_tools` itself — unknown
+    /// Synthetic outcomes produced inside `classify_tools` itself - unknown
     /// tools, denied dispatch decisions. Folded into the assistant turn's
     /// `invocations` at commit time so the invariant ("every dispatched
     /// tool_call has a paired outcome") holds even when no execution
@@ -431,14 +431,14 @@ struct ToolExecutionPlan<'a> {
 
 /// Fold every produced outcome into a `Vec<ToolInvocation>` in the order
 /// the LLM emitted the calls. Any call without a recorded outcome gets a
-/// synthetic `interrupted` outcome — that case should be unreachable in
+/// synthetic `interrupted` outcome - that case should be unreachable in
 /// production (all execution paths produce an outcome), but the safety net
 /// makes the on-disk + on-wire invariant true *by construction*, not by
 /// careful code review.
 ///
 /// Precedence on `call_id` collision: `slot` > `plugin` > `inline`. The
 /// classify-then-execute pipeline routes each call to exactly one path,
-/// so collisions shouldn't happen in practice — but if a path bug starts
+/// so collisions shouldn't happen in practice - but if a path bug starts
 /// double-writing, the explicit precedence keeps the result deterministic.
 fn pair_invocations_in_order(
     calls: &[protocol::ToolCall],
@@ -463,7 +463,7 @@ fn pair_invocations_in_order(
                 // Safety net: should be unreachable because every execution
                 // path (slot, plugin, sequential, inline-classify) writes
                 // an outcome before pair_invocations_in_order runs. If it
-                // fires, our reasoning was wrong — log so we can find out.
+                // fires, our reasoning was wrong - log so we can find out.
                 crate::log::entry(
                     crate::log::Level::Warn,
                     "agent_invocation_missing",
@@ -494,7 +494,7 @@ fn pair_invocations_in_order(
 
 /// Log a warning when a host hook returns a `Vec<Message>` with assistant
 /// `tool_calls` whose ids aren't satisfied by following `Role::Tool`
-/// messages. The orphans are auto-repaired by `history_from_messages` —
+/// messages. The orphans are auto-repaired by `history_from_messages` -
 /// this surface makes the repair visible so a misbehaving plugin can be
 /// found instead of silently fixed.
 fn warn_if_replacement_has_orphans(replacement: &[Message], site: &str) {
@@ -576,7 +576,7 @@ struct Turn<'a> {
     /// Committed conversation history. Invariant: every `Assistant` turn
     /// either has no `invocations` (terminal) or has a `ToolOutcome` paired
     /// with every `ToolCall` the LLM emitted. There is no in-flight tool
-    /// state here — that lives on stack-locals during the run loop's
+    /// state here - that lives on stack-locals during the run loop's
     /// dispatch phase and is folded into a single `HistoryItem::Assistant`
     /// at commit time.
     history: Vec<HistoryItem>,
@@ -601,7 +601,7 @@ impl<'a> Turn<'a> {
     }
 
     /// Fire a `HostCall` and await its `oneshot::Sender<Reply>`. Returns
-    /// `None` if the host dropped the reply (channel closed) — callers
+    /// `None` if the host dropped the reply (channel closed) - callers
     /// treat that as "no mutation, proceed with the original value".
     async fn host_call<Reply, F>(&mut self, build: F) -> Option<Reply>
     where
@@ -660,8 +660,8 @@ impl<'a> Turn<'a> {
     }
 
     /// Append an assistant turn atomically. When `invocations` is non-empty,
-    /// every entry already carries its `ToolOutcome` — the only way to
-    /// satisfy `AssistantTurn`'s shape — so the on-disk and on-wire
+    /// every entry already carries its `ToolOutcome` - the only way to
+    /// satisfy `AssistantTurn`'s shape - so the on-disk and on-wire
     /// representations can never carry an orphan tool_use.
     fn push_assistant_turn(&mut self, mut turn: AssistantTurn) {
         if self.config.redact_secrets {
@@ -750,7 +750,7 @@ impl<'a> Turn<'a> {
     }
 
     /// Commit a streamed-but-cancelled assistant message. The model never
-    /// asked for any tools, so this is a terminal turn — `invocations` is
+    /// asked for any tools, so this is a terminal turn - `invocations` is
     /// empty by construction.
     fn commit_partial_assistant(&mut self, text: String, reasoning: String) {
         let content = if text.trim().is_empty() {
@@ -1034,7 +1034,7 @@ impl<'a> Turn<'a> {
                         &serde_json::json!({"reason": "quota_exceeded", "error": body}),
                     );
                     self.emit(EngineEvent::TurnError {
-                        message: "API quota exceeded — check your plan and billing details"
+                        message: "API quota exceeded; check your plan and billing details"
                             .to_string(),
                     });
                     self.emit_turn_complete(false);
@@ -1191,7 +1191,7 @@ impl<'a> Turn<'a> {
                 .await;
             // Capture the (possibly hook-mutated) in-flight assistant shape
             // for atomic commit. The `tool_calls` that classify_tools will
-            // dispatch are read from the hook output too — plugins that
+            // dispatch are read from the hook output too - plugins that
             // synthesize calls must do so via the hook return value.
             let post_hook_content = hooked.content;
             let post_hook_reasoning = hooked.reasoning_content;
@@ -1438,7 +1438,7 @@ impl<'a> Turn<'a> {
         let mut futs: futures_util::stream::FuturesUnordered<TaggedFut<'_>> =
             futures_util::stream::FuturesUnordered::new();
 
-        // Side-call futures from `smelt.tools.call` — don't count against `outstanding`.
+        // Side-call futures from `smelt.tools.call` - don't count against `outstanding`.
         type SideFut<'x> =
             std::pin::Pin<Box<dyn std::future::Future<Output = (u64, ToolResult)> + Send + 'x>>;
         let mut side_futs: futures_util::stream::FuturesUnordered<SideFut<'_>> =
@@ -1776,7 +1776,7 @@ impl<'a> Turn<'a> {
 
     /// Populate `completed[i]` with a synthetic `cancelled` outcome for any
     /// slot that never finished. Emits a `ToolFinished` event per slot. The
-    /// resulting `Vec<Option<ToolResult>>` invariant — Some for every slot —
+    /// resulting `Vec<Option<ToolResult>>` invariant - Some for every slot -
     /// is what `gather_slot_results` then folds into the assistant turn.
     fn mark_unfinished_cancelled(
         &mut self,
@@ -2178,7 +2178,7 @@ mod tests {
     #[test]
     fn pair_invocations_in_order_precedence_is_slot_then_plugin_then_inline() {
         // Same call_id appears in all three inputs. The classifier guarantees
-        // this can't happen in practice — this test pins the tiebreaker so a
+        // this can't happen in practice - this test pins the tiebreaker so a
         // future refactor that *does* introduce a collision behaves
         // predictably instead of silently flipping which outcome wins.
         let calls = vec![tc("c1"), tc("c2"), tc("c3")];

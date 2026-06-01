@@ -69,20 +69,17 @@ Module bodies run with the host pointer live on every Lua-context bring-up —
 both cold start and `/reload`. Three pieces compose into "my UI keeps the
 same position / focus / content when the user reloads my plugin":
 
-1. **`smelt.state(name)`** — JSON-shaped table that survives `/reload` (not
+1. **`smelt.state(name)`** - JSON-shaped table that survives `/reload` (not
    restart). Persist your `is_open` / cursor / variant index here.
 2. **`opts.name = "..."`** on `smelt.overlay.new`, `smelt.win.new`,
-   `smelt.buf.new`, and `smelt.paint.register` — opts the resource into
+   `smelt.buf.new`, and `smelt.paint.register` - opts the resource into
    hot-reload survival. The Rust-side structure stays in place; re-passing
    the same name on re-open swaps the layout / closure / contents
    atomically. Anonymous (no-name) resources get reaped each reload.
-3. **Module-body re-open** — at the bottom of your file, check the state
+3. **Module-body re-open** - at the bottom of your file, check the state
    flag and re-call your `open()`. On cold start `is_open` is false, so
    it's a no-op; after `/reload` it's true, so `open()` re-runs and finds
    the named overlay / paint slot already there, just updating closures.
-
-The canonical example is
-[`runtime/lua/smelt/examples/banner_picker.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/examples/banner_picker.lua):
 
 ```lua
 local function open()
@@ -95,7 +92,7 @@ local function open()
   persist().is_open = true
 end
 
--- module body — runs on every Lua-context bring-up.
+-- module body - runs on every Lua-context bring-up.
 if persist().is_open then open() end
 ```
 

@@ -338,7 +338,7 @@ impl TuiApp {
             self.finish_turn(cancelled);
             self.agent = None;
         } else if cancelled {
-            // No active turn but user requested cancel — still notify the
+            // No active turn but user requested cancel - still notify the
             // engine and kill any running Lua tasks (background tool calls,
             // bash executions, etc.).
             self.core.engine.send(UiCommand::Cancel);
@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn non_unicode_env_var_maps_to_not_unicode_error() {
         // `std::env::VarError::NotUnicode` carries an `OsString`; we don't
-        // care about its payload — only the variant matters for our message.
+        // care about its payload - only the variant matters for our message.
         let out = lookup_api_key("MY_KEY", |_| {
             Err(std::env::VarError::NotUnicode(std::ffi::OsString::new()))
         });

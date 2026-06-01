@@ -1,6 +1,6 @@
 //! Recent-pick memory for model / mode / reasoning effort.
 //!
-//! Not config — config lives in `init.lua`. This is the "what was I
+//! Not config - config lives in `init.lua`. This is the "what was I
 //! using last" memory, analogous to Vim's shada / Neovim's session
 //! info: a fresh launch lands where you left off, while `init.lua`
 //! still owns the actual configuration.

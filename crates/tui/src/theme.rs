@@ -6,7 +6,7 @@
 //! ------------
 //! - A colorscheme lives in Lua as a `ThemeSpec` table: a flat map
 //!   keyed by highlight-group name. Diff backgrounds, scrollbar colors,
-//!   mode indicators — they're all just groups.
+//!   mode indicators - they're all just groups.
 //! - `ThemeSpec`, `StyleDecl`, and `ColorDecl` round-trip through mlua
 //!   with full IDE completion. `ColorDecl` is recursive (its `dark` /
 //!   `light` branches are themselves `ColorDecl`s) so the `FromLua` and
@@ -15,11 +15,11 @@
 //!   entries (e.g. `Comment = "SmeltMuted"`) at compile time, applies
 //!   the `is_light` branch to any `{ dark, light }` `ColorDecl`, and
 //!   produces a flat `HlGroup → Style` map. There is no runtime alias
-//!   table — references are resolved once.
+//!   table - references are resolved once.
 //! - `default_baked()` returns a process-wide fallback theme. It evals
 //!   `runtime/lua/smelt/colorschemes/default.lua` (embedded via
 //!   `include_str!`) in a throwaway `mlua::Lua` and decodes the result
-//!   as a `ThemeSpec`. The Lua file is the single source of truth — no
+//!   as a `ThemeSpec`. The Lua file is the single source of truth - no
 //!   parallel Rust HashMap. Offline render paths (`format.rs`,
 //!   `prompt_buf.rs`) that don't have access to the live app theme
 //!   reach the default via this entry point.
@@ -82,7 +82,7 @@ impl FromLua for GroupDecl {
     }
 }
 
-/// Style table for a single highlight group. Every field is optional —
+/// Style table for a single highlight group. Every field is optional -
 /// unset fields stay at `Style::default()`. Pass a string in place of
 /// this struct (at the group-map level) to alias another group.
 #[derive(Debug, Default, Clone, LuaOpts)]
@@ -268,7 +268,7 @@ impl FromLua for ColorDecl {
 /// name (nvim conventions: `Comment`, `Visual`, `SmeltAccent`, …) with
 /// either a `StyleDecl` table or a string referencing another group
 /// in the same spec as the value. Compile via [`compile`] to produce
-/// a runtime `Theme`. Every themable color lives here — there are no
+/// a runtime `Theme`. Every themable color lives here - there are no
 /// special-case fields. The diff renderer's row fills are just
 /// `SmeltDiffAddBg` / `SmeltDiffDelBg` groups, scrollbar colors are
 /// `SmeltScrollbarTrack` / `…Thumb`, and so on.
@@ -293,7 +293,7 @@ impl LuaType for ThemeSpec {
             name: "smelt.theme.ThemeSpec",
             doc: Self::DOC,
             fields: vec![LuaClassField {
-                // `[string]` is the LuaCATS index-signature key — emitted as
+                // `[string]` is the LuaCATS index-signature key - emitted as
                 // `---@field [string] V` so any group name typechecks.
                 name: "[string]",
                 ty: "string | smelt.theme.StyleDecl".into(),
@@ -552,7 +552,7 @@ fn wait_for_input(fd: std::os::fd::RawFd, timeout_ms: u64) -> bool {
 /// live app theme (e.g. `format.rs`, transcript parser unit tests).
 /// First call also publishes the theme as the process-wide active
 /// theme, so the diff renderer has working colors before the TUI app
-/// starts. The `is_light` flag defaults to dark — light-mode callers
+/// starts. The `is_light` flag defaults to dark - light-mode callers
 /// should clone and flip.
 pub fn default_baked() -> &'static Arc<Theme> {
     static T: OnceLock<Arc<Theme>> = OnceLock::new();
@@ -571,7 +571,7 @@ pub fn default_baked_with_background(is_light: bool) -> Theme {
 
 /// Decode `runtime/lua/smelt/colorschemes/default.lua` (embedded at
 /// compile time) into a `ThemeSpec`. The Lua file is the single source
-/// of truth for the default colorscheme — `default_baked()` calls this
+/// of truth for the default colorscheme - `default_baked()` calls this
 /// once and caches the compiled `Theme`. Panics on decode failure so a
 /// malformed default.lua surfaces immediately at first paint.
 fn baked_default_spec() -> ThemeSpec {

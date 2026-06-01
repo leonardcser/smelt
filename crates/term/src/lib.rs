@@ -3,10 +3,10 @@
 //! Editor concepts (`Window`, `Buffer`, overlays) live in `smelt-edit`.
 //!
 //! Key entry points:
-//! - [`Compositor::render_with`] — drive a frame.
-//! - [`paint_layout_tree`] — walk a [`LayoutTree`] and dispatch leaves.
-//! - [`flush_diff`] — emit SGR escapes for a `Grid` diff.
-//! - [`Grid`] / [`GridSlice`] — `set`/`put_str` (full overwrite),
+//! - [`Compositor::render_with`] - drive a frame.
+//! - [`paint_layout_tree`] - walk a [`LayoutTree`] and dispatch leaves.
+//! - [`flush_diff`] - emit SGR escapes for a `Grid` diff.
+//! - [`Grid`] / [`GridSlice`] - `set`/`put_str` (full overwrite),
 //!   `put_char`/`put_str_fg`/`put_line` (preserve bg).
 
 pub mod compositor;

@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Direct fuzzing of `smelt_buffer::attached::AttachedTextMut` — the
+//! Direct fuzzing of `smelt_buffer::attached::AttachedTextMut` - the
 //! lockstep `(source, attachment_ids)` invariant carrier. Bugs here
 //! traced back to mis-counted markers across `replace_range` boundaries
 //! (a removed marker whose byte range straddles the snap point), which
@@ -10,7 +10,7 @@
 //! The reference model is segment-based: an obviously-correct
 //! `Vec<Seg>` where `Seg::Text(String)` and `Seg::Marker(id)` interleave.
 //! After every op we rebuild the production state's segments and assert
-//! they match the reference's segments — a stronger check than just
+//! they match the reference's segments - a stronger check than just
 //! comparing `(source, ids)` because it catches realignment bugs that
 //! would still pass the marker-count invariant.
 
@@ -83,7 +83,7 @@ impl Ref {
 
     /// Naive `replace_range`: snap endpoints via char_indices walk,
     /// rebuild `(source, ids)`, re-derive segments. Slow but
-    /// unambiguous — divergence from prod is a real bug.
+    /// unambiguous - divergence from prod is a real bug.
     fn replace_range(&mut self, range: core::ops::Range<usize>, new: &str) {
         let cur_source = self.source();
         let start = snap_chars(&cur_source, range.start);
@@ -188,19 +188,19 @@ fn snap_chars(s: &str, pos: usize) -> usize {
 
 #[derive(Arbitrary, Debug)]
 enum AttachedOp {
-    /// `replace_range` — the canonical id-realignment surface.
+    /// `replace_range` - the canonical id-realignment surface.
     Replace { start: u32, end: u32, with: String },
-    /// `insert_str` — must not contain a marker; we strip them defensively.
+    /// `insert_str` - must not contain a marker; we strip them defensively.
     InsertStr { pos: u32, s: String },
-    /// `insert` — single char; we substitute non-marker chars.
+    /// `insert` - single char; we substitute non-marker chars.
     Insert { pos: u32, ch: u32 },
-    /// `insert_marker` — atomic source-marker + id push.
+    /// `insert_marker` - atomic source-marker + id push.
     InsertMarker { pos: u32, id: u64 },
-    /// `strip_attachments` — drops every marker + id.
+    /// `strip_attachments` - drops every marker + id.
     Strip,
-    /// `clear` — empties both halves.
+    /// `clear` - empties both halves.
     Clear,
-    /// `install` — wholesale swap; we only accept self-consistent pairs.
+    /// `install` - wholesale swap; we only accept self-consistent pairs.
     Install {
         src_ids: Vec<u64>,
         text_between: Vec<String>,
@@ -323,7 +323,7 @@ fn run(input: Input) {
         }
         // 1) Production invariant (matches debug-assert in AttachedTextMut).
         assert_invariant(&source, &ids);
-        // 2) Reference agreement — the differential.
+        // 2) Reference agreement - the differential.
         let ref_source = reference.source();
         let ref_ids = reference.ids();
         if source != ref_source {

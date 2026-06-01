@@ -5,7 +5,7 @@
 //! `vim_mode`, `curswant`, and `VimWindowState` (Visual anchor, last `f`/`t`,
 //! pending operator, count accumulators), and the single global `Clipboard`
 //! (kill ring + platform sink) owned by `TuiApp`. Vim itself holds no
-//! cross-call state — it's a pure function of the borrowed context.
+//! cross-call state - it's a pure function of the borrowed context.
 
 use super::{Action, History, PromptCtx, PromptState};
 use crate::smelt_term::vim::{self, VimContext};
@@ -18,7 +18,7 @@ pub(super) enum VimBridgeResult {
     Handled(Action),
     /// Vim passed the key through; caller should continue to keymap lookup.
     Passthrough,
-    /// Not a key event or vim disabled — caller handles as paste/resize/etc.
+    /// Not a key event or vim disabled - caller handles as paste/resize/etc.
     NotAKey,
 }
 

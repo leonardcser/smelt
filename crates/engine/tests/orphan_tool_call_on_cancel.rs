@@ -9,7 +9,7 @@
 //!
 //! The fix introduces `HistoryItem::Assistant(AssistantTurn)` with a
 //! `Vec<ToolInvocation>` whose entries each carry their own `result`.
-//! That makes an unpaired tool_use unrepresentable — there is no
+//! That makes an unpaired tool_use unrepresentable - there is no
 //! intermediate state for the persister to catch. This test verifies
 //! that property end-to-end against the real event loop with a fake
 //! LLM emitting a tool_use mid-turn.
@@ -42,7 +42,7 @@ fn canned_sse_response() -> String {
     body
 }
 
-/// Returns the list of assistant invocations whose `call_id` is empty — the
+/// Returns the list of assistant invocations whose `call_id` is empty - the
 /// historical orphan failure mode. With the sum-type history this should
 /// always return an empty list.
 fn snapshot_has_orphan(history: &[HistoryItem]) -> Option<Vec<String>> {
@@ -229,6 +229,6 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
     });
     assert!(
         saw_invocation,
-        "test never observed the web_fetch:36 tool_use — fake server / engine plumbing is broken"
+        "test never observed the web_fetch:36 tool_use - fake server / engine plumbing is broken"
     );
 }

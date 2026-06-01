@@ -1,4 +1,4 @@
-//! `smelt.engine` — cancel, ask, inherited ask, and submit_command for Lua-rendered turns.
+//! `smelt.engine` - cancel, ask, inherited ask, and submit_command for Lua-rendered turns.
 
 use crate::app::QueuedInput;
 use crate::lua::{LuaHandle, LuaShared};
@@ -159,7 +159,7 @@ pub struct LuaAskResponseFormat {
 /// Typed error table delivered to `on_response` when the underlying
 /// provider call fails. `kind` is a stable string the caller can branch
 /// on; `message` is a human-readable single-line description. The
-/// struct exists purely as a doc / LuaCATS schema target — the actual
+/// struct exists purely as a doc / LuaCATS schema target - the actual
 /// table is built in `LuaRuntime::fire_ask_callback` because it lands
 /// on a callback path that bypasses `FromLua` decoding.
 #[allow(dead_code)]
@@ -273,7 +273,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "engine",
-        "LLM engine control — cancel, ask, inherited ask, submit commands, and request tool approval. UiHost-only.",
+        "LLM engine control - cancel, ask, inherited ask, submit commands, and request tool approval. UiHost-only.",
         Tier::UiHost,
     )?;
     m.fn_(
@@ -305,7 +305,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         type HookCb = LuaCallback<(Vec<LuaAskMessage>, ReplyCb), ()>;
         m.fn_(
             "on_context_limit",
-            "Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once — either with a shorter messages array (engine swaps it in and retries the turn) or `nil` (engine aborts with the existing TurnError). The first registered hook to call `reply` wins; later hooks are ignored. Returns a `Reg` whose `:remove()` drops the hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.",
+            "Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once - either with a shorter messages array (engine swaps it in and retries the turn) or `nil` (engine aborts with the existing TurnError). The first registered hook to call `reply` wins; later hooks are ignored. Returns a `Reg` whose `:remove()` drops the hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.",
             &["hook"],
             move |lua, hook: HookCb| -> LuaResult<smelt_core::lua::reg::LuaReg> {
                 let id = s.hooks.context_limit.register(lua, hook.into_inner(), "")?;
@@ -319,7 +319,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         type HookCb = LuaCallback<(LuaPrepareRequest, ReplyCb), ()>;
         m.fn_(
             "on_prepare_request",
-            "Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once — either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.",
+            "Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once - either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.",
             &["hook"],
             move |lua, hook: HookCb| -> LuaResult<smelt_core::lua::reg::LuaReg> {
                 let id = s.hooks.prepare_request.register(lua, hook.into_inner(), "")?;
@@ -329,7 +329,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     m.fn_(
         "reload",
-        "Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. Cancels any in-flight `smelt.spawn` tasks and dismisses an open modal dialog before reloading (the parked coroutine is dropped with the rest). `early.lua` is intentionally skipped — its CLI-flag and `smelt.builtins.disable` effects are startup-only.",
+        "Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`. Cancels any in-flight `smelt.spawn` tasks and dismisses an open modal dialog before reloading (the parked coroutine is dropped with the rest). `early.lua` is intentionally skipped - its CLI-flag and `smelt.builtins.disable` effects are startup-only.",
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {

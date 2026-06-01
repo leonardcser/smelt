@@ -344,7 +344,7 @@ static BINDINGS: &[Binding] = &[
         KeyAction::PageUp,
     ),
     // Emacs buffer bounds (M-< / M->). Both `<`/`>` and Shift-versions of
-    // `,`/`.` are accepted — terminals differ in whether they fold the
+    // `,`/`.` are accepted - terminals differ in whether they fold the
     // shift into the keycode.
     bind(
         KeyCode::Char('<'),

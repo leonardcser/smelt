@@ -432,10 +432,10 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.esc_chord` | Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.predict` | Input prediction plugin. |
-| `smelt.plugins.scroll_pills` | Scroll-pill overlays shown while the transcript is scrolled off-tail: * Bottom pill — " ↓ jump to bottom " above the prompt; click re-pins to tail. * Top pill — first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
+| `smelt.plugins.scroll_pills` | Scroll-pill overlays shown while the transcript is scrolled off-tail: * Bottom pill - " ↓ jump to bottom " above the prompt; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
 | `smelt.plugins.title` | Session title plugin. |
 | `smelt.plugins.upgrade` | Autoupgrade plugin. |
-| `smelt.plugins.version` | /version — surface the running smelt build identity as a notification. |
+| `smelt.plugins.version` | /version - surface the running smelt build identity as a notification. |
 
 ### Opt-in
 
@@ -443,7 +443,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 
 | Plugin | Summary |
 | --- | --- |
-| `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode, `exit_plan_mode` tool, and system prompt section. |
+| `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `exit_plan_mode` tool. |
 
 <!-- PLUGINS_END -->
 
@@ -757,9 +757,9 @@ Image file detection and base64 data-URL loading.
 Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callbacks.
 
 - `smelt.layout.diff` :: `fun(opts: table): table`
-  Inline-diff render directive — the worker renders the diff directly into the block buffer.
+  Inline-diff render directive - the worker renders the diff directly into the block buffer.
 - `smelt.layout.file_view` :: `fun(opts: table): table`
-  Syntax-highlighted file-view render directive — single line-number column, no diff bg.
+  Syntax-highlighted file-view render directive - single line-number column, no diff bg.
 - `smelt.layout.hbox` :: `fun(items: table): table`
   Lay `items` out horizontally.
 - `smelt.layout.leaf` :: `fun(buf: any): table`
@@ -1128,14 +1128,14 @@ Resolved application configuration introspection.
 
 #### `smelt.confirm`
 
-Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution.
+Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution.
 
 - `smelt.confirm.open` :: `fun(handle_id: string): nil`
   Drive the bundled tool-permission confirm dialog for `handle_id`.
 
 #### `smelt.engine`
 
-LLM engine control — cancel, ask, inherited ask, submit commands, and request tool approval.
+LLM engine control - cancel, ask, inherited ask, submit commands, and request tool approval.
 
 - `smelt.engine.ask` :: `fun(spec: smelt.engine.AskSpec): integer`
   Run an out-of-band LLM request without touching the main turn.
@@ -1417,12 +1417,18 @@ Apply, read, and override the active colorscheme.
 
 Read rendered transcript display text.
 
+- `smelt.transcript.block_at_row` :: `fun(row: integer): table?`
+  Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block.
 - `smelt.transcript.blocks` :: `fun(): table`
   Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
 - `smelt.transcript.is_empty` :: `fun(): boolean`
   Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
+- `smelt.transcript.rows` :: `fun(start: integer, count: integer): table`
+  Return rendered transcript display rows in `[start, start + count)`.
 - `smelt.transcript.text` :: `fun(): string`
   Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
+- `smelt.transcript.visible_blocks` :: `fun(): table`
+  Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries.
 
 #### `smelt.ui.layout`
 

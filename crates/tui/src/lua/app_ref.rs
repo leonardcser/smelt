@@ -1,13 +1,13 @@
 //! Thread-local pointer slots that let Lua bindings reach the frontend synchronously.
 //!
 //! Two TLS slots are installed at every Lua-entry boundary by [`install_app_ptr`]:
-//! - `APP` — `*mut TuiApp` for UiHost-tier bindings.
-//! - `CORE_PTR` — `*mut Core` (installed via `smelt_core::host::install_core_ptr`)
+//! - `APP` - `*mut TuiApp` for UiHost-tier bindings.
+//! - `CORE_PTR` - `*mut Core` (installed via `smelt_core::host::install_core_ptr`)
 //!   for Host-tier bindings; headless-safe because `HeadlessApp` installs the same slot.
 //!
 //! Safety invariant: [`install_app_ptr`] borrows `&mut TuiApp` exclusively and returns a
 //! drop-guard that restores the previous slots. The borrow is held across the Lua call but
-//! is not touched while Lua runs — Rust is blocked on the FFI. [`with_app`] reborrows the
+//! is not touched while Lua runs - Rust is blocked on the FFI. [`with_app`] reborrows the
 //! raw pointer as a fresh `&mut` for its closure; because Lua is single-threaded and never
 //! re-enters a frame holding an active mutable borrow, the reborrow is always sole.
 //! [`with_app`] panics if called outside an [`install_app_ptr`] scope.
@@ -35,7 +35,7 @@ pub(crate) fn install_app_ptr(app: &mut TuiApp) -> AppPtrGuard {
 
 /// Run `body` with the APP pointer installed for its duration. The
 /// equivalent of `let _g = install_app_ptr(app); body(app)`, but reads
-/// straight-line at the call site — preferred for one-shot Lua entries
+/// straight-line at the call site - preferred for one-shot Lua entries
 /// like draining lifecycle hooks.
 pub(crate) fn with_app_ptr<R>(app: &mut TuiApp, body: impl FnOnce(&mut TuiApp) -> R) -> R {
     let _guard = install_app_ptr(app);

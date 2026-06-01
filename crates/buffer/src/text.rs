@@ -128,7 +128,7 @@ pub fn insert_str(s: &mut String, pos: usize, ins: &str) -> usize {
 mod tests {
     use super::*;
 
-    /// 9 bytes, 3 chars — drives non-boundary offsets.
+    /// 9 bytes, 3 chars - drives non-boundary offsets.
     const CJK: &str = "日本語";
 
     #[test]

@@ -347,7 +347,7 @@ pub(crate) async fn ensure_access_token_full(
     client: &reqwest::Client,
 ) -> Result<CopilotTokens, String> {
     let tokens =
-        CopilotTokens::load().ok_or("not logged in to GitHub Copilot — run `smelt auth` first")?;
+        CopilotTokens::load().ok_or("not logged in to GitHub Copilot; run `smelt auth` first")?;
     if !tokens.needs_refresh() {
         return Ok(tokens);
     }

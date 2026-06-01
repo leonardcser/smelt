@@ -1,6 +1,6 @@
 #![no_main]
 
-//! Direct fuzzing of `smelt_buffer::text` — the single canonical module
+//! Direct fuzzing of `smelt_buffer::text` - the single canonical module
 //! for UTF-8 boundary handling. Three of the bugs caught by the TUI
 //! fuzz target traced back to stale byte offsets feeding these helpers
 //! (motions `find_char`, vim visual_anchor swap, completer anchor across
@@ -15,7 +15,7 @@
 //!  - replace_range round-trips: result.contains(replacement)
 //!  - boundary helpers are monotonic relative to input
 //!  - **production helpers agree with naive `char_indices`-based
-//!    reference implementations** — the production code uses byte
+//!    reference implementations** - the production code uses byte
 //!    tricks for speed; divergence from the canonical iteration-based
 //!    reference catches optimization bugs (mis-snapped offsets,
 //!    off-by-one in char counts, etc.) that the intrinsic invariants
@@ -29,7 +29,7 @@ use smelt_buffer::text::{
 };
 
 /// Reference implementations: O(n) walks over `char_indices`. Slower
-/// than the production code but obviously correct — every divergence
+/// than the production code but obviously correct - every divergence
 /// is a real bug.
 mod refer {
     pub fn snap(s: &str, pos: usize) -> usize {
@@ -52,7 +52,7 @@ mod refer {
         // `prev_char_boundary_snaps_back_to_previous_boundary_from_mid_char`
         // unit test): "largest boundary STRICTLY less than `pos`",
         // clamped to `s.len()`. From mid-char that's the boundary at the
-        // start of the containing char — NOT one boundary further back.
+        // start of the containing char - NOT one boundary further back.
         // An earlier version of this reference snapped pos first, which
         // pushed mid-char inputs one extra boundary backward and showed
         // up as a real differential failure during fuzzing.
@@ -267,7 +267,7 @@ fn run(initial: String, ops: Vec<TextOp>) {
         // that bypassed it via unsafe would be caught).
         let _ = s.as_str();
     }
-    // Also exercise `line_start_offsets` against the final state — a
+    // Also exercise `line_start_offsets` against the final state - a
     // multi-line edge case that the per-op variants don't hit.
     let lines: Vec<String> = s.split('\n').map(|l| l.to_string()).collect();
     let offsets = line_start_offsets(&lines);

@@ -3,7 +3,7 @@
 //! layout userdata via `opts.layout`).
 //!
 //! The constructors (`leaf` / `vbox` / `hbox` / `measure`) are registered
-//! exclusively under `smelt.ui.layout` — `smelt.overlay.new` accepts the
+//! exclusively under `smelt.ui.layout` - `smelt.overlay.new` accepts the
 //! resulting userdata but doesn't host its own copy of the namespace.
 //!
 //! Constraint vocabulary on item slots matches `Constraint`:
@@ -20,7 +20,7 @@ use smelt_term::Line;
 use std::sync::{Arc, Mutex};
 
 /// Mutable cell shared between Lua (`measure_handle:set(w, h)`) and the
-/// term layout resolver (`Natural::size`). Lock contention is negligible —
+/// term layout resolver (`Natural::size`). Lock contention is negligible -
 /// the cell is only read during layout passes and written from Lua key
 /// handlers / state changes.
 #[derive(Clone)]
@@ -149,9 +149,9 @@ fn resolve_leaf_target(target: &mlua::Value) -> mlua::Result<u64> {
 }
 
 /// Parse `opts.measure`. Accepts:
-///   * `nil` — no override; the host's `LeafSizer` decides
-///   * `{ w, h }` array — fixed natural size
-///   * `smelt.ui.layout.measure(...)` userdata — shared mutable cell
+///   * `nil` - no override; the host's `LeafSizer` decides
+///   * `{ w, h }` array - fixed natural size
+///   * `smelt.ui.layout.measure(...)` userdata - shared mutable cell
 fn parse_measure(opts: Option<&mlua::Table>, ctx: &str) -> mlua::Result<Option<NaturalRef>> {
     let Some(t) = opts else { return Ok(None) };
     let v: mlua::Value = match t.get("measure") {

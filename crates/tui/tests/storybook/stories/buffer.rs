@@ -121,7 +121,7 @@ story!(table_selection_masks_chrome_and_padding, |ctx| {
 story!(decoration_fill_bg_paints_content_region, |ctx| {
     // Width 12 with default Gutters reserves the rightmost column for the
     // scrollbar, leaving 11 cells of content. `fill_bg` covers exactly the
-    // content region — the scrollbar column stays unstyled — matching
+    // content region - the scrollbar column stays unstyled - matching
     // `pad_row_to_layout_width`'s span so blank padding rows align with
     // content rows in user-message blocks.
     let buf_id = open_with_lines(ctx, &["hello"], 12, 3);

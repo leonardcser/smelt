@@ -1,4 +1,4 @@
--- `@file` completer — opens when the cursor sits inside an `@…` zone (an `@`
+-- `@file` completer - opens when the cursor sits inside an `@…` zone (an `@`
 -- followed by non-whitespace bytes, or just `@` itself). Selecting an entry
 -- inserts `@path ` (or `@"quoted path" ` when the label contains a space).
 

@@ -247,7 +247,7 @@ impl LuaRuntime {
     /// Swap the global `smelt` for the restricted Early-phase view, set the
     /// phase, run `body`, then restore the full `smelt` regardless of
     /// outcome. The single place that owns the Early-phase smelt-view
-    /// contract — every early-phase loader (`run_early_phase`,
+    /// contract - every early-phase loader (`run_early_phase`,
     /// `load_bundled_early`) routes through here. Body errors win over
     /// restore errors so a real user mistake isn't masked by table-restore
     /// noise.
@@ -271,7 +271,7 @@ impl LuaRuntime {
     /// Build the restricted `smelt` table seen by `early.lua`. Exposes
     /// only the phase-zero namespaces; access to anything else returns
     /// nil, so calling e.g. `smelt.cmd.register(...)` from early.lua
-    /// errors with "attempt to call nil" — loud, immediate, traceable.
+    /// errors with "attempt to call nil" - loud, immediate, traceable.
     fn build_early_smelt_view(&self, full: &mlua::Table) -> LuaResult<mlua::Table> {
         const ALLOWED: &[&str] = &["builtins", "cli", "phase", "provider"];
         let view = self.lua.create_table()?;
@@ -389,7 +389,7 @@ impl LuaRuntime {
     }
 
     /// **Single ledger** of every Lua-side surface wiped at the top of a
-    /// `/reload` cycle. Add new `LuaShared` registries here — `reload()`
+    /// `/reload` cycle. Add new `LuaShared` registries here - `reload()`
     /// is the only caller, and the matching reload-survival test asserts
     /// every clearable surface is empty after calling this.
     ///
@@ -756,7 +756,7 @@ impl LuaRuntime {
 
     /// Invoke every `smelt.lifecycle.on(event, fn)` callback in registration
     /// order, then drop them. The host calls this at the corresponding phase
-    /// — `"ready"` after Lua bootstrap and argv parse, `"shutdown"` after the
+    /// - `"ready"` after Lua bootstrap and argv parse, `"shutdown"` after the
     /// TUI tears down but before the process exits. Per-hook errors are
     /// returned so the caller can surface them as in-app notifications without
     /// aborting the remaining hooks.
@@ -1147,9 +1147,9 @@ impl LuaRuntime {
     }
 
     /// Invoke the tool's `summary(args)` Lua hook. The hook may return:
-    ///   * `nil` / no value — empty summary (no header text)
-    ///   * a `string` — wrapped as a single plain span (each `\n`-line one row)
-    ///   * a table of `{ {span, span}, {span, span} }` — multi-line styled output;
+    ///   * `nil` / no value - empty summary (no header text)
+    ///   * a `string` - wrapped as a single plain span (each `\n`-line one row)
+    ///   * a table of `{ {span, span}, {span, span} }` - multi-line styled output;
     ///     span shape matches `buf:styled` (`{ text, syntax?, style? }`).
     pub fn tool_summary(
         &self,
@@ -1396,7 +1396,7 @@ impl LuaRuntime {
     /// Run all `tools.middleware{after=...}` hooks for `tool_name` against
     /// a synchronous tool result. Each handler receives `(args, ctx, result)`
     /// where `result` is `{ content, is_error }`. A returned table replaces
-    /// the result. Pending/yielding tools currently bypass this path —
+    /// the result. Pending/yielding tools currently bypass this path -
     /// only Immediate results go through `run_after_hooks`.
     fn run_after_hooks(
         &self,
@@ -1505,7 +1505,7 @@ impl LuaRuntime {
             return result;
         }
 
-        // Keep clones for `run_after_hooks` — `mlua::Table` is Rc-backed
+        // Keep clones for `run_after_hooks` - `mlua::Table` is Rc-backed
         // internally, so this is cheap and the originals are consumed by
         // the task-spawn MultiValue below.
         let args_for_after = args_table.clone();
@@ -1604,9 +1604,9 @@ impl LuaRuntime {
 /// Decode a Lua return value into `protocol::StyledLines`.
 ///
 /// Accepted shapes:
-///   * `nil` — empty
-///   * `string` — wrapped as one or more plain-text lines (split on `\n`)
-///   * `table` — must be a 2D sequence: outer list is lines, each line is a
+///   * `nil` - empty
+///   * `string` - wrapped as one or more plain-text lines (split on `\n`)
+///   * `table` - must be a 2D sequence: outer list is lines, each line is a
 ///     list of span tables of shape `{ text, syntax?, selectable?, title_suffix?, style? = { hl?, dim?,
 ///     bold?, italic?, fg?, bg? } }`. Mirrors `buf:styled`.
 fn decode_styled_lines(value: mlua::Value) -> Result<protocol::StyledLines, String> {
@@ -1701,7 +1701,7 @@ pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
 /// `CARGO_PKG_VERSION`: re-extracts on smelt upgrade, skips otherwise.
 ///
 /// Best-effort. Returns the target directory on success, or the I/O
-/// error on failure — callers should log and continue, since the
+/// error on failure - callers should log and continue, since the
 /// runtime stays fully functional from the embedded copy.
 ///
 /// This is intentionally separate from the user-overlay path
@@ -1750,7 +1750,7 @@ fn write_dir_recursive(dir: &Dir<'_>, target: &std::path::Path) -> std::io::Resu
 /// Resolve a bootstrap-file relative path to its source, walking the
 /// same disk-overlay roots as `require()` before falling back to the
 /// baked-in [`EMBEDDED_LUA`] snapshot. Lets `dialog.lua`, `cmd.lua`,
-/// etc. hot-reload from disk on `/reload` — same dev-loop parity as
+/// etc. hot-reload from disk on `/reload` - same dev-loop parity as
 /// autoloaded plugins. Returns `(source, chunk_name)`; the chunk name
 /// reflects where the source actually came from so Lua tracebacks
 /// point at the file you're editing.
@@ -1922,11 +1922,11 @@ fn module_to_relpath(module: &str) -> PathBuf {
 }
 
 /// Override search roots in priority order:
-/// 1. `$SMELT_RUNTIME_DIR` (when set) — explicit dev override.
-/// 2. Workspace `runtime/lua/` (debug builds only, when the path exists) —
+/// 1. `$SMELT_RUNTIME_DIR` (when set) - explicit dev override.
+/// 2. Workspace `runtime/lua/` (debug builds only, when the path exists) -
 ///    so `cargo run` + `/reload` picks up unbuilt edits to bundled plugins.
-/// 3. `.smelt/runtime/` in cwd — project overrides.
-/// 4. `<XDG_DATA_HOME>/smelt/runtime/` — user overrides.
+/// 3. `.smelt/runtime/` in cwd - project overrides.
+/// 4. `<XDG_DATA_HOME>/smelt/runtime/` - user overrides.
 fn module_overlay_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(dir) = std::env::var_os("SMELT_RUNTIME_DIR") {
@@ -2139,7 +2139,7 @@ mod tests {
             .expect("read log");
         assert_eq!(log, vec!["a".to_string(), "b".to_string()]);
 
-        // Second drain returns nothing — hooks are one-shot.
+        // Second drain returns nothing - hooks are one-shot.
         let again = rt.drain_lifecycle_hooks("ready", |_| Ok(mlua::Value::Nil));
         assert!(again.is_empty());
         assert!(rt.shared.hooks.lifecycle.is_empty());
@@ -2253,7 +2253,7 @@ mod tests {
     }
 
     // End-to-end `reload()` lives in `tui::lua::tests::reload_clears_tui_surfaces`
-    // — the bundled autoload modules need the TUI Lua API to run.
+    // - the bundled autoload modules need the TUI Lua API to run.
 
     #[test]
     fn overlay_file_overrides_embedded_module() {

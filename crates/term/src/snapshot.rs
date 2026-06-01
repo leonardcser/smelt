@@ -12,7 +12,7 @@
 //! The text views collapse wide-char continuation cells (`\0`) to
 //! `' '` and `text()` `trim_end`s for diff cleanliness. The styles
 //! sidecar carries a `dim: W H` header so `parse` recovers cell
-//! dimensions losslessly — without it, a trailing wide-char
+//! dimensions losslessly - without it, a trailing wide-char
 //! continuation that `trim_end` ate would be unrecoverable.
 
 use super::grid::{Cell, Grid, Style};
@@ -254,7 +254,7 @@ fn parse_dim_header(styles_text: &str) -> Option<(u16, u16)> {
 
 /// Visual width of a serialized row, treating each char as one cell.
 /// `from_grid` stores one char per cell (collapsing `\0` to space), so
-/// `chars().count()` is the correct cell width — *except* when the
+/// `chars().count()` is the correct cell width - *except* when the
 /// last cell was a wide char's continuation (trimmed by `text()`).
 /// In that case the last char is a wide glyph with no trailing slot;
 /// we add one cell to compensate.
@@ -263,7 +263,7 @@ fn row_visual_width(row: &str) -> u16 {
     let mut cells = chars.len() as u16;
     if let Some(&last) = chars.last() {
         if UnicodeWidthChar::width(last).unwrap_or(0) == 2 {
-            // The continuation slot is missing — `trim_end` ate the
+            // The continuation slot is missing - `trim_end` ate the
             // collapsed `\0`-as-space. Add it back.
             cells = cells.saturating_add(1);
         }
@@ -326,7 +326,7 @@ fn parse_spans(styles_text: &str) -> Vec<(u16, u16, u16, Style)> {
         let Ok(len) = len_tok.parse::<u16>() else {
             continue;
         };
-        // `len_tok` is a slice of `trimmed` — derive the tail offset
+        // `len_tok` is a slice of `trimmed` - derive the tail offset
         // from pointer arithmetic via `str::find` on the same source.
         let tail_start = nums
             .next()
@@ -343,7 +343,7 @@ fn parse_spans(styles_text: &str) -> Vec<(u16, u16, u16, Style)> {
 fn apply_kv_string(style: &mut Style, s: &str) {
     // Format from `fmt_style`: `fg=… bg=… attrs=…`, each optional.
     // Values are `Debug`-formatted, so `Rgb { r: 60, g: 20, b: 20 }`
-    // contains spaces — split on known key prefixes, not whitespace.
+    // contains spaces - split on known key prefixes, not whitespace.
     const KEYS: &[&str] = &["fg=", "bg=", "attrs="];
     let mut cursor = 0;
     while cursor < s.len() {
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn roundtrip_with_trailing_wide_char() {
-        // Row ends on a wide glyph — `trim_end` ate the continuation
+        // Row ends on a wide glyph - `trim_end` ate the continuation
         // slot in `text()`; `dim:` header recovers width.
         let frame = snap_grid(|g| {
             g.put_str(0, 0, "你好", Style::default());

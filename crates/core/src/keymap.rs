@@ -12,7 +12,7 @@
 //! registry would do the same.
 //!
 //! Per-frontend state (when a chord started, what mode was active, the
-//! pending sequence itself) lives in the frontend — only the matching
+//! pending sequence itself) lives in the frontend - only the matching
 //! algorithm is shared.
 //!
 //! See `tui::app::events::dispatch_common` for the live caller.

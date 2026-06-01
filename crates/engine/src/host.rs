@@ -1,4 +1,4 @@
-//! Host-callback channel — typed RPCs from the engine task to whoever
+//! Host-callback channel - typed RPCs from the engine task to whoever
 //! runs Lua (TUI / headless). Each variant carries its own
 //! `oneshot::Sender<Reply>` so correlation is "the channel handle"
 //! instead of an integer id + lookup table.
@@ -8,7 +8,7 @@
 //! `oneshot::Sender` is neither serializable nor meaningful across process
 //! boundaries. Splitting host RPC into its own channel keeps the protocol
 //! surface clean and lets us add new RPCs by adding a single enum variant
-//! plus a handler arm on the consumer side — no protocol churn, no pending
+//! plus a handler arm on the consumer side - no protocol churn, no pending
 //! HashMap on the engine, no `*Response` variants on `UiCommand`.
 
 use protocol::{AgentMode, Message, ToolHooks, ToolOutcome};
@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 /// One synchronous request from the engine to the host (TUI / headless).
 /// The host must `reply.send(...)` exactly once or the engine's awaiting
 /// future will resolve with the channel's `Closed` error and fall back
-/// to a default; both paths are intentional — dropping a `reply` is a
+/// to a default; both paths are intentional - dropping a `reply` is a
 /// "no-op" signal.
 pub enum HostCall {
     /// Execute a Lua-defined tool. Engine awaits the `ToolOutcome`.

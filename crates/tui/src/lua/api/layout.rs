@@ -1,4 +1,4 @@
-//! `smelt.ui.layout` — composable layout-tree primitives for the main TUI.
+//! `smelt.ui.layout` - composable layout-tree primitives for the main TUI.
 //!
 //! Plugins register a composer with `smelt.ui.layout.set(fn)`. The host
 //! invokes it once per frame with a state table describing the current
@@ -7,7 +7,7 @@
 //! resolves to per-window rectangles for that frame.
 //!
 //! The same constructors also produce the layout userdata accepted by
-//! `smelt.overlay.new` via `opts.layout` — there's one namespace for both
+//! `smelt.overlay.new` via `opts.layout` - there's one namespace for both
 //! screen-composition and overlay-composition cases.
 
 use crate::lua::LuaShared;

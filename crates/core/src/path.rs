@@ -1,4 +1,4 @@
-//! Path manipulation primitives. Pure logic — does not touch the filesystem
+//! Path manipulation primitives. Pure logic - does not touch the filesystem
 //! except for `canonical`.
 
 use std::path::{Component, Path, PathBuf};

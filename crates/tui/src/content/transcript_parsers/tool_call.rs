@@ -1,4 +1,4 @@
-//! `Block::ToolCall` renderer — thin delegation to `super::tools::render_tool`.
+//! `Block::ToolCall` renderer - thin delegation to `super::tools::render_tool`.
 
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::transcript_model::{ToolState, ToolStatus};
@@ -19,7 +19,7 @@ pub(super) fn render(
     state: &ToolState,
     width: usize,
 ) -> u16 {
-    // Cache hit only when the cached width matches the current layout width — a resize
+    // Cache hit only when the cached width matches the current layout width - a resize
     // invalidates without us having to track it explicitly.
     let rendered = state
         .render_cache

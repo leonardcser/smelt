@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn cursor_and_scroll_scrolls_down_when_selection_falls_below_viewport() {
-        // Selection at row 7, viewport [0, 5) — needs to scroll so row 7 is visible.
+        // Selection at row 7, viewport [0, 5) - needs to scroll so row 7 is visible.
         let (cursor, scroll) = cursor_and_scroll(7, 10, 5, false, 0);
         assert_eq!(cursor, 7);
         // Window slides so cursor is at the bottom: scroll = 7 + 1 - 5 = 3.
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn cursor_and_scroll_scrolls_up_when_selection_falls_above_viewport() {
-        // Selection at row 1, viewport [4, 9) — needs to scroll up.
+        // Selection at row 1, viewport [4, 9) - needs to scroll up.
         let (cursor, scroll) = cursor_and_scroll(1, 10, 5, false, 4);
         assert_eq!(cursor, 1);
         // Window slides so cursor is at the top: scroll = 1.
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn anchor_for_screen_bottom_does_not_reserve_statusline_rows() {
-        // The host has no `statusline` concept anymore — the Lua layer
+        // The host has no `statusline` concept anymore - the Lua layer
         // owns the statusline window and any reservation lives on the
         // caller. `ScreenBottom` resolves to the literal screen bottom;
         // overlays that need to clear chrome anchor explicitly against

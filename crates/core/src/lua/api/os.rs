@@ -1,4 +1,4 @@
-//! `smelt.os` — environment and system primitives (getenv, setenv, platform, cwd, pid, etc.).
+//! `smelt.os` - environment and system primitives (getenv, setenv, platform, cwd, pid, etc.).
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

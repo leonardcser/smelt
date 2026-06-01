@@ -1,4 +1,4 @@
-//! `smelt.fuzzy` — score / rank candidates via neo_frizbee.
+//! `smelt.fuzzy` - score / rank candidates via neo_frizbee.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

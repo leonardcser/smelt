@@ -1,4 +1,4 @@
-//! `smelt.vim` bindings — read and write the focused-pane `VimMode`.
+//! `smelt.vim` bindings - read and write the focused-pane `VimMode`.
 
 use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;

@@ -1,4 +1,4 @@
-//! Layout-tree paint stories. Pure structural shapes — these hunt
+//! Layout-tree paint stories. Pure structural shapes - these hunt
 //! solver bugs, chrome painting, and gap math.
 
 use smelt_term::layout::{Border, Constraint};
@@ -110,7 +110,7 @@ story!(vbox_min_competes_with_fill, |ctx| {
 
 story!(vbox_max_clamps_pane_height, |ctx| {
     ctx.set_viewport(20, 8);
-    ctx.set_leaf(PaintId(1), ["capped at 2 rows tall — extra lines clip"]);
+    ctx.set_leaf(PaintId(1), ["capped at 2 rows tall - extra lines clip"]);
     ctx.set_leaf(PaintId(2), ["rest"]);
     let tree = LayoutTree::vbox(vec![
         (Constraint::Max(2), LayoutTree::leaf(PaintId(1))),

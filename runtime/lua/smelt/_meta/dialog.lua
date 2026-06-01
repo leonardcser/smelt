@@ -18,7 +18,7 @@ dialog.content = nil
 --- Return the topmost active dialog ctx (the same shape passed to
 --- `on_submit`/`keymap` handlers: `{ resolve, close, win, panels,
 --- focused_leaf }`), or `nil` if no dialog is open. Use it inside
---- `leaf:key(...)` callbacks — those normally lack a path to the
+--- `leaf:key(...)` callbacks - those normally lack a path to the
 --- dialog's resolve handle.
 ---@type fun(): table | nil
 dialog.current = nil
@@ -59,7 +59,7 @@ dialog.open = nil
 --- Non-coroutine open. Returns `{ win, panels, close() }` synchronously.
 --- The consumer drives the lifecycle via `on_submit` / `on_dismiss`
 --- callbacks and tears down with `handle:close()`. No value flows back
---- — use `smelt.dialog.open` when you need to read the result.
+--- - use `smelt.dialog.open` when you need to read the result.
 ---@see smelt.dialog.open
 ---@type fun(opts: smelt.dialog.Opts): table
 dialog.open_handle = nil

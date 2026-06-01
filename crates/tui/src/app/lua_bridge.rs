@@ -115,7 +115,7 @@ impl TuiApp {
     ///
     /// Two-phase to keep `&mut TuiApp` aliasing clean: phase 1 collects (func, payload) while
     /// `&mut self` is live; phase 2 installs the TLS app pointer and calls each function with no
-    /// Rust borrow on self — so Lua bodies that reach back via `with_app` get the sole reborrow.
+    /// Rust borrow on self - so Lua bodies that reach back via `with_app` get the sole reborrow.
     pub(crate) fn drain_lua_invocations(&mut self) {
         loop {
             let pending = self.lua.drain_invocations();

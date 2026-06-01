@@ -40,7 +40,7 @@ app_story!(text_streams_via_deltas, |ctx| {
 });
 
 app_story!(text_block_code_fence_no_language, |ctx| {
-    // Fenced block without a language tag — the renderer must still
+    // Fenced block without a language tag - the renderer must still
     // emit the code chrome (gutter, monospace body) but skip the
     // syntax highlighting pipeline. Pins the fallback path.
     ctx.set_viewport(60, 12);
@@ -71,7 +71,7 @@ app_story!(user_message_block_slash_command_accent, |ctx| {
     // `/permissions` is a built-in registered slash command, so
     // `user::render` paints the whole line with `SmeltAccent` fg
     // instead of the default body color. The styles snapshot
-    // captures the accent color span — drift in the
+    // captures the accent color span - drift in the
     // command-resolver wiring will surface as a styles diff.
     ctx.set_viewport(40, 8);
     ctx.push_user_turn("/permissions");
@@ -81,7 +81,7 @@ app_story!(user_message_block_slash_command_accent, |ctx| {
 // ── Error / compaction ────────────────────────────────────────────
 
 app_story!(turn_error_block, |ctx| {
-    // `TurnError` renders as the assistant's error block — its own
+    // `TurnError` renders as the assistant's error block - its own
     // chrome and color group, distinct from a regular text block.
     ctx.set_viewport(60, 10);
     ctx.engine(EngineEvent::Text {

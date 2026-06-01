@@ -349,7 +349,7 @@ fn replay_rendered(out: &mut LineBuilder, layout: &RenderedLayout, inner_width: 
 }
 
 /// Render a `RenderedLayout` directly into `out` (no tool-block gutter, no row cap)
-/// — used by the confirm dialog's preview pipeline, which renders into a fresh
+/// - used by the confirm dialog's preview pipeline, which renders into a fresh
 /// dialog-owned buffer instead of stamping into a transcript row.
 pub fn render_layout_into(out: &mut LineBuilder, layout: &RenderedLayout, width: u16) -> u16 {
     replay_node(out, layout, u16::MAX, width, false)
@@ -440,7 +440,7 @@ fn render_diff_spec(out: &mut LineBuilder, spec: &DiffSpec, with_gutter: bool) -
     )
 }
 
-/// Render a `FileView` spec leaf — single-line-number column, no diff bg.
+/// Render a `FileView` spec leaf - single-line-number column, no diff bg.
 fn render_file_view_spec(out: &mut LineBuilder, spec: &FileViewSpec, with_gutter: bool) -> u16 {
     let ext = spec
         .lang

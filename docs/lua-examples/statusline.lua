@@ -3,12 +3,12 @@
 -- statusline's left strip (or right strip when `align_right = true`).
 --
 -- Items use the same shape as `core_compose` in `smelt/statusline.lua`:
---   text        (required) — the rendered string
---   style       (optional) — { fg, bg, hl_group, bold, italic, dim, ... }
---   priority    (optional) — higher = more droppable when line is tight
---   truncatable (optional) — if true, the item shrinks before being dropped
---   separated   (optional) — prefix " · " when not first in its strip
---   align_right (optional) — push to the right strip
+--   text        (required) - the rendered string
+--   style       (optional) - { fg, bg, hl_group, bold, italic, dim, ... }
+--   priority    (optional) - higher = more droppable when line is tight
+--   truncatable (optional) - if true, the item shrinks before being dropped
+--   separated   (optional) - prefix " · " when not first in its strip
+--   align_right (optional) - push to the right strip
 
 local statusline = require("smelt.statusline")
 

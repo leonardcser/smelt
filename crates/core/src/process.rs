@@ -1,4 +1,4 @@
-//! Process capability — async spawn-and-wait (`run_async`) and async
+//! Process capability - async spawn-and-wait (`run_async`) and async
 //! streaming (`run_streaming`) primitives. `ProcessRegistry` manages
 //! long-lived background children (`spawn_bg`, `read_output`, `stop`).
 
@@ -32,7 +32,7 @@ pub(crate) struct Output {
 
 /// Spawn `cmd` with `args` and wait for completion, honoring a
 /// `CancellationToken`. The caller can short-circuit a long-running
-/// child by cancelling the token — the child's process group receives
+/// child by cancelling the token - the child's process group receives
 /// SIGTERM (then SIGKILL on the standard escalation) and the future
 /// resolves with `RunOutcome::Cancelled` once the wait completes.
 /// Stdout/stderr are read concurrently so the child can't deadlock on

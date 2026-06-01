@@ -1,4 +1,4 @@
-//! `smelt.theme` bindings — apply a colorscheme spec, read/write
+//! `smelt.theme` bindings - apply a colorscheme spec, read/write
 //! individual groups, snapshot the resolved theme.
 //!
 //! A colorscheme is a `ThemeSpec` table: a map from highlight-group

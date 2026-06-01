@@ -1,4 +1,4 @@
-//! `smelt.parse` — pure parsers: `frontmatter(content) -> (table | nil, body)`.
+//! `smelt.parse` - pure parsers: `frontmatter(content) -> (table | nil, body)`.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

@@ -1,6 +1,6 @@
 //! Shared types for the smelt fuzz target and the `crash_to_scenario`
 //! converter. The on-disk scenario format is a JSON-serialized
-//! [`Scenario`] — also the exact shape libFuzzer's `arbitrary` decoder
+//! [`Scenario`] - also the exact shape libFuzzer's `arbitrary` decoder
 //! produces, so a crash artifact round-trips into a readable file with no
 //! lossy translation.
 
@@ -27,7 +27,7 @@ pub use tui::app::test_harness::TestApp;
 
 /// Bounded JSON value tree for tool argument fuzzing. Production paths
 /// (`evaluate_hooks`, `permissions.decide`, pattern matching in
-/// `RequestPermission`) consume `HashMap<String, serde_json::Value>` —
+/// `RequestPermission`) consume `HashMap<String, serde_json::Value>` -
 /// feeding them all-empty bags reaches none of that logic. The
 /// `Arbitrary` impl synthesises small (≤ 6 keys, depth ≤ 3) trees so
 /// each op stays cheap.
@@ -168,7 +168,7 @@ pub enum FuzzOp {
     KeyShift(u8),
     /// Bare special key chosen by `which % SPECIALS.len()`.
     KeySpecial(u8),
-    /// Shift-modified special key — drives shift+arrow / shift+Home/End
+    /// Shift-modified special key - drives shift+arrow / shift+Home/End
     /// selection-extend code paths that plain `KeySpecial` skips.
     KeySpecialShift(u8),
     /// Bracketed paste with arbitrary UTF-8 payload.
@@ -355,7 +355,7 @@ pub enum FuzzOp {
     },
     /// Side channel: invoke the `/reload` pipeline. Stresses named-slot
     /// survival (paint ids, buf/win/overlay NamedSlots) and `on_ready`
-    /// re-entry (`ctx.kind = "reload"`) against arbitrary pre-state —
+    /// re-entry (`ctx.kind = "reload"`) against arbitrary pre-state -
     /// the surface where the `fix(edit): drop named bindings on close`
     /// bug class lives.
     ReloadLua,
@@ -437,7 +437,7 @@ pub enum FuzzOp {
 
 impl FuzzOp {
     /// Short human label used by `play_scenario` for its status line.
-    /// Lives next to the enum so adding a variant is one edit, not two —
+    /// Lives next to the enum so adding a variant is one edit, not two -
     /// the per-variant match previously lived in `play_scenario.rs` and
     /// drifted every time a new op landed.
     pub fn label(&self) -> String {
@@ -535,7 +535,7 @@ impl From<FuzzMode> for AgentMode {
 /// `serde_json::to_string_pretty`. `Arbitrary` is **hand-written** to draw
 /// per-scenario [`SwarmWeights`] up front, then sample ops from that
 /// distribution (see [`build_fuzz_op`]). JSON serialisation still
-/// round-trips losslessly via serde derive — the swarm table itself is
+/// round-trips losslessly via serde derive - the swarm table itself is
 /// generator state and is not persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuzzInput {
@@ -570,7 +570,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 /// variants and skew the rest wildly so each scenario commits to one
 /// shape of workload rather than uniformly spreading thin.
 ///
-/// Weights aren't persisted in the on-disk `Scenario` JSON — they're a
+/// Weights aren't persisted in the on-disk `Scenario` JSON - they're a
 /// per-Arbitrary-draw artifact. Crashed scenarios round-trip through
 /// the `ops` vector alone, which is what actually replays.
 pub struct SwarmWeights {
@@ -582,7 +582,7 @@ impl SwarmWeights {
     /// Draw a fresh swarm table over `n` variants. One byte per slot:
     /// `byte < 64` disables the variant (25% disable rate); otherwise
     /// the weight is `byte - 63` (range `1..=192`). Single-byte cost
-    /// matters — measured coverage A/B showed the prior 2-byte/variant
+    /// matters - measured coverage A/B showed the prior 2-byte/variant
     /// encoding ate the entire entropy budget of the median 47-byte
     /// libFuzzer seed, leaving nothing for op bytes.
     pub fn arbitrary(u: &mut Unstructured<'_>, n: usize) -> arbitrary::Result<Self> {
@@ -599,8 +599,8 @@ impl SwarmWeights {
         if total == 0 {
             // Empty random draw (or exhausted input): fall back to a
             // uniform distribution rather than collapsing to a single
-            // variant. Short seeds — common in libFuzzer's early corpus
-            // growth — would otherwise only ever fire variant 0.
+            // variant. Short seeds - common in libFuzzer's early corpus
+            // growth - would otherwise only ever fire variant 0.
             weights.fill(1);
             total = n as u32;
         }
@@ -853,7 +853,7 @@ pub type Scenario = FuzzInput;
 /// engine stream updates, resize, mouse drag, overlay/dialog motion,
 /// reload (re-fires `on_ready`, may open splashes). `false` for ops
 /// that only nudge clock or queue-meta state (`Tick`, `EngineReady`,
-/// `EngineTokenUsage`) — rendering after those is pure cost. Lifting
+/// `EngineTokenUsage`) - rendering after those is pure cost. Lifting
 /// every `content/*` parser out of 0% coverage is exactly what this
 /// classification unlocks; the trade-off is one frame projection per
 /// non-trivial op (≈50% of ops, on average).
@@ -948,7 +948,7 @@ fn call_id_string(id: u8) -> String {
 /// Synthesize a deterministic, lightweight history vector for compaction
 /// payloads. Rotates through user, terminal assistant, and tool-call
 /// assistant turns so `EngineMessages` / `EngineTurnComplete` exercise
-/// every `HistoryItem` discriminant — the sum-typed history (commit
+/// every `HistoryItem` discriminant - the sum-typed history (commit
 /// `b0c54474`) added a third arm and the rebuild-screen path through
 /// `restore_screen` must survive each variant.
 fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
@@ -1066,7 +1066,7 @@ enum PostCheck {
     ToolOutput {
         call_id: String,
     },
-    /// `ToolFinished` clears `call_id` from pending — but only verifiable
+    /// `ToolFinished` clears `call_id` from pending - but only verifiable
     /// when it was actually present beforehand.
     ToolFinished {
         call_id: String,
@@ -1328,7 +1328,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
         }
         PostCheck::PermissionRequested => {
             // Idle dispatch falls through to the `_ => {}` arm in
-            // `handle_idle_engine_event` — no state change. Only enforce
+            // `handle_idle_engine_event` - no state change. Only enforce
             // the trichotomy when a turn was running.
             if pre.agent_running {
                 let new_confirms = post.pending_confirms.saturating_sub(pre.pending_confirms);
@@ -1347,7 +1347,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             approved,
             had_message,
         } => {
-            // Side-channel returns false when no confirm was pending —
+            // Side-channel returns false when no confirm was pending -
             // skip in that case.
             if pre.pending_confirms == 0 {
                 return;
@@ -1368,7 +1368,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             );
             // Approve never ends the turn. Deny without a message ends it
             // (resolve_confirm returns true → discard_turn). Deny with a
-            // message keeps the turn alive — the user sent steering text
+            // message keeps the turn alive - the user sent steering text
             // instead of stopping.
             if pre.agent_running {
                 let should_end = !approved && !had_message;
@@ -1781,7 +1781,7 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
             // resources for the first time); anonymous slots get
             // reaped (they don't contribute to these counters).
             // Strictly: post >= pre component-wise. This is the
-            // `ce76000e`-class regression detector — cheap and specific.
+            // `ce76000e`-class regression detector - cheap and specific.
             let pre = app.named_resource_counts();
             app.reload_lua();
             let post = app.named_resource_counts();
@@ -1888,7 +1888,7 @@ pub fn apply(app: &mut TestApp, op: FuzzOp) {
     };
 
     let pre = Snapshot::capture(app);
-    // `TurnComplete` is gated on `turn_id` matching the live agent — read
+    // `TurnComplete` is gated on `turn_id` matching the live agent - read
     // it here so the dispatched event hits the active arm whenever a turn
     // is running. Idle dispatch still applies for the `agent_running ==
     // false` case.
@@ -1980,7 +1980,7 @@ pub fn run_scenario(scenario: Scenario) {
     // Vim bang escape (`!cmd<CR>`) spawns a shell via `tokio::spawn`. With
     // no runtime entered, that panics. We use a current-thread runtime
     // that never drives the task queue, so spawn succeeds and the queued
-    // shell command never actually runs — keeping fuzz iterations free
+    // shell command never actually runs - keeping fuzz iterations free
     // of real process / fs side effects.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2007,7 +2007,7 @@ pub fn run_scenario(scenario: Scenario) {
         }
     }
     // Always render once at the end so the final state passes through the
-    // projection — covers scenarios that end on a `Tick` and would
+    // projection - covers scenarios that end on a `Tick` and would
     // otherwise skip the renderer entirely.
     app.render_silent();
 

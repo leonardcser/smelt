@@ -1,10 +1,10 @@
-//! `smelt.settings` — typed preferences (bool, number, or string) as
+//! `smelt.settings` - typed preferences (bool, number, or string) as
 //! direct field access via `__index`/`__newindex`. Writes before app
 //! init are stored in `LuaShared.settings_overrides` for later pickup.
 //! Unknown keys raise at the access site; type mismatches raise on
 //! assignment.
 //!
-//! The schema lives entirely in `smelt_core::config::SETTINGS` — this
+//! The schema lives entirely in `smelt_core::config::SETTINGS` - this
 //! module reads / writes through that table and adds no per-key code
 //! of its own.
 

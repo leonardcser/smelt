@@ -287,7 +287,7 @@ mod tests {
                 "system prompt must not embed a time-varying substring (found `{needle}` in rendered output)",
             );
         }
-        // Also pin: rendering twice produces identical bytes — the template
+        // Also pin: rendering twice produces identical bytes - the template
         // itself must not call into any time-of-day source.
         let a = build_system_prompt_full(
             std::path::Path::new("/some/cwd"),

@@ -1,4 +1,4 @@
-//! `smelt.work` — push background work-state tokens. Distinct from
+//! `smelt.work` - push background work-state tokens. Distinct from
 //! `smelt.spinner`, which is just the shared animation primitive: this
 //! module is the engine/state-machine surface. Tokens here drive the
 //! reactive `work_*` cells and the prompt top-bar indicator. UiHost-only.

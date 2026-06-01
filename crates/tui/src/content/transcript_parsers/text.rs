@@ -1,4 +1,4 @@
-//! `Block::Text` renderer — thin wrapper over the markdown layout.
+//! `Block::Text` renderer - thin wrapper over the markdown layout.
 
 use smelt_core::content::builder::LineBuilder;
 

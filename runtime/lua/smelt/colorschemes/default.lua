@@ -5,7 +5,7 @@
 -- A colorscheme `return`s a `ThemeSpec` table: a flat map keyed by
 -- highlight-group name (`SmeltAccent`, `Comment`, …) whose values are
 -- either a `StyleDecl` table or a string referencing another group.
--- There's no `groups = { ... }` wrapper — top-level keys are groups.
+-- There's no `groups = { ... }` wrapper - top-level keys are groups.
 --
 -- Color shape (anywhere a `fg = ...` or `bg = ...` appears):
 --   - `{ ansi = N }` for an ANSI 256-color slot.

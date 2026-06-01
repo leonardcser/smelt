@@ -12,7 +12,7 @@ smelt.session = smelt.session or {}
 -- immediately followed by its children, sorted by the same key.
 --
 -- Entries whose `parent_id` references an id not present in `entries` are
--- treated as roots — this is what makes the function safe under workspace
+-- treated as roots - this is what makes the function safe under workspace
 -- filtering, where a fork's parent may have been filtered out.
 ---@type fun(entries: table[], opts: table?): table[]
 function smelt.session.tree(entries, opts)

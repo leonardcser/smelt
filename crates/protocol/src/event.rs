@@ -70,11 +70,11 @@ pub struct EngineAskError {
 /// How a registered tool interacts with concurrent tool execution.
 ///
 /// `Concurrent` (default): runs alongside other tools via the engine's
-/// `pending_tools` channel — good for pure data fetches with no UI.
+/// `pending_tools` channel - good for pure data fetches with no UI.
 ///
 /// `Sequential`: deferred until after every concurrent tool has
 /// finished, then dispatched one at a time. Used by tools that open a
-/// dialog and await a user reply — the user should see all other tool
+/// dialog and await a user reply - the user should see all other tool
 /// output before the prompt. `ask_user_question` is the canonical
 /// example.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -106,7 +106,7 @@ pub struct ToolDef {
     pub override_core: bool,
     /// Hook signals declared by the tool. Each `true` flag tells the
     /// engine to round-trip through `ToolHooksRequest` before
-    /// dispatching the tool — to ask the user for permission, run a
+    /// dispatching the tool - to ask the user for permission, run a
     /// preflight check, etc. When all flags are false the engine
     /// dispatches the tool directly (today's behavior, no permission
     /// gate). Tools that touch security-sensitive surfaces
@@ -119,7 +119,7 @@ pub struct ToolDef {
 /// `ToolDef` so the engine knows whether to ask the TUI to
 /// evaluate them per-call.
 ///
-/// `summary` is always evaluated regardless of this flag set — it's a
+/// `summary` is always evaluated regardless of this flag set - it's a
 /// display concern, not a permission hook. The flags here gate the
 /// `ToolHooksRequest` round-trip that produces a `ToolHooks` reply.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -131,7 +131,7 @@ pub struct ToolHookFlags {
 }
 
 impl ToolHookFlags {
-    /// True when at least one hook is registered — i.e. the engine must
+    /// True when at least one hook is registered - i.e. the engine must
     /// round-trip through `ToolHooksRequest` before dispatch.
     pub fn any(&self) -> bool {
         self.approval_patterns || self.preflight
@@ -170,7 +170,7 @@ pub struct ToolHooks {
     pub approval_patterns: Vec<String>,
     /// Styled one-line-or-more summary of this invocation. Comes from
     /// the tool's `summary(args)` Lua callback. Sole source of truth
-    /// for the transcript header AND confirm dialog body header — the
+    /// for the transcript header AND confirm dialog body header - the
     /// engine never extracts arg fields by tool name.
     #[serde(default)]
     pub summary: StyledLines,
@@ -240,7 +240,7 @@ pub enum EngineEvent {
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
         approval_patterns: Vec<String>,
-        /// Styled summary of the pending call — both the dialog body
+        /// Styled summary of the pending call - both the dialog body
         /// header and any auto-approval pattern matching read this.
         summary: StyledLines,
     },
@@ -277,7 +277,7 @@ pub enum EngineEvent {
     /// Atomic snapshot of the engine's committed history. Fires after each
     /// step that mutates `Vec<HistoryItem>`. By construction every
     /// `HistoryItem::Assistant` carries paired `ToolInvocation`s for the
-    /// tool_calls it emitted — there is no in-flight state to worry about.
+    /// tool_calls it emitted - there is no in-flight state to worry about.
     HistoryUpdated {
         turn_id: u64,
         history: Vec<crate::history::HistoryItem>,
@@ -330,7 +330,7 @@ pub enum EngineEvent {
 }
 
 /// Payload for [`UiCommand::StartTurn`]. Boxed at the variant so the
-/// enum stays small — the other variants are channel-frequent
+/// enum stays small - the other variants are channel-frequent
 /// (`Steer`, `Cancel`, `PermissionDecision`, …) while StartTurn is
 /// once-per-turn and carries the full message history + tool list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,7 +419,7 @@ pub enum UiCommand {
     /// `EngineAskResponse`. `model` overrides the primary model when
     /// `Some`; `response_format` enforces a JSON schema when present;
     /// `reasoning_effort` controls effort (defaults to `Off`). Overflow
-    /// handling is the caller's responsibility — context-window failures
+    /// handling is the caller's responsibility - context-window failures
     /// surface through `EngineAskError { kind = "context_window" }` and
     /// plugins compose retry strategy in Lua.
     EngineAsk {

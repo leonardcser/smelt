@@ -5,8 +5,8 @@
 -- and permission rule-set overrides (`tools`, `bash`, `web_fetch`).
 --
 -- Shell output markers in the body:
---   ` ```!\n<script>\n``` ` — runs the script, replaces the fence with its output.
---   `!`<command>`` ` — inline; replaces the marker with stdout/stderr.
+--   ` ```!\n<script>\n``` ` - runs the script, replaces the fence with its output.
+--   `!`<command>`` ` - inline; replaces the marker with stdout/stderr.
 -- A leading backslash escapes the marker.
 
 local function trim_trailing(s)

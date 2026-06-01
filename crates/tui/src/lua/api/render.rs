@@ -1,4 +1,4 @@
-//! `smelt.render` — paint plain text / markdown / syntax-highlighted
+//! `smelt.render` - paint plain text / markdown / syntax-highlighted
 //! code / split diffs into a `Buf`. UiHost-only.
 //!
 //! Every fn writes into one or more buffers using the same renderer
@@ -7,7 +7,7 @@
 //!
 //! For inline diffs, file views, and notebook previews inside tool
 //! `render` / `preview` callbacks, return a declarative
-//! `smelt.layout.{diff,file_view,vbox}{...}` instead — the host renders
+//! `smelt.layout.{diff,file_view,vbox}{...}` instead - the host renders
 //! it directly into the block buffer with no scratch-buffer seam.
 
 use crate::content::highlight::{
@@ -34,7 +34,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "text",
-        "Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = \"ErrorMsg\"` for errors, `\"SmeltAccent\"` for accent, or any registered theme group — the mapping is the caller's choice, not the renderer's.",
+        "Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = \"ErrorMsg\"` for errors, `\"SmeltAccent\"` for accent, or any registered theme group - the mapping is the caller's choice, not the renderer's.",
         &["buf", "content", "opts"],
         |_, (buf, content, opts): (LuaBuf, String, Option<mlua::Table>)| -> LuaResult<()> {
             let hl_group = opts

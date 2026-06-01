@@ -1,4 +1,4 @@
-//! `smelt.builtins` — opt out of bundled `smelt.<dotted>` modules before
+//! `smelt.builtins` - opt out of bundled `smelt.<dotted>` modules before
 //! they are auto-loaded. Designed to be called from `early.lua` so the
 //! `require()` for a disabled module is skipped entirely. Calls made
 //! later still mark the module as disabled, but the module body has
@@ -14,7 +14,7 @@ use mlua::prelude::*;
 use std::sync::Arc;
 
 /// Selector accepted by `smelt.builtins.disable` / `enable`. Each list
-/// is a set of bundled module short-names — see the table below for the
+/// is a set of bundled module short-names - see the table below for the
 /// `smelt.<dotted>` form each one expands to.
 ///
 /// | field | expansion |

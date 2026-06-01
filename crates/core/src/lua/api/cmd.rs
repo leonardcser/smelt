@@ -1,4 +1,4 @@
-//! `smelt.cmd` — register/list slash commands. `run` is added by the TUI after host-API init.
+//! `smelt.cmd` - register/list slash commands. `run` is added by the TUI after host-API init.
 
 use crate::lua::doc::Tier;
 use crate::lua::lua_type::LuaCallback;

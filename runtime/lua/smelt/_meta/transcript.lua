@@ -7,6 +7,10 @@
 ---@class smelt.transcript
 local transcript = {}
 
+--- Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.
+---@type fun(row: integer): table?
+transcript.block_at_row = nil
+
 --- Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.
 ---@type fun(): table
 transcript.blocks = nil
@@ -15,8 +19,16 @@ transcript.blocks = nil
 ---@type fun(): boolean
 transcript.is_empty = nil
 
+--- Return rendered transcript display rows in `[start, start + count)`. This is exact and may materialize the full transcript until range-native transcript documents land.
+---@type fun(start: integer, count: integer): table
+transcript.rows = nil
+
 --- Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 ---@type fun(): string
 transcript.text = nil
+
+--- Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this does not force full transcript materialization.
+---@type fun(): table
+transcript.visible_blocks = nil
 
 return transcript

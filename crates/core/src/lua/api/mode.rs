@@ -1,4 +1,4 @@
-//! `smelt.mode` — callable selector for the agent mode.
+//! `smelt.mode` - callable selector for the agent mode.
 //! `smelt.mode()` reads, `smelt.mode(v)` sets (TUI override), and
 //! `smelt.mode.cycle_list()` returns the configured cycle.
 

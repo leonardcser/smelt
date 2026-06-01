@@ -1,4 +1,4 @@
-//! `smelt.provider` — config-time provider and model registration.
+//! `smelt.provider` - config-time provider and model registration.
 
 use mlua::prelude::*;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use crate::lua::LuaShared;
 use lua_doc_derive::LuaOpts;
 
 /// One model entry in a provider's `models` list. Plugin authors can
-/// pass either a bare model id string or a full table — the wrapper
+/// pass either a bare model id string or a full table - the wrapper
 /// handles both forms transparently.
 #[derive(Debug, Default, LuaOpts)]
 #[lua(name = "smelt.provider.Model")]
@@ -259,10 +259,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "middleware",
             "Register provider middleware. `mw` is a table of \
 `{ on_request = fn?, on_response = fn? }`:\n\n\
-- `on_request(messages)` — runs just before the engine calls the provider. `messages` is the full conversation history (an array of `{ role, content, tool_calls? }` rows including the system prompt at index 1). Return a replacement array to mutate it; any other return value leaves the history untouched.\n\
-- `on_response(message)` — runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = \"assistant\", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.\n\n\
+- `on_request(messages)` - runs just before the engine calls the provider. `messages` is the full conversation history (an array of `{ role, content, tool_calls? }` rows including the system prompt at index 1). Return a replacement array to mutate it; any other return value leaves the history untouched.\n\
+- `on_response(message)` - runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = \"assistant\", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.\n\n\
 Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns a `Reg` whose `:remove()` drops this middleware.\n\n\
-For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` — synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.",
+For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` - synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.",
             &["mw"],
             move |lua, mw: mlua::Table| -> LuaResult<LuaReg> {
                 let on_request: Option<mlua::Function> = mw.get("on_request").ok();

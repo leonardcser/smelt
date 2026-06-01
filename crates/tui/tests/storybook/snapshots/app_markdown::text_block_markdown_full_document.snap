@@ -12,7 +12,7 @@ legacy paths removed.
 - syntax highlighting in fenced code
 - bug fix: trailing newline in headings
 
-> Heads up: the API changed in one place — see below.
+> Heads up: the API changed in one place - see below.
 
 ───
 

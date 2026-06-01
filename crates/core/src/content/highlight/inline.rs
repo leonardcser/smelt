@@ -109,7 +109,7 @@ fn fit_column_widths(
     Some(widths)
 }
 
-/// Apply the dim "table border" style. No bg — borders ride on whatever bg the
+/// Apply the dim "table border" style. No bg - borders ride on whatever bg the
 /// surrounding block uses (transcript / box / code-block).
 fn enter_border_style(out: &mut LineBuilder) {
     out.set_dim();
@@ -811,7 +811,7 @@ mod tests {
 
     #[test]
     fn intraword_underscore_identifier() {
-        // `snake_case_variable` — underscores are part of the identifier.
+        // `snake_case_variable` - underscores are part of the identifier.
         assert_eq!(parse("snake_case_variable"), vec![p("snake_case_variable")]);
     }
 
@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn bold_containing_italic() {
-        // `**bold *italic* bold**` — inner italic must render inside bold.
+        // `**bold *italic* bold**` - inner italic must render inside bold.
         assert_eq!(
             parse("**bold *it* bold**"),
             vec![b("bold "), bi("it"), b(" bold")]
@@ -892,7 +892,7 @@ mod tests {
 
     #[test]
     fn code_inside_italic() {
-        // `*a `code` b*` — italic wrapping, code inside. The inner code
+        // `*a `code` b*` - italic wrapping, code inside. The inner code
         // span inherits italic, so it's italic+code.
         assert_eq!(
             parse("*a `code` b*"),
@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     fn asterisk_as_multiplication() {
-        // `a * b` — stars with whitespace on both sides, not emphasis.
+        // `a * b` - stars with whitespace on both sides, not emphasis.
         assert_eq!(parse("a * b = c"), vec![p("a * b = c")]);
     }
 
@@ -943,13 +943,13 @@ mod tests {
 
     #[test]
     fn space_before_closing_delim_rejects_emphasis() {
-        // `**text **` — close preceded by space is NOT right-flanking.
+        // `**text **` - close preceded by space is NOT right-flanking.
         assert_eq!(parse("**text **"), vec![p("**text **")]);
     }
 
     #[test]
     fn space_after_opening_delim_rejects_emphasis() {
-        // `** text**` — open followed by space is NOT left-flanking.
+        // `** text**` - open followed by space is NOT left-flanking.
         assert_eq!(parse("** text**"), vec![p("** text**")]);
     }
 
@@ -989,13 +989,13 @@ mod tests {
 
     #[test]
     fn mixed_underscore_and_star_dont_match() {
-        // `*foo_` — `*` opener, `_` is just a literal char, not a closer.
+        // `*foo_` - `*` opener, `_` is just a literal char, not a closer.
         assert_eq!(parse("*foo_"), vec![p("*foo_")]);
     }
 
     #[test]
     fn underscore_surrounded_by_non_alnum_can_italic() {
-        // `(_foo_)` — `_` is not intraword here because `(` and `)` are
+        // `(_foo_)` - `_` is not intraword here because `(` and `)` are
         // not alphanumeric. CommonMark permits this as italic.
         assert_eq!(parse("(_foo_)"), vec![p("("), i("foo"), p(")")]);
     }
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn code_with_backtick_literal() {
-        // A backtick inside a code span closes it — our single-backtick
+        // A backtick inside a code span closes it - our single-backtick
         // parser can't represent literal backticks inside a code span.
         // `` `a`b` `` → code("a") + plain("b`").
         assert_eq!(parse("`a`b`"), vec![c("a"), p("b`")]);
@@ -1028,7 +1028,7 @@ mod tests {
 
     #[test]
     fn strip_markers_handles_intraword_underscore() {
-        // Must not strip `_` that are intraword — they're part of the
+        // Must not strip `_` that are intraword - they're part of the
         // identifier, not emphasis markers.
         assert_eq!(
             strip_markdown_markers("call foo_bar_baz() now"),
@@ -1047,7 +1047,7 @@ mod tests {
     /// Source-text round-trip for fenced code blocks: opening fence on
     /// the first row, closing fence on the last, raw line per row in
     /// between. Lets vim-visual / click-drag selections that cover any
-    /// subset of code rows reconstruct the markdown — fences re-attach
+    /// subset of code rows reconstruct the markdown - fences re-attach
     /// when the first / last row is in the selection.
     #[test]
     fn render_code_block_with_fence_attaches_source_text_per_line() {

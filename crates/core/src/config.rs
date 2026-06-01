@@ -89,7 +89,7 @@ impl SettingValue {
 }
 
 /// Schema entry for one settings key. Authored exclusively via the
-/// `settings!` macro below — the macro is the only thing that ever
+/// `settings!` macro below - the macro is the only thing that ever
 /// constructs `SettingDecl`, so its shape can evolve without touching
 /// any call site.
 pub struct SettingDecl {
@@ -113,7 +113,7 @@ pub struct SettingDecl {
 
 /// One declaration per setting; the macro emits the `ResolvedSettings`
 /// struct, its `Default` impl, and the `SETTINGS` schema table. Adding
-/// a setting means appending one line below — nothing else fans out.
+/// a setting means appending one line below - nothing else fans out.
 ///
 /// Grammar:
 ///   key: Kind = default[, choices: [..]];      -- one or more docs above
@@ -131,7 +131,7 @@ macro_rules! settings {
     ) => {
         /// Fully resolved settings. Lives on `AppConfig` so runtime
         /// reads/writes hit the live struct; persistence is not a
-        /// concern of this type — config is `init.lua`, not a JSON
+        /// concern of this type - config is `init.lua`, not a JSON
         /// registry.
         #[derive(Debug, Clone)]
         pub struct ResolvedSettings {
@@ -344,7 +344,7 @@ impl std::fmt::Display for ResolveModelRefError {
             Self::NotFound { reference } => write!(f, "unknown model or provider: {reference}"),
             Self::Ambiguous { reference, matches } => write!(
                 f,
-                "ambiguous reference '{reference}' — use provider/model ({})",
+                "ambiguous reference '{reference}' - use provider/model ({})",
                 matches.join(", ")
             ),
         }
@@ -450,7 +450,7 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| "openai-compatible".to_string());
 
-            // Codex and Copilot models are fetched dynamically — emit a
+            // Codex and Copilot models are fetched dynamically - emit a
             // placeholder so the provider is detected even when no models are
             // listed in config.
             if (provider_type == "codex" || provider_type == "copilot")

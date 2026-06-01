@@ -175,7 +175,7 @@ fn build_authorize_url(redirect_uri: &str, pkce: &PkceCodes, state: &str) -> Str
 }
 
 const HTML_SUCCESS: &str = r#"<!doctype html>
-<html><head><title>smelt — Authorization Successful</title>
+<html><head><title>smelt - Authorization Successful</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;
 align-items:center;height:100vh;margin:0;background:#131010;color:#f1ecec}
 .c{text-align:center;padding:2rem}h1{margin-bottom:1rem}p{color:#b7b1b1}</style>
@@ -186,7 +186,7 @@ align-items:center;height:100vh;margin:0;background:#131010;color:#f1ecec}
 fn html_error(msg: &str) -> String {
     format!(
         r#"<!doctype html>
-<html><head><title>Agent — Authorization Failed</title>
+<html><head><title>Agent - Authorization Failed</title>
 <style>body{{font-family:system-ui,sans-serif;display:flex;justify-content:center;
 align-items:center;height:100vh;margin:0;background:#131010;color:#f1ecec}}
 .c{{text-align:center;padding:2rem}}h1{{color:#fc533a;margin-bottom:1rem}}
@@ -219,7 +219,7 @@ pub(crate) async fn browser_login(client: &reqwest::Client) -> Result<CodexToken
             .map_err(|e| format!("callback error: {e}"))?;
 
     if received_state != state {
-        return Err("state mismatch — potential CSRF attack".into());
+        return Err("state mismatch; potential CSRF attack".into());
     }
 
     exchange_code(client, &code, &pkce.verifier, &redirect_uri).await
@@ -392,11 +392,11 @@ pub(crate) async fn refresh_tokens(
 
 fn classify_refresh_error(body: &str) -> String {
     if body.contains("refresh_token_expired") {
-        "your refresh token has expired — run `smelt auth` to sign in again".into()
+        "your refresh token has expired; run `smelt auth` to sign in again".into()
     } else if body.contains("refresh_token_reused") {
-        "your refresh token was already used — run `smelt auth` to sign in again".into()
+        "your refresh token was already used; run `smelt auth` to sign in again".into()
     } else if body.contains("refresh_token_invalidated") {
-        "your refresh token was revoked — run `smelt auth` to sign in again".into()
+        "your refresh token was revoked; run `smelt auth` to sign in again".into()
     } else {
         format!("token refresh error: {body}")
     }
@@ -624,7 +624,7 @@ pub(crate) async fn device_code_login(client: &reqwest::Client) -> Result<CodexT
 
     if status.as_u16() == 404 {
         return Err(
-            "device code login is not enabled for this server — use browser login instead"
+            "device code login is not enabled for this server; use browser login instead"
                 .to_string(),
         );
     }
@@ -689,7 +689,7 @@ pub(crate) async fn device_code_login(client: &reqwest::Client) -> Result<CodexT
 pub(crate) async fn ensure_access_token_full(
     client: &reqwest::Client,
 ) -> Result<CodexTokens, String> {
-    let tokens = CodexTokens::load().ok_or("not logged in to Codex — run `smelt auth` first")?;
+    let tokens = CodexTokens::load().ok_or("not logged in to Codex; run `smelt auth` first")?;
 
     if !tokens.needs_refresh() {
         return Ok(tokens);

@@ -1,4 +1,4 @@
-//! `smelt.reasoning` — callable selector for reasoning effort. Mirrors
+//! `smelt.reasoning` - callable selector for reasoning effort. Mirrors
 //! `smelt.mode`. `smelt.reasoning()` reads, `smelt.reasoning(v)` sets,
 //! `smelt.reasoning.cycle_list()` returns the configured cycle.
 

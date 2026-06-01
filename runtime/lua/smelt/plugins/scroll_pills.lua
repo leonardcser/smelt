@@ -1,6 +1,6 @@
 -- Scroll-pill overlays shown while the transcript is scrolled off-tail:
---   * Bottom pill — " ↓ jump to bottom " above the prompt; click re-pins to tail.
---   * Top pill    — first line of the nearest user message above the viewport;
+--   * Bottom pill - " ↓ jump to bottom " above the prompt; click re-pins to tail.
+--   * Top pill    - first line of the nearest user message above the viewport;
 --     click scrolls to it with one row of gap so repeated clicks walk back.
 -- Disable via `smelt.builtins.disable({ plugins = { "scroll_pills" } })`.
 

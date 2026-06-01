@@ -37,7 +37,7 @@ app_story!(stats_dialog, |ctx| {
 });
 
 app_story!(messages_dialog_empty, |ctx| {
-    // `/messages` with zero entries — the dialog shows the placeholder
+    // `/messages` with zero entries - the dialog shows the placeholder
     // body. Pins the empty-state branch in `format_lines`.
     ctx.set_viewport(70, 12);
     ctx.run_command("messages");
@@ -98,7 +98,7 @@ app_story!(btw_dialog_with_answer, |ctx| {
     // `smelt.dialog.open`. With no real engine task, the ask sits
     // pending. We harvest the pending ask id from `ask_callbacks` and
     // synthesise an `EngineAskResponse` so the dialog body renders the
-    // markdown answer instead of the spinner — the steady state users
+    // markdown answer instead of the spinner - the steady state users
     // see once the side question completes.
     ctx.push_user_turn("how do I render a buffer?");
     ctx.push_assistant_text("Call `buf:lines(...)` or set `buf:source(text)`.");

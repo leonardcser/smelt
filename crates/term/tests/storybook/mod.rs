@@ -16,7 +16,7 @@ use smelt_term::{
     Style, Theme,
 };
 
-/// Discard writer — the compositor writes SGR escapes during render
+/// Discard writer - the compositor writes SGR escapes during render
 /// but the storybook only cares about the post-render grid.
 pub struct Discard;
 

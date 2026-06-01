@@ -157,7 +157,7 @@ fn format_rate_limit(resets_at: &Option<u64>) -> String {
         return "rate limited".to_string();
     };
     let time_str = format_epoch_local(*epoch);
-    format!("rate limited — try again at {time_str}")
+    format!("rate limited; try again at {time_str}")
 }
 
 fn format_epoch_local(epoch_secs: u64) -> String {
@@ -318,7 +318,7 @@ impl ProviderKind {
         }
     }
 
-    /// Canonical config string for this provider — the inverse of
+    /// Canonical config string for this provider - the inverse of
     /// [`ProviderKind::from_config`]. Used for catalog lookups and logging.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -389,7 +389,7 @@ impl<'a> ChatOptions<'a> {
 /// Per-request prompt-cache strategy. Anthropic uses `cache_control`
 /// markers; OpenAI-family providers use a `prompt_cache_key` routing hint
 /// (session-scoped) that improves hit rate under load. The key is a
-/// performance optimization, not telemetry — without it OpenAI's prefix
+/// performance optimization, not telemetry - without it OpenAI's prefix
 /// cache works opportunistically; with it the request routes to a shard
 /// that already saw the prefix.
 #[derive(Clone, Debug, Default)]
@@ -882,7 +882,7 @@ impl Provider {
 
     pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
         let provider_label = self.kind.as_str();
-        // Hit the provider's own `/v1/models` first — that's the
+        // Hit the provider's own `/v1/models` first - that's the
         // authoritative source. Fall through to the models.dev catalog
         // if it doesn't expose a window field.
         let from_provider = match self.kind {
@@ -1061,7 +1061,7 @@ pub fn slugify(title: &str) -> String {
 /// same way the production code does, so `cache_invariance` can
 /// byte-compare cached prefixes across randomly-generated histories
 /// without going through the network layer. Gated behind the `fuzz`
-/// feature; not part of the supported API surface — use `Provider::chat`
+/// feature; not part of the supported API surface - use `Provider::chat`
 /// instead.
 #[cfg(any(test, feature = "fuzz"))]
 pub fn fuzz_build_anthropic_body(

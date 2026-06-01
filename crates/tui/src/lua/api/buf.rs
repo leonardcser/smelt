@@ -1,4 +1,4 @@
-//! `smelt.buf` — Buf handle. UiHost-only.
+//! `smelt.buf` - Buf handle. UiHost-only.
 //!
 //! `smelt.buf.new(opts?)` returns a `Buf` userdata with chainable
 //! methods. `opts.name` opts the buffer into hot-reload survival:
@@ -40,12 +40,12 @@ impl From<LuaVirtTextPos> for smelt_core::buffer::VirtTextPos {
 }
 
 /// Color value for the `fg`/`bg` highlight fields. Accepts:
-/// - `string` — theme-group name resolved through the active theme.
-/// - `{ r, g, b }` — direct RGB triple (integer array).
-/// - `{ rgb = { r, g, b } }` — same RGB triple in the `StyleDecl` shape
+/// - `string` - theme-group name resolved through the active theme.
+/// - `{ r, g, b }` - direct RGB triple (integer array).
+/// - `{ rgb = { r, g, b } }` - same RGB triple in the `StyleDecl` shape
 ///   that `smelt.theme.get(group)` returns, so a caller can pipe a
 ///   theme-derived color straight back into another highlight.
-/// - `{ ansi = N }` — direct 256-color slot in the same shape.
+/// - `{ ansi = N }` - direct 256-color slot in the same shape.
 #[derive(Debug, Clone)]
 pub enum LuaColor {
     Group(String),
@@ -114,7 +114,7 @@ pub struct LuaMarkOpts {
     /// 1-based end row (inclusive). `nil` keeps the mark single-line.
     pub end_row: Option<u64>,
     /// End byte offset for highlight ranges (exclusive). Same unit as
-    /// `col` — bytes into the line, matching `#s` and `string.find`.
+    /// `col` - bytes into the line, matching `#s` and `string.find`.
     pub end_col: Option<u64>,
     /// Higher-priority marks paint over lower-priority ones.
     #[lua(default)]
@@ -265,7 +265,7 @@ impl mlua::UserData for LuaBuf {
             },
         );
 
-        // ── line(idx) — single line read, 1-based ──────────────────
+        // ── line(idx) - single line read, 1-based ──────────────────
         methods.add_method("line", |_, this, idx: u64| -> LuaResult<Option<String>> {
             let line0 = match idx.checked_sub(1) {
                 Some(n) => n as usize,
@@ -279,7 +279,7 @@ impl mlua::UserData for LuaBuf {
             .flatten())
         });
 
-        // ── styled(spans) — set styled lines (chainable) ───────────
+        // ── styled(spans) - set styled lines (chainable) ───────────
         methods.add_function(
             "styled",
             |_,
@@ -325,7 +325,7 @@ impl mlua::UserData for LuaBuf {
              -> LuaResult<u64> { Ok(set_extmark(this.id, ns, row, col, opts)) },
         );
 
-        // ── clear_ns(ns, start?, end?) — chainable ─────────────────
+        // ── clear_ns(ns, start?, end?) - chainable ─────────────────
         methods.add_function(
             "clear_ns",
             |_,
@@ -358,9 +358,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         smelt,
         "buf",
         "Buffer handle constructor. `smelt.buf.new(opts?)` returns a `Buf` userdata. \
-`opts.name` opts the buffer into hot-reload survival — repeat calls with the same name \
+`opts.name` opts the buffer into hot-reload survival - repeat calls with the same name \
 return the same handle with mutable opts re-applied. Anonymous buffers are reaped on `/reload`. \
-UiHost-only — buffers are terminal-screen backing stores that windows render into.",
+UiHost-only - buffers are terminal-screen backing stores that windows render into.",
         Tier::UiHost,
     )?;
 
@@ -373,7 +373,7 @@ UiHost-only — buffers are terminal-screen backing stores that windows render i
             "line" => fn(idx: u64) -> Option<String>, "Read a single line by 1-based index. `nil` if out of range or the buffer is gone.",
             "styled" => fn(lines: mlua::Table) -> LuaBuf, "Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.",
             "readonly" => fn(val: Option<bool>) -> mlua::Value, "Read or write the readonly flag. With arg, returns the handle for chaining.",
-            "mark" => fn(ns: u32, row: u64, col: u64, opts: Option<LuaMarkOpts>) -> u64, "Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line — the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.",
+            "mark" => fn(ns: u32, row: u64, col: u64, opts: Option<LuaMarkOpts>) -> u64, "Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line - the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.",
             "clear_ns" => fn(ns: u32, start: Option<i64>, end_: Option<i64>) -> LuaBuf, "Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining.",
         },
     });
@@ -383,7 +383,7 @@ UiHost-only — buffers are terminal-screen backing stores that windows render i
         let s = shared.clone();
         m.fn_(
             "new",
-            "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival — repeat calls with the same name return the same handle with mutable opts re-applied. When omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned so the buffer survives `/reload` without explicit naming.",
+            "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival - repeat calls with the same name return the same handle with mutable opts re-applied. When omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned so the buffer survives `/reload` without explicit naming.",
             &["opts"],
             move |lua, opts: Option<mlua::Table>| -> LuaResult<LuaBuf> {
                 // Auto-name from active plugin scope when caller didn't.
@@ -457,7 +457,7 @@ fn create_or_open(
     // autoload pass). The buffer is created for real on the second pass,
     // when `bring_up_lua("launch")` reloads with the app available.
     let result_id = crate::lua::try_with_app(|app| -> crate::smelt_term::BufId {
-        // Named buffer that already exists — refresh mutable opts.
+        // Named buffer that already exists - refresh mutable opts.
         if let Some(ref n) = name {
             if let Some((bid, buf)) = app.ui.lookup_named_buf_mut(n) {
                 buf.readonly = readonly;
@@ -501,7 +501,7 @@ fn create_or_open(
     Ok(result_id)
 }
 
-/// `buf:styled(spans)` — set a styled line list. Same semantics as the
+/// `buf:styled(spans)` - set a styled line list. Same semantics as the
 /// old `set_styled_lines`; lifted out so `Buf` methods stay tidy.
 fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResult<()> {
     use crate::content::to_buffer::render_into_buffer;

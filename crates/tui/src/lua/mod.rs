@@ -52,7 +52,7 @@ pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     };
     let is_named = !matches!(key.code, KeyCode::Char(_));
     if !has_ctrl && !has_alt && (!has_shift || matches!(key.code, KeyCode::Char(_))) && !is_named {
-        // Plain printable char — no angle-bracket wrap.
+        // Plain printable char - no angle-bracket wrap.
         return Some(base);
     }
     let mut prefix = String::new();
@@ -308,7 +308,7 @@ impl std::ops::DerefMut for LuaRuntime {
 
 impl LuaRuntime {
     /// Build a fresh runtime and register the `smelt` global.
-    /// Does not load `init.lua` — call [`LuaRuntime::load_autoload`] after
+    /// Does not load `init.lua` - call [`LuaRuntime::load_autoload`] after
     /// startup snapshots are available so plugins see real data at registration time.
     pub fn new() -> Self {
         let shared = Arc::new(LuaShared::default());
@@ -391,7 +391,7 @@ impl LuaRuntime {
     /// Fire the `smelt.engine.ask` callback registered under `id` with
     /// `(response_or_nil, err_or_nil)`. The success payload mirrors the
     /// provider-shaped assistant `protocol::Message` row; the error table mirrors the
-    /// `smelt.engine.AskError` shape — `{ kind, message }` strings —
+    /// `smelt.engine.AskError` shape - `{ kind, message }` strings -
     /// so plugins can branch on the failure mode without parsing text.
     pub(crate) fn fire_ask_callback(
         &self,
@@ -711,7 +711,7 @@ mod tests {
     #[test]
     fn invoke_callback_unknown_handle_is_noop() {
         let rt = LuaRuntime::new();
-        // Nothing registered under id 9999 — should silently succeed.
+        // Nothing registered under id 9999 - should silently succeed.
         rt.invoke_callback(
             crate::smelt_term::LuaHandle(9999),
             crate::smelt_term::WinId(0),
@@ -767,7 +767,7 @@ mod tests {
         // Synthesize an EngineAskResponse for the same id. The shared id
         // counter means a real ask call would never collide with this id,
         // but a buggy engine emitting a stale id used to fire the wrong
-        // handler — verify the ask path stays in its own lane.
+        // handler - verify the ask path stays in its own lane.
         let msg =
             protocol::Message::assistant(Some(protocol::Content::text("synthetic")), None, None);
         rt.fire_ask_callback(id, Some(&msg), None);

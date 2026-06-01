@@ -6,7 +6,7 @@ You just finished a task. Before moving on, step back and honestly evaluate what
 you did.
 
 The goal is to catch cases where you fought friction instead of fixing its root
-cause — band-aid fixes, workarounds, growing complexity that signals a wrong
+cause - band-aid fixes, workarounds, growing complexity that signals a wrong
 abstraction. This is your chance to course-correct before the debt compounds.
 
 ## Rules
@@ -24,7 +24,7 @@ abstraction. This is your chance to course-correct before the debt compounds.
      added to bypass something broken.
    - **Did I add complexity because the existing structure fought me?** If
      slotting in a feature required touching many files, adding parameters, or
-     threading state through layers — maybe the structure is wrong, not the
+     threading state through layers - maybe the structure is wrong, not the
      feature.
    - **Is there a simpler design I dismissed too early?** Sometimes the "harder"
      refactor is actually less total work than the "quick" fix plus all its
@@ -40,7 +40,7 @@ abstraction. This is your chance to course-correct before the debt compounds.
    - What you'd do instead
    - Why it's worth the effort (skip anything that isn't)
 
-Be blunt and be brief. An empty list is a valid answer — not every task leaves
+Be blunt and be brief. An empty list is a valid answer - not every task leaves
 debt. Don't pad the list to look thorough.]]
 
 smelt.cmd.register("reflect", function(arg)

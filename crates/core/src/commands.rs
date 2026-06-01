@@ -1,6 +1,6 @@
 //! Process-global `/command` resolver. Front-ends install a closure that maps
 //! a command name (no `/` prefix) to whether it's currently registered; every
-//! caller — prompt highlighter, transcript renderer, command dispatch — agrees
+//! caller - prompt highlighter, transcript renderer, command dispatch - agrees
 //! by going through `is_command`. Headless front-ends leave the resolver
 //! unset; `is_command` then returns false and structural callers can fall back
 //! to [`crate::transcript_model::is_command_like`].

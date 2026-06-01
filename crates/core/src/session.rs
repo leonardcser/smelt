@@ -52,7 +52,7 @@ impl Default for ContextCheckpoint {
 ///
 /// Storage shape is `Vec<HistoryItem>` (the sum-type history that makes
 /// orphan tool_calls impossible). The on-disk JSON format remains the
-/// legacy `messages: Vec<Message>` for backward compatibility — conversion
+/// legacy `messages: Vec<Message>` for backward compatibility - conversion
 /// happens in the `Serialize`/`Deserialize` impls via the
 /// [`SessionWire`] shadow type. Loading an older session also repairs any
 /// orphan tool_use blocks by synthesizing an "interrupted" tool result
@@ -94,7 +94,7 @@ pub struct Session {
 
 /// On-disk JSON shape. Kept stable so older sessions deserialize without a
 /// migration pass. Snapshot keys are stored in `Vec<Message>` position
-/// space — the `Session` deserialize impl translates them into
+/// space - the `Session` deserialize impl translates them into
 /// `Vec<HistoryItem>` positions on load and back on save.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionWire {
@@ -784,7 +784,7 @@ fn build_search_blob(history: &[HistoryItem]) -> String {
 
 /// Read the searchable text blob for `id`. Falls back to regenerating from
 /// `session.json` (and caching to disk) when the `content.txt` sidecar is
-/// missing — older sessions written before the sidecar existed.
+/// missing - older sessions written before the sidecar existed.
 pub fn load_search_blob(id: &str) -> Option<String> {
     let _perf = smelt_perf::perf::begin("session:load_search_blob");
     let session_dir = sessions_dir().join(id);
@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn session_id_is_deterministic_for_fixed_inputs() {
         // Same (now_ms, pid) at adjacent counter values produces stable
-        // ids — so a sim scenario that scripts both replays bit-identical.
+        // ids - so a sim scenario that scripts both replays bit-identical.
         let now = 1_700_000_000_000;
         let pid = 7;
         let a = new_session_id(now, pid);
@@ -1546,7 +1546,7 @@ mod tests {
         // through the `messages: Vec<Message>` on-disk JSON shape.
         //
         // Note: `ToolInvocation.elapsed_ms` is NOT carried by the wire
-        // `Message::tool` shape — it is engine-internal telemetry. The
+        // `Message::tool` shape - it is engine-internal telemetry. The
         // canonical on-disk source for per-call elapsed times is
         // `turn_metas.tool_elapsed`, which the renderer reads as a
         // fallback. We zero `elapsed_ms` on the original side before
@@ -1653,13 +1653,13 @@ mod tests {
             .invocations[0];
         assert_eq!(
             restored_inv.elapsed_ms, None,
-            "inv.elapsed_ms is engine-only — should be lost across the wire form"
+            "inv.elapsed_ms is engine-only - should be lost across the wire form"
         );
         let restored_meta_elapsed = round.turn_metas[0].1.tool_elapsed.get("c1").copied();
         assert_eq!(
             restored_meta_elapsed,
             Some(42),
-            "turn_metas.tool_elapsed is the canonical on-disk channel — must survive"
+            "turn_metas.tool_elapsed is the canonical on-disk channel - must survive"
         );
     }
 

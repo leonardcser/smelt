@@ -229,7 +229,7 @@ impl TranscriptProjection {
     }
 
     /// Clear every cached layout so the next `project()` rebuilds from scratch.
-    /// Called when the theme changes — colors that were baked into anonymous
+    /// Called when the theme changes - colors that were baked into anonymous
     /// highlight groups need to be re-resolved against the new palette.
     pub(crate) fn invalidate_theme(&mut self) {
         self.cache.clear();
@@ -287,7 +287,7 @@ impl TranscriptProjection {
         }
 
         // When width changes, capture a content-stable anchor at the current
-        // scroll_top — (BlockId, row_offset_in_block) — before the layout is
+        // scroll_top - (BlockId, row_offset_in_block) - before the layout is
         // discarded. The same remap is needed when leaving a tail projection:
         // prefix rows may have been estimated, but the block-local anchor is stable.
         let width_changed = self
@@ -539,7 +539,7 @@ impl TranscriptProjection {
 
         // Trim buffer to just before the last block's old start.
         // If the last block previously had rows, it was preceded by a gap
-        // that must also be removed — otherwise the gap is duplicated when
+        // that must also be removed - otherwise the gap is duplicated when
         // we re-append gap + block rows below.
         let mut keep_rows = old_last.start.min(usize::MAX as RowIndex) as usize;
         if old_last.rows > 0 {

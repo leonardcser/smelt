@@ -457,11 +457,11 @@ pub enum Anchor {
         col_offset: i32,
     },
     /// Anchored to another window. `attach` picks the alignment point on
-    /// both the target rect and the overlay rect — see [`Align`]. `NW`
+    /// both the target rect and the overlay rect - see [`Align`]. `NW`
     /// flush-mounts top-left; `Center` centers the overlay inside the
     /// target; `N`/`S`/`E`/`W` align the overlay's matching edge midpoint
     /// to the target's. `row_offset`/`col_offset` nudge the resolved rect
-    /// away from the alignment point — useful for compensating chrome
+    /// away from the alignment point - useful for compensating chrome
     /// rows (gutter, status line) the host adds inside the target.
     Win {
         target: PaintId,
@@ -579,7 +579,7 @@ impl Border {
         self.top.is_some() || self.right.is_some() || self.bottom.is_some() || self.left.is_some()
     }
 
-    /// `Border::single().all(())` — single glyphs on all four sides, default color.
+    /// `Border::single().all(())` - single glyphs on all four sides, default color.
     pub fn single_all() -> Self {
         Self::single().all(())
     }
@@ -982,7 +982,7 @@ pub fn resolve_constraints_with_fit_caps(
     // Pass 3: elastic children (`Fill`, `Fit`, `Min`, `Max`) share the remainder.
     // Each elastic child has a `(floor, cap)`:
     //   * `Fill`     → `(0, MAX)`
-    //   * `Fit`      → `(0, natural)`     — natural comes from `fit_caps`
+    //   * `Fit`      → `(0, natural)`     - natural comes from `fit_caps`
     //   * `Min(n)`   → `(n, MAX)`
     //   * `Max(n)`   → `(0, n)`
     // Equal-share baseline; clamp to caps; surplus from cap-hit children
@@ -996,7 +996,7 @@ pub fn resolve_constraints_with_fit_caps(
         })
         .collect();
     if elastic.is_empty() || remaining == 0 {
-        // Still need to honor floors (`Min(n)`) even when no remainder — they
+        // Still need to honor floors (`Min(n)`) even when no remainder - they
         // can claim space by displacing earlier hard claimants? No: passes
         // 1-2 already locked those in. Min with no remainder gets 0.
         return sizes;
@@ -1094,7 +1094,7 @@ pub fn resolve_constraints_with_fit_caps(
 }
 
 /// `(floor, cap)` bounds for an elastic constraint. `Length`/`Percentage`/`Ratio`
-/// return `None` — they're hard claimants resolved in earlier passes.
+/// return `None` - they're hard claimants resolved in earlier passes.
 fn elastic_bounds(c: Constraint, fit_cap: Option<u16>) -> Option<(u16, u16)> {
     match c {
         Constraint::Fill => Some((0, u16::MAX)),
@@ -1315,7 +1315,7 @@ mod tests {
 
     /// Confirm-dialog-shaped vbox: small leaf Fits + one elastic Fit panel
     /// (the preview). At every terminal height the panels must collectively
-    /// consume the entire dialog inner area — no leftover rows below the last
+    /// consume the entire dialog inner area - no leftover rows below the last
     /// panel (that's the "3 whitespaces under reason" bug).
     #[test]
     fn confirm_dialog_layout_consumes_all_rows_at_varying_heights() {
@@ -1442,7 +1442,7 @@ mod tests {
     fn natural_size_fill_contributes_zero_with_sizer() {
         let tree = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(A))]);
         let sizer = FixedSizer(5);
-        // Fill is elastic — even with a sizer reporting 5, it contributes 0
+        // Fill is elastic - even with a sizer reporting 5, it contributes 0
         // to the parent's natural-size demand.
         assert_eq!(tree.natural_size_with((80, 24), &sizer), (0, 0));
     }

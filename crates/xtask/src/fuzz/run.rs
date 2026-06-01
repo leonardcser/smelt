@@ -1,4 +1,4 @@
-//! `cargo xtask fuzz run <target> [--fork N] [--cmin]` — fuzz a single target.
+//! `cargo xtask fuzz run <target> [--fork N] [--cmin]` - fuzz a single target.
 //!
 //! Thin wrapper over `cargo +nightly fuzz run` that wires the flags we
 //! actually want:
@@ -7,7 +7,7 @@
 //!   - optional `--cmin` runs `cargo fuzz cmin` first to sweep the
 //!     accumulated corpus for regressions and shrink it before fuzzing.
 //!
-//! No time budget — runs until crash or Ctrl-C. To bound a session, pass
+//! No time budget - runs until crash or Ctrl-C. To bound a session, pass
 //! `-max_total_time=<secs>` after the target (anything trailing the
 //! target name lands in the libFuzzer argv).
 
@@ -92,7 +92,7 @@ pub fn run(args: Vec<String>) {
     if !status.success() {
         eprintln!();
         eprintln!(
-            ">>> fuzz exited {status} — check fuzz/artifacts/{target}/ for the crash artifact"
+            ">>> fuzz exited {status} - check fuzz/artifacts/{target}/ for the crash artifact"
         );
         eprintln!(">>> next: cargo xtask fuzz triage {target} fuzz/artifacts/{target}/crash-<hex>");
         std::process::exit(status.code().unwrap_or(1));

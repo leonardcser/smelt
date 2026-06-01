@@ -136,10 +136,10 @@ end
 -- registration with the same name; the bundled banner plugin queries
 -- every source each time it opens the splash. Each source returns one
 -- of:
---   * nil                                — contribute nothing
---   * string                             — one dim line
---   * { text, dim?, style_group? }       — one styled entry
---   * { entry, entry, ... }              — multiple styled entries
+--   * nil                                - contribute nothing
+--   * string                             - one dim line
+--   * { text, dim?, style_group? }       - one styled entry
+--   * { entry, entry, ... }              - multiple styled entries
 -- Returns a `Reg` whose `:remove()` drops the source.
 
 local banner_sources = {}

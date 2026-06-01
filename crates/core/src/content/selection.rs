@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn scan_at_token_rejects_when_preceded_by_word_char() {
-        // e.g., "foo@bar" — `@` glued to a letter is not a reference.
+        // e.g., "foo@bar" - `@` glued to a letter is not a reference.
         let cs = chars("foo@bar");
         assert!(scan_at_token(&cs, 3).is_none());
     }

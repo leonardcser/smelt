@@ -1,15 +1,15 @@
--- `/settings` — every key in `smelt.settings.schema()` shows up here:
+-- `/settings` - every key in `smelt.settings.schema()` shows up here:
 --   * bool                   → Enter toggles
 --   * string with `choices`  → Enter cycles to the next choice
 --   * number                 → shown read-only; tune via init.lua, `--set`,
 --                              or `smelt.settings.<key> = N`
 --
--- Toggles apply to the current session only — `init.lua` is the only
+-- Toggles apply to the current session only - `init.lua` is the only
 -- persistence path. After each change the picker prints the exact
 -- `smelt.settings.<key> = ...` line to paste into `init.lua`.
 --
 -- The list is schema-driven on purpose. Every newly declared setting in
--- `smelt_core::config::SETTINGS` shows up here automatically — no hand
+-- `smelt_core::config::SETTINGS` shows up here automatically - no hand
 -- list to keep in sync.
 
 local function humanise(key)
@@ -40,7 +40,7 @@ end
 
 local function notify_session_only(key)
   smelt.notify(
-    "session only — add `" .. snippet_for(key, smelt.settings[key]) .. "` to init.lua to persist"
+    "session only - add `" .. snippet_for(key, smelt.settings[key]) .. "` to init.lua to persist"
   )
 end
 
@@ -76,7 +76,7 @@ smelt.cmd.picker("settings", {
   startup_ok = true,
 })
 
--- `/settings-export` — copy a Lua snippet of the live state (settings +
+-- `/settings-export` - copy a Lua snippet of the live state (settings +
 -- active theme + current model / mode / reasoning effort) to the
 -- clipboard. Paste into `init.lua` to promote the current session into
 -- persistent config.
@@ -111,5 +111,5 @@ end
 smelt.cmd.register("settings-export", function()
   local snippet = build_snippet()
   smelt.clipboard.write(snippet)
-  smelt.notify("settings snippet copied — paste into init.lua to persist")
+  smelt.notify("settings snippet copied - paste into init.lua to persist")
 end, { desc = "copy current settings as init.lua snippet" })

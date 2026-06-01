@@ -43,7 +43,7 @@ smelt.cmd.register("help", function()
       end
     end
     -- `wrap = false` so the leaf reports its actual longest-line width as its
-    -- natural width — without this the overlay's `width = "fit"` would resolve
+    -- natural width - without this the overlay's `width = "fit"` would resolve
     -- to the full terminal.
     -- `selectable = true` so mouse click-and-drag highlights text the same way
     -- it does in the transcript; vim_enabled tracks the user's global setting so
@@ -77,7 +77,7 @@ end, { desc = "show keybindings" })
 -- is actively typing into. That narrows the literal-`?` carve-out to: prompt
 -- focus AND non-empty content AND vim is in insert mode (or vim is disabled,
 -- so every keystroke is text). Vim normal/visual mode is always a "command"
--- context — `?` opens help even when the prompt has content. Returning false
+-- context - `?` opens help even when the prompt has content. Returning false
 -- passes the keystroke through to the buffer so it lands as a real `?`.
 smelt.keymap.set("", "?", function()
   if smelt.focus() == "prompt" then

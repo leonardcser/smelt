@@ -32,7 +32,7 @@ app_story!(edit_file_tool_block_with_diff_gutter, |ctx| {
     // tool-block gutter chrome (2-cell indent, attached header).
     // Driving the real `ToolStarted` + `ToolFinished` events makes
     // the worker run the tool's `preview(args)` Lua callback, which
-    // returns a `Diff` leaf — the snapshot then captures the buffer-
+    // returns a `Diff` leaf - the snapshot then captures the buffer-
     // backed inline diff with line numbers, +/- markers, and
     // syntax-highlighted content all sharing one render pass.
     ctx.set_viewport(80, 16);
@@ -59,7 +59,7 @@ app_story!(edit_file_tool_block_with_diff_gutter, |ctx| {
 
 app_story!(edit_file_tool_block_error, |ctx| {
     // `edit_file.render` falls back to `layout.text(content, is_error)`
-    // when the result is an error — same fallback every tool with a
+    // when the result is an error - same fallback every tool with a
     // structured render uses. Pins the error chrome.
     ctx.set_viewport(70, 10);
     ctx.tool_call_error(
@@ -177,7 +177,7 @@ app_story!(bash_tool_block_error_output, |ctx| {
 // ── glob ──────────────────────────────────────────────────────────
 
 app_story!(glob_tool_block, |ctx| {
-    // `glob.render` returns "N files" — the header carries the pattern
+    // `glob.render` returns "N files" - the header carries the pattern
     // via `summary(args)` (`pattern` + optional `path`).
     ctx.set_viewport(60, 10);
     ctx.tool_call(
@@ -208,7 +208,7 @@ app_story!(glob_tool_block_error, |ctx| {
 // ── grep ──────────────────────────────────────────────────────────
 
 app_story!(grep_tool_block, |ctx| {
-    // `grep.render` returns "N matches" — the header carries the
+    // `grep.render` returns "N matches" - the header carries the
     // pattern + path via `summary(args)`.
     ctx.set_viewport(70, 10);
     ctx.tool_call(
@@ -319,7 +319,7 @@ app_story!(web_search_tool_block, |ctx| {
     ctx.tool_call(
         "web_search",
         &[("query", json!("rust unicode width crate"))],
-        "1. unicode-width — crates.io\n2. unicode-segmentation — crates.io",
+        "1. unicode-width - crates.io\n2. unicode-segmentation - crates.io",
         Some(330),
     );
     ctx.assert_snapshot();
@@ -328,7 +328,7 @@ app_story!(web_search_tool_block, |ctx| {
 // ── Tool block states beyond the happy path ───────────────────────
 
 app_story!(tool_block_pending_no_result, |ctx| {
-    // `ToolStarted` without a matching `ToolFinished` — the spinner /
+    // `ToolStarted` without a matching `ToolFinished` - the spinner /
     // running chrome users see while a tool is in flight.
     ctx.set_viewport(60, 8);
     ctx.tool_started("bash", &[("command", json!("sleep 5"))]);
@@ -336,7 +336,7 @@ app_story!(tool_block_pending_no_result, |ctx| {
 });
 
 app_story!(tool_block_parallel_pending, |ctx| {
-    // Two `ToolStarted` events before any `ToolFinished` — the
+    // Two `ToolStarted` events before any `ToolFinished` - the
     // claude-code shape where the agent fires multiple tools at once.
     // Pins the block ordering and the per-block pending chrome.
     ctx.set_viewport(60, 12);

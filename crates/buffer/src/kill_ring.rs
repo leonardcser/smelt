@@ -1,8 +1,8 @@
 //! Emacs-style kill ring with yank-pop support.
 //!
 //! The kill ring carries plain text only. Attachment markers have no
-//! representation here — an `AttachmentId` is bound to a specific buffer's
-//! attachment list, not to text — so every entry point strips
+//! representation here - an `AttachmentId` is bound to a specific buffer's
+//! attachment list, not to text - so every entry point strips
 //! `ATTACHMENT_MARKER` before storing. Yanking back can then go through
 //! `AttachedTextMut::insert_str` without risk of producing orphan markers
 //! that would desync source from the id list.
@@ -210,7 +210,7 @@ mod tests {
     use crate::attached::AttachedTextMut;
     use crate::attachment::AttachmentId;
 
-    /// Mutate `buf` (a `String`) as if it were an attached text — empty ids.
+    /// Mutate `buf` (a `String`) as if it were an attached text - empty ids.
     /// Returns the closure result.
     fn with_attached<F, R>(buf: &mut String, f: F) -> R
     where
@@ -250,7 +250,7 @@ mod tests {
         kr.set_with_source("first".into(), false, 0, 5);
         kr.mark_yanked(t0);
         assert!(kr.yank_flash_range(t0).is_some());
-        // Subsequent delete-style update — no mark_yanked.
+        // Subsequent delete-style update - no mark_yanked.
         kr.set_with_source("second".into(), false, 10, 16);
         assert!(kr.yank_flash_range(t0).is_none());
     }
@@ -292,7 +292,7 @@ mod tests {
         let mut buf = String::new();
         with_attached(&mut buf, |a| kr.yank(a, 0));
         assert_eq!(buf, "k33");
-        // Yank-pop 32 times — every entry in history should be reachable
+        // Yank-pop 32 times - every entry in history should be reachable
         // exactly once before it wraps. The oldest reachable should be k1.
         let mut seen = vec![buf.clone()];
         for _ in 0..32 {
@@ -362,7 +362,7 @@ mod tests {
         let mut buf = String::new();
         with_attached(&mut buf, |a| kr.yank(a, 0));
         kr.clear_yank();
-        // last_yank is gone — yank_pop has no range to replace.
+        // last_yank is gone - yank_pop has no range to replace.
         assert!(with_attached(&mut buf, |a| kr.yank_pop(a)).is_none());
     }
 

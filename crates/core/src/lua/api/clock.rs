@@ -1,4 +1,4 @@
-//! `smelt.clock` — wall-clock time primitives.
+//! `smelt.clock` - wall-clock time primitives.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

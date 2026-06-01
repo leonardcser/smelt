@@ -3,7 +3,7 @@
 //! OpenAI / aux-model prompt-cache invariance fuzz. The Anthropic target
 //! covers `cache_control`-marker stability; this target covers the
 //! OpenAI Responses shape used by aux models (title generation, prompt
-//! prediction) — `instructions` (joined system prompts), `input` array,
+//! prediction) - `instructions` (joined system prompts), `input` array,
 //! `tools`, and the session-scoped `prompt_cache_key` routing hint.
 //!
 //! Cache-invariance properties under OpenAI semantics:
@@ -12,7 +12,7 @@
 //!    is implicit on OpenAI; the routing hint just lands the request on
 //!    the shard that already saw it).
 //!  - `prompt_cache_key` must stay byte-identical across stable actions
-//!    within a session — a drift here invalidates the routing hint and
+//!    within a session - a drift here invalidates the routing hint and
 //!    burns the aux cache.
 //!  - `tools` must be sorted by `sort_tools_for_cache_stability` so
 //!    registration-order drift can't bust the prefix.
@@ -34,7 +34,7 @@ use smelt_fuzz::cache_common::{mode_at, ArbTool, StableAction};
 
 #[derive(Debug, Arbitrary)]
 struct Input {
-    /// First system message — `instructions` concatenates all `Role::System`
+    /// First system message - `instructions` concatenates all `Role::System`
     /// contents with `\n`, so we also seed a few extras.
     initial_system: String,
     extra_system: Vec<String>,

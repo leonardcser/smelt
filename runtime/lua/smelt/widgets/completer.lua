@@ -30,7 +30,7 @@ local lock_count = 0
 -- Take a modality lock on the prompt area so completers/pickers don't
 -- pop while the caller owns the screen. Returns a `Reg` whose
 -- `:remove()` releases the lock; the last release re-runs the
--- recompute pass. Idempotent — multiple acquirers stack.
+-- recompute pass. Idempotent - multiple acquirers stack.
 ---@type fun(): smelt.Reg
 function smelt.prompt.acquire()
   lock_count = lock_count + 1

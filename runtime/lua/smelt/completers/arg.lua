@@ -1,4 +1,4 @@
--- `/cmd <arg>` dim placeholder — shows a hint like `[arg1|arg2|...]` when the
+-- `/cmd <arg>` dim placeholder - shows a hint like `[arg1|arg2|...]` when the
 -- prompt reads `/<cmd> ` with the cursor past the space and no argument typed
 -- yet. Replaces the old picker-based arg completer.
 

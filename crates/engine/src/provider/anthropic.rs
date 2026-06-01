@@ -377,7 +377,7 @@ pub(super) fn parse_response(data: &serde_json::Value) -> Result<ParsedResponse,
 }
 
 /// Streaming accumulator for one thinking content block. Holds the verbatim
-/// shape we will replay on the next request — text + signature for normal
+/// shape we will replay on the next request - text + signature for normal
 /// thinking, opaque `data` for redacted_thinking.
 #[derive(Default)]
 pub(super) struct ThinkingAccum {
@@ -828,7 +828,7 @@ mod tests {
             &cfg(),
             &cache_on(),
         );
-        // No system, no tools — only the last user counts.
+        // No system, no tools - only the last user counts.
         assert!(body["messages"][0]["content"][0]
             .get("cache_control")
             .is_none());
@@ -1106,7 +1106,7 @@ mod tests {
         assert_eq!(r.tool_calls.len(), 1);
         assert_eq!(r.tool_calls[0].id, "id-1");
         assert_eq!(r.tool_calls[0].function.name, "f");
-        // input is serialized via Value::to_string — no spaces in JSON.
+        // input is serialized via Value::to_string - no spaces in JSON.
         assert!(r.tool_calls[0].function.arguments.contains("\"q\":\"x\""));
     }
 
@@ -1625,7 +1625,7 @@ mod tests {
 
     /// Stable: mode-change synthetic user note appends without disturbing
     /// the system block. The base prompt is mode-agnostic, so flipping
-    /// modes only adds a trailing user note — system bytes match.
+    /// modes only adds a trailing user note - system bytes match.
     #[test]
     fn cache_stable_when_mode_change_appends_user_note() {
         let tools = two_tools();
@@ -1662,7 +1662,7 @@ mod tests {
     }
 
     /// Invalidated (expected): editing AGENTS.md / `/reload` produces a
-    /// different system prompt. The bytes diverge — by design.
+    /// different system prompt. The bytes diverge - by design.
     #[test]
     fn cache_invalidates_when_system_prompt_changes() {
         let before = build_body(
@@ -1789,7 +1789,7 @@ mod tests {
     }
 
     /// Stable: an EngineAsk inheriting the session sends the SAME system,
-    /// tools, and message prefix as the main turn — only the trailing
+    /// tools, and message prefix as the main turn - only the trailing
     /// instruction differs. The cached prefix up to the last main-turn
     /// user message survives.
     #[test]

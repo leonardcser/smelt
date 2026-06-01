@@ -4,10 +4,10 @@
 //! Model-generated content (assistant, reasoning, tool-call args) is never touched.
 //!
 //! Detection layers (sourced from gitleaks patterns):
-//! 1. Known prefix patterns — provider tokens (near-zero false positives)
-//! 2. Structural patterns — PEM keys, JWTs, database connection strings
-//! 3. Keyword proximity — `password = "..."`, `secret: "..."`, etc.
-//! 4. Shannon entropy — catch-all for high-entropy unknown tokens
+//! 1. Known prefix patterns - provider tokens (near-zero false positives)
+//! 2. Structural patterns - PEM keys, JWTs, database connection strings
+//! 3. Keyword proximity - `password = "..."`, `secret: "..."`, etc.
+//! 4. Shannon entropy - catch-all for high-entropy unknown tokens
 //!
 //! Secrets are replaced with `[REDACTED:label]` placeholders.
 
@@ -146,7 +146,7 @@ fn patterns() -> &'static Patterns {
             (r"(?i)(?:Server|Data Source)=[^;]+;[^;]*Password=[^;\s]+", "connection_string"),
         ];
 
-        // `token` and `credential` omitted — too generic; caught by prefix layer.
+        // `token` and `credential` omitted - too generic; caught by prefix layer.
         let keyword: Vec<&str> = vec![
             r#"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|api_?secret|client_?secret)\s*[:=]\s*"[^"]{8,}""#,
             r"(?i)(?:password|passwd|pwd|secret|api_?key|auth_?key|private_?key|access_?key|api_?secret|client_?secret)\s*[:=]\s*'[^']{8,}'",
@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn keyword_value_url_not_redacted() {
-        // An `api_key` whose value is a URL should not be redacted —
+        // An `api_key` whose value is a URL should not be redacted -
         // it's almost certainly a reference, not a secret.
         let input = r#"api_key_url = "https://example.com/path/to/key/endpoint""#;
         assert_eq!(redact(input), input);
@@ -773,7 +773,7 @@ mod tests {
 
     #[test]
     fn full_git_sha_not_redacted() {
-        // 40-char SHA-1 — previously caught by entropy layer.
+        // 40-char SHA-1 - previously caught by entropy layer.
         let input = "commit df2a1bc489ae7b30f1c89e0a5fc2e3d98b77c456";
         assert_eq!(redact(input), input);
     }
@@ -792,7 +792,7 @@ mod tests {
 
     #[test]
     fn long_mixed_identifier_not_redacted() {
-        // CamelCase identifier with digits/underscores — common in code,
+        // CamelCase identifier with digits/underscores - common in code,
         // not a secret. Would previously trip the entropy check.
         let input = "call fn CamelCaseIdentifierWith_Mixed_Case_123 here";
         assert_eq!(redact(input), input);

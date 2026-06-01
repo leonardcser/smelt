@@ -1,4 +1,4 @@
-//! `smelt.clipboard` — read/write the system clipboard.
+//! `smelt.clipboard` - read/write the system clipboard.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

@@ -6,8 +6,8 @@
 //! shape is identical: a small tool palette, a deduped history of user /
 //! assistant turns, and a `StableAction` describing one mutation that
 //! must *not* invalidate the cache prefix. This module owns the shared
-//! fixture so adding a new stable action — say "reorder system prompts"
-//! — happens in exactly one place and lands in both targets.
+//! fixture so adding a new stable action - say "reorder system prompts"
+//! - happens in exactly one place and lands in both targets.
 
 use arbitrary::Arbitrary;
 use engine::provider::{sort_tools_for_cache_stability, FunctionSchema, ToolDefinition};
@@ -49,19 +49,19 @@ impl ArbTool {
 /// One mutation that must NOT invalidate the cache prefix.
 #[derive(Debug, Clone, Arbitrary)]
 pub enum StableAction {
-    /// Append `assistant_text, user_text` — the canonical follow-up turn.
+    /// Append `assistant_text, user_text` - the canonical follow-up turn.
     AppendTurn {
         assistant_text: String,
         user_text: String,
     },
-    /// Append a `[smelt:mode]` synthetic note + a regular user turn —
+    /// Append a `[smelt:mode]` synthetic note + a regular user turn -
     /// mirrors `/mode` switching, which lands in the message stream
     /// rather than the system prompt.
     AppendModeNote { mode: u8, user_text: String },
-    /// Reorder tools — `sort_tools_for_cache_stability` must produce the
+    /// Reorder tools - `sort_tools_for_cache_stability` must produce the
     /// same output regardless of registration order.
     ReorderTools,
-    /// Toggle reasoning effort — sits in sampling params, outside the
+    /// Toggle reasoning effort - sits in sampling params, outside the
     /// cached prefix.
     NudgeReasoningEffort,
 }
@@ -91,7 +91,7 @@ pub fn build_tools(arb: &[ArbTool]) -> Vec<ToolDefinition> {
 }
 
 /// Reverse the input order, dedup again, then canonical sort. This is
-/// the "did the sort produce stable output" probe — the input order
+/// the "did the sort produce stable output" probe - the input order
 /// flipped, the sorted output must be byte-identical to `build_tools`.
 pub fn reorder_tools(arb: &[ArbTool]) -> Vec<ToolDefinition> {
     let mut reordered: Vec<ArbTool> = dedup_arb_tools_by_name(arb).into_iter().rev().collect();

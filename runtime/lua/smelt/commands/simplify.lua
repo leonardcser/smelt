@@ -20,12 +20,12 @@ Work through the diff yourself across three concerns.
 For each change:
 
 - **Search for existing utilities and helpers** that could replace newly
-  written code. Look for similar patterns elsewhere in the codebase — common
+  written code. Look for similar patterns elsewhere in the codebase - common
   locations are utility directories, shared modules, and files adjacent to the
   changed ones.
 - **Flag any new function that duplicates existing functionality.** Note the
   existing function to use instead.
-- **Flag any inline logic that could use an existing utility** — hand-rolled
+- **Flag any inline logic that could use an existing utility** - hand-rolled
   string manipulation, manual path handling, custom environment checks, ad-hoc
   type guards, and similar patterns are common candidates.
 
@@ -45,7 +45,7 @@ Review the same changes for hacky patterns:
   variants already exist in the codebase
 - **Unnecessary comments**: comments explaining WHAT the code does (well-named
   identifiers already do that), narrating the change, or referencing the
-  task/caller — delete; keep only non-obvious WHY (hidden constraints, subtle
+  task/caller - delete; keep only non-obvious WHY (hidden constraints, subtle
   invariants, workarounds)
 
 ### 3. Efficiency
@@ -59,11 +59,11 @@ Review the same changes for efficiency:
 - **Hot-path bloat**: new blocking work added to startup or
   per-request/per-render hot paths
 - **Recurring no-op updates**: state/store updates inside polling loops,
-  intervals, or event handlers that fire unconditionally — add a
+  intervals, or event handlers that fire unconditionally - add a
   change-detection guard so downstream consumers aren't notified when nothing
   changed
 - **Unnecessary existence checks**: pre-checking file/resource existence before
-  operating (TOCTOU anti-pattern) — operate directly and handle the error
+  operating (TOCTOU anti-pattern) - operate directly and handle the error
 - **Memory**: unbounded data structures, missing cleanup, event listener leaks
 - **Overly broad operations**: reading entire files when only a portion is
   needed, loading all items when filtering for one
@@ -71,7 +71,7 @@ Review the same changes for efficiency:
 ## Phase 3: Fix Issues
 
 Aggregate your findings and fix each issue directly. If a finding is a false
-positive or not worth addressing, note it and move on — do not argue with the
+positive or not worth addressing, note it and move on - do not argue with the
 finding, just skip it.
 
 When done, briefly summarize what was fixed (or confirm the code was already

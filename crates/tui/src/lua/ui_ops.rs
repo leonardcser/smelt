@@ -1,7 +1,7 @@
 //! Lua → ui helpers: overlay open, picker construction, list/input window
 //! recipes.
 //!
-//! Overlay sizing is driven entirely by `opts.layout` — a `LayoutTree` built
+//! Overlay sizing is driven entirely by `opts.layout` - a `LayoutTree` built
 //! from `smelt.ui.layout.leaf` / `.vbox` / `.hbox`. The overlay's outer size
 //! comes from `LayoutTree::natural_size_with` evaluated against the current
 //! terminal extent every frame; resize tracks automatically. To pin a width or
@@ -18,7 +18,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, String> {
     // Parse the full opts up front so a named re-open refreshes the whole
-    // layout (not just title/border) — structural edits to a plugin's
+    // layout (not just title/border) - structural edits to a plugin's
     // overlay tree hot-reload in place. `size_override` on the existing
     // overlay is left intact so user-resized panels stay resized.
     let name: Option<String> = opts.get::<Option<String>>("name").ok().flatten();
@@ -125,7 +125,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
 
 /// Read `opts[key]` as a `Constraint` for the overlay's width or height.
 /// Missing/`nil` defaults to `Fit` (read the layout's natural size on that
-/// axis — back-compat with the original `natural_size_with` path). Any
+/// axis - back-compat with the original `natural_size_with` path). Any
 /// shape accepted by `crate::lua::parse::constraint` is supported here.
 fn parse_overlay_constraint(
     opts: &mlua::Table,
@@ -273,7 +273,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
     if let (Some(win), Some(buf)) = (win, buf) {
         win.selection_highlight = true;
         // List-style leaf: `mouse_scroll = true` doubles as the caret-leaf opt-out,
-        // so mouse-up doesn't commit `cpos` here — the highlighted row is driven
+        // so mouse-up doesn't commit `cpos` here - the highlighted row is driven
         // by j/k navigation, not the click byte.
         win.mouse_scroll = true;
         win.jump_to_row(buf, target, viewport);
@@ -586,7 +586,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
             let new_cursor_col = (split.saturating_sub(1)) as u16;
             replace_line(ctx, new.clone(), new_cursor_col);
             // Re-seed the dim placeholder when backspacing empties the line, so
-            // the input doesn't sit blank — matches the "show on empty" pattern
+            // the input doesn't sit blank - matches the "show on empty" pattern
             // users expect from a filter input.
             if new.is_empty() && !placeholder_for_backspace.is_empty() {
                 restore_placeholder(ctx, &placeholder_for_backspace);

@@ -1,4 +1,4 @@
-//! Filesystem capability — sync primitives over `std::fs`. Pure I/O, no policy.
+//! Filesystem capability - sync primitives over `std::fs`. Pure I/O, no policy.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ pub(crate) fn is_dir(path: impl AsRef<Path>) -> bool {
     path.as_ref().is_dir()
 }
 
-/// Returns paths in OS order — callers sort if they care.
+/// Returns paths in OS order - callers sort if they care.
 pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(path)? {
@@ -357,7 +357,7 @@ impl FileStateCache {
         );
     }
 
-    /// Cache a just-written file. Not dedup-eligible — a follow-up read must re-read.
+    /// Cache a just-written file. Not dedup-eligible - a follow-up read must re-read.
     pub fn record_write(&self, path: &str, content: String) {
         let mtime_ms = file_mtime_ms(path).unwrap_or(0);
         self.set(
@@ -592,7 +592,7 @@ mod file_state_tests {
     #[test]
     fn eviction_removes_oldest_on_byte_overflow() {
         let c = FileStateCache::new();
-        // Half the cap each — third insertion should evict the first.
+        // Half the cap each - third insertion should evict the first.
         let big = "x".repeat(MAX_TOTAL_BYTES / 2 + 1);
         c.set("/tmp/a", state(&big, 1, None));
         c.set("/tmp/b", state(&big, 2, None));

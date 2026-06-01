@@ -1,4 +1,4 @@
-//! `smelt.metrics` bindings — metrics ledger access plus live perf
+//! `smelt.metrics` bindings - metrics ledger access plus live perf
 //! instrumentation consumed by Lua UI.
 
 use mlua::prelude::*;

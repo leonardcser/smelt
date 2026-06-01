@@ -1,4 +1,4 @@
--- `/usage` and `/cost` — show local session cost plus active-provider usage limits.
+-- `/usage` and `/cost` - show local session cost plus active-provider usage limits.
 
 local bar = require("smelt.bar")
 
@@ -150,13 +150,13 @@ local function codex_usage_lines()
   local res, auth_err = smelt.auth.request("codex", { path = "/wham/usage" })
   if not res then
     local msg = tostring(auth_err or "")
-    local friendly = "usage unavailable — try again later"
+    local friendly = "usage unavailable - try again later"
     local style = DIM
     if msg:find("not logged in", 1, true) then
       return { text_row("Codex: not logged in", DIM) }
     end
     if msg:find("sign in again", 1, true) or msg:find("refresh token", 1, true) then
-      friendly = "authentication expired — run `smelt auth` to sign in again"
+      friendly = "authentication expired - run `smelt auth` to sign in again"
       style = ERR
     end
     return usage_unavailable("Codex", friendly, {
@@ -168,10 +168,10 @@ local function codex_usage_lines()
   local payload = smelt.parse.json(res.body or "")
   if res.status ~= 200 then
     local body = tostring(res.body or "")
-    local message = "usage unavailable right now — try again later"
+    local message = "usage unavailable right now - try again later"
     local style = DIM
     if tonumber(res.status) == 401 then
-      message = "authentication expired — run `smelt auth` to sign in again"
+      message = "authentication expired - run `smelt auth` to sign in again"
       style = ERR
     elseif tonumber(res.status) == 403 then
       message = "usage unavailable for this account"
@@ -183,7 +183,7 @@ local function codex_usage_lines()
     }, style)
   end
   if type(payload) ~= "table" then
-    return usage_unavailable("Codex", "usage response was invalid — try again later", {
+    return usage_unavailable("Codex", "usage response was invalid - try again later", {
       kind = "invalid_json",
       status = res.status,
       body = tostring(res.body or ""):sub(1, 1000),
@@ -280,7 +280,7 @@ local function kimi_usage_lines()
     timeout_secs = 20,
   })
   if not res then
-    return usage_unavailable("Kimi Code", "usage unavailable — check your connection and try again", {
+    return usage_unavailable("Kimi Code", "usage unavailable - check your connection and try again", {
       kind = "network",
       error = tostring(http_err),
       url = base .. "/usages",
@@ -290,10 +290,10 @@ local function kimi_usage_lines()
   local payload = smelt.parse.json(res.body or "")
   if res.status ~= 200 then
     local body = tostring(res.body or "")
-    local message = "usage unavailable right now — try again later"
+    local message = "usage unavailable right now - try again later"
     local style = DIM
     if tonumber(res.status) == 401 then
-      message = "authentication expired — sign in to Kimi Code again"
+      message = "authentication expired - sign in to Kimi Code again"
       style = ERR
     elseif tonumber(res.status) == 403 then
       message = "usage unavailable for this account"
@@ -305,7 +305,7 @@ local function kimi_usage_lines()
     }, style)
   end
   if type(payload) ~= "table" then
-    return usage_unavailable("Kimi Code", "usage response was invalid — try again later", {
+    return usage_unavailable("Kimi Code", "usage response was invalid - try again later", {
       kind = "invalid_json",
       status = res.status,
       body = tostring(res.body or ""):sub(1, 1000),
@@ -342,7 +342,7 @@ end
 
 local function rate(value)
   value = tonumber(value) or 0
-  if value == 0 then return "—" end
+  if value == 0 then return "-" end
   return smelt.text.format_cost(value)
 end
 

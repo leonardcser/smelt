@@ -1,4 +1,4 @@
-//! `smelt.auth` — authenticated provider helpers that keep credentials inside Rust.
+//! `smelt.auth` - authenticated provider helpers that keep credentials inside Rust.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

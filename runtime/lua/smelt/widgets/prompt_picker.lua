@@ -1,4 +1,4 @@
--- `smelt.prompt.open_picker(opts)` — prompt-docked picker.
+-- `smelt.prompt.open_picker(opts)` - prompt-docked picker.
 -- Up/Down navigate, Tab inserts the label, Esc dismisses.
 --
 -- Two modes, distinguished by whether `on_enter` is supplied:
@@ -9,7 +9,7 @@
 --
 --   Persistent (on_enter is a function):
 --     Enter fires `on_enter(item, index)` and the picker stays open.
---     `opts.items` may be a function — it's re-evaluated after each
+--     `opts.items` may be a function - it's re-evaluated after each
 --     on_enter so callbacks that mutate state (toggle settings, etc.)
 --     see the refreshed list without rebuilding the picker. The cursor
 --     stays on the same row. Returns nil when the user dismisses.

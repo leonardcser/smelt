@@ -1,4 +1,4 @@
-//! `smelt.timer` — one-shot and recurring timer callbacks. Each call
+//! `smelt.timer` - one-shot and recurring timer callbacks. Each call
 //! returns a `Reg` userdata whose `:remove()` cancels the timer.
 
 use crate::lua::doc::Tier;

@@ -1,4 +1,4 @@
-//! `smelt.state` — JSON-backed per-plugin persistence. The ephemeral
+//! `smelt.state` - JSON-backed per-plugin persistence. The ephemeral
 //! `smelt.state(name)` lookup (per-reload table) lives in bundled lua;
 //! this module supplies the file I/O primitives that
 //! `smelt.state.persistent(name)` builds on.
@@ -72,7 +72,7 @@ fn state_path(name: &str) -> PathBuf {
 /// Wrapper so we can call the private `lua_value_to_json` from a sibling
 /// module. Mirrors `lua_table_to_json`'s public path.
 fn lua_value_to_json_pub(lua: &Lua, value: &mlua::Value) -> serde_json::Value {
-    // Same logic as `lua_value_to_json` in the parent module — duplicated
+    // Same logic as `lua_value_to_json` in the parent module - duplicated
     // here because that one is private.
     match value {
         mlua::Value::Nil => serde_json::Value::Null,

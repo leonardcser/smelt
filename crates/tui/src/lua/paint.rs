@@ -1,4 +1,4 @@
-//! Lua paint registry — maps `PaintId`s to Lua callbacks invoked by the renderer.
+//! Lua paint registry - maps `PaintId`s to Lua callbacks invoked by the renderer.
 //!
 //! The slice borrow is live only while the dispatcher's paint closure is on the stack.
 //! [`SliceGuard`] installs the pointer in TLS before the Lua call and clears it on drop
@@ -97,7 +97,7 @@ impl PaintRegistry {
     }
 
     /// Count of named paint slots. Anonymous slots have no entry in
-    /// `names`, so this excludes them — exactly what reload-survival
+    /// `names`, so this excludes them - exactly what reload-survival
     /// post-checks want. Harness-only: production code reads names
     /// directly via `id_by_name`.
     #[cfg(any(test, feature = "harness"))]
@@ -257,7 +257,7 @@ fn build_ctx_table(lua: &Lua, ctx: &DrawContext) -> LuaResult<mlua::Table> {
 }
 
 /// Fire the Lua paint callback for `handle_id`. Errors are recorded rather than
-/// propagated — a broken painter skips the leaf for the frame without crashing the renderer.
+/// propagated - a broken painter skips the leaf for the frame without crashing the renderer.
 pub(crate) fn invoke_paint(
     runtime: &super::LuaRuntime,
     handle_id: u64,

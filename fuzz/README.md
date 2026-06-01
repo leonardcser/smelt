@@ -42,7 +42,7 @@ The intended shape for long-running fuzz sessions in an agent loop:
 
 1. Spawn each target with `run_in_background: true`, redirecting output to
    `/tmp/fuzz-loop/fuzz-<target>.log`.
-2. Don't poll — the harness fires a notification the moment any background
+2. Don't poll - the harness fires a notification the moment any background
    process exits, and `cargo xtask fuzz run` only exits on crash (or
    Ctrl-C). An exit code 77 means libFuzzer caught a panic; the artifact
    is under `fuzz/artifacts/<target>/`.
@@ -55,7 +55,7 @@ The intended shape for long-running fuzz sessions in an agent loop:
 4. Fix the bug, commit a regression seed under
    `fuzz/seeds/<target>/regression/`, then re-launch the target.
 
-The agent doesn't sleep, schedule wake-ups, or check progress — the
+The agent doesn't sleep, schedule wake-ups, or check progress - the
 notification on exit is the loop signal.
 
 ## When the fuzzer finds a crash
@@ -65,8 +65,8 @@ notification on exit is the loop signal.
 cargo xtask fuzz triage lua_loop fuzz/artifacts/lua_loop/crash-<hex>
 ```
 
-Then either fix the bug and commit a regression seed, or — if you want
-to keep poking — replay the shrunk scenario directly:
+Then either fix the bug and commit a regression seed, or - if you want
+to keep poking - replay the shrunk scenario directly:
 
 ```sh
 cargo run --bin replay_scenario -- --target lua_loop /path/to/shrunk.json
@@ -99,7 +99,7 @@ cargo xtask fuzz coverage-snapshot smelt_loop      # one target only
 ## Lower-level
 
 ```sh
-# Raw shrinker — predicate is `panic::catch_unwind(run_scenario)`.
+# Raw shrinker - predicate is `panic::catch_unwind(run_scenario)`.
 cargo run --release --bin shrink_scenario -- --target lua_loop in.json out.min.json
 
 # Headless replay (exits non-zero on panic; what triage and CI use):

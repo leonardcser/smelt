@@ -17,7 +17,7 @@
 //!  - construct a `Grid`, run `from_grid` → `text + styles_text` →
 //!    `parse`, assert the parsed `SnapshotFrame` matches the original
 //!
-//! Wide-char placement is left to the existing snapshot unit tests —
+//! Wide-char placement is left to the existing snapshot unit tests -
 //! the focus here is the `parse_spans` + `parse_row` path with random
 //! styled runs that the unit tests cover only on a handful of cases.
 
@@ -39,7 +39,7 @@ struct Cell {
     style_idx: u8,
 }
 
-/// Single-width chars only — the round-trip story for wide chars is
+/// Single-width chars only - the round-trip story for wide chars is
 /// covered by `snapshot::tests` in `crates/term`. Including ASCII
 /// printable + a few common single-width unicode keeps the parser
 /// branches exercised without spilling into wide-char territory.

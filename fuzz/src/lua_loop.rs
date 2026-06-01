@@ -3,7 +3,7 @@
 //! directly. This target fills the third gap: the **Lua bindings layer**
 //! (`crates/{core,tui}/src/lua/api/*`), which only runs when plugin Lua
 //! code calls into it. Coverage measurement showed 14 of 27 Lua-API
-//! modules sit under 50% — that's the surface this target attacks.
+//! modules sit under 50% - that's the surface this target attacks.
 //!
 //! Each `LuaOp` corresponds to one `smelt.*` call (or `/reload`). Ops
 //! are serialised into a single Lua snippet per scenario and executed
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use tui::app::test_harness::TestApp;
 
 /// Bounded JSON-ish value for `state.<key> = value`. Mirrors `ArgsBag`
-/// but flatter — Lua-side state assignment doesn't need deep tables to
+/// but flatter - Lua-side state assignment doesn't need deep tables to
 /// reach meaningful coverage of the state-slot path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ArbValue {
@@ -131,7 +131,7 @@ pub enum LuaOp {
     Reload,
 
     /// `smelt.paint.register(fn, { name = ... })`. `body_kind` picks
-    /// a small body (no-op, write one cell, write a row) — the body
+    /// a small body (no-op, write one cell, write a row) - the body
     /// itself only matters when the overlay actually renders.
     PaintRegister {
         name_slot: Option<u8>,
@@ -173,24 +173,24 @@ pub enum LuaOp {
     /// `smelt.text.fit(s, w)`, `win:content_width()`,
     /// `smelt.session.text(id)`, `smelt.session.texts({ids})`.
     /// `kind % 7` picks the probe. These surfaces aren't reached by the
-    /// lifecycle ops above — exercising them keeps the new
+    /// lifecycle ops above - exercising them keeps the new
     /// render-pipeline and session-search accessors honest under fuzz.
     ProbeRead { kind: u8, target_idx: u8 },
 
     /// Call a `smelt.<module>.<name>` function selected by index into
-    /// the [`smelt_core::lua::doc::snapshot`] registry — the same
+    /// the [`smelt_core::lua::doc::snapshot`] registry - the same
     /// enumeration that powers `cargo xtask gen-lua-docs`. Any function
     /// added via `LuaMod::fn_` flows into this op automatically with
     /// no hand-written entry, so coverage of the Lua API surface keeps
     /// up with the surface itself instead of silently rotting.
     /// `arg_kind % 5` picks an arg shape (`nil`, `""`, `0`, `true`, `{}`)
-    /// — most calls will fail with type errors (wrapped in `pcall`)
+    /// - most calls will fail with type errors (wrapped in `pcall`)
     /// but the host-side type-checking + arg-conversion paths still
     /// execute.
     ApiProbe { fn_idx: u16, arg_kind: u8 },
 
     /// Execute an arbitrary Lua snippet verbatim. **Not produced by the
-    /// fuzz generator** — `build_lua_op` doesn't emit this variant. It
+    /// fuzz generator** - `build_lua_op` doesn't emit this variant. It
     /// exists so hand-authored regression seeds (under
     /// `fuzz/seeds/<target>/regression/`) can reproduce a specific bug
     /// deterministically: instead of guessing which `ApiProbe { fn_idx, arg_kind }`
@@ -199,7 +199,7 @@ pub enum LuaOp {
     /// `Arbitrary` impl changes (raw libFuzzer-byte seeds aren't).
     LuaSnippet { code: String },
 
-    /// `smelt.work.busy("label")` — push a busy token, store the
+    /// `smelt.work.busy("label")` - push a busy token, store the
     /// returned `Reg` under `slot % POOL`. Exercises the per-app
     /// `BusyStack`: push ordering, label drift, reactive `work_*` cell
     /// publishing, and crucially the cleanup path (reload must wipe
@@ -207,7 +207,7 @@ pub enum LuaOp {
     /// exact pushed id).
     WorkBusyAcquire { slot: u8, label_slot: u8 },
 
-    /// `__fuzz.regs[slot]:remove()` — release a token captured by an
+    /// `__fuzz.regs[slot]:remove()` - release a token captured by an
     /// earlier `WorkBusyAcquire`. No-op if the slot is nil; same chord
     /// the production code uses (`Reg:remove`) so the BusyStack release
     /// path with mismatched ids surfaces here too.
@@ -216,7 +216,7 @@ pub enum LuaOp {
 
 impl LuaOp {
     /// Short human label for status-line / log display. Mirrors
-    /// [`crate::FuzzOp::label`] — keeps the per-variant text next to
+    /// [`crate::FuzzOp::label`] - keeps the per-variant text next to
     /// the variant definition so adding a `LuaOp` is one edit.
     pub fn label(&self) -> String {
         use LuaOp::*;
@@ -381,12 +381,12 @@ impl<'a> Arbitrary<'a> for LuaScenario {
     /// `LuaOp` variants and skews the rest wildly so scenarios commit
     /// to one shape of workload (buf-heavy, hook-heavy, paint-heavy…)
     /// rather than uniformly bouncing across all variants. No state
-    /// model — the emitted Lua has defensive `#pool == 0` guards so
+    /// model - the emitted Lua has defensive `#pool == 0` guards so
     /// "act on an empty pool" ops cleanly no-op at runtime; the
     /// generator doesn't need to know what's live. (A prior state-aware
     /// generator added a retry loop and terminated scenarios early on
     /// state-starvation, costing more ops than it saved.) The swarm
-    /// table itself isn't persisted in the JSON scenario — `ops` is
+    /// table itself isn't persisted in the JSON scenario - `ops` is
     /// what replays.
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let swarm = SwarmWeights::arbitrary(u, N_LUAOP_VARIANTS)?;
@@ -545,7 +545,7 @@ fn emit_remove(out: &mut String, kind: u8, idx: u8) {
     };
     // `table.remove` (not `pool[i] = nil`) so live indices stay dense.
     // The `n == 0` guard handles the (common) case where the swarm
-    // emits Remove against an empty pool — the generator no longer
+    // emits Remove against an empty pool - the generator no longer
     // pre-filters such ops.
     out.push_str("(function()\n");
     out.push_str(&format!("  local n = #__fuzz.{pool}\n"));
@@ -605,7 +605,7 @@ fn emit_cmd_register(out: &mut String, name_slot: u8, handler_kind: u8) {
     // Body variants 3..=5 are **re-entrant**: the registered handler
     // calls back into the Rust API mid-execution. This drives the
     // Rust→Lua-callback→Rust path that flat top-level call sequences
-    // can't reach — bug class is "second Rust call mutates state the
+    // can't reach - bug class is "second Rust call mutates state the
     // outer Rust call still holds a reference to". Variant 5 emits
     // mutual recursion across two `fuzz.cmd.*` slots (bounded by Lua
     // stack depth + the host's command-dispatch reentry guard).
@@ -652,13 +652,13 @@ fn emit_keymap_set(out: &mut String, scope_kind: u8, chord_slot: u8, handler_kin
 }
 
 /// Build the full Lua chunk for `ops`. `api_metas` is the live
-/// `(module, name)` enumeration from `TestApp::lua_doc_snapshot()` —
+/// `(module, name)` enumeration from `TestApp::lua_doc_snapshot()` -
 /// `LuaOp::ApiProbe` indices mod into it at emit time so the fuzz
 /// surface tracks the API surface automatically. Returns the snippet
 /// string.
 pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(2048);
-    // Handle pool — declared as Lua-side tables so emitted ops can
+    // Handle pool - declared as Lua-side tables so emitted ops can
     // index into them. Initialised fresh each scenario; on /reload
     // these locals survive (they're in the eval frame, not the
     // bundled-plugin frame that gets wiped).
@@ -676,7 +676,7 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
             } => emit_overlay_new(&mut out, layout, *name_slot, *keymap_count),
             LuaOp::Remove { kind, idx } => emit_remove(&mut out, *kind, *idx),
             LuaOp::Reload => {
-                // /reload is a host-side call — emit a sentinel the
+                // /reload is a host-side call - emit a sentinel the
                 // runner picks up by splitting the op stream. We can't
                 // reload from inside a running chunk because mlua
                 // can't recursively bring up its own runtime.
@@ -705,7 +705,7 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
             LuaOp::LuaSnippet { code } => {
                 // Wrap in pcall so a regression scenario that hits a
                 // Lua-level error still gets to the post-scenario
-                // invariants — those are what catch the real bug
+                // invariants - those are what catch the real bug
                 // (panic in a binding, leaked handle, …).
                 out.push_str("pcall(function()\n");
                 out.push_str(code);
@@ -722,7 +722,7 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
 
 /// `__fuzz.regs[slot] = smelt.work.busy("fuzz.label.<n>")`. The slot
 /// pool is 6-wide so collisions on the same slot exercise the
-/// "overwrite then leak the prior `Reg`" case — the prior token must
+/// "overwrite then leak the prior `Reg`" case - the prior token must
 /// then survive only on the BusyStack (with no client handle), making
 /// reload-time cleanup the only release path.
 fn emit_work_busy_acquire(out: &mut String, slot: u8, label_slot: u8) {
@@ -733,7 +733,7 @@ fn emit_work_busy_acquire(out: &mut String, slot: u8, label_slot: u8) {
     ));
 }
 
-/// `__fuzz.regs[slot]:remove()` — pop the matching busy token from
+/// `__fuzz.regs[slot]:remove()` - pop the matching busy token from
 /// the BusyStack. Drops the slot afterwards so a follow-up release
 /// no-ops cleanly (matches plugin code that nils out the Reg after
 /// release).
@@ -753,7 +753,7 @@ fn emit_api_probe(out: &mut String, fn_idx: u16, arg_kind: u8, api_metas: &[(&st
         return;
     }
     let (module, name) = api_metas[(fn_idx as usize) % api_metas.len()];
-    // Skip private (`__`-prefixed) entries — they're internals not
+    // Skip private (`__`-prefixed) entries - they're internals not
     // intended for plugin callers, and probing them just creates noise.
     if name.starts_with("__") {
         return;
@@ -824,7 +824,7 @@ fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
 /// Run one scenario end-to-end. The build emits a `-- @reload@` line
 /// for every `LuaOp::Reload`; the runner splits on that line so each
 /// resulting segment is one chunk, with `app.reload_lua()` interleaved.
-/// Invariants assert after every segment AND after every reload —
+/// Invariants assert after every segment AND after every reload -
 /// failures stay attached to whichever op caused them.
 pub fn run_lua_scenario(scenario: LuaScenario) {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -846,7 +846,7 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
     let segments: Vec<&str> = snippet.split("-- @reload@\n").collect();
     for (i, segment) in segments.iter().enumerate() {
         if !segment.trim().is_empty() {
-            // Lua-level errors aren't fuzz failures — the snippet
+            // Lua-level errors aren't fuzz failures - the snippet
             // intentionally tolerates type errors via `pcall`. Real
             // bugs surface through `assert_invariants`, Rust panics
             // inside binding code, or the FFI ledger detecting a
@@ -856,7 +856,7 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
             // FFI ledger: force a full Lua GC and verify every Rust-
             // side `LuaHandle` still resolves in the mlua registry.
             // Without this, a path that drops a `RegistryKey` without
-            // calling `remove` survives latently — only manifesting
+            // calling `remove` survives latently - only manifesting
             // when something else tries to invoke the dead handle,
             // potentially much later or never. Running it between
             // segments pins the failure to the op batch responsible.
@@ -869,7 +869,7 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
             app.reload_lua();
             app.assert_invariants();
             // `/reload` is the heaviest GC-and-rebuild surface in the
-            // Lua API — re-check per-field liveness afterward so a
+            // Lua API - re-check per-field liveness afterward so a
             // reload that forgot to re-register a named handle surfaces
             // here.
             app.assert_lua_handles_alive();
@@ -878,7 +878,7 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
     // Post-scenario steady-state leak check: do two more reloads from
     // current state and assert the live-handle count is stable between
     // them. Catches reload-path leaks (handles created during reload
-    // but never dropped) that the per-field walk above can't see — it
+    // but never dropped) that the per-field walk above can't see - it
     // only checks tracked fields, not the global counter.
     drop(segments);
     app.assert_no_handle_leak_across_reload();

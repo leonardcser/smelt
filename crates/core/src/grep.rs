@@ -1,4 +1,4 @@
-//! Grep capability — thin async wrapper over `rg`. Pure subprocess
+//! Grep capability - thin async wrapper over `rg`. Pure subprocess
 //! composition, no policy. Missing/failed `rg` surfaces as `io::Error`;
 //! fallback is the caller's concern.
 

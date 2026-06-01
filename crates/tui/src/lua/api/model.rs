@@ -1,4 +1,4 @@
-//! `smelt.model` — callable selector for the configured provider/model.
+//! `smelt.model` - callable selector for the configured provider/model.
 //! `smelt.model()` reads the active key, `smelt.model(v)` switches,
 //! `smelt.model.list()` returns the available models.
 

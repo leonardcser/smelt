@@ -1,4 +1,4 @@
-//! `smelt.notebook` — parse, read, apply, and compute preview data for notebook edits.
+//! `smelt.notebook` - parse, read, apply, and compute preview data for notebook edits.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
@@ -53,7 +53,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "read",
-        "Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure — same output the built-in `read_file` tool produces.",
+        "Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure - same output the built-in `read_file` tool produces.",
         &["path", "offset", "limit"],
         |_, (path, offset, limit): (String, u64, u64)| -> LuaResult<(Option<String>, Option<String>)> {
 

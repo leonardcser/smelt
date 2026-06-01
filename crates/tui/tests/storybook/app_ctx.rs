@@ -93,7 +93,7 @@ impl AppStoryCtx {
             .feed_one(tui::app::test_harness::SourceEvent::Engine(ev));
     }
 
-    /// Push a `Block::Compacted` summary block — the same block the
+    /// Push a `Block::Compacted` summary block - the same block the
     /// bundled compact plugin emits between turns. Use this to
     /// snapshot the compaction chrome without driving a real
     /// `engine.ask` round-trip.
@@ -163,7 +163,7 @@ impl AppStoryCtx {
         self.tool_call_full(tool_name, args, content, false, Some(metadata), elapsed_ms);
     }
 
-    /// Emit only `ToolStarted` — the pending state. Use this when the
+    /// Emit only `ToolStarted` - the pending state. Use this when the
     /// snapshot should capture the streaming/spinner chrome before any
     /// result arrives.
     pub fn tool_started(&mut self, tool_name: &str, args: &[(&str, serde_json::Value)]) {

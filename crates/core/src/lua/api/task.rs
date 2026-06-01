@@ -1,4 +1,4 @@
-//! `smelt.task` — `alloc`/`resume` for the yield-then-resume coroutine bridge.
+//! `smelt.task` - `alloc`/`resume` for the yield-then-resume coroutine bridge.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

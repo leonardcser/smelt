@@ -2,7 +2,7 @@
 //!
 //! Every `LuaMod` carries its full dotted path (`smelt.http.cache`) and
 //! the tier it belongs to. Sub-modules are created with `.sub(name, doc)`
-//! and derive their path by concatenation — the path string appears once,
+//! and derive their path by concatenation - the path string appears once,
 //! at module creation, and the matching `record_module_doc` call fires
 //! automatically. Function registration goes through
 //! `.fn_(name, doc, params, f)`; the LuaCATS signature is derived from
@@ -48,7 +48,7 @@ impl<'a> LuaMod<'a> {
 
     /// Wrap an already-attached table at `path` so a higher tier can
     /// extend it (e.g. the TUI adding UiHost fns to host-tier
-    /// `smelt.cmd`). Does not record the module doc — the original owner
+    /// `smelt.cmd`). Does not record the module doc - the original owner
     /// already did.
     pub fn extend(lua: &'a Lua, tbl: mlua::Table, path: &'static str, tier: Tier) -> Self {
         Self {
@@ -96,7 +96,7 @@ impl<'a> LuaMod<'a> {
 
     /// Register a Lua function at `<self.path>.<name>` with the given
     /// doc and param names. Trait bounds derive the LuaCATS signature
-    /// from the Rust types — drift becomes a compile error.
+    /// from the Rust types - drift becomes a compile error.
     pub fn fn_<F, A, R>(
         &self,
         name: &'static str,

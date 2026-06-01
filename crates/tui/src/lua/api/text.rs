@@ -1,4 +1,4 @@
-//! `smelt.text` — visual-width measurement and human-readable formatting.
+//! `smelt.text` - visual-width measurement and human-readable formatting.
 //! UiHost-only (the width metric matches the TUI's terminal-cell column
 //! count). Render helpers live in `smelt.render`.
 
@@ -177,7 +177,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "fit",
-        "Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `\"…\"`), pad when too short (with `opts.fill`, default `\" \"`). `opts.align` is `\"left\"` (default), `\"right\"`, or `\"center\"`. Use this for fixed-width UI slots — handles multi-byte and wide chars correctly so the result is always exactly `width` cells wide regardless of content.",
+        "Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `\"…\"`), pad when too short (with `opts.fill`, default `\" \"`). `opts.align` is `\"left\"` (default), `\"right\"`, or `\"center\"`. Use this for fixed-width UI slots - handles multi-byte and wide chars correctly so the result is always exactly `width` cells wide regardless of content.",
         &["s", "width", "opts"],
         |_, (s, width, opts): (String, usize, Option<mlua::Table>)| -> LuaResult<String> {
             let opt = |key: &str, default: &str| {

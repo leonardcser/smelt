@@ -17,7 +17,7 @@ struct SkillEntry {
 /// at lowest precedence so user/project copies with the same name win.
 ///
 /// Bundled files (anything other than `SKILL.md` in the skill dir) are not
-/// supported for built-ins — there's no real on-disk path to point the
+/// supported for built-ins - there's no real on-disk path to point the
 /// agent at. If a built-in needs ancillary content, inline it into the
 /// SKILL.md body.
 static BUILTIN_SKILLS: &[(&str, &str)] = &[(
@@ -135,7 +135,7 @@ fn parse_skill(path: &Path) -> Option<SkillEntry> {
 }
 
 /// Parse a `SKILL.md` body into a [`SkillEntry`]. `dir` is the on-disk
-/// directory the skill came from — used to enumerate bundled files. Pass
+/// directory the skill came from - used to enumerate bundled files. Pass
 /// `None` for built-ins, which have no on-disk base directory.
 fn parse_skill_text(text: &str, dir: Option<&Path>) -> Option<SkillEntry> {
     let (fm, body) = split_frontmatter(text)?;

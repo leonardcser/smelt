@@ -1,4 +1,4 @@
-//! `smelt.path` — pure path arithmetic (normalize, join, relative, expand, display, etc.).
+//! `smelt.path` - pure path arithmetic (normalize, join, relative, expand, display, etc.).
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

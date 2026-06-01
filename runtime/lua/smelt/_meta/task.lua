@@ -47,7 +47,7 @@ task.resume = nil
 
 --- Run `fn` with an `ms`-millisecond deadline. Returns `(result, nil)` if
 --- `fn` finishes in time, or `(nil, "timeout")` if the deadline fires
---- first — in which case `fn`'s coroutine is cancelled (any in-flight
+--- first - in which case `fn`'s coroutine is cancelled (any in-flight
 --- `smelt.sleep` / `task.wait` raises `cancelled` and the coroutine
 --- unwinds). Must run inside a yielding context.
 ---@type fun(ms: integer, fn: fun(): any): any, string?

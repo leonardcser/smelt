@@ -1,4 +1,4 @@
-//! `smelt-edit` — editor layer over `smelt-term`.
+//! `smelt-edit` - editor layer over `smelt-term`.
 //!
 //! `Ui` ties `Window`s (per-buffer view + viewport + scrollbar + gutter)
 //! to layout and routes events. Renderer primitives come from `smelt-term`.
@@ -117,7 +117,7 @@ pub struct Ui {
     /// Gesture target that bypasses hit-testing for the duration of a drag.
     /// Auto-clears when the owning split or overlay disappears.
     capture: Option<HitTarget>,
-    /// `(time, row, col, count)` — tracks successive Down events for click-count.
+    /// `(time, row, col, count)` - tracks successive Down events for click-count.
     last_click: Option<(std::time::Instant, u16, u16, u8)>,
     /// Global cursor shape; only the focused window honours it.
     cursor_shape: CursorShape,
@@ -135,7 +135,7 @@ pub struct Ui {
 /// One scroll-mirror group. `members` lists the participating window ids;
 /// `last` is the post-sync `(scroll_top, scroll_left)` of each member captured
 /// the previous frame, used to detect which side moved on which axis this
-/// frame. Each axis is leader-detected independently — a horizontal pan on
+/// frame. Each axis is leader-detected independently - a horizontal pan on
 /// one member mirrors only horizontally, leaving vertical positions untouched.
 struct ScrollGroup {
     members: Vec<WinId>,
@@ -305,7 +305,7 @@ impl Ui {
     /// Hit-test a primary-button Down/Drag/Up against any leaf (splits or overlay).
     /// Latches capture on Down; returns `(win, click_count)` where `click_count`
     /// is 0 for Drag/Up. Up clears capture. Call only when `dispatch_event`
-    /// returned `Ignored` — that method owns scrollbar drag and modal blocking.
+    /// returned `Ignored` - that method owns scrollbar drag and modal blocking.
     /// Overlay leaves participate so a `selectable` notification or dialog body
     /// can drive its own selection through `Window::handle_mouse`.
     pub fn resolve_split_mouse(
@@ -388,7 +388,7 @@ impl Ui {
         }
         let buf = Buffer::new(id, opts);
         self.bufs.insert(id, buf);
-        // Only advance when the id is in Rust's range — Lua ids have their own counter.
+        // Only advance when the id is in Rust's range - Lua ids have their own counter.
         if id.0 < LUA_BUF_ID_BASE && id.0 >= self.next_buf_id {
             self.next_buf_id = id.0 + 1;
         }
@@ -436,7 +436,7 @@ impl Ui {
 
     /// Counts of bound names per registry: `(bufs, wins, overlays)`.
     /// Used by fuzz post-checks to assert named resources survive
-    /// `/reload` — anonymous slots get reaped but named ones must
+    /// `/reload` - anonymous slots get reaped but named ones must
     /// keep their bindings.
     pub fn named_counts(&self) -> (usize, usize, usize) {
         (
@@ -472,7 +472,7 @@ impl Ui {
     /// every Lua-created buffer (id ≥ `lua_buf_threshold`) that no
     /// surviving window references. Used by `/reload` so anonymous
     /// dialogs/pickers from the previous cycle don't linger as ghost
-    /// overlays. Named resources are left untouched — plugins recover
+    /// overlays. Named resources are left untouched - plugins recover
     /// them by passing the same `opts.name` on re-open. Returns the
     /// union of Lua callback ids the caller must release.
     pub fn reap_anonymous(&mut self, lua_buf_threshold: u64) -> Vec<u64> {
@@ -574,7 +574,7 @@ impl Ui {
                         return Some(removed);
                     }
                 }
-                // History exhausted — focus stays cleared.
+                // History exhausted - focus stays cleared.
             }
         }
         Some(removed)
@@ -933,7 +933,7 @@ impl Ui {
     }
 
     /// Fire a `WinEvent` on `win`. Callbacks registered on `win` for `ev` fire in
-    /// registration order. The event does not bubble to other leaves — consumers that
+    /// registration order. The event does not bubble to other leaves - consumers that
     /// need to catch events from multiple panels (e.g. `dialog.lua`) register on each
     /// relevant leaf.
     pub fn fire_win_event(
@@ -1198,7 +1198,7 @@ impl Ui {
     /// at the top or bottom of the captured window's viewport, pan one row in
     /// that direction and re-park the endpoint at the new leading edge so the
     /// selection grows by one row per tick. The endpoint, not `cpos`, is the
-    /// trigger — `cpos` is the pre-drag cursor and is unchanged mid-gesture,
+    /// trigger - `cpos` is the pre-drag cursor and is unchanged mid-gesture,
     /// so a cursor-based check would fire on whatever line happened to be
     /// selected before the drag. Returns `true` if anything panned.
     pub fn tick_drag_autoscroll(&mut self) -> bool {
@@ -1524,7 +1524,7 @@ impl Ui {
     /// Route a terminal event. Key: fires keymaps; bare Esc/Ctrl-C on a modal dismisses it.
     /// Resize: updates terminal size. Mouse: owns scrollbar drag and chrome drag; absorbs
     /// wheel on focused overlays. Clicks outside a modal pass through to the host so
-    /// drag-select on background splits still works — the host is expected to skip
+    /// drag-select on background splits still works - the host is expected to skip
     /// `app_focus` promotion while a modal is active, leaving the modal focused.
     /// Returns `Ignored` for everything else so the host can continue routing.
     pub fn dispatch_event(&mut self, ev: Event, lua_invoke: &mut LuaInvoke) -> Status {
@@ -1669,7 +1669,7 @@ impl Ui {
                 // outside its rect still flow to the splits underneath so the
                 // user can drag-select transcript content. The caller is
                 // responsible for not promoting `app_focus` while a modal is
-                // active — keeping the modal as the focused overlay produces
+                // active - keeping the modal as the focused overlay produces
                 // the natural snap-back-after-drag behavior.
                 Status::Ignored
             }
@@ -1819,7 +1819,7 @@ impl Ui {
     }
 
     /// Tier 3 of the key cascade: per-window catch-all fallback (the "text
-    /// input" tier — e.g. a dialog input that inserts any printable char).
+    /// input" tier - e.g. a dialog input that inserts any printable char).
     /// Runs only after `dispatch_event(Event::Key)` returned `Ignored` AND
     /// global Lua keymaps declined, so site-wide chords like `?` → /help take
     /// precedence over a leaf's blanket printable-char capture.
@@ -1894,7 +1894,7 @@ impl Ui {
     /// Final tier of the key cascade: dismiss the active modal on a bare
     /// `Esc` or `Ctrl-C`. Returns `Status::Consumed` only when a modal was
     /// actually dismissed. Caller runs this AFTER specific keymaps, global
-    /// Lua keymaps, leaf fallback, and any overlay-viewer handler — the
+    /// Lua keymaps, leaf fallback, and any overlay-viewer handler - the
     /// modal should close only when no one else claimed the chord.
     pub fn try_dismiss_modal_for_chord(
         &mut self,
@@ -2047,7 +2047,7 @@ impl Default for Ui {
 }
 
 /// Compositor-bearing surface exposed by frontends. `TuiApp` implements this; `HeadlessApp`
-/// does not — UiHost-only Lua bindings raise a runtime error in headless context.
+/// does not - UiHost-only Lua bindings raise a runtime error in headless context.
 /// `Ui` also impls it so tests can exercise compositor code without a full frontend.
 pub trait UiHost {
     fn ui(&mut self) -> &mut Ui;
@@ -2181,7 +2181,7 @@ fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZ
 /// against the terminal extent. `Fit` reads the layout's natural size on
 /// that axis; explicit sizing modes evaluate independently per axis.
 /// Then [`Overlay::max_width`] / [`Overlay::max_height`] cap the result if
-/// set — they're resolved with the same rules and act as upper bounds.
+/// set - they're resolved with the same rules and act as upper bounds.
 fn resolve_overlay_size(
     overlay: &Overlay,
     term: (u16, u16),
@@ -2263,7 +2263,7 @@ impl<'a> layout::LeafSizer for UiLeafSizer<'a> {
             return (0, 0);
         };
         let h = (buf.lines().len() as u32).min(u16::MAX as u32) as u16;
-        // Wrapped content has no intrinsic width — its layout depends on the
+        // Wrapped content has no intrinsic width - its layout depends on the
         // wrap column, which is whatever the parent slot resolves to. Defer
         // to the cap. For non-wrapping content we can compute the actual
         // longest-line width + chrome, so `width = "fit"` overlays shrink
@@ -2417,7 +2417,7 @@ mod tests {
 
     fn sized_overlay(width: u16, height: u16, anchor: layout::Anchor) -> Overlay {
         // Single-leaf box wrapped in an Hbox of fixed width holding a
-        // Vbox of fixed height — exercises both axes' natural-size
+        // Vbox of fixed height - exercises both axes' natural-size
         // composition.
         let layout = LayoutTree::hbox(vec![(
             Constraint::Length(width),
@@ -2572,7 +2572,7 @@ mod tests {
         make_split(&mut ui, inside);
         let id = ui.overlay_open(stub_overlay());
         ui.set_focus(inside);
-        // No prior focus — history empty.
+        // No prior focus - history empty.
         assert!(ui.focus_history().is_empty());
         ui.overlay_close(id);
         assert_eq!(ui.focus(), None);
@@ -2778,7 +2778,7 @@ mod tests {
     #[test]
     fn body_click_drags_non_focusable_draggable_overlay_through_modal() {
         // Regression: a non-focusable leaf inside a draggable overlay
-        // (perf panel — pure HUD with `focusable = false`) treats body
+        // (perf panel - pure HUD with `focusable = false`) treats body
         // clicks the same as chrome Title/Body for drag purposes,
         // *and* this works while a modal dialog is open below.
         let mut ui = make_ui();
@@ -2837,7 +2837,7 @@ mod tests {
     fn chrome_drag_latches_on_non_modal_overlay_with_modal_open() {
         // Regression: a draggable non-modal overlay (perf panel) and a
         // modal dialog (messages) both at default z=50 should not
-        // block each other's chrome drag — if the click lands on the
+        // block each other's chrome drag - if the click lands on the
         // perf panel's chrome, the drag must latch.
         let mut ui = make_ui();
         // Perf panel: bordered, top-right corner, draggable. Outer
@@ -2896,7 +2896,7 @@ mod tests {
         // its own rect).
         let hit = ui.overlay_hit_test(11, 36, None).unwrap();
         assert_eq!(hit.0, modal_id);
-        // Hit inside the under overlay but outside the modal — the
+        // Hit inside the under overlay but outside the modal - the
         // visible part of the under overlay still receives clicks. The
         // modal only blocks at its own rect, not globally.
         let outside = ui.overlay_hit_test(8, 22, None).unwrap();
@@ -3134,7 +3134,7 @@ mod tests {
         )]));
         ui.set_focus(win);
         assert_eq!(ui.focus(), Some(win));
-        // New tree omits the focused leaf — focus clears.
+        // New tree omits the focused leaf - focus clears.
         ui.set_layout(LayoutTree::vbox(Vec::new()));
         assert_eq!(ui.focus(), None);
     }
@@ -3173,7 +3173,7 @@ mod tests {
             LayoutTree::leaf(win),
         )]));
         ui.set_capture(HitTarget::Scrollbar { owner: win });
-        // Replacement tree omits `win` — capture must clear.
+        // Replacement tree omits `win` - capture must clear.
         ui.set_layout(LayoutTree::vbox(Vec::new()));
         assert_eq!(ui.capture(), None);
     }
@@ -3345,7 +3345,7 @@ mod tests {
     fn dispatch_event_esc_with_modifiers_does_not_dismiss_modal() {
         let mut ui = make_ui();
         let id = ui.overlay_open(modal_overlay_with_leaves(WinId(50), WinId(51), WinId(52)));
-        // Esc + Shift falls through to normal dispatch — built-in
+        // Esc + Shift falls through to normal dispatch - built-in
         // dismiss is bare Esc only.
         let _ = dispatch_key(
             &mut ui,
@@ -3360,8 +3360,8 @@ mod tests {
         // Multi-panel overlay: dialog.lua registers
         // `on_event("dismiss", …)` on the dialog's root WinId (the
         // first leaf in declaration order, returned from `_open`).
-        // Esc must fire Dismiss exactly once on the root — not
-        // once per leaf — so dialog.lua's single handler runs once
+        // Esc must fire Dismiss exactly once on the root - not
+        // once per leaf - so dialog.lua's single handler runs once
         // and the parked task resumes once. Non-root leaves with
         // their own Dismiss callbacks are addressed via root
         // redirect inside `fire_win_event`.
@@ -3371,7 +3371,7 @@ mod tests {
         let c = WinId(62);
         let id = ui.overlay_open(modal_overlay_with_leaves(a, b, c));
         let count = std::sync::Arc::new(std::sync::Mutex::new(0u32));
-        // Only the root (a) gets a callback — like dialog.lua does.
+        // Only the root (a) gets a callback - like dialog.lua does.
         let count_cb = count.clone();
         ui.win_on_event(
             a,
@@ -3632,7 +3632,7 @@ mod tests {
         // Both leaves' Window entries gone from the registry.
         assert!(ui.win(win_a).is_none());
         assert!(ui.win(win_b).is_none());
-        // Closing again is a no-op — overlay is already gone.
+        // Closing again is a no-op - overlay is already gone.
         assert_eq!(ui.win_close(win_a), Vec::<u64>::new());
     }
 
@@ -3944,7 +3944,7 @@ mod tests {
     fn ui_host_dispatch_round_trips_through_dyn() {
         // Drive every UiHost method through `&mut dyn UiHost` so the
         // trait shape is exercised end-to-end (not just the inherent
-        // path). Mirrors how Lua bindings reach the compositor — by
+        // path). Mirrors how Lua bindings reach the compositor - by
         // trait, not by direct field access.
         fn drive(host: &mut dyn UiHost) -> (BufId, WinId, OverlayId) {
             let buf = host.buf_create(BufCreateOpts::default());
@@ -3967,7 +3967,7 @@ mod tests {
             }
             // Hosting `win` in a modal overlay both makes it focusable
             // (overlay leaf) and exercises `overlay_open`. The modal
-            // also auto-focuses the first leaf — re-asserting via the
+            // also auto-focuses the first leaf - re-asserting via the
             // explicit `set_focus` keeps that method on the trait path.
             let layout = LayoutTree::vbox(vec![(Constraint::Fill, LayoutTree::leaf(win))]);
             let oid =
@@ -4028,7 +4028,7 @@ mod tests {
     #[test]
     fn ui_host_per_pane_data_default_impl() {
         // Ui's default `rows_for` / `breaks_for` / `viewport_for` cover
-        // any window the host hasn't overridden — buffer lines as rows,
+        // any window the host hasn't overridden - buffer lines as rows,
         // join positions as hard breaks, no soft wraps. Drives all
         // three through `&mut dyn UiHost` so the trait shape is
         // exercised end-to-end.
@@ -4054,7 +4054,7 @@ mod tests {
             assert_eq!(vp.rect.width, 20);
             let rows = host.rows_for(win).unwrap();
             assert_eq!(rows, vec!["hello", "world!", "ok"]);
-            // "hello\nworld!\nok" — `\n` after "hello" lives at byte 5,
+            // "hello\nworld!\nok" - `\n` after "hello" lives at byte 5,
             // `\n` after "world!" at byte 12. Both are hard breaks; soft
             // breaks are empty for an unwrapped buffer.
             let (soft, hard) = host.breaks_for(win).unwrap();
@@ -4234,7 +4234,7 @@ mod tests {
     fn resolve_split_mouse_down_latches_window_capture_and_records_click() {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
-        // Click on content (col 5, row 3) — not on the scrollbar.
+        // Click on content (col 5, row 3) - not on the scrollbar.
         let me = raw_mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             3,
@@ -4253,7 +4253,7 @@ mod tests {
         let mut ui = make_ui();
         let win = make_scrollbar_split(&mut ui);
         ui.set_capture(HitTarget::Window(win));
-        // Drag at (50, 50) — well outside the leaf rect — still routes
+        // Drag at (50, 50) - well outside the leaf rect - still routes
         // to `win` because capture is latched.
         let drag = raw_mouse_event(
             crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
@@ -4284,7 +4284,7 @@ mod tests {
     fn resolve_split_mouse_down_on_scrollbar_returns_none() {
         let mut ui = make_ui();
         let _win = make_scrollbar_split(&mut ui);
-        // Click on the scrollbar column — Ui::dispatch_event handles
+        // Click on the scrollbar column - Ui::dispatch_event handles
         // that gesture; resolve_split_mouse declines.
         let me = raw_mouse_event(
             crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -4345,7 +4345,7 @@ mod tests {
         ui.set_capture(HitTarget::Window(win));
         park_drag_endpoint_at(&mut ui, win, 0);
         assert!(ui.drag_autoscroll_interval().is_some());
-        // Already at top of buffer — can't scroll further up, but the
+        // Already at top of buffer - can't scroll further up, but the
         // trigger still fires; the tick just no-ops the pan.
         assert!(!ui.tick_drag_autoscroll());
 

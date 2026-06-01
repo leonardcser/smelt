@@ -6,7 +6,7 @@ use super::LuaRuntime;
 use std::sync::atomic::Ordering;
 
 impl LuaRuntime {
-    /// Register a Lua callable under a fresh u64 id. Test-only — production uses
+    /// Register a Lua callable under a fresh u64 id. Test-only - production uses
     /// [`crate::lua::register_callback_handle`] directly.
     #[cfg(test)]
     pub(super) fn register_callback(&self, func: mlua::Function) -> mlua::Result<u64> {
@@ -18,7 +18,7 @@ impl LuaRuntime {
         Ok(id)
     }
 
-    /// Invoke a registered callback with a payload table. Test-only — production uses
+    /// Invoke a registered callback with a payload table. Test-only - production uses
     /// the two-phase [`Self::prepare_invocation`] / call split to avoid borrow conflicts.
     #[cfg(test)]
     pub(super) fn invoke_callback(
@@ -73,7 +73,7 @@ impl LuaRuntime {
     }
 
     /// Queue an invocation from inside `ui.dispatch_event` / `ui.fire_win_event`.
-    /// The ui dispatcher holds `&mut Ui`, so Lua cannot be called immediately — it would
+    /// The ui dispatcher holds `&mut Ui`, so Lua cannot be called immediately - it would
     /// collide with the borrow. The host drains the queue after the ui call returns.
     pub(crate) fn queue_invocation(
         &self,

@@ -1,4 +1,4 @@
-//! `smelt.paint` bindings — register Lua callbacks against custom
+//! `smelt.paint` bindings - register Lua callbacks against custom
 //! paint regions.
 //!
 //! `smelt.paint.register(func, opts?)` returns an opaque `Paint`
@@ -9,7 +9,7 @@
 //! context table; the callback writes cells via slice methods (`set` /
 //! `put_str` / `fill_rect`).
 //!
-//! Lifetime / safety: see `crate::lua::paint` — the slice is exposed
+//! Lifetime / safety: see `crate::lua::paint` - the slice is exposed
 //! via TLS-stashed pointer for the duration of one paint call, and
 //! out-of-scope method calls fail cleanly with a Lua runtime error.
 
@@ -63,7 +63,7 @@ impl From<LuaPaintEvent> for crate::smelt_term::WinEvent {
 /// Handle returned by `smelt.paint.register`. Carries the `PaintId`
 /// directly so it can stand in for a Win userdata in layout leaves,
 /// and exposes `:remove()`. The `PaintId` is intentionally not exposed
-/// to Lua — names are the stable identity surface.
+/// to Lua - names are the stable identity surface.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaPaintReg {
     pub(crate) id: crate::smelt_term::layout::PaintId,

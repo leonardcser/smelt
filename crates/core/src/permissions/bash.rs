@@ -85,13 +85,13 @@ fn split_impl(cmd: &str) -> (Vec<String>, Vec<String>) {
                     }
                 }
 
-                // Redirections involving & (2>&1, >&2, &>, &>>) — not an operator.
+                // Redirections involving & (2>&1, >&2, &>, &>>) - not an operator.
                 if rest.starts_with("&>") {
                     i += if rest.starts_with("&>>") { 3 } else { 2 };
                     continue;
                 }
                 if bytes[i] == b'&' && i > 0 && bytes[i - 1] == b'>' {
-                    // >& fd duplication (e.g. 2>&1) — skip the fd digit(s).
+                    // >& fd duplication (e.g. 2>&1) - skip the fd digit(s).
                     i += 1;
                     while i < len && bytes[i].is_ascii_digit() {
                         i += 1;
@@ -182,7 +182,7 @@ fn parse_heredoc(cmd: &str, i: usize) -> Option<(usize, usize)> {
         }
         si += 1;
     }
-    Some((header_end, len)) // no closing delimiter — consume rest
+    Some((header_end, len)) // no closing delimiter - consume rest
 }
 
 /// Strip heredoc bodies so downstream parsing doesn't misinterpret body content as shell constructs.
@@ -414,7 +414,7 @@ pub(super) fn has_output_redirection(cmd: &str) -> bool {
                 i += 2;
             }
             b'<' => {
-                // << is heredoc, < is input redirect — neither is output.
+                // << is heredoc, < is input redirect - neither is output.
                 i += if i + 1 < len && bytes[i + 1] == b'<' {
                     2
                 } else {
@@ -435,7 +435,7 @@ pub(super) fn has_output_redirection(cmd: &str) -> bool {
                         i = j + 1;
                         continue;
                     }
-                    // >& without a digit — treat as real redirection.
+                    // >& without a digit - treat as real redirection.
                 }
                 if !redirect_is_dev_null(bytes, &mut i) {
                     return true;

@@ -1,4 +1,4 @@
--- `/model` — switch active model. Direct with an arg; picker without.
+-- `/model` - switch active model. Direct with an arg; picker without.
 
 local function models_list()
   return smelt.model.list() or {}

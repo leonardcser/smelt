@@ -1,4 +1,4 @@
-//! `cargo xtask fuzz triage <target> <crash-artifact>` — shrink a crash and
+//! `cargo xtask fuzz triage <target> <crash-artifact>` - shrink a crash and
 //! print the minimal scenario. Replaces the manual "cargo fuzz fmt →
 //! cargo fuzz tmin → eyeball → maybe write it up" dance.
 

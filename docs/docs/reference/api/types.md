@@ -25,7 +25,7 @@ Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same
 | `line` | `fun(idx: integer): string?` | yes | Read a single line by 1-based index. `nil` if out of range or the buffer is gone. |
 | `styled` | `fun(lines: table): smelt.buf.Buf` | yes | Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining. |
 | `readonly` | `fun(val: boolean?): any` | yes | Read or write the readonly flag. With arg, returns the handle for chaining. |
-| `mark` | `fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer` | yes | Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line — the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`. |
+| `mark` | `fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer` | yes | Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line - the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`. |
 | `clear_ns` | `fun(ns: integer, start: integer?, end_: integer?): smelt.buf.Buf` | yes | Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining. |
 
 ### `smelt.buf.MarkOpts`
@@ -36,7 +36,7 @@ Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `
 | --- | --- | --- | --- |
 | `id` | `integer` |  | Retarget an existing mark by id instead of allocating a new one. |
 | `end_row` | `integer` |  | 1-based end row (inclusive). `nil` keeps the mark single-line. |
-| `end_col` | `integer` |  | End byte offset for highlight ranges (exclusive). Same unit as `col` — bytes into the line, matching `#s` and `string.find`. |
+| `end_col` | `integer` |  | End byte offset for highlight ranges (exclusive). Same unit as `col` - bytes into the line, matching `#s` and `string.find`. |
 | `priority` | `integer` |  | Higher-priority marks paint over lower-priority ones. |
 | `right_gravity` | `boolean` |  | If true, the mark sticks with text inserted to its right. |
 | `end_right_gravity` | `boolean` |  | Right-gravity flag for the end-of-range cursor. |
@@ -56,7 +56,7 @@ Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `
 
 ### `smelt.builtins.Selector`
 
-Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of bundled module short-names — see the table below for the `smelt.<dotted>` form each one expands to. | field | expansion | |---|---| | `tools = { "web_search" }` | `smelt.tools.web_search` | | `commands = { "compact" }` | `smelt.commands.compact` | | `plugins = { "predict" }` | `smelt.plugins.predict` | | `dialogs = { "resume" }` | `smelt.dialogs.resume` | | `modules = { "smelt.foo.bar" }` | passed through verbatim |
+Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of bundled module short-names - see the table below for the `smelt.<dotted>` form each one expands to. | field | expansion | |---|---| | `tools = { "web_search" }` | `smelt.tools.web_search` | | `commands = { "compact" }` | `smelt.commands.compact` | | `plugins = { "predict" }` | `smelt.plugins.predict` | | `dialogs = { "resume" }` | `smelt.dialogs.resume` | | `modules = { "smelt.foo.bar" }` | passed through verbatim |
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -74,7 +74,7 @@ Sticky handle returned by `smelt.cell(name)`. Setters return the handle for chai
 | --- | --- | --- | --- |
 | `get` | `fun(): any` | yes | Return the current cell value, or `nil` when the cell isn't declared. |
 | `set` | `fun(value: any): smelt.cell.Cell` | yes | Publish a new value. Returns the handle for chaining. |
-| `subscribe` | `fun(handler: fun(value: any)): smelt.Reg` | yes | Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass) — the module body re-runs inside `bring_up_lua` where the bind takes effect. |
+| `subscribe` | `fun(handler: fun(value: any)): smelt.Reg` | yes | Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass) - the module body re-runs inside `bring_up_lua` where the bind takes effect. |
 | `name` | `fun(): string` | yes | Return the cell name. |
 
 ### `smelt.cli.RegisterFlagOpts`
@@ -179,7 +179,7 @@ Options accepted by `smelt.dialog.picker`. Layered on top of
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `items` | `any[]` |  | | fun(): any[] Eager item table or a lazy producer; re-evaluated by `on_query`. |
-| `render` | `fun(item: any):` | yes | table Per-item `{ text, marks }` table — see `smelt.list.new`. |
+| `render` | `fun(item: any):` | yes | table Per-item `{ text, marks }` table - see `smelt.list.new`. |
 | `filter` | `fun(item: any):` |  | boolean Predicate applied during `set_filter` / `refresh`. |
 | `placeholder` | `string` |  | Input placeholder; defaults to `""`. |
 | `empty_text` | `string` |  | Shown in the list when nothing matches. |
@@ -196,7 +196,7 @@ Options accepted by `smelt.dialog.picker`. Layered on top of
 
 ### `smelt.engine.AskError`
 
-Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target — the actual table is built in `LuaRuntime::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
+Typed error table delivered to `on_response` when the underlying provider call fails. `kind` is a stable string the caller can branch on; `message` is a human-readable single-line description. The struct exists purely as a doc / LuaCATS schema target - the actual table is built in `LuaRuntime::fire_ask_callback` because it lands on a callback path that bypasses `FromLua` decoding.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -302,7 +302,7 @@ Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-m
 
 ### `smelt.list.Opts`
 
-Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory —
+Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
 they own the rendered selection cursor and the backing line buffer;
 the rest configure how data is sourced, filtered, and rendered.
 
@@ -436,7 +436,7 @@ Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the sa
 | --- | --- | --- | --- |
 | `win` | `fun(): smelt.win.Win` | yes | Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input). |
 | `close` | `fun(): nil` | yes | Close the picker overlay. No-op if already closed. |
-| `items` | `fun(items: table, selected: integer?): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. `selected` is the 0-based logical index to land the cursor on (default 0 — top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining. |
+| `items` | `fun(items: table, selected: integer?): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining. |
 | `selected` | `fun(idx: integer?): any` | yes | Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining. |
 | `move` | `fun(delta: integer): smelt.picker.Picker` | yes | Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
 
@@ -497,7 +497,7 @@ Spec accepted by `smelt.provider.register`.
 
 ### `smelt.provider.Model`
 
-One model entry in a provider's `models` list. Plugin authors can pass either a bare model id string or a full table — the wrapper handles both forms transparently.
+One model entry in a provider's `models` list. Plugin authors can pass either a bare model id string or a full table - the wrapper handles both forms transparently.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -528,7 +528,7 @@ Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) 
 
 ### `smelt.theme.StyleDecl`
 
-Style table for a single highlight group. Every field is optional — unset fields stay at `Style::default()`. Pass a string in place of this struct (at the group-map level) to alias another group.
+Style table for a single highlight group. Every field is optional - unset fields stay at `Style::default()`. Pass a string in place of this struct (at the group-map level) to alias another group.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -558,12 +558,12 @@ Per-mode default decisions installed by `smelt.tools.register`. Keys are mode na
 
 ### `smelt.tools.ToolDef`
 
-Plugin tool definition passed to `smelt.tools.register`. `execute` is required; the remaining hooks are optional and are invoked at well-defined points during a tool turn — see the field docs for each callback's contract.
+Plugin tool definition passed to `smelt.tools.register`. `execute` is required; the remaining hooks are optional and are invoked at well-defined points during a tool turn - see the field docs for each callback's contract.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | `string` | yes | Tool name; used as the engine-facing identifier. |
-| `execute` | `function` | yes | Required handler: `execute(args, ctx)` — returns the tool result. |
+| `execute` | `function` | yes | Required handler: `execute(args, ctx)` - returns the tool result. |
 | `description` | `string` |  | Human-readable description shown to the model. |
 | `parameters` | `table` |  | JSON-schema parameters table passed through to the model. |
 | `permission_defaults` | [smelt.tools.PermissionDefaults](types.md#smelttoolspermissiondefaults) |  | Per-mode default decisions. |
@@ -571,13 +571,13 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `subpattern_parser` | `string` |  | Built-in subpattern parser kind (e.g. `"bash"`). |
 | `modes` | `table` |  | Agent modes the tool is available in; nil means all modes. |
 | `execution_mode` | `string` |  | `"concurrent"` (default) or `"sequential"`. |
-| `summary` | `function` |  | `summary(args) -> string | styled_lines | nil` — styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` — same span shape as `buf:styled` plus optional `selectable = false` for chrome text and `title_suffix = true` for metadata rendered after the live tool timer. |
-| `approval_patterns` | `function` |  | `approval_patterns(args, ctx) -> string[]` — patterns offered as one-click approvals. |
-| `preflight` | `function` |  | `preflight(args, ctx) -> table?` — validation hook; nil result skips. |
-| `render` | `function` |  | `render(buf, args, result)` — custom transcript render. |
-| `paths_for_workspace` | `function` |  | `paths_for_workspace(args) -> string[]` — files this invocation will touch. |
-| `preview` | `function` |  | `preview(args) -> smelt.layout` — pre-execute preview render. Returns the same `smelt.layout` value the `render` callback returns; the confirm dialog renders it directly into the preview pane. |
-| `decide` | `function` |  | `decide(args, mode) -> smelt.tools.Decision?` — per-call decision; nil falls through to generic permissions. |
+| `summary` | `function` |  | `summary(args) -> string | styled_lines | nil` - styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` - same span shape as `buf:styled` plus optional `selectable = false` for chrome text and `title_suffix = true` for metadata rendered after the live tool timer. |
+| `approval_patterns` | `function` |  | `approval_patterns(args, ctx) -> string[]` - patterns offered as one-click approvals. |
+| `preflight` | `function` |  | `preflight(args, ctx) -> table?` - validation hook; nil result skips. |
+| `render` | `function` |  | `render(buf, args, result)` - custom transcript render. |
+| `paths_for_workspace` | `function` |  | `paths_for_workspace(args) -> string[]` - files this invocation will touch. |
+| `preview` | `function` |  | `preview(args) -> smelt.layout` - pre-execute preview render. Returns the same `smelt.layout` value the `render` callback returns; the confirm dialog renders it directly into the preview pane. |
+| `decide` | `function` |  | `decide(args, mode) -> smelt.tools.Decision?` - per-call decision; nil falls through to generic permissions. |
 | `override` | `boolean` |  | Replace a core tool of the same name (advanced). |
 
 ### `smelt.win.Win`
@@ -595,7 +595,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `move_cursor` | `fun(delta: integer): smelt.win.Win` | yes | Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
 | `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords. |
 | `on` | `fun(event: smelt.win.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription. |
-| `placeholder` | `fun(text: string, opts: table?): smelt.win.Win` | yes | Set the window's placeholder — a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the extmark survives so an undo back to an empty buffer makes it visible again. Today only the prompt window renders the dim text and runs the accept/dismiss dispatch — calls on other windows store state but won't render. Returns the handle for chaining. |
+| `placeholder` | `fun(text: string, opts: table?): smelt.win.Win` | yes | Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ "esc", "c-c" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the extmark survives so an undo back to an empty buffer makes it visible again. Today only the prompt window renders the dim text and runs the accept/dismiss dispatch - calls on other windows store state but won't render. Returns the handle for chaining. |
 | `clear_placeholder` | `fun(): nil` | yes | Clear the window's placeholder text and opts. Idempotent. |
 | `placeholder_text` | `fun(): string?` | yes | Return the current placeholder text, or `nil` if none is set. |
 | `link_scroll` | `fun(others: smelt.win.Win): smelt.win.Win` | yes | Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining. |
@@ -611,9 +611,9 @@ Variants: `"inline"` \| `"overlay"` \| `"right_align"` \| `"eol"`
 
 ### `smelt.cell.Name`
 
-Name of a reactive cell. Open alias — plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
+Name of a reactive cell. Open alias - plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
 
-Open alias — accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"permission_pending"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
+Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"errors"` \| `"history"` \| `"input_submit"` \| `"model"` \| `"now"` \| `"permission_pending"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.cli.FlagKind`
 
@@ -635,7 +635,7 @@ Variants: `"off"` \| `"low"` \| `"medium"` \| `"high"` \| `"max"`
 
 ### `smelt.tools.Decision`
 
-Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` — the engine's `Error(_)` variant is not exposed.
+Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 
 Variants: `"allow"` \| `"ask"` \| `"deny"`
 

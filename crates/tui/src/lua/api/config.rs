@@ -1,4 +1,4 @@
-//! `smelt.config` — read-only introspection of the resolved application
+//! `smelt.config` - read-only introspection of the resolved application
 //! configuration: provider, model overrides, sampling params, and window
 //! sizing. UiHost-only.
 

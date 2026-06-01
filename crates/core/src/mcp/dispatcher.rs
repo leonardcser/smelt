@@ -16,7 +16,7 @@ impl McpDispatcher {
     /// dispatcher. Callers typically build the manager via
     /// [`McpManager::start`] and pass a clone of the `Arc` here, keeping
     /// a second clone on `Core` for Lua introspection. The dispatcher
-    /// holds no cached tool list — it queries `manager.tool_defs()` on
+    /// holds no cached tool list - it queries `manager.tool_defs()` on
     /// every access so `/reload`-driven server changes are picked up
     /// immediately.
     pub fn new(

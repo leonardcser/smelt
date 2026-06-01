@@ -1,4 +1,4 @@
--- Snake game — demo of `smelt.paint` custom paint regions.
+-- Snake game - demo of `smelt.paint` custom paint regions.
 -- Not autoloaded; add `require("smelt.examples.snake")` to init.lua.
 -- Registers F11 to toggle and a /snake command.
 --

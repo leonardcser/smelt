@@ -131,7 +131,7 @@ mod tests {
         let (clock, mut t) = fixture();
         t.set(Duration::from_millis(10), h);
         assert_eq!(t.len(), 1);
-        // Not yet due — clock has not advanced past the deadline.
+        // Not yet due - clock has not advanced past the deadline.
         assert!(t.drain_due(&lua).is_empty());
         assert_eq!(t.len(), 1);
         clock.advance(Duration::from_millis(20));

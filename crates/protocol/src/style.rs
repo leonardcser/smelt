@@ -1,7 +1,7 @@
 //! Styled-text payloads carried between the engine, the TUI, and Lua.
 //!
 //! `StyledLines` is the canonical representation for "rich text the user
-//! sees" — tool summary headers, confirm dialog body content, anywhere a
+//! sees" - tool summary headers, confirm dialog body content, anywhere a
 //! tool wants to attach color/syntax/emphasis. The shape matches the
 //! `buf:styled` Lua API: a list of lines, each a list of
 //! styled spans.
@@ -77,7 +77,7 @@ impl Default for StyledSpan {
 pub struct StyledLines(pub Vec<Vec<StyledSpan>>);
 
 impl StyledLines {
-    /// Empty payload — no lines.
+    /// Empty payload - no lines.
     pub fn empty() -> Self {
         Self(Vec::new())
     }

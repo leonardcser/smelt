@@ -1,4 +1,4 @@
-//! `smelt.html` — HTML parsing (title, links, to_text, to_markdown, DDG results).
+//! `smelt.html` - HTML parsing (title, links, to_text, to_markdown, DDG results).
 
 use mlua::prelude::*;
 

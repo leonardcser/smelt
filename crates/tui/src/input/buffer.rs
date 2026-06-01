@@ -16,7 +16,7 @@ impl PromptState {
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
-    /// Save undo state. Skips during vim Insert — the session entry saved on insert-entry covers it.
+    /// Save undo state. Skips during vim Insert - the session entry saved on insert-entry covers it.
     pub(crate) fn save_undo(&mut self, ctx: &mut PromptCtx<'_>) {
         if ctx.win.vim_enabled && ctx.win.vim_mode == VimMode::Insert {
             return; // insert session groups all edits into one undo step
@@ -289,7 +289,7 @@ impl PromptState {
 
     pub(super) fn insert_paste(&mut self, ctx: &mut PromptCtx<'_>, data: String) {
         // Normalize `\r\n` and lone `\r` to `\n` (terminals in bracketed-paste mode send `\r`).
-        // Also strip ATTACHMENT_MARKER — that sentinel must only enter the
+        // Also strip ATTACHMENT_MARKER - that sentinel must only enter the
         // buffer through `insert_attachment_id` so source markers and
         // `attachment_ids` stay in 1:1 sync.
         let data = data

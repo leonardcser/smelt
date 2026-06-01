@@ -100,8 +100,8 @@ impl Grid {
         self.write_cell(x, y, Cell { symbol, style });
     }
 
-    /// Single mutation entry point. Every cell write — `set`, `put_char`,
-    /// `fill`, and their slice equivalents — funnels through here so the
+    /// Single mutation entry point. Every cell write - `set`, `put_char`,
+    /// `fill`, and their slice equivalents - funnels through here so the
     /// wide-char continuation invariant is upheld in exactly one place:
     ///
     /// 1. A wide char at `(x, y)` implies `(x+1, y).symbol == '\0'`.
@@ -655,7 +655,7 @@ mod tests {
     fn diff_does_not_emit_update_for_cell_under_a_wide_char() {
         // Regression for the wide-char bug: if prev had a real char at
         // the continuation column and curr paints a wide char that covers
-        // it, diff must not yield an update for the continuation column —
+        // it, diff must not yield an update for the continuation column -
         // otherwise flush_diff overwrites the right half of the wide char.
         let mut prev = Grid::new(5, 1);
         prev.set(1, 0, 'X', Style::default());
@@ -687,7 +687,7 @@ mod tests {
         // Within a single frame, an earlier paint can leave a wide char at
         // col N (marking col N+1 as '\0'), and a later paint can overwrite
         // col N with a narrow char. The narrow overwrite must clear the
-        // stale continuation marker at col N+1 — otherwise the next diff
+        // stale continuation marker at col N+1 - otherwise the next diff
         // skips that cell (because it filters '\0'), and the terminal keeps
         // showing whatever was at col N+1 in the previous frame.
         let mut grid = Grid::new(5, 1);
@@ -705,7 +705,7 @@ mod tests {
     fn overwriting_wide_continuation_with_narrow_clears_leading_wide_glyph() {
         // Symmetric case: a previous paint wrote a wide char at col N (so
         // col N+1 is '\0'). A later paint writes a narrow char at col N+1.
-        // The wide char at col N is now orphaned — its visual right half
+        // The wide char at col N is now orphaned - its visual right half
         // is occupied by the new narrow char. The leading slot must lose
         // its wide glyph so flush/diff don't try to render a 2-cell-wide
         // char that's been broken.
@@ -732,7 +732,7 @@ mod tests {
         // a span or virt text paint), then a later paint overwrites col 0
         // with a narrow char (e.g. a cursor or overlay). The diff must
         // still emit an update for col 1 so the terminal clears the right
-        // half of the previous wide char — otherwise that half lingers.
+        // half of the previous wide char - otherwise that half lingers.
         let mut prev = Grid::new(5, 1);
         prev.set(0, 0, '漢', Style::default());
 
@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn fill_starting_on_a_continuation_breaks_the_leading_wide() {
         // Wide at col 0 (continuation at col 1). Fill clobbers cols 1..3
-        // — leaves the leading slot at col 0 untouched. The leading wide
+        // - leaves the leading slot at col 0 untouched. The leading wide
         // must be broken because its right half is gone.
         let mut grid = Grid::new(5, 1);
         grid.set(0, 0, '漢', Style::default());
@@ -836,7 +836,7 @@ mod tests {
         assert_eq!(grid.cell(2, 0).symbol, '\0');
         // Col 0 lost its right half, so the wide glyph there must be broken.
         assert_ne!(grid.cell(0, 0).symbol, '漢');
-        // Col 3 was the displaced wide's continuation — it must be cleared.
+        // Col 3 was the displaced wide's continuation - it must be cleared.
         assert_ne!(grid.cell(3, 0).symbol, '\0');
     }
 
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn put_str_breaks_when_wide_char_would_overflow() {
         // 4-wide grid, write "ab漢": the wide char would land at col 2 and
-        // would need col 3 too — fits. Try "abc漢" in width 4: 'c' at 2,
+        // would need col 3 too - fits. Try "abc漢" in width 4: 'c' at 2,
         // wide char needs 3+4 → overflows, breaks before writing.
         let mut grid = Grid::new(4, 1);
         grid.put_str(0, 0, "abc漢", Style::default());

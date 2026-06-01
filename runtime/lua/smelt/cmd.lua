@@ -2,17 +2,17 @@
 -- without arguments, or calls `apply(arg)` directly when given one.
 --
 -- `opts`:
---   desc       string                      — completion description.
---   args       table                       — completion args; defaults to `items[*].label`.
---   items      table | function() → table  — picker entries. A function re-evaluates after each
+--   desc       string                      - completion description.
+--   args       table                       - completion args; defaults to `items[*].label`.
+--   items      table | function() → table  - picker entries. A function re-evaluates after each
 --                                             `on_enter` when `stay_open = true`, so the picker
 --                                             reflects mutated state (toggles, edits, etc.).
---   apply      function(arg)               — direct dispatch.
---   prepare    function()                  — runs once before opening.
---   on_select  function(item)              — fires on every navigation.
---   on_enter   function(item, idx)         — Enter accept.
---   on_dismiss function()                  — Esc dismiss.
---   stay_open  bool                        — keep picker open after Enter (persistent mode).
+--   apply      function(arg)               - direct dispatch.
+--   prepare    function()                  - runs once before opening.
+--   on_select  function(item)              - fires on every navigation.
+--   on_enter   function(item, idx)         - Enter accept.
+--   on_dismiss function()                  - Esc dismiss.
+--   stay_open  bool                        - keep picker open after Enter (persistent mode).
 
 local function report_picker_error(event, err)
   local msg = tostring(err)

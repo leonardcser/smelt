@@ -1,4 +1,4 @@
-//! `smelt.layout` — composable block layout (vbox/hbox/leaf) returned from tool `render` callbacks.
+//! `smelt.layout` - composable block layout (vbox/hbox/leaf) returned from tool `render` callbacks.
 
 use crate::buffer::BufId;
 use crate::content::block_layout::{
@@ -78,7 +78,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "diff",
-        "Inline-diff render directive — the worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.",
+        "Inline-diff render directive - the worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.",
         &["opts"],
         |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
             let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
@@ -99,7 +99,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "file_view",
-        "Syntax-highlighted file-view render directive — single line-number column, no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.",
+        "Syntax-highlighted file-view render directive - single line-number column, no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.",
         &["opts"],
         |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
             let content: String = opts.get::<Option<String>>("content")?.unwrap_or_default();

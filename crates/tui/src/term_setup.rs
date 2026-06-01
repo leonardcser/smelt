@@ -2,7 +2,7 @@
 //!
 //! The TUI lives inside an envelope of terminal modes (alt screen, raw mode,
 //! mouse capture, bracketed paste, focus reporting, line wrap off, hidden
-//! cursor). [`TuiTerminal`] is an RAII handle that owns that envelope —
+//! cursor). [`TuiTerminal`] is an RAII handle that owns that envelope -
 //! claim it once at startup and the matching teardown runs on drop, including
 //! on panic. [`TuiTerminal::suspended`] is the temporary handoff used for
 //! shell-outs like `$EDITOR`.

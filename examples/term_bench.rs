@@ -9,7 +9,7 @@
 //! All timings are measured from "first byte written" to "flush() returns,"
 //! which is when the kernel has delivered all bytes to the TTY. The
 //! terminal's own rendering happens asynchronously and is not measured here
-//! — but on modern terminals the kernel delivery is the dominant cost at
+//! - but on modern terminals the kernel delivery is the dominant cost at
 //! the user-space level.
 
 use std::io::{self, BufWriter, Write};
@@ -143,7 +143,7 @@ fn write_dense_sgr() {
     let stdout = io::stdout();
     let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
     out.write_all(b"\x1b[?2026h").unwrap();
-    // 24-bit RGB escapes like syntect emits — worst case for parse cost.
+    // 24-bit RGB escapes like syntect emits - worst case for parse cost.
     let colors: [&[u8]; 8] = [
         b"\x1b[38;2;200;60;60m",
         b"\x1b[38;2;60;200;60m",

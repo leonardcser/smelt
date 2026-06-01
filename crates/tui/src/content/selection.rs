@@ -86,7 +86,7 @@ pub(crate) fn wrap_with_offsets(buf: &str, char_kinds: &[SpanKind], usable: usiz
         state.row_offsets.push(0);
     }
     // When the last visual line is full (display width reaches `max_col`), reserve
-    // an empty trailing row so a cursor at end-of-line has a visible home — neovim-
+    // an empty trailing row so a cursor at end-of-line has a visible home - neovim-
     // style wrap. Without this, typing the char that fills the row leaves the
     // cursor one cell past the visible content and it goes invisible.
     let needs_padding_row = state
@@ -98,7 +98,7 @@ pub(crate) fn wrap_with_offsets(buf: &str, char_kinds: &[SpanKind], usable: usiz
         })
         .unwrap_or(false);
     if needs_padding_row {
-        // The padding row sits at the end of the display-char stream — its
+        // The padding row sits at the end of the display-char stream - its
         // offset is the previous row's start plus that row's char count.
         let pad_offset = state
             .row_offsets
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn offsets_wrapped_line() {
-        // "abcdef" at width 3 → "abc", "def" — the last row fills exactly, so
+        // "abcdef" at width 3 → "abc", "def" - the last row fills exactly, so
         // a padding row is appended at offset 6.
         assert_eq!(wrap("abcdef", 3).row_offsets, vec![0, 3, 6]);
     }
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn prompt_tabs_respect_prompt_column_without_forced_wrap() {
         let r = wrap("a\tb", 8);
-        // Tab expands `a` to col 8, so the row fills exactly — a trailing empty
+        // Tab expands `a` to col 8, so the row fills exactly - a trailing empty
         // row is reserved. The text on row 0 is unaltered.
         assert_eq!(
             r.visual_lines

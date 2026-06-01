@@ -4,7 +4,7 @@
 -- between "this workspace" (default) and "all sessions".
 --
 -- Matching is two-tier:
---   * Title + first-user-message: fuzzy match (`smelt.fuzzy`), instant — runs
+--   * Title + first-user-message: fuzzy match (`smelt.fuzzy`), instant - runs
 --     against cheap meta loaded up front.
 --   * Full message text: substring match against the per-session `content.txt`
 --     sidecar, loaded in parallel on the first non-empty query and cached for

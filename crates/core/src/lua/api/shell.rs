@@ -1,4 +1,4 @@
-//! `smelt.shell` — shell command splitting and interactive/background-operator validators.
+//! `smelt.shell` - shell command splitting and interactive/background-operator validators.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
@@ -21,7 +21,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
         };
         let base = bin.rsplit('/').next().unwrap_or(bin);
         if INTERACTIVE_BINS.contains(&base) {
-            return Some("Interactive commands (editors, REPLs, pagers) cannot run here — they require a terminal. If there is no non-interactive alternative, ask the user to run it themselves.");
+            return Some("Interactive commands (editors, REPLs, pagers) cannot run here - they require a terminal. If there is no non-interactive alternative, ask the user to run it themselves.");
         }
         if base == "git" {
             let has_interactive_flag = parts.iter().any(|p| *p == "-i" || *p == "--interactive");
@@ -29,7 +29,7 @@ fn check_interactive(command: &str) -> Option<&'static str> {
                 let has_interactive_subcmd =
                     parts.iter().any(|p| GIT_INTERACTIVE_SUBCMDS.contains(p));
                 if has_interactive_subcmd {
-                    return Some("Interactive git commands (rebase -i, add -i, etc.) cannot run here — they require a terminal. If there is no non-interactive alternative, ask the user to run it themselves.");
+                    return Some("Interactive git commands (rebase -i, add -i, etc.) cannot run here - they require a terminal. If there is no non-interactive alternative, ask the user to run it themselves.");
                 }
             }
         }

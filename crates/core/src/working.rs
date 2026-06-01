@@ -153,14 +153,14 @@ impl WorkingState {
 
     /// Whether the status bar currently displays a frame-by-frame
     /// animation (spinner glyph rotating, elapsed clock ticking).
-    /// `false` once a turn has completed — the archived result is
+    /// `false` once a turn has completed - the archived result is
     /// static text.
     pub fn is_animating(&self) -> bool {
         self.live.is_some()
     }
 
     /// Engine-only view of the live turn. Returns `None` when no live
-    /// turn is running — the caller layers the busy stack on top to
+    /// turn is running - the caller layers the busy stack on top to
     /// decide `Idle` / `Busy` / `Done` / `Interrupted`.
     pub fn engine_state(&self) -> Option<WorkState> {
         let live = self.live.as_ref()?;
@@ -218,7 +218,7 @@ impl WorkingState {
         }
     }
 
-    /// Elapsed time for the display — `since` for a live turn,
+    /// Elapsed time for the display - `since` for a live turn,
     /// archived `elapsed` otherwise. Live elapsed excludes time
     /// during which a blocking dialog paused the turn.
     pub fn elapsed(&self) -> Option<Duration> {
@@ -303,7 +303,7 @@ mod tests {
     use std::time::SystemTime;
 
     /// Build a `WorkingState` whose time advances only via `clock.advance`.
-    /// Returning the clock lets each test drive it directly — the determinism
+    /// Returning the clock lets each test drive it directly - the determinism
     /// property under test is "tick the clock, observe the state move."
     fn fixture() -> (Arc<VirtualClock>, WorkingState) {
         let clock = Arc::new(VirtualClock::new(Instant::now(), SystemTime::now()));
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn record_tokens_per_sec_only_applies_while_live() {
         let (_clock, mut s) = fixture();
-        s.record_tokens_per_sec(99.0); // dropped — no live turn
+        s.record_tokens_per_sec(99.0); // dropped - no live turn
         s.begin(TurnPhase::Working);
         s.record_tokens_per_sec(1.0);
         s.record_tokens_per_sec(3.0);

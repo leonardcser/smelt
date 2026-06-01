@@ -1,4 +1,4 @@
-//! `Block::Compacted` renderer — a hr-flanked label with the
+//! `Block::Compacted` renderer - a hr-flanked label with the
 //! summary text underneath, all dim.
 
 use smelt_core::content::builder::LineBuilder;

@@ -54,7 +54,7 @@ pub(crate) fn compute_input(
         // Parser already built lines and highlights. Just map selection and ghost text.
         let total_lines = buf.line_count();
 
-        // Map source selection to display selection via the shared helper —
+        // Map source selection to display selection via the shared helper -
         // same code path the transcript will eventually use.
         let pctx_ref = crate::input::PromptCtxRef { buf, win: inp.win };
         if let Some((start, end)) =

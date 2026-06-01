@@ -1,4 +1,4 @@
-//! `smelt.session` bindings — current session metadata, turn list,
+//! `smelt.session` bindings - current session metadata, turn list,
 //! messages snapshot, rewind, list / load / delete persisted sessions.
 
 use mlua::prelude::*;
@@ -414,7 +414,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "texts",
-        "Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions — the heavy IO happens on a worker pool rather than serializing on the Lua thread.",
+        "Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions - the heavy IO happens on a worker pool rather than serializing on the Lua thread.",
         &["ids"],
         |lua, ids: Vec<String>| -> LuaResult<mlua::Table> {
             let pairs = smelt_core::session::load_search_blobs(ids);

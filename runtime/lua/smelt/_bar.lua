@@ -2,7 +2,7 @@
 -- bottom bar), statusline priority-drop layout, and the
 -- traveling-wave color used by the working indicator.
 --
--- Internal — not part of the public API. `prompt_bar.lua` and
+-- Internal - not part of the public API. `prompt_bar.lua` and
 -- `statusline.lua` call into this; plugins that want a custom bar
 -- can replace these functions in their own renderer or copy them out.
 -- Human-readable formatters that used to live here (`format_duration`,
@@ -133,7 +133,7 @@ function M.compose_status(items, opts)
   local bg_group = opts.bg_group
   local sep_group = opts.sep_group
 
-  -- Defensive deep-clone — truncation mutates `text` and the caller's
+  -- Defensive deep-clone - truncation mutates `text` and the caller's
   -- items must stay intact across frames.
   local working = {}
   for i, it in ipairs(items) do

@@ -1,4 +1,4 @@
-//! `smelt.permissions` bindings — list current session + workspace
+//! `smelt.permissions` bindings - list current session + workspace
 //! rules, sync a Lua-built ruleset back through the App. Sits over
 //! `RuntimeApprovals` + [`crate::permissions::store`].
 

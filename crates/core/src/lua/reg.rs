@@ -1,4 +1,4 @@
-//! `smelt.Reg` — uniform registration handle.
+//! `smelt.Reg` - uniform registration handle.
 //!
 //! Every reactive-subscription API (`win:key`, `win:on`, `timer.set`,
 //! `timer.every`, `cell:subscribe`, `cell.glob`) returns a `Reg`. The

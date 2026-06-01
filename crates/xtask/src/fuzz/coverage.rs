@@ -1,4 +1,4 @@
-//! `cargo xtask fuzz coverage-snapshot [target...]` — per-target source-code
+//! `cargo xtask fuzz coverage-snapshot [target...]` - per-target source-code
 //! coverage snapshot. Runs each target against its on-disk corpus and writes
 //! a timestamped summary under `fuzz/coverage-history/`. With no args it
 //! snapshots every target that has a corpus.

@@ -246,7 +246,7 @@ mod tests {
         store.insert_image("b.png".into(), "data:image/png;base64,BBB".into());
         store.clear();
         assert!(store.get(id1).is_none(), "old ids are gone after clear");
-        // Re-inserting the same content gets id 1 again — counter was reset.
+        // Re-inserting the same content gets id 1 again - counter was reset.
         let new_id = store.insert_image("a.png".into(), "data:image/png;base64,AAA".into());
         assert_eq!(new_id, 1);
     }

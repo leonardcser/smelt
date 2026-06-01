@@ -2,7 +2,7 @@
 //!
 //! Reads the blessed `.snap` files under `crates/tui/tests/storybook/snapshots/`
 //! and renders each story's frame with its styles sidecar applied. No story
-//! re-execution — the snapshot files contain everything the user would see.
+//! re-execution - the snapshot files contain everything the user would see.
 //!
 //! All of the format knowledge lives in `smelt_term::SnapshotFrame`:
 //! `parse` reconstructs the captured frame losslessly (the `dim:` header
@@ -90,7 +90,7 @@ fn enumerate_stories() -> Vec<Story> {
     entries
 }
 
-/// Strip the insta YAML header from a `.snap` body — `insta`'s
+/// Strip the insta YAML header from a `.snap` body - `insta`'s
 /// concern, not the library's.
 fn read_snap_body(path: &Path) -> std::io::Result<String> {
     let raw = std::fs::read_to_string(path)?;
@@ -239,7 +239,7 @@ fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
 
     // Header.
     let header = format!(
-        "smelt storybook — {} stories across {} groups",
+        "smelt storybook - {} stories across {} groups",
         app.stories.len(),
         group_counts(&app.stories).len()
     );
@@ -349,7 +349,7 @@ fn run() -> std::io::Result<()> {
     let stories = enumerate_stories();
     if stories.is_empty() {
         eprintln!(
-            "no stories found under {} — run `cargo nextest run -p tui --test storybook_main` first.",
+            "no stories found under {} - run `cargo nextest run -p tui --test storybook_main` first.",
             snapshot_dir().display()
         );
         std::process::exit(1);

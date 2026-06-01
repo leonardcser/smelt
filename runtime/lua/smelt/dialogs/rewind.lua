@@ -18,7 +18,7 @@ smelt.cmd.register("rewind", function(args)
     local options_leaf = smelt.dialog.menu(items, {
       selected  = #items,
       -- The list often runs longer than nine items and rewinding is
-      -- destructive, so digits only move the cursor — Enter confirms.
+      -- destructive, so digits only move the cursor - Enter confirms.
       shortcuts = "select",
     })
 

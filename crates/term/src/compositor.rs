@@ -35,7 +35,7 @@ impl Compositor {
     }
 
     /// Render one frame. `paint` writes into `current`. The hardware caret
-    /// stays hidden for the lifetime of the app — any visible cursor is
+    /// stays hidden for the lifetime of the app - any visible cursor is
     /// painted into the grid as a styled cell, so it rides the diff atomically
     /// with the rest of the frame and can never flicker through the
     /// intermediate `MoveTo`s that `flush_diff` emits between cell runs.
@@ -90,7 +90,7 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
         let mut x = 0u16;
         while x < grid.width() {
             let cell = grid.cell(x, y);
-            // `\0` is a wide-char continuation slot — paint a space to
+            // `\0` is a wide-char continuation slot - paint a space to
             // keep the cursor in sync rather than emitting a literal NUL.
             let symbol = if cell.symbol == '\0' {
                 ' '

@@ -1,4 +1,4 @@
-//! `smelt.image` — image file detection and base64 data-URL loading.
+//! `smelt.image` - image file detection and base64 data-URL loading.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

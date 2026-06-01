@@ -24,7 +24,7 @@ pub enum Phase {
     /// Autoload has run and `init.lua` is being evaluated. Full `smelt`
     /// surface is available.
     Init = 1,
-    /// Steady state — the agent is running. Plugins added at this stage
+    /// Steady state - the agent is running. Plugins added at this stage
     /// (e.g. from a `/cmd` handler) execute the same way as `Init`.
     Running = 2,
 }
@@ -75,7 +75,7 @@ pub struct LuaShared {
     /// Send+Sync mirror of `commands`' key set. `commands` itself can't be
     /// shared off the main thread because `RegisteredCommand` carries a
     /// `LuaHandle`, but worker threads (e.g. parallel block layout) need
-    /// to ask "is `/foo` a known command?" — this is the answer.
+    /// to ask "is `/foo` a known command?" - this is the answer.
     pub command_names: Arc<Mutex<HashSet<String>>>,
     pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
     /// Lua-registered composer for the main TUI layout. When `Some`, the
@@ -95,7 +95,7 @@ pub struct LuaShared {
     /// Callbacks registered for `smelt.engine.ask`. Separate from
     /// `callbacks` so `fire_ask_callback` can't accidentally fire a
     /// paint/win/overlay handler that happens to share an id namespace
-    /// — the two maps allocate ids from the same `next_id` counter but
+    /// - the two maps allocate ids from the same `next_id` counter but
     /// each call_id only ever lands in one of them.
     pub ask_callbacks: Mutex<HashMap<u64, LuaHandle>>,
     pub next_id: AtomicU64,
@@ -124,7 +124,7 @@ pub struct LuaShared {
     /// to skip the matching `require()` calls. Names use the dotted module
     /// form, e.g. `"smelt.tools.web_search"`, `"smelt.commands.compact"`.
     pub disabled_modules: Mutex<HashSet<String>>,
-    /// `package.loaded` keys present right after `Lua::new()` — the
+    /// `package.loaded` keys present right after `Lua::new()` - the
     /// stdlib. `/reload` wipes everything outside this set.
     pub native_module_names: Mutex<HashSet<String>>,
     /// CLI flag specs registered from `early.lua` via `smelt.cli.register_flag`.
@@ -149,7 +149,7 @@ pub struct LuaShared {
     pub next_watcher_id: AtomicU64,
     /// Current boot phase. Phase-sensitive APIs use this to gate their
     /// behavior (refuse-when-late or warn-when-late). Defaults to `Early`
-    /// — the runtime promotes it to `Init` before autoload and `Running`
+    /// - the runtime promotes it to `Init` before autoload and `Running`
     /// once the agent loop is live.
     phase: AtomicU8,
 }
@@ -183,7 +183,7 @@ pub struct Hooks {
     /// Always uses `name = ""`.
     pub prepare_request: Arc<HookRegistry>,
     /// `smelt.lifecycle.on(event, fn)` registry. Unlike the other
-    /// surfaces this one uses `drain_for` semantics — the host takes
+    /// surfaces this one uses `drain_for` semantics - the host takes
     /// every hook matching the event name and clears them, so each
     /// hook fires at most once per launch. `name` is the event name
     /// (currently only `"ready"`).

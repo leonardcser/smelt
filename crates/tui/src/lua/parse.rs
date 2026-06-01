@@ -166,7 +166,7 @@ pub(crate) fn title(v: Option<mlua::Value>) -> Result<Option<Line<'static>>, Str
 /// - string `"min:N"` / `"max:N"` / `"pct:N"` / `"ratio:N/M"` →
 ///   matching variant; `"length:N"` / `"len:N"` are aliases of an
 ///   integer literal.
-/// - table `{ kind = "min", n = 5 }` etc. — long form.
+/// - table `{ kind = "min", n = 5 }` etc. - long form.
 pub(crate) fn constraint(v: Option<mlua::Value>, ctx: &str) -> Result<Constraint, String> {
     match v {
         None | Some(mlua::Value::Nil) => Ok(Constraint::Fill),
@@ -262,11 +262,11 @@ fn table_u16(t: &mlua::Table, key: &str, ctx: &str) -> Result<u16, String> {
 
 /// Parse a border spec from a table that may carry the `border` key:
 ///
-/// - `border = "single"` (default) / `"rounded"` / `"double"` — all four sides,
+/// - `border = "single"` (default) / `"rounded"` / `"double"` - all four sides,
 ///   default color.
-/// - `border = "none"` or `border = false` — no border at all.
-/// - `border = "top"` — single style, top edge only, default color.
-/// - `border = { style = "rounded", top = "accent", bottom = true }` — per-side
+/// - `border = "none"` or `border = false` - no border at all.
+/// - `border = "top"` - single style, top edge only, default color.
+/// - `border = { style = "rounded", top = "accent", bottom = true }` - per-side
 ///   table form. Each side key is `nil`/`false` (off), `true` (on, default
 ///   color), a theme-role string (on, fg = `theme.resolve(role)`), or a table
 ///   `{ color = "..." }`. `all = "..."` sugar applies to every side; per-side

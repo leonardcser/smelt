@@ -9,7 +9,7 @@
 
 local prompt = smelt.prompt.win()
 
-local SYSTEM = "Task: predict what the user will type next in the conversation below. Keep it short — one sentence max. If you cannot predict, reply with an empty string."
+local SYSTEM = "Task: predict what the user will type next in the conversation below. Keep it short - one sentence max. If you cannot predict, reply with an empty string."
 
 local function has_queued_messages()
   return #smelt.prompt.queued() > 0

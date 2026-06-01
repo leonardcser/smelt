@@ -1,4 +1,4 @@
-//! Generic hook registry — the storage and lifecycle pattern shared by
+//! Generic hook registry - the storage and lifecycle pattern shared by
 //! tool middleware (`smelt.tools.middleware`), provider middleware
 //! (`smelt.provider.middleware`), and any future "register a callback
 //! list" surface. Each registered hook gets a monotonic id from the
@@ -9,7 +9,7 @@
 //! Hooks are name-scoped: `name = ""` registers a wildcard that fires
 //! for every dispatched event; a non-empty name only fires when the
 //! caller-supplied filter matches exactly. The empty-string convention
-//! keeps the surface flat — there's no separate "global" vs
+//! keeps the surface flat - there's no separate "global" vs
 //! "per-target" registration; one API does both.
 
 use super::LuaHandle;
@@ -36,7 +36,7 @@ pub struct HookRegistry {
 }
 
 impl HookRegistry {
-    /// Allocate a fresh registry. `Default` works too — both forms exist
+    /// Allocate a fresh registry. `Default` works too - both forms exist
     /// so consumers can drop one in a `lazy_static`-style site without
     /// importing the trait.
     pub fn new() -> Self {
@@ -88,7 +88,7 @@ impl HookRegistry {
 
     /// Snapshot the Lua functions whose entry name is `""` or equals
     /// `name`, in registration order. Returns an owned vector so the
-    /// mutex is released before the caller invokes the functions —
+    /// mutex is released before the caller invokes the functions -
     /// preventing re-entrancy deadlocks when a hook reads back from the
     /// same registry. Entries stay registered for the next dispatch.
     pub fn snapshot_for(&self, lua: &Lua, name: &str) -> Vec<mlua::Function> {
@@ -142,7 +142,7 @@ impl HookRegistry {
 
     /// Walk every entry as `(id, name, &handle)`. Test harnesses use
     /// this to verify each registered handle still resolves in the
-    /// mlua registry after a forced GC — a `Nil` value means the
+    /// mlua registry after a forced GC - a `Nil` value means the
     /// handle was dropped without going through `remove`.
     pub fn for_each_entry(&self, mut f: impl FnMut(u64, &str, &LuaHandle)) {
         if let Ok(entries) = self.entries.lock() {

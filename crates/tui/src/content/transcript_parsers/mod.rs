@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn adjacent_text_blocks_gap() {
-        // Two consecutive text blocks — gap should be 1 (paragraph spacing).
+        // Two consecutive text blocks - gap should be 1 (paragraph spacing).
         let gap = gap_between(&text("a"), &text("b"));
         assert_eq!(gap, 1, "Text→Text gap = 1");
     }
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn thinking_summary_bold_must_have_content() {
-        // "****" is 4 chars — the `len() > 4` check rejects empty bold
+        // "****" is 4 chars - the `len() > 4` check rejects empty bold
         let (label, _) = thinking_summary("****");
         assert_eq!(label, "thinking");
     }

@@ -1,5 +1,5 @@
 //! Proc macros backing `smelt-core`'s `LuaOpts` and `LuaAlias`
-//! traits — see `crates/core/src/lua/lua_type.rs` for the trait
+//! traits - see `crates/core/src/lua/lua_type.rs` for the trait
 //! definitions and the doc registry that `gen-lua-docs` reads from.
 //!
 //! Both derives emit:
@@ -11,7 +11,7 @@
 //! - `mlua::FromLua` so the closure receives a fully decoded value.
 //!
 //! The `LuaType` impl pushes the decl into the doc registry the first
-//! time `lua_type()` runs — i.e. as soon as a `LuaMod::fn_` site
+//! time `lua_type()` runs - i.e. as soon as a `LuaMod::fn_` site
 //! references the type. No central "declare" step needed; declaration
 //! follows usage.
 
@@ -142,7 +142,7 @@ fn has_lua_path_flag(attrs: &[Attribute], key: &str) -> bool {
 
 /// Concatenate every `#[doc = "..."]` line on an item into a single
 /// string. Whitespace at the start of each line is trimmed and joined
-/// with spaces — keeps `--- ` Lua-comment output flat.
+/// with spaces - keeps `--- ` Lua-comment output flat.
 fn doc_string(attrs: &[Attribute]) -> String {
     let mut out = String::new();
     for attr in attrs {
@@ -235,12 +235,12 @@ fn expand_lua_opts(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 ));
             }
             let t = &f.ty;
-            // Inner V for `HashMap<String, V>` — used as the index-signature
+            // Inner V for `HashMap<String, V>` - used as the index-signature
             // value type in the LuaCATS render.
             let value_ty_expr = quote! {
                 <#t as ::smelt_core::lua::lua_type::LuaType>::lua_type()
             };
-            // Render as `[string]` in the LuaClassField table — the
+            // Render as `[string]` in the LuaClassField table - the
             // emitter treats this name as a LuaCATS index signature
             // (`---@field [string] V`).
             field_descs.push(quote! {
@@ -269,7 +269,7 @@ fn expand_lua_opts(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let lua_default = has_lua_default(&f.attrs);
         let inner_opt = unwrap_option(&f.ty);
         let optional = inner_opt.is_some() || lua_default;
-        // Inner type for Lua sig — strip the Option wrapper if present.
+        // Inner type for Lua sig - strip the Option wrapper if present.
         let lua_ty_expr = if let Some(inner) = inner_opt {
             quote! { <#inner as ::smelt_core::lua::lua_type::LuaType>::lua_type() }
         } else {

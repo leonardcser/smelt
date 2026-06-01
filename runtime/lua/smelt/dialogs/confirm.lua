@@ -183,7 +183,7 @@ function smelt.confirm.open(handle_id)
 
   -- Tab from the options leaf jumps focus into the reason input; Esc inside
   -- the reason input pops focus back to the options leaf (instead of
-  -- dismissing the dialog — that still works from the options leaf). Enter
+  -- dismissing the dialog - that still works from the options leaf). Enter
   -- in the reason input routes through the menu's submit path so the
   -- highlighted option still drives the decision. Scoping all three
   -- keymaps per-leaf means typing literal Tab/Esc/Enter characters in the

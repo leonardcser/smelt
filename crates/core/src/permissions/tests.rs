@@ -408,7 +408,7 @@ fn split_shell_commands_utf8_with_backslash() {
 
 #[test]
 fn split_shell_commands_utf8_in_subshell() {
-    // Subshell extraction with multi-byte chars — inner commands are appended.
+    // Subshell extraction with multi-byte chars - inner commands are appended.
     assert_eq!(
         split_shell_commands("echo $(echo ✿)"),
         vec!["echo $(echo ✿)", "echo ✿"]
@@ -642,7 +642,7 @@ fn double_quotes_inside_single() {
 
 #[test]
 fn escaped_quote_inside_double_quotes() {
-    // echo "he said \"hi\" && rm" is all one quoted string — single command
+    // echo "he said \"hi\" && rm" is all one quoted string - single command
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
         p.check_subcommand(normal(), "bash", r#"echo "he said \"hi\" && rm""#),
@@ -761,7 +761,7 @@ fn split_with_ops_preserves_operators() {
 
 #[test]
 fn trailing_backslash() {
-    // Trailing backslash with nothing after — should not panic
+    // Trailing backslash with nothing after - should not panic
     assert_eq!(split_shell_commands("ls \\"), vec!["ls \\"]);
 }
 
@@ -805,7 +805,7 @@ fn heredoc_with_pipe() {
 fn heredoc_permission_check() {
     let p = perms_with_bash(&["cat *", "grep *"], &[], &["rm *"]);
     let cmd = "cat << 'EOF' | grep foo\nrm -rf /\nEOF";
-    // "rm -rf /" is heredoc content, not a command — should not be denied
+    // "rm -rf /" is heredoc content, not a command - should not be denied
     assert_eq!(p.check_subcommand(normal(), "bash", cmd), Decision::Allow);
 }
 
@@ -1202,13 +1202,13 @@ fn dev_null_in_chain_not_escalated() {
 
 #[test]
 fn dev_null_mixed_with_real_redirect() {
-    // One redirect to /dev/null, but another to a real file — should escalate
+    // One redirect to /dev/null, but another to a real file - should escalate
     assert!(has_output_redirection("cmd 2>/dev/null > out.txt"));
 }
 
 #[test]
 fn dev_null_prefix_not_treated_as_dev_null() {
-    // `/dev/null-x` is a real file, not `/dev/null` — should escalate
+    // `/dev/null-x` is a real file, not `/dev/null` - should escalate
     assert!(has_output_redirection("echo hi > /dev/null-backup"));
 }
 
@@ -1679,7 +1679,7 @@ fn approvals_add_session_tool_stores_patterns_on_first_call() {
     rt.add_session_tool("bash", vec![pat("ls *"), pat("cat *")]);
     assert!(rt.has_pattern("bash", "ls *"));
     assert!(rt.has_pattern("bash", "cat *"));
-    // Blanket approval is NOT in effect — only patterns match.
+    // Blanket approval is NOT in effect - only patterns match.
     assert!(rt.is_approved("bash", "ls /tmp", None));
     assert!(!rt.is_approved("bash", "rm /tmp", None));
 }
@@ -1705,7 +1705,7 @@ fn approvals_add_session_tool_existing_blanket_beats_incoming_patterns() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", Vec::new());
     rt.add_session_tool("bash", vec![pat("ls *")]);
-    // Stays blanket — narrowing requires explicit clear.
+    // Stays blanket - narrowing requires explicit clear.
     assert!(rt.is_approved("bash", "anything goes", None));
 }
 

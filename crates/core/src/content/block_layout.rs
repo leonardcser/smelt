@@ -1,11 +1,11 @@
 //! Composable layout tree returned by a tool's `render` callback.
 //!
 //! Generic over the buffer payload so the same hierarchy serves two roles:
-//! - `BlockLayout<BufId>` (alias `LuaLayout`) — what the Lua hook returns; the
+//! - `BlockLayout<BufId>` (alias `LuaLayout`) - what the Lua hook returns; the
 //!   `Buf` leaf carries a buffer id the plugin rendered into via `smelt.buf` /
 //!   `smelt.diff.render`, and `Diff` / `FileView` leaves carry specs the worker
-//!   renders into its block buffer directly — no scratch buffer, no replay seam.
-//! - `BlockLayout<Box<Buffer>>` (alias `RenderedLayout`) — main-thread-extracted
+//!   renders into its block buffer directly - no scratch buffer, no replay seam.
+//! - `BlockLayout<Box<Buffer>>` (alias `RenderedLayout`) - main-thread-extracted
 //!   form. `Buf(id)` becomes `Buf(box)` (buffer destroyed out of `app.ui` and
 //!   owned outright); specs pass through verbatim. This survives a thread hop
 //!   to the parallel layout workers, which cannot touch `app.ui`.
@@ -26,7 +26,7 @@ pub struct DiffSpec {
 }
 
 /// File-view render directive (all-Context diff IR). Used by `write_file` and
-/// notebook insert mode — same renderer as `Diff`, single line-number column.
+/// notebook insert mode - same renderer as `Diff`, single line-number column.
 #[derive(Clone, Debug)]
 pub struct FileViewSpec {
     pub content: String,

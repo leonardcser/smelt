@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 
 /// Drain complete SSE events from `buf`. Strips processed lines; partial lines
 /// remain. `data:` lines are JSON-parsed; `[DONE]` markers and non-data lines
-/// are skipped. Pure — called repeatedly as new chunks arrive.
+/// are skipped. Pure - called repeatedly as new chunks arrive.
 pub(super) fn drain_sse_events(buf: &mut String) -> Vec<serde_json::Value> {
     let mut events = Vec::new();
     while let Some(pos) = buf.find('\n') {

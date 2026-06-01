@@ -1,4 +1,4 @@
-//! `Block::CodeLine` renderer — one streamed line of a fenced code block.
+//! `Block::CodeLine` renderer - one streamed line of a fenced code block.
 
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::render_code_block;

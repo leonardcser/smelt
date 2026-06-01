@@ -120,7 +120,7 @@ impl Cells {
         }
     }
 
-    /// Declare a cell. Idempotent — re-declaration resets the value and drops all subscribers.
+    /// Declare a cell. Idempotent - re-declaration resets the value and drops all subscribers.
     pub(crate) fn declare<T: Any + 'static>(&mut self, name: impl Into<String>, initial: T) {
         self.slots.insert(
             name.into(),
@@ -307,7 +307,7 @@ pub struct ToolEnd {
 pub struct ConfirmRequested {
     pub handle_id: u64,
     pub tool_name: String,
-    /// Styled summary — the sole source of truth for the dialog body header.
+    /// Styled summary - the sole source of truth for the dialog body header.
     pub summary: protocol::StyledLines,
     pub args: std::collections::HashMap<String, serde_json::Value>,
     pub outside_dir: Option<String>,
@@ -334,7 +334,7 @@ pub struct CursorPos {
 }
 
 /// Payload for the `stream_delta` cell. Emitted for every streaming
-/// chunk arriving from the provider — text, thinking, and tool-call
+/// chunk arriving from the provider - text, thinking, and tool-call
 /// argument JSON fragments. Use `bytes` for cheap counters (live TPS);
 /// `text` carries the raw delta. For `kind == "tool_args"`, `call_id`
 /// and `tool_name` identify which tool call the fragment belongs to.
@@ -356,7 +356,7 @@ pub struct StreamDelta {
 
 /// Built-in cell names declared by [`build_with_builtins`]. Surfaces in
 /// the `smelt.cell.Name` LuaCATS alias as IDE autocomplete hints.
-/// Keep in lockstep with the `cells.declare(...)` calls below — both
+/// Keep in lockstep with the `cells.declare(...)` calls below - both
 /// the assertion in `builtin_seeds_declare_every_cell` and
 /// `crates/core/src/lua/api/cell.rs` read from this list.
 pub const SEEDED_CELL_NAMES: &[&str] = &[
@@ -404,7 +404,7 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
 ];
 
 /// Project a `StyledLines` payload into the same shape Lua sees from
-/// `buf:styled` — a sequence of lines, each a sequence
+/// `buf:styled` - a sequence of lines, each a sequence
 /// of `{ text, syntax?, selectable?, title_suffix?, style? = { hl?, dim?, bold?, italic?, fg?, bg? } }`
 /// span tables. Empty lines come through as `{}`.
 fn styled_lines_to_lua(lua: &mlua::Lua, sl: &protocol::StyledLines) -> mlua::Value {
@@ -1106,7 +1106,7 @@ mod tests {
                 assert_eq!(t.get::<i64>("prompt_tokens").unwrap(), 1234);
                 assert_eq!(t.get::<i64>("context_tokens").unwrap(), 1690);
                 assert_eq!(t.get::<i64>("completion_tokens").unwrap(), 456);
-                // Absent fields surface as nil — not 0 — so plugins can
+                // Absent fields surface as nil - not 0 - so plugins can
                 // distinguish "no data" from "0 tokens".
                 assert!(matches!(
                     t.get::<mlua::Value>("reasoning_tokens").unwrap(),
@@ -1130,7 +1130,7 @@ mod tests {
             branch: String::new(),
         });
 
-        // Set typed payloads via set_dyn — Cells::project_to_lua keys
+        // Set typed payloads via set_dyn - Cells::project_to_lua keys
         // on the stored value's TypeId, so the typed projector takes
         // over even though the slot was declared with EventStub.
         let mut cells = cells;

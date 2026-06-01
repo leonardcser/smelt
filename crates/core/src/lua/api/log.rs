@@ -1,4 +1,4 @@
-//! `smelt.log` — structured JSONL log entries written to the rotating
+//! `smelt.log` - structured JSONL log entries written to the rotating
 //! engine log. Lua callers use this to emit machine-readable telemetry.
 //! Host-tier so bundled runtime code can log without a terminal UI.
 

@@ -1,11 +1,11 @@
 //! Doc-collection registry for Lua FFI bindings.
 //!
-//! [`super::module::LuaMod`] is the entry point — every Lua module
+//! [`super::module::LuaMod`] is the entry point - every Lua module
 //! constructs one and registers its functions via `.fn_(...)`. The
 //! LuaCATS signature is *derived* from the closure's argument-tuple
 //! and return types via [`super::lua_type::LuaType`] /
 //! [`super::lua_type::LuaTypeTuple`], so it can never drift from the
-//! actual mlua marshalling — drift becomes a compile error. The
+//! actual mlua marshalling - drift becomes a compile error. The
 //! module's tier (Host vs UiHost) surfaces in the generated nav and
 //! stub headers so plugin authors can tell at a glance which APIs
 //! are headless-safe.
@@ -24,7 +24,7 @@ use super::lua_type::{LuaAliasDecl, LuaClassDecl, LuaType, LuaTypeTuple};
 /// Which Lua-runtime tier a binding belongs to.
 ///
 /// `Host` bindings (`smelt.fs`, `smelt.http`, `smelt.cell`, …) live in
-/// `smelt-core` and work without a terminal UI — headless plugins can
+/// `smelt-core` and work without a terminal UI - headless plugins can
 /// call them. `UiHost` bindings (`smelt.win`, `smelt.theme`,
 /// `smelt.confirm`, …) live in the TUI crate and crash if invoked
 /// without an attached UI.

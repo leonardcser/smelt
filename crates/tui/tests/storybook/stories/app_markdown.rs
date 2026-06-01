@@ -10,7 +10,7 @@ use crate::app_story;
 
 app_story!(text_block_markdown_with_code_fence, |ctx| {
     // Fenced code blocks are rendered inside `Block::Text` via
-    // `render_markdown_inner` → `render_code_block` — syntax
+    // `render_markdown_inner` → `render_code_block` - syntax
     // highlighting in the snapshot proves the highlight pipeline is
     // wired end-to-end (not just inside the dialog diff renderer).
     ctx.set_viewport(60, 16);
@@ -61,7 +61,7 @@ app_story!(text_block_markdown_blockquote, |ctx| {
 });
 
 app_story!(text_block_markdown_table, |ctx| {
-    // Pipe-table runs through `render_markdown_table` — separate path
+    // Pipe-table runs through `render_markdown_table` - separate path
     // from regular line rendering, complete with alignment + borders.
     ctx.set_viewport(60, 12);
     ctx.engine(EngineEvent::Text {
@@ -165,7 +165,7 @@ app_story!(text_block_markdown_full_document, |ctx| {
             "- syntax highlighting in fenced code\n",
             "- ~~bug~~ fix: trailing newline in headings\n",
             "\n",
-            "> Heads up: the API changed in one place — see below.\n",
+            "> Heads up: the API changed in one place - see below.\n",
             "\n",
             "---\n",
             "\n",

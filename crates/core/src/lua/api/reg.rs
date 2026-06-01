@@ -1,4 +1,4 @@
-//! `smelt.reg` — construct `Reg` handles from Lua. Useful for plugin
+//! `smelt.reg` - construct `Reg` handles from Lua. Useful for plugin
 //! authors who compose several reactive subscriptions and want a single
 //! cancellation surface to return.
 

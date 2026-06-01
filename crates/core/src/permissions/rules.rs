@@ -115,7 +115,7 @@ fn build_tool_map(raw: &RawRuleSet) -> HashMap<String, Decision> {
     for name in &raw.ask {
         map.insert(name.clone(), Decision::Ask);
     }
-    // Deny wins — inserted last so it overwrites allow/ask
+    // Deny wins - inserted last so it overwrites allow/ask
     for name in &raw.deny {
         map.insert(name.clone(), Decision::Deny);
     }

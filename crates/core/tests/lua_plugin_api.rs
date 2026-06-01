@@ -6,7 +6,7 @@
 //! `smelt.fs.watch`, `smelt.fs.read_async`, `smelt.process.run`,
 //! cancellation behavior, …) end-to-end.
 //!
-//! Tests that need tokio (anything that goes through `tokio::spawn` —
+//! Tests that need tokio (anything that goes through `tokio::spawn` -
 //! `process.run`) use `#[tokio::test]`; everything else uses the
 //! plain `#[test]` form.
 
@@ -63,7 +63,7 @@ async fn pump_until_async(rt: &LuaRuntime, ms: u64, done: impl Fn(&LuaRuntime) -
 }
 
 /// Read a Lua global by name. Panics if the global is absent or the
-/// wrong type — keeps test bodies free of unwrap chains.
+/// wrong type - keeps test bodies free of unwrap chains.
 fn get_global<T: mlua::FromLua>(rt: &LuaRuntime, name: &str) -> T {
     rt.lua
         .globals()

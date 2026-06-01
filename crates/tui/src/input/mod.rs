@@ -135,7 +135,7 @@ impl PromptState {
 
     /// Selection range for rendering. Falls back to yank-flash so vim copy ops get the
     /// brief post-yank highlight (nvim's `vim.highlight.on_yank`).
-    /// Editing must use `selection_range` — the flash must never affect mutations.
+    /// Editing must use `selection_range` - the flash must never affect mutations.
     pub(crate) fn display_selection_range(
         &self,
         ctx: PromptCtxRef<'_>,
@@ -194,7 +194,7 @@ impl PromptState {
 
     pub(crate) fn set_vim_enabled(&mut self, win: &mut crate::smelt_term::Window, enabled: bool) {
         win.set_vim_enabled(enabled);
-        // Prompt is the only writable vim surface — land in Insert when vim
+        // Prompt is the only writable vim surface - land in Insert when vim
         // turns on so typing works immediately. The global `VimMode` default
         // is Normal (right for transcript / read-only overlays); the prompt
         // overrides here.
@@ -234,7 +234,7 @@ impl PromptState {
     /// selection + vim visual anchors.
     ///
     /// Passing `ids = vec![]` with marker-containing text trips the debug
-    /// assert — exactly what you want, since the caller would otherwise be
+    /// assert - exactly what you want, since the caller would otherwise be
     /// silently dropping attachment ids while leaving their markers in
     /// source. Callers that need to preserve attachments hand the
     /// corresponding `Vec<AttachmentId>` in; those that genuinely want a
@@ -265,7 +265,7 @@ impl PromptState {
     ///
     /// Intended for callers feeding text from outside the prompt: Lua
     /// `smelt.prompt.set_text`, placeholder accept, `$EDITOR` re-import.
-    /// Any `ATTACHMENT_MARKER` bytes in `text` are stripped — these
+    /// Any `ATTACHMENT_MARKER` bytes in `text` are stripped - these
     /// callers can't carry attachment ids, so the markers would be
     /// orphaned (and trip the marker/id invariant in
     /// `AttachedTextMut::install`).
@@ -297,7 +297,7 @@ impl PromptState {
 
     /// Prepend `prefix` to the buffer, snapshot undo, shift cpos forward.
     /// Existing source bytes (including ATTACHMENT_MARKERs) and their
-    /// `attachment_ids` are preserved — unlike `replace_text`, which wipes
+    /// `attachment_ids` are preserved - unlike `replace_text`, which wipes
     /// attachments by assuming the new text fully supplants the old.
     pub(crate) fn prepend_text(&mut self, ctx: &mut PromptCtx<'_>, prefix: String) {
         if prefix.is_empty() {
@@ -800,7 +800,7 @@ impl PromptState {
             // ── Page motion ─────────────────────────────────────────────
             // The prompt is a single edit buffer; page motion clamps to its
             // bounds. Used in vim Normal (Ctrl-B/F/U/D/Y/E) and emacs
-            // (Ctrl-V/Alt-V) — both surface through the shared keymap.
+            // (Ctrl-V/Alt-V) - both surface through the shared keymap.
             KeyAction::PageUp => {
                 self.scroll_lines(ctx, -(content::term_height() as isize));
                 Action::Redraw
@@ -857,7 +857,7 @@ impl PromptState {
             }
             KeyAction::ClipboardImage => {
                 // Bracketed-paste terminals forward Cmd+V as `Event::Paste`, bypassing this arm.
-                // Terminals with bracketed paste off send it as a key — handle both paths.
+                // Terminals with bracketed paste off send it as a key - handle both paths.
                 if let Some(url) = clipboard_image_to_data_url() {
                     self.save_undo(ctx);
                     self.insert_image(ctx, "clipboard.png".into(), url);
@@ -1109,13 +1109,13 @@ fn clipboard_image_to_data_url() -> Option<String> {
 /// Result of pressing Esc during agent processing.
 #[derive(Debug, PartialEq)]
 pub(crate) enum EscAction {
-    /// Vim was in insert mode — switch to normal, double-Esc timer started.
+    /// Vim was in insert mode - switch to normal, double-Esc timer started.
     VimToNormal,
     /// Unqueue messages back into the input buffer.
     Unqueue,
     /// Double-Esc cancel. Contains the vim mode to restore (if vim enabled).
     Cancel { restore_vim: Option<VimMode> },
-    /// First Esc in normal/no-vim mode — timer started.
+    /// First Esc in normal/no-vim mode - timer started.
     StartTimer,
 }
 
@@ -2197,7 +2197,7 @@ mod tests {
         input.win.cpos = 0;
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectRight, crate::smelt_term::VimMode::Insert);
-        // Should select "hé" — 2 chars but 3 bytes.
+        // Should select "hé" - 2 chars but 3 bytes.
         assert_eq!(input.win.cpos, 3); // byte offset of 'l'
         assert_eq!(
             input.state.selection_range(PromptCtxRef {
@@ -2225,7 +2225,7 @@ mod tests {
             }),
             Some((3, 5))
         );
-        // Then select left 4 chars — anchor stays at 3.
+        // Then select left 4 chars - anchor stays at 3.
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
         input.test_action(KeyAction::SelectLeft, crate::smelt_term::VimMode::Insert);
@@ -2264,7 +2264,7 @@ mod tests {
                 win: &input.win
             })
             .is_some());
-        // Press Esc — vim switches to normal mode AND clears selection.
+        // Press Esc - vim switches to normal mode AND clears selection.
         let esc = Event::Key(KeyEvent {
             code: KeyCode::Esc,
             modifiers: KeyModifiers::empty(),
@@ -2313,7 +2313,7 @@ mod tests {
             .unwrap()
             .insert_image("img.png".into(), "data:image/png;base64,AAA".into());
         input.buf.attachment_ids.push(id);
-        // Select "b<marker>c" (bytes 1..5 — marker is 3 bytes).
+        // Select "b<marker>c" (bytes 1..5 - marker is 3 bytes).
         input.win.selection_anchor = Some(1);
         input.win.cpos = 1 + 1 + ATTACHMENT_MARKER.len_utf8() + 1;
         assert!(input

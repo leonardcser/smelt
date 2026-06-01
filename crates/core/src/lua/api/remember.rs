@@ -1,4 +1,4 @@
-//! `smelt.remember` — per-key opt-in to last-used recall on launch.
+//! `smelt.remember` - per-key opt-in to last-used recall on launch.
 //!
 //! `smelt.remember({ model, mode, reasoning_effort })` flips whether
 //! each pick survives across restarts. Every field defaults to `true`.

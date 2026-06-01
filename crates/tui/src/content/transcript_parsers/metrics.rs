@@ -2,7 +2,7 @@
 //! per-block renderers. Every block keeps its leftmost column inside a
 //! shared budget so a `Text → CodeLine → Tool` transition doesn't step.
 //!
-//! The numbers are intentionally small and untyped — they describe terminal
+//! The numbers are intentionally small and untyped - they describe terminal
 //! cell counts, not byte lengths.
 
 /// Cells reserved on the left of every non-chrome block (thinking, tool

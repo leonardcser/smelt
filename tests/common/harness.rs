@@ -143,8 +143,8 @@ impl Harness {
     /// Drain captured `POST /messages` request bodies the wiremock saw
     /// during this run. Bodies are parsed as JSON; entries that fail to
     /// parse (binary, malformed) are dropped silently. Useful for
-    /// asserting on what we *sent* — `cache_control` markers,
-    /// `prompt_cache_key`, tool ordering — not just what we received.
+    /// asserting on what we *sent* - `cache_control` markers,
+    /// `prompt_cache_key`, tool ordering - not just what we received.
     pub async fn captured_request_bodies(&self) -> Vec<Value> {
         self.mock
             .received_requests()

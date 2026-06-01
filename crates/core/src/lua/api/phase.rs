@@ -1,4 +1,4 @@
-//! `smelt.phase` — query the current boot phase.
+//! `smelt.phase` - query the current boot phase.
 //!
 //! Returns one of `"early"`, `"init"`, `"running"`. Plugins use this to
 //! branch behavior or assert preconditions:

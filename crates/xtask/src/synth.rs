@@ -1,4 +1,4 @@
-//! `cargo xtask synth` — generate a synthetic session for perf testing.
+//! `cargo xtask synth` - generate a synthetic session for perf testing.
 //!
 //! Writes a session with `--turns` (user, assistant) message pairs to
 //! `<state>/sessions/<id>/`, then prints the new session id. Resume it via
@@ -66,12 +66,12 @@ fn generate(turns: usize, words: usize, title: Option<String>) {
     let stamp = session.id.clone();
     session.title =
         Some(title.unwrap_or_else(|| format!("synth fixture · {turns} turns × {words} words")));
-    session.first_user_message = Some("synth turn 1 — describe topic 1".to_string());
+    session.first_user_message = Some("synth turn 1 - describe topic 1".to_string());
     session.slug = Some("synth".into());
     session.model = Some("synth/local".into());
 
     for i in 1..=turns {
-        let user_text = format!("synth turn {i} — describe topic {i}");
+        let user_text = format!("synth turn {i} - describe topic {i}");
         session
             .history
             .push(protocol::HistoryItem::user(Content::text(user_text)));

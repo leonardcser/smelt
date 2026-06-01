@@ -20,7 +20,7 @@ pub struct DrawContext {
     pub terminal_width: u16,
     pub terminal_height: u16,
     /// Whether keyboard focus is on this leaf. Drives focus-only paint decisions
-    /// (e.g. some highlight groups). Independent of cursor ownership — a leaf
+    /// (e.g. some highlight groups). Independent of cursor ownership - a leaf
     /// can be focused without owning the cursor (e.g. while a drag on another
     /// leaf has captured it) or vice versa.
     pub focused: bool,
@@ -199,11 +199,11 @@ pub struct SplitConfig {
 }
 
 /// How the focused window's cursor renders (single global on `Ui`).
-/// `Hidden` — no cursor. `Block { glyph, style, pos }` — paint a cell at `pos`
+/// `Hidden` - no cursor. `Block { glyph, style, pos }` - paint a cell at `pos`
 /// when set, else at the window-derived `(cursor_col, cursor_row - scroll_top)`.
 /// `pos` is the host's projected (screen-relative) `(col, row)` override for
 /// panes that wrap or format their buffer before paint (transcript, prompt).
-/// The terminal's hardware caret is hidden for the lifetime of the app —
+/// The terminal's hardware caret is hidden for the lifetime of the app -
 /// every cursor we show is painted into the grid as a styled cell, which keeps
 /// large redraws atomic with the rest of the frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -237,7 +237,7 @@ pub struct Window {
     pub focusable: bool,
     /// Caret-style cursorline: paints `CursorLine` bg on the cursor row
     /// **only when this window is focused**. Models Neovim's `'cursorline'`
-    /// — the cursor lives in this window, this is where it is. Off by
+    /// - the cursor lives in this window, this is where it is. Off by
     /// default. Set on caret leaves (transcript, code/diff viewers) where
     /// an unfocused sibling pane should not show a stale cursor row.
     pub cursor_line: bool,
@@ -271,7 +271,7 @@ pub struct Window {
     /// Preferred display column for vertical motion; measured in terminal cells.
     pub curswant: Option<usize>,
     pub scroll_top: RowIndex,
-    /// Logical anchor for `scroll_top` — `(changedtick, logical_row, byte_offset)`
+    /// Logical anchor for `scroll_top` - `(changedtick, logical_row, byte_offset)`
     /// of the chunk that was at the top of the viewport when scroll was last
     /// set. Restored after a width/wrap-driven layout rebuild so resize keeps
     /// the same logical row anchored at the top instead of letting the
@@ -415,7 +415,7 @@ impl Window {
             }
         }
         // Snapshot the cursor's distance from `scroll_top` before rebuild.
-        // Only meaningful when the layout matches the buffer — otherwise
+        // Only meaningful when the layout matches the buffer - otherwise
         // `cursor_row` was computed against a stale layout. Buffers replaced
         // under us mid-frame (transcript projection) reach this point with a
         // mismatched tick and skip the snapshot here; the render loop takes
@@ -429,7 +429,7 @@ impl Window {
         };
         self.layout = WrappedLayout::from_buffer(buf, width, self.wrap);
         self.layout_key = Some(key);
-        // Restore the logical anchor only on width/wrap changes — a content
+        // Restore the logical anchor only on width/wrap changes - a content
         // change (changedtick bump) shouldn't move the viewport behind the
         // user's back, and the anchor's `(lrow, byte)` may no longer reference
         // the same content.
@@ -482,7 +482,7 @@ impl Window {
     /// layout. Called after a width/wrap rebuild in `ensure_layout`. Skips
     /// when no anchor is set, when `follow_tail` is active (sentinel wins),
     /// when the buffer's content was replaced since the anchor was stamped
-    /// (changedtick mismatch — the (lrow, byte) is no longer meaningful), or
+    /// (changedtick mismatch - the (lrow, byte) is no longer meaningful), or
     /// when the anchor row no longer exists in the buffer.
     fn restore_scroll_from_anchor(&mut self, buf: &Buffer) {
         if self.follow_tail {
@@ -503,7 +503,7 @@ impl Window {
     }
 
     /// Reposition the cursor so it sits at `scroll_top + screen_row` in the
-    /// current layout — used after a layout/scroll restore so the cursor
+    /// current layout - used after a layout/scroll restore so the cursor
     /// stays visually fixed relative to the viewport instead of drifting
     /// off-screen as reflow shifts visual rows. Reassigns `cpos` to whatever
     /// byte lands at that visual row using `curswant` as the column target.
@@ -523,7 +523,7 @@ impl Window {
     }
 
     /// `true` when `self.layout` was built against `buf`'s current
-    /// `changedtick`. Row count alone isn't enough — a row whose text shrank in
+    /// `changedtick`. Row count alone isn't enough - a row whose text shrank in
     /// place (e.g. transcript reset, prompt clear) keeps the row count but
     /// invalidates the cached chunk byte offsets, so slicing the layout's
     /// chunks against the fresh `lines` panics. Callers that haven't run
@@ -681,7 +681,7 @@ impl Window {
     }
 
     /// Screen row (relative to the viewport top) where the cursor should render.
-    /// `None` when the buffer cursor lies outside the viewport — the renderer must
+    /// `None` when the buffer cursor lies outside the viewport - the renderer must
     /// suppress the cursor in that case.
     pub fn cursor_screen_row(&self, viewport_rows: u16) -> Option<u16> {
         self.cursor_screen_row_at(self.scroll_top, viewport_rows)
@@ -745,7 +745,7 @@ impl Window {
     /// Re-derive `cursor_row` / `cursor_col` from the persisted `cpos` using the
     /// buffer's display mapping. The prompt layer calls this after a buffer
     /// mutation has moved `cpos` but no scroll/recenter decision has been made
-    /// yet — it owns its own `keep_cursor_visible` vs `recenter` choice.
+    /// yet - it owns its own `keep_cursor_visible` vs `recenter` choice.
     pub fn resync_display_coords(&mut self, buf: &Buffer) {
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
@@ -755,7 +755,7 @@ impl Window {
     /// Place the logical cursor at line `row`, column 0, writing `cpos` so all
     /// downstream readers (renderer's `effective_endpoint`, selection paint,
     /// copy_range) see the same position. Used by list leaves where j/k
-    /// navigation owns the logical cursor — keeping `cpos` in sync means the
+    /// navigation owns the logical cursor - keeping `cpos` in sync means the
     /// global active-cursor machinery paints the block on the correct row when
     /// this leaf takes the cursor (e.g. when focus lands here, or when a drag
     /// ends here).
@@ -804,7 +804,7 @@ impl Window {
     }
 
     /// Resolve the shift-selection range against `src`. Both endpoints are clamped to
-    /// `src.len()` and snapped to char boundaries — a stale anchor that survived a
+    /// `src.len()` and snapped to char boundaries - a stale anchor that survived a
     /// source mutation degrades to `None` instead of producing an out-of-bounds slice.
     pub fn selection_range_at(&self, cpos: usize, src: &str) -> Option<(usize, usize)> {
         let a = text::snap(src, self.selection_anchor?);
@@ -1088,7 +1088,7 @@ impl Window {
 
     /// Pan `scroll_top` and `scroll_left` so the cursor stays inside the
     /// viewport on both axes. Zero on either dimension treats that axis as
-    /// "no viewport yet" and skips it — the host's `pending_scroll_to_cursor`
+    /// "no viewport yet" and skips it - the host's `pending_scroll_to_cursor`
     /// retries once real dimensions land. Horizontal bounds come from the
     /// cached layout's widest visual row; vertical bounds use the caller-
     /// supplied `total_rows` so wrap-aware paths pass `visual_row_total` and
@@ -1331,7 +1331,7 @@ impl Window {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         // Commit-or-discard the drag endpoint. A "caret leaf" is any focusable,
-        // non-list-style window — its `cpos` is the visible cursor, so a click
+        // non-list-style window - its `cpos` is the visible cursor, so a click
         // should park the caret at the release byte. List leaves (`mouse_scroll`,
         // selection driven by an index) and non-focusable surfaces (notifications)
         // skip the commit: their `cpos` either has no visible meaning or is
@@ -1502,7 +1502,7 @@ impl Window {
                 self.recenter_on_cursor(buf, total_rows, viewport_rows);
                 self.keep_cursor_visible(buf, total_rows, 0, viewport_cols);
             }
-            // `zh`/`zl` pan the horizontal viewport without moving the cursor —
+            // `zh`/`zl` pan the horizontal viewport without moving the cursor -
             // the cursor is allowed to scroll off-screen, matching nvim.
             Action::PanColumns(delta) => {
                 self.pan_by_columns(delta, viewport_cols);
@@ -1550,11 +1550,11 @@ impl Window {
     /// clamped to `[0, max_row_width - viewport_cols]`. The cursor's source-row
     /// column is unchanged; if it would land off-viewport after the pan, the
     /// caller is responsible for tugging it back (vim `zh/zl` keeps the cursor
-    /// where it is by design — same as nvim).
+    /// where it is by design - same as nvim).
     ///
     /// Assumes `ensure_layout` ran this frame; otherwise `max_row_width` is
     /// stale. The host's prep pass guarantees that for any window with a live
-    /// viewport — tests that bypass the prep pass should call `ensure_layout`
+    /// viewport - tests that bypass the prep pass should call `ensure_layout`
     /// themselves before calling this.
     pub fn pan_by_columns(&mut self, delta: isize, viewport_cols: u16) {
         if viewport_cols == 0 || delta == 0 {
@@ -1569,7 +1569,7 @@ impl Window {
     /// moves `drag_endpoint` to sit on the new leading edge of the viewport at
     /// the drag's current visual column, so the selection grows by one row per
     /// tick and the endpoint stays parked at the trigger edge for the next
-    /// poll. `cpos` is untouched — mouse-up commits the final endpoint.
+    /// poll. `cpos` is untouched - mouse-up commits the final endpoint.
     /// Returns `true` when the viewport actually moved.
     pub fn drag_autoscroll_step(&mut self, buf: &Buffer, viewport_rows: u16, delta: isize) -> bool {
         if delta == 0 || viewport_rows == 0 {
@@ -1658,7 +1658,7 @@ impl Window {
         self.follow_tail = new_scroll >= max_scroll;
     }
 
-    /// One-shot positioning. Leaves `follow_tail` alone — callers that want
+    /// One-shot positioning. Leaves `follow_tail` alone - callers that want
     /// tail-follow re-engagement (transcript `<C-End>`) call `scroll_to_bottom`
     /// instead; non-streaming surfaces (pickers, dialog lists) get to stay at
     /// their default `false` even when the cursor lands on the last row.
@@ -1784,7 +1784,7 @@ impl Window {
                 selection_owned = self.auto_selection_ranges(buf, ctx.vim_mode);
                 &selection_owned[..]
             };
-        // Reused per-row scratch — avoids `height` allocations of each Vec.
+        // Reused per-row scratch - avoids `height` allocations of each Vec.
         let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
         let mut line_chars: Vec<char> = Vec::with_capacity(content_width as usize);
         let mut spans_buf: Vec<smelt_buffer::buffer::Span> = Vec::new();
@@ -1878,7 +1878,7 @@ impl Window {
             //
             // `to_viewport_col` translates a span/selection column (in source-row
             // cell space, after chunk_cell_offset for wrapped continuations) into
-            // the viewport's cell space — clamped so out-of-view spans collapse
+            // the viewport's cell space - clamped so out-of-view spans collapse
             // to a no-op range rather than panicking on subtraction.
             let scroll_left = self.scroll_left;
             let to_viewport_col = |source: u16| -> u16 {
@@ -1948,7 +1948,7 @@ impl Window {
             // Selection painting: after highlights (wins over base) but before virt-text.
             // Mask out cells under `selectable = false` spans so chrome (e.g. inline
             // gutter, line-number column) doesn't receive the Visual bg. Skip the mask
-            // when the row has only chrome and no selectable cells — the virtual
+            // when the row has only chrome and no selectable cells - the virtual
             // selection span placed after the chrome by `selection_to_row_ranges` will
             // paint there, keeping multi-line selections visually continuous without
             // highlighting the chrome itself.
@@ -2033,7 +2033,7 @@ impl Window {
         }
 
         // `ctx.cursor_shape == Block` reaches this leaf only when it is the
-        // `Ui::active_cursor_leaf` for the frame (drag-active leaf, else focus) —
+        // `Ui::active_cursor_leaf` for the frame (drag-active leaf, else focus) -
         // exactly one leaf paints a block per frame. Position derives from
         // `effective_endpoint`: `drag_endpoint` during a drag (so the cursor tracks
         // the mouse, even on non-focusable leaves like notifications), `cpos`
@@ -2044,7 +2044,7 @@ impl Window {
                 let (row, col) = self.cursor_visual(buf, end);
                 // Snap visual cursor past chrome spans (e.g. inline gutter) so the
                 // caret never paints inside non-selectable cells. Logical row is
-                // resolved via the layout — when the layout doesn't match, fall
+                // resolved via the layout - when the layout doesn't match, fall
                 // back to identity (vrow == logical).
                 let logical_row = self
                     .layout
@@ -2087,7 +2087,7 @@ fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
 
 /// Advance `col` past any leading non-selectable (chrome) spans on `logical_row`.
 /// Used by cursor positioning so the caret never lands inside an inline gutter
-/// or other chrome — caller-supplied col is clamped forward to the first
+/// or other chrome - caller-supplied col is clamped forward to the first
 /// selectable cell, repeated until no chrome span covers it. If advancing
 /// would carry the cursor past every selectable cell on the row (e.g. click in
 /// a trailing bg pad, or an all-chrome user-block padding row), clamp back to
@@ -2295,7 +2295,7 @@ mod tests {
         w.ensure_layout(&buf, 10);
         // Mutate the line in place to empty (e.g. prompt clear after submit).
         buf.set_all_lines(vec![String::new()]);
-        // No new `ensure_layout` yet — must not panic.
+        // No new `ensure_layout` yet - must not panic.
         let _ = w.cursor_visual(&buf, 0);
     }
 
@@ -2482,7 +2482,7 @@ mod tests {
     #[test]
     fn pan_by_columns_pans_viewport_without_moving_cursor() {
         // `zh`/`zl` and wheel-horizontal: pan the column viewport without
-        // touching cpos. The cursor can scroll off-screen — that's what the
+        // touching cpos. The cursor can scroll off-screen - that's what the
         // bindings are for.
         let mut w = make_win();
         let row = "x".repeat(100);
@@ -2655,7 +2655,7 @@ mod tests {
         );
         assert_eq!(r, Status::Capture);
         assert!(yank.is_none());
-        // Non-vim Down does not write `cpos` — it stashes the click byte in
+        // Non-vim Down does not write `cpos` - it stashes the click byte in
         // `pending_press` and parks it in `drag_endpoint` for visual feedback.
         // `cpos` is committed only on Up, and only for caret leaves.
         assert_eq!(w.cpos, 0);
@@ -2875,7 +2875,7 @@ mod tests {
 
     #[test]
     fn render_skips_cursor_highlight_without_opt_in() {
-        // Both `cursor_line` and `selection_highlight` default to false —
+        // Both `cursor_line` and `selection_highlight` default to false -
         // focused content viewers (transcript, /help, /btw) stay clean.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
@@ -2922,9 +2922,9 @@ mod tests {
         assert_eq!(grid.cell(2, 0).symbol, 'c');
         assert!(grid.cell(2, 0).style.dim);
         assert!(grid.cell(4, 0).style.dim);
-        // Cell at col 5 is the exclusive end — not dim.
+        // Cell at col 5 is the exclusive end - not dim.
         assert!(!grid.cell(5, 0).style.dim);
-        // Cell before the span — not dim.
+        // Cell before the span - not dim.
         assert!(!grid.cell(1, 0).style.dim);
     }
 
@@ -3000,7 +3000,7 @@ mod tests {
     #[test]
     fn render_paints_selection_highlight_unfocused() {
         // List-shaped windows (`selection_highlight = true`) keep selection
-        // painted regardless of focus — picker overlays may be driven by an
+        // painted regardless of focus - picker overlays may be driven by an
         // external input yet still need to show the selected row.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["alpha".into(), "bravo".into()]);
@@ -3025,7 +3025,7 @@ mod tests {
 
     #[test]
     fn render_paints_virt_text_after_line_content() {
-        // Set virt_text at col=2 ("hi") on row 0 — paints over the
+        // Set virt_text at col=2 ("hi") on row 0 - paints over the
         // cells starting at col 2 with the virt_text characters.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
@@ -3175,7 +3175,7 @@ mod tests {
         // The render dispatch (`Ui::render_with_paints`) sets `cursor_shape` to
         // `Hidden` on every leaf that isn't `Ui::active_cursor_leaf`, so exactly
         // one leaf paints a block per frame. `Window::render` trusts that gate
-        // and paints if-and-only-if it receives a `Block` shape — the previous
+        // and paints if-and-only-if it receives a `Block` shape - the previous
         // `ctx.focused` guard was redundant.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["abc".into()]);
@@ -3297,7 +3297,7 @@ mod tests {
     #[test]
     fn mouse_single_click_without_drag_yields_no_selection() {
         // Down-then-Up with no Drag in between must leave no selection,
-        // no Visual mode, and no clipboard yank — only the cursor moved.
+        // no Visual mode, and no clipboard yank - only the cursor moved.
         let mut w = make_win();
         w.set_vim_mode(VimMode::Normal);
         w.vim_enabled = true;
@@ -3362,7 +3362,7 @@ mod tests {
 
     #[test]
     fn mouse_drag_release_stamps_curswant_at_endpoint_col() {
-        // Drag from col 0 to col 7 — curswant must follow the endpoint, not
+        // Drag from col 0 to col 7 - curswant must follow the endpoint, not
         // stay at the drag start.
         let mut w = make_win();
         w.set_vim_mode(VimMode::Normal);
@@ -3434,7 +3434,7 @@ mod tests {
         assert_eq!(r, Status::Consumed);
         assert!(yank.is_none());
 
-        // Up — selected text "hello wo" is returned
+        // Up - selected text "hello wo" is returned
         let ctx = MouseCtx {
             soft_breaks: &[],
             hard_breaks: &hard_breaks(&rows),
@@ -3699,7 +3699,7 @@ mod tests {
     #[test]
     fn snap_col_past_chrome_clamps_trailing_pad_to_selectable_edge() {
         // Click in a user-block trailing bg pad (chrome past the content) must
-        // not push the cursor to layout_width — that would pan the viewport
+        // not push the cursor to layout_width - that would pan the viewport
         // horizontally to the row's right edge. Clamp to the last selectable
         // col_end instead.
         let mut buf = make_buf(vec![" hello                          ".into()]);
@@ -3882,10 +3882,10 @@ mod tests {
     fn scroll_anchor_restored_after_width_change() {
         // Build a wrapped buffer where each row wraps into 4 visual rows at
         // width=5, and 2 visual rows at width=10. With cursor at the top,
-        // scroll to visual row 8 — that's logical row 2 at width=5. After
+        // scroll to visual row 8 - that's logical row 2 at width=5. After
         // narrowing width to nothing (rebuild only), then widening to 10, the
         // anchor must restore scroll_top to the visual row that contains
-        // logical row 2 at the new width — visual row 4.
+        // logical row 2 at the new width - visual row 4.
         let mut w = make_win();
         w.wrap = true;
         let rows = vec![
@@ -3927,7 +3927,7 @@ mod tests {
 
         w.ensure_layout(&buf, 5);
         w.set_scroll(8, &buf);
-        // Place cursor 3 visual rows below scroll_top — logical row 2,
+        // Place cursor 3 visual rows below scroll_top - logical row 2,
         // chunk 3.
         w.cpos = buf.byte_at_display_pos(2, 15);
         let (r, c) = w.cursor_visual(&buf, w.cpos);
@@ -3945,7 +3945,7 @@ mod tests {
 
     #[test]
     fn scroll_anchor_skipped_on_changedtick_bump() {
-        // Content change (changedtick bump) must invalidate the anchor — the
+        // Content change (changedtick bump) must invalidate the anchor - the
         // (lrow, byte) no longer references the same content, so silently
         // restoring would teleport the viewport.
         let mut w = make_win();
@@ -3955,7 +3955,7 @@ mod tests {
         w.set_scroll(2, &buf);
         assert!(w.scroll_anchor.is_some());
 
-        // Replace buffer content in place — bumps changedtick.
+        // Replace buffer content in place - bumps changedtick.
         buf.set_all_lines(vec!["x".into(); 5]);
         w.ensure_layout(&buf, 10);
         // Anchor cleared because changedtick mismatched.

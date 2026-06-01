@@ -18,7 +18,7 @@ pub(crate) struct ExecHandle {
 ///
 /// The dispatcher's call site treats `Shell` specially (spawn a child) and
 /// `Slash` as a registered command invocation. `Bare` is plain text that the
-/// user typed without a sigil — it is NOT dispatched as a command, even if
+/// user typed without a sigil - it is NOT dispatched as a command, even if
 /// its first word matches a registered name; the caller hands it to the
 /// agent as a normal user message.
 #[derive(Debug, PartialEq, Eq)]
@@ -66,7 +66,7 @@ pub(crate) fn parse_command_line(line: &str) -> ParsedCommand<'_> {
 
 /// Dispatch a raw command line. `!` lines spawn a shell escape; `/` and `:`
 /// dispatch to a Lua-registered handler. Bare text (no sigil) is never
-/// dispatched — it is left for the caller to forward to the agent.
+/// dispatched - it is left for the caller to forward to the agent.
 pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     let _perf = smelt_perf::perf::begin("cmd:dispatch");
     let (name, arg) = match parse_command_line(line) {
@@ -122,7 +122,7 @@ impl TuiApp {
     pub(crate) fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
         let is_from_paste = self.input.skip_shell_escape();
 
-        // Shell escape — `! cmd` (skipped while pasting).
+        // Shell escape - `! cmd` (skipped while pasting).
         if input.starts_with('!') && !is_from_paste {
             return match run_command(self, input) {
                 CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn bare_name_without_a_sigil_parses_as_bare_text() {
         // Without a leading `/` or `:`, the line is plain text headed for
-        // the agent — even if its first word matches a registered command.
+        // the agent - even if its first word matches a registered command.
         assert_eq!(
             parse_command_line("foo bar"),
             ParsedCommand::Bare { text: "foo bar" }
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn shell_takes_priority_over_slash_when_both_prefixes_present() {
-        // The leading char wins — `!/foo` is a shell escape for `/foo`.
+        // The leading char wins - `!/foo` is a shell escape for `/foo`.
         assert_eq!(
             parse_command_line("!/foo bar"),
             ParsedCommand::Shell { script: "/foo bar" }

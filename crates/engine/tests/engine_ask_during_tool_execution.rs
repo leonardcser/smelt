@@ -159,7 +159,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         }
     }
 
-    // Register the tool as a Lua-defined tool with no hooks — classify
+    // Register the tool as a Lua-defined tool with no hooks - classify
     // pushes it straight to `pending_tools` and emits ToolDispatch.
     let tool = ToolDef {
         name: TOOL_NAME.into(),
@@ -245,7 +245,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
 
     assert!(
         sent_engine_ask,
-        "test never received ToolDispatch — the test plumbing is broken \
+        "test never received ToolDispatch - the test plumbing is broken \
          before the bug under test is exercised"
     );
     assert!(

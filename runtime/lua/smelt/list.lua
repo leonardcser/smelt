@@ -85,7 +85,7 @@ local function plain_spans(text)
 end
 
 -- Read the leaf's inner-content width in cells (gutter and pad already
--- subtracted). Returns nil before the first paint — the leaf has no
+-- subtracted). Returns nil before the first paint - the leaf has no
 -- viewport until then.
 local function content_width(self)
   return self.leaf:content_width()
@@ -109,7 +109,7 @@ local function render_visible(self)
     local rendered = self.render(item) or {}
     local text = rendered.text or span_text(rendered.spans)
     -- Truncate to the leaf's content width so long items don't trigger
-    -- horizontal panning. `fit` pads to exact width — trailing whitespace
+    -- horizontal panning. `fit` pads to exact width - trailing whitespace
     -- is invisible and keeps the selection-highlight row uniform.
     if width and width > 0 then
       text = smelt.text.fit(text, width)
@@ -218,7 +218,7 @@ function List:move_cursor(delta)
   self.leaf:move_cursor(delta)
 end
 
---- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory —
+--- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
 --- they own the rendered selection cursor and the backing line buffer;
 --- the rest configure how data is sourced, filtered, and rendered.
 ---@class smelt.list.Opts

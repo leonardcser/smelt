@@ -1,4 +1,4 @@
-//! Buffer — lines + namespaced extmarks.
+//! Buffer - lines + namespaced extmarks.
 //!
 //! Mirrors `nvim_buf_set_extmark`: a `Buffer` holds text lines plus
 //! `Extmark`s grouped into namespaces. Highlights, decorations, and
@@ -158,7 +158,7 @@ impl Default for SpanMeta {
     }
 }
 
-/// Per-row mapping back to a "source line number" — what a gutter provider
+/// Per-row mapping back to a "source line number" - what a gutter provider
 /// (`LineNumberGutter`) renders for that row. `None` on the decoration falls back
 /// to the row index + 1 so a plain text buffer needs no setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,7 +194,7 @@ pub struct LineDecoration {
     /// When `true`, `copy_byte_range` treats this row as part of the previous
     /// row's copy group: it skips the newline and, if `source_text` was already
     /// emitted from the group's first row, skips this row entirely. This is
-    /// orthogonal to `soft_wrapped` — table rows use `copy_continuation` without
+    /// orthogonal to `soft_wrapped` - table rows use `copy_continuation` without
     /// `soft_wrapped` so each display row is a hard selection boundary while
     /// still coalescing into a single `source_text` on copy.
     pub copy_continuation: bool,
@@ -266,7 +266,7 @@ pub enum HlMode {
     Replace,
     /// Combine fg/bg attributes over the existing row paint.
     Combine,
-    /// Blend (alpha) — currently treated as Combine.
+    /// Blend (alpha) - currently treated as Combine.
     Blend,
 }
 
@@ -684,7 +684,7 @@ impl Buffer {
     }
 
     /// Snapshot a byte range as a [`CopyOutput`]. The range is in the buffer's
-    /// editable-byte space — `source` when the parser writes it, otherwise
+    /// editable-byte space - `source` when the parser writes it, otherwise
     /// `lines.join("\n")`. Endpoints are snapped and clamped; buffers without
     /// a copier fall through to identity.
     pub fn copy_range(&self, range: std::ops::Range<usize>) -> CopyOutput {
@@ -715,7 +715,7 @@ impl Buffer {
 
     /// Mutable access to source + attachment ids as a single
     /// invariant-preserving wrapper. Use this instead of raw `&mut String`
-    /// for any mutation that might add/remove attachment markers — the
+    /// for any mutation that might add/remove attachment markers - the
     /// wrapper drains/inserts ids automatically. Bumps `source_tick`.
     pub fn text_mut(&mut self) -> crate::attached::AttachedTextMut<'_> {
         self.source_tick = self.source_tick.wrapping_add(1);
@@ -751,7 +751,7 @@ impl Buffer {
     }
 
     /// Re-render at `width`. With a parser, re-runs `parse` if `(source_tick,
-    /// width)` is stale. Without a parser, no-op — caller-written lines are
+    /// width)` is stale. Without a parser, no-op - caller-written lines are
     /// final and wrap (if any) is owned by the host window.
     ///
     /// Returns `true` when a re-render actually happened.
@@ -769,7 +769,7 @@ impl Buffer {
         let source = std::mem::take(&mut self.source);
         // Reset to a single seed line; `set_all_lines` clears well-known
         // namespaces across all rows so stale highlights don't leak.
-        // Maps cleared too — parser repopulates if it needs custom mapping.
+        // Maps cleared too - parser repopulates if it needs custom mapping.
         self.set_all_lines(vec![String::new()]);
         self.projection_maps = None;
         parser.parse(self, &source, width);
@@ -991,7 +991,7 @@ impl Buffer {
             // Clamp `col` to the row's display-char count. `ProjectionMaps`
             // stores one continuous display↔source char stream, so an
             // unclamped `col` would index past this row and resolve into the
-            // NEXT line — making click-past-EOL and "preserve screen row"
+            // NEXT line - making click-past-EOL and "preserve screen row"
             // scrolling onto a shorter row silently slip to the wrong byte.
             let col = col.min(line.chars().count());
             return maps.byte_at(&self.source, row, col);
@@ -1017,7 +1017,7 @@ impl Buffer {
         self.projection_maps.as_ref()
     }
 
-    /// Monotonic counter, bumped on every mutation that affects rendering —
+    /// Monotonic counter, bumped on every mutation that affects rendering -
     /// `lines` edits plus decoration changes. Use as a cheap fingerprint for
     /// cache invalidation tied to displayed output.
     pub fn changedtick(&self) -> u64 {
@@ -1264,7 +1264,7 @@ impl Buffer {
 
     pub fn virtual_text_at_into(&self, line: usize, out: &mut Vec<VirtualText>) {
         // See `highlights_at_into` for the SCRATCH design rationale and
-        // reentrancy caveat — same pattern, different payload.
+        // reentrancy caveat - same pattern, different payload.
         thread_local! {
             static SCRATCH: std::cell::RefCell<Vec<(u32, u32, u32, VirtualText)>> =
                 const { std::cell::RefCell::new(Vec::new()) };
@@ -1622,7 +1622,7 @@ mod tests {
             let len = buf.source().len();
             let captured: Vec<usize> = (0..=len + 4).collect();
 
-            // Mutate directly — `set_source` would normalize and hide the issue.
+            // Mutate directly - `set_source` would normalize and hide the issue.
             // Build a transient text wrapper just to apply the mutation through
             // the same in-place path production code uses.
             {
@@ -1799,7 +1799,7 @@ mod tests {
         // Source "aaa\nbbb" (7 chars, 7 bytes); display char stream "aaa\nbbb"
         // is one continuous run in the ProjectionMaps tables. Without per-row
         // clamping, `byte_at(0, 5)` would index past row 0 (3 chars) into row
-        // 1's chars and resolve to a byte inside "bbb" — wrong row. With the
+        // 1's chars and resolve to a byte inside "bbb" - wrong row. With the
         // clamp, the column collapses to the row's display-char count.
         let mut buf = make_buf();
         buf.set_source("aaa\nbbb".into());

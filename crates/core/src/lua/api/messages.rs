@@ -1,4 +1,4 @@
-//! `smelt.messages` — persistent message log. Full bodies (with tracebacks) live here; toasts show only the first line.
+//! `smelt.messages` - persistent message log. Full bodies (with tracebacks) live here; toasts show only the first line.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

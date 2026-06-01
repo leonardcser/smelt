@@ -76,7 +76,7 @@ session.system = nil
 ---@type fun(id: string): string?
 session.text = nil
 
---- Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions — the heavy IO happens on a worker pool rather than serializing on the Lua thread.
+--- Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions - the heavy IO happens on a worker pool rather than serializing on the Lua thread.
 ---@type fun(ids: string[]): table
 session.texts = nil
 
@@ -91,7 +91,7 @@ session.tokens = nil
 --- immediately followed by its children, sorted by the same key.
 --- 
 --- Entries whose `parent_id` references an id not present in `entries` are
---- treated as roots — this is what makes the function safe under workspace
+--- treated as roots - this is what makes the function safe under workspace
 --- filtering, where a fork's parent may have been filtered out.
 ---@see smelt.session.list
 ---@type fun(entries: table[], opts: table?): table[]

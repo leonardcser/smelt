@@ -61,7 +61,7 @@ pub struct ToolState {
     pub user_message: Option<String>,
     /// Output of the plugin `render(args, output, ctx)` hook, pre-baked on the main
     /// thread before parallel layout. `None` means "not yet rendered (or invalidated)";
-    /// the tuple's `u16` is the width the layout was rendered at — a mismatch on read
+    /// the tuple's `u16` is the width the layout was rendered at - a mismatch on read
     /// triggers re-render. Cleared automatically by every mutator on `ToolState`.
     pub render_cache: Option<(u16, crate::content::block_layout::RenderedLayout)>,
     /// Bumped when mutable tool state changes. Tool call blocks keep immutable
@@ -130,7 +130,7 @@ impl Block {
     /// Stable content hash of this block. Two blocks with the same
     /// content hash produce identical `DisplayBlock`s for the same
     /// `LayoutKey` and `ToolState`. For `ToolCall`, `ToolState` (status
-    /// / output / elapsed) is deliberately *not* hashed — mutable tool
+    /// / output / elapsed) is deliberately *not* hashed - mutable tool
     /// state lives separately and is invalidated via
     /// `BlockHistory::invalidate_block_layout`.
     ///
@@ -150,7 +150,7 @@ impl Block {
     /// Raw source text for the block, before markdown rendering. Used
     /// by whole-block yank so copying a rendered markdown block returns
     /// the original `**bold**`, `` `code` ``, fenced ```` ``` ```` blocks,
-    /// `|` tables, `---` rules, etc. — instead of walking display cells
+    /// `|` tables, `---` rules, etc. - instead of walking display cells
     /// (which strips inline markup).
     ///
     /// Returns `None` for structured blocks (tool calls,
@@ -204,14 +204,14 @@ impl BlockId {
     }
 }
 
-/// How the block is presented in the transcript. Independent of [`Status`] —
+/// How the block is presented in the transcript. Independent of [`Status`] -
 /// a streaming block can be `Collapsed`. The layout cache keys on this, so
 /// flipping view state invalidates only that block.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]
 pub enum ViewState {
-    /// Full content — default.
+    /// Full content - default.
     #[default]
     Expanded,
     /// One summary line only.
@@ -232,7 +232,7 @@ pub enum Status {
 }
 
 /// Cache key for a block's per-frame layout. When content changes, the new
-/// `content_hash` misses the old entry — invalidation by keying, not eviction.
+/// `content_hash` misses the old entry - invalidation by keying, not eviction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayoutKey {
     pub width: u16,
@@ -576,8 +576,8 @@ mod tests {
     #[test]
     fn raw_text_preserves_markdown_markers() {
         // Whole-block yank must round-trip every inline / block
-        // markdown construct — bold, italic, inline code, fenced code,
-        // tables, horizontal rules — because the cell-walked fallback
+        // markdown construct - bold, italic, inline code, fenced code,
+        // tables, horizontal rules - because the cell-walked fallback
         // strips the markers.
         let md = concat!(
             "**bold** and *italic* and `inline code`\n",
@@ -612,7 +612,7 @@ mod tests {
 
     #[test]
     fn raw_text_is_none_for_structured_blocks() {
-        // Tool blocks don't have a single markdown source — yank falls back
+        // Tool blocks don't have a single markdown source - yank falls back
         // to cell-walking for them.
         assert!(Block::ToolCall {
             call_id: "c1".into(),
@@ -821,7 +821,7 @@ mod tests {
         });
         assert_eq!(history.len(), 3);
         assert!(history.tool_states.contains_key("tc1"));
-        // Truncate to before the ToolCall — the tool_state entry should be GC'd.
+        // Truncate to before the ToolCall - the tool_state entry should be GC'd.
         history.truncate(1);
         assert_eq!(history.len(), 1);
         assert!(!history.tool_states.contains_key("tc1"));

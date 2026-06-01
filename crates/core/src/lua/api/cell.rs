@@ -1,4 +1,4 @@
-//! `smelt.cell` — typed reactive cell registry. `smelt.cell(name)`
+//! `smelt.cell` - typed reactive cell registry. `smelt.cell(name)`
 //! returns a sticky `Cell` handle whose `:get` / `:set` / `:subscribe`
 //! methods drive the cell. `smelt.cell.new(name, initial)` declares a
 //! new cell. `smelt.cell.glob(pattern, handler)` subscribes across
@@ -26,7 +26,7 @@ impl LuaType for LuaCellName {
     fn lua_type() -> String {
         record_alias(LuaAliasDecl {
             name: "smelt.cell.Name",
-            doc: "Name of a reactive cell. Open alias — plugin-defined cells \
+            doc: "Name of a reactive cell. Open alias - plugin-defined cells \
 declared via `smelt.cell.new` are accepted alongside the well-known \
 runtime cells listed here.",
             variants: crate::cells::SEEDED_CELL_NAMES.to_vec(),
@@ -74,7 +74,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         fields: crate::class_methods! {
             "get" => fn() -> mlua::Value, "Return the current cell value, or `nil` when the cell isn't declared.",
             "set" => fn(value: mlua::Value) -> LuaCell, "Publish a new value. Returns the handle for chaining.",
-            "subscribe" => fn(handler: LuaCallback<mlua::Value, ()>) -> LuaReg, "Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass) — the module body re-runs inside `bring_up_lua` where the bind takes effect.",
+            "subscribe" => fn(handler: LuaCallback<mlua::Value, ()>) -> LuaReg, "Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass) - the module body re-runs inside `bring_up_lua` where the bind takes effect.",
             "name" => fn() -> String, "Return the cell name.",
         },
     });

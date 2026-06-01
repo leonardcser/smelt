@@ -403,7 +403,7 @@ async fn anthropic_emits_cache_control_markers() {
 
 /// `prompt_cache_key` is gated to `openai` and `codex` provider kinds.
 /// Generic `openai-compatible` endpoints (vllm, llama.cpp, etc.) often
-/// don't recognize the field — sending it would be telemetry without
+/// don't recognize the field - sending it would be telemetry without
 /// any caching benefit.
 #[tokio::test]
 async fn openai_compatible_omits_prompt_cache_key() {

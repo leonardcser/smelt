@@ -1,4 +1,4 @@
-//! `cargo xtask fuzz replay-regression` — replay every seed under
+//! `cargo xtask fuzz replay-regression` - replay every seed under
 //! `fuzz/seeds/<target>/regression/`. Non-zero exit on the first failure.
 //! CI calls this on every PR; devs call it before sending changes.
 //!

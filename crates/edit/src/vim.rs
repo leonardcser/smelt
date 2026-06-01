@@ -40,15 +40,15 @@ pub enum Action {
     /// Center the input viewport on the cursor (zz).
     CenterScroll,
     /// Pan the viewport horizontally by `delta` cells (vim `zh`/`zl`).
-    /// Positive = pan right, negative = pan left. Cursor stays put — same
+    /// Positive = pan right, negative = pan left. Cursor stays put - same
     /// semantics as nvim's `zh`/`zl`.
     PanColumns(isize),
-    /// Key not handled — caller should use its own logic.
+    /// Key not handled - caller should use its own logic.
     Passthrough,
 }
 
 /// Shared mutable state for vim operations. Borrowed from the host per keypress.
-/// `buf` exposes source + attachment ids together as one wrapper — there is no
+/// `buf` exposes source + attachment ids together as one wrapper - there is no
 /// `&mut String` to grab, so every text mutation goes through methods that keep
 /// the two halves in sync.
 pub struct VimContext<'a> {
@@ -76,7 +76,7 @@ impl VimContext<'_> {
 
     /// Install an undo/redo entry: swap source + attachments, restore cpos,
     /// and clamp every offset that survived the source swap (cpos and the
-    /// vim visual anchor — either can land past end-of-source if the entry
+    /// vim visual anchor - either can land past end-of-source if the entry
     /// shrunk the buffer).
     fn restore(&mut self, entry: UndoEntry) {
         self.buf.install(entry.buf, entry.attachments);
@@ -102,7 +102,7 @@ impl VimContext<'_> {
     }
 
     /// Stage `buf[start..end]` in the kill ring with its source byte range.
-    /// The system clipboard is **not** written here — `Window::handle_key`'s
+    /// The system clipboard is **not** written here - `Window::handle_key`'s
     /// caller observes the kill-ring's `source_range` change and pushes the
     /// rendered (`BufferCopy::copy`) form to the system clipboard. Keeping
     /// vim out of the system clipboard means raw markers stay in the kill
@@ -230,7 +230,7 @@ pub struct VimWindowState {
 
 impl VimWindowState {
     /// Visual anchor, snapped to a char boundary in `buf`. All consumers
-    /// must go through this accessor — the raw field may be stale.
+    /// must go through this accessor - the raw field may be stale.
     pub fn visual_anchor_at(&self, buf: &str) -> usize {
         smelt_buffer::text::snap(buf, self.visual_anchor)
     }
@@ -2312,7 +2312,7 @@ mod tests {
 
     #[test]
     fn yank_stages_in_kill_ring_with_source_range() {
-        // Vim deliberately does NOT push to the system clipboard — the host
+        // Vim deliberately does NOT push to the system clipboard - the host
         // observes `kill_ring.yank_tick()` and pushes the rendered form via
         // `Buffer::sync_clipboard_from_kill_ring`, so the prompt/transcript
         // copier can transform attachment markers / fold markers before paste.
@@ -2348,7 +2348,7 @@ mod tests {
 
     #[test]
     fn paste_keeps_kill_ring_when_clipboard_matches_last_write() {
-        // Kill ring was the last writer — its linewise flag matters
+        // Kill ring was the last writer - its linewise flag matters
         // for `p` placement, so we must not overwrite charwise.
         let inner = mem_sink(Some("line\n"));
         let clipboard = Clipboard::new(Box::new(MemSink(inner)));
@@ -2360,7 +2360,7 @@ mod tests {
         h.clipboard
             .kill_ring
             .record_clipboard_write("line\n".to_string());
-        // Position on first line, then `p` — linewise pastes below.
+        // Position on first line, then `p` - linewise pastes below.
         h.handle(key('p'));
         assert!(h.buf.contains("line\n"));
         assert!(h.clipboard.kill_ring.is_linewise());
@@ -2981,7 +2981,7 @@ mod tests {
         h.buf.push_str("ab");
         h.cpos = 2;
         h.vim_state.visual_anchor = 2;
-        // `u` restores empty source — the stale anchor must follow.
+        // `u` restores empty source - the stale anchor must follow.
         h.handle(key('u'));
         assert_eq!(h.buf, "");
         assert!(

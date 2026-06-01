@@ -111,7 +111,7 @@ fn drive(scenario: &Scenario, term_w: u16, term_h: u16) -> io::Result<()> {
             app = smelt_fuzz::build_app(scenario);
             app.set_terminal_size(term_w, app_h);
         } else if dump {
-            // Push to stderr — visible after exit, doesn't disturb the
+            // Push to stderr - visible after exit, doesn't disturb the
             // alt-screen view. Useful for diffing state across steps.
             eprintln!("step {step}/{total}: {:?}", app.state());
             continue;

@@ -1,11 +1,11 @@
 //! Per-row gutter column rendered to the left of buffer content.
 //!
 //! A [`GutterProvider`] is queried by the window renderer at paint time. It owns the
-//! width of the reserved column and produces a [`GutterCell`] per row — text plus a
+//! width of the reserved column and produces a [`GutterCell`] per row - text plus a
 //! pre-resolved style. The window paints the gutter cells into the leftmost cells of
 //! each row; content paint shifts right by `gutter_width`.
 //!
-//! Use this for line numbers, diff old/new line numbers, signs, fold markers — anything
+//! Use this for line numbers, diff old/new line numbers, signs, fold markers - anything
 //! that's per-row metadata distinct from the buffer's text content. The provider can
 //! read the buffer and theme; it cannot mutate them.
 //!
@@ -37,11 +37,11 @@ pub trait GutterProvider: Send + Sync {
 
 /// Line numbers, derived from each row's `SourceLine` metadata. Plain buffers with no
 /// mapping fall back to `row + 1`. Diff buffers automatically render old + new columns
-/// — the same provider works for both.
+/// - the same provider works for both.
 ///
 /// Layout:
 /// - plain (all rows linear or unset): `" N "` (one pad each side).
-/// - diff (any row carries `Diff`): `" O  N "` — old column, gap, new column.
+/// - diff (any row carries `Diff`): `" O  N "` - old column, gap, new column.
 /// - synthetic rows render as blanks of the full width.
 ///
 /// Widths are cached by `(BufId, changedtick)` so the full-buffer scan runs once per
@@ -91,7 +91,7 @@ fn digits_of(n: u32) -> u16 {
 
 impl LineNumberGutter {
     /// Widen the gutter to fit explicit `SourceLine::Linear` / `SourceLine::Diff`
-    /// stamps. Rows with no stamp (or `Synthetic`) contribute no width — a buffer
+    /// stamps. Rows with no stamp (or `Synthetic`) contribute no width - a buffer
     /// whose rows are all unstamped/synthetic gets a zero-width gutter so unrelated
     /// content (e.g. transcript text rows) doesn't lose horizontal space.
     ///
@@ -230,7 +230,7 @@ mod tests {
     fn unstamped_buffer_has_no_gutter() {
         let g = LineNumberGutter::new();
         // Without any `SourceLine` stamps the gutter is zero-width and
-        // produces no per-row cell — text-only buffers don't lose horizontal
+        // produces no per-row cell - text-only buffers don't lose horizontal
         // space to an empty column.
         let buf = buf_with_lines(0, 12);
         let theme = Theme::new();
@@ -316,7 +316,7 @@ mod tests {
         let mut buf = buf_with_lines(0, 1);
         stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 1 });
         assert_eq!(g.width(&buf), 3); // " 1 "
-                                      // Mutate to require more digits — cache must invalidate via changedtick.
+                                      // Mutate to require more digits - cache must invalidate via changedtick.
         stamp_source_line(&mut buf, 0, SourceLine::Linear { lineno: 9999 });
         assert_eq!(g.width(&buf), 6); // " 9999 "
     }

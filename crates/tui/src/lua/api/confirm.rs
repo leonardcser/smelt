@@ -10,10 +10,10 @@
 //! once via `smelt.cell("confirm_requested"):get()` instead of polling
 //! Rust by handle. Rust exposes:
 //!
-//! - `__back_tab` — toggles app mode + auto-allows when the new mode
+//! - `__back_tab` - toggles app mode + auto-allows when the new mode
 //!   covers this request.
-//! - `__render_preview` — dispatches to the tool's `preview` callback.
-//! - `__resolve` — final pick, removes the registry entry.
+//! - `__render_preview` - dispatches to the tool's `preview` callback.
+//! - `__resolve` - final pick, removes the registry entry.
 //!
 //! Per-panel control (`scroll_by`, `focus`, …) goes through the
 //! generic `smelt.dialog._panel_*` primitives surfaced by the
@@ -34,7 +34,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "confirm",
-        "Confirm dialog primitives — preview dispatch, back-tab cycling, and choice resolution. UiHost-only.",
+        "Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resolution. UiHost-only.",
         Tier::UiHost,
     )?;
 

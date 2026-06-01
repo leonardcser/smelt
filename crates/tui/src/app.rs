@@ -121,7 +121,7 @@ pub struct TuiApp {
     pub(crate) timers: Timers,
     /// Confirm/dialog requests deferred while the user is still typing.
     pub(crate) pending_dialogs: VecDeque<DeferredDialog>,
-    /// Owned for the lifetime of `run()`. `None` outside that scope — the
+    /// Owned for the lifetime of `run()`. `None` outside that scope - the
     /// test harness constructs a `TuiApp` without a real terminal and skips
     /// claiming. `Drop` here restores the terminal even on panic.
     pub(crate) terminal: Option<crate::term_setup::TuiTerminal>,
@@ -489,7 +489,7 @@ impl TuiApp {
             // Install the baked default theme up-front. `run()` may
             // overwrite it after detecting light/dark, and Lua's
             // `theme.use(...)` will later swap to the user's
-            // colorscheme — but until then every render path sees a
+            // colorscheme - but until then every render path sees a
             // working theme. Tests that construct TuiApp without
             // calling run() rely on this.
             *ui.theme_mut() = crate::theme::default_baked().as_ref().clone();
@@ -532,7 +532,7 @@ impl TuiApp {
             if let Some(w) = ui.win_mut(crate::app::TRANSCRIPT_WIN) {
                 w.set_vim_enabled(vim_enabled);
                 // Transcript blocks (code, diff) stamp `SourceLine` per row;
-                // `LineNumberGutter` is strict — text/markdown rows leave no
+                // `LineNumberGutter` is strict - text/markdown rows leave no
                 // stamp and contribute no gutter width.
                 w.gutter = Some(std::sync::Arc::new(
                     crate::smelt_term::gutter::LineNumberGutter::new(),
@@ -763,7 +763,7 @@ impl TuiApp {
         self.publish_work_cells();
     }
 
-    /// User-facing vim mode label for the focused surface — or empty
+    /// User-facing vim mode label for the focused surface - or empty
     /// when no vim-enabled surface owns input. The Lua statusline reads
     /// this directly from the `vim_mode` cell.
     fn vim_mode_cell_value(&self) -> String {
@@ -978,7 +978,7 @@ impl TuiApp {
     /// (multi-line predictions collapse to a single line for safety) and fires
     /// `WinEvent::PlaceholderAccepted`. Dismiss clears the placeholder and fires
     /// `WinEvent::PlaceholderDismissed`. Both run only when the buffer is empty
-    /// — the same visibility rule that gates rendering.
+    /// - the same visibility rule that gates rendering.
     pub(crate) fn dispatch_placeholder_key(
         &mut self,
         win: crate::smelt_term::WinId,
@@ -1220,7 +1220,7 @@ impl TuiApp {
         if let Some(w) = self.ui.win_mut(win) {
             // Non-focusable surface: text-selectable for drag-copy, but the
             // caret-leaf predicate (focusable && !mouse_scroll) keeps `cpos`
-            // untouched on click — notification rows have no meaningful caret.
+            // untouched on click - notification rows have no meaningful caret.
             w.focusable = false;
             w.selectable = true;
         }
@@ -1361,7 +1361,7 @@ impl TuiApp {
 
         // Cold-start the Lua context through the same pipeline `/reload`
         // uses. `main` already ran a pre-TUI plugin pass to extract
-        // engine config — that pass couldn't touch `smelt.win`,
+        // engine config - that pass couldn't touch `smelt.win`,
         // `smelt.overlay`, `smelt.paint`, `smelt.cell:subscribe`, etc.
         // because the host pointer wasn't installed yet. Re-running
         // here inside `install_app_ptr` makes the host live for module

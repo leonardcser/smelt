@@ -1,4 +1,4 @@
-//! `smelt.notify` — informational toasts in the status area.
+//! `smelt.notify` - informational toasts in the status area.
 //!
 //! `smelt.notify("msg")`, `smelt.notify.warn("msg")`, and
 //! `smelt.notify.error("msg")` each show a one-line toast over the

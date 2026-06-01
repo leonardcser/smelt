@@ -27,7 +27,7 @@ pub struct WrappedLayout {
     /// Widest visual row, in terminal cells. Drives horizontal scroll math:
     /// callers clamp `scroll_left` to `max_row_width - viewport_cols` so the
     /// content never pans past its rightmost cell. Pre-formatted (non-wrapped)
-    /// rows can exceed the viewport — that's exactly what `scroll_left` is for.
+    /// rows can exceed the viewport - that's exactly what `scroll_left` is for.
     max_row_width: u16,
 }
 

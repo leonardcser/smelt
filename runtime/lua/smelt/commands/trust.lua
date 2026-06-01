@@ -1,4 +1,4 @@
--- /trust — record the SHA-256 hash of `<cwd>/.smelt/` so smelt loads it on startup.
+-- /trust - record the SHA-256 hash of `<cwd>/.smelt/` so smelt loads it on startup.
 -- Edits invalidate the hash and require re-running /trust.
 
 smelt.cmd.register("trust", function()

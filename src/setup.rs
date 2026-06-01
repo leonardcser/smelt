@@ -270,7 +270,7 @@ pub async fn run_initial_setup(config_path: &Path) -> bool {
 
     if let Some(kind) = tmpl.oauth {
         run_login(kind).await;
-        println!("Provider auto-detected from credentials — no config file needed.");
+        println!("Provider auto-detected from credentials; no config file needed.");
         return true;
     }
 
@@ -290,7 +290,7 @@ pub async fn run_initial_setup(config_path: &Path) -> bool {
     }
 }
 
-/// `smelt auth` — provider picker, then provider-specific flow.
+/// `smelt auth` - provider picker, then provider-specific flow.
 pub async fn run_auth_command() {
     let _cursor_guard = CursorGuard;
     install_cursor_restoring_signal_handler();

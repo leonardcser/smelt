@@ -309,7 +309,7 @@ impl<'a> InlineSyntax<'a> {
 
     /// Print a single line with syntax highlighting; does not emit a newline.
     /// Snapshots the caller's style on entry and restores it on exit, so per-region
-    /// fg mutations don't leak (other axes — dim/bold/italic/group — stay in effect).
+    /// fg mutations don't leak (other axes - dim/bold/italic/group - stay in effect).
     pub fn print_line(&mut self, out: &mut LineBuilder, line: &str) {
         let line_with_nl = format!("{}\n", line);
         let regions = self
@@ -334,7 +334,7 @@ impl<'a> InlineSyntax<'a> {
     }
 }
 
-/// Render `content` as a plain code block — one source line per row, no gutter, no line
+/// Render `content` as a plain code block - one source line per row, no gutter, no line
 /// numbers, no soft wrap. Indentation is the caller's responsibility (panel `pad_left`,
 /// composed leading spaces, etc.). Suited to inline command previews and other
 /// "show this snippet" cases where the file-view gutter from `print_syntax_file`

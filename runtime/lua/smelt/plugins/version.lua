@@ -1,4 +1,4 @@
--- /version — surface the running smelt build identity as a notification.
+-- /version - surface the running smelt build identity as a notification.
 --
 -- The notification body matches `smelt --version` (both read
 -- `smelt.build.display`, the single canonical identity string built by

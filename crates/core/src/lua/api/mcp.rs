@@ -1,4 +1,4 @@
-//! `smelt.mcp` — config-time MCP server registration. Unknown fields and types raise errors.
+//! `smelt.mcp` - config-time MCP server registration. Unknown fields and types raise errors.
 
 use crate::lua::doc::Tier;
 use crate::lua::lua_type::{LuaType, LuaTypeTuple};
@@ -159,7 +159,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     m.fn_(
         "list",
-        "Snapshot every declared MCP server. Each row is `{ name, config, status, tool_count }` where `status` is `{ kind = \"disabled\"|\"connecting\"|\"connected\"|\"error\", since_ms?, error?, at_ms? }`. Lifecycle reads are sync — safe to call from a status renderer or keymap.",
+        "Snapshot every declared MCP server. Each row is `{ name, config, status, tool_count }` where `status` is `{ kind = \"disabled\"|\"connecting\"|\"connected\"|\"error\", since_ms?, error?, at_ms? }`. Lifecycle reads are sync - safe to call from a status renderer or keymap.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;

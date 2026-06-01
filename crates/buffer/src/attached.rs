@@ -11,7 +11,7 @@
 //! Every `\u{FFFC}` in `source` has a matching `AttachmentId` at the same
 //! ordinal position in `ids`. Callers cannot desync the two halves by
 //! accident because there is no `&mut String` or `&mut Vec<_>` reachable
-//! from the wrapper — only safe mutation methods.
+//! from the wrapper - only safe mutation methods.
 
 use crate::attachment::AttachmentId;
 use crate::attachment::ATTACHMENT_MARKER;

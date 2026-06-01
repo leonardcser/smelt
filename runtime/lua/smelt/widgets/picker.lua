@@ -2,7 +2,7 @@
 -- Enter/Esc resolution live here; Rust provides the float window.
 --
 -- Selection is the buffer cursor, so wheel-scroll naturally pans the list
--- while the highlight tracks the cursor's screen row — same model as the
+-- while the highlight tracks the cursor's screen row - same model as the
 -- resume/rewind dialogs.
 
 local M = {}

@@ -1,4 +1,4 @@
-//! `smelt.win` — Win handle. UiHost-only.
+//! `smelt.win` - Win handle. UiHost-only.
 //!
 //! `smelt.win.new(buf, opts?)` opens a split window over `buf` (a `Buf`
 //! handle) and returns a `Win` userdata. `opts.name` opts the window
@@ -157,7 +157,7 @@ impl mlua::UserData for LuaWin {
             Ok(())
         });
 
-        // ── buf — return the backing Buf handle ────────────────────
+        // ── buf - return the backing Buf handle ────────────────────
         methods.add_method(
             "buf",
             |_, this, ()| -> LuaResult<Option<super::buf::LuaBuf>> {
@@ -167,7 +167,7 @@ impl mlua::UserData for LuaWin {
             },
         );
 
-        // ── rect — current layout-resolved bounds ──────────────────
+        // ── rect - current layout-resolved bounds ──────────────────
         // Reads `split_rect` when the leaf has been placed in the
         // current layout tree, so renderers running BEFORE the first
         // paint already see the correct width (no startup width flash).
@@ -195,7 +195,7 @@ impl mlua::UserData for LuaWin {
 
         // Inner-content width in cells, with gutter and pad_left/pad_right
         // already subtracted. Falls back to the layout-resolved rect minus
-        // gutters when the viewport hasn't been laid out yet — keeps bar
+        // gutters when the viewport hasn't been laid out yet - keeps bar
         // renderers from picking the `or 80` cold-start width on the
         // first frame after bootstrap.
         methods.add_method("content_width", |_, this, ()| -> LuaResult<mlua::Value> {
@@ -243,7 +243,7 @@ impl mlua::UserData for LuaWin {
             },
         );
 
-        // ── move_cursor(delta) — chainable ─────────────────────────
+        // ── move_cursor(delta) - chainable ─────────────────────────
         methods.add_function(
             "move_cursor",
             |_, (this_ud, delta): (mlua::AnyUserData, i64)| -> LuaResult<mlua::AnyUserData> {
@@ -463,7 +463,7 @@ impl mlua::UserData for LuaWin {
             },
         );
 
-        // ── link_scroll(...) — chainable; variadic over Win ────────
+        // ── link_scroll(...) - chainable; variadic over Win ────────
         methods.add_function(
             "link_scroll",
             |_,
@@ -481,7 +481,7 @@ impl mlua::UserData for LuaWin {
             },
         );
 
-        // ── set_renderer(fn) — register/clear per-window renderer ──
+        // ── set_renderer(fn) - register/clear per-window renderer ──
         methods.add_function(
             "set_renderer",
             |lua,
@@ -599,7 +599,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         smelt,
         "win",
         "Window handle constructor. `smelt.win.new(buf, opts?)` opens a split window over `buf` and returns a `Win` userdata. \
-`opts.name` opts the window into hot-reload survival. UiHost-only — windows are layout leaves that render a buffer onto the screen.",
+`opts.name` opts the window into hot-reload survival. UiHost-only - windows are layout leaves that render a buffer onto the screen.",
         Tier::UiHost,
     )?;
 
@@ -623,7 +623,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "key" => fn(chord: String, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Bind `func` to `chord` on this window. Returns a Reg handle whose `:remove()` undoes the binding. Raises on unknown chords.",
             "on" => fn(event: LuaWinEvent, func: LuaCallback<mlua::Table, ()>) -> LuaReg, "Subscribe `func` to `event` on this window. Returns a Reg handle whose `:remove()` undoes the subscription.",
-            "placeholder" => fn(text: String, opts: Option<mlua::Table>) -> LuaWin, "Set the window's placeholder — a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ \"esc\", \"c-c\" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the extmark survives so an undo back to an empty buffer makes it visible again. Today only the prompt window renders the dim text and runs the accept/dismiss dispatch — calls on other windows store state but won't render. Returns the handle for chaining.",
+            "placeholder" => fn(text: String, opts: Option<mlua::Table>) -> LuaWin, "Set the window's placeholder - a dim suggestion rendered when the buffer is empty. Replaces any prior placeholder. `text` must be a single line (no `\\n`); split before calling. `opts.accept_keys` (array of chord strings, default `{}`) accept the placeholder into the buffer and fire `placeholder_accepted`. `opts.dismiss_keys` (default `{ \"esc\", \"c-c\" }`) clear the placeholder and fire `placeholder_dismissed`. Typing does not destroy the placeholder; the extmark survives so an undo back to an empty buffer makes it visible again. Today only the prompt window renders the dim text and runs the accept/dismiss dispatch - calls on other windows store state but won't render. Returns the handle for chaining.",
             "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
             "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
@@ -632,7 +632,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     });
 
     // Doc text is built at registration time so per-opt defaults stay in
-    // lockstep with the Rust source (`Gutters::default()`) — no hand-kept
+    // lockstep with the Rust source (`Gutters::default()`) - no hand-kept
     // duplication that could drift on a default change.
     let new_doc: &'static str = Box::leak(format!(
         "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
@@ -678,7 +678,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     // Well-known window constants. After the layout/bars/statusline
-    // migration these are the only two engine-owned windows —
+    // migration these are the only two engine-owned windows -
     // everything else (top bar, bottom bar, statusline, plugin
     // sidebars, …) is Lua-allocated via `smelt.win.new`.
     m.tbl.set(
@@ -711,7 +711,7 @@ fn open_or_refresh(
         let name: Option<String> = opts
             .and_then(|t| t.get::<Option<String>>("name").ok())
             .flatten();
-        // Named window already exists — refresh and return.
+        // Named window already exists - refresh and return.
         if let Some(ref n) = name {
             if let Some(existing) = app.ui.named_win(n) {
                 if let Some(t) = opts {

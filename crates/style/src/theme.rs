@@ -2,7 +2,7 @@
 //! Unknown names resolve to `Style::default()` without panicking.
 //!
 //! A `Theme` is a flat `HlGroup → Style` map plus an `is_light` hint. There
-//! is no aliasing layer — a colorscheme that wants two names to share a
+//! is no aliasing layer - a colorscheme that wants two names to share a
 //! color either sets both directly, or expresses the relationship in its
 //! source spec (e.g. `Comment = "SmeltMuted"` resolved at compile time in
 //! `smelt_tui::theme::compile`). The runtime sees only resolved styles.
@@ -118,7 +118,7 @@ pub fn reset_for_test() {
 
 /// Total distinct interned entries. Anonymous styles share the named
 /// registry under `__anon__/<hash>` keys (see `intern_anonymous_style`),
-/// so the named map's length already includes them — no separate count
+/// so the named map's length already includes them - no separate count
 /// is added. Used by leak invariants to confirm registries don't grow
 /// across scenario repeats.
 pub fn registry_len() -> usize {
@@ -216,7 +216,7 @@ impl Theme {
 // ── Process-wide active theme ───────────────────────────────────────────
 //
 // Deep renderers (the diff renderer in `smelt_core`, future syntax
-// theming) can't reasonably thread `&Theme` through every signature —
+// theming) can't reasonably thread `&Theme` through every signature -
 // they're called from worker threads that have no live app context. So
 // the runtime publishes the current `Theme` to one process-wide slot
 // that anyone can read with a single locked Arc clone.
@@ -232,7 +232,7 @@ fn active_slot() -> &'static RwLock<Arc<Theme>> {
 }
 
 /// Snapshot the active process-wide theme. Reads are uncontended in the
-/// steady state — the lock is only held during a theme swap.
+/// steady state - the lock is only held during a theme swap.
 pub fn active() -> Arc<Theme> {
     active_slot().read().unwrap().clone()
 }

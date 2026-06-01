@@ -14,7 +14,7 @@
 local SUMMARY_TASK = [[
 The conversation above is becoming long. Stop the current task and instead produce a CONTEXT CHECKPOINT COMPACTION: a structured handoff summary that another instance of yourself will read to resume the task without losing critical context.
 
-Reply in this exact Markdown structure. Omit a section only if the conversation truly contains nothing for it; never invent details. Respond with ONLY the Markdown document — no preamble, no apology. Under no circumstances use tools; any tool call will be denied and you must answer with the Markdown summary only.
+Reply in this exact Markdown structure. Omit a section only if the conversation truly contains nothing for it; never invent details. Respond with ONLY the Markdown document - no preamble, no apology. Under no circumstances use tools; any tool call will be denied and you must answer with the Markdown summary only.
 
 # Goal
 What the user is trying to accomplish (one or two sentences).

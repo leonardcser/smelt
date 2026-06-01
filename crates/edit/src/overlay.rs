@@ -40,7 +40,7 @@ pub struct Overlay {
     pub anchor: Anchor,
     /// How wide the overlay rect is along the horizontal axis. Resolved
     /// against the terminal width every frame. Default `Fit` reads the
-    /// layout's natural width — back-compat with the original
+    /// layout's natural width - back-compat with the original
     /// `natural_size_with` path.
     pub width: Constraint,
     /// Vertical-axis twin of [`Self::width`].

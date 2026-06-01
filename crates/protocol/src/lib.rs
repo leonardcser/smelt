@@ -5,7 +5,7 @@
 //! - [`message`]: `Message`, `Role`, tool calls, tool outcomes
 //! - [`mode`]: agent modes and reasoning effort levels
 //! - [`usage`]: token usage, turn metadata, per-turn overrides
-//! - [`event`]: the wire contract — `EngineEvent` and `UiCommand`
+//! - [`event`]: the wire contract - `EngineEvent` and `UiCommand`
 
 pub mod content;
 pub mod event;

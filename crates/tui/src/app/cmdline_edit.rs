@@ -57,7 +57,7 @@ pub(crate) fn delete_forward(payload: &str, cur: usize) -> (String, usize) {
     (new, cur)
 }
 
-/// `Ctrl-W` / `M-Backspace` — delete one word backward. A "word" stops at
+/// `Ctrl-W` / `M-Backspace` - delete one word backward. A "word" stops at
 /// any non-alphanumeric, non-underscore character. Returns `None` only
 /// when the payload was already empty (caller closes the cmdline).
 pub(crate) fn delete_word_back(payload: &str, cur: usize) -> Option<(String, usize)> {
@@ -85,7 +85,7 @@ pub(crate) fn delete_word_back(payload: &str, cur: usize) -> Option<(String, usi
     Some((format!("{head}{tail}"), new_cursor))
 }
 
-/// Clamp a relative cursor move into `[0, count]`. `delta` is signed —
+/// Clamp a relative cursor move into `[0, count]`. `delta` is signed -
 /// negative values move left.
 pub(crate) fn clamp_move(count: usize, cur: usize, delta: i32) -> usize {
     let count = count as i32;
@@ -102,7 +102,7 @@ pub(crate) enum HistoryStep<'a> {
     /// Already at the boundary in this direction; cursor doesn't move.
     Boundary,
     /// Move browse cursor to `idx` and replace payload with `entry`.
-    /// `stash_current` is `true` when this is the FIRST Up — the caller
+    /// `stash_current` is `true` when this is the FIRST Up - the caller
     /// must save the current payload so Down past the newest entry
     /// can restore it.
     Browse {
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn delete_word_back_underscore_counts_as_word_char() {
-        // `foo_bar` is one word — Ctrl-W deletes the whole thing.
+        // `foo_bar` is one word - Ctrl-W deletes the whole thing.
         let (out, cur) = delete_word_back("foo_bar", 7).unwrap();
         assert_eq!(out, "");
         assert_eq!(cur, 0);

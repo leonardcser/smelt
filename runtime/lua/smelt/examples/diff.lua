@@ -1,4 +1,4 @@
--- `/diff <filepath>` — side-by-side diff of <filepath> vs `git show HEAD:<filepath>`.
+-- `/diff <filepath>` - side-by-side diff of <filepath> vs `git show HEAD:<filepath>`.
 -- Demo of `smelt.render.diff_split` + `smelt.ui.layout.hbox`.
 -- Not autoloaded; add `require("smelt.examples.diff")` to init.lua.
 
@@ -24,7 +24,7 @@ local function head_blob(root, rel)
 		return nil, err or "git show failed"
 	end
 	if res.exit_code ~= 0 then
-		-- New file (no HEAD blob) — treat as empty so the right side shows all-insert.
+		-- New file (no HEAD blob) - treat as empty so the right side shows all-insert.
 		return "", nil
 	end
 	return res.stdout or "", nil
@@ -124,7 +124,7 @@ local function open(filepath)
 	left_win:link_scroll(right_win)
 
 	-- No Esc keymap: with `modal = true`, Tier 5 of the key cascade dismisses
-	-- the overlay on bare Esc / Ctrl-C — and only when vim is in idle Normal
+	-- the overlay on bare Esc / Ctrl-C - and only when vim is in idle Normal
 	-- (so Esc in Visual still exits Visual instead of closing the dialog).
 	-- We listen for `close` to keep STATE in sync once the overlay tears down.
 	left_win:on("close", function()

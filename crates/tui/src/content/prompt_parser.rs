@@ -340,7 +340,7 @@ mod tests {
         let source = format!("xy{ATTACHMENT_MARKER}z");
         buf.set_source(source.clone());
         buf.attachment_ids.push(id);
-        // Range covers only the marker — attachment index aligns with markers before `range.start`.
+        // Range covers only the marker - attachment index aligns with markers before `range.start`.
         let marker_start = 2;
         let marker_end = marker_start + ATTACHMENT_MARKER.len_utf8();
         let out = buf.copy_range(marker_start..marker_end);

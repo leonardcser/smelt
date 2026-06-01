@@ -1,4 +1,4 @@
-//! Generic structural shrinker — delta-debugging over a JSON scenario.
+//! Generic structural shrinker - delta-debugging over a JSON scenario.
 //!
 //! All functions take a `crashes: F` predicate where `F: Fn(&Value) ->
 //! bool + Copy`. The shrinker calls `crashes` to decide whether each
@@ -13,7 +13,7 @@
 //!
 //! Why JSON-Value-level and not typed? Both targets' scenarios are
 //! `Vec<Op>` shapes that differ in `Op`'s variants. Working at the
-//! serde_json::Value level lets one implementation serve both — the
+//! serde_json::Value level lets one implementation serve both - the
 //! binary picks the target only for the predicate.
 
 use serde_json::Value;
@@ -44,7 +44,7 @@ pub fn string_chars(value: &Value) -> usize {
     acc
 }
 
-/// Drive both passes (ops + strings) plus a closing ops pass — string
+/// Drive both passes (ops + strings) plus a closing ops pass - string
 /// truncation occasionally makes a previously-load-bearing op
 /// redundant.
 pub fn shrink<F>(mut value: Value, crashes: F) -> Value
@@ -66,7 +66,7 @@ pub fn ddmin_ops<F>(mut value: Value, crashes: F) -> Value
 where
     F: Fn(&Value) -> bool + Copy,
 {
-    // Pass A — drop singletons to fixed point.
+    // Pass A - drop singletons to fixed point.
     let mut changed = true;
     while changed {
         changed = false;
@@ -79,7 +79,7 @@ where
             }
         }
     }
-    // Pass B — drop chunks (ddmin's group-size descent).
+    // Pass B - drop chunks (ddmin's group-size descent).
     let mut group = ops_count(&value).max(2) / 2;
     while group >= 1 {
         let mut i = 0;
@@ -114,7 +114,7 @@ where
                 Some(s) if !s.is_empty() => s.to_string(),
                 _ => continue,
             };
-            // Empty first — often a load-bearing string is load-bearing
+            // Empty first - often a load-bearing string is load-bearing
             // by presence rather than content.
             if try_replace_string(&mut value, &path, "", crashes) {
                 any_change = true;
@@ -172,7 +172,7 @@ where
 }
 
 /// JSON pointers for every string in `ops/<i>/...`. Top-level fields
-/// (`mode`, `vim`) are skipped — those drive app build options, not
+/// (`mode`, `vim`) are skipped - those drive app build options, not
 /// op payloads, and shrinking them rarely helps.
 fn string_paths(value: &Value) -> Vec<String> {
     let mut out = Vec::new();
@@ -279,7 +279,7 @@ mod tests {
                 { "id": 4, "payload": "dddddddddd" }
             ]
         });
-        // Crash depends only on which ids are present — not on
+        // Crash depends only on which ids are present - not on
         // payload contents.
         let crashes = |v: &Value| {
             let ids = ids_of(v);

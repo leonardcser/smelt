@@ -1,4 +1,4 @@
-//! `smelt.defaults` — startup fallbacks for new sessions.
+//! `smelt.defaults` - startup fallbacks for new sessions.
 //!
 //! `smelt.defaults({ model, mode, reasoning_effort })` sets the model /
 //! mode / reasoning-effort that fresh sessions land on. Every field is

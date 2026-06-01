@@ -1,4 +1,4 @@
-//! `smelt.keymap` — register chord→callback and expose `keymap.help`.
+//! `smelt.keymap` - register chord→callback and expose `keymap.help`.
 //! Chords and modes are canonicalized at registration; unknown values raise immediately.
 
 use crate::lua::{LuaHandle, LuaShared};

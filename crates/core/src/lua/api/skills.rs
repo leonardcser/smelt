@@ -1,4 +1,4 @@
-//! `smelt.skills` — list/load skill content from the `SkillLoader` populated at startup.
+//! `smelt.skills` - list/load skill content from the `SkillLoader` populated at startup.
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;

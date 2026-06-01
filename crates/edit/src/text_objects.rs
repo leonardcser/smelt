@@ -224,7 +224,7 @@ fn text_object_paragraph(buf: &str, cpos: usize, inner: bool) -> Option<(usize, 
     // - With a trailing run of opposite-status lines, extend through it.
     // - With no trailing run but cursor in a non-blank paragraph, fall back
     //   to leading blank lines (the "no white in front, none in back" branch).
-    // - With cursor in a trailing blank run at EOF, `ap` fails — return None.
+    // - With cursor in a trailing blank run at EOF, `ap` fails - return None.
     if hi + 1 < lines.len() {
         let other = lines[hi + 1].2;
         let mut hi2 = hi + 1;
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn quote_text_object_does_not_cross_line_boundaries() {
         let s = "\"a\nb\"";
-        // cursor on `a` — only the open quote is on this line.
+        // cursor on `a` - only the open quote is on this line.
         assert_eq!(text_object(s, 1, true, '"'), None);
     }
 

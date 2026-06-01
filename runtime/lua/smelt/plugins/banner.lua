@@ -5,7 +5,7 @@
 -- the same logo + dimmed version + resume hint print to the scrollback.
 --
 -- The version label is a real buffer so users can select / copy it. Art
--- lives in `smelt.banner` — override `FIRE_PIXELS` / `WORDMARK_PIXELS` /
+-- lives in `smelt.banner` - override `FIRE_PIXELS` / `WORDMARK_PIXELS` /
 -- `PALETTE` to retheme, or disable this module via
 -- `smelt.builtins.disable({ plugins = { "banner" } })` in `early.lua`.
 
@@ -367,7 +367,7 @@ end
 -- terminal is too short for that block, the overlay rect spills past the
 -- transcript's bottom edge and bleeds over the prompt chrome (which sits
 -- at the same z-layer in the main layout). Suppress the splash entirely
--- in that case — `refresh()` re-evaluates on resize via the
+-- in that case - `refresh()` re-evaluates on resize via the
 -- transcript window's `resized` event so it pops back as soon as the
 -- terminal grows large enough.
 local function transcript_fits_banner()

@@ -1,6 +1,6 @@
 -- Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.work.busy`
 -- tokens, e.g. /compact), or rewind to the previous turn. Defers to Rust when
--- the agent is running — the cancel-agent path lives there.
+-- the agent is running - the cancel-agent path lives there.
 
 smelt.keymap.set("", "<Esc><Esc>", function(ctx)
   if smelt.engine.is_running() then
