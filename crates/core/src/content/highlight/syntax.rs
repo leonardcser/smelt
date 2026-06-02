@@ -11,6 +11,7 @@ use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::style::Color;
 use crate::theme::intern;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Map a language token (`"bash"`, `"rust"`, `"ts"`, …) to a syntect-friendly file extension.
 /// Unknown tokens fall through unchanged so syntect can attempt a direct extension lookup.
@@ -216,23 +217,27 @@ fn split_regions_into_rows(
     let max_width = max_width.max(1);
     let mut rows: Vec<Vec<(Style, String)>> = Vec::new();
     let mut current_row: Vec<(Style, String)> = Vec::new();
-    let mut col = 0;
+    let mut col = 0usize;
 
     for (style, text) in regions {
         let text = text.trim_end_matches('\n').trim_end_matches('\r');
         if text.is_empty() {
             continue;
         }
-        let mut chars = text.chars().peekable();
-        while chars.peek().is_some() {
-            let remaining = max_width.saturating_sub(col);
-            if remaining == 0 {
+        let mut chunk = String::new();
+        for ch in text.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if col > 0 && col.saturating_add(ch_width) > max_width {
+                if !chunk.is_empty() {
+                    current_row.push((*style, std::mem::take(&mut chunk)));
+                }
                 rows.push(std::mem::take(&mut current_row));
                 col = 0;
-                continue;
             }
-            let chunk: String = chars.by_ref().take(remaining).collect();
-            col += chunk.chars().count();
+            chunk.push(ch);
+            col = col.saturating_add(ch_width);
+        }
+        if !chunk.is_empty() {
             current_row.push((*style, chunk));
         }
     }
@@ -368,7 +373,7 @@ fn print_split_regions(
         };
         out.set_fg(fg);
         out.print(text);
-        col += text.chars().count();
+        col += UnicodeWidthStr::width(text.as_str());
     }
     out.reset_style();
     col
@@ -524,6 +529,21 @@ mod tests {
     }
 
     #[test]
+    fn render_code_block_wraps_wide_chars_by_cells() {
+        let block = render_test(80, |out| {
+            render_code_block(out, &["abぁ"], "txt", 3, false, None, false);
+        });
+        assert_eq!(block.lines.len(), 2);
+        for line in &block.lines {
+            assert!(
+                UnicodeWidthStr::width(line.text.as_str()) <= 3,
+                "line overflowed width: {:?}",
+                line.text
+            );
+        }
+    }
+
+    #[test]
     fn render_code_block_fence_attaches_source_text_per_line() {
         let block = render_test(80, |out| {
             render_code_block(out, &["a", "b", "c"], "rust", 80, false, None, true);
@@ -635,6 +655,22 @@ mod tests {
                 .flat_map(|r| r.iter().map(|(_, t)| t.as_str()))
                 .collect();
             assert_eq!(concat, "abcdefgh");
+        });
+    }
+
+    #[test]
+    fn split_regions_into_rows_wraps_wide_chars_by_cells() {
+        render_test(80, |out| {
+            let regions = vec![(style((0, 0, 0)), "abぁ")];
+            let rows = split_regions_into_rows(out, &regions, 3);
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                let text: String = row.iter().map(|(_, t)| t.as_str()).collect();
+                assert!(
+                    UnicodeWidthStr::width(text.as_str()) <= 3,
+                    "row overflowed width: {text:?}"
+                );
+            }
         });
     }
 

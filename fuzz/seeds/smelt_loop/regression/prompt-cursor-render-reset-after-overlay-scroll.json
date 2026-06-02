@@ -1,0 +1,30 @@
+{
+  "mode": "normal",
+  "ops": [
+    {
+      "data": {
+        "call_id": "",
+        "delta": "",
+        "tool_name": ""
+      },
+      "kind": "engine_tool_args_delta"
+    },
+    {
+      "data": {
+        "button": 254,
+        "col": 31,
+        "kind": 109,
+        "mods": 31,
+        "row": 39
+      },
+      "kind": "mouse"
+    },
+    {
+      "data": {
+        "variant": 0
+      },
+      "kind": "probe_prompt_cursor_after_turn"
+    }
+  ],
+  "vim": false
+}

@@ -28,6 +28,13 @@ impl TuiApp {
         // may underflow and return None, skipping the post-projection restore.
         let transcript_cursor_screen_row = self.transcript_win().cursor_screen_row_in_viewport();
 
+        // The prompt owns cursor/scroll through `sync_input_layer`. A mouse wheel
+        // over its reserved scrollbar can mark the leaf as tail-following via the
+        // generic window pan path; clear that stale display state before the
+        // global tail-follow pass can reinterpret the prompt cursor.
+        if let Some(win) = self.ui.win_mut(crate::app::PROMPT_WIN) {
+            win.follow_tail = false;
+        }
         self.ui.apply_tail_follow();
         self.ui.sync_scroll_links();
         let transcript_captured = matches!(

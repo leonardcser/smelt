@@ -1,0 +1,50 @@
+{
+  "_about": "Compaction prepare probe regression: previous random prompt input can leave Lua cell callbacks/tasks queued. The probe mirrors the production tick order by draining those before injecting synthetic compaction state, so stale cancellation/history callbacks are not misattributed to compaction ending an active turn.",
+  "_fix": "fix(fuzz): quiesce pending Lua callbacks before compaction turn-preservation oracle",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": 0,
+      "kind": "key_shift"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "key_special"
+    },
+    {
+      "data": 255,
+      "kind": "key_special"
+    },
+    {
+      "data": 117,
+      "kind": "key_special"
+    },
+    {
+      "data": 27,
+      "kind": "start_turn"
+    },
+    {
+      "data": {
+        "variant": 190
+      },
+      "kind": "probe_compaction_prepare_request"
+    }
+  ],
+  "vim": true
+}

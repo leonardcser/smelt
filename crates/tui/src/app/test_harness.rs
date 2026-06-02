@@ -38,6 +38,7 @@ pub struct AppSnapshot {
     pub cmdline_open: bool,
     pub cmdline_text: String,
     pub focused_overlay: Option<OverlayId>,
+    pub active_modal: Option<OverlayId>,
     pub prompt_text: String,
     pub queued_inputs: Vec<String>,
     pub agent_running: bool,
@@ -745,6 +746,52 @@ impl TestApp {
             app.render_normal_to(agent_running, &mut sink);
         });
         self.assert_render_layout_invariants();
+        self.assert_prompt_cursor_projection();
+    }
+
+    fn assert_prompt_cursor_projection(&self) {
+        let Some(win) = self.app.ui.win(crate::app::PROMPT_WIN) else {
+            return;
+        };
+        if win.effective_endpoint() != win.cpos {
+            return;
+        }
+        let Some(buf) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) else {
+            return;
+        };
+        let source = buf.source();
+        let cpos = smelt_buffer::text::snap(source, win.cpos.min(source.len()));
+        assert_eq!(
+            win.cpos,
+            cpos,
+            "prompt cpos is not on a UTF-8 boundary after render: cpos {}, source len {}",
+            win.cpos,
+            source.len()
+        );
+        let projected = win.compute_cpos(buf);
+        if projected != cpos {
+            let (start, end) = if projected < cpos {
+                (projected, cpos)
+            } else {
+                (cpos, projected)
+            };
+            let hidden = smelt_buffer::text::slice(source, start..end);
+            // Terminal cells cannot distinguish zero-width spans, and a block
+            // cursor over a literal space renders like the insertion point just
+            // after that space. Keep the oracle strict for visible non-space
+            // text, which is the stuck-cursor class this probe targets.
+            let hidden_width = unicode_width::UnicodeWidthStr::width(hidden);
+            assert!(
+                hidden_width == 0 || hidden.chars().all(|ch| ch == ' '),
+                "prompt visual cursor projection does not round-trip to cpos: visual row {}, col {}, cpos {}, projected {}, hidden source {:?}, source {:?}",
+                win.cursor_row(),
+                win.cursor_col(),
+                cpos,
+                projected,
+                hidden,
+                source
+            );
+        }
     }
 
     fn assert_render_layout_invariants(&self) {
@@ -900,14 +947,13 @@ impl TestApp {
             .unwrap_or(0)
     }
 
-    /// Whether a plain printable key should insert at the prompt cursor with
-    /// no overlay/cmdline/selection/key-capture semantics in front of it.
-    pub fn prompt_plain_insert_ready(&self) -> bool {
+    fn prompt_input_ready_base(&self, allow_pending_chord: bool) -> bool {
         let state = self.state();
         if !matches!(state.app_focus, AppFocus::Prompt)
             || state.agent_running
             || state.cmdline_open
             || state.focused_overlay.is_some()
+            || state.active_modal.is_some()
             || !state.term_focused
         {
             return false;
@@ -920,13 +966,35 @@ impl TestApp {
         }
         if win.selection_anchor.is_some()
             || win.effective_endpoint() != win.cpos
-            || self.app.timers.pending_chord.is_some()
+            || (!allow_pending_chord && self.app.timers.pending_chord.is_some())
             || self.app.timers.pending_pane_chord.is_some()
-            || self.app.timers.app_sequence.has_pending()
         {
             return false;
         }
         !self.app.ui.any_drag_active()
+    }
+
+    /// Whether plain text input should edit the prompt. Unlike
+    /// `prompt_plain_insert_ready`, prediction placeholders are allowed: typing
+    /// an ordinary printable key or paste while a placeholder is visible should
+    /// still insert into the empty prompt; only placeholder accept/dismiss
+    /// chords are special.
+    pub fn prompt_text_input_ready(&self) -> bool {
+        self.prompt_input_ready_base(false)
+    }
+
+    fn prompt_text_input_ready_for_turn_probe(&self) -> bool {
+        // The turn-end probe intentionally preserves a stale Lua chord prefix,
+        // such as the first Esc of the global Esc-Esc binding. The next
+        // ordinary text key must decay that prefix and still edit the prompt,
+        // so do not pre-filter those cases out of the probe.
+        self.prompt_input_ready_base(true)
+    }
+
+    /// Whether a plain printable key should insert at the prompt cursor with
+    /// no overlay/cmdline/selection/key-capture semantics in front of it.
+    pub fn prompt_plain_insert_ready(&self) -> bool {
+        self.prompt_input_ready_base(false)
             && !self
                 .app
                 .placeholder_opts
@@ -1116,6 +1184,74 @@ impl TestApp {
         );
     }
 
+    fn prediction_history_for_probe(&self, variant: u8) -> Vec<protocol::HistoryItem> {
+        vec![protocol::HistoryItem::user(protocol::Content::text(
+            format!("fuzz prompt prediction history {variant}"),
+        ))]
+    }
+
+    fn focus_prompt_without_clearing_transients(&mut self) {
+        self.app.app_focus = AppFocus::Prompt;
+        self.app.term_focused = true;
+        let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
+        if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
+            if win.vim_enabled {
+                win.set_vim_mode(VimMode::Insert);
+            }
+        }
+    }
+
+    fn assert_prompt_typing_and_motion(&mut self, variant: u8) {
+        self.render_silent();
+        assert!(
+            self.prompt_text_input_ready_for_turn_probe(),
+            "prompt is not ready for text input in probe variant {variant}"
+        );
+
+        for (idx, ch) in "ab".chars().enumerate() {
+            self.type_char(ch);
+            let cpos_before_render = self.prompt_cpos();
+            self.render_silent();
+            let actual_cpos = self.prompt_cpos();
+            let state = self.state();
+            assert_eq!(
+                actual_cpos,
+                idx + 1,
+                "prompt cursor did not advance after typing {ch:?} in probe variant {variant}; cpos_before_render {}, prompt_text {:?}, app_focus {:?}, overlay {:?}, cmdline {}, agent {}, pending_chord {}, pending_pane_chord {}, app_sequence {}, overlay_count {}, picker_count {}",
+                cpos_before_render,
+                state.prompt_text,
+                state.app_focus,
+                state.focused_overlay,
+                state.cmdline_open,
+                state.agent_running,
+                self.app.timers.pending_chord.is_some(),
+                self.app.timers.pending_pane_chord.is_some(),
+                self.app.timers.app_sequence.has_pending(),
+                self.app.ui.overlay_count(),
+                self.app.picker_state.len(),
+            );
+        }
+        assert_eq!(self.state().prompt_text, "ab");
+
+        self.press(KeyCode::Left);
+        self.render_silent();
+        assert_eq!(
+            self.prompt_cpos(),
+            1,
+            "left motion did not move prompt cursor in probe variant {variant}",
+        );
+        self.type_char('X');
+        self.render_silent();
+        assert_eq!(self.state().prompt_text, "aXb");
+        assert_eq!(self.prompt_cpos(), 2);
+
+        self.press(KeyCode::End);
+        self.type_text("cd");
+        self.render_silent();
+        assert_eq!(self.state().prompt_text, "aXbcd");
+        assert_eq!(self.prompt_cpos(), 5);
+    }
+
     /// Side-channel: drive the exact bug class from #15. After a turn lifecycle
     /// transition, typing must advance the prompt cursor; left motion must also
     /// move the insertion point. A stuck cursor reverses "ab" into "ba" and
@@ -1132,6 +1268,7 @@ impl TestApp {
         }
 
         let mut turn_id = 10_000 + u64::from(variant);
+        let prediction_probe = variant & 0x80 != 0 && matches!(variant % 4, 0 | 1);
         self.start_turn(turn_id);
         if variant & 0x40 != 0 {
             self.press(KeyCode::Esc);
@@ -1143,60 +1280,73 @@ impl TestApp {
         } else if variant & 0x20 != 0 {
             self.press(KeyCode::Esc);
         }
+        let mut prediction_ids = Vec::new();
         match variant % 4 {
             2 => self.feed_one(SourceEvent::Engine(EngineEvent::TurnError {
                 message: "fuzz turn error".into(),
             })),
             3 => self.cancel(),
-            _ => self.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
-                turn_id,
-                history: vec![],
-                meta: None,
-            })),
+            _ => {
+                let history = if prediction_probe {
+                    self.prediction_history_for_probe(variant)
+                } else {
+                    vec![]
+                };
+                self.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+                    turn_id,
+                    history,
+                    meta: None,
+                }));
+                if prediction_probe {
+                    prediction_ids = self.drain_engine_ask_ids();
+                }
+            }
         }
-        if variant % 8 >= 4 {
+        let reloaded = variant % 8 >= 4;
+        if reloaded {
             self.reload_lua();
         }
         if variant & 0x10 != 0 {
             self.probe_stale_prompt_prediction_response(variant);
         }
-        self.force_prompt_keyboard_focus();
-        self.render_silent();
-        assert!(
-            self.prompt_plain_insert_ready(),
-            "prompt is not ready for plain insertion in probe variant {variant}"
-        );
-
-        for (idx, ch) in "ab".chars().enumerate() {
-            self.type_char(ch);
-            assert_eq!(
-                self.prompt_cpos(),
-                idx + 1,
-                "prompt cursor did not advance after typing {ch:?} in probe variant {variant}",
+        if prediction_probe {
+            if !reloaded {
+                if let Some(id) = prediction_ids.last().copied() {
+                    self.respond_ask_with_text(id, "predicted follow-up");
+                    assert_eq!(
+                        self.app.placeholder_text(crate::app::PROMPT_WIN).as_deref(),
+                        Some("predicted follow-up"),
+                        "turn-end prediction response did not install placeholder in probe variant {variant}"
+                    );
+                }
+            }
+            self.focus_prompt_without_clearing_transients();
+        } else {
+            self.force_prompt_keyboard_focus();
+            assert!(
+                self.prompt_plain_insert_ready(),
+                "prompt is not ready for plain insertion in probe variant {variant}"
             );
         }
-        assert_eq!(self.state().prompt_text, "ab");
 
-        self.press(KeyCode::Left);
-        assert_eq!(
-            self.prompt_cpos(),
-            1,
-            "left motion did not move prompt cursor in probe variant {variant}",
-        );
-        self.type_char('X');
-        assert_eq!(self.state().prompt_text, "aXb");
-        assert_eq!(self.prompt_cpos(), 2);
-
-        self.press(KeyCode::End);
-        self.type_text("cd");
-        assert_eq!(self.state().prompt_text, "aXbcd");
-        assert_eq!(self.prompt_cpos(), 5);
+        self.assert_prompt_typing_and_motion(variant);
     }
 
     /// Side-channel: exercise the real compaction prepare-request path through
     /// `HostCall::PrepareRequest`, pair the generated EngineAsk with a response,
     /// and assert the replacement arrives while active-turn state survives.
     pub fn probe_compaction_prepare_request(&mut self, variant: u8) {
+        // Production reaches host-call dispatch after draining Lua callbacks and
+        // tasks for the tick. Mirror that before installing the synthetic
+        // compaction history so stale callbacks from earlier random input are
+        // not attributed to the prepare-request lifecycle.
+        {
+            let _g = crate::lua::install_app_ptr(&mut self.app);
+            self.app.flush_lua_callbacks();
+            self.app.drive_lua_tasks();
+        }
+        self.drain_cmd();
+
         self.app.core.config.context_window = Some(100);
         self.app.core.session.context_tokens = None;
         self.app.core.session.context_tokens_history_len = None;
@@ -1212,6 +1362,13 @@ impl TestApp {
             .session
             .history
             .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+        // Prepare-request itself drains pending engine events before invoking
+        // hooks. Do that before deciding whether the probe should preserve an
+        // active turn so a queued completion from an earlier synthetic submit
+        // is not misattributed to compaction.
+        while let Ok(ev) = self.app.core.engine.try_recv() {
+            self.app.dispatch_engine_event(ev);
+        }
         // Prepare-request runs before a model request is dispatched. Keep the
         // probe on that lifecycle edge rather than injecting compaction while
         // a synthetic tool call is already in flight.
@@ -1936,6 +2093,7 @@ impl TestApp {
             cmdline_open,
             cmdline_text,
             focused_overlay: self.app.ui.focused_overlay(),
+            active_modal: self.app.ui.active_modal(),
             prompt_text,
             queued_inputs: self
                 .app

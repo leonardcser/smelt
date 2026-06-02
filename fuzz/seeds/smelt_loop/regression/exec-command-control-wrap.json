@@ -1,0 +1,35 @@
+{
+  "_about": "Exec transcript chrome regression: a shell-escape command containing control bytes and a long @-reference must be display-sanitized before wrapping. Raw controls previously let the preformatted chrome row exceed the transcript viewport after resize while scroll_left was pinned to zero.",
+  "_fix": "fix(tui): sanitize exec command text before transcript chrome wrapping",
+  "mode": "plan",
+  "ops": [
+    {
+      "data": "!\u0000\u0000\u0000677S7\u0000\u0000\u0000\u0000\u0000\u0000*\u00001k77 @FI",
+      "kind": "paste"
+    },
+    {
+      "data": 10,
+      "kind": "key_special"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    },
+    {
+      "data": 1,
+      "kind": "key_special"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    },
+    {
+      "data": {
+        "h": 0,
+        "w": 108
+      },
+      "kind": "resize"
+    }
+  ],
+  "vim": true
+}

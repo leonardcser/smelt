@@ -1,0 +1,13 @@
+{
+  "_about": "Regression probe for #15: a local Esc during an active Vim-mode turn can leave the global Esc-Esc Lua chord prefix pending. After the turn completes and prediction placeholder is installed, ordinary typing must decay that stale prefix and still advance the prompt cursor.",
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "probe_prompt_cursor_after_turn",
+      "data": {
+        "variant": 160
+      }
+    }
+  ],
+  "vim": true
+}

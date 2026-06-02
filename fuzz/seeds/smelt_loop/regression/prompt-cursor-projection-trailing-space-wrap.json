@@ -1,0 +1,25 @@
+{
+  "mode": "plan",
+  "ops": [
+    {
+      "data": "( @F",
+      "kind": "paste"
+    },
+    {
+      "data": 0,
+      "kind": "key_special"
+    },
+    {
+      "data": 188,
+      "kind": "key_special"
+    },
+    {
+      "data": {
+        "h": 62789,
+        "w": 3
+      },
+      "kind": "resize"
+    }
+  ],
+  "vim": true
+}

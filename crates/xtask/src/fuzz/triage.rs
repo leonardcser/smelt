@@ -64,14 +64,12 @@ pub fn run(args: Vec<String>) {
     );
 
     eprintln!(">>> 2/3 shrinking (predicate: same panic)");
-    let shrunk_file =
-        std::fs::File::create(&shrunk).unwrap_or_else(|e| die(&format!("create shrunk.json: {e}")));
     step(
         "JSON → shrunk JSON",
         Command::new(&shrink_scenario)
             .args(["--target", target])
             .arg(&raw)
-            .stdout(shrunk_file),
+            .arg(&shrunk),
     );
 
     eprintln!(">>> 3/3 shrunk scenario:");

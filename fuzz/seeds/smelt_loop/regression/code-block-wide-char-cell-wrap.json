@@ -1,0 +1,20 @@
+{
+  "_about": "Code-block wrapping regression: syntax-highlighted transcript code rows must wrap by terminal-cell width, not character count. A wide glyph at the edge previously produced a row wider than the transcript viewport while scroll_left was pinned to zero.",
+  "_fix": "fix(core): wrap syntax-highlighted code blocks by display cells",
+  "mode": "yolo",
+  "ops": [
+    {
+      "data": 40,
+      "kind": "start_turn"
+    },
+    {
+      "data": "```S\n\u0019",
+      "kind": "engine_text_delta"
+    },
+    {
+      "data": "=?ぁ",
+      "kind": "engine_text_delta"
+    }
+  ],
+  "vim": true
+}

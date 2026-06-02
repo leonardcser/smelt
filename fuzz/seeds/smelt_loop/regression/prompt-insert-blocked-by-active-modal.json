@@ -1,0 +1,32 @@
+{
+  "_about": "Prompt insertion oracle regression: a modal overlay can be active even when no overlay leaf currently owns keyboard focus. In that state prompt text keys are routed through modal handling and must not be expected to edit the prompt.",
+  "_fix": "test(fuzz): treat active modal overlays as blocking prompt text readiness",
+  "mode": "yolo",
+  "ops": [
+    {
+      "data": {
+        "variant": 38
+      },
+      "kind": "probe_compaction_prepare_request"
+    },
+    {
+      "data": {
+        "button": 0,
+        "col": 38,
+        "kind": 0,
+        "mods": 38,
+        "row": 38
+      },
+      "kind": "mouse"
+    },
+    {
+      "data": 640034342,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 730662,
+      "kind": "key_unicode"
+    }
+  ],
+  "vim": true
+}

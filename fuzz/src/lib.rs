@@ -1071,7 +1071,7 @@ struct Snapshot {
     deferred_dialogs: usize,
     prompt_source: String,
     prompt_cpos: usize,
-    prompt_plain_insert_ready: bool,
+    prompt_text_input_ready: bool,
     /// Length of the harness's action log at capture time. Use
     /// `app.actions_since(snapshot.action_count)` to inspect actions
     /// produced after the snapshot, replacing the previous per-UiCommand
@@ -1097,7 +1097,7 @@ impl Snapshot {
             deferred_dialogs: app.pending_deferred_dialog_count(),
             prompt_source: app.state().prompt_text,
             prompt_cpos: app.prompt_cpos(),
-            prompt_plain_insert_ready: app.prompt_plain_insert_ready(),
+            prompt_text_input_ready: app.prompt_text_input_ready(),
             action_count: app.actions().len(),
         }
     }
@@ -1547,7 +1547,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             ch,
             lua_keymap_bound,
         } => {
-            if !pre.prompt_plain_insert_ready
+            if !pre.prompt_text_input_ready
                 || lua_keymap_bound
                 || ch.is_control()
                 || ch == '\u{FFFC}'
@@ -1571,7 +1571,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             );
         }
         PostCheck::PromptTextInserted { text } => {
-            if !pre.prompt_plain_insert_ready {
+            if !pre.prompt_text_input_ready {
                 return;
             }
             let inserted = normalize_prompt_paste_text(&text);
