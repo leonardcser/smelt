@@ -1,0 +1,38 @@
+{
+  "_about": "Prompt cursor probe regression: a prompt-docked picker left from earlier input can restore its query during the probe's cleanup, so the probe must quiesce picker transients and clear the prompt again immediately before checking post-turn typing.",
+  "_fix": "test(fuzz): quiesce prompt pickers before cursor probes",
+  "mode": "plan",
+  "ops": [
+    {
+      "data": {
+        "variant": 98
+      },
+      "kind": "probe_prompt_cursor_after_turn"
+    },
+    {
+      "data": 1,
+      "kind": "key_special"
+    },
+    {
+      "data": 0,
+      "kind": "key_special_shift"
+    },
+    {
+      "data": {
+        "variant": 47
+      },
+      "kind": "probe_prompt_cursor_after_turn"
+    },
+    {
+      "data": 199,
+      "kind": "key_ctrl"
+    },
+    {
+      "data": {
+        "variant": 114
+      },
+      "kind": "probe_prompt_cursor_after_turn"
+    }
+  ],
+  "vim": true
+}

@@ -39,6 +39,7 @@ pub struct AppSnapshot {
     pub cmdline_text: String,
     pub focused_overlay: Option<OverlayId>,
     pub active_modal: Option<OverlayId>,
+    pub picker_count: usize,
     pub prompt_text: String,
     pub queued_inputs: Vec<String>,
     pub agent_running: bool,
@@ -954,6 +955,7 @@ impl TestApp {
             || state.cmdline_open
             || state.focused_overlay.is_some()
             || state.active_modal.is_some()
+            || state.picker_count > 0
             || !state.term_focused
         {
             return false;
@@ -1096,6 +1098,12 @@ impl TestApp {
             .or_else(|| self.app.ui.active_modal())
         {
             self.app.close_overlay(overlay_id);
+        }
+        // Prompt-docked pickers own the prompt through Lua registrations on
+        // the prompt window, not through overlay focus. Reloading drops those
+        // registrations before the probe installs its own clean prompt state.
+        if !self.app.picker_state.is_empty() {
+            self.reload_lua();
         }
         self.app.timers.pending_chord = None;
         self.app.timers.pending_pane_chord = None;
@@ -1323,6 +1331,9 @@ impl TestApp {
             self.focus_prompt_without_clearing_transients();
         } else {
             self.force_prompt_keyboard_focus();
+            // Turn-end hooks can leave prompt-owned transients behind; clear after
+            // they are quiesced so the typing oracle starts from a known buffer.
+            let _ = self.run_lua(r#"smelt.prompt.set_text("")"#);
             assert!(
                 self.prompt_plain_insert_ready(),
                 "prompt is not ready for plain insertion in probe variant {variant}"
@@ -2094,6 +2105,7 @@ impl TestApp {
             cmdline_text,
             focused_overlay: self.app.ui.focused_overlay(),
             active_modal: self.app.ui.active_modal(),
+            picker_count: self.app.picker_state.len(),
             prompt_text,
             queued_inputs: self
                 .app
