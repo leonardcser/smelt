@@ -34,15 +34,19 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "text",
-        "Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = \"ErrorMsg\"` for errors, `\"SmeltAccent\"` for accent, or any registered theme group - the mapping is the caller's choice, not the renderer's.",
+        "Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = \"ErrorMsg\"` for errors, `\"SmeltAccent\"` for accent, or any registered theme group - the mapping is the caller's choice, not the renderer's. `opts.width` overrides the wrapping width for tool layouts rendered into narrower panes.",
         &["buf", "content", "opts"],
         |_, (buf, content, opts): (LuaBuf, String, Option<mlua::Table>)| -> LuaResult<()> {
             let hl_group = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten());
+            let width_opt = opts
+                .as_ref()
+                .and_then(|t| t.get::<u16>("width").ok())
+                .filter(|w| *w > 0);
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
-                let width = crate::content::term_width() as u16;
+                let width = width_opt.unwrap_or_else(|| crate::content::term_width() as u16);
                 if let Some(buf) = app.ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         let max_cols = (width as usize).saturating_sub(3);

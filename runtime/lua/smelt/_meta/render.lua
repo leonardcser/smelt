@@ -19,7 +19,7 @@ render.markdown = nil
 ---@type fun(buf: smelt.buf.Buf, opts: table): nil
 render.syntax = nil
 
---- Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = "ErrorMsg"` for errors, `"SmeltAccent"` for accent, or any registered theme group - the mapping is the caller's choice, not the renderer's.
+--- Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = "ErrorMsg"` for errors, `"SmeltAccent"` for accent, or any registered theme group - the mapping is the caller's choice, not the renderer's. `opts.width` overrides the wrapping width for tool layouts rendered into narrower panes.
 ---@type fun(buf: smelt.buf.Buf, content: string, opts: table?): nil
 render.text = nil
 

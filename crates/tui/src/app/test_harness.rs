@@ -492,7 +492,7 @@ impl TestApp {
     /// Number of transcript blocks. Used by event invariants that assert
     /// a block was pushed (e.g. `ProcessCompleted`).
     pub fn transcript_block_count(&self) -> usize {
-        self.app.transcript.history.len()
+        self.app.transcript.history().len()
     }
 
     /// Side-channel: insert a synthetic image attachment at the prompt
@@ -1756,7 +1756,7 @@ impl TestApp {
                 // state; a terminal status means the pending bookkeeping
                 // wasn't cleared when the tool finished - both corrupt
                 // the tool widget.
-                let state = self.app.transcript.history.tool_states.get(&pt.call_id);
+                let state = self.app.transcript.history().tool_states.get(&pt.call_id);
                 assert!(
                     state.is_some(),
                     "pending tool {:?} has no ToolState entry in transcript history",
@@ -1777,8 +1777,9 @@ impl TestApp {
         // missing block means `gc_tool_states` failed to drop a state
         // that no longer has a live block, or `set_history` left state
         // behind.
-        for call_id in self.app.transcript.history.tool_states.keys() {
-            let exists = self.app.transcript.history.blocks.values().any(|b| {
+        let history = self.app.transcript.history();
+        for call_id in history.tool_states.keys() {
+            let exists = history.blocks.values().any(|b| {
                 matches!(
                     b,
                     smelt_core::transcript_model::Block::ToolCall { call_id: cid, .. }

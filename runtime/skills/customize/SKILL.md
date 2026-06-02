@@ -656,6 +656,8 @@ Sync filesystem primitives.
   Read `path` off the main thread.
 - `smelt.fs.read_dir` :: `fun(p: string): string[]?, string?`
   List the immediate entries of directory `p`.
+- `smelt.fs.read_limited` :: `fun(p: string, max_bytes: integer): table?, string?`
+  Read at most `max_bytes` bytes from `p`.
 - `smelt.fs.remove_dir` :: `fun(p: string): boolean, string?`
   Delete the empty directory at `p`.
 - `smelt.fs.remove_dir_all` :: `fun(p: string): boolean, string?`
@@ -769,11 +771,13 @@ Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callback
 - `smelt.layout.leaf` :: `fun(buf: any): table`
   Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.
 - `smelt.layout.markdown` :: `fun(content: string): any`
-  Build a leaf layout from a markdown string.
+  
 - `smelt.layout.sep` :: `fun(char: string?): any`
   Build a 1×1 leaf from a single glyph.
 - `smelt.layout.text` :: `fun(content: string, opts: table?): any`
   Build a leaf layout from a string.
+- `smelt.layout.tool_output` :: `fun(output: table, ctx: table?, opts: table?): any`
+  Render tool stdout/stderr-style text at the tool block width.
 - `smelt.layout.vbox` :: `fun(items: table): table`
   Stack `items` vertically into a single block layout.
 
@@ -1355,6 +1359,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Switch the UI to the persisted session with `id`.
 - `smelt.session.model_messages` :: `fun(): table`
   Return the model-visible message list for the next request.
+- `smelt.session.render_preview_into` :: `fun(id: string, opts: table): table?`
+  Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI.
 - `smelt.session.reset` :: `fun(): nil`
   Cancel any in-flight agent and clear the session to a blank slate.
 - `smelt.session.rewind_to` :: `fun(block_idx: integer?, opts: table?): nil`
@@ -1435,6 +1441,13 @@ Read rendered transcript display text.
   Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 - `smelt.transcript.visible_blocks` :: `fun(): table`
   Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries.
+
+#### `smelt.ui`
+
+Screen-composition primitives: main layout composer and per-window renderer registration.
+
+- `smelt.ui.size` :: `fun(): table`
+  Return the current terminal size as `{ width, height }` in cells.
 
 #### `smelt.ui.layout`
 

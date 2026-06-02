@@ -44,9 +44,7 @@ Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the bu
 fun(content: string): any
 ```
 
-Build a leaf layout from a markdown string. Common pattern for `render`
-callbacks that want full block-level markdown (headings, fenced code,
-lists, tables) instead of plain dim body text.
+
 
 ## `smelt.layout.sep`
 
@@ -64,6 +62,16 @@ fun(content: string, opts: table?): any
 ```
 
 Build a leaf layout from a string. Common pattern for `render` callbacks.
+
+## `smelt.layout.tool_output`
+
+```lua
+fun(output: table, ctx: table?, opts: table?): any
+```
+
+Render tool stdout/stderr-style text at the tool block width. Use this for
+tool results and errors so long diagnostics wrap instead of widening the
+transcript horizontally.
 
 ## `smelt.layout.vbox`
 

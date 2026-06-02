@@ -29,6 +29,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         Tier::UiHost,
     )?;
 
+    ui.fn_(
+        "size",
+        "Return the current terminal size as `{ width, height }` in cells. Useful for choosing between compact and wide overlay layouts without relying on any particular window's current rect.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let (width, height) = crate::lua::try_with_app(|app| (app.last_width, app.last_height))
+                .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)));
+            let out = lua.create_table()?;
+            out.set("width", width)?;
+            out.set("height", height)?;
+            Ok(out)
+        },
+    )?;
+
     let m = ui.sub(
         "layout",
         "Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout. \

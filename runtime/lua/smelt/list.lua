@@ -91,21 +91,44 @@ local function content_width(self)
   return self.leaf:content_width()
 end
 
+local function content_height(self)
+  local rect = self.leaf:rect() or {}
+  return rect.height
+end
+
+local function top_padding(self, row_count)
+  if self.anchor ~= "bottom" then return 0 end
+  local height = content_height(self)
+  if not height or height <= row_count then return 0 end
+  return height - row_count
+end
+
 local function render_visible(self)
   self.buf:clear_ns(NS)
   local visible = self.visible_items
+  local width = content_width(self)
   if #visible == 0 then
-    self.buf:lines({ self.empty_text })
-    self.buf:mark(NS, 1, 0, { end_col = #self.empty_text, dim = true })
-    self.last_rendered_width = content_width(self)
+    local pad = top_padding(self, 1)
+    local lines = {}
+    for i = 1, pad do lines[i] = "" end
+    lines[pad + 1] = self.empty_text
+    self.buf:lines(lines)
+    self.buf:mark(NS, pad + 1, 0, { end_col = #self.empty_text, dim = true })
+    self.row_offset = pad
+    self.last_rendered_width = width
     return
   end
-  local width = content_width(self)
+  local pad = top_padding(self, #visible)
   local lines = {}
   local styled_lines = {}
   local row_marks = {}
   local use_styled = false
+  for i = 1, pad do
+    lines[i] = ""
+    styled_lines[i] = plain_spans("")
+  end
   for i, item in ipairs(visible) do
+    local row = pad + i
     local rendered = self.render(item) or {}
     local text = rendered.text or span_text(rendered.spans)
     -- Truncate to the leaf's content width so long items don't trigger
@@ -114,27 +137,28 @@ local function render_visible(self)
     if width and width > 0 then
       text = smelt.text.fit(text, width)
     end
-    lines[i] = text
+    lines[row] = text
     if rendered.spans then
       use_styled = true
-      styled_lines[i] = fit_spans(rendered.spans, width)
+      styled_lines[row] = fit_spans(rendered.spans, width)
     else
-      styled_lines[i] = plain_spans(text)
+      styled_lines[row] = plain_spans(text)
     end
-    row_marks[i] = clone_marks(rendered.marks)
+    row_marks[row] = clone_marks(rendered.marks)
   end
   if use_styled then
     self.buf:styled(styled_lines)
   else
     self.buf:lines(lines)
   end
-  for i, marks in ipairs(row_marks) do
+  for row, marks in ipairs(row_marks) do
     if marks then
       for _, m in ipairs(marks) do
-        self.buf:mark(NS, i, m.col or 0, m.opts or {})
+        self.buf:mark(NS, row, m.col or 0, m.opts or {})
       end
     end
   end
+  self.row_offset = pad
   self.last_rendered_width = width
 end
 
@@ -153,7 +177,7 @@ end
 function List:refresh()
   rederive_visible(self)
   render_visible(self)
-  self.leaf:cursor(0)
+  self:set_cursor(0)
 end
 
 function List:set_items(items)
@@ -172,7 +196,7 @@ function List:set_items_preserve(items, key_fn)
   if selected_key == nil then return end
   for i, item in ipairs(self.visible_items) do
     if key_fn(item) == selected_key then
-      self.leaf:cursor(i - 1)
+      self:set_cursor(i - 1)
       return
     end
   end
@@ -201,7 +225,11 @@ end
 
 function List:selected_index()
   if #self.visible_items == 0 then return nil end
-  return self.leaf:cursor() or 0
+  local row = self.leaf:cursor() or self.row_offset or 0
+  local idx = row - (self.row_offset or 0)
+  if idx < 0 then idx = 0 end
+  if idx >= #self.visible_items then idx = #self.visible_items - 1 end
+  return idx
 end
 
 function List:selected()
@@ -211,11 +239,19 @@ function List:selected()
 end
 
 function List:set_cursor(i)
-  self.leaf:cursor(i)
+  local n = #self.visible_items
+  if n == 0 then
+    self.leaf:cursor(self.row_offset or 0)
+    return
+  end
+  local idx = math.max(0, math.min(n - 1, i or 0))
+  self.leaf:cursor((self.row_offset or 0) + idx)
 end
 
 function List:move_cursor(delta)
-  self.leaf:move_cursor(delta)
+  local idx = self:selected_index()
+  if not idx then return end
+  self:set_cursor(idx + delta)
 end
 
 --- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
@@ -228,12 +264,15 @@ end
 ---@field render fun(item: any): table Returns `{ text, spans?, marks? }` per visible row.
 ---@field filter? fun(item: any): boolean Predicate re-run on `:set_filter` / `:refresh`.
 ---@field empty_text? string Placeholder line shown when no row passes the filter.
+---@field anchor? "top"|"bottom" Render short lists at the top or bottom of the viewport. Defaults to "top".
 
 -- Build a structured list bound to the dialog-list `opts.leaf` and its
 -- backing `opts.buf`. `opts.items` is the data source; `opts.render(item)`
 -- returns `{ text, spans?, marks }`; `opts.filter(item)` is optional and re-runs
 -- whenever `:set_filter` / `:refresh` fires. `opts.empty_text` shows
--- when no row passes the filter. Returns a handle with `:selected`,
+-- when no row passes the filter. `opts.anchor = "bottom"` pads short result
+-- sets above the rows so filtered pickers stay pinned to the bottom of their
+-- viewport. Returns a handle with `:selected`,
 -- `:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
 -- `:set_cursor`, `:move_cursor`. See the header docstring for the full
 -- usage shape.
@@ -256,6 +295,8 @@ function smelt.list.new(opts)
     items         = opts.items or {},
     visible_items = {},
     empty_text    = opts.empty_text or "  (no items)",
+    anchor        = opts.anchor or "top",
+    row_offset    = 0,
     last_rendered_width = nil,
   }, List)
   self:refresh()
@@ -264,7 +305,9 @@ function smelt.list.new(opts)
   -- `resized` event fires the real-width render and any later terminal
   -- resize re-triggers it.
   self.resize_reg = self.leaf:on("resized", function()
+    local idx = self:selected_index()
     render_visible(self)
+    if idx then self:set_cursor(idx) end
   end)
   return self
 end

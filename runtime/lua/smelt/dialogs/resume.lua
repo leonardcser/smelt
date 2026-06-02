@@ -1,7 +1,8 @@
--- Built-in /resume command. Telescope-style picker: search input on top, results
--- below. Arrows + Ctrl-J/K navigate; typing into the input filters; Enter loads;
--- Alt-D deletes the highlighted session; Ctrl-W toggles the workspace filter
--- between "this workspace" (default) and "all sessions".
+-- Built-in /resume command. Centered Telescope-style overlay: results and
+-- search input on the left, rendered transcript preview on the right. Arrows +
+-- Ctrl-J/K navigate; typing into the input filters; Enter loads; Alt-D deletes
+-- the highlighted session; Ctrl-W toggles the workspace filter between "this
+-- workspace" (default) and "all sessions".
 --
 -- Matching is two-tier:
 --   * Title + first-user-message: fuzzy match (`smelt.fuzzy`), instant - runs
@@ -52,7 +53,8 @@ local function time_ago(ts_ms, now_ms)
   return string.format("%dd", math.floor(delta / 86400))
 end
 
-local LEADING, SIZE_COL, TIME_COL, GAP = 2, 8, 7, 2
+local LEADING, SIZE_COL, TIME_COL, GAP = 1, 6, 4, 1
+local PREVIEW_MIN_TERM_WIDTH = 100
 
 local function make_render(now_ms)
   return function(entry)
@@ -82,6 +84,16 @@ local function update_state_label(buf, workspace_only)
     virt_text_pos = "right_align",
     dim           = true,
   })
+end
+
+local function reverse_in_place(items)
+  local i, j = 1, #items
+  while i < j do
+    items[i], items[j] = items[j], items[i]
+    i = i + 1
+    j = j - 1
+  end
+  return items
 end
 
 -- Wire the `--resume` CLI flag (declared in `smelt/early/resume.lua`) to a
@@ -115,6 +127,7 @@ smelt.cmd.register("resume", function()
 
     -- Expand flat list into DFS-ordered tree (depth field for fork indent).
     local tree_entries = smelt.session.tree(entries)
+    reverse_in_place(tree_entries)
 
     -- Pre-build title haystacks once. Hot path runs `smelt.fuzzy.score` against
     -- these per refilter; rebuilding per call would re-concatenate strings.
@@ -150,49 +163,252 @@ smelt.cmd.register("resume", function()
       end
     end
 
-    local picked = smelt.dialog.picker({
-      title       = "resume",
-      height      = "70%",
-      placeholder = "filter sessions…",
-      items       = tree_entries,
-      render      = make_render(now_ms),
-      filter      = make_filter(),
-      empty_text  = "  (no matching sessions)",
+    local task_id = smelt.task.alloc()
+    local resolved = false
+    local overlay
 
-      on_open = function(ctx)
-        update_state_label(ctx.input_buf, workspace_only)
-      end,
-
-      on_query = function(q, ctx)
-        query = q
-        if query ~= "" then ensure_texts() end
-        ctx.list:set_filter(make_filter())
-      end,
-
-      keymaps = {
-        { key = "ctrl-w", hint = "^w: workspace ⇄ all", on_press = function(ctx)
-            workspace_only = not workspace_only
-            update_state_label(ctx.input_buf, workspace_only)
-            ctx.list:set_filter(make_filter())
-          end },
-        { key = "alt-d", hint = "⌥d: delete", on_press = function(ctx)
-            local e = ctx.list:selected()
-            if not e then return end
-            smelt.session.delete(e.id)
-            for i, x in ipairs(tree_entries) do
-              if x.id == e.id then table.remove(tree_entries, i); break end
-            end
-            title_hays[e.id] = nil
-            if texts then texts[e.id] = nil end
-            ctx.list:set_items(tree_entries)
-          end },
-      },
-
-      on_submit = function(ctx)
-        if ctx.item ~= nil then ctx.resolve(ctx.item) end
-      end,
+    local input_buf = smelt.buf.new()
+    input_buf:lines({ "" })
+    local input_leaf = smelt.win.new(input_buf, {
+      region = "resume_overlay", focusable = true, selectable = true,
+      pad_left = 1, pad_right = 1, scrollbar = false, wrap = false,
+      kind = "input", placeholder = "filter sessions…",
     })
 
+    local list_buf = smelt.buf.new()
+    local list_leaf = smelt.win.new(list_buf, {
+      region = "resume_overlay", focusable = false, selectable = true,
+      pad_left = 1, pad_right = 1, scrollbar = false,
+      kind = "list", initial_cursor = 0,
+    })
+
+    local ui_size = smelt.ui.size()
+    local show_preview = (ui_size.width or 80) >= PREVIEW_MIN_TERM_WIDTH
+    local preview_buf, preview_leaf
+    if show_preview then
+      preview_buf = smelt.buf.new({ readonly = true })
+      preview_buf:lines({ "" })
+      preview_leaf = smelt.win.new(preview_buf, {
+        region = "resume_overlay", focusable = false, selectable = true,
+        pad_left = 0, pad_right = 0, wrap = false, scrollbar = true,
+      })
+    end
+
+    local active_preview_key = nil
+    local preview_timer = nil
+    local rendering_preview = false
+    local ignore_preview_scroll_top = nil
+
+    local list = smelt.list.new({
+      leaf       = list_leaf,
+      buf        = list_buf,
+      items      = tree_entries,
+      render     = make_render(now_ms),
+      filter     = make_filter(),
+      anchor     = "bottom",
+      empty_text = "  (no matching sessions)",
+    })
+
+    local function select_bottom()
+      local n = list:size()
+      if n > 0 then
+        list:set_cursor(n - 1)
+        list_leaf:scroll("tail")
+      end
+    end
+
+    local function preview_size()
+      if not preview_leaf then return 80, 1 end
+      local width = preview_leaf:content_width() or 80
+      local rect = preview_leaf:rect() or {}
+      local height = math.max(1, rect.height or 1)
+      return width, height
+    end
+
+    local function render_preview(scroll_top)
+      if preview_timer then
+        preview_timer:remove()
+        preview_timer = nil
+      end
+      if not show_preview then return end
+      local e = list:selected()
+      if not e then
+        active_preview_key = nil
+        preview_buf:lines({ "  (no session selected)" })
+        return
+      end
+      local width, height = preview_size()
+      local key = table.concat({
+        e.id,
+        tostring(e.updated_at_ms or ""),
+        tostring(width),
+        tostring(height),
+        tostring(scroll_top or "tail"),
+        tostring(smelt.settings.show_thinking),
+      }, ":")
+      active_preview_key = key
+      rendering_preview = true
+      local info = smelt.session.render_preview_into(e.id, {
+        buf = preview_buf,
+        win = preview_leaf,
+        width = width,
+        height = height,
+        scroll_top = scroll_top,
+        updated_at_ms = e.updated_at_ms,
+        show_thinking = smelt.settings.show_thinking,
+      })
+      rendering_preview = false
+      if active_preview_key == key then
+        if info then
+          ignore_preview_scroll_top = info.scroll_top
+        else
+          preview_buf:lines({ "  (session missing)" })
+          ignore_preview_scroll_top = 0
+          preview_leaf:scroll(0)
+        end
+      end
+    end
+
+    local function schedule_preview(scroll_top)
+      if not show_preview then return end
+      if preview_timer then preview_timer:remove() end
+      preview_timer = smelt.timer.set(40, function()
+        preview_timer = nil
+        if resolved then return end
+        render_preview(scroll_top)
+      end)
+    end
+
+    local function refilter()
+      list:set_filter(make_filter())
+      select_bottom()
+      schedule_preview()
+    end
+
+    local function close(value)
+      if resolved then return end
+      resolved = true
+      if preview_timer then
+        preview_timer:remove()
+        preview_timer = nil
+      end
+      if overlay then overlay:close() end
+      smelt.task.resume(task_id, value)
+    end
+
+    local function submit()
+      local e = list:selected()
+      if e then close(e) end
+    end
+
+    update_state_label(input_buf, workspace_only)
+
+    input_leaf:on("text_changed", function(raw)
+      query = (raw and raw.text) or ""
+      if query ~= "" then ensure_texts() end
+      refilter()
+    end)
+    list_leaf:on("selection_changed", function() schedule_preview() end)
+    list_leaf:on("resized", function() select_bottom() end)
+    if show_preview then
+      preview_leaf:on("resized", function() schedule_preview() end)
+      preview_leaf:on("scrolled", function(raw)
+        local top = (raw and raw.top) or 0
+        if rendering_preview then return end
+        if ignore_preview_scroll_top == top then
+          ignore_preview_scroll_top = nil
+          return
+        end
+        render_preview(top)
+      end)
+    end
+    input_leaf:on("submit", function() submit() end)
+    list_leaf:on("submit", function() submit() end)
+    input_leaf:on("dismiss", function() close(nil) end)
+    list_leaf:on("dismiss", function() close(nil) end)
+    if show_preview then preview_leaf:on("dismiss", function() close(nil) end) end
+
+    local function nav(delta)
+      return function()
+        list:move_cursor(delta)
+        schedule_preview()
+      end
+    end
+
+    local function delete_selected()
+      local e = list:selected()
+      if not e then return end
+      smelt.session.delete(e.id)
+      for i, x in ipairs(tree_entries) do
+        if x.id == e.id then table.remove(tree_entries, i); break end
+      end
+      title_hays[e.id] = nil
+      if texts then texts[e.id] = nil end
+      list:set_items(tree_entries)
+      select_bottom()
+      schedule_preview()
+    end
+
+    local function toggle_workspace()
+      workspace_only = not workspace_only
+      update_state_label(input_buf, workspace_only)
+      refilter()
+    end
+
+    local list_layout = smelt.ui.layout.leaf(list_leaf, {
+      border = { all = "Comment" },
+      title = " sessions ",
+    })
+    local input_layout = smelt.ui.layout.leaf(input_leaf, {
+      border = { all = "Comment" },
+      title = " filter ",
+    })
+    local left = smelt.ui.layout.vbox({
+      { list_layout,  height = "fill" },
+      { input_layout, height = 3      },
+    }, { gap = 0 })
+    local root = left
+    if show_preview then
+      root = smelt.ui.layout.hbox({
+        { left, width = "40%" },
+        { smelt.ui.layout.leaf(preview_leaf, {
+            border = { all = "Comment" },
+            title = " transcript ",
+          }), width = "fill" },
+      }, { gap = 0, padding = 0 })
+    end
+
+    overlay = smelt.overlay.new({
+      anchor = "center",
+      border = "none",
+      modal  = true,
+      width  = "85%",
+      height = "75%",
+      layout = root,
+      keymaps = {
+        { key = "up",     on_press = nav(-1) },
+        { key = "down",   on_press = nav(1)  },
+        { key = "ctrl-k", on_press = nav(-1) },
+        { key = "ctrl-j", on_press = nav(1)  },
+        { key = "ctrl-p", on_press = nav(-1) },
+        { key = "ctrl-n", on_press = nav(1)  },
+        { key = "pgup",   on_press = nav(-10) },
+        { key = "pgdn",   on_press = nav(10)  },
+        { key = "ctrl-u", on_press = nav(-5)  },
+        { key = "ctrl-d", on_press = nav(5)   },
+        { key = "enter",  on_press = submit },
+        { key = "esc",    on_press = function() close(nil) end },
+        { key = "c-c",    on_press = function() close(nil) end },
+        { key = "ctrl-w", on_press = toggle_workspace },
+        { key = "alt-d",  on_press = delete_selected },
+      },
+    })
+    list:refresh()
+    select_bottom()
+    render_preview()
+    input_leaf:focus()
+
+    local picked = smelt.task.wait(task_id)
     if picked then smelt.session.load(picked.id) end
   end)
 end, { desc = "resume saved session", while_busy = false, startup_ok = true })

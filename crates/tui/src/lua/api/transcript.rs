@@ -47,7 +47,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).",
         &[],
         |_, ()| -> LuaResult<bool> {
-            Ok(crate::lua::try_with_app(|app| app.transcript.history.is_empty()).unwrap_or(true))
+            Ok(crate::lua::try_with_app(|app| app.transcript.is_empty()).unwrap_or(true))
         },
     )?;
     m.fn_(

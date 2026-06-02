@@ -5,6 +5,30 @@ use crate::smelt_term::{Buffer, ExtmarkOpts, ExtmarkPayload};
 /// suggestion when the buffer is empty.
 pub(crate) const PLACEHOLDER_NS: &str = "placeholder";
 
+pub(crate) fn set_placeholder_extmark(buf: &mut Buffer, text: Option<String>) {
+    let ns = buf.create_namespace(PLACEHOLDER_NS);
+    buf.clear_namespace(ns, 0, usize::MAX);
+    if let Some(text) = text.filter(|s| !s.is_empty()) {
+        buf.set_extmark(
+            ns,
+            0,
+            0,
+            ExtmarkOpts::virt_text(text, Some("GhostText".into())),
+        );
+    }
+}
+
+pub(crate) fn placeholder_text(buf: &mut Buffer) -> Option<String> {
+    let ns = buf.create_namespace(PLACEHOLDER_NS);
+    buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
+        if let ExtmarkPayload::VirtText { text, .. } = &mark.payload {
+            Some(text.clone())
+        } else {
+            None
+        }
+    })
+}
+
 pub(crate) struct InputLeafInput<'a> {
     pub(crate) input: &'a PromptState,
     pub(crate) win: &'a crate::smelt_term::Window,

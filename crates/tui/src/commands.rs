@@ -394,11 +394,11 @@ mod tests {
     }
 
     fn mode_blocks(app: &crate::app::TuiApp) -> Vec<&str> {
-        app.transcript
-            .history
+        let history = app.transcript.history();
+        history
             .order
             .iter()
-            .filter_map(|id| match app.transcript.history.blocks.get(id) {
+            .filter_map(|id| match history.blocks.get(id) {
                 Some(Block::Mode { text, .. }) => Some(text.as_str()),
                 _ => None,
             })

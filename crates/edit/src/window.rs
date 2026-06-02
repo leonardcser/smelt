@@ -618,6 +618,22 @@ impl Window {
         self.total_rows_override = Some(total_rows);
     }
 
+    /// Configure the backing buffer as a materialized slice of a larger virtual
+    /// row space. Clears virtual mode only when the slice covers the whole row
+    /// space; a top slice with more rows below must still keep `total_rows`.
+    pub fn set_materialized_rows(
+        &mut self,
+        row_base: RowIndex,
+        materialized_rows: RowIndex,
+        total_rows: RowIndex,
+    ) {
+        if row_base == 0 && materialized_rows >= total_rows {
+            self.clear_virtual_rows();
+        } else {
+            self.set_virtual_rows(row_base, total_rows);
+        }
+    }
+
     pub fn clear_virtual_rows(&mut self) {
         self.row_base = 0;
         self.total_rows_override = None;

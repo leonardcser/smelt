@@ -18,7 +18,9 @@ Build a structured list bound to the dialog-list `opts.leaf` and its
 backing `opts.buf`. `opts.items` is the data source; `opts.render(item)`
 returns `{ text, spans?, marks }`; `opts.filter(item)` is optional and re-runs
 whenever `:set_filter` / `:refresh` fires. `opts.empty_text` shows
-when no row passes the filter. Returns a handle with `:selected`,
+when no row passes the filter. `opts.anchor = "bottom"` pads short result
+sets above the rows so filtered pickers stay pinned to the bottom of their
+viewport. Returns a handle with `:selected`,
 `:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
 `:set_cursor`, `:move_cursor`. See the header docstring for the full
 usage shape.

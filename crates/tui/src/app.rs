@@ -49,9 +49,9 @@ pub(crate) struct ContextWindowUpdate {
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
-    pub(crate) transcript: smelt_core::content::transcript::Transcript,
+    pub(crate) transcript: crate::app::transcript::TranscriptView,
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
-    pub(crate) transcript_projection: crate::content::transcript_buf::TranscriptProjection,
+    pub(crate) resume_preview_cache: crate::app::transcript::ResumePreviewCache,
     pub(crate) input_history: History,
     pub(crate) input: PromptState,
     pub(crate) exec: Option<crate::commands::ExecHandle>,
@@ -516,7 +516,6 @@ impl TuiApp {
 
         let app_config = config;
 
-        let transcript_projection = crate::content::transcript_buf::TranscriptProjection::new();
         let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
         let (ui, well_known) = {
             let mut ui = crate::smelt_term::Ui::new();
@@ -641,9 +640,9 @@ impl TuiApp {
         Self {
             core,
             lua,
-            transcript: smelt_core::content::transcript::Transcript::new(),
+            transcript: crate::app::transcript::TranscriptView::new(),
             parser: smelt_core::content::stream_parser::StreamParser::new(),
-            transcript_projection,
+            resume_preview_cache: crate::app::transcript::ResumePreviewCache::new(6),
             input_history: History::load(),
             input,
             exec: None,
@@ -977,14 +976,7 @@ impl TuiApp {
     /// extmark on the window's buffer in the well-known placeholder namespace.
     pub(crate) fn placeholder_text(&mut self, win: crate::smelt_term::WinId) -> Option<String> {
         let buf = self.ui.win_buf_mut(win)?;
-        let ns = buf.create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
-        buf.extmarks(ns).into_iter().find_map(|(_, mark)| {
-            if let crate::smelt_term::ExtmarkPayload::VirtText { text, .. } = &mark.payload {
-                Some(text.clone())
-            } else {
-                None
-            }
-        })
+        crate::content::prompt_buf::placeholder_text(buf)
     }
 
     /// Set the placeholder text on `win`. Replaces any prior placeholder.
@@ -992,21 +984,13 @@ impl TuiApp {
         let Some(buf) = self.ui.win_buf_mut(win) else {
             return;
         };
-        let ns = buf.create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
-        buf.clear_namespace(ns, 0, usize::MAX);
-        buf.set_extmark(
-            ns,
-            0,
-            0,
-            crate::smelt_term::ExtmarkOpts::virt_text(text, Some("GhostText".into())),
-        );
+        crate::content::prompt_buf::set_placeholder_extmark(buf, Some(text));
     }
 
     /// Clear the placeholder on `win` (text + opts). Idempotent.
     pub fn clear_placeholder(&mut self, win: crate::smelt_term::WinId) {
         if let Some(buf) = self.ui.win_buf_mut(win) {
-            let ns = buf.create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
-            buf.clear_namespace(ns, 0, usize::MAX);
+            crate::content::prompt_buf::set_placeholder_extmark(buf, None);
         }
         self.placeholder_opts.remove(&win);
     }
@@ -1313,8 +1297,8 @@ impl TuiApp {
             if include_tick {
                 self.ui.dispatch_tick(&mut lua_invoke);
             }
-            self.ui.dispatch_scroll_events(&mut lua_invoke);
             self.ui.dispatch_resize_events(&mut lua_invoke);
+            self.ui.dispatch_scroll_events(&mut lua_invoke);
         }
         self.flush_lua_callbacks();
     }

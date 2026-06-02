@@ -1,6 +1,6 @@
 use super::block_buffers::BlockBufferCache;
 use crate::smelt_term::Theme;
-use crate::smelt_term::{clamp_scroll, Buffer, RowIndex};
+use crate::smelt_term::{clamp_scroll, BufId, Buffer, RowIndex};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
@@ -11,7 +11,7 @@ pub(crate) struct TranscriptProjection {
     cache: BlockBufferCache,
     cache_generation: u64,
     cache_width: u16,
-    project_key: Option<ProjectKey>,
+    materialized: Option<MaterializedProjection>,
     /// Block layout from the last visible `project()`. Surfaced to Lua via `visible_blocks`.
     visible_layout: Vec<LayoutEntry>,
     /// Absolute row represented by local row 0 in the backing buffer.
@@ -110,10 +110,29 @@ impl TranscriptDocument {
         first
     }
 
-    fn tail_block_ids(&self, viewport_rows: u16) -> impl Iterator<Item = BlockId> + '_ {
-        self.nodes[self.tail_start_index(viewport_rows)..]
-            .iter()
-            .map(|node| node.id)
+    fn start_index_for_row(&self, row: RowIndex) -> usize {
+        let idx = self.prefix_rows.partition_point(|prefix| *prefix <= row);
+        idx.saturating_sub(1).min(self.nodes.len())
+    }
+
+    fn block_index(&self, id: BlockId) -> Option<usize> {
+        self.nodes.iter().position(|node| node.id == id)
+    }
+
+    fn window_end_index(&self, first: usize, viewport_rows: u16) -> usize {
+        let target_rows = (viewport_rows as RowIndex).saturating_add(TAIL_OVERSCAN_ROWS);
+        let mut selected_rows: RowIndex = 0;
+        let mut end = first;
+        while end < self.nodes.len() {
+            let node = &self.nodes[end];
+            selected_rows =
+                selected_rows.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
+            end += 1;
+            if selected_rows >= target_rows {
+                break;
+            }
+        }
+        end
     }
 
     fn rebuild_prefix_rows(&mut self) {
@@ -142,13 +161,39 @@ struct ProjectKey {
     generation: u64,
     width: u16,
     show_thinking: bool,
-    tail_viewport_rows: Option<u16>,
+    virtual_viewport_rows: Option<u16>,
+    tail: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MaterializedProjection {
+    key: ProjectKey,
+    buf_id: BufId,
+    changedtick: u64,
 }
 
 pub(crate) struct ProjectOutput {
     pub clamped_scroll: RowIndex,
     pub row_base: RowIndex,
     pub total_rows: RowIndex,
+    pub projected_rows: RowIndex,
+}
+
+pub(crate) struct ProjectionPlan {
+    key: ProjectKey,
+    scroll_target: ScrollTarget,
+    scroll_top: RowIndex,
+    viewport_rows: u16,
+    first: usize,
+    block_ids: Vec<BlockId>,
+    block_keys: Vec<LayoutKey>,
+    resize_anchor: Option<(BlockId, RowIndex)>,
+}
+
+impl ProjectionPlan {
+    pub(crate) fn block_ids(&self) -> &[BlockId] {
+        &self.block_ids
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -198,7 +243,7 @@ impl TranscriptProjection {
             cache: BlockBufferCache::new(),
             cache_generation: u64::MAX,
             cache_width: 0,
-            project_key: None,
+            materialized: None,
             visible_layout: Vec::new(),
             visible_row_base: 0,
             visible_total_rows: 0,
@@ -221,7 +266,7 @@ impl TranscriptProjection {
             // Width change invalidates all layouts (wrapping changes).
             self.cache.clear();
             self.cache_width = width;
-            self.project_key = None;
+            self.materialized = None;
             self.visible_layout.clear();
             self.visible_row_base = 0;
             self.visible_total_rows = 0;
@@ -236,7 +281,7 @@ impl TranscriptProjection {
     /// highlight groups need to be re-resolved against the new palette.
     pub(crate) fn invalidate_theme(&mut self) {
         self.cache.clear();
-        self.project_key = None;
+        self.materialized = None;
         self.visible_layout.clear();
         self.visible_row_base = 0;
         self.visible_total_rows = 0;
@@ -244,7 +289,104 @@ impl TranscriptProjection {
         self.document = TranscriptDocument::default();
     }
 
-    /// Render every block (parallel on cache misses) and stitch the unified buffer.
+    fn target_has_projection(&self, key: ProjectKey, buf: &Buffer) -> bool {
+        self.materialized.is_some_and(|m| {
+            m.key == key && m.buf_id == buf.id() && m.changedtick == buf.changedtick()
+        })
+    }
+
+    fn last_project_key(&self) -> Option<ProjectKey> {
+        self.materialized.map(|m| m.key)
+    }
+
+    fn mark_projected_into(&mut self, key: ProjectKey, buf: &Buffer) {
+        self.materialized = Some(MaterializedProjection {
+            key,
+            buf_id: buf.id(),
+            changedtick: buf.changedtick(),
+        });
+    }
+
+    fn prepare_document(&mut self, history: &BlockHistory, width: u16, show_thinking: bool) {
+        let gen = history.generation();
+        self.gc_if_stale(gen, width);
+        let base_key = base_layout_key(width, show_thinking);
+        self.document
+            .rebuild_if_stale(history, width, show_thinking, base_key);
+    }
+
+    fn resize_anchor_for(
+        &self,
+        width: u16,
+        scroll_target: ScrollTarget,
+    ) -> Option<(BlockId, RowIndex)> {
+        let ScrollTarget::VisibleRow(row) = scroll_target else {
+            return None;
+        };
+        let width_changed = self
+            .last_project_key()
+            .map(|prev| prev.width != width)
+            .unwrap_or(false);
+        width_changed.then(|| self.block_anchor_at(row)).flatten()
+    }
+
+    pub(crate) fn plan_projection(
+        &mut self,
+        history: &BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        scroll_target: ScrollTarget,
+        viewport_rows: u16,
+    ) -> ProjectionPlan {
+        let scroll_top = scroll_target.as_scroll_top();
+        let key = ProjectKey {
+            generation: history.generation(),
+            width,
+            show_thinking,
+            virtual_viewport_rows: matches!(
+                scroll_target,
+                ScrollTarget::Tail | ScrollTarget::VisibleRow(_)
+            )
+            .then_some(viewport_rows),
+            tail: scroll_target == ScrollTarget::Tail,
+        };
+        let resize_anchor = self.resize_anchor_for(width, scroll_target);
+        self.prepare_document(history, width, show_thinking);
+        let first = match scroll_target {
+            ScrollTarget::Tail => self.document.tail_start_index(viewport_rows),
+            ScrollTarget::VisibleRow(row) => resize_anchor
+                .and_then(|(id, _)| self.document.block_index(id))
+                .unwrap_or_else(|| self.document.start_index_for_row(row)),
+            ScrollTarget::Row(_) => 0,
+        };
+        let end = match scroll_target {
+            ScrollTarget::Row(_) => self.document.nodes.len(),
+            ScrollTarget::Tail | ScrollTarget::VisibleRow(_) => {
+                self.document.window_end_index(first, viewport_rows)
+            }
+        };
+        let block_ids = self.document.nodes[first..end]
+            .iter()
+            .map(|node| node.id)
+            .collect();
+        let block_keys = self.document.nodes[first..end]
+            .iter()
+            .map(|node| node.key)
+            .collect();
+        ProjectionPlan {
+            key,
+            scroll_target,
+            scroll_top,
+            viewport_rows,
+            first,
+            block_ids,
+            block_keys,
+            resize_anchor,
+        }
+    }
+
+    /// Render a full transcript or a bounded virtual window into `buf`.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn project(
         &mut self,
@@ -256,88 +398,80 @@ impl TranscriptProjection {
         scroll_target: ScrollTarget,
         viewport_rows: u16,
     ) -> ProjectOutput {
-        let scroll_top = scroll_target.as_scroll_top();
-        let gen = history.generation();
-        let key = ProjectKey {
-            generation: gen,
-            width,
-            show_thinking,
-            tail_viewport_rows: (scroll_target == ScrollTarget::Tail).then_some(viewport_rows),
-        };
+        let plan =
+            self.plan_projection(history, width, show_thinking, scroll_target, viewport_rows);
+        self.project_planned(buf, history, theme, plan)
+    }
 
-        if let ScrollTarget::VisibleRow(row) = scroll_target {
+    pub(crate) fn project_planned(
+        &mut self,
+        buf: &mut Buffer,
+        history: &mut BlockHistory,
+        theme: &Theme,
+        plan: ProjectionPlan,
+    ) -> ProjectOutput {
+        if let ScrollTarget::VisibleRow(row) = plan.scroll_target {
             if let Some(out) = self.reuse_visible_projection_for_row(
                 buf,
-                gen,
-                width,
-                show_thinking,
+                plan.key.generation,
+                plan.key.width,
+                plan.key.show_thinking,
                 row,
-                viewport_rows,
+                plan.viewport_rows,
             ) {
                 return out;
             }
         }
 
-        if self.project_key == Some(key) {
-            let total_rows = match scroll_target {
-                ScrollTarget::Row(_) | ScrollTarget::VisibleRow(_) => buf.line_count() as RowIndex,
-                ScrollTarget::Tail => self.visible_total_rows,
+        if !matches!(plan.scroll_target, ScrollTarget::VisibleRow(_))
+            && self.target_has_projection(plan.key, buf)
+        {
+            let total_rows = match plan.scroll_target {
+                ScrollTarget::Row(_) => buf.line_count() as RowIndex,
+                ScrollTarget::VisibleRow(_) | ScrollTarget::Tail => self.visible_total_rows,
             };
             return ProjectOutput {
-                clamped_scroll: clamp_scroll(scroll_top, total_rows, viewport_rows),
+                clamped_scroll: clamp_scroll(plan.scroll_top, total_rows, plan.viewport_rows),
                 row_base: self.visible_row_base,
                 total_rows,
+                projected_rows: buf.line_count() as RowIndex,
             };
         }
 
-        if scroll_target == ScrollTarget::Tail {
-            return self.project_tail_visible(
-                buf,
-                history,
-                width,
-                show_thinking,
-                theme,
-                viewport_rows,
-                key,
-            );
+        match plan.scroll_target {
+            ScrollTarget::Row(_) => self.project_full(buf, history, theme, plan),
+            ScrollTarget::Tail | ScrollTarget::VisibleRow(_) => {
+                let mut out = self.project_visible_range(buf, history, theme, &plan);
+                if let Some((block_id, offset)) = plan.resize_anchor {
+                    if let Some(entry) = self
+                        .visible_layout
+                        .iter()
+                        .find(|entry| entry.id == block_id)
+                    {
+                        out.clamped_scroll = clamp_scroll(
+                            entry.start.saturating_add(offset),
+                            out.total_rows,
+                            plan.viewport_rows,
+                        );
+                    }
+                }
+                out
+            }
         }
+    }
 
-        // When width changes, capture a content-stable anchor at the current
-        // scroll_top - (BlockId, row_offset_in_block) - before the layout is
-        // discarded. The same remap is needed when leaving a tail projection:
-        // prefix rows may have been estimated, but the block-local anchor is stable.
-        let width_changed = self
-            .project_key
-            .map(|prev| prev.width != width)
-            .unwrap_or(false);
-        let leaving_tail_projection = self
-            .project_key
-            .map(|prev| prev.tail_viewport_rows.is_some())
-            .unwrap_or(false);
-        let resize_anchor = if width_changed || leaving_tail_projection {
-            self.block_anchor_at(scroll_top)
-        } else {
-            None
-        };
-
-        self.gc_if_stale(gen, width);
-
-        let base_key = base_layout_key(width, show_thinking);
-        self.document
-            .rebuild_if_stale(history, width, show_thinking, base_key);
+    fn project_full(
+        &mut self,
+        buf: &mut Buffer,
+        history: &mut BlockHistory,
+        theme: &Theme,
+        plan: ProjectionPlan,
+    ) -> ProjectOutput {
         let _perf = smelt_perf::perf::begin("project:render");
-
-        let n = history.order.len();
-        let mut block_ids: Vec<BlockId> = Vec::with_capacity(n);
-        let mut block_keys: Vec<LayoutKey> = Vec::with_capacity(n);
-        for i in 0..n {
-            let id = history.order[i];
-            block_ids.push(id);
-            block_keys.push(history.resolve_key(id, base_key));
-        }
         self.cache
-            .ensure_many(history, &block_ids, &block_keys, theme);
+            .ensure_many(history, &plan.block_ids, &plan.block_keys, theme);
 
+        let n = plan.block_ids.len();
         let mut texts: Vec<String> = Vec::with_capacity(n.saturating_mul(8));
         let mut pending: Vec<PendingRow> = Vec::new();
         let mut layout: Vec<LayoutEntry> = Vec::with_capacity(n);
@@ -349,7 +483,13 @@ impl TranscriptProjection {
         };
 
         for i in 0..n {
-            self.append_projected_block(history, i, block_ids[i], block_keys[i], &mut rows);
+            self.append_projected_block(
+                history,
+                i,
+                plan.block_ids[i],
+                plan.block_keys[i],
+                &mut rows,
+            );
         }
         self.document.refresh_height_index();
 
@@ -358,7 +498,7 @@ impl TranscriptProjection {
         // rebuilding from scratch. This keeps changedtick stable for earlier
         // rows so Window::render re-uses its WrappedLayout cache.
         let incremental = self.can_incremental(&layout)
-            && self.apply_incremental(buf, history, &block_ids, &block_keys, &layout);
+            && self.apply_incremental(buf, history, &plan.block_ids, &plan.block_keys, &layout);
 
         if !incremental {
             buf.set_all_lines(texts);
@@ -374,21 +514,23 @@ impl TranscriptProjection {
         let total_rows = buf.line_count() as RowIndex;
         self.visible_row_base = 0;
         self.visible_total_rows = total_rows;
-        self.project_key = Some(key);
+        self.mark_projected_into(plan.key, buf);
 
-        let restored_scroll = resize_anchor
+        let restored_scroll = plan
+            .resize_anchor
             .and_then(|(block_id, offset)| {
                 self.visible_layout
                     .iter()
                     .find(|e| e.id == block_id)
                     .map(|entry| entry.start.saturating_add(offset))
             })
-            .unwrap_or(scroll_top);
+            .unwrap_or(plan.scroll_top);
 
         ProjectOutput {
-            clamped_scroll: clamp_scroll(restored_scroll, total_rows, viewport_rows),
+            clamped_scroll: clamp_scroll(restored_scroll, total_rows, plan.viewport_rows),
             row_base: 0,
             total_rows,
+            projected_rows: buf.line_count() as RowIndex,
         }
     }
 
@@ -401,12 +543,12 @@ impl TranscriptProjection {
         row: RowIndex,
         viewport_rows: u16,
     ) -> Option<ProjectOutput> {
-        let prev = self.project_key?;
-        if prev.generation != gen
-            || prev.width != width
-            || prev.show_thinking != show_thinking
-            || prev.tail_viewport_rows.is_none()
-        {
+        let prev = self.last_project_key()?;
+        if prev.generation != gen || prev.width != width || prev.show_thinking != show_thinking {
+            return None;
+        }
+
+        if !self.target_has_projection(prev, buf) {
             return None;
         }
 
@@ -421,44 +563,27 @@ impl TranscriptProjection {
                 clamped_scroll,
                 row_base: self.visible_row_base,
                 total_rows,
+                projected_rows: buf.line_count() as RowIndex,
             });
         }
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn project_tail_visible(
+    fn project_visible_range(
         &mut self,
         buf: &mut Buffer,
         history: &mut BlockHistory,
-        width: u16,
-        show_thinking: bool,
         theme: &Theme,
-        viewport_rows: u16,
-        key: ProjectKey,
+        plan: &ProjectionPlan,
     ) -> ProjectOutput {
-        let gen = history.generation();
-        self.gc_if_stale(gen, width);
+        self.cache
+            .ensure_many(history, &plan.block_ids, &plan.block_keys, theme);
 
-        let base_key = base_layout_key(width, show_thinking);
-        self.document
-            .rebuild_if_stale(history, width, show_thinking, base_key);
-
-        let first = self.document.tail_start_index(viewport_rows);
-        let ids: Vec<BlockId> = self.document.nodes[first..]
-            .iter()
-            .map(|node| node.id)
-            .collect();
-        let keys: Vec<LayoutKey> = self.document.nodes[first..]
-            .iter()
-            .map(|node| node.key)
-            .collect();
-        self.cache.ensure_many(history, &ids, &keys, theme);
-
+        let first = plan.first;
         let row_base = self.document.prefix_row(first);
         let mut texts: Vec<String> = Vec::new();
         let mut pending = Vec::new();
-        let mut layout = Vec::with_capacity(ids.len());
+        let mut layout = Vec::with_capacity(plan.block_ids.len());
         let mut rows = ProjectRows {
             row_base,
             texts: &mut texts,
@@ -466,7 +591,12 @@ impl TranscriptProjection {
             layout: &mut layout,
         };
 
-        for (offset, (&id, &bkey)) in ids.iter().zip(keys.iter()).enumerate() {
+        for (offset, (&id, &bkey)) in plan
+            .block_ids
+            .iter()
+            .zip(plan.block_keys.iter())
+            .enumerate()
+        {
             self.append_projected_block(history, first + offset, id, bkey, &mut rows);
         }
 
@@ -483,15 +613,15 @@ impl TranscriptProjection {
         self.visible_layout = layout;
         self.visible_row_base = row_base;
         self.visible_total_rows = total_rows;
-        self.project_key = Some(key);
+        self.mark_projected_into(plan.key, buf);
         debug_assert!(total_rows >= row_base);
         debug_assert!(row_base.saturating_add(materialized_rows) <= total_rows);
-        let clamped_scroll = clamp_scroll(RowIndex::MAX, total_rows, viewport_rows);
-        debug_assert!(clamped_scroll >= row_base.saturating_sub(1));
+        let clamped_scroll = clamp_scroll(plan.scroll_top, total_rows, plan.viewport_rows);
         ProjectOutput {
             clamped_scroll,
             row_base,
             total_rows,
+            projected_rows: materialized_rows,
         }
     }
 
@@ -657,20 +787,6 @@ impl TranscriptProjection {
             entry.rows.saturating_sub(1)
         };
         Some((entry.id, offset))
-    }
-
-    /// Estimated tail-visible block ids for pre-rendering side effects before layout.
-    pub(crate) fn tail_block_ids(
-        &mut self,
-        history: &BlockHistory,
-        width: u16,
-        show_thinking: bool,
-        viewport_rows: u16,
-    ) -> Vec<BlockId> {
-        let base_key = base_layout_key(width, show_thinking);
-        self.document
-            .rebuild_if_stale(history, width, show_thinking, base_key);
-        self.document.tail_block_ids(viewport_rows).collect()
     }
 
     /// Render every block into the cache. For full-text consumers that may run
@@ -1333,6 +1449,82 @@ mod tests {
     }
 
     #[test]
+    fn cached_tail_projection_rewrites_mutated_target_buffer() {
+        let mut transcript = Transcript::new();
+        for i in 0..40 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(8), Default::default());
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Tail,
+            5,
+        );
+
+        buf.set_all_lines(vec!["other session".into()]);
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Tail,
+            5,
+        );
+
+        assert!(buf.lines().iter().any(|line| line == "line 39"));
+        assert!(!buf.lines().iter().any(|line| line == "other session"));
+    }
+
+    #[test]
+    fn cached_tail_projection_rewrites_new_target_buffer() {
+        let mut transcript = Transcript::new();
+        for i in 0..40 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut first_buf = Buffer::new(crate::smelt_term::BufId(8), Default::default());
+        projection.project(
+            &mut first_buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Tail,
+            5,
+        );
+
+        let mut second_buf = Buffer::new(crate::smelt_term::BufId(9), Default::default());
+        second_buf.set_all_lines(vec!["other session".into()]);
+        projection.project(
+            &mut second_buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Tail,
+            5,
+        );
+
+        assert!(second_buf.lines().iter().any(|line| line == "line 39"));
+        assert!(!second_buf
+            .lines()
+            .iter()
+            .any(|line| line == "other session"));
+    }
+
+    #[test]
     fn materialized_block_layout_is_exact_after_tail_projection() {
         let mut transcript = Transcript::new();
         for i in 0..40 {
@@ -1365,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    fn full_projection_remaps_scroll_when_leaving_estimated_tail() {
+    fn tail_projection_refines_total_without_full_materialization() {
         let mut transcript = Transcript::new();
         for i in 0..40 {
             let lines = (0..10)
@@ -1387,7 +1579,38 @@ mod tests {
             ScrollTarget::Tail,
             5,
         );
-        assert!(tail.total_rows < 439, "prefix rows start as estimates");
+        assert!(tail.total_rows < 439);
+        assert!(tail.total_rows >= buf.line_count() as RowIndex);
+        assert_eq!(tail.clamped_scroll, tail.total_rows.saturating_sub(5));
+        assert!(buf.lines().iter().any(|line| line == "block 39 line 9"));
+        assert!(!buf.lines().iter().any(|line| line == "block 0 line 0"));
+
+        let visible = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::VisibleRow(tail.clamped_scroll.saturating_sub(1)),
+            5,
+        );
+        assert!(visible.row_base > 0);
+        assert!(buf.lines().iter().any(|line| line == "block 39 line 9"));
+        assert!(!buf.lines().iter().any(|line| line == "block 0 line 0"));
+
+        let top = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::VisibleRow(0),
+            5,
+        );
+        assert_eq!(top.row_base, 0);
+        assert!(top.projected_rows < top.total_rows);
+        assert!(buf.lines().iter().any(|line| line == "block 0 line 0"));
+        assert!(!buf.lines().iter().any(|line| line == "block 39 line 9"));
 
         let full = projection.project(
             &mut buf,
@@ -1395,15 +1618,63 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(tail.clamped_scroll.saturating_sub(1)),
+            ScrollTarget::Row(0),
             5,
         );
 
         assert_eq!(full.total_rows, 439);
-        assert!(
-            full.clamped_scroll > 300,
-            "leaving tail should stay anchored near the resumed tail, not jump to the top"
+    }
+
+    #[test]
+    fn visible_projection_preserves_block_anchor_across_width_change() {
+        let mut transcript = Transcript::new();
+        for i in 0..20 {
+            transcript.push(Block::Text {
+                content: format!("block {i} {}", "wrapped text ".repeat(20)),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(10), Default::default());
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Row(0),
+            5,
         );
+        let anchor_id = transcript.history.order[10];
+        let anchor_row = projection
+            .visible_layout
+            .iter()
+            .find(|entry| entry.id == anchor_id)
+            .map(|entry| entry.start)
+            .expect("anchor block layout");
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::VisibleRow(anchor_row),
+            5,
+        );
+        assert!(buf.lines().iter().any(|line| line.contains("block 10")));
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            24,
+            false,
+            &theme,
+            ScrollTarget::VisibleRow(anchor_row),
+            5,
+        );
+        assert!(buf.lines().iter().any(|line| line.contains("block 10")));
     }
 
     #[test]

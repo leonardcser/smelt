@@ -149,13 +149,14 @@ smelt.tools.register({
     end
     return lines
   end,
-  render = function(_, output)
+  render = function(_, output, ctx)
     local items = {}
     local content = (output.content or ""):gsub("%s+$", "")
     if content:match("%S") then
-      table.insert(items, smelt.layout.text(content, {
-        hl_group = output.is_error and "ErrorMsg" or nil,
-      }))
+      table.insert(items, smelt.layout.tool_output({
+        content = content,
+        is_error = output.is_error,
+      }, ctx))
     end
     return smelt.layout.vbox(items)
   end,

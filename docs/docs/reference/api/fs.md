@@ -97,6 +97,14 @@ fun(p: string): string[]?, string?
 
 List the immediate entries of directory `p`. Returns `(entries, nil)` on success or `(nil, err_string)` on failure.
 
+## `smelt.fs.read_limited`
+
+```lua
+fun(p: string, max_bytes: integer): table?, string?
+```
+
+Read at most `max_bytes` bytes from `p`. Returns `({ content, truncated }, nil)` on success or `(nil, err_string)` on failure.
+
 ## `smelt.fs.remove_dir`
 
 ```lua

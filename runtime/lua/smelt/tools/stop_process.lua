@@ -27,11 +27,8 @@ smelt.tools.register({
   summary = function(args)
     return args.id or ""
   end,
-  render = function(_, output)
-    if output.is_error then
-      return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
-    end
-    return smelt.layout.text(output.content or "")
+  render = function(_, output, ctx)
+    return smelt.layout.tool_output(output, ctx)
   end,
   execute = function(args)
     local id = args.id or ""

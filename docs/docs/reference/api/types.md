@@ -325,6 +325,7 @@ the rest configure how data is sourced, filtered, and rendered.
 | `render` | `fun(item: any):` | yes | table Returns `{ text, spans?, marks? }` per visible row. |
 | `filter` | `fun(item: any):` |  | boolean Predicate re-run on `:set_filter` / `:refresh`. |
 | `empty_text` | `string` |  | Placeholder line shown when no row passes the filter. |
+| `anchor` | `"top"|"bottom"` |  | Render short lists at the top or bottom of the viewport. Defaults to "top". |
 
 ### `smelt.mcp.Config`
 

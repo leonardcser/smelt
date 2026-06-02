@@ -426,6 +426,86 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "render_preview_into",
+        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching virtual scroll state when provided; `opts.show_thinking` defaults to the current UI setting. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.",
+        &["id", "opts"],
+        |lua, (id, opts): (String, mlua::Table)| -> LuaResult<Option<mlua::Table>> {
+            let buf: super::buf::LuaBuf = opts.get("buf")?;
+            let win = opts.get::<Option<super::win::LuaWin>>("win").ok().flatten();
+            let width = opts
+                .get::<u16>("width")
+                .ok()
+                .filter(|w| *w > 0)
+                .unwrap_or(80);
+            let height = opts
+                .get::<u16>("height")
+                .ok()
+                .filter(|h| *h > 0)
+                .unwrap_or(1);
+            let show_thinking_opt = opts.get::<bool>("show_thinking").ok();
+            let scroll_top = opts.get::<u64>("scroll_top").ok();
+            let cache_key_hint = opts
+                .get::<u64>("updated_at_ms")
+                .ok()
+                .map(|ts| format!("{id}:{ts}"));
+
+            let rendered = crate::lua::with_app(|app| {
+                let show_thinking =
+                    show_thinking_opt.unwrap_or(app.core.config.settings.show_thinking);
+                let mut cached_key = cache_key_hint.clone();
+                let mut cached_view = cached_key
+                    .as_deref()
+                    .and_then(|key| app.resume_preview_cache.take(key));
+
+                if cached_view.is_none() {
+                    let session = smelt_core::session::load(&id)?;
+                    let cache_key = format!("{}:{}", session.id, session.updated_at_ms);
+                    if cached_key.as_deref() != Some(cache_key.as_str()) {
+                        cached_view = app.resume_preview_cache.take(&cache_key);
+                    }
+                    cached_key = Some(cache_key);
+                    if cached_view.is_none() {
+                        cached_view = Some(crate::app::transcript::TranscriptView::from_transcript(
+                            crate::app::history::build_transcript_from_session(&app.lua, &session),
+                        ));
+                    }
+                }
+
+                let cache_key = cached_key?;
+                let mut view = cached_view?;
+                let scroll_target = scroll_top
+                    .map(crate::content::transcript_buf::ScrollTarget::VisibleRow)
+                    .unwrap_or(crate::content::transcript_buf::ScrollTarget::Tail);
+                let plan = view.plan_projection(width, show_thinking, scroll_target, height);
+                app.prerender_tool_blocks_in_history_for_ids(
+                    view.history_mut(),
+                    width,
+                    plan.block_ids(),
+                );
+                let theme = app.ui.theme().clone();
+                let out = {
+                    let target = app.ui.buf_mut(buf.id)?;
+                    view.project_planned(target, &theme, plan)
+                };
+                if let Some(win) = win.and_then(|w| app.ui.win_mut(w.id)) {
+                    win.set_materialized_rows(out.row_base, out.projected_rows, out.total_rows);
+                    win.scroll_top = out.clamped_scroll;
+                    win.follow_tail = false;
+                }
+                app.resume_preview_cache.store(cache_key, view);
+                Some((out.total_rows, out.clamped_scroll))
+            });
+
+            let Some((total_rows, scroll_top)) = rendered else {
+                return Ok(None);
+            };
+            let out = lua.create_table()?;
+            out.set("total_rows", total_rows)?;
+            out.set("scroll_top", scroll_top)?;
+            Ok(Some(out))
+        },
+    )?;
+    m.fn_(
         "delete",
         "Delete the persisted session with `id`. Refuses to delete the currently active session.",
         &["id"],

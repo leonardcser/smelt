@@ -227,6 +227,7 @@
 ---@field render fun(item: any): table Returns `{ text, spans?, marks? }` per visible row.
 ---@field filter? fun(item: any): boolean Predicate re-run on `:set_filter` / `:refresh`.
 ---@field empty_text? string Placeholder line shown when no row passes the filter.
+---@field anchor? "top"|"bottom" Render short lists at the top or bottom of the viewport. Defaults to "top".
 
 --- MCP server config accepted by `smelt.mcp.register`.
 ---@class smelt.mcp.Config

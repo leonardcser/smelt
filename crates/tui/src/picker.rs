@@ -286,11 +286,11 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
         let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
         if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
             w.scroll_top = scroll;
-            if range.start == 0 && range.end == total as RowIndex {
-                w.clear_virtual_rows();
-            } else {
-                w.set_virtual_rows(range.start, total as RowIndex);
-            }
+            w.set_materialized_rows(
+                range.start,
+                range.end.saturating_sub(range.start),
+                total as RowIndex,
+            );
             let local_cursor = selected_visual
                 .saturating_sub(range.start)
                 .min(buf_ref.line_count().saturating_sub(1) as RowIndex);

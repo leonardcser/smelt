@@ -55,6 +55,10 @@ fs.read_async = nil
 ---@type fun(p: string): string[]?, string?
 fs.read_dir = nil
 
+--- Read at most `max_bytes` bytes from `p`. Returns `({ content, truncated }, nil)` on success or `(nil, err_string)` on failure.
+---@type fun(p: string, max_bytes: integer): table?, string?
+fs.read_limited = nil
+
 --- Delete the empty directory at `p`. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 ---@type fun(p: string): boolean, string?
 fs.remove_dir = nil

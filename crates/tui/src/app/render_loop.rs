@@ -188,11 +188,7 @@ impl TuiApp {
             debug_assert!(
                 tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
             );
-            if tdata.row_base == 0 {
-                win.clear_virtual_rows();
-            } else {
-                win.set_virtual_rows(tdata.row_base, tdata.total_rows);
-            }
+            win.set_materialized_rows(tdata.row_base, tdata.projected_rows, tdata.total_rows);
             win.scroll_top = tdata.clamped_scroll;
         }
         // After scroll is restored to the new block anchor, pin the cursor to

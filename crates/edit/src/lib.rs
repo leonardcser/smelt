@@ -1264,31 +1264,23 @@ impl Ui {
         self.render_with_paints(w, |_, _, _| {})
     }
 
-    /// Render one frame, delegating non-Window `Paint(id)` leaves to `paint(id, slice, ctx)`.
-    pub fn render_with_paints<W, F>(&mut self, w: &mut W, mut paint: F) -> std::io::Result<()>
-    where
-        W: std::io::Write,
-        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
-    {
-        let resolved = self.resolve_overlays(None);
-        let resolved: Vec<(OverlayId, Rect, Overlay)> = resolved
+    /// Resolve overlay leaf geometry into `Window::viewport` before the next paint.
+    ///
+    /// Overlay layout is independent from the main split tree, so a newly opened
+    /// overlay otherwise has no viewport until its first frame is painted. Priming
+    /// here lets Lua resize callbacks and tail-follow calculations see the real
+    /// overlay rect before anything is drawn.
+    pub fn prime_overlay_viewports(&mut self) {
+        let resolved: Vec<(OverlayId, Rect, Overlay)> = self
+            .resolve_overlays(None)
             .into_iter()
             .map(|(id, rect, ov)| (id, rect, ov.clone()))
             .collect();
-        let split_rects = self.resolve_splits();
-        let painted_splits: Vec<(WinId, Rect)> = self
-            .splits()
-            .leaves_in_order()
-            .into_iter()
-            .filter_map(|p| {
-                let win = WinId(p.0);
-                split_rects.get(&win).map(|r| (win, *r))
-            })
-            .collect();
-        // Pre-pass: call `ensure_rendered_at` on each overlay leaf so parsers populate
-        // their lines before the immutable paint walk. Also writes `Window.viewport` so
-        // input dispatch (vim nav, mouse hit-test) sees the same geometry as the compositor.
-        for (_id, rect, overlay) in &resolved {
+        self.refresh_overlay_viewports(&resolved);
+    }
+
+    fn refresh_overlay_viewports(&mut self, resolved: &[(OverlayId, Rect, Overlay)]) {
+        for (_id, rect, overlay) in resolved {
             let sizer = UiLeafSizer {
                 wins: &self.wins,
                 bufs: &self.bufs,
@@ -1353,6 +1345,30 @@ impl Ui {
                 }
             }
         }
+    }
+
+    /// Render one frame, delegating non-Window `Paint(id)` leaves to `paint(id, slice, ctx)`.
+    pub fn render_with_paints<W, F>(&mut self, w: &mut W, mut paint: F) -> std::io::Result<()>
+    where
+        W: std::io::Write,
+        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+    {
+        let resolved = self.resolve_overlays(None);
+        let resolved: Vec<(OverlayId, Rect, Overlay)> = resolved
+            .into_iter()
+            .map(|(id, rect, ov)| (id, rect, ov.clone()))
+            .collect();
+        let split_rects = self.resolve_splits();
+        let painted_splits: Vec<(WinId, Rect)> = self
+            .splits()
+            .leaves_in_order()
+            .into_iter()
+            .filter_map(|p| {
+                let win = WinId(p.0);
+                split_rects.get(&win).map(|r| (win, *r))
+            })
+            .collect();
+        self.refresh_overlay_viewports(&resolved);
         for (win_id, rect) in &painted_splits {
             let Some(win) = self.wins.get(win_id) else {
                 continue;
@@ -3863,6 +3879,41 @@ mod tests {
             matches!(hit, HitTarget::Window(w) if w == win),
             "interior column must still be Window, got {hit:?}",
         );
+    }
+
+    #[test]
+    fn prime_overlay_viewports_sets_leaf_geometry_before_render() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines(vec!["overlay-text".into()]);
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "test".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let layout = LayoutTree::vbox(vec![(
+            Constraint::Length(10),
+            LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(win))]),
+        )])
+        .with_border(Border::SINGLE);
+        ui.overlay_open(Overlay::new(layout, layout::Anchor::ScreenCenter));
+
+        assert!(ui.wins.get(&win).and_then(|w| w.viewport).is_none());
+        ui.prime_overlay_viewports();
+
+        let vp = ui
+            .wins
+            .get(&win)
+            .and_then(|w| w.viewport)
+            .expect("viewport populated before render");
+        assert_eq!(vp.rect, Rect::new(7, 20, 40, 10));
+        assert_eq!(vp.content_width, 39);
     }
 
     #[test]

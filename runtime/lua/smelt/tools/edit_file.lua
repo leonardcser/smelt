@@ -108,9 +108,9 @@ smelt.tools.register({
     end
     return smelt.fs.file_state.staleness_error(path, "file")
   end,
-  render = function(args, output)
+  render = function(args, output, ctx)
     if output.is_error then
-      return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
+      return smelt.layout.tool_output(output, ctx)
     end
     local meta = output.metadata
     if meta then

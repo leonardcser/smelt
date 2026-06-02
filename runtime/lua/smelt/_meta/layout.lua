@@ -23,9 +23,6 @@ layout.hbox = nil
 ---@type fun(buf: any): table
 layout.leaf = nil
 
---- Build a leaf layout from a markdown string. Common pattern for `render`
---- callbacks that want full block-level markdown (headings, fenced code,
---- lists, tables) instead of plain dim body text.
 ---@type fun(content: string): any
 layout.markdown = nil
 
@@ -37,6 +34,12 @@ layout.sep = nil
 --- Build a leaf layout from a string. Common pattern for `render` callbacks.
 ---@type fun(content: string, opts: table?): any
 layout.text = nil
+
+--- Render tool stdout/stderr-style text at the tool block width. Use this for
+--- tool results and errors so long diagnostics wrap instead of widening the
+--- transcript horizontally.
+---@type fun(output: table, ctx: table?, opts: table?): any
+layout.tool_output = nil
 
 --- Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`/`layout.diff`/`layout.file_view`.
 ---@type fun(items: table): table

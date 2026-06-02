@@ -338,9 +338,25 @@ if smelt.layout and smelt.layout.leaf then
     return smelt.layout.leaf(buf)
   end
 
-  -- Build a leaf layout from a markdown string. Common pattern for `render`
-  -- callbacks that want full block-level markdown (headings, fenced code,
-  -- lists, tables) instead of plain dim body text.
+  -- Render tool stdout/stderr-style text at the tool block width. Use this for
+  -- tool results and errors so long diagnostics wrap instead of widening the
+  -- transcript horizontally.
+  ---@type fun(output: table, ctx: table?, opts: table?): any
+  function smelt.layout.tool_output(output, ctx, opts)
+    output = output or {}
+    local merged = {}
+    if type(opts) == "table" then
+      for k, v in pairs(opts) do merged[k] = v end
+    end
+    if output.is_error and merged.hl_group == nil then
+      merged.hl_group = "ErrorMsg"
+    end
+    if ctx and ctx.width and merged.width == nil then
+      merged.width = ctx.width
+    end
+    return smelt.layout.text(output.content or "", merged)
+  end
+
   ---@type fun(content: string): any
   function smelt.layout.markdown(content)
     local buf = smelt.buf.new()

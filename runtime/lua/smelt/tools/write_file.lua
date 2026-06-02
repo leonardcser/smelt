@@ -40,9 +40,9 @@ smelt.tools.register({
   preflight = function(args)
     return preflight_message(args.file_path or "")
   end,
-  render = function(args, output)
+  render = function(args, output, ctx)
     if output.is_error then
-      return smelt.layout.text(output.content, { hl_group = "ErrorMsg" })
+      return smelt.layout.tool_output(output, ctx)
     end
     return smelt.layout.file_view({
       content = args.content or "",

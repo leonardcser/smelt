@@ -6,3 +6,11 @@
 
 Screen-composition primitives: main layout composer and per-window renderer registration.
 
+## `smelt.ui.size`
+
+```lua
+fun(): table
+```
+
+Return the current terminal size as `{ width, height }` in cells. Useful for choosing between compact and wide overlay layouts without relying on any particular window's current rect.
+

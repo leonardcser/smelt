@@ -120,6 +120,7 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     if let Some(n) = name {
         app.ui.name_overlay(n, id);
     }
+    app.ui.prime_overlay_viewports();
     Ok(id.0 as u64)
 }
 
@@ -301,6 +302,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
             if target == abs {
                 return CallbackResult::Consumed;
             }
+            win.follow_tail = false;
             win.scroll_top = scroll_to_show(win.scroll_top, target, viewport);
             win.jump_to_row(buf, target, viewport.unwrap_or(0));
             new_abs = Some(target as usize);
@@ -407,6 +409,7 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
     if abs == target {
         return;
     }
+    win.follow_tail = false;
     win.scroll_top = scroll_to_show(win.scroll_top, target, viewport);
     win.jump_to_row(buf, target, viewport.unwrap_or(0));
     let lua = &app.lua;
@@ -458,20 +461,13 @@ fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
 /// Left/Right/Home/End move the cursor, Enter fires `WinEvent::Submit`.
 /// Every edit also fires `WinEvent::TextChanged`.
 ///
-/// Placeholder: when `placeholder` is non-empty, the buffer's row 0 is seeded with the
-/// placeholder text and dimmed via the well-known highlights namespace. The first
-/// printable keystroke replaces the line (set_lines clears well-known highlights, so
-/// `is_placeholder` flips to false naturally); Backspace is a no-op while the
-/// placeholder is showing.
+/// Placeholder: when `placeholder` is non-empty, it is rendered as virtual text
+/// while the buffer remains empty. The first printable keystroke inserts real
+/// input at column 0; Backspace and horizontal movement are no-ops while only
+/// the placeholder is visible.
 pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: String) {
     if !placeholder.is_empty() {
-        if let Some(buf_id) = app.ui.win(leaf).map(|w| w.buf) {
-            if let Some(buf) = app.ui.buf_mut(buf_id) {
-                buf.set_all_lines(vec![placeholder.clone()]);
-                let end = placeholder.chars().count() as u16;
-                buf.add_highlight(0, 0, end, crate::smelt_term::SpanStyle::new().dim());
-            }
-        }
+        app.set_placeholder(leaf, placeholder.clone());
     }
     if let Some(win) = app.ui.win_mut(leaf) {
         win.reset_cursor();
@@ -488,17 +484,22 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
             .unwrap_or_default()
     }
 
-    fn is_placeholder(ctx: &crate::smelt_term::CallbackCtx<'_>) -> bool {
-        // A non-empty row 0 with highlights indicates the placeholder is still showing.
-        // `set_lines` drops well-known-namespace marks, so highlights are a reliable signal.
+    fn is_placeholder(ctx: &crate::smelt_term::CallbackCtx<'_>, placeholder: &str) -> bool {
+        !placeholder.is_empty() && current_line(ctx).is_empty()
+    }
+
+    fn set_placeholder_mark(ctx: &mut crate::smelt_term::CallbackCtx<'_>, placeholder: &str) {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
-            None => return false,
+            None => return,
         };
-        ctx.ui
-            .buf(buf_id)
-            .map(|b| !b.highlights_at(0).is_empty() && !b.get_line(0).unwrap_or("").is_empty())
-            .unwrap_or(false)
+        if let Some(buf) = ctx.ui.buf_mut(buf_id) {
+            crate::content::prompt_buf::set_placeholder_extmark(buf, Some(placeholder.to_string()));
+        }
+    }
+
+    fn clear_placeholder_mark(ctx: &mut crate::smelt_term::CallbackCtx<'_>) {
+        set_placeholder_mark(ctx, "");
     }
 
     fn replace_line(
@@ -518,8 +519,12 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         }
     }
 
-    fn insert_char(ctx: &mut crate::smelt_term::CallbackCtx<'_>, c: char) -> CallbackResult {
-        let placeholder_mode = is_placeholder(ctx);
+    fn insert_char(
+        ctx: &mut crate::smelt_term::CallbackCtx<'_>,
+        placeholder: &str,
+        c: char,
+    ) -> CallbackResult {
+        let placeholder_mode = is_placeholder(ctx, placeholder);
         let cursor = if placeholder_mode {
             0
         } else {
@@ -542,6 +547,9 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
             .chain(chars[split..].iter().copied())
             .collect();
         let new_cursor_col = (split + 1) as u16;
+        if placeholder_mode {
+            clear_placeholder_mark(ctx);
+        }
         replace_line(ctx, new.clone(), new_cursor_col);
         CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
     }
@@ -552,10 +560,9 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
             None => return,
         };
         if let Some(buf) = ctx.ui.buf_mut(buf_id) {
-            buf.set_lines(0, 1, vec![placeholder.to_string()]);
-            let end = placeholder.chars().count() as u16;
-            buf.add_highlight(0, 0, end, crate::smelt_term::SpanStyle::new().dim());
+            buf.set_lines(0, 1, vec![String::new()]);
         }
+        set_placeholder_mark(ctx, placeholder);
         if let Some(win) = ctx.ui.win_mut(ctx.win) {
             win.set_cursor_col_single_line(0);
         }
@@ -564,7 +571,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
     let placeholder_for_backspace = placeholder.clone();
     let backspace: Callback = Callback::Rust(Box::new(
         move |ctx: &mut crate::smelt_term::CallbackCtx<'_>| -> CallbackResult {
-            if is_placeholder(ctx) {
+            if is_placeholder(ctx, &placeholder_for_backspace) {
                 return CallbackResult::Consumed;
             }
             let text = current_line(ctx);
@@ -602,8 +609,12 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         End,
     }
 
-    fn move_h(ctx: &mut crate::smelt_term::CallbackCtx<'_>, target: HMove) -> CallbackResult {
-        if is_placeholder(ctx) {
+    fn move_h(
+        ctx: &mut crate::smelt_term::CallbackCtx<'_>,
+        placeholder: &str,
+        target: HMove,
+    ) -> CallbackResult {
+        if is_placeholder(ctx, placeholder) {
             return CallbackResult::Consumed;
         }
         let len = current_line(ctx).chars().count();
@@ -625,30 +636,43 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         KeyBind::new(KeyCode::Backspace, KeyModifiers::NONE),
         backspace,
     );
+    let placeholder_for_left = placeholder.clone();
     let _ = app.ui.win_set_keymap(
         leaf,
         KeyBind::new(KeyCode::Left, KeyModifiers::NONE),
-        Callback::Rust(Box::new(|ctx| move_h(ctx, HMove::Left))),
+        Callback::Rust(Box::new(move |ctx| {
+            move_h(ctx, &placeholder_for_left, HMove::Left)
+        })),
     );
+    let placeholder_for_right = placeholder.clone();
     let _ = app.ui.win_set_keymap(
         leaf,
         KeyBind::new(KeyCode::Right, KeyModifiers::NONE),
-        Callback::Rust(Box::new(|ctx| move_h(ctx, HMove::Right))),
+        Callback::Rust(Box::new(move |ctx| {
+            move_h(ctx, &placeholder_for_right, HMove::Right)
+        })),
     );
+    let placeholder_for_home = placeholder.clone();
     let _ = app.ui.win_set_keymap(
         leaf,
         KeyBind::new(KeyCode::Home, KeyModifiers::NONE),
-        Callback::Rust(Box::new(|ctx| move_h(ctx, HMove::Home))),
+        Callback::Rust(Box::new(move |ctx| {
+            move_h(ctx, &placeholder_for_home, HMove::Home)
+        })),
     );
+    let placeholder_for_end = placeholder.clone();
     let _ = app.ui.win_set_keymap(
         leaf,
         KeyBind::new(KeyCode::End, KeyModifiers::NONE),
-        Callback::Rust(Box::new(|ctx| move_h(ctx, HMove::End))),
+        Callback::Rust(Box::new(move |ctx| {
+            move_h(ctx, &placeholder_for_end, HMove::End)
+        })),
     );
 
     // Enter fires Submit with line 0; placeholder counts as empty.
-    let submit: Callback = Callback::Rust(Box::new(|ctx| {
-        let content = if is_placeholder(ctx) {
+    let placeholder_for_submit = placeholder.clone();
+    let submit: Callback = Callback::Rust(Box::new(move |ctx| {
+        let content = if is_placeholder(ctx, &placeholder_for_submit) {
             String::new()
         } else {
             current_line(ctx)
@@ -662,14 +686,15 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
     );
 
     // Catch-all: printable chars insert, non-printables are consumed, Esc/Ctrl-C pass through.
-    let fallback: Callback = Callback::Rust(Box::new(|ctx| {
+    let placeholder_for_fallback = placeholder.clone();
+    let fallback: Callback = Callback::Rust(Box::new(move |ctx| {
         if let Payload::Key {
             code: KeyCode::Char(c),
             mods,
         } = &ctx.payload
         {
             if mods.is_empty() || *mods == KeyModifiers::SHIFT {
-                return insert_char(ctx, *c);
+                return insert_char(ctx, &placeholder_for_fallback, *c);
             }
         }
         if matches!(

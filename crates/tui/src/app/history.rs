@@ -1,10 +1,159 @@
 use crate::app::TuiApp;
+use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
 use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
 
 use protocol::{AgentMode, AssistantTurn, Content, HistoryItem, UiCommand};
 use std::collections::HashMap;
 use std::time::Duration;
+
+pub(crate) fn build_transcript_from_session(
+    lua: &crate::lua::LuaRuntime,
+    session: &session::Session,
+) -> Transcript {
+    let mut transcript = Transcript::new();
+    if session.history.is_empty() {
+        return transcript;
+    }
+
+    let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
+    for (_, meta) in &session.turn_metas {
+        tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
+    }
+
+    let compaction = session.checkpoint.clone();
+    for (idx, item) in session.history.iter().enumerate() {
+        if compaction
+            .as_ref()
+            .is_some_and(|cp| cp.first_live_index == idx)
+        {
+            transcript.push(Block::Compacted {
+                summary: compaction
+                    .as_ref()
+                    .map(|cp| cp.summary.clone())
+                    .unwrap_or_default(),
+            });
+        }
+        match item {
+            HistoryItem::User { content } => push_user_block(&mut transcript, lua, content),
+            HistoryItem::Assistant(turn) => {
+                push_assistant_blocks(&mut transcript, lua, turn, &tool_elapsed)
+            }
+            HistoryItem::System { .. } => {}
+        }
+    }
+    if compaction
+        .as_ref()
+        .is_some_and(|cp| cp.first_live_index >= session.history.len())
+    {
+        transcript.push(Block::Compacted {
+            summary: compaction.map(|cp| cp.summary).unwrap_or_default(),
+        });
+    }
+
+    transcript
+}
+
+fn push_user_block(transcript: &mut Transcript, lua: &crate::lua::LuaRuntime, content: &Content) {
+    let text = content.text_content();
+    let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
+    if let Some(rest) = text.strip_prefix(prefix_marker) {
+        let summary = rest.trim_start_matches('\n');
+        transcript.push(Block::Compacted {
+            summary: summary.to_string(),
+        });
+        return;
+    }
+    if let Some(note) = text.strip_prefix(protocol::MODE_NOTE_PREFIX) {
+        transcript.push(lua.mode_block(None, note.trim()));
+        return;
+    }
+    if let Some(note) = text.strip_prefix(protocol::PROCESS_STATUS_NOTE_PREFIX) {
+        transcript.push(Block::ProcessStatus {
+            text: note.trim().to_string(),
+        });
+        return;
+    }
+    if is_legacy_process_status_note(&text) {
+        transcript.push(Block::ProcessStatus {
+            text: text.into_owned(),
+        });
+        return;
+    }
+    let image_labels = content.image_labels();
+    let display_text = if image_labels.is_empty() {
+        text.into_owned()
+    } else {
+        let suffix = image_labels.join(" ");
+        if text.is_empty() {
+            suffix
+        } else {
+            format!("{text} {suffix}")
+        }
+    };
+    transcript.push(Block::User {
+        text: display_text,
+        image_labels,
+    });
+}
+
+fn push_assistant_blocks(
+    transcript: &mut Transcript,
+    lua: &crate::lua::LuaRuntime,
+    turn: &AssistantTurn,
+    tool_elapsed: &HashMap<String, u64>,
+) {
+    if let Some(ref reasoning) = turn.reasoning {
+        if !reasoning.is_empty() {
+            transcript.push(Block::Thinking {
+                content: reasoning.clone(),
+            });
+        }
+    }
+    if let Some(ref content) = turn.content {
+        transcript.push(Block::Text {
+            content: content.text_content().into_owned(),
+        });
+    }
+    for inv in &turn.invocations {
+        let args: HashMap<String, serde_json::Value> =
+            serde_json::from_str(&inv.arguments).unwrap_or_default();
+        let status = if inv.result.content.contains("denied this tool call")
+            || inv.result.content.contains("blocked this tool call")
+        {
+            ToolStatus::Denied
+        } else if inv.result.is_error {
+            ToolStatus::Err
+        } else {
+            ToolStatus::Ok
+        };
+        let output = ToolOutput {
+            content: inv.result.content.clone(),
+            is_error: inv.result.is_error,
+            metadata: inv.result.metadata.clone(),
+        };
+        let elapsed_ms = inv
+            .elapsed_ms
+            .or_else(|| tool_elapsed.get(&inv.call_id).copied());
+        let summary = lua.tool_summary(&inv.name, &args);
+        transcript.push_tool_call(
+            Block::ToolCall {
+                call_id: inv.call_id.clone(),
+                name: inv.name.clone(),
+                summary,
+                args,
+            },
+            ToolState {
+                status,
+                elapsed: elapsed_ms.map(Duration::from_millis),
+                output: Some(Box::new(output)),
+                user_message: None,
+                render_cache: None,
+                layout_revision: 0,
+            },
+        );
+    }
+}
 
 impl TuiApp {
     /// Redact secrets from user-submitted text before it lands on screen or
@@ -285,145 +434,11 @@ impl TuiApp {
         if let Some(ref slug) = self.core.session.slug {
             self.set_task_label(slug.clone());
         }
-        if self.core.session.history.is_empty() {
-            return;
-        }
-
-        // Per-call elapsed times survive across reloads via turn_metas.
-        // ToolInvocation also carries its own elapsed; we prefer the
-        // in-line value and fall back to turn_metas for older sessions.
-        let mut tool_elapsed: HashMap<String, u64> = HashMap::new();
-        for (_, meta) in &self.core.session.turn_metas {
-            tool_elapsed.extend(meta.tool_elapsed.iter().map(|(k, v)| (k.clone(), *v)));
-        }
-
-        let history = self.core.session.history.clone();
-        let compaction = self.core.session.checkpoint.clone();
-        for (idx, item) in history.iter().enumerate() {
-            if compaction
-                .as_ref()
-                .is_some_and(|cp| cp.first_live_index == idx)
-            {
-                self.push_block(Block::Compacted {
-                    summary: compaction
-                        .as_ref()
-                        .map(|cp| cp.summary.clone())
-                        .unwrap_or_default(),
-                });
-            }
-            match item {
-                HistoryItem::User { content } => self.push_user_block(content),
-                HistoryItem::Assistant(turn) => self.push_assistant_blocks(turn, &tool_elapsed),
-                HistoryItem::System { .. } => {}
-            }
-        }
-        if compaction
-            .as_ref()
-            .is_some_and(|cp| cp.first_live_index >= history.len())
-        {
-            self.push_block(Block::Compacted {
-                summary: compaction.map(|cp| cp.summary).unwrap_or_default(),
-            });
-        }
+        self.transcript
+            .replace_transcript(build_transcript_from_session(&self.lua, &self.core.session));
 
         if let Some((_, meta)) = self.core.session.turn_metas.last() {
             self.working.restore_from_turn_meta(meta);
-        }
-    }
-
-    fn push_user_block(&mut self, content: &Content) {
-        let text = content.text_content();
-        let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
-        if let Some(rest) = text.strip_prefix(prefix_marker) {
-            let summary = rest.trim_start_matches('\n');
-            self.push_block(Block::Compacted {
-                summary: summary.to_string(),
-            });
-            return;
-        }
-        if let Some(note) = text.strip_prefix(protocol::MODE_NOTE_PREFIX) {
-            self.push_block(self.lua.mode_block(None, note.trim()));
-            return;
-        }
-        if let Some(note) = text.strip_prefix(protocol::PROCESS_STATUS_NOTE_PREFIX) {
-            self.push_block(Block::ProcessStatus {
-                text: note.trim().to_string(),
-            });
-            return;
-        }
-        if is_legacy_process_status_note(&text) {
-            self.push_block(Block::ProcessStatus {
-                text: text.into_owned(),
-            });
-            return;
-        }
-        let image_labels = content.image_labels();
-        let display_text = if image_labels.is_empty() {
-            text.into_owned()
-        } else {
-            let suffix = image_labels.join(" ");
-            if text.is_empty() {
-                suffix
-            } else {
-                format!("{text} {suffix}")
-            }
-        };
-        self.push_block(Block::User {
-            text: display_text,
-            image_labels,
-        });
-    }
-
-    fn push_assistant_blocks(&mut self, turn: &AssistantTurn, tool_elapsed: &HashMap<String, u64>) {
-        if let Some(ref reasoning) = turn.reasoning {
-            if !reasoning.is_empty() {
-                self.push_block(Block::Thinking {
-                    content: reasoning.clone(),
-                });
-            }
-        }
-        if let Some(ref content) = turn.content {
-            self.push_block(Block::Text {
-                content: content.text_content().into_owned(),
-            });
-        }
-        for inv in &turn.invocations {
-            let args: HashMap<String, serde_json::Value> =
-                serde_json::from_str(&inv.arguments).unwrap_or_default();
-            let status = if inv.result.content.contains("denied this tool call")
-                || inv.result.content.contains("blocked this tool call")
-            {
-                ToolStatus::Denied
-            } else if inv.result.is_error {
-                ToolStatus::Err
-            } else {
-                ToolStatus::Ok
-            };
-            let output = ToolOutput {
-                content: inv.result.content.clone(),
-                is_error: inv.result.is_error,
-                metadata: inv.result.metadata.clone(),
-            };
-            let elapsed_ms = inv
-                .elapsed_ms
-                .or_else(|| tool_elapsed.get(&inv.call_id).copied());
-            let summary = self.lua.tool_summary(&inv.name, &args);
-            self.push_tool_call(
-                Block::ToolCall {
-                    call_id: inv.call_id.clone(),
-                    name: inv.name.clone(),
-                    summary,
-                    args,
-                },
-                ToolState {
-                    status,
-                    elapsed: elapsed_ms.map(Duration::from_millis),
-                    output: Some(Box::new(output)),
-                    user_message: None,
-                    render_cache: None,
-                    layout_revision: 0,
-                },
-            );
         }
     }
 
@@ -651,9 +666,10 @@ mod checkpoint_tests {
 
         app.app.restore_screen();
 
-        let id = app.app.transcript.history.order[0];
+        let history = app.app.transcript.history();
+        let id = history.order[0];
         assert!(matches!(
-            app.app.transcript.history.blocks.get(&id),
+            history.blocks.get(&id),
             Some(Block::ProcessStatus { text }) if text == note
         ));
     }
@@ -666,9 +682,10 @@ mod checkpoint_tests {
 
         app.app.restore_screen();
 
-        let id = app.app.transcript.history.order[0];
+        let history = app.app.transcript.history();
+        let id = history.order[0];
         assert!(matches!(
-            app.app.transcript.history.blocks.get(&id),
+            history.blocks.get(&id),
             Some(Block::ProcessStatus { text }) if text == note
         ));
     }
@@ -681,11 +698,9 @@ mod checkpoint_tests {
 
         app.app.restore_screen();
 
-        let id = app.app.transcript.history.order[0];
-        assert!(matches!(
-            app.app.transcript.history.blocks.get(&id),
-            Some(Block::Mode { .. })
-        ));
+        let history = app.app.transcript.history();
+        let id = history.order[0];
+        assert!(matches!(history.blocks.get(&id), Some(Block::Mode { .. })));
     }
 
     #[tokio::test(flavor = "current_thread")]

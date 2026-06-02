@@ -236,14 +236,12 @@ smelt.tools.register({
     if pat then return { pat } end
     return {}
   end,
-  render = function(args, output)
+  render = function(args, output, ctx)
     local items = {}
     if args.prompt and args.prompt ~= "" then
-      table.insert(items, smelt.layout.text(args.prompt))
+      table.insert(items, smelt.layout.text(args.prompt, { width = ctx and ctx.width or nil }))
     end
-    table.insert(items, smelt.layout.text(output.content, {
-      hl_group = output.is_error and "ErrorMsg" or nil,
-    }))
+    table.insert(items, smelt.layout.tool_output(output, ctx))
     return smelt.layout.vbox(items)
   end,
   execute = function(args)

@@ -60,6 +60,10 @@ session.load = nil
 ---@type fun(): table
 session.model_messages = nil
 
+--- Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching virtual scroll state when provided; `opts.show_thinking` defaults to the current UI setting. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.
+---@type fun(id: string, opts: table): table?
+session.render_preview_into = nil
+
 --- Cancel any in-flight agent and clear the session to a blank slate. Logs an `agent_stop` event with reason `user_cancel_and_clear`.
 ---@type fun(): nil
 session.reset = nil

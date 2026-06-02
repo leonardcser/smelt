@@ -6,10 +6,11 @@ use crate::smelt_term::{BufCreateOpts, Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 
 use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
+use smelt_core::content::transcript::Transcript;
 use smelt_core::transcript_model::{
-    Block, BlockId, ToolOutput, ToolOutputRef, ToolState, ToolStatus,
+    Block, BlockHistory, BlockId, ToolOutput, ToolOutputRef, ToolStatus,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +18,184 @@ pub(crate) struct TranscriptData {
     pub(crate) clamped_scroll: crate::smelt_term::RowIndex,
     pub(crate) row_base: crate::smelt_term::RowIndex,
     pub(crate) total_rows: crate::smelt_term::RowIndex,
+    pub(crate) projected_rows: crate::smelt_term::RowIndex,
+}
+
+pub(crate) struct TranscriptView {
+    transcript: Transcript,
+    projection: crate::content::transcript_buf::TranscriptProjection,
+}
+
+impl TranscriptView {
+    pub(crate) fn new() -> Self {
+        Self::from_transcript(Transcript::new())
+    }
+
+    pub(crate) fn from_transcript(transcript: Transcript) -> Self {
+        Self {
+            transcript,
+            projection: crate::content::transcript_buf::TranscriptProjection::new(),
+        }
+    }
+
+    pub(crate) fn replace_transcript(&mut self, transcript: Transcript) {
+        *self = Self::from_transcript(transcript);
+    }
+
+    pub(crate) fn invalidate_theme(&mut self) {
+        self.projection.invalidate_theme();
+    }
+
+    pub(crate) fn build_rows(
+        &mut self,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+    ) -> Arc<Vec<String>> {
+        self.projection
+            .build_rows(&mut self.transcript.history, width, show_thinking, theme)
+    }
+
+    pub(crate) fn line_breaks(
+        &mut self,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+    ) -> (Vec<usize>, Vec<usize>) {
+        self.projection
+            .line_breaks(&mut self.transcript.history, width, show_thinking, theme)
+    }
+
+    pub(crate) fn materialize_block_layout(
+        &mut self,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+    ) -> Vec<(
+        BlockId,
+        crate::smelt_term::RowIndex,
+        crate::smelt_term::RowIndex,
+    )> {
+        self.projection.materialize_block_layout(
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+            theme,
+        )
+    }
+
+    pub(crate) fn visible_block_layout(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            BlockId,
+            crate::smelt_term::RowIndex,
+            crate::smelt_term::RowIndex,
+        ),
+    > + '_ {
+        self.projection.visible_block_layout()
+    }
+
+    pub(crate) fn plan_projection(
+        &mut self,
+        width: u16,
+        show_thinking: bool,
+        scroll_target: crate::content::transcript_buf::ScrollTarget,
+        viewport_rows: u16,
+    ) -> crate::content::transcript_buf::ProjectionPlan {
+        self.projection.plan_projection(
+            &self.transcript.history,
+            width,
+            show_thinking,
+            scroll_target,
+            viewport_rows,
+        )
+    }
+
+    pub(crate) fn project_planned(
+        &mut self,
+        buf: &mut Buffer,
+        theme: &Theme,
+        plan: crate::content::transcript_buf::ProjectionPlan,
+    ) -> crate::content::transcript_buf::ProjectOutput {
+        self.projection
+            .project_planned(buf, &mut self.transcript.history, theme, plan)
+    }
+
+    pub(crate) fn history(&self) -> &BlockHistory {
+        &self.transcript.history
+    }
+
+    pub(crate) fn history_mut(&mut self) -> &mut BlockHistory {
+        &mut self.transcript.history
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.transcript.history.is_empty()
+    }
+
+    pub(crate) fn push(&mut self, block: Block) {
+        self.transcript.push(block);
+    }
+
+    pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
+        self.transcript.drain_finished_blocks()
+    }
+
+    pub(crate) fn user_turns(&self) -> Vec<(usize, String)> {
+        self.transcript.user_turns()
+    }
+
+    pub(crate) fn truncate_to(&mut self, block_idx: usize) {
+        self.transcript.truncate_to(block_idx);
+    }
+}
+
+impl Default for TranscriptView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) struct ResumePreviewCache {
+    views: HashMap<String, TranscriptView>,
+    order: VecDeque<String>,
+    limit: usize,
+}
+
+impl ResumePreviewCache {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            views: HashMap::new(),
+            order: VecDeque::new(),
+            limit,
+        }
+    }
+
+    pub(crate) fn take(&mut self, key: &str) -> Option<TranscriptView> {
+        self.views.remove(key)
+    }
+
+    pub(crate) fn store(&mut self, key: String, view: TranscriptView) {
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.views.insert(key.clone(), view);
+
+        while self.order.len() > self.limit {
+            let Some(old_key) = self.order.pop_front() else {
+                break;
+            };
+            if old_key != key {
+                self.views.remove(&old_key);
+            }
+        }
+    }
+
+    pub(crate) fn invalidate_theme(&mut self) {
+        for view in self.views.values_mut() {
+            view.invalidate_theme();
+        }
+    }
 }
 
 struct ToolRenderJob {
@@ -26,6 +205,46 @@ struct ToolRenderJob {
     output: Option<ToolOutput>,
     status: ToolStatus,
     elapsed_secs: Option<u64>,
+}
+
+fn collect_tool_render_jobs(
+    history: &BlockHistory,
+    width: u16,
+    ids: impl Iterator<Item = BlockId>,
+) -> Vec<ToolRenderJob> {
+    let mut jobs = Vec::new();
+    for id in ids {
+        let Some(block) = history.blocks.get(&id) else {
+            continue;
+        };
+        let Block::ToolCall {
+            call_id,
+            name,
+            args,
+            ..
+        } = block
+        else {
+            continue;
+        };
+        let Some(state) = history.tool_states.get(call_id) else {
+            continue;
+        };
+        if matches!(state.status, ToolStatus::Denied) {
+            continue;
+        }
+        if matches!(&state.render_cache, Some((w, _)) if *w == width) {
+            continue;
+        }
+        jobs.push(ToolRenderJob {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            args: args.clone(),
+            output: state.output.as_deref().cloned(),
+            status: state.status,
+            elapsed_secs: state.elapsed.map(|d| d.as_secs()),
+        });
+    }
+    jobs
 }
 
 type TranscriptBlockSnapshot = (
@@ -63,32 +282,28 @@ impl TuiApp {
         self.parser.begin_turn();
     }
 
-    pub(crate) fn push_tool_call(&mut self, block: Block, state: ToolState) {
-        self.transcript.push_tool_call(block, state);
-    }
-
     pub(crate) fn push_block(&mut self, block: Block) {
         self.transcript.push(block);
     }
 
     pub(crate) fn append_streaming_thinking(&mut self, delta: &str) {
         self.parser
-            .append_streaming_thinking(&mut self.transcript.history, delta);
+            .append_streaming_thinking(self.transcript.history_mut(), delta);
     }
 
     pub(crate) fn flush_streaming_thinking(&mut self) {
         self.parser
-            .flush_streaming_thinking(&mut self.transcript.history);
+            .flush_streaming_thinking(self.transcript.history_mut());
     }
 
     pub(crate) fn append_streaming_text(&mut self, delta: &str) {
         self.parser
-            .append_streaming_text(&mut self.transcript.history, delta);
+            .append_streaming_text(self.transcript.history_mut(), delta);
     }
 
     pub(crate) fn flush_streaming_text(&mut self) {
         self.parser
-            .flush_streaming_text(&mut self.transcript.history);
+            .flush_streaming_text(self.transcript.history_mut());
     }
 
     pub(crate) fn start_tool(
@@ -100,7 +315,7 @@ impl TuiApp {
     ) {
         let now = self.core.clock.instant_now();
         self.parser.start_tool(
-            &mut self.transcript.history,
+            self.transcript.history_mut(),
             call_id,
             name,
             summary,
@@ -111,12 +326,12 @@ impl TuiApp {
 
     pub(crate) fn start_exec(&mut self, command: String) {
         self.parser
-            .start_exec(&mut self.transcript.history, command);
+            .start_exec(self.transcript.history_mut(), command);
     }
 
     pub(crate) fn append_exec_output(&mut self, chunk: &str) {
         self.parser
-            .append_exec_output(&mut self.transcript.history, chunk);
+            .append_exec_output(self.transcript.history_mut(), chunk);
     }
 
     pub(crate) fn finish_exec(&mut self, exit_code: Option<i32>) {
@@ -124,7 +339,7 @@ impl TuiApp {
     }
 
     pub(crate) fn finalize_exec(&mut self) {
-        self.parser.finalize_exec(&mut self.transcript.history);
+        self.parser.finalize_exec(self.transcript.history_mut());
     }
 
     pub(crate) fn has_active_exec(&self) -> bool {
@@ -133,18 +348,18 @@ impl TuiApp {
 
     pub(crate) fn append_active_output(&mut self, call_id: &str, chunk: &str) {
         self.parser
-            .append_active_output(&mut self.transcript.history, call_id, chunk);
+            .append_active_output(self.transcript.history_mut(), call_id, chunk);
     }
 
     pub(crate) fn set_active_status(&mut self, call_id: &str, status: ToolStatus) {
         let now = self.core.clock.instant_now();
         self.parser
-            .set_active_status(&mut self.transcript.history, call_id, status, now);
+            .set_active_status(self.transcript.history_mut(), call_id, status, now);
     }
 
     pub(crate) fn set_active_user_message(&mut self, call_id: &str, msg: String) {
         self.parser
-            .set_active_user_message(&mut self.transcript.history, call_id, msg);
+            .set_active_user_message(self.transcript.history_mut(), call_id, msg);
     }
 
     pub(crate) fn finish_tool(
@@ -156,7 +371,7 @@ impl TuiApp {
     ) {
         let now = self.core.clock.instant_now();
         self.parser.finish_tool(
-            &mut self.transcript.history,
+            self.transcript.history_mut(),
             call_id,
             status,
             output,
@@ -166,7 +381,7 @@ impl TuiApp {
     }
 
     pub(crate) fn has_transcript_content(&mut self, _show_thinking: bool) -> bool {
-        !self.transcript.history.is_empty()
+        !self.transcript.is_empty()
     }
 
     /// Full transcript as one string per display row. Result is cached as an
@@ -175,12 +390,7 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("transcript:materialize_rows_full");
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        self.transcript_projection.build_rows(
-            &mut self.transcript.history,
-            tw,
-            show_thinking,
-            &theme,
-        )
+        self.transcript.build_rows(tw, show_thinking, &theme)
     }
 
     pub(crate) fn transcript_display_rows_range(
@@ -206,12 +416,7 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("transcript:materialize_breaks_full");
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let (mut soft, mut hard) = self.transcript_projection.line_breaks(
-            &mut self.transcript.history,
-            tw,
-            show_thinking,
-            &theme,
-        );
+        let (mut soft, mut hard) = self.transcript.line_breaks(tw, show_thinking, &theme);
         soft.sort_unstable();
         hard.sort_unstable();
         (soft, hard)
@@ -276,16 +481,13 @@ impl TuiApp {
     /// the caller as needed). Returns empty when no projection has run yet
     /// (i.e. before the first frame).
     pub(crate) fn visible_transcript_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
-        self.transcript_block_snapshots_from_layout(
-            self.transcript_projection.visible_block_layout(),
-        )
+        self.transcript_block_snapshots_from_layout(self.transcript.visible_block_layout())
     }
 
     pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        let layout = self.transcript_projection.materialize_block_layout(
-            &mut self.transcript.history,
+        let layout = self.transcript.materialize_block_layout(
             tw,
             self.core.config.settings.show_thinking,
             &theme,
@@ -304,7 +506,7 @@ impl TuiApp {
         >,
     ) -> Vec<TranscriptBlockSnapshot> {
         let mut out = Vec::new();
-        let history = &self.transcript.history;
+        let history = self.transcript.history();
         for (block_id, first_row, rows) in layout {
             let Some(idx) = history.order.iter().position(|id| *id == block_id) else {
                 continue;
@@ -342,14 +544,14 @@ impl TuiApp {
     pub(crate) fn finish_transcript_turn(&mut self) {
         let _perf = smelt_perf::perf::begin("render:finish_turn");
         self.parser
-            .finalize_active_tools(&mut self.transcript.history);
+            .finalize_active_tools(self.transcript.history_mut());
     }
 
     pub(crate) fn set_agent_blocked_paused(&mut self, paused: bool) {
         let now = self.core.clock.instant_now();
         self.working.set_paused(paused);
         self.parser
-            .set_active_tools_paused(&self.transcript.history, paused, now);
+            .set_active_tools_paused(self.transcript.history(), paused, now);
     }
 
     pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
@@ -381,19 +583,17 @@ impl TuiApp {
         block: Block,
         replace_user_prefix: Option<&str>,
     ) {
+        let history = self.transcript.history();
         if let Some(prefix) = replace_user_prefix {
-            if let Some(id) = self.transcript.history.order.last().copied() {
+            if let Some(id) = history.order.last().copied() {
                 let replaces_mode_block = prefix == protocol::MODE_NOTE_PREFIX
-                    && matches!(
-                        self.transcript.history.blocks.get(&id),
-                        Some(Block::Mode { .. })
-                    );
+                    && matches!(history.blocks.get(&id), Some(Block::Mode { .. }));
                 let replaces_prefixed_text = matches!(
-                    self.transcript.history.blocks.get(&id),
+                    history.blocks.get(&id),
                     Some(Block::User { text, .. }) if text.starts_with(prefix)
                 );
                 if replaces_mode_block || replaces_prefixed_text {
-                    self.transcript.history.rewrite(id, block);
+                    self.transcript.history_mut().rewrite(id, block);
                     return;
                 }
             }
@@ -409,7 +609,8 @@ impl TuiApp {
     pub(crate) fn invalidate_for_width(&mut self, _width: u16) {}
 
     pub(crate) fn invalidate_for_theme(&mut self) {
-        self.transcript_projection.invalidate_theme();
+        self.transcript.invalidate_theme();
+        self.resume_preview_cache.invalidate_theme();
     }
 
     /// Install a complete theme and publish it to the process-wide active slot.
@@ -428,7 +629,7 @@ impl TuiApp {
 
     pub(crate) fn clear_transcript(&mut self) {
         self.pending_history_appends.clear();
-        self.transcript.history.clear();
+        self.transcript.history_mut().clear();
         self.parser.clear();
     }
 
@@ -467,140 +668,55 @@ impl TuiApp {
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let now = self.core.clock.instant_now();
         self.parser
-            .sync_active_tool_elapsed_at(&mut self.transcript.history, now);
-        // Run plugin `render` hooks on the main thread (Lua is single-threaded) and stash
-        // the resulting owned buffers on `ToolState.render_cache`. Worker layout below
-        // reads those buffers without touching `app.ui` or the Lua VM. Tail-follow asks
-        // the transcript height index for the bounded suffix; arbitrary scroll positions
-        // still use the compatibility full pre-pass until random-access projection lands.
-        if scroll_target == crate::content::transcript_buf::ScrollTarget::Tail {
-            let ids = self.tail_prerender_block_ids(tw as u16, show_thinking, viewport_rows);
-            self.prerender_tool_blocks_for_ids(tw as u16, &ids);
-        } else {
-            self.prerender_tool_blocks(tw as u16);
-        }
+            .sync_active_tool_elapsed_at(self.transcript.history_mut(), now);
+        let plan =
+            self.transcript
+                .plan_projection(tw as u16, show_thinking, scroll_target, viewport_rows);
+        self.prerender_transcript_tool_blocks_for_ids(tw as u16, plan.block_ids());
         let theme = self.ui.theme().clone();
 
         let buf = self
             .ui
             .win_buf_mut(self.well_known.transcript)
             .expect("transcript window must be registered at startup");
-        let out = self.transcript_projection.project(
-            buf,
-            &mut self.transcript.history,
-            tw as u16,
-            show_thinking,
-            &theme,
-            scroll_target,
-            viewport_rows,
-        );
+        let out = self.transcript.project_planned(buf, &theme, plan);
 
         TranscriptData {
             clamped_scroll: out.clamped_scroll,
             row_base: out.row_base,
             total_rows: out.total_rows,
+            projected_rows: out.projected_rows,
         }
     }
 
-    fn tail_prerender_block_ids(
+    pub(crate) fn prerender_tool_blocks_in_history_for_ids(
+        &mut self,
+        history: &mut BlockHistory,
+        width: u16,
+        ids: &[BlockId],
+    ) {
+        let jobs = collect_tool_render_jobs(history, width, ids.iter().copied());
+        let rendered = self.render_tool_jobs(width, jobs);
+        Self::store_tool_render_results(history, width, rendered);
+    }
+
+    /// Main-thread pre-pass: run plugin `render` hooks for the tool blocks the
+    /// next projection can actually materialize. The Lua VM is single-threaded;
+    /// worker layout downstream only reads the cached owned buffers.
+    fn prerender_transcript_tool_blocks_for_ids(&mut self, width: u16, ids: &[BlockId]) {
+        let jobs = collect_tool_render_jobs(self.transcript.history(), width, ids.iter().copied());
+        let rendered = self.render_tool_jobs(width, jobs);
+        Self::store_tool_render_results(self.transcript.history_mut(), width, rendered);
+    }
+
+    fn render_tool_jobs(
         &mut self,
         width: u16,
-        show_thinking: bool,
-        viewport_rows: u16,
-    ) -> Vec<BlockId> {
-        self.transcript_projection.tail_block_ids(
-            &self.transcript.history,
-            width,
-            show_thinking,
-            viewport_rows,
-        )
-    }
-
-    fn prerender_tool_blocks_for_ids(&mut self, width: u16, ids: &[BlockId]) {
-        let jobs: Vec<ToolRenderJob> = {
-            let history = &self.transcript.history;
-            let mut jobs = Vec::new();
-            for id in ids {
-                let Some(block) = history.blocks.get(id) else {
-                    continue;
-                };
-                let Block::ToolCall {
-                    call_id,
-                    name,
-                    args,
-                    ..
-                } = block
-                else {
-                    continue;
-                };
-                let Some(state) = history.tool_states.get(call_id) else {
-                    continue;
-                };
-                if matches!(state.status, ToolStatus::Denied) {
-                    continue;
-                }
-                if matches!(&state.render_cache, Some((w, _)) if *w == width) {
-                    continue;
-                }
-                jobs.push(ToolRenderJob {
-                    call_id: call_id.clone(),
-                    name: name.clone(),
-                    args: args.clone(),
-                    output: state.output.as_deref().cloned(),
-                    status: state.status,
-                    elapsed_secs: state.elapsed.map(|d| d.as_secs()),
-                });
-            }
-            jobs
-        };
-        self.render_tool_jobs(width, jobs);
-    }
-
-    /// Main-thread pre-pass: walk every `Block::ToolCall` whose `ToolState.render_cache`
-    /// is missing or width-stale, call the plugin's `render` hook (Lua VM is single-
-    /// threaded), and stash the resulting owned-buffer tree on the state. Parallel layout
-    /// workers downstream just read those buffers - they never touch `app.ui` or Lua.
-    fn prerender_tool_blocks(&mut self, width: u16) {
-        let jobs: Vec<ToolRenderJob> = {
-            let history = &self.transcript.history;
-            let mut jobs = Vec::new();
-            for id in &history.order {
-                let block = &history.blocks[id];
-                let Block::ToolCall {
-                    call_id,
-                    name,
-                    args,
-                    ..
-                } = block
-                else {
-                    continue;
-                };
-                let Some(state) = history.tool_states.get(call_id) else {
-                    continue;
-                };
-                if matches!(state.status, ToolStatus::Denied) {
-                    continue;
-                }
-                if matches!(&state.render_cache, Some((w, _)) if *w == width) {
-                    continue;
-                }
-                jobs.push(ToolRenderJob {
-                    call_id: call_id.clone(),
-                    name: name.clone(),
-                    args: args.clone(),
-                    output: state.output.as_deref().cloned(),
-                    status: state.status,
-                    elapsed_secs: state.elapsed.map(|d| d.as_secs()),
-                });
-            }
-            jobs
-        };
-        self.render_tool_jobs(width, jobs);
-    }
-
-    fn render_tool_jobs(&mut self, width: u16, jobs: Vec<ToolRenderJob>) {
+        jobs: Vec<ToolRenderJob>,
+    ) -> Vec<(String, RenderedLayout)> {
+        let mut rendered_jobs = Vec::new();
         if jobs.is_empty() {
-            return;
+            return rendered_jobs;
         }
 
         for job in jobs {
@@ -624,8 +740,18 @@ impl TuiApp {
             else {
                 continue;
             };
-            let rendered = extract_rendered_layout(&layout, &mut self.ui);
-            if let Some(state) = self.transcript.history.tool_states.get_mut(&job.call_id) {
+            rendered_jobs.push((job.call_id, extract_rendered_layout(&layout, &mut self.ui)));
+        }
+        rendered_jobs
+    }
+
+    fn store_tool_render_results(
+        history: &mut BlockHistory,
+        width: u16,
+        rendered_jobs: Vec<(String, RenderedLayout)>,
+    ) {
+        for (call_id, rendered) in rendered_jobs {
+            if let Some(state) = history.tool_states.get_mut(&call_id) {
                 state.render_cache = Some((width, rendered));
             }
         }

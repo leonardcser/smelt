@@ -813,12 +813,11 @@ mod tests {
     use super::*;
 
     fn process_status_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
-        app.app
-            .transcript
-            .history
+        let history = app.app.transcript.history();
+        history
             .order
             .iter()
-            .filter_map(|id| app.app.transcript.history.blocks.get(id))
+            .filter_map(|id| history.blocks.get(id))
             .filter_map(|block| match block {
                 Block::ProcessStatus { text } => Some(text.clone()),
                 _ => None,
@@ -827,12 +826,11 @@ mod tests {
     }
 
     fn user_blocks(app: &crate::app::test_harness::TestApp) -> Vec<String> {
-        app.app
-            .transcript
-            .history
+        let history = app.app.transcript.history();
+        history
             .order
             .iter()
-            .filter_map(|id| app.app.transcript.history.blocks.get(id))
+            .filter_map(|id| history.blocks.get(id))
             .filter_map(|block| match block {
                 Block::User { text, .. } => Some(text.clone()),
                 _ => None,
