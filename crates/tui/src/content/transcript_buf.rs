@@ -94,22 +94,6 @@ impl TranscriptDocument {
         self.prefix_rows.last().copied().unwrap_or(0)
     }
 
-    fn tail_start_index(&self, viewport_rows: u16) -> usize {
-        let target_rows = (viewport_rows as RowIndex).saturating_add(TAIL_OVERSCAN_ROWS);
-        let mut selected_rows: RowIndex = 0;
-        let mut first = self.nodes.len();
-        for i in (0..self.nodes.len()).rev() {
-            let node = &self.nodes[i];
-            selected_rows =
-                selected_rows.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
-            first = i;
-            if selected_rows >= target_rows {
-                break;
-            }
-        }
-        first
-    }
-
     fn start_index_for_row(&self, row: RowIndex) -> usize {
         let idx = self.prefix_rows.partition_point(|prefix| *prefix <= row);
         idx.saturating_sub(1).min(self.nodes.len())
@@ -299,6 +283,11 @@ impl TranscriptProjection {
         self.materialized.map(|m| m.key)
     }
 
+    fn target_is_last_materialized(&self, buf: &Buffer) -> bool {
+        self.materialized
+            .is_some_and(|m| m.buf_id == buf.id() && m.changedtick == buf.changedtick())
+    }
+
     fn mark_projected_into(&mut self, key: ProjectKey, buf: &Buffer) {
         self.materialized = Some(MaterializedProjection {
             key,
@@ -343,27 +332,21 @@ impl TranscriptProjection {
             generation: history.generation(),
             width,
             show_thinking,
-            virtual_viewport_rows: matches!(
-                scroll_target,
-                ScrollTarget::Tail | ScrollTarget::VisibleRow(_)
-            )
-            .then_some(viewport_rows),
+            virtual_viewport_rows: matches!(scroll_target, ScrollTarget::VisibleRow(_))
+                .then_some(viewport_rows),
             tail: scroll_target == ScrollTarget::Tail,
         };
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
         self.prepare_document(history, width, show_thinking);
         let first = match scroll_target {
-            ScrollTarget::Tail => self.document.tail_start_index(viewport_rows),
+            ScrollTarget::Tail | ScrollTarget::Row(_) => 0,
             ScrollTarget::VisibleRow(row) => resize_anchor
                 .and_then(|(id, _)| self.document.block_index(id))
                 .unwrap_or_else(|| self.document.start_index_for_row(row)),
-            ScrollTarget::Row(_) => 0,
         };
         let end = match scroll_target {
-            ScrollTarget::Row(_) => self.document.nodes.len(),
-            ScrollTarget::Tail | ScrollTarget::VisibleRow(_) => {
-                self.document.window_end_index(first, viewport_rows)
-            }
+            ScrollTarget::Tail | ScrollTarget::Row(_) => self.document.nodes.len(),
+            ScrollTarget::VisibleRow(_) => self.document.window_end_index(first, viewport_rows),
         };
         let block_ids = self.document.nodes[first..end]
             .iter()
@@ -439,8 +422,10 @@ impl TranscriptProjection {
         }
 
         match plan.scroll_target {
-            ScrollTarget::Row(_) => self.project_full(buf, history, theme, plan),
-            ScrollTarget::Tail | ScrollTarget::VisibleRow(_) => {
+            ScrollTarget::Tail | ScrollTarget::Row(_) => {
+                self.project_full(buf, history, theme, plan)
+            }
+            ScrollTarget::VisibleRow(_) => {
                 let mut out = self.project_visible_range(buf, history, theme, &plan);
                 if let Some((block_id, offset)) = plan.resize_anchor {
                     if let Some(entry) = self
@@ -497,7 +482,8 @@ impl TranscriptProjection {
         // to before the last block and append the new tail instead of
         // rebuilding from scratch. This keeps changedtick stable for earlier
         // rows so Window::render re-uses its WrappedLayout cache.
-        let incremental = self.can_incremental(&layout)
+        let incremental = self.target_is_last_materialized(buf)
+            && self.can_incremental(&layout)
             && self.apply_incremental(buf, history, &plan.block_ids, &plan.block_keys, &layout);
 
         if !incremental {
@@ -1368,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn tail_projection_renders_bounded_suffix_then_scroll_materializes_full_buffer() {
+    fn tail_projection_renders_full_buffer_at_bottom() {
         let mut transcript = Transcript::new();
         for i in 0..100 {
             transcript.push(Block::Text {
@@ -1390,7 +1376,7 @@ mod tests {
         );
         let tail_lines: Vec<String> = buf.lines().to_vec();
         assert!(tail_lines.iter().any(|line| line == "line 99"));
-        assert!(!tail_lines.iter().any(|line| line == "line 0"));
+        assert!(tail_lines.iter().any(|line| line == "line 0"));
 
         projection.project(
             &mut buf,
@@ -1441,11 +1427,12 @@ mod tests {
 
         assert!(buf.line_count() as RowIndex <= full_rows);
         assert!(buf.line_count() as RowIndex >= 5);
-        assert!(output.row_base > 0);
+        assert_eq!(output.row_base, 0);
+        assert_eq!(output.projected_rows, full_rows);
         assert_eq!(output.total_rows, full_rows);
         assert_eq!(output.clamped_scroll, full_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "block 39"));
-        assert!(!buf.lines().iter().any(|line| line == "block 0"));
+        assert!(buf.lines().iter().any(|line| line == "block 0"));
     }
 
     #[test]
@@ -1525,6 +1512,61 @@ mod tests {
     }
 
     #[test]
+    fn cached_projection_can_be_reused_after_shared_preview_buffer_switches_sessions() {
+        let mut first = Transcript::new();
+        for i in 0..40 {
+            first.push(Block::Text {
+                content: format!("first {i}"),
+            });
+        }
+        let mut second = Transcript::new();
+        for i in 0..40 {
+            second.push(Block::Text {
+                content: format!("second {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut first_projection = TranscriptProjection::new();
+        let mut second_projection = TranscriptProjection::new();
+        let mut shared = Buffer::new(crate::smelt_term::BufId(11), Default::default());
+
+        first_projection.project(
+            &mut shared,
+            &mut first.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Tail,
+            5,
+        );
+        second_projection.project(
+            &mut shared,
+            &mut second.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Tail,
+            5,
+        );
+
+        first_projection.project(
+            &mut shared,
+            &mut first.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::Tail,
+            5,
+        );
+
+        assert!(shared.lines().iter().any(|line| line == "first 39"));
+        assert!(!shared
+            .lines()
+            .iter()
+            .any(|line| line.starts_with("second ")));
+    }
+
+    #[test]
     fn materialized_block_layout_is_exact_after_tail_projection() {
         let mut transcript = Transcript::new();
         for i in 0..40 {
@@ -1546,7 +1588,7 @@ mod tests {
             5,
         );
         let visible_count = projection.visible_block_layout().count();
-        assert!(visible_count < transcript.history.order.len());
+        assert_eq!(visible_count, transcript.history.order.len());
 
         let layout =
             projection.materialize_block_layout(&mut transcript.history, 80, false, &theme);
@@ -1557,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn tail_projection_refines_total_without_full_materialization() {
+    fn tail_projection_uses_exact_total_from_full_materialization() {
         let mut transcript = Transcript::new();
         for i in 0..40 {
             let lines = (0..10)
@@ -1579,11 +1621,11 @@ mod tests {
             ScrollTarget::Tail,
             5,
         );
-        assert!(tail.total_rows < 439);
-        assert!(tail.total_rows >= buf.line_count() as RowIndex);
+        assert_eq!(tail.total_rows, 439);
+        assert_eq!(tail.total_rows, buf.line_count() as RowIndex);
         assert_eq!(tail.clamped_scroll, tail.total_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "block 39 line 9"));
-        assert!(!buf.lines().iter().any(|line| line == "block 0 line 0"));
+        assert!(buf.lines().iter().any(|line| line == "block 0 line 0"));
 
         let visible = projection.project(
             &mut buf,
@@ -1594,9 +1636,9 @@ mod tests {
             ScrollTarget::VisibleRow(tail.clamped_scroll.saturating_sub(1)),
             5,
         );
-        assert!(visible.row_base > 0);
+        assert_eq!(visible.row_base, 0);
         assert!(buf.lines().iter().any(|line| line == "block 39 line 9"));
-        assert!(!buf.lines().iter().any(|line| line == "block 0 line 0"));
+        assert!(buf.lines().iter().any(|line| line == "block 0 line 0"));
 
         let top = projection.project(
             &mut buf,
@@ -1608,9 +1650,9 @@ mod tests {
             5,
         );
         assert_eq!(top.row_base, 0);
-        assert!(top.projected_rows < top.total_rows);
+        assert_eq!(top.projected_rows, top.total_rows);
         assert!(buf.lines().iter().any(|line| line == "block 0 line 0"));
-        assert!(!buf.lines().iter().any(|line| line == "block 39 line 9"));
+        assert!(buf.lines().iter().any(|line| line == "block 39 line 9"));
 
         let full = projection.project(
             &mut buf,

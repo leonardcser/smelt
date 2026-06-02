@@ -400,7 +400,7 @@ impl mlua::UserData for LuaWin {
                             let total = app
                                 .ui
                                 .buf(win.buf)
-                                .map(|b| b.lines().len() as u64)
+                                .map(|buf| win.scroll_row_total(buf))
                                 .unwrap_or(0);
                             let viewport = win.viewport.map(|v| v.rect.height).unwrap_or(0);
                             let max = total.saturating_sub(viewport as u64);

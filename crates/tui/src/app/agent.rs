@@ -867,7 +867,7 @@ mod tests {
         ));
         assert_eq!(
             app.app.pending_history_appends[0].history_note(),
-            "Background process 4242 exited with code 9."
+            protocol::process_status_note("Background process 4242 exited with code 9.")
         );
     }
 

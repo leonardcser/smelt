@@ -1,23 +1,22 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 344
 expression: frame.text()
 ---
 
 
+     ┌ sessions ─────────────────────────────────────────────────┐
+     │                                                           │
+     │                                                           │
+     │                                                           │
+     │                                                           │
+     │    1.4M 5d   spike: notebook preview                      │
+     │   85.6K 1d   first pass at the resume picker              │
+     │    4.0K 2h   wire up the diff renderer                    │
+     │   12.1K 5m   investigate parser regression                │
+     └───────────────────────────────────────────────────────────┘
+     ┌ filter ───────────────────────────────────────────────────┐
+     │ filter sessions…                               workspace  │
+─────└───────────────────────────────────────────────────────────┘──────
 
-
-
-─ resume ───────────────────────────────────────────────────────────────
- filter sessions…                                            workspace
-      12.1K  5m       investigate parser regression
-       4.0K  2h       wire up the diff renderer
-      85.6K  1d       first pass at the resume picker
-       1.4M  5d       spike: notebook preview
-
-
-
-
-
-
+────────────────────────────────────────────────────────────────────────
  ○ normal                                                       1:1 100%

@@ -1695,16 +1695,10 @@ impl TestApp {
         }
 
         // Placeholder dispatch opts shadow the extmark-stored placeholder
-        // text; both `set_placeholder` and `clear_placeholder` are the only
-        // ways to install/remove them, but a window close that bypasses
-        // `clear_placeholder` would orphan the entry. The dispatcher then
-        // matches keys against a policy for a window that no longer exists.
-        //
-        // Beyond reachability, opts and extmark must move as a unit:
-        // `Win:placeholder(text, opts)` always pairs `set_placeholder`
-        // with an opts insert, and `clear_placeholder` removes both. A
-        // divergence in either direction means a future `dispatch_placeholder_key`
-        // either fires on a phantom policy or ignores a real placeholder.
+        // text. Static placeholders (input labels, predictions) may have an
+        // extmark without dispatch opts; entries in `placeholder_opts` are the
+        // interactive subset and must point at a live window with exactly one
+        // placeholder extmark.
         let placeholder_ns =
             smelt_buffer::buffer::create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
         for win in self.app.placeholder_opts.keys() {
@@ -1720,17 +1714,6 @@ impl TestApp {
             assert_eq!(
                 extmark_count, 1,
                 "placeholder_opts[{win:?}] has {extmark_count} extmarks in PLACEHOLDER_NS (expected 1)",
-            );
-        }
-        for (wid, win) in self.app.ui.iter_wins() {
-            let Some(buf) = self.app.ui.buf(win.buf) else {
-                continue;
-            };
-            let has_extmark = !buf.extmarks(placeholder_ns).is_empty();
-            let has_opts = self.app.placeholder_opts.contains_key(&wid);
-            assert_eq!(
-                has_extmark, has_opts,
-                "window {wid:?}: placeholder extmark present={has_extmark} but opts present={has_opts}",
             );
         }
     }
