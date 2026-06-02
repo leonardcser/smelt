@@ -979,8 +979,12 @@ impl TuiApp {
         crate::content::prompt_buf::placeholder_text(buf)
     }
 
-    /// Set the placeholder text on `win`. Replaces any prior placeholder.
+    /// Set the placeholder text on `win`. Empty text clears any prior placeholder.
     pub fn set_placeholder(&mut self, win: crate::smelt_term::WinId, text: String) {
+        if text.is_empty() {
+            self.clear_placeholder(win);
+            return;
+        }
         let Some(buf) = self.ui.win_buf_mut(win) else {
             return;
         };

@@ -525,6 +525,10 @@ impl TestApp {
         dismiss: Vec<crate::smelt_term::KeyBind>,
     ) {
         let win = self.app.well_known.prompt;
+        if text.is_empty() {
+            self.app.clear_placeholder(win);
+            return;
+        }
         self.app.set_placeholder(win, text);
         self.app.placeholder_opts.insert(
             win,

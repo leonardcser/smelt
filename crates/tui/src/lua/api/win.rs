@@ -311,14 +311,18 @@ impl mlua::UserData for LuaWin {
                 let dismiss_keys =
                     parse_chord_list_with_default(opts.as_ref(), "dismiss_keys", &["esc", "c-c"])?;
                 crate::lua::with_app(|app| {
-                    app.set_placeholder(this.id, text);
-                    app.placeholder_opts.insert(
-                        this.id,
-                        crate::app::PlaceholderOpts {
-                            accept_keys,
-                            dismiss_keys,
-                        },
-                    );
+                    if text.is_empty() {
+                        app.clear_placeholder(this.id);
+                    } else {
+                        app.set_placeholder(this.id, text);
+                        app.placeholder_opts.insert(
+                            this.id,
+                            crate::app::PlaceholderOpts {
+                                accept_keys,
+                                dismiss_keys,
+                            },
+                        );
+                    }
                 });
                 Ok(this_ud)
             },

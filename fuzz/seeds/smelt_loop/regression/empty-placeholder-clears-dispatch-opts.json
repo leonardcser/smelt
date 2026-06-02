@@ -1,0 +1,14 @@
+{
+  "_about": "Installing an empty prompt placeholder must clear dispatch opts along with the extmark; otherwise placeholder_opts can outlive the visible placeholder.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "install_placeholder",
+      "data": {
+        "text": "",
+        "variant": 0
+      }
+    }
+  ],
+  "vim": true
+}
