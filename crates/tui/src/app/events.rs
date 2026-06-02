@@ -130,14 +130,34 @@ impl TuiApp {
             return false;
         }
 
+        let prompt_insert_check = if self.prompt_trace_enabled() {
+            self.prompt_insert_check_for_event(&ev)
+        } else {
+            None
+        };
+        if prompt_insert_check.is_some() {
+            self.trace_prompt_event(
+                "prompt_printable_before",
+                serde_json::json!({ "event": format!("{:?}", ev) }),
+            );
+        }
+
         let outcome = if self.agent.is_some() || self.busy_stack.is_busy() {
             self.handle_event_running(ev)
         } else {
             self.handle_event_idle(ev)
         };
 
+        if prompt_insert_check.is_some() {
+            self.trace_prompt_event("prompt_printable_after_input", serde_json::json!({}));
+        }
+
         // Notify Lua subscribers if the prompt buffer changed (drives filter-as-you-type pickers).
         self.emit_prompt_text_changed_if_dirty();
+
+        if let Some(check) = &prompt_insert_check {
+            self.check_prompt_insert_after_event(check);
+        }
 
         self.apply_event_outcome(outcome)
     }
@@ -451,6 +471,12 @@ impl TuiApp {
         }
 
         let now = self.core.clock.instant_now();
+        if self.prompt_trace_enabled() {
+            self.trace_prompt_event(
+                "prompt_input_before",
+                serde_json::json!({ "path": "idle", "event": format!("{:?}", ev) }),
+            );
+        }
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         let action = self.input.handle_event(
             &mut pctx,
@@ -459,6 +485,12 @@ impl TuiApp {
             &mut self.core.clipboard,
             now,
         );
+        if self.prompt_trace_enabled() {
+            self.trace_prompt_event(
+                "prompt_input_after",
+                serde_json::json!({ "path": "idle", "action": input_action_label(&action) }),
+            );
+        }
         self.dispatch_input_action(action)
     }
 
@@ -509,6 +541,12 @@ impl TuiApp {
         }
 
         let now = self.core.clock.instant_now();
+        if self.prompt_trace_enabled() {
+            self.trace_prompt_event(
+                "prompt_input_before",
+                serde_json::json!({ "path": "running", "event": format!("{:?}", ev) }),
+            );
+        }
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         let input_action = self.input.handle_event(
             &mut pctx,
@@ -517,6 +555,12 @@ impl TuiApp {
             &mut self.core.clipboard,
             now,
         );
+        if self.prompt_trace_enabled() {
+            self.trace_prompt_event(
+                "prompt_input_after",
+                serde_json::json!({ "path": "running", "action": input_action_label(&input_action) }),
+            );
+        }
         match input_action {
             Action::Submit {
                 mut content,
@@ -1237,6 +1281,19 @@ impl TuiApp {
             return Status::Consumed;
         }
         Status::Ignored
+    }
+}
+
+fn input_action_label(action: &Action) -> &'static str {
+    match action {
+        Action::Redraw => "redraw",
+        Action::Submit { .. } => "submit",
+        Action::SubmitEmpty => "submit_empty",
+        Action::EditInEditor => "edit_in_editor",
+        Action::CenterScroll => "center_scroll",
+        Action::PanColumns(_) => "pan_columns",
+        Action::NotifyError(_) => "notify_error",
+        Action::Noop => "noop",
     }
 }
 

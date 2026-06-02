@@ -40,8 +40,25 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["text"],
         |_, text: String| -> LuaResult<()> {
             crate::lua::with_app(|app| {
-                let mut pctx = crate::input::prompt_ctx_mut(&mut app.ui);
-                app.input.replace_text(&mut pctx, text);
+                let trace = app.prompt_trace_enabled();
+                let new_len = text.len();
+                let new_hash = trace.then(|| crate::app::TuiApp::prompt_text_hash(&text));
+                if trace {
+                    app.trace_prompt_event(
+                        "lua_prompt_set_text_before",
+                        serde_json::json!({ "new_len": new_len, "new_hash": new_hash }),
+                    );
+                }
+                {
+                    let mut pctx = crate::input::prompt_ctx_mut(&mut app.ui);
+                    app.input.replace_text(&mut pctx, text);
+                }
+                if trace {
+                    app.trace_prompt_event(
+                        "lua_prompt_set_text_after",
+                        serde_json::json!({ "new_len": new_len, "new_hash": new_hash }),
+                    );
+                }
             });
             Ok(())
         },
@@ -53,12 +70,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |_, pos: Option<i64>| -> LuaResult<i64> {
             Ok(crate::lua::with_app(|app| match pos {
                 Some(p) => {
-                    let pctx = crate::input::prompt_ctx_mut(&mut app.ui);
-                    let p = p.max(0) as usize;
-                    let snapped = smelt_buffer::text::snap(pctx.buf.source(), p);
-                    pctx.win.cpos = snapped;
-                    pctx.win.selection_anchor = None;
-                    pctx.win.clamp_anchors_to_source(pctx.buf.source());
+                    let requested = p.max(0) as usize;
+                    let before_cpos = app.prompt_win().cpos;
+                    let snapped = {
+                        let pctx = crate::input::prompt_ctx_mut(&mut app.ui);
+                        let snapped = smelt_buffer::text::snap(pctx.buf.source(), requested);
+                        pctx.win.cpos = snapped;
+                        pctx.win.selection_anchor = None;
+                        pctx.win.clamp_anchors_to_source(pctx.buf.source());
+                        snapped
+                    };
+                    if app.prompt_trace_enabled() {
+                        app.trace_prompt_event(
+                            "lua_prompt_cursor_set",
+                            serde_json::json!({
+                                "requested": requested,
+                                "before_cpos": before_cpos,
+                                "after_cpos": snapped,
+                            }),
+                        );
+                    }
                     snapped as i64
                 }
                 None => app.prompt_win().cpos as i64,
@@ -71,15 +102,32 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["start", "end", "text"],
         |_, (start, end, text): (i64, i64, String)| -> LuaResult<i64> {
             Ok(crate::lua::with_app(|app| {
-                let pctx = crate::input::prompt_ctx_mut(&mut app.ui);
-                let src = pctx.buf.source();
-                let start = smelt_buffer::text::snap(src, start.max(0) as usize);
-                let end = smelt_buffer::text::snap(src, end.max(0) as usize).max(start);
-                pctx.buf.text_mut().replace_range(start..end, &text);
-                let new_cpos = start + text.len();
-                pctx.win.cpos = new_cpos;
-                pctx.win.selection_anchor = None;
-                pctx.win.clamp_anchors_to_source(pctx.buf.source());
+                let before_cpos = app.prompt_win().cpos;
+                let (start, end, new_cpos) = {
+                    let pctx = crate::input::prompt_ctx_mut(&mut app.ui);
+                    let src = pctx.buf.source();
+                    let start = smelt_buffer::text::snap(src, start.max(0) as usize);
+                    let end = smelt_buffer::text::snap(src, end.max(0) as usize).max(start);
+                    pctx.buf.text_mut().replace_range(start..end, &text);
+                    let new_cpos = start + text.len();
+                    pctx.win.cpos = new_cpos;
+                    pctx.win.selection_anchor = None;
+                    pctx.win.clamp_anchors_to_source(pctx.buf.source());
+                    (start, end, new_cpos)
+                };
+                if app.prompt_trace_enabled() {
+                    app.trace_prompt_event(
+                        "lua_prompt_replace_range",
+                        serde_json::json!({
+                            "start": start,
+                            "end": end,
+                            "inserted_len": text.len(),
+                            "inserted_hash": crate::app::TuiApp::prompt_text_hash(&text),
+                            "before_cpos": before_cpos,
+                            "after_cpos": new_cpos,
+                        }),
+                    );
+                }
                 new_cpos as i64
             }))
         },

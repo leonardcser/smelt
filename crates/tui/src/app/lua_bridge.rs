@@ -63,6 +63,16 @@ impl TuiApp {
             return;
         }
         let cursor_before = self.prompt_win().cpos;
+        if self.prompt_trace_enabled() {
+            self.trace_prompt_event(
+                "text_changed_before",
+                serde_json::json!({
+                    "current_len": current_text.len(),
+                    "current_hash": Self::prompt_text_hash(&current_text),
+                    "cursor_before": cursor_before,
+                }),
+            );
+        }
         self.last_prompt_text = current_text.clone();
         let lua = &self.lua;
         let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
@@ -79,15 +89,39 @@ impl TuiApp {
             &mut lua_invoke,
         );
         self.flush_lua_callbacks();
+        if self.prompt_trace_enabled() {
+            self.trace_prompt_event(
+                "text_changed_after_callbacks",
+                serde_json::json!({
+                    "fired_len": current_text.len(),
+                    "fired_hash": Self::prompt_text_hash(&current_text),
+                    "cursor_before": cursor_before,
+                    "text_still_same": self.prompt_buf().source() == current_text,
+                }),
+            );
+        }
 
         // `text_changed` is observational: filter/completer callbacks can edit
         // the prompt explicitly, but a callback that only moves the cursor must
         // not repark the insertion point after every typed character.
         if self.prompt_buf().source() == current_text && self.prompt_win().cpos != cursor_before {
-            let pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-            pctx.win.cpos = smelt_buffer::text::snap(pctx.buf.source(), cursor_before);
-            pctx.win.selection_anchor = None;
-            pctx.win.clamp_anchors_to_source(pctx.buf.source());
+            let cursor_after_callbacks = self.prompt_win().cpos;
+            {
+                let pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+                pctx.win.cpos = smelt_buffer::text::snap(pctx.buf.source(), cursor_before);
+                pctx.win.selection_anchor = None;
+                pctx.win.clamp_anchors_to_source(pctx.buf.source());
+            }
+            if self.prompt_trace_enabled() {
+                self.trace_prompt_event(
+                    "text_changed_restore_cursor",
+                    serde_json::json!({
+                        "cursor_before": cursor_before,
+                        "cursor_after_callbacks": cursor_after_callbacks,
+                        "cursor_after_restore": self.prompt_win().cpos,
+                    }),
+                );
+            }
         }
     }
 

@@ -10,6 +10,7 @@ pub(crate) mod lua_bridge;
 pub(crate) mod lua_handlers;
 pub(crate) mod mouse;
 pub(crate) mod pane_focus;
+pub(crate) mod prompt_trace;
 pub(crate) mod render_loop;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
