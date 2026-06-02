@@ -26,7 +26,10 @@ pub use history::{
     message_to_history_positions, AssistantTurn, HistoryItem, ToolInvocation,
 };
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
-pub use mode::{mode_change_note, AgentMode, ReasoningEffort, MODE_NOTE_PREFIX};
+pub use mode::{
+    mode_change_note, process_status_note, AgentMode, ReasoningEffort, MODE_NOTE_PREFIX,
+    PROCESS_STATUS_NOTE_PREFIX,
+};
 pub use style::{StyledLines, StyledSpan};
 pub use usage::{
     ModelConfigOverrides, PermissionOverrides, RuleSetOverride, ThinkingBudgets, TokenUsage,

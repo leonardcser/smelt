@@ -355,10 +355,8 @@ impl TuiApp {
     pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
         let appends = std::mem::take(&mut self.pending_history_appends);
         for append in appends {
-            self.apply_history_append_to_history(
-                append.history_note(),
-                append.replacement_prefix(),
-            );
+            let note = append.history_note();
+            self.apply_history_append_to_history(&note, append.replacement_prefix());
             self.commit_history_append_block(
                 append.transcript_block(),
                 append.replacement_prefix(),

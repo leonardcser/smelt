@@ -123,15 +123,16 @@ impl TuiApp {
         self.clear_prompt_prediction();
         self.begin_turn();
         self.push_block(Block::ProcessStatus { text: note.clone() });
+        let history_note = protocol::process_status_note(&note);
         if !note.is_empty() {
             self.core
                 .session
                 .history
-                .push(HistoryItem::user(Content::text(note.clone())));
+                .push(HistoryItem::user(Content::text(history_note.clone())));
             self.sync_session_snapshot();
             self.core.session.history.pop();
         }
-        self.dispatch_turn(Content::text(note))
+        self.dispatch_turn(Content::text(history_note))
     }
 
     pub(crate) fn begin_custom_command_turn(

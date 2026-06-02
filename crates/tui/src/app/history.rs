@@ -29,7 +29,7 @@ impl TuiApp {
                     _ => false,
                 })
             })
-            .map(|pending| pending.history_note().to_string())
+            .map(|pending| pending.history_note())
             .collect();
         self.core
             .session
@@ -345,6 +345,18 @@ impl TuiApp {
             self.push_block(self.lua.mode_block(None, note.trim()));
             return;
         }
+        if let Some(note) = text.strip_prefix(protocol::PROCESS_STATUS_NOTE_PREFIX) {
+            self.push_block(Block::ProcessStatus {
+                text: note.trim().to_string(),
+            });
+            return;
+        }
+        if is_legacy_process_status_note(&text) {
+            self.push_block(Block::ProcessStatus {
+                text: text.into_owned(),
+            });
+            return;
+        }
         let image_labels = content.image_labels();
         let display_text = if image_labels.is_empty() {
             text.into_owned()
@@ -586,6 +598,15 @@ fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
     }
 }
 
+fn is_legacy_process_status_note(text: &str) -> bool {
+    let Some(status) = text.strip_prefix("Background process ") else {
+        return false;
+    };
+    status.ends_with(" completed successfully.")
+        || status.ends_with(" exited.")
+        || (status.contains(" exited with code ") && status.ends_with('.'))
+}
+
 #[cfg(test)]
 mod checkpoint_tests {
     use super::*;
@@ -620,6 +641,51 @@ mod checkpoint_tests {
             .processes
             .spawn(id.clone(), "sleep 30", child, std::time::Instant::now());
         id
+    }
+
+    #[test]
+    fn restore_screen_rebuilds_process_status_notes_as_process_blocks() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let note = "Background process 123 completed successfully.";
+        app.app.core.session.history = vec![user(&protocol::process_status_note(note))];
+
+        app.app.restore_screen();
+
+        let id = app.app.transcript.history.order[0];
+        assert!(matches!(
+            app.app.transcript.history.blocks.get(&id),
+            Some(Block::ProcessStatus { text }) if text == note
+        ));
+    }
+
+    #[test]
+    fn restore_screen_rebuilds_legacy_process_status_notes_as_process_blocks() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let note = "Background process 123 exited with code 1.";
+        app.app.core.session.history = vec![user(note)];
+
+        app.app.restore_screen();
+
+        let id = app.app.transcript.history.order[0];
+        assert!(matches!(
+            app.app.transcript.history.blocks.get(&id),
+            Some(Block::ProcessStatus { text }) if text == note
+        ));
+    }
+
+    #[test]
+    fn restore_screen_rebuilds_mode_notes_as_mode_blocks() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let note = protocol::mode_change_note("now in apply mode");
+        app.app.core.session.history = vec![user(&note)];
+
+        app.app.restore_screen();
+
+        let id = app.app.transcript.history.order[0];
+        assert!(matches!(
+            app.app.transcript.history.blocks.get(&id),
+            Some(Block::Mode { .. })
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

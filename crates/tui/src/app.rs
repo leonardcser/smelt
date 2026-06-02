@@ -358,10 +358,10 @@ pub(crate) enum PendingHistoryAppend {
 }
 
 impl PendingHistoryAppend {
-    pub(crate) fn history_note(&self) -> &str {
+    pub(crate) fn history_note(&self) -> String {
         match self {
-            PendingHistoryAppend::ModeChange { note, .. }
-            | PendingHistoryAppend::ProcessStatus { note } => note,
+            PendingHistoryAppend::ModeChange { note, .. } => note.clone(),
+            PendingHistoryAppend::ProcessStatus { note } => protocol::process_status_note(note),
         }
     }
 
@@ -427,7 +427,7 @@ impl TuiApp {
     }
 
     pub(crate) fn queue_history_append(&mut self, append: PendingHistoryAppend) {
-        let note = append.history_note().to_string();
+        let note = append.history_note();
         let replace_user_prefix = append.replacement_prefix().map(str::to_string);
 
         if let Some(prefix) = append.replacement_prefix() {
