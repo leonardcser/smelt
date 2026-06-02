@@ -155,6 +155,7 @@ fn token_range_at_transparent<F>(
 where
     F: Fn(char) -> bool,
 {
+    let pos = snap(buf, pos);
     let is_trans = |p: usize| transparent.binary_search(&p).is_ok();
     if pos >= buf.len() {
         return None;
@@ -288,6 +289,13 @@ mod tests {
     #[test]
     fn word_range_at_transparent_returns_none_on_punctuation() {
         assert_eq!(word_range_at_transparent("a, b", 1, &[]), None);
+    }
+
+    #[test]
+    fn word_range_at_transparent_snaps_mid_char_position() {
+        let s = "abc日def";
+        assert_eq!(word_range_at_transparent(s, 4, &[]), Some((0, s.len())));
+        assert_eq!(big_word_range_at_transparent(s, 5, &[]), Some((0, s.len())));
     }
 
     #[test]

@@ -1,0 +1,32 @@
+{
+  "_about": "Double-click/drag word selection can carry a byte offset from display-coordinate mouse mapping that lands inside a multibyte replacement glyph in Buffer::text(). token_range_at_transparent sliced at that raw offset and panicked on a non-UTF-8 boundary.",
+  "_fix": "fix(edit): snap transparent word selection positions",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": "\n\n\nl*\u001d*\u0000\u0000\u0000",
+      "kind": "paste"
+    },
+    {
+      "data": {
+        "button": 96,
+        "col": 96,
+        "kind": 96,
+        "mods": 64,
+        "row": 39
+      },
+      "kind": "mouse"
+    },
+    {
+      "data": {
+        "button": 96,
+        "col": 96,
+        "kind": 96,
+        "mods": 0,
+        "row": 39
+      },
+      "kind": "mouse"
+    }
+  ],
+  "vim": true
+}
