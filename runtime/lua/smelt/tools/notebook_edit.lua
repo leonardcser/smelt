@@ -84,6 +84,10 @@ smelt.tools.register({
       path = meta.path or "",
     })
   end,
+  paths_for_workspace = function(args)
+    local p = args.notebook_path or ""
+    return p ~= "" and { p } or {}
+  end,
   execute = function(args)
     local path = args.notebook_path or ""
     if path == "" then

@@ -695,12 +695,6 @@ fn run_edit(args: &HashMap<String, Value>, files: &FileStateCache) -> NbResult {
         return NbResult::err(format!("file not found: {}", display_path(&path)));
     }
 
-    // Acquire cross-process advisory lock (non-blocking).
-    let _flock = match crate::fs::try_flock(&path) {
-        Ok(guard) => Some(guard),
-        Err(e) => return NbResult::err(e),
-    };
-
     let edit_mode = {
         let m = str_arg(args, "edit_mode");
         if m.is_empty() {
@@ -1398,6 +1392,30 @@ mod edit_tests {
         let cells = nb.get("cells").unwrap().as_array().unwrap();
         let source = join_string_or_array(cells[1].get("source"));
         assert_eq!(source, "print('bye')");
+    }
+
+    #[test]
+    fn apply_succeeds_when_caller_holds_flock() {
+        let dir = tempdir().unwrap();
+        let path = write_nb(dir.path(), "a.ipynb", sample_nb());
+        let files = FileStateCache::new();
+        prime_cache(&files, &path);
+        let _lock = crate::fs::try_flock(&path).unwrap();
+
+        apply_edit(
+            &args_for(&[
+                ("notebook_path", json!(path)),
+                ("edit_mode", json!("replace")),
+                ("cell_id", json!("c1")),
+                ("new_source", json!("print('bye')")),
+            ]),
+            &files,
+        )
+        .unwrap();
+
+        let nb = parse_file(&path);
+        let cells = nb.get("cells").unwrap().as_array().unwrap();
+        assert_eq!(join_string_or_array(cells[1].get("source")), "print('bye')");
     }
 
     #[test]
