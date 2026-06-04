@@ -6,7 +6,7 @@ use crate::ModelConfig;
 use crate::{ApiConfig, EngineConfig};
 use protocol::Decision;
 use protocol::{
-    AgentMode, AskModel, AssistantTurn, Content, EngineAskError, EngineAskErrorKind, EngineEvent,
+    AgentMode, AskModel, AssistantStep, Content, EngineAskError, EngineAskErrorKind, EngineEvent,
     HistoryItem, Message, ReasoningEffort, ToolInvocation, ToolOutcome, TurnMeta, UiCommand,
 };
 use serde_json::Value;
@@ -420,7 +420,7 @@ struct ToolExecutionPlan<'a> {
     pending_tool_hooks: Vec<(u64, PendingToolCall<'a>)>,
     pending_tool_perms: Vec<(u64, PendingToolCall<'a>)>,
     /// Synthetic outcomes produced inside `classify_tools` itself - unknown
-    /// tools, denied dispatch decisions. Folded into the assistant turn's
+    /// tools, denied dispatch decisions. Folded into the assistant step's
     /// `invocations` at commit time so the invariant ("every dispatched
     /// tool_call has a paired outcome") holds even when no execution
     /// happens for that slot.
@@ -569,7 +569,7 @@ struct Turn<'a> {
     http_client: &'a reqwest::Client,
     cancel: crate::cancel::CancellationToken,
     bg_cancel: crate::cancel::CancellationToken,
-    /// Committed conversation history. Invariant: every `Assistant` turn
+    /// Committed conversation history. Invariant: every `Assistant` step
     /// either has no `invocations` (terminal) or has a `ToolOutcome` paired
     /// with every `ToolCall` the LLM emitted. There is no in-flight tool
     /// state here - that lives on stack-locals during the run loop's
@@ -656,20 +656,20 @@ impl<'a> Turn<'a> {
         self.history.push(HistoryItem::User { content });
     }
 
-    /// Append an assistant turn atomically. When `invocations` is non-empty,
+    /// Append an assistant step atomically. When `invocations` is non-empty,
     /// every entry already carries its `ToolOutcome` - the only way to
-    /// satisfy `AssistantTurn`'s shape - so the on-disk and on-wire
+    /// satisfy `AssistantStep`'s shape - so the on-disk and on-wire
     /// representations can never carry an orphan tool_use.
-    fn push_assistant_turn(&mut self, mut turn: AssistantTurn) {
+    fn push_assistant_step(&mut self, mut step: AssistantStep) {
         if self.config.redact_secrets {
-            for inv in &mut turn.invocations {
+            for inv in &mut step.invocations {
                 let redacted = crate::redact::redact(&inv.result.content);
                 if redacted != inv.result.content {
                     inv.result.content = redacted;
                 }
             }
         }
-        self.history.push(HistoryItem::Assistant(turn));
+        self.history.push(HistoryItem::Assistant(step));
     }
 
     /// Rebuilds the system prompt after `/reload`. Mode changes alone
@@ -712,26 +712,18 @@ impl<'a> Turn<'a> {
         });
     }
 
-    fn queue_history_item(&mut self, item: HistoryItem, replace_user_prefix: Option<String>) {
-        if let Some(prefix) = replace_user_prefix.as_deref() {
-            if let HistoryItem::User { content } = &item {
-                if content.as_text().starts_with(prefix) {
-                    if let Some(last) = self.pending_history_items.last_mut() {
-                        if matches!(last, HistoryItem::User { content } if content.as_text().starts_with(prefix))
-                        {
-                            *last = item;
-                            return;
-                        }
-                    }
-                    if let Some(last) = self.history.last_mut() {
-                        if matches!(last, HistoryItem::User { content } if content.as_text().starts_with(prefix))
-                        {
-                            *last = item;
-                            self.emit_messages_snapshot();
-                            return;
-                        }
-                    }
-                }
+    fn queue_history_item(
+        &mut self,
+        item: HistoryItem,
+        replace_note_kind: Option<protocol::HistoryNoteKind>,
+    ) {
+        if let Some(kind) = replace_note_kind {
+            if protocol::replace_last_note_kind(&mut self.pending_history_items, &item, kind) {
+                return;
+            }
+            if protocol::replace_last_note_kind(&mut self.history, &item, kind) {
+                self.emit_messages_snapshot();
+                return;
             }
         }
         self.pending_history_items.push(item);
@@ -747,7 +739,7 @@ impl<'a> Turn<'a> {
     }
 
     /// Commit a streamed-but-cancelled assistant message. The model never
-    /// asked for any tools, so this is a terminal turn - `invocations` is
+    /// asked for any tools, so this is a terminal step - `invocations` is
     /// empty by construction.
     fn commit_partial_assistant(&mut self, text: String, reasoning: String) {
         let content = if text.trim().is_empty() {
@@ -761,7 +753,7 @@ impl<'a> Turn<'a> {
             Some(reasoning)
         };
         if content.is_some() || reasoning.is_some() {
-            self.push_assistant_turn(AssistantTurn::terminal(content, reasoning, Vec::new()));
+            self.push_assistant_step(AssistantStep::terminal(content, reasoning, Vec::new()));
         }
     }
 
@@ -897,9 +889,9 @@ impl<'a> Turn<'a> {
             }
             UiCommand::AppendHistoryItem {
                 item,
-                replace_user_prefix,
+                replace_note_kind,
             } => {
-                self.queue_history_item(item, replace_user_prefix);
+                self.queue_history_item(item, replace_note_kind);
                 true
             }
             UiCommand::SetReasoningEffort { effort } => {
@@ -1170,12 +1162,12 @@ impl<'a> Turn<'a> {
                         None,
                     ))
                     .await;
-                let turn = AssistantTurn::terminal(
+                let turn = AssistantStep::terminal(
                     hooked.content,
                     hooked.reasoning_content,
                     hooked.reasoning_details.unwrap_or_default(),
                 );
-                self.push_assistant_turn(turn);
+                self.push_assistant_step(turn);
                 self.emit_messages_snapshot();
                 self.emit_turn_complete(false);
                 return;
@@ -1223,7 +1215,7 @@ impl<'a> Turn<'a> {
                 inline_outcomes,
             );
             crate::result_dedup::apply_in_place(&mut invocations, &self.history);
-            self.push_assistant_turn(AssistantTurn::with_invocations(
+            self.push_assistant_step(AssistantStep::with_invocations(
                 post_hook_content,
                 post_hook_reasoning,
                 post_hook_reasoning_blocks,
@@ -1264,7 +1256,7 @@ impl<'a> Turn<'a> {
 
         // Cancellation isn't checked inside the per-tool loop: if it
         // were, the unprocessed tool_calls would never produce
-        // outcomes, leaving the committed assistant turn with orphan
+        // outcomes, leaving the committed assistant step with orphan
         // calls. Letting classification finish is cheap, and
         // `execute_concurrent` short-circuits the actual work on
         // cancellation by draining its pending vecs with a synthetic
@@ -1768,7 +1760,7 @@ impl<'a> Turn<'a> {
     /// Populate `completed[i]` with a synthetic `cancelled` outcome for any
     /// slot that never finished. Emits a `ToolFinished` event per slot. The
     /// resulting `Vec<Option<ToolResult>>` invariant - Some for every slot -
-    /// is what `gather_slot_results` then folds into the assistant turn.
+    /// is what `gather_slot_results` then folds into the assistant step.
     fn mark_unfinished_cancelled(
         &mut self,
         plan: &ToolExecutionPlan<'_>,
@@ -1975,7 +1967,7 @@ impl<'a> Turn<'a> {
             };
             // Convert the engine's `Vec<HistoryItem>` to the wire-format
             // `Vec<Message>` the provider speaks. Pairing is invariant-safe
-            // by construction (every `AssistantTurn` carries its
+            // by construction (every `AssistantStep` carries its
             // `ToolInvocation`s inline), so the resulting Message slice
             // satisfies "assistant tool_calls followed by tool_results".
             let wire_messages = protocol::history_to_messages(&self.history);
@@ -2048,9 +2040,9 @@ impl<'a> Turn<'a> {
                 }) if id == request_id => return Some((content, is_error, metadata)),
                 Some(UiCommand::AppendHistoryItem {
                     item,
-                    replace_user_prefix,
+                    replace_note_kind,
                 }) => {
-                    self.queue_history_item(item, replace_user_prefix);
+                    self.queue_history_item(item, replace_note_kind);
                 }
                 Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
                 Some(UiCommand::SetMode { mode }) => self.mode = mode,

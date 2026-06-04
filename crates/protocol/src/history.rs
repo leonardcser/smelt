@@ -5,8 +5,8 @@
 //! which now lives on as the *wire* format for OpenAI/Anthropic requests.
 //!
 //! The shape encodes one invariant the rest of the codebase used to enforce
-//! by discipline: **an assistant turn that invoked tools carries every tool
-//! result inline**. There is no way to construct an `AssistantTurn` with a
+//! by discipline: **an assistant step that invoked tools carries every tool
+//! result inline**. There is no way to construct an `AssistantStep` with a
 //! `ToolInvocation` whose `result` is missing, so the engine cannot leave the
 //! history in a half-applied state mid-tool - the bug pattern that produced
 //! "tool_call_id … did not have response messages" errors on resumed
@@ -26,17 +26,85 @@ use serde::{Deserialize, Serialize};
 pub enum HistoryItem {
     System { content: Content },
     User { content: Content },
-    Assistant(AssistantTurn),
+    Assistant(AssistantStep),
+    Note(HistoryNote),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "note_kind", rename_all = "snake_case")]
+pub enum HistoryNote {
+    ModeChange {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        mode: Option<String>,
+        text: String,
+    },
+    ProcessStatus {
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryNoteKind {
+    ModeChange,
+    ProcessStatus,
+}
+
+impl HistoryNote {
+    pub fn mode_change(text: impl Into<String>) -> Self {
+        Self::ModeChange {
+            mode: None,
+            text: text.into(),
+        }
+    }
+
+    pub fn mode_change_for_mode(mode: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::ModeChange {
+            mode: Some(mode.into()),
+            text: text.into(),
+        }
+    }
+
+    pub fn process_status(text: impl Into<String>) -> Self {
+        Self::ProcessStatus { text: text.into() }
+    }
+
+    pub fn kind(&self) -> HistoryNoteKind {
+        match self {
+            HistoryNote::ModeChange { .. } => HistoryNoteKind::ModeChange,
+            HistoryNote::ProcessStatus { .. } => HistoryNoteKind::ProcessStatus,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        match self {
+            HistoryNote::ModeChange { text, .. } | HistoryNote::ProcessStatus { text } => text,
+        }
+    }
+
+    pub fn mode(&self) -> Option<&str> {
+        match self {
+            HistoryNote::ModeChange { mode, .. } => mode.as_deref(),
+            HistoryNote::ProcessStatus { .. } => None,
+        }
+    }
+
+    pub fn to_model_text(&self) -> String {
+        match self {
+            HistoryNote::ModeChange { text, .. } => crate::mode::mode_change_note(text),
+            HistoryNote::ProcessStatus { text } => crate::mode::process_status_note(text),
+        }
+    }
 }
 
 /// A committed assistant message.
 ///
-/// - `invocations` empty ⇒ terminal turn (the assistant produced text /
+/// - `invocations` empty ⇒ terminal step (the assistant produced text /
 ///   reasoning and the conversation continues with the user).
-/// - `invocations` non-empty ⇒ tool turn. Every tool the model asked for is
+/// - `invocations` non-empty ⇒ tool step. Every tool the model asked for is
 ///   in this vec, and each one already has its `result` recorded.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AssistantTurn {
+pub struct AssistantStep {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub content: Option<Content>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -47,8 +115,8 @@ pub struct AssistantTurn {
     pub invocations: Vec<ToolInvocation>,
 }
 
-impl AssistantTurn {
-    /// Terminal turn - no tool calls. The conversation continues with the
+impl AssistantStep {
+    /// Terminal step - no tool calls. The conversation continues with the
     /// next user message (or ends if the user does nothing).
     pub fn terminal(
         content: Option<Content>,
@@ -63,7 +131,7 @@ impl AssistantTurn {
         }
     }
 
-    /// Tool turn - every `ToolCall` in `calls` is paired with the matching
+    /// Tool step - every `ToolCall` in `calls` is paired with the matching
     /// `ToolOutcome` from `results`. Panics in debug if the lengths or
     /// call_ids don't line up; that's a bug in the caller.
     pub fn with_invocations(
@@ -81,7 +149,7 @@ impl AssistantTurn {
     }
 }
 
-/// One tool call from an assistant turn together with its execution result.
+/// One tool call from an assistant step together with its execution result.
 ///
 /// `arguments` is the JSON-encoded argument object the LLM emitted (kept as
 /// a string so the wire format round-trips byte-identically).
@@ -128,16 +196,59 @@ impl HistoryItem {
         HistoryItem::User { content }
     }
 
-    pub fn assistant(turn: AssistantTurn) -> Self {
+    pub fn note(note: HistoryNote) -> Self {
+        HistoryItem::Note(note)
+    }
+
+    pub fn note_kind(&self) -> Option<HistoryNoteKind> {
+        match self {
+            HistoryItem::Note(note) => Some(note.kind()),
+            _ => None,
+        }
+    }
+
+    pub fn note_text(&self) -> Option<&str> {
+        match self {
+            HistoryItem::Note(note) => Some(note.text()),
+            _ => None,
+        }
+    }
+
+    pub fn as_note(&self) -> Option<&HistoryNote> {
+        match self {
+            HistoryItem::Note(note) => Some(note),
+            _ => None,
+        }
+    }
+
+    pub fn assistant(turn: AssistantStep) -> Self {
         HistoryItem::Assistant(turn)
     }
 
-    pub fn as_assistant(&self) -> Option<&AssistantTurn> {
+    pub fn as_assistant(&self) -> Option<&AssistantStep> {
         match self {
             HistoryItem::Assistant(turn) => Some(turn),
             _ => None,
         }
     }
+}
+
+pub fn replace_last_note_kind(
+    items: &mut [HistoryItem],
+    item: &HistoryItem,
+    kind: HistoryNoteKind,
+) -> bool {
+    if item.note_kind() != Some(kind) {
+        return false;
+    }
+    let Some(last) = items.last_mut() else {
+        return false;
+    };
+    if last.note_kind() != Some(kind) {
+        return false;
+    }
+    *last = item.clone();
+    true
 }
 
 // ---- Legacy `Vec<Message>` ↔ `Vec<HistoryItem>` conversion ------------
@@ -151,6 +262,17 @@ impl HistoryItem {
 // resuming a session that was killed mid-tool safe (see issue #8).
 
 use crate::message::{Message, Role};
+
+pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
+    let text = content.text_content();
+    if let Some(note) = text.strip_prefix(crate::mode::MODE_NOTE_PREFIX) {
+        return Some(HistoryNote::mode_change(note.trim().to_string()));
+    }
+    if let Some(note) = text.strip_prefix(crate::mode::PROCESS_STATUS_NOTE_PREFIX) {
+        return Some(HistoryNote::process_status(note.trim().to_string()));
+    }
+    None
+}
 
 /// Fold a legacy `Vec<Message>` into `Vec<HistoryItem>`.
 ///
@@ -173,7 +295,11 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
             }
             Role::User => {
                 if let Some(c) = m.content.clone() {
-                    out.push(HistoryItem::User { content: c });
+                    if let Some(note) = note_from_user_content(&c) {
+                        out.push(HistoryItem::Note(note));
+                    } else {
+                        out.push(HistoryItem::User { content: c });
+                    }
                 }
                 i += 1;
             }
@@ -217,7 +343,7 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
                         }
                     })
                     .collect::<Vec<_>>();
-                out.push(HistoryItem::Assistant(AssistantTurn {
+                out.push(HistoryItem::Assistant(AssistantStep {
                     content: m.content.clone(),
                     reasoning: m.reasoning_content.clone(),
                     reasoning_blocks: m.reasoning_details.clone().unwrap_or_default(),
@@ -248,6 +374,9 @@ pub fn history_to_messages(items: &[HistoryItem]) -> Vec<Message> {
             }
             HistoryItem::User { content } => {
                 out.push(Message::user(content.clone()));
+            }
+            HistoryItem::Note(note) => {
+                out.push(Message::user(Content::text(note.to_model_text())));
             }
             HistoryItem::Assistant(turn) => {
                 let tool_calls = if turn.invocations.is_empty() {
@@ -335,7 +464,7 @@ pub fn history_to_message_positions(items: &[HistoryItem]) -> Vec<usize> {
     for item in items {
         out.push(msg_idx);
         match item {
-            HistoryItem::System { .. } | HistoryItem::User { .. } => {
+            HistoryItem::System { .. } | HistoryItem::User { .. } | HistoryItem::Note(_) => {
                 msg_idx += 1;
             }
             HistoryItem::Assistant(turn) => {
@@ -362,8 +491,8 @@ mod tests {
     }
 
     #[test]
-    fn assistant_turn_with_no_invocations_round_trips() {
-        let turn = AssistantTurn::terminal(Some(Content::text("hi")), None, vec![]);
+    fn assistant_step_with_no_invocations_round_trips() {
+        let turn = AssistantStep::terminal(Some(Content::text("hi")), None, vec![]);
         let item = HistoryItem::Assistant(turn);
         let msgs = history_to_messages(std::slice::from_ref(&item));
         let back = history_from_messages(msgs);
@@ -383,7 +512,7 @@ mod tests {
             },
             elapsed_ms: None,
         };
-        let item = HistoryItem::Assistant(AssistantTurn::with_invocations(
+        let item = HistoryItem::Assistant(AssistantStep::with_invocations(
             None,
             None,
             vec![],
@@ -392,6 +521,32 @@ mod tests {
         let history = vec![item.clone()];
         let back = history_from_messages(history_to_messages(&history));
         assert_eq!(back, history);
+    }
+
+    #[test]
+    fn notes_round_trip_through_legacy_user_messages() {
+        let item = HistoryItem::note(HistoryNote::mode_change("now in apply mode"));
+        let messages = history_to_messages(std::slice::from_ref(&item));
+        assert!(matches!(messages[0].role, Role::User));
+        assert!(messages[0].content.as_ref().is_some_and(|content| content
+            .text_content()
+            .starts_with(crate::mode::MODE_NOTE_PREFIX)));
+        assert_eq!(history_from_messages(messages), vec![item]);
+    }
+
+    #[test]
+    fn notes_serialize_without_kind_field_collision() {
+        let item = HistoryItem::note(HistoryNote::mode_change_for_mode(
+            "apply",
+            "now in apply mode",
+        ));
+        let json = serde_json::to_value(&item).expect("serialize note item");
+        assert_eq!(json["kind"], "note");
+        assert_eq!(json["note_kind"], "mode_change");
+        assert_eq!(json["mode"], "apply");
+        assert_eq!(json["text"], "now in apply mode");
+        let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
+        assert_eq!(back, item);
     }
 
     #[test]
@@ -411,7 +566,7 @@ mod tests {
         let assistant = history
             .iter()
             .find_map(|i| i.as_assistant())
-            .expect("assistant turn");
+            .expect("assistant step");
         assert_eq!(assistant.invocations.len(), 1);
         assert!(assistant.invocations[0].result.is_error);
         assert!(assistant.invocations[0]
@@ -437,7 +592,7 @@ mod tests {
         let assistant = history
             .iter()
             .find_map(|i| i.as_assistant())
-            .expect("assistant turn");
+            .expect("assistant step");
         assert_eq!(assistant.invocations.len(), 2);
         assert_eq!(assistant.invocations[0].result.content, "result-a");
         assert!(!assistant.invocations[0].result.is_error);

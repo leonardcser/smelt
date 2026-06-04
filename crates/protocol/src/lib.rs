@@ -23,7 +23,8 @@ pub use event::{
 };
 pub use history::{
     history_from_messages, history_to_message_positions, history_to_messages,
-    message_to_history_positions, AssistantTurn, HistoryItem, ToolInvocation,
+    message_to_history_positions, replace_last_note_kind, AssistantStep, HistoryItem, HistoryNote,
+    HistoryNoteKind, ToolInvocation,
 };
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
 pub use mode::{

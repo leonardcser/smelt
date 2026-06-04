@@ -54,10 +54,9 @@ impl TuiApp {
             self.core.session.first_user_message = Some(text.clone().into_owned());
         }
         if !content.is_empty() {
-            self.core
-                .session
-                .history
-                .push(HistoryItem::user(content.clone()));
+            self.core.session.history.push(HistoryItem::User {
+                content: content.clone(),
+            });
             self.sync_session_snapshot();
             self.core.session.history.pop();
         }
@@ -123,16 +122,17 @@ impl TuiApp {
         self.clear_prompt_prediction();
         self.begin_turn();
         self.push_block(Block::ProcessStatus { text: note.clone() });
-        let history_note = protocol::process_status_note(&note);
+        let history_note = protocol::HistoryNote::process_status(note.clone());
+        let model_text = history_note.to_model_text();
         if !note.is_empty() {
             self.core
                 .session
                 .history
-                .push(HistoryItem::user(Content::text(history_note.clone())));
+                .push(HistoryItem::note(history_note));
             self.sync_session_snapshot();
             self.core.session.history.pop();
         }
-        self.dispatch_turn(Content::text(history_note))
+        self.dispatch_turn(Content::text(model_text))
     }
 
     pub(crate) fn begin_custom_command_turn(
@@ -149,10 +149,9 @@ impl TuiApp {
         if !evaluated.is_empty() {
             // Publish the expanded command body to session observers before dispatch;
             // the engine receives the same text as this turn's user content below.
-            self.core
-                .session
-                .history
-                .push(HistoryItem::user(Content::text(evaluated.clone())));
+            self.core.session.history.push(HistoryItem::User {
+                content: Content::text(evaluated.clone()),
+            });
             self.sync_session_snapshot();
             self.core.session.history.pop();
         }
@@ -461,7 +460,7 @@ impl TuiApp {
         };
         let note = format!("Background process {id} {status}.");
         if self.agent_is_running() {
-            self.queue_history_append(crate::app::PendingHistoryAppend::ProcessStatus { note });
+            self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
         } else if self.busy_stack.is_busy() {
             if self.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
                 self.queued_inputs
@@ -861,13 +860,11 @@ mod tests {
 
         assert!(process_status_blocks(&app).is_empty());
         assert_eq!(app.app.pending_history_appends.len(), 1);
-        assert!(matches!(
-            app.app.pending_history_appends[0],
-            crate::app::PendingHistoryAppend::ProcessStatus { .. }
-        ));
         assert_eq!(
-            app.app.pending_history_appends[0].history_note(),
-            protocol::process_status_note("Background process 4242 exited with code 9.")
+            app.app.pending_history_appends[0].history_item(),
+            protocol::HistoryItem::note(protocol::HistoryNote::process_status(
+                "Background process 4242 exited with code 9."
+            ))
         );
     }
 

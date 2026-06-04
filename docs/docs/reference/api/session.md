@@ -30,6 +30,14 @@ fun(): integer?
 
 Configured context-window size in tokens for the active model. `nil` when the model entry has no declared limit.
 
+## `smelt.session.conversation`
+
+```lua
+fun(): table
+```
+
+Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.
+
 ## `smelt.session.cost`
 
 ```lua
@@ -77,6 +85,14 @@ fun(): nil
 ```
 
 Fork the current session: clone its messages into a new session id and switch to it. Useful for branching off an experiment without losing the original timeline.
+
+## `smelt.session.history`
+
+```lua
+fun(): table
+```
+
+Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only; use `messages(list)` for legacy replacement.
 
 ## `smelt.session.id`
 

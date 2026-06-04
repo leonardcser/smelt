@@ -1339,6 +1339,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Latest authoritative provider-reported active-context token count, or `nil` when Smelt does not currently have a valid reading for the model-visible history.
 - `smelt.session.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model.
+- `smelt.session.conversation` :: `fun(): table`
+  Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results.
 - `smelt.session.cost` :: `fun(): number`
   Cumulative session cost in USD across every model call this session has made.
 - `smelt.session.created_at_ms` :: `fun(): integer`
@@ -1351,6 +1353,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).
 - `smelt.session.fork` :: `fun(): nil`
   Fork the current session: clone its messages into a new session id and switch to it.
+- `smelt.session.history` :: `fun(): table`
+  Return the semantic session history as compaction-safe items.
 - `smelt.session.id` :: `fun(): string`
   Stable session id (matches the on-disk session filename).
 - `smelt.session.list` :: `fun(): table`

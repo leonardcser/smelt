@@ -46,7 +46,7 @@ smelt.cell("turn_end"):subscribe(function(payload)
     return
   end
 
-  local history = smelt.session.messages()
+  local history = smelt.session.conversation()
 
   local user_msgs = {}
   local last_assistant = nil
@@ -66,24 +66,25 @@ smelt.cell("turn_end"):subscribe(function(payload)
     return
   end
 
-  -- Build messages from recent context.
+  -- Build messages from recent semantic conversation context. Internal session
+  -- notes are excluded by smelt.session.conversation().
   local messages = {}
   for _, msg in ipairs(user_msgs) do
     local text = msg.content or ""
     text = smelt.text.truncate(text, 500, { keep = "tail" })
-    table.insert(messages, { role = "user", content = "User: " .. text })
+    table.insert(messages, { role = "user", content = text })
   end
   if last_assistant then
     local text = last_assistant.content or ""
     text = smelt.text.truncate(text, 500, { keep = "tail" })
-    table.insert(messages, { role = "assistant", content = "Assistant: " .. text })
+    table.insert(messages, { role = "assistant", content = text })
   end
 
   -- Skip if nothing changed since last call.
   local changed = #messages ~= #sent_messages
   if not changed then
     for i = 1, #messages do
-      if messages[i].content ~= sent_messages[i].content then
+      if messages[i].role ~= sent_messages[i].role or messages[i].content ~= sent_messages[i].content then
         changed = true
         break
       end

@@ -78,7 +78,7 @@ fn generate(turns: usize, words: usize, title: Option<String>) {
 
         let body = assistant_body(i, words);
         session.history.push(protocol::HistoryItem::Assistant(
-            protocol::AssistantTurn::terminal(Some(Content::text(body)), None, Vec::new()),
+            protocol::AssistantStep::terminal(Some(Content::text(body)), None, Vec::new()),
         ));
     }
 

@@ -20,6 +20,10 @@ session.context_tokens = nil
 ---@type fun(): integer?
 session.context_window = nil
 
+--- Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.
+---@type fun(): table
+session.conversation = nil
+
 --- Cumulative session cost in USD across every model call this session has made.
 ---@type fun(): number
 session.cost = nil
@@ -43,6 +47,10 @@ session.dir = nil
 --- Fork the current session: clone its messages into a new session id and switch to it. Useful for branching off an experiment without losing the original timeline.
 ---@type fun(): nil
 session.fork = nil
+
+--- Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only; use `messages(list)` for legacy replacement.
+---@type fun(): table
+session.history = nil
 
 --- Stable session id (matches the on-disk session filename).
 ---@type fun(): string

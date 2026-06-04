@@ -734,6 +734,9 @@ fn compute_text_bytes(history: &[HistoryItem]) -> u64 {
             HistoryItem::System { content } | HistoryItem::User { content } => {
                 total += content.text_content().len() as u64;
             }
+            HistoryItem::Note(note) => {
+                total += note.text().len() as u64;
+            }
             HistoryItem::Assistant(turn) => {
                 if let Some(ref c) = turn.content {
                     total += c.text_content().len() as u64;
@@ -770,7 +773,7 @@ fn build_search_blob(history: &[HistoryItem]) -> String {
         let text_opt = match item {
             HistoryItem::User { content } => Some(content.text_content()),
             HistoryItem::Assistant(turn) => turn.content.as_ref().map(|c| c.text_content()),
-            HistoryItem::System { .. } => None,
+            HistoryItem::System { .. } | HistoryItem::Note(_) => None,
         };
         if let Some(text) = text_opt {
             if !text.is_empty() {
@@ -833,6 +836,7 @@ fn rewrite_history_image_urls<F: Fn(&mut String)>(history: &mut [HistoryItem], s
                     rewrite_image_urls(c, &swap);
                 }
             }
+            HistoryItem::Note(_) => {}
         }
     }
 }
@@ -918,7 +922,7 @@ mod tests {
         assert_eq!(prefix, "abcd");
     }
 
-    use protocol::{AssistantTurn, Content, ContentPart, HistoryItem, ToolInvocation, ToolOutcome};
+    use protocol::{AssistantStep, Content, ContentPart, HistoryItem, ToolInvocation, ToolOutcome};
 
     fn user_item(text: &str) -> HistoryItem {
         HistoryItem::User {
@@ -926,7 +930,7 @@ mod tests {
         }
     }
     fn assistant_text_item(text: &str) -> HistoryItem {
-        HistoryItem::Assistant(AssistantTurn::terminal(
+        HistoryItem::Assistant(AssistantStep::terminal(
             Some(Content::Text(text.into())),
             None,
             Vec::new(),
@@ -972,7 +976,7 @@ mod tests {
 
     #[test]
     fn install_checkpoint_uses_explicit_message_boundary_with_tool_group() {
-        let tool_heavy_turn = HistoryItem::Assistant(AssistantTurn::with_invocations(
+        let tool_heavy_turn = HistoryItem::Assistant(AssistantStep::with_invocations(
             Some(Content::Text("done".into())),
             None,
             Vec::new(),
@@ -1006,7 +1010,7 @@ mod tests {
 
     #[test]
     fn install_checkpoint_rejects_boundary_inside_assistant_tool_group() {
-        let tool_heavy_turn = HistoryItem::Assistant(AssistantTurn::with_invocations(
+        let tool_heavy_turn = HistoryItem::Assistant(AssistantStep::with_invocations(
             Some(Content::Text("done".into())),
             None,
             Vec::new(),
@@ -1354,7 +1358,7 @@ mod tests {
             },
             elapsed_ms: None,
         };
-        let turn = AssistantTurn::with_invocations(
+        let turn = AssistantStep::with_invocations(
             Some(Content::Text("text".into())),
             Some("thinking".into()),
             Vec::new(),
@@ -1579,7 +1583,7 @@ mod tests {
         original.history.push(assistant_text_item("hello"));
         original
             .history
-            .push(HistoryItem::Assistant(AssistantTurn::with_invocations(
+            .push(HistoryItem::Assistant(AssistantStep::with_invocations(
                 Some(Content::Text("doing work".into())),
                 None,
                 Vec::new(),
@@ -1619,7 +1623,7 @@ mod tests {
         let mut original = Session::new(7, std::path::PathBuf::from("/w"));
         original
             .history
-            .push(HistoryItem::Assistant(AssistantTurn::with_invocations(
+            .push(HistoryItem::Assistant(AssistantStep::with_invocations(
                 None,
                 None,
                 Vec::new(),

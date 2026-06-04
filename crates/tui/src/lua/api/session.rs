@@ -61,6 +61,70 @@ pub(crate) fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResul
     Ok(tbl)
 }
 
+fn note_kind_to_lua(kind: protocol::HistoryNoteKind) -> &'static str {
+    match kind {
+        protocol::HistoryNoteKind::ModeChange => "mode_change",
+        protocol::HistoryNoteKind::ProcessStatus => "process_status",
+    }
+}
+
+fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult<mlua::Table> {
+    let tbl = lua.create_table()?;
+    for (i, item) in items.iter().enumerate() {
+        let entry = lua.create_table()?;
+        match item {
+            protocol::HistoryItem::System { content } => {
+                entry.set("kind", "system")?;
+                entry.set("content", content.text_content())?;
+            }
+            protocol::HistoryItem::User { content } => {
+                entry.set("kind", "user")?;
+                entry.set("content", content.text_content())?;
+            }
+            protocol::HistoryItem::Assistant(step) => {
+                entry.set("kind", "assistant")?;
+                if let Some(content) = &step.content {
+                    entry.set("content", content.text_content())?;
+                }
+                if let Some(reasoning) = &step.reasoning {
+                    entry.set("reasoning_content", reasoning.as_str())?;
+                }
+                if !step.invocations.is_empty() {
+                    let invocations = lua.create_table()?;
+                    for (j, inv) in step.invocations.iter().enumerate() {
+                        let row = lua.create_table()?;
+                        row.set("call_id", inv.call_id.as_str())?;
+                        row.set("name", inv.name.as_str())?;
+                        row.set("arguments", inv.arguments.as_str())?;
+                        if let Some(elapsed_ms) = inv.elapsed_ms {
+                            row.set("elapsed_ms", elapsed_ms)?;
+                        }
+                        let result = lua.create_table()?;
+                        result.set("content", inv.result.content.as_str())?;
+                        result.set("is_error", inv.result.is_error)?;
+                        if let Some(metadata) = &inv.result.metadata {
+                            result.set("metadata", smelt_core::lua::json_to_lua(lua, metadata)?)?;
+                        }
+                        row.set("result", result)?;
+                        invocations.set(j + 1, row)?;
+                    }
+                    entry.set("invocations", invocations)?;
+                }
+            }
+            protocol::HistoryItem::Note(note) => {
+                entry.set("kind", "note")?;
+                entry.set("note_kind", note_kind_to_lua(note.kind()))?;
+                entry.set("text", note.text())?;
+                if let Some(mode) = note.mode() {
+                    entry.set("mode", mode)?;
+                }
+            }
+        }
+        tbl.set(i + 1, entry)?;
+    }
+    Ok(tbl)
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -333,6 +397,49 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 crate::lua::try_with_app(|app| protocol::history_to_messages(&app.model_history()))
                     .unwrap_or_default();
             messages_to_lua(lua, &messages)
+        },
+    )?;
+    m.fn_(
+        "history",
+        "Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only; use `messages(list)` for legacy replacement.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let history = crate::lua::try_with_app(|app| app.core.session.history.clone())
+                .unwrap_or_default();
+            history_items_to_lua(lua, &history)
+        },
+    )?;
+    m.fn_(
+        "conversation",
+        "Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let history = crate::lua::try_with_app(|app| app.core.session.history.clone())
+                .unwrap_or_default();
+            let out = lua.create_table()?;
+            let mut idx = 1;
+            for item in history {
+                match item {
+                    protocol::HistoryItem::User { content } => {
+                        let row = lua.create_table()?;
+                        row.set("role", "user")?;
+                        row.set("content", content.text_content())?;
+                        out.set(idx, row)?;
+                        idx += 1;
+                    }
+                    protocol::HistoryItem::Assistant(step) => {
+                        if let Some(content) = step.content {
+                            let row = lua.create_table()?;
+                            row.set("role", "assistant")?;
+                            row.set("content", content.text_content())?;
+                            out.set(idx, row)?;
+                            idx += 1;
+                        }
+                    }
+                    protocol::HistoryItem::System { .. } | protocol::HistoryItem::Note(_) => {}
+                }
+            }
+            Ok(out)
         },
     )?;
     m.fn_(

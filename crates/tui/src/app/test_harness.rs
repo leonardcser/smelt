@@ -935,7 +935,7 @@ impl TestApp {
             .session
             .history
             .push(protocol::HistoryItem::Assistant(
-                protocol::AssistantTurn::terminal(
+                protocol::AssistantStep::terminal(
                     Some(protocol::Content::Text(text.to_string())),
                     None,
                     Vec::new(),

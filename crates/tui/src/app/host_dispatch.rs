@@ -348,7 +348,7 @@ impl PrepareContextEstimateSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{AssistantTurn, Content, HistoryItem, ToolInvocation, ToolOutcome};
+    use protocol::{AssistantStep, Content, HistoryItem, ToolInvocation, ToolOutcome};
 
     #[test]
     fn prepare_context_estimate_uses_full_estimate_without_provider_baseline() {
@@ -365,7 +365,7 @@ mod tests {
     fn prepare_context_estimate_adds_only_history_after_latest_token_snapshot() {
         let history = vec![
             HistoryItem::user(Content::text("old")),
-            HistoryItem::assistant(AssistantTurn::terminal(
+            HistoryItem::assistant(AssistantStep::terminal(
                 Some(Content::text("reply")),
                 None,
                 Vec::new(),
@@ -395,7 +395,7 @@ mod tests {
     fn prepare_context_estimate_stays_at_baseline_when_snapshot_covers_history() {
         let history = vec![
             HistoryItem::user(Content::text("old")),
-            HistoryItem::assistant(AssistantTurn::terminal(
+            HistoryItem::assistant(AssistantStep::terminal(
                 Some(Content::text("reply")),
                 None,
                 Vec::new(),
@@ -422,7 +422,7 @@ mod tests {
     fn prepare_context_estimate_does_not_double_count_snapshotted_tool_output() {
         let history = vec![
             HistoryItem::user(Content::text("run tests")),
-            HistoryItem::assistant(AssistantTurn::with_invocations(
+            HistoryItem::assistant(AssistantStep::with_invocations(
                 None,
                 None,
                 Vec::new(),
@@ -438,7 +438,7 @@ mod tests {
                     elapsed_ms: None,
                 }],
             )),
-            HistoryItem::assistant(AssistantTurn::terminal(
+            HistoryItem::assistant(AssistantStep::terminal(
                 Some(Content::text("done")),
                 None,
                 Vec::new(),
@@ -472,7 +472,7 @@ mod tests {
     fn prepare_context_estimate_adds_delta_when_baseline_predates_tool_output() {
         let history = vec![
             HistoryItem::user(Content::text("run tests")),
-            HistoryItem::assistant(AssistantTurn::with_invocations(
+            HistoryItem::assistant(AssistantStep::with_invocations(
                 None,
                 None,
                 Vec::new(),
@@ -509,7 +509,7 @@ mod tests {
     fn prepare_context_estimate_falls_back_to_full_history_len_when_baseline_len_missing() {
         let history = vec![
             HistoryItem::user(Content::text("run command")),
-            HistoryItem::assistant(AssistantTurn::with_invocations(
+            HistoryItem::assistant(AssistantStep::with_invocations(
                 None,
                 None,
                 Vec::new(),
@@ -545,7 +545,7 @@ mod tests {
     fn prepare_context_estimate_uses_full_request_when_baseline_cleared() {
         let history = vec![
             HistoryItem::user(Content::text("hello")),
-            HistoryItem::assistant(AssistantTurn::terminal(
+            HistoryItem::assistant(AssistantStep::terminal(
                 Some(Content::text("hi")),
                 None,
                 Vec::new(),

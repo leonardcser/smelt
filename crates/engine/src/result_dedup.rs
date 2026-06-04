@@ -1,5 +1,5 @@
 //! Append-only deduplication of tool invocation results within a conversation.
-//! Walks committed `HistoryItem::Assistant` turns and replaces a freshly-
+//! Walks committed `HistoryItem::Assistant` steps and replaces a freshly-
 //! produced `ToolOutcome.content` with a short pointer when an identical
 //! result already exists earlier in the conversation. Cache-safe: the
 //! pointer lives on the *new* invocation, never on prior history bytes.
@@ -73,7 +73,7 @@ pub(crate) fn apply_in_place(invocations: &mut [ToolInvocation], history: &[Hist
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::{AssistantTurn, Content, HistoryItem, ToolInvocation, ToolOutcome};
+    use protocol::{AssistantStep, Content, HistoryItem, ToolInvocation, ToolOutcome};
 
     fn big(prefix: &str) -> String {
         format!("{prefix}{}", "x".repeat(MIN_DEDUP_LEN))
@@ -94,7 +94,7 @@ mod tests {
     }
 
     fn assistant_with(invocations: Vec<ToolInvocation>) -> HistoryItem {
-        HistoryItem::Assistant(AssistantTurn::with_invocations(
+        HistoryItem::Assistant(AssistantStep::with_invocations(
             None,
             None,
             Vec::new(),

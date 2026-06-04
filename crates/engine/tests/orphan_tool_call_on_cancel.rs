@@ -7,7 +7,7 @@
 //! tool_results existed, and a SIGINT at that moment saved the broken
 //! state to disk.
 //!
-//! The fix introduces `HistoryItem::Assistant(AssistantTurn)` with a
+//! The fix introduces `HistoryItem::Assistant(AssistantStep)` with a
 //! `Vec<ToolInvocation>` whose entries each carry their own `result`.
 //! That makes an unpaired tool_use unrepresentable - there is no
 //! intermediate state for the persister to catch. This test verifies
@@ -205,6 +205,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
                         .map(|inv| (inv.call_id.clone(), inv.result.is_error))
                         .collect::<Vec<_>>()
                 ),
+                HistoryItem::Note(note) => eprintln!("  [{i}] note {:?}", note.kind()),
             }
         }
     }

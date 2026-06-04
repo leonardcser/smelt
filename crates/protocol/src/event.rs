@@ -395,7 +395,7 @@ pub enum UiCommand {
     AppendHistoryItem {
         item: HistoryItem,
         #[serde(skip_serializing_if = "Option::is_none", default)]
-        replace_user_prefix: Option<String>,
+        replace_note_kind: Option<crate::history::HistoryNoteKind>,
     },
 
     /// Change the active agent mode while the engine is running. This is

@@ -344,20 +344,16 @@ impl TuiApp {
             self.core
                 .engine
                 .send(UiCommand::SetMode { mode: mode.clone() });
-            // Queue a synthetic user note so the next LLM request learns about
+            // Queue an internal mode-change note so the next LLM request learns about
             // the new mode without regenerating the cached prompt prefix. If a
             // turn is active, the engine applies the same note when it reaches
             // its next request boundary; otherwise we apply it locally before
             // the next turn starts.
             let note_text = self.lua.mode_note(self.core.config.mode.as_str());
-            let note = protocol::mode_change_note(&note_text);
-            let mode_block = self
-                .lua
-                .mode_block(Some(self.core.config.mode.as_str()), &note_text);
-            self.queue_history_append(crate::app::PendingHistoryAppend::ModeChange {
-                note,
-                block: mode_block,
-            });
+            self.queue_history_append(crate::app::PendingHistoryAppend::mode_change(
+                self.core.config.mode.as_str().to_string(),
+                note_text,
+            ));
         }
     }
 
@@ -404,14 +400,16 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
 
-        let note = protocol::mode_change_note(&app.app.lua.mode_note("apply"));
+        let note = app.app.lua.mode_note("apply");
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
         assert!(mode_blocks(&app.app).is_empty());
 
         app.feed_one(crate::event_source::SourceEvent::Engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id: 1,
-                history: vec![protocol::HistoryItem::user(protocol::Content::text(note))],
+                history: vec![protocol::HistoryItem::note(
+                    protocol::HistoryNote::mode_change(note),
+                )],
             },
         ));
 
@@ -424,13 +422,15 @@ mod tests {
         app.start_turn(1);
 
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        let note = protocol::mode_change_note(&app.app.lua.mode_note("yolo"));
+        let note = app.app.lua.mode_note("yolo");
         app.app.set_mode(AgentMode::parse("yolo").unwrap(), false);
 
         app.feed_one(crate::event_source::SourceEvent::Engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id: 1,
-                history: vec![protocol::HistoryItem::user(protocol::Content::text(note))],
+                history: vec![protocol::HistoryItem::note(
+                    protocol::HistoryNote::mode_change(note),
+                )],
             },
         ));
 

@@ -1023,7 +1023,7 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
             };
             match i % 3 {
                 0 => protocol::HistoryItem::user(Content::text(body)),
-                1 => protocol::HistoryItem::Assistant(protocol::AssistantTurn::terminal(
+                1 => protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
                     Some(Content::text(body)),
                     None,
                     reasoning_blocks,
@@ -1040,7 +1040,7 @@ fn synth_history(count: usize) -> Vec<protocol::HistoryItem> {
                         },
                         elapsed_ms: None,
                     };
-                    protocol::HistoryItem::Assistant(protocol::AssistantTurn::with_invocations(
+                    protocol::HistoryItem::Assistant(protocol::AssistantStep::with_invocations(
                         Some(Content::text(body)),
                         None,
                         reasoning_blocks,

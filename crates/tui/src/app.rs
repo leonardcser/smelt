@@ -352,33 +352,56 @@ pub(crate) struct PendingTool {
 }
 
 #[derive(Clone)]
-pub(crate) enum PendingHistoryAppend {
-    ModeChange { note: String, block: Block },
-    ProcessStatus { note: String },
+pub(crate) struct PendingHistoryAppend {
+    item: protocol::HistoryItem,
+    replace_note_kind: Option<protocol::HistoryNoteKind>,
 }
 
 impl PendingHistoryAppend {
-    pub(crate) fn history_note(&self) -> String {
-        match self {
-            PendingHistoryAppend::ModeChange { note, .. } => note.clone(),
-            PendingHistoryAppend::ProcessStatus { note } => protocol::process_status_note(note),
+    pub(crate) fn mode_change(mode: String, text: String) -> Self {
+        Self {
+            item: protocol::HistoryItem::note(protocol::HistoryNote::mode_change_for_mode(
+                mode, text,
+            )),
+            replace_note_kind: Some(protocol::HistoryNoteKind::ModeChange),
         }
     }
 
-    pub(crate) fn transcript_block(&self) -> Block {
-        match self {
-            PendingHistoryAppend::ModeChange { block, .. } => block.clone(),
-            PendingHistoryAppend::ProcessStatus { note } => {
-                Block::ProcessStatus { text: note.clone() }
-            }
+    pub(crate) fn process_status(text: String) -> Self {
+        Self {
+            item: protocol::HistoryItem::note(protocol::HistoryNote::process_status(text)),
+            replace_note_kind: None,
         }
     }
 
-    pub(crate) fn replacement_prefix(&self) -> Option<&'static str> {
-        match self {
-            PendingHistoryAppend::ModeChange { .. } => Some(protocol::MODE_NOTE_PREFIX),
-            PendingHistoryAppend::ProcessStatus { .. } => None,
+    pub(crate) fn history_item(&self) -> protocol::HistoryItem {
+        self.item.clone()
+    }
+
+    pub(crate) fn transcript_block(&self, lua: &crate::lua::LuaRuntime) -> Block {
+        crate::app::history::history_note_to_block(
+            lua,
+            self.item
+                .as_note()
+                .expect("pending history appends are notes"),
+        )
+    }
+
+    pub(crate) fn replacement_note_kind(&self) -> Option<protocol::HistoryNoteKind> {
+        self.replace_note_kind
+    }
+
+    pub(crate) fn matches_history_item(&self, item: &protocol::HistoryItem) -> bool {
+        if &self.item == item {
+            return true;
         }
+        let Some(expected) = self.item.as_note() else {
+            return false;
+        };
+        let Some(actual) = item.as_note() else {
+            return false;
+        };
+        expected.kind() == actual.kind() && expected.text() == actual.text()
     }
 }
 
@@ -427,14 +450,14 @@ impl TuiApp {
     }
 
     pub(crate) fn queue_history_append(&mut self, append: PendingHistoryAppend) {
-        let note = append.history_note();
-        let replace_user_prefix = append.replacement_prefix().map(str::to_string);
+        let item = append.history_item();
+        let replace_note_kind = append.replacement_note_kind();
 
-        if let Some(prefix) = append.replacement_prefix() {
+        if let Some(kind) = replace_note_kind {
             if let Some(existing) = self
                 .pending_history_appends
                 .iter_mut()
-                .find(|pending| pending.replacement_prefix() == Some(prefix))
+                .find(|pending| pending.replacement_note_kind() == Some(kind))
             {
                 *existing = append.clone();
             } else if self.agent_is_running() {
@@ -448,18 +471,15 @@ impl TuiApp {
             self.core
                 .engine
                 .send(protocol::UiCommand::AppendHistoryItem {
-                    item: protocol::HistoryItem::user(protocol::Content::text(note)),
-                    replace_user_prefix,
+                    item,
+                    replace_note_kind,
                 });
         } else if !self.core.session.history.is_empty() {
-            self.apply_history_append_to_history(&note, append.replacement_prefix());
-            self.commit_history_append_block(
-                append.transcript_block(),
-                append.replacement_prefix(),
-            );
-        } else if let Some(prefix) = append.replacement_prefix() {
+            self.apply_history_append_to_history(item, replace_note_kind);
+            self.commit_history_append_block(append.transcript_block(&self.lua), replace_note_kind);
+        } else if let Some(kind) = replace_note_kind {
             self.pending_history_appends
-                .retain(|pending| pending.replacement_prefix() != Some(prefix));
+                .retain(|pending| pending.replacement_note_kind() != Some(kind));
         }
     }
 

@@ -3,7 +3,7 @@ use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
 use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
 
-use protocol::{AgentMode, AssistantTurn, Content, HistoryItem, UiCommand};
+use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -39,6 +39,7 @@ pub(crate) fn build_transcript_from_session(
             HistoryItem::Assistant(turn) => {
                 push_assistant_blocks(&mut transcript, lua, turn, &tool_elapsed)
             }
+            HistoryItem::Note(note) => push_note_block(&mut transcript, lua, note),
             HistoryItem::System { .. } => {}
         }
     }
@@ -52,6 +53,26 @@ pub(crate) fn build_transcript_from_session(
     }
 
     transcript
+}
+
+pub(crate) fn history_note_to_block(
+    lua: &crate::lua::LuaRuntime,
+    note: &protocol::HistoryNote,
+) -> Block {
+    match note.kind() {
+        protocol::HistoryNoteKind::ModeChange => lua.mode_block(note.mode(), note.text()),
+        protocol::HistoryNoteKind::ProcessStatus => Block::ProcessStatus {
+            text: note.text().to_string(),
+        },
+    }
+}
+
+fn push_note_block(
+    transcript: &mut Transcript,
+    lua: &crate::lua::LuaRuntime,
+    note: &protocol::HistoryNote,
+) {
+    transcript.push(history_note_to_block(lua, note));
 }
 
 fn push_user_block(transcript: &mut Transcript, lua: &crate::lua::LuaRuntime, content: &Content) {
@@ -100,7 +121,7 @@ fn push_user_block(transcript: &mut Transcript, lua: &crate::lua::LuaRuntime, co
 fn push_assistant_blocks(
     transcript: &mut Transcript,
     lua: &crate::lua::LuaRuntime,
-    turn: &AssistantTurn,
+    turn: &AssistantStep,
     tool_elapsed: &HashMap<String, u64>,
 ) {
     if let Some(ref reasoning) = turn.reasoning {
@@ -169,22 +190,21 @@ impl TuiApp {
     }
 
     pub(crate) fn set_history(&mut self, history: Vec<HistoryItem>) {
-        let applied_notes: Vec<String> = self
+        let applied_items: Vec<HistoryItem> = self
             .pending_history_appends
             .iter()
-            .filter(|pending| {
-                history.iter().any(|item| match item {
-                    HistoryItem::User { content } => content.as_text() == pending.history_note(),
-                    _ => false,
-                })
+            .filter_map(|pending| {
+                history
+                    .iter()
+                    .find(|existing| pending.matches_history_item(existing))
+                    .cloned()
             })
-            .map(|pending| pending.history_note())
             .collect();
         self.core
             .session
             .merge_model_history_snapshot(engine::SUMMARY_PREFIX, history);
-        for note in applied_notes {
-            self.commit_pending_history_append(&note);
+        for item in applied_items {
+            self.commit_pending_history_append(&item);
         }
         self.sync_session_snapshot();
         self.publish_history_delta("set");
@@ -206,29 +226,15 @@ impl TuiApp {
 
     pub(crate) fn apply_history_append_to_history(
         &mut self,
-        note: &str,
-        replace_user_prefix: Option<&str>,
+        item: HistoryItem,
+        replace_note_kind: Option<protocol::HistoryNoteKind>,
     ) {
-        let new_item = HistoryItem::user(Content::text(note.to_string()));
-        if let Some(prefix) = replace_user_prefix {
-            let last_matches = self
-                .core
-                .session
-                .history
-                .last()
-                .and_then(|item| match item {
-                    HistoryItem::User { content } => Some(content),
-                    _ => None,
-                })
-                .is_some_and(|c| c.as_text().starts_with(prefix));
-            if last_matches {
-                if let Some(last) = self.core.session.history.last_mut() {
-                    *last = new_item;
-                }
+        if let Some(kind) = replace_note_kind {
+            if protocol::replace_last_note_kind(&mut self.core.session.history, &item, kind) {
                 return;
             }
         }
-        self.core.session.history.push(new_item);
+        self.core.session.history.push(item);
     }
 
     pub(crate) fn sync_session_snapshot(&mut self) {
@@ -633,7 +639,7 @@ mod checkpoint_tests {
     }
 
     fn assistant(text: &str) -> HistoryItem {
-        HistoryItem::Assistant(protocol::AssistantTurn::terminal(
+        HistoryItem::Assistant(protocol::AssistantStep::terminal(
             Some(Content::text(text)),
             None,
             Vec::new(),

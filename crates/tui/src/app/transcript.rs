@@ -557,42 +557,44 @@ impl TuiApp {
     pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
         let appends = std::mem::take(&mut self.pending_history_appends);
         for append in appends {
-            let note = append.history_note();
-            self.apply_history_append_to_history(&note, append.replacement_prefix());
-            self.commit_history_append_block(
-                append.transcript_block(),
-                append.replacement_prefix(),
-            );
+            let item = append.history_item();
+            let replace_note_kind = append.replacement_note_kind();
+            self.apply_history_append_to_history(item, replace_note_kind);
+            self.commit_history_append_block(append.transcript_block(&self.lua), replace_note_kind);
         }
     }
 
-    pub(crate) fn commit_pending_history_append(&mut self, note: &str) {
+    pub(crate) fn commit_pending_history_append(&mut self, item: &protocol::HistoryItem) {
         let Some(idx) = self
             .pending_history_appends
             .iter()
-            .position(|append| append.history_note() == note)
+            .position(|append| append.matches_history_item(item))
         else {
             return;
         };
         let append = self.pending_history_appends.remove(idx);
-        self.commit_history_append_block(append.transcript_block(), append.replacement_prefix());
+        self.commit_history_append_block(
+            append.transcript_block(&self.lua),
+            append.replacement_note_kind(),
+        );
     }
 
     pub(crate) fn commit_history_append_block(
         &mut self,
         block: Block,
-        replace_user_prefix: Option<&str>,
+        replace_note_kind: Option<protocol::HistoryNoteKind>,
     ) {
         let history = self.transcript.history();
-        if let Some(prefix) = replace_user_prefix {
+        if let Some(kind) = replace_note_kind {
             if let Some(id) = history.order.last().copied() {
-                let replaces_mode_block = prefix == protocol::MODE_NOTE_PREFIX
+                let replaces_mode_block = kind == protocol::HistoryNoteKind::ModeChange
                     && matches!(history.blocks.get(&id), Some(Block::Mode { .. }));
-                let replaces_prefixed_text = matches!(
-                    history.blocks.get(&id),
-                    Some(Block::User { text, .. }) if text.starts_with(prefix)
-                );
-                if replaces_mode_block || replaces_prefixed_text {
+                let replaces_legacy_prefixed_text = kind == protocol::HistoryNoteKind::ModeChange
+                    && matches!(
+                        history.blocks.get(&id),
+                        Some(Block::User { text, .. }) if text.starts_with(protocol::MODE_NOTE_PREFIX)
+                    );
+                if replaces_mode_block || replaces_legacy_prefixed_text {
                     self.transcript.history_mut().rewrite(id, block);
                     return;
                 }
