@@ -17,7 +17,7 @@ Completed on `transcript-abstractions-plan`:
 - Made transcript range APIs range-native: bounded row requests no longer full-materialize the transcript, and range-local soft/hard break offsets are preserved.
 - Switched normal transcript frames to visible projection by default.
 - Kept mouse selection/copy buffer-local; while a transcript mouse drag is captured, projection is frozen so streaming appends do not invalidate the selected buffer slice.
-- Kept full-transcript compatibility APIs explicit; full buffer projection is test-only and not part of the normal production frame path.
+- Kept full-transcript compatibility APIs explicit; the old full buffer projection path has been removed.
 - Deferred Lua per-block/window rendering while preserving the materialization seams it will need later.
 
 ## Code Audit Summary
@@ -291,7 +291,7 @@ Make the call site explicit: visible-frame projection is for painting and local 
 
 ## Phase 4 — Enable visible transcript projection by default
 
-Status: complete for normal frames. The render loop now requests visible transcript projection for both tail-follow and pinned-scroll frames. Full-transcript compatibility APIs remain explicit, and full buffer projection is test-only.
+Status: complete for normal frames. The render loop now requests visible transcript projection for both tail-follow and pinned-scroll frames. Full-transcript compatibility APIs remain explicit, and full buffer projection has been removed.
 
 The normal render loop now uses visible projection after Phases 1-3 established the generic materialization substrate, range-native transcript APIs, and buffer-local selection/copy behavior.
 
