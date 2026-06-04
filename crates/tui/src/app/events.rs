@@ -1327,3 +1327,127 @@ impl smelt_core::keymap::ChordOracle for LuaChordOracle<'_> {
             .run_keymap(seq, self.vim_mode, Some(ctx.as_slice()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::test_harness::TestApp;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use protocol::AgentMode;
+
+    #[test]
+    fn running_esc_esc_cancels_but_single_esc_does_not() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+
+        app.press(KeyCode::Esc);
+        assert!(
+            app.agent_running(),
+            "first Esc should only arm the app-level Esc Esc sequence"
+        );
+
+        app.press(KeyCode::Esc);
+        assert!(
+            !app.agent_running(),
+            "second Esc should resolve the app-level hard-cancel sequence"
+        );
+    }
+
+    #[test]
+    fn running_esc_esc_drains_queued_input_before_canceling() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.push_queued_message("queued steer".to_string());
+
+        app.press(KeyCode::Esc);
+        app.press(KeyCode::Esc);
+
+        let state = app.state();
+        assert!(
+            state.agent_running,
+            "Esc Esc with queued input should preserve the active turn"
+        );
+        assert!(
+            state.queued_inputs.is_empty(),
+            "queued input should be drained instead of left pending"
+        );
+        assert_eq!(state.prompt_text, "queued steer");
+    }
+
+    #[test]
+    fn global_mode_toggle_wins_before_prompt_placeholder_accept_key() {
+        let mut app = TestApp::builder().build();
+        app.install_prompt_placeholder(
+            "draft".to_string(),
+            vec![crate::smelt_term::KeyBind {
+                code: KeyCode::BackTab,
+                mods: KeyModifiers::NONE,
+            }],
+            Vec::new(),
+        );
+        assert_eq!(app.app.core.config.mode, AgentMode::normal());
+
+        app.press(KeyCode::BackTab);
+
+        assert_eq!(app.app.core.config.mode, AgentMode::parse("plan").unwrap());
+        assert_eq!(
+            app.state().prompt_text,
+            "",
+            "prompt placeholder must not accept a globally-handled chord"
+        );
+    }
+
+    #[test]
+    fn modal_overlay_swallows_cmdline_open_key() {
+        let mut app = TestApp::builder().build();
+        let buf = app
+            .app
+            .ui
+            .buf_create(crate::smelt_term::BufCreateOpts::default());
+        let win = app
+            .app
+            .ui
+            .win_open_split(
+                buf,
+                crate::smelt_term::SplitConfig {
+                    region: "event-test-overlay".into(),
+                    gutters: crate::smelt_term::Gutters::default(),
+                },
+            )
+            .expect("overlay test window opens");
+        app.app.ui.overlay_open(
+            crate::smelt_term::Overlay::new(
+                crate::smelt_term::LayoutTree::leaf(win),
+                crate::smelt_term::layout::Anchor::ScreenCenter,
+            )
+            .modal(true),
+        );
+        assert!(app.state().active_modal.is_some());
+
+        app.press(KeyCode::Char(':'));
+
+        let state = app.state();
+        assert!(state.active_modal.is_some());
+        assert!(
+            !state.cmdline_open,
+            "':' must stay inside overlay routing while a modal overlay is active"
+        );
+        assert_eq!(state.prompt_text, "");
+    }
+
+    #[test]
+    fn busy_submit_queues_without_starting_agent_turn() {
+        let mut app = TestApp::builder().build();
+        app.app.busy_stack.push("background".to_string());
+        app.type_text("run later");
+
+        app.press(KeyCode::Enter);
+
+        let state = app.state();
+        assert!(
+            !state.agent_running,
+            "busy-only submit should not start an agent turn immediately"
+        );
+        assert_eq!(state.queued_inputs, vec!["run later".to_string()]);
+        assert_eq!(state.prompt_text, "");
+    }
+}
