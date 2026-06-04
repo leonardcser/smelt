@@ -1,0 +1,20 @@
+{
+  "_about": "Slash-command token parsing used split_whitespace after '/', which skipped Unicode whitespace immediately after the slash. It then sliced the original text using the later token length as if the token started at byte 1, landing inside a multibyte whitespace character.",
+  "_fix": "fix(core): keep slash command parsing on UTF-8 boundaries",
+  "mode": "plan",
+  "ops": [
+    {
+      "data": 47,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 8192,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 388302243,
+      "kind": "key_unicode"
+    }
+  ],
+  "vim": false
+}

@@ -19,11 +19,12 @@ pub fn set_command_resolver(f: impl Fn(&str) -> bool + Send + Sync + 'static) {
 /// Leading `/name` token from a slash command invocation.
 /// Returns `None` when `text` does not start with a non-empty slash command name.
 pub fn command_token(text: &str) -> Option<&str> {
-    let name = text.strip_prefix('/')?.split_whitespace().next()?;
-    if name.is_empty() {
+    let rest = text.strip_prefix('/')?;
+    let name_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    if name_len == 0 {
         return None;
     }
-    Some(&text[..1 + name.len()])
+    Some(&text[..1 + name_len])
 }
 
 /// Slash command name without the leading `/`.
@@ -76,6 +77,12 @@ mod tests {
         assert_eq!(command_token("/日本語 arg"), Some("/日本語"));
         assert_eq!(command_token("help"), None);
         assert_eq!(command_token("/   "), None);
+    }
+
+    #[test]
+    fn command_token_rejects_whitespace_after_slash_without_skipping() {
+        assert_eq!(command_token("/\u{2000}x"), None);
+        assert_eq!(command_name("/\u{2000}x"), None);
     }
 
     #[test]
