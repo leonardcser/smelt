@@ -1,0 +1,31 @@
+{
+  "_about": "Transcript horizontal wheel regression: after compaction projected transcript content and a very narrow resize, a ScrollRight mouse event over the transcript must not leave the projected transcript pane horizontally panned between frames.",
+  "_fix": "fix(tui): keep projected panes pinned after horizontal wheel scroll",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "probe_compaction_prepare_request",
+      "data": {
+        "variant": 27
+      }
+    },
+    {
+      "kind": "resize",
+      "data": {
+        "w": 3,
+        "h": 31
+      }
+    },
+    {
+      "kind": "mouse",
+      "data": {
+        "kind": 119,
+        "button": 0,
+        "col": 0,
+        "row": 0,
+        "mods": 0
+      }
+    }
+  ],
+  "vim": true
+}

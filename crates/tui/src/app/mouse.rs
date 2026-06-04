@@ -132,6 +132,9 @@ impl TuiApp {
                 .dispatch_event(crate::smelt_edit::Event::Mouse(me), &mut |_, _, _| {}),
             crate::smelt_edit::Status::Consumed
         ) {
+            if is_scroll_event(me.kind) {
+                self.pin_well_known_horizontal_scroll();
+            }
             if let Some(owner) =
                 scrollbar_owner_from_capture_transition(cap_before, self.ui.capture())
             {
@@ -251,6 +254,14 @@ impl TuiApp {
         }
 
         EventOutcome::Noop
+    }
+
+    fn pin_well_known_horizontal_scroll(&mut self) {
+        for win_id in [crate::app::PROMPT_WIN, crate::app::TRANSCRIPT_WIN] {
+            if let Some(win) = self.ui.win_mut(win_id) {
+                win.scroll_left = 0;
+            }
+        }
     }
 
     /// Fire a pointer `WinEvent` (`Press`/`Release`/`Drag`) on `win` with
