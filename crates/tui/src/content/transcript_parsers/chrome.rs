@@ -7,7 +7,6 @@
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::wrap::wrap_line;
-use smelt_core::style::Color;
 use smelt_core::theme::intern;
 
 use super::metrics::CHROME_INNER_PAD;
@@ -25,7 +24,6 @@ pub(super) fn render(
     mut paint: impl FnMut(&mut LineBuilder, &str, ChunkPos),
 ) -> u16 {
     let user_bg = intern("SmeltUserBg");
-    let user_bg_color = out.theme().resolve(user_bg).bg.unwrap_or(Color::Reset);
     let pad_meta = SpanMeta {
         selectable: false,
         copy_as: None,
@@ -34,8 +32,8 @@ pub(super) fn render(
     let blank_row = |out: &mut LineBuilder| {
         out.set_hl(user_bg);
         out.print_with_meta(&pad, pad_meta.clone());
+        out.pad_row_to_layout_width(pad_meta.clone());
         out.reset_style();
-        out.fill_line_bg(user_bg_color);
         out.newline();
     };
 

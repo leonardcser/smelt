@@ -175,21 +175,20 @@ mod tests {
     }
 
     #[test]
-    fn blank_padding_rows_do_not_include_extra_anchor_cell() {
+    fn blank_chrome_rows_fill_layout_width() {
         let theme = themed();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let width = 40;
         let rows = {
-            let mut out = LineBuilder::new(&mut buf, &theme, 40);
-            let r = render(&mut out, "hello", &[], 40);
+            let mut out = LineBuilder::new(&mut buf, &theme, width);
+            let r = render(&mut out, "hello\n\nworld", &[], width as usize);
             out.finish();
             r as usize
         };
         let lines = read_buffer(&buf, &theme, rows);
-        assert_eq!(lines[0].text.len(), super::super::metrics::CHROME_INNER_PAD);
-        assert_eq!(
-            lines[rows - 1].text.len(),
-            super::super::metrics::CHROME_INNER_PAD
-        );
+        assert_eq!(lines[0].text.len(), width as usize);
+        assert_eq!(lines[2].text.len(), width as usize);
+        assert_eq!(lines[rows - 1].text.len(), width as usize);
     }
 
     #[test]
