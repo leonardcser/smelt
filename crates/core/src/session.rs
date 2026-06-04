@@ -1366,8 +1366,8 @@ mod tests {
             vec![inv],
         );
         let items = vec![HistoryItem::Assistant(turn)];
-        // 4 (text) + 8 (reasoning) + 4 (name) + 15 (args)
-        assert_eq!(compute_text_bytes(&items), 31);
+        // 4 (text) + 8 (reasoning) + 4 (name) + 15 (args) + 2 (result)
+        assert_eq!(compute_text_bytes(&items), 33);
     }
 
     #[test]
