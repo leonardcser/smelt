@@ -28,9 +28,9 @@ impl TuiApp {
         self.ui.resolve_tail_scrolls();
         self.ui.sync_scroll_links();
         let transcript_scroll_target = if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
-            crate::content::transcript_buf::ScrollTarget::full_tail()
+            crate::content::transcript_buf::ScrollTarget::visible_tail()
         } else {
-            crate::content::transcript_buf::ScrollTarget::full_row(
+            crate::content::transcript_buf::ScrollTarget::visible_row(
                 self.transcript_win().scroll_top(),
             )
         };
@@ -80,13 +80,17 @@ impl TuiApp {
         let _ = queued;
         {
             let _p = smelt_perf::perf::begin("compositor:transcript");
-            self.sync_transcript_layer(
-                width,
-                viewport_rows,
-                transcript_scroll_target,
-                has_transcript_cursor,
-                transcript_cursor_screen_row,
-            );
+            if self.ui.drag_capture_window() == Some(crate::app::TRANSCRIPT_WIN) {
+                self.sync_frozen_transcript_layer(has_transcript_cursor);
+            } else {
+                self.sync_transcript_layer(
+                    width,
+                    viewport_rows,
+                    transcript_scroll_target,
+                    has_transcript_cursor,
+                    transcript_cursor_screen_row,
+                );
+            }
         }
         {
             let _p = smelt_perf::perf::begin("compositor:input");
@@ -143,6 +147,19 @@ impl TuiApp {
             && self.term_focused
             && matches!(self.app_focus, crate::app::AppFocus::Content);
         (has_prompt_cursor, has_transcript_cursor)
+    }
+
+    fn sync_frozen_transcript_layer(&mut self, has_transcript_cursor: bool) {
+        if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
+            buf.set_selection(Vec::new());
+        }
+        if has_transcript_cursor {
+            self.ui
+                .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
+        }
+        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+            win.scroll_left = 0;
+        }
     }
 
     /// Project the transcript into its display buffer and drive `Ui::wins[TRANSCRIPT_WIN]`.

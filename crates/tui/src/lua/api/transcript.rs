@@ -86,7 +86,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "rows",
-        "Return rendered transcript display rows in `[start, start + count)`. This is exact and may materialize the full transcript until range-native transcript documents land.",
+        "Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.",
         &["start", "count"],
         |lua, (start, count): (crate::smelt_edit::RowIndex, crate::smelt_edit::RowIndex)| -> LuaResult<mlua::Table> {
             let rows = crate::lua::try_with_app(|app| app.transcript_visible_rows(start, count))

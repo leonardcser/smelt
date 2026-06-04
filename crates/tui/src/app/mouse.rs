@@ -618,6 +618,12 @@ mod tests {
         }
         app.transcript_win_mut().scroll_to_bottom();
         app.render_normal_to(false, &mut std::io::sink());
+        let rendered_rows = app.ui.buf(app.transcript_win().buf).unwrap().lines();
+        assert!(rendered_rows.iter().any(|line| line == "line 99"));
+        assert!(
+            !rendered_rows.iter().any(|line| line == "line 0"),
+            "tail render should materialize a bounded visible slice, not the full transcript"
+        );
 
         let vp = app
             .transcript_win()

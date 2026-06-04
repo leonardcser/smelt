@@ -217,6 +217,7 @@ impl ScrollAnchor {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum ScrollTarget {
     /// Materialize the full transcript and scroll to the anchor.
     Full(ScrollAnchor),
@@ -225,10 +226,12 @@ pub(crate) enum ScrollTarget {
 }
 
 impl ScrollTarget {
+    #[allow(dead_code)]
     pub(crate) fn full_row(row: RowIndex) -> Self {
         Self::Full(ScrollAnchor::Row(row))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn full_tail() -> Self {
         Self::Full(ScrollAnchor::Tail)
     }
