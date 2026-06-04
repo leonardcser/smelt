@@ -67,6 +67,10 @@ pub(crate) async fn run_async(
     };
 
     let mut args: Vec<String> = Vec::new();
+    args.push("--max-columns=500".into());
+    for dir in [".git", ".jj", ".hg", ".svn", ".sl", ".worktrees"] {
+        args.push(format!("--glob=!**/{dir}/**"));
+    }
 
     match opts.mode {
         Mode::Content => {

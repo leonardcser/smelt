@@ -52,7 +52,7 @@ local function run_rg(args)
   local pattern = args.pattern or ""
   local path = args.path or ""
   local mode = args.output_mode
-  if mode == nil or mode == "" then mode = "content" end
+  if mode == nil or mode == "" then mode = "files_with_matches" end
 
   local context = pick_int(args.context, 0)
   if context == 0 then context = pick_int(args["-C"], 0) end
@@ -117,7 +117,7 @@ smelt.tools.register({
       output_mode = {
         type = "string",
         ["enum"] = { "content", "files_with_matches", "count" },
-        description = 'Output mode: "content" shows matching lines (default), "files_with_matches" shows file paths, "count" shows match counts.',
+        description = 'Output mode: "content" shows matching lines, "files_with_matches" shows file paths (default), "count" shows match counts.',
       },
       ["-i"] = { type = "boolean", description = "Case insensitive search (rg -i)" },
       ["-n"] = { type = "boolean", description = 'Show line numbers in output (rg -n). Requires output_mode: "content", ignored otherwise. Defaults to true.' },
@@ -126,7 +126,7 @@ smelt.tools.register({
       ["-C"] = { type = "integer", description = "Alias for context." },
       context = { type = "integer", description = 'Number of lines to show before and after each match. Only applies to output_mode "content".' },
       multiline = { type = "boolean", description = "Enable multiline mode where . matches newlines and patterns can span lines." },
-      head_limit = { type = "integer", description = "Limit output to first N lines/entries. 0 means unlimited (default)." },
+      head_limit = { type = "integer", description = "Limit output to first N lines/entries. Defaults to 250; 0 means unlimited." },
       offset = { type = "integer", description = "Skip first N lines/entries before applying head_limit." },
       timeout_ms = { type = "integer", description = "Timeout in milliseconds (default: 30000)" },
     },
@@ -150,7 +150,7 @@ smelt.tools.register({
   end,
   execute = function(args)
     local offset = pick_int(args.offset, 0)
-    local head_limit = pick_int(args.head_limit, 0)
+    local head_limit = pick_int(args.head_limit, 250)
 
     local out, err = run_rg(args)
     if not out then

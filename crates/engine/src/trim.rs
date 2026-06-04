@@ -1,26 +1,61 @@
-//! Tool-output trimming for LLM context windows.
+//! Tool-output trimming for model context windows.
 //!
-//! Applied by provider serializers before building API requests.
-//! Individual tools may enforce their own (often larger) limits before
-//! this final trim.
+//! This is the single engine-level budget for tool output. Tools may still
+//! self-limit before producing output, but every model-visible tool result is
+//! normalized here before it enters committed history.
 
-/// Maximum lines of tool output sent to the LLM.
+use protocol::ToolInvocation;
+
+/// Maximum lines of a single tool output sent to the LLM.
 pub(crate) const MAX_TOOL_OUTPUT_LINES: usize = 2000;
-/// Maximum approximate tokens of tool output sent to the LLM.
-pub(crate) const MAX_TOOL_OUTPUT_TOKENS: usize = 10_000;
 const APPROX_BYTES_PER_TOKEN: usize = 4;
-const MAX_TOOL_OUTPUT_BYTES: usize = MAX_TOOL_OUTPUT_TOKENS * APPROX_BYTES_PER_TOKEN;
+/// Maximum approximate tokens of a single tool output sent to the LLM.
+pub(crate) const MAX_TOOL_OUTPUT_TOKENS: usize = 10_000;
+/// Maximum approximate tokens of all tool outputs in one assistant tool step.
+pub(crate) const MAX_TURN_TOOL_OUTPUT_TOKENS: usize = 40_000;
 const TRUNCATION_NOTICE: &str = "[tool output truncated for model context]";
 
-/// Trim tool output for LLM context. Prepends the total line count and appends
-/// an explicit truncation notice when content is clipped by line count, or keeps
-/// the head and tail when content exceeds the token budget.
+/// Apply the canonical model-visible budget to a batch of tool invocations.
+///
+/// The per-tool cap keeps any one result bounded; the aggregate cap prevents a
+/// parallel batch of individually-legal outputs from filling the context window.
+pub(crate) fn budget_tool_invocations(invocations: &mut [ToolInvocation]) {
+    for inv in invocations.iter_mut() {
+        inv.result.content = trim_tool_output(&inv.result.content, MAX_TOOL_OUTPUT_LINES);
+    }
+
+    let mut used_tokens = 0usize;
+    for inv in invocations.iter_mut() {
+        let tokens = approx_token_count(&inv.result.content);
+        if used_tokens.saturating_add(tokens) <= MAX_TURN_TOOL_OUTPUT_TOKENS {
+            used_tokens += tokens;
+            continue;
+        }
+
+        let remaining = MAX_TURN_TOOL_OUTPUT_TOKENS.saturating_sub(used_tokens);
+        inv.result.content = trim_tool_output_to_token_budget(&inv.result.content, remaining);
+        used_tokens = MAX_TURN_TOOL_OUTPUT_TOKENS;
+    }
+}
+
+/// Trim a single tool output for model context. Prepends the total line count
+/// and appends an explicit truncation notice when content is clipped by line
+/// count, or keeps the head and tail when content exceeds the token budget.
 pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
+    trim_tool_output_with_budget(content, max_lines, MAX_TOOL_OUTPUT_TOKENS)
+}
+
+fn trim_tool_output_with_budget(content: &str, max_lines: usize, max_tokens: usize) -> String {
     if content == "no matches found" {
         return content.to_string();
     }
-    if approx_token_count(content) > MAX_TOOL_OUTPUT_TOKENS {
-        return truncate_middle_to_bytes(content, MAX_TOOL_OUTPUT_BYTES);
+    if max_tokens == 0 {
+        return omitted_notice(content);
+    }
+
+    let max_bytes = max_tokens.saturating_mul(APPROX_BYTES_PER_TOKEN);
+    if approx_token_count(content) > max_tokens {
+        return truncate_middle_to_bytes(content, max_bytes);
     }
 
     let total = content.lines().count();
@@ -34,11 +69,25 @@ pub(crate) fn trim_tool_output(content: &str, max_lines: usize) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let output = format!("Total output lines: {total}\n\n{visible}\n\n{TRUNCATION_NOTICE}");
-    if approx_token_count(&output) > MAX_TOOL_OUTPUT_TOKENS {
-        truncate_middle_to_bytes(&output, MAX_TOOL_OUTPUT_BYTES)
+    if approx_token_count(&output) > max_tokens {
+        truncate_middle_to_bytes(&output, max_bytes)
     } else {
         output
     }
+}
+
+fn trim_tool_output_to_token_budget(content: &str, max_tokens: usize) -> String {
+    if max_tokens < 64 {
+        return omitted_notice(content);
+    }
+    trim_tool_output_with_budget(content, MAX_TOOL_OUTPUT_LINES, max_tokens)
+}
+
+fn omitted_notice(content: &str) -> String {
+    format!(
+        "[tool output omitted for model context: per-turn tool output budget exhausted; original output was {} bytes]",
+        content.len()
+    )
 }
 
 fn approx_token_count(text: &str) -> usize {
@@ -94,6 +143,10 @@ fn suffix_with_byte_budget(content: &str, max_bytes: usize) -> String {
 mod tests {
     use super::*;
 
+    fn max_tool_output_bytes() -> usize {
+        MAX_TOOL_OUTPUT_TOKENS * APPROX_BYTES_PER_TOKEN
+    }
+
     #[test]
     fn no_matches_found_sentinel_passes_through_unchanged() {
         assert_eq!(trim_tool_output("no matches found", 0), "no matches found");
@@ -135,10 +188,10 @@ mod tests {
     #[test]
     fn dense_single_line_over_token_cap_is_middle_truncated() {
         let tail = "z".repeat(128);
-        let input = format!("{}{}", "a".repeat(MAX_TOOL_OUTPUT_BYTES), tail);
+        let input = format!("{}{}", "a".repeat(max_tool_output_bytes()), tail);
         let out = trim_tool_output(&input, MAX_TOOL_OUTPUT_LINES);
 
-        assert!(out.len() <= MAX_TOOL_OUTPUT_BYTES);
+        assert!(out.len() <= max_tool_output_bytes());
         assert!(out.starts_with("aaaa"));
         assert!(out.ends_with(&tail));
         assert!(out.contains(TRUNCATION_NOTICE));
@@ -157,10 +210,61 @@ mod tests {
 
     #[test]
     fn middle_truncation_respects_utf8_boundaries() {
-        let input = "é".repeat(MAX_TOOL_OUTPUT_BYTES / 2 + 10);
+        let input = "é".repeat(max_tool_output_bytes() / 2 + 10);
         let out = trim_tool_output(&input, MAX_TOOL_OUTPUT_LINES);
 
-        assert!(out.len() <= MAX_TOOL_OUTPUT_BYTES);
+        assert!(out.len() <= max_tool_output_bytes());
         assert!(out.contains(TRUNCATION_NOTICE));
+    }
+
+    fn invocation(call_id: &str, content: String) -> ToolInvocation {
+        ToolInvocation {
+            call_id: call_id.into(),
+            name: "tool".into(),
+            arguments: "{}".into(),
+            result: protocol::ToolOutcome {
+                content,
+                is_error: false,
+                metadata: None,
+            },
+            elapsed_ms: None,
+        }
+    }
+
+    #[test]
+    fn invocation_budget_caps_each_tool_output() {
+        let input = "x".repeat(max_tool_output_bytes() + 1024);
+        let mut invocations = vec![invocation("call_1", input)];
+
+        budget_tool_invocations(&mut invocations);
+
+        let output = &invocations[0].result.content;
+        assert!(output.len() <= max_tool_output_bytes());
+        assert!(output.contains(TRUNCATION_NOTICE));
+    }
+
+    #[test]
+    fn invocation_budget_caps_aggregate_output() {
+        let body = "x".repeat((MAX_TURN_TOOL_OUTPUT_TOKENS / 2) * APPROX_BYTES_PER_TOKEN);
+        let mut invocations = vec![
+            invocation("call_1", body.clone()),
+            invocation("call_2", body.clone()),
+            invocation("call_3", body),
+        ];
+
+        budget_tool_invocations(&mut invocations);
+
+        let total_tokens: usize = invocations
+            .iter()
+            .map(|inv| approx_token_count(&inv.result.content))
+            .sum();
+        assert!(total_tokens <= MAX_TURN_TOOL_OUTPUT_TOKENS + 64);
+        assert!(
+            invocations[2].result.content.contains(TRUNCATION_NOTICE)
+                || invocations[2]
+                    .result
+                    .content
+                    .contains("omitted for model context")
+        );
     }
 }

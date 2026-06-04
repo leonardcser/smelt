@@ -1215,6 +1215,7 @@ impl<'a> Turn<'a> {
                 inline_outcomes,
             );
             crate::result_dedup::apply_in_place(&mut invocations, &self.history);
+            crate::trim::budget_tool_invocations(&mut invocations);
             self.push_assistant_step(AssistantStep::with_invocations(
                 post_hook_content,
                 post_hook_reasoning,

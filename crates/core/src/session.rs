@@ -747,6 +747,7 @@ fn compute_text_bytes(history: &[HistoryItem]) -> u64 {
                 for inv in &turn.invocations {
                     total += inv.name.len() as u64;
                     total += inv.arguments.len() as u64;
+                    total += inv.result.content.len() as u64;
                 }
             }
         }
