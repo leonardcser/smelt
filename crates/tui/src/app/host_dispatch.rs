@@ -269,6 +269,10 @@ impl PrepareContextEstimate {
         };
         let base_history_len = context_tokens_history_len.unwrap_or(current_history.len());
 
+        if base_history_len > current_history.len() {
+            return Self::full_request(full_request_estimate, current_history.len());
+        }
+
         if base_history_len == current_history.len() {
             // Baseline exactly covers current history.
             return Self {
@@ -281,31 +285,16 @@ impl PrepareContextEstimate {
             };
         }
 
-        if base_history_len < current_history.len() {
-            // Baseline is stale; compute a delta for appended messages.
-            let added_messages =
-                protocol::history_to_messages(&current_history[base_history_len..]);
-            let estimated_delta_tokens =
-                smelt_core::session::estimate_message_tokens(&added_messages);
-            return Self {
-                total_context_tokens: base.saturating_add(estimated_delta_tokens),
-                provider_context_tokens: current_context_tokens,
-                estimated_delta_tokens,
-                latest_snapshot_history_len: context_tokens_history_len,
-                current_history_len: current_history.len(),
-                source: PrepareContextEstimateSource::ProviderSnapshotPlusHistoryDelta,
-            };
-        }
-
-        // Baseline history len is somehow ahead of current history (shouldn't
-        // happen in practice, but treat it as an exact match to be safe).
+        // Baseline is stale; compute a delta for appended messages.
+        let added_messages = protocol::history_to_messages(&current_history[base_history_len..]);
+        let estimated_delta_tokens = smelt_core::session::estimate_message_tokens(&added_messages);
         Self {
-            total_context_tokens: base,
+            total_context_tokens: base.saturating_add(estimated_delta_tokens),
             provider_context_tokens: current_context_tokens,
-            estimated_delta_tokens: 0,
+            estimated_delta_tokens,
             latest_snapshot_history_len: context_tokens_history_len,
             current_history_len: current_history.len(),
-            source: PrepareContextEstimateSource::ProviderSnapshot,
+            source: PrepareContextEstimateSource::ProviderSnapshotPlusHistoryDelta,
         }
     }
 
@@ -556,6 +545,21 @@ mod tests {
             PrepareContextEstimate::from_request(None, None, &history, &messages, 10_000);
 
         assert_eq!(estimate.total_context_tokens, 10_000);
+        assert_eq!(estimate.provider_context_tokens, None);
+        assert_eq!(
+            estimate.source,
+            PrepareContextEstimateSource::FullRequestEstimate
+        );
+    }
+
+    #[test]
+    fn prepare_context_estimate_uses_full_request_when_baseline_is_ahead() {
+        let history = vec![HistoryItem::user(Content::text("rewound"))];
+        let messages = protocol::history_to_messages(&history);
+        let estimate =
+            PrepareContextEstimate::from_request(Some(5_000), Some(4), &history, &messages, 900);
+
+        assert_eq!(estimate.total_context_tokens, 900);
         assert_eq!(estimate.provider_context_tokens, None);
         assert_eq!(
             estimate.source,

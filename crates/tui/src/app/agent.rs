@@ -413,7 +413,7 @@ impl TuiApp {
         if !cancelled {
             self.apply_pending_history_appends_for_request();
         }
-        self.snapshot_tokens();
+        self.snapshot_accounting();
         self.save_session();
     }
 

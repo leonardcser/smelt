@@ -263,19 +263,12 @@ impl TuiApp {
             .unwrap_or_else(|| self.core.config.model.clone())
     }
 
-    pub(crate) fn snapshot_tokens(&mut self) {
-        // Keep the last provider baseline when this turn produced no fresh
-        // usage. It is keyed by `context_tokens_history_len`, so request
-        // preparation can add a local delta for appended history instead of
-        // losing the authoritative count after a cancel or failed compaction.
-        // Successful checkpoints and full history replacements clear the
-        // baseline explicitly because they change the model-visible prefix.
+    pub(crate) fn snapshot_accounting(&mut self) {
+        if self.context_tokens_updated_this_turn && self.core.session.context_tokens.is_some() {
+            self.core.session.context_tokens_history_len = Some(self.core.session.history.len());
+        }
         self.context_tokens_updated_this_turn = false;
-        let cost = self.core.session.session_cost_usd;
-        self.core
-            .session
-            .cost_snapshots
-            .push((self.core.session.history.len(), cost));
+        self.core.session.snapshot_accounting();
     }
 
     pub(crate) fn fork_session(&mut self) {
@@ -398,17 +391,7 @@ impl TuiApp {
         }
         // Drop snapshots beyond the restored history length.
         let hist_len = self.core.session.history.len();
-        self.core
-            .session
-            .cost_snapshots
-            .retain(|(len, _)| *len <= hist_len);
-        self.core.session.session_cost_usd = self
-            .core
-            .session
-            .cost_snapshots
-            .last()
-            .map(|&(_, c)| c)
-            .unwrap_or(0.0);
+        self.core.session.prune_accounting_snapshots(hist_len);
         self.reset_session_permissions();
         self.queued_inputs.clear();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -474,8 +457,8 @@ impl TuiApp {
         self.persister.flush();
     }
 
-    /// Atomically replace `session.messages` with `messages`. Clears token /
-    /// cost / turn-meta snapshots (they key into pre-replacement positions),
+    /// Atomically replace `session.messages` with `messages`. Clears accounting
+    /// and turn-meta snapshots (they key into pre-replacement positions),
     /// resets `context_tokens`, repaints the screen, and saves the session.
     /// No-op when `messages` is empty.
     pub(crate) fn replace_history(&mut self, history: Vec<HistoryItem>) {
@@ -484,8 +467,8 @@ impl TuiApp {
         }
         self.core.session.history = history;
         self.core.session.checkpoint = None;
-        self.core.session.cost_snapshots.clear();
         self.core.session.turn_metas.clear();
+        self.core.session.clear_accounting_snapshots();
         self.core.session.clear_context_tokens();
 
         self.restore_screen();
@@ -567,18 +550,10 @@ impl TuiApp {
                 .checkpoint
                 .as_ref()
                 .is_some_and(|cp| cp.first_live_index == hist_idx);
-        if !keep_checkpoint_at_boundary {
-            self.core.session.clear_checkpoint_if_rewound_to(hist_idx);
-        }
-        truncate_keyed(&mut self.core.session.cost_snapshots, hist_idx);
         truncate_keyed(&mut self.core.session.turn_metas, hist_idx);
-        self.core.session.session_cost_usd = self
-            .core
+        self.core
             .session
-            .cost_snapshots
-            .last()
-            .map(|&(_, c)| c)
-            .unwrap_or(0.0);
+            .restore_accounting_after_rewind(hist_idx, keep_checkpoint_at_boundary);
         self.truncate_to(block_idx);
         self.reset_session_permissions();
         if self.core.session.history.is_empty() {
@@ -593,9 +568,8 @@ impl TuiApp {
     pub(crate) fn rewind_to_start(&mut self) {
         self.core.session.history.clear();
         self.core.session.checkpoint = None;
-        self.core.session.cost_snapshots.clear();
         self.core.session.turn_metas.clear();
-        self.core.session.session_cost_usd = 0.0;
+        self.core.session.clear_accounting_snapshots();
         self.core.session.clear_context_tokens();
         self.task_label = None;
         self.clear_transcript();
@@ -1055,7 +1029,6 @@ mod checkpoint_tests {
             tokens_after_estimate: None,
             ..Default::default()
         });
-        session.cost_snapshots.push((2, 1.0));
         session.turn_metas.push((
             2,
             protocol::TurnMeta {
@@ -1068,82 +1041,133 @@ mod checkpoint_tests {
         session.context_tokens = Some(100);
         session.context_tokens_history_len = Some(2);
         session.visible_context_tokens = Some(100);
+        session.session_usage.prompt_tokens = Some(10);
+        session.snapshot_accounting();
 
         // Simulate replace_history
         session.history = vec![user("x")];
         session.checkpoint = None;
-        session.cost_snapshots.clear();
         session.turn_metas.clear();
+        session.clear_accounting_snapshots();
         session.clear_context_tokens();
 
         assert!(session.checkpoint.is_none());
-        assert!(session.cost_snapshots.is_empty());
         assert!(session.turn_metas.is_empty());
+        assert!(session.accounting_snapshots.is_empty());
+        assert!(session.session_usage.prompt_tokens.is_none());
         assert!(session.context_tokens.is_none());
         assert!(session.context_tokens_history_len.is_none());
         assert!(session.visible_context_tokens.is_none());
     }
 
     #[test]
-    fn rewind_keeps_baseline_and_cost() {
+    fn rewind_restores_accounting_snapshot() {
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![user("a"), assistant("b"), user("c"), assistant("d")];
-        session.cost_snapshots = vec![(2, 0.5), (4, 1.0)];
-        session.session_cost_usd = 1.0;
+        session.history = vec![user("a"), assistant("b")];
+        session.session_usage.prompt_tokens = Some(10);
+        session.session_usage.completion_tokens = Some(1);
+        session.context_tokens = Some(50);
+        session.context_tokens_history_len = Some(2);
+        session.visible_context_tokens = Some(50);
+        session.session_cost_usd = 0.5;
+        session.snapshot_accounting();
+
+        session.history.extend([user("c"), assistant("d")]);
+        session.session_usage.prompt_tokens = Some(30);
+        session.session_usage.completion_tokens = Some(3);
         session.context_tokens = Some(100);
         session.context_tokens_history_len = Some(4);
         session.visible_context_tokens = Some(100);
+        session.session_cost_usd = 1.0;
+        session.snapshot_accounting();
 
-        // Rewind to history index 2 (before user "c")
         let hist_idx = 2;
         session.history.truncate(hist_idx);
-        truncate_keyed(&mut session.cost_snapshots, hist_idx);
-        session.session_cost_usd = session
-            .cost_snapshots
-            .last()
-            .map(|&(_, c)| c)
-            .unwrap_or(0.0);
+        session.restore_accounting_after_rewind(hist_idx, false);
 
         assert_eq!(session.history.len(), 2);
-        assert_eq!(session.context_tokens, Some(100));
-        assert_eq!(session.context_tokens_history_len, Some(4));
-        assert_eq!(session.visible_context_tokens, Some(100));
+        assert_eq!(session.session_usage.prompt_tokens, Some(10));
+        assert_eq!(session.session_usage.completion_tokens, Some(1));
+        assert_eq!(session.context_tokens, Some(50));
+        assert_eq!(session.context_tokens_history_len, Some(2));
+        assert_eq!(session.visible_context_tokens, Some(50));
         assert_eq!(session.session_cost_usd, 0.5);
     }
 
     #[test]
-    fn rewind_past_all_cost_snapshots_clears_cost_keeps_baseline() {
-        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![user("a"), assistant("b")];
-        session.cost_snapshots = vec![(2, 0.5)];
-        session.session_cost_usd = 0.5;
-        session.context_tokens = Some(50);
-        session.context_tokens_history_len = Some(2);
-        session.visible_context_tokens = Some(50);
+    fn app_rewind_restores_accounting_snapshot() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![user("a"), assistant("b")];
+        app.app.core.session.session_usage.prompt_tokens = Some(10);
+        app.app.core.session.session_usage.completion_tokens = Some(1);
+        app.app.core.session.context_tokens = Some(50);
+        app.app.core.session.context_tokens_history_len = Some(2);
+        app.app.core.session.visible_context_tokens = Some(50);
+        app.app.core.session.session_cost_usd = 0.5;
+        app.app.core.session.snapshot_accounting();
 
-        session.history.truncate(0);
-        truncate_keyed(&mut session.cost_snapshots, 0);
-        session.session_cost_usd = session
-            .cost_snapshots
-            .last()
-            .map(|&(_, c)| c)
-            .unwrap_or(0.0);
+        app.app
+            .core
+            .session
+            .history
+            .extend([user("c"), assistant("d")]);
+        app.app.core.session.session_usage.prompt_tokens = Some(30);
+        app.app.core.session.session_usage.completion_tokens = Some(3);
+        app.app.core.session.context_tokens = Some(100);
+        app.app.core.session.context_tokens_history_len = Some(4);
+        app.app.core.session.visible_context_tokens = Some(100);
+        app.app.core.session.session_cost_usd = 1.0;
+        app.app.core.session.snapshot_accounting();
+        app.app.restore_screen();
 
-        assert_eq!(session.context_tokens, Some(50));
-        assert_eq!(session.context_tokens_history_len, Some(2));
-        assert_eq!(session.visible_context_tokens, Some(50));
-        assert_eq!(session.session_cost_usd, 0.0);
+        let restored = app.app.rewind_to(2).expect("second user turn");
+
+        assert_eq!(restored.0, "c");
+        assert_eq!(app.app.core.session.history.len(), 2);
+        assert_eq!(app.app.core.session.session_cost_usd, 0.5);
+        assert_eq!(app.app.core.session.session_usage.prompt_tokens, Some(10));
+        assert_eq!(
+            app.app.core.session.session_usage.completion_tokens,
+            Some(1)
+        );
+        assert_eq!(app.app.core.session.context_tokens, Some(50));
+        assert_eq!(app.app.core.session.context_tokens_history_len, Some(2));
+        assert_eq!(app.app.core.session.visible_context_tokens, Some(50));
+        assert_eq!(app.app.core.session.accounting_snapshots.len(), 1);
     }
 
     #[test]
-    fn rewind_past_checkpoint_restores_pre_checkpoint_baseline() {
+    fn rewind_past_all_accounting_snapshots_clears_usage_and_context() {
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
-        session.history = vec![
-            user("old"),
-            assistant("old reply"),
-            user("recent"),
-            assistant("recent reply"),
-        ];
+        session.history = vec![user("a"), assistant("b")];
+        session.session_usage.prompt_tokens = Some(10);
+        session.context_tokens = Some(50);
+        session.context_tokens_history_len = Some(2);
+        session.visible_context_tokens = Some(50);
+        session.snapshot_accounting();
+
+        session.history.truncate(0);
+        session.restore_accounting_after_rewind(0, false);
+
+        assert!(session.session_usage.prompt_tokens.is_none());
+        assert!(session.context_tokens.is_none());
+        assert!(session.context_tokens_history_len.is_none());
+        assert!(session.visible_context_tokens.is_none());
+    }
+
+    #[test]
+    fn rewind_past_checkpoint_restores_pre_checkpoint_snapshot() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![user("old"), assistant("old reply")];
+        session.session_usage.prompt_tokens = Some(10);
+        session.context_tokens = Some(50);
+        session.context_tokens_history_len = Some(2);
+        session.visible_context_tokens = Some(50);
+        session.snapshot_accounting();
+
+        session
+            .history
+            .extend([user("recent"), assistant("recent reply")]);
         session.context_tokens = Some(100);
         session.context_tokens_history_len = Some(4);
         session.visible_context_tokens = Some(100);
@@ -1151,25 +1175,70 @@ mod checkpoint_tests {
             kind: "compaction".to_string(),
             summary: "summary".to_string(),
             first_live_index: 2,
-            created_at_ms: 0,
+            created_at_ms: 7,
+            tokens_before: Some(100),
+            tokens_after_estimate: None,
+            pre_checkpoint_context_tokens: Some(100),
+            pre_checkpoint_context_history_len: Some(4),
+        });
+        session.clear_context_tokens_baseline();
+        session.snapshot_accounting();
+        session.context_tokens = Some(80);
+        session.context_tokens_history_len = Some(4);
+        session.visible_context_tokens = Some(80);
+        session.snapshot_accounting();
+
+        let hist_idx = 2;
+        session.history.truncate(hist_idx);
+        session.restore_accounting_after_rewind(hist_idx, false);
+
+        assert!(session.checkpoint.is_none());
+        assert_eq!(session.session_usage.prompt_tokens, Some(10));
+        assert_eq!(session.context_tokens, Some(50));
+        assert_eq!(session.context_tokens_history_len, Some(2));
+        assert_eq!(session.visible_context_tokens, Some(50));
+    }
+
+    #[test]
+    fn rewind_past_checkpoint_without_snapshot_uses_pre_checkpoint_baseline() {
+        let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        session.session_usage.prompt_tokens = Some(30);
+        session.session_cost_usd = 1.0;
+        session.context_tokens = None;
+        session.context_tokens_history_len = None;
+        session.visible_context_tokens = Some(100);
+        session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 7,
             tokens_before: Some(100),
             tokens_after_estimate: None,
             pre_checkpoint_context_tokens: Some(100),
             pre_checkpoint_context_history_len: Some(4),
         });
 
-        // Rewind to before the checkpoint
-        session.history.truncate(1);
-        session.clear_checkpoint_if_rewound_to(session.history.len());
+        let hist_idx = 2;
+        session.history.truncate(hist_idx);
+        session.restore_accounting_after_rewind(hist_idx, false);
 
         assert!(session.checkpoint.is_none());
+        assert!(session.accounting_snapshots.is_empty());
+        assert!(session.session_usage.prompt_tokens.is_none());
+        assert_eq!(session.session_cost_usd, 0.0);
         assert_eq!(session.context_tokens, Some(100));
         assert_eq!(session.context_tokens_history_len, Some(4));
         assert_eq!(session.visible_context_tokens, Some(100));
     }
 
     #[test]
-    fn rewind_keeps_checkpoint_keeps_post_checkpoint_baseline() {
+    fn rewind_keeps_checkpoint_clears_incompatible_context_snapshot() {
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![
             user("old"),
@@ -1178,27 +1247,28 @@ mod checkpoint_tests {
             assistant("recent reply"),
             user("newest"),
         ];
-        session.context_tokens = Some(80);
-        session.context_tokens_history_len = Some(5);
-        session.visible_context_tokens = Some(80);
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
             summary: "summary".to_string(),
             first_live_index: 2,
-            created_at_ms: 0,
+            created_at_ms: 7,
             tokens_before: Some(100),
             tokens_after_estimate: None,
             pre_checkpoint_context_tokens: Some(100),
             pre_checkpoint_context_history_len: Some(4),
         });
+        session.context_tokens = Some(80);
+        session.context_tokens_history_len = Some(5);
+        session.visible_context_tokens = Some(80);
+        session.snapshot_accounting();
 
-        // Rewind to after the checkpoint (hist len = 4)
-        session.history.truncate(4);
-        session.clear_checkpoint_if_rewound_to(session.history.len());
+        let hist_idx = 2;
+        session.history.truncate(hist_idx);
+        session.restore_accounting_after_rewind(hist_idx, true);
 
         assert!(session.checkpoint.is_some());
-        assert_eq!(session.context_tokens, Some(80));
-        assert_eq!(session.context_tokens_history_len, Some(5));
-        assert_eq!(session.visible_context_tokens, Some(80));
+        assert!(session.context_tokens.is_none());
+        assert!(session.context_tokens_history_len.is_none());
+        assert!(session.visible_context_tokens.is_none());
     }
 }
