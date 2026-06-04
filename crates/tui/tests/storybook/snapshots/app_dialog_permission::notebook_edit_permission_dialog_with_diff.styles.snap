@@ -19,7 +19,8 @@ dim: 80 28
  14  11  13 fg=Rgb { r: 248, g: 248, b: 242 }
  14  24  10 fg=Rgb { r: 230, g: 219, b: 116 }
  14  34   1 fg=Rgb { r: 248, g: 248, b: 242 }
- 15   1   6 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
+ 15   1   4 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
+ 15   5   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
  15   7   5 fg=Rgb { r: 102, g: 217, b: 239 } bg=Rgb { r: 20, g: 50, b: 20 }
  15  12  11 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
  15  23  55 bg=Rgb { r: 20, g: 50, b: 20 }
