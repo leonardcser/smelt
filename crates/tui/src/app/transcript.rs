@@ -400,9 +400,8 @@ impl TuiApp {
         count: crate::smelt_edit::RowIndex,
     ) -> Vec<String> {
         let rows = self.full_transcript_display_text(show_thinking);
-        let start_idx = crate::smelt_edit::document::row_to_usize(start).min(rows.len());
-        let end =
-            crate::smelt_edit::document::row_to_usize(start.saturating_add(count)).min(rows.len());
+        let start_idx = crate::smelt_edit::row_to_usize(start).min(rows.len());
+        let end = crate::smelt_edit::row_to_usize(start.saturating_add(count)).min(rows.len());
         rows[start_idx..end].to_vec()
     }
 

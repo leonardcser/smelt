@@ -4,12 +4,12 @@
 //! to layout and routes events. Renderer primitives come from `smelt-term`.
 
 pub mod callback;
-pub mod document;
 pub(crate) mod event;
 pub mod gutter;
 pub(crate) mod motions;
 pub mod named;
 pub(crate) mod overlay;
+pub mod row;
 pub mod text;
 pub(crate) mod text_objects;
 pub mod vim;
@@ -61,10 +61,10 @@ use callback::Callbacks;
 pub use callback::{
     Callback, CallbackCtx, CallbackResult, KeyBind, LuaHandle, MouseButton, Payload, WinEvent,
 };
-pub use document::{BufferDocument, DisplayRow, DocPos, Document, RowIndex, ViewAnchor};
 pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
+pub use row::{row_to_usize, RowIndex};
 pub use vim::VimMode;
 pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, CursorShape, DrawContext, EventCtx,
@@ -2088,8 +2088,8 @@ pub trait UiHost {
         count: RowIndex,
     ) -> Option<Vec<String>> {
         let rows = self.rows_for(win)?;
-        let start_idx = document::row_to_usize(start).min(rows.len());
-        let end = document::row_to_usize(start.saturating_add(count)).min(rows.len());
+        let start_idx = row_to_usize(start).min(rows.len());
+        let end = row_to_usize(start.saturating_add(count)).min(rows.len());
         Some(rows[start_idx..end].to_vec())
     }
 

@@ -5,7 +5,7 @@ use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
 use super::{BufId, UndoHistory, WinId};
-use crate::document::{row_to_usize, Document, RowIndex};
+use crate::row::{row_to_usize, RowIndex};
 use crate::Theme;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::VirtTextPos;
@@ -1843,56 +1843,6 @@ impl Window {
         self.scroll_top..self.scroll_top.saturating_add(viewport_rows as RowIndex)
     }
 
-    pub fn render_document<D: Document>(
-        &self,
-        doc: &mut D,
-        slice: &mut GridSlice<'_>,
-        ctx: &DrawContext,
-    ) {
-        use unicode_width::UnicodeWidthChar;
-
-        let width = slice.width();
-        let height = slice.height();
-        let content_width = self.config.gutters.content_width(width).min(width);
-        let rows = doc.rows(self.visible_range(height), content_width, &ctx.theme);
-        let normal_style = ctx.theme.get("Normal");
-        let cursor_style = ctx.theme.get("CursorLine");
-        let cursor_screen_row = self.cursor_screen_row(height);
-        let fill_cursor_row = self.selection_highlight || (self.cursor_line && ctx.focused);
-
-        for row in 0..height {
-            let display = rows.get(row as usize);
-            let base_row_style = if fill_cursor_row && cursor_screen_row == Some(row) {
-                cursor_style
-            } else {
-                normal_style
-            };
-            let row_style = match display.and_then(|d| d.decoration.fill_bg) {
-                Some(bg) => Style {
-                    bg: Some(bg),
-                    ..base_row_style
-                },
-                None => base_row_style,
-            };
-            if base_row_style != Style::default() {
-                for col in 0..width {
-                    slice.set(col, row, ' ', base_row_style);
-                }
-            }
-            if let Some(display) = display {
-                let mut col: u16 = 0;
-                for ch in display.text.chars() {
-                    let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
-                    if col.saturating_add(cw) > content_width {
-                        break;
-                    }
-                    slice.set(col, row, ch, row_style);
-                    col = col.saturating_add(cw);
-                }
-            }
-        }
-    }
-
     pub fn render(&self, buf: &Buffer, slice: &mut GridSlice<'_>, ctx: &DrawContext) {
         use unicode_width::UnicodeWidthChar;
 
@@ -3068,27 +3018,6 @@ mod tests {
         assert_eq!(w.scroll_row_total(&buf), 20);
         w.set_virtual_rows(80, 100);
         assert_eq!(w.scroll_row_total(&buf), 100);
-    }
-
-    #[test]
-    fn render_document_paints_only_visible_range() {
-        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
-        buf.set_all_lines(vec![
-            "alpha".into(),
-            "bravo".into(),
-            "charlie".into(),
-            "delta".into(),
-        ]);
-        let mut w = make_win();
-        w.scroll_top = 2;
-        let mut doc = crate::BufferDocument::new(&buf, false);
-        let mut grid = Grid::new(10, 2);
-        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 2));
-        w.render_document(&mut doc, &mut slice, &ctx());
-        assert_eq!(grid.cell(0, 0).symbol, 'c');
-        assert_eq!(grid.cell(6, 0).symbol, 'e');
-        assert_eq!(grid.cell(0, 1).symbol, 'd');
-        assert_eq!(grid.cell(4, 1).symbol, 'a');
     }
 
     #[test]
