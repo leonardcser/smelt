@@ -1421,6 +1421,7 @@ impl Ui {
                 );
             }
         }
+        self.resolve_tail_scrolls();
         let focus = self.focus;
         let active_cursor = self.active_cursor_leaf();
         let cursor_shape = self.cursor_shape;
@@ -4439,6 +4440,65 @@ mod tests {
         park_drag_endpoint_at(&mut ui, win, 0);
         assert!(ui.drag_autoscroll_interval().is_none());
         assert!(!ui.tick_drag_autoscroll());
+    }
+
+    #[test]
+    fn render_reanchors_tail_when_viewport_height_shrinks() {
+        let mut ui = make_ui();
+        ui.set_terminal_size(20, 12);
+        let transcript_buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(buf) = ui.buf_mut(transcript_buf) {
+            buf.set_all_lines((0..50).map(|i| format!("line {i}")).collect());
+        }
+        let prompt_buf = ui.buf_create(BufCreateOpts::default());
+        let transcript = ui
+            .win_open_split(
+                transcript_buf,
+                SplitConfig {
+                    region: "transcript".into(),
+                    gutters: Gutters {
+                        scrollbar: false,
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        let prompt = ui
+            .win_open_split(
+                prompt_buf,
+                SplitConfig {
+                    region: "prompt".into(),
+                    gutters: Gutters {
+                        scrollbar: false,
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::vbox(vec![
+            (Constraint::Fill, LayoutTree::leaf(transcript)),
+            (Constraint::Length(2), LayoutTree::leaf(prompt)),
+        ]));
+
+        let mut out = Vec::new();
+        ui.render(&mut out).unwrap();
+        ui.win_mut(transcript).unwrap().scroll_to_bottom();
+        ui.resolve_tail_scrolls();
+        assert_eq!(ui.win(transcript).unwrap().scroll_top(), 40);
+
+        ui.set_layout(LayoutTree::vbox(vec![
+            (Constraint::Fill, LayoutTree::leaf(transcript)),
+            (Constraint::Length(5), LayoutTree::leaf(prompt)),
+        ]));
+        out.clear();
+        ui.render(&mut out).unwrap();
+
+        let win = ui.win(transcript).unwrap();
+        let viewport = win.viewport.expect("render populates viewport");
+        assert_eq!(viewport.rect.height, 7);
+        assert_eq!(win.scroll_top(), 43);
+        assert_eq!(viewport.scroll_top, 43);
+        assert!(win.is_following_tail());
     }
 
     #[test]

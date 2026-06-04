@@ -444,6 +444,9 @@ impl Window {
 
     pub fn resolve_tail_scroll(&mut self, row: RowIndex) {
         self.scroll_top = row;
+        if let Some(viewport) = self.viewport.as_mut() {
+            viewport.scroll_top = row;
+        }
         self.scroll_state = VerticalScroll::Tail;
     }
 
