@@ -1,0 +1,55 @@
+{
+  "_about": "Readonly transcript vim keys run against a scratch buffer so yanks and motions can share the editable vim implementation. A scratch delete could clamp visual_anchor in scratch-space, then discard the scratch and leave the stored anchor inside a multibyte glyph in the real transcript text.",
+  "_fix": "fix(edit): clamp readonly vim anchors after scratch edits",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": {
+        "variant": 255
+      },
+      "kind": "probe_compaction_prepare_request"
+    },
+    {
+      "kind": "toggle_pane_focus"
+    },
+    {
+      "data": {
+        "variant": 0
+      },
+      "kind": "probe_compaction_prepare_request"
+    },
+    {
+      "data": 47,
+      "kind": "key_shift"
+    },
+    {
+      "kind": "toggle_pane_focus"
+    },
+    {
+      "kind": "toggle_pane_focus"
+    },
+    {
+      "data": 27,
+      "kind": "key_shift"
+    },
+    {
+      "kind": "toggle_pane_focus"
+    },
+    {
+      "kind": "toggle_pane_focus"
+    },
+    {
+      "data": 1,
+      "kind": "key_shift"
+    },
+    {
+      "data": 55,
+      "kind": "key_shift"
+    },
+    {
+      "data": 55,
+      "kind": "key_shift"
+    }
+  ],
+  "vim": true
+}

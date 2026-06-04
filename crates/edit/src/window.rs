@@ -1634,11 +1634,12 @@ impl Window {
         if buf.readonly {
             // Insertion-mode-entering keys (o, O, i, a, ...) run against a
             // scratch built from `buf.text()` and discard the write, but vim
-            // still advances `cpos` past the scratch's appended bytes. Snap
-            // back into the persistent text-space so the cursor stays valid
-            // for follow-up renders and invariant checks.
+            // still advances byte offsets inside the scratch. Snap persistent
+            // offsets back into the real readonly text-space so follow-up
+            // renders and invariant checks see valid anchors.
             let text = buf.text();
             self.cpos = text::snap(&text, self.cpos.min(text.len()));
+            self.vim_state.clamp_visual_anchor(&text);
         } else {
             buf.sync_after_edit(width);
         }
