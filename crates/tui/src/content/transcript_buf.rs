@@ -153,6 +153,7 @@ struct LayoutEntry {
     /// First absolute row of the block, after its leading gap.
     start: RowIndex,
     rows: RowIndex,
+    #[cfg(test)]
     key: LayoutKey,
 }
 
@@ -166,8 +167,11 @@ struct ProjectKey {
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum ProjectionMode {
+    #[cfg(test)]
     Full,
-    Visible { viewport_rows: u16 },
+    Visible {
+        viewport_rows: u16,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -217,8 +221,8 @@ impl ScrollAnchor {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum ScrollTarget {
+    #[cfg(test)]
     /// Materialize the full transcript and scroll to the anchor.
     Full(ScrollAnchor),
     /// Materialize only the visible window around the anchor.
@@ -226,12 +230,12 @@ pub(crate) enum ScrollTarget {
 }
 
 impl ScrollTarget {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn full_row(row: RowIndex) -> Self {
         Self::Full(ScrollAnchor::Row(row))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn full_tail() -> Self {
         Self::Full(ScrollAnchor::Tail)
     }
@@ -246,7 +250,9 @@ impl ScrollTarget {
 
     fn anchor(self) -> ScrollAnchor {
         match self {
-            Self::Full(anchor) | Self::Visible(anchor) => anchor,
+            #[cfg(test)]
+            Self::Full(anchor) => anchor,
+            Self::Visible(anchor) => anchor,
         }
     }
 
@@ -256,11 +262,13 @@ impl ScrollTarget {
 
     fn mode(self, viewport_rows: u16) -> ProjectionMode {
         match self {
+            #[cfg(test)]
             Self::Full(_) => ProjectionMode::Full,
             Self::Visible(_) => ProjectionMode::Visible { viewport_rows },
         }
     }
 
+    #[cfg(test)]
     fn is_full(self) -> bool {
         matches!(self, Self::Full(_))
     }
@@ -268,6 +276,7 @@ impl ScrollTarget {
     fn visible_row_anchor(self) -> Option<RowIndex> {
         match self {
             Self::Visible(anchor) => anchor.row(),
+            #[cfg(test)]
             Self::Full(_) => None,
         }
     }
@@ -275,6 +284,7 @@ impl ScrollTarget {
     fn visible_scroll_top(self) -> Option<RowIndex> {
         match self {
             Self::Visible(anchor) => Some(anchor.as_scroll_top()),
+            #[cfg(test)]
             Self::Full(_) => None,
         }
     }
@@ -343,17 +353,21 @@ impl TranscriptProjection {
         self.visible_layout.iter().map(|e| (e.id, e.start, e.rows))
     }
 
+    fn clear_materialized_state(&mut self) {
+        self.materialized = None;
+        self.visible_layout.clear();
+        self.visible_row_base = 0;
+        self.visible_total_rows = 0;
+        self.cached_rows = None;
+        self.row_index = BlockRowIndex::default();
+    }
+
     fn gc_if_stale(&mut self, gen: u64, width: u16) {
         if width != self.cache_width {
             // Width change invalidates all layouts (wrapping changes).
             self.cache.clear();
             self.cache_width = width;
-            self.materialized = None;
-            self.visible_layout.clear();
-            self.visible_row_base = 0;
-            self.visible_total_rows = 0;
-            self.cached_rows = None;
-            self.row_index = BlockRowIndex::default();
+            self.clear_materialized_state();
         }
         self.cache_generation = gen;
     }
@@ -363,12 +377,7 @@ impl TranscriptProjection {
     /// highlight groups need to be re-resolved against the new palette.
     pub(crate) fn invalidate_theme(&mut self) {
         self.cache.clear();
-        self.materialized = None;
-        self.visible_layout.clear();
-        self.visible_row_base = 0;
-        self.visible_total_rows = 0;
-        self.cached_rows = None;
-        self.row_index = BlockRowIndex::default();
+        self.clear_materialized_state();
     }
 
     fn target_has_projection(&self, key: ProjectKey, buf: &Buffer) -> bool {
@@ -381,6 +390,7 @@ impl TranscriptProjection {
         self.materialized.map(|m| m.key)
     }
 
+    #[cfg(test)]
     fn target_is_last_materialized(&self, buf: &Buffer) -> bool {
         self.materialized
             .is_some_and(|m| m.buf_id == buf.id() && m.changedtick == buf.changedtick())
@@ -433,6 +443,7 @@ impl TranscriptProjection {
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
         self.prepare_row_index(history, width, show_thinking);
         let (first, end) = match scroll_target {
+            #[cfg(test)]
             ScrollTarget::Full(_) => (0, self.row_index.nodes.len()),
             ScrollTarget::Visible(ScrollAnchor::Row(row)) => {
                 let first = resize_anchor
@@ -503,6 +514,7 @@ impl TranscriptProjection {
             }
         }
 
+        #[cfg(test)]
         if plan.scroll_target.is_full() && self.target_has_projection(plan.key, buf) {
             let total_rows = buf.line_count() as RowIndex;
             return MaterializedRows {
@@ -514,6 +526,7 @@ impl TranscriptProjection {
         }
 
         match plan.scroll_target {
+            #[cfg(test)]
             ScrollTarget::Full(_) => self.project_full(buf, history, theme, plan),
             ScrollTarget::Visible(_) => {
                 let mut out = self.project_visible_range(buf, history, theme, &plan);
@@ -535,6 +548,7 @@ impl TranscriptProjection {
         }
     }
 
+    #[cfg(test)]
     fn project_full(
         &mut self,
         buf: &mut Buffer,
@@ -740,6 +754,7 @@ impl TranscriptProjection {
             id,
             start: rows.row_base.saturating_add(local_start),
             rows: block_rows as RowIndex,
+            #[cfg(test)]
             key,
         });
     }
@@ -748,6 +763,7 @@ impl TranscriptProjection {
 
     /// True when all earlier blocks are unchanged and only the last block's
     /// rendered suffix needs replacement.
+    #[cfg(test)]
     fn can_incremental(&self, new_layout: &[LayoutEntry]) -> bool {
         if self.visible_layout.len() != new_layout.len() || self.visible_layout.is_empty() {
             return false;
@@ -771,6 +787,7 @@ impl TranscriptProjection {
     }
 
     /// Replace the last block's rendered suffix. Returns true on success.
+    #[cfg(test)]
     fn apply_incremental(
         &mut self,
         buf: &mut Buffer,
@@ -919,6 +936,7 @@ impl TranscriptProjection {
                 id,
                 start: row,
                 rows: block_rows as RowIndex,
+                #[cfg(test)]
                 key: bkey,
             });
             row = row.saturating_add(block_rows as RowIndex);
@@ -1057,23 +1075,8 @@ impl TranscriptProjection {
         self.row_index
             .rebuild_if_stale(history, width, show_thinking, base_key);
 
-        // The break ending row r is soft iff r+1 has `decoration.soft_wrapped`.
-        struct RowMeta {
-            byte_end: usize,
-            next_soft: bool,
-        }
-        let mut metas: Vec<RowMeta> = Vec::new();
-        let mut pos = 0usize;
-
-        let push_row = |metas: &mut Vec<RowMeta>, byte_end: usize, current_is_soft: bool| {
-            if let Some(prev) = metas.last_mut() {
-                prev.next_soft = current_is_soft;
-            }
-            metas.push(RowMeta {
-                byte_end,
-                next_soft: false,
-            });
-        };
+        let mut row_lengths: Vec<usize> = Vec::new();
+        let mut soft_wrapped: Vec<bool> = Vec::new();
 
         for i in 0..history.order.len() {
             let id = history.order[i];
@@ -1086,33 +1089,16 @@ impl TranscriptProjection {
             self.row_index
                 .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             for _ in 0..gap {
-                push_row(&mut metas, pos, false);
-                pos += 1;
+                row_lengths.push(0);
+                soft_wrapped.push(false);
             }
             for r in 0..block_rows {
-                let line_len = block_buf.get_line(r).unwrap_or("").len();
-                pos += line_len;
-                let current_soft = block_buf.decoration_at(r).soft_wrapped;
-                push_row(&mut metas, pos, current_soft);
-                pos += 1;
+                row_lengths.push(block_buf.get_line(r).unwrap_or("").len());
+                soft_wrapped.push(block_buf.decoration_at(r).soft_wrapped);
             }
         }
         self.row_index.refresh_height_index();
-
-        let mut soft = Vec::new();
-        let mut hard = Vec::new();
-        let last = metas.len().saturating_sub(1);
-        for (i, m) in metas.iter().enumerate() {
-            if i == last {
-                continue;
-            }
-            if m.next_soft {
-                soft.push(m.byte_end);
-            } else {
-                hard.push(m.byte_end);
-            }
-        }
-        (soft, hard)
+        breaks_for_row_lengths(row_lengths, &soft_wrapped)
     }
 }
 
@@ -1120,20 +1106,34 @@ fn breaks_for_materialized_rows(
     rows: &[String],
     soft_wrapped: &[bool],
 ) -> (Vec<usize>, Vec<usize>) {
+    breaks_for_row_lengths(rows.iter().map(|row| row.len()), soft_wrapped)
+}
+
+fn breaks_for_row_lengths(
+    row_lengths: impl IntoIterator<Item = usize>,
+    soft_wrapped: &[bool],
+) -> (Vec<usize>, Vec<usize>) {
     let mut soft = Vec::new();
     let mut hard = Vec::new();
     let mut pos = 0usize;
-    for (i, row) in rows.iter().enumerate().take(rows.len().saturating_sub(1)) {
-        pos += row.len();
+    let mut rows = row_lengths.into_iter().peekable();
+    let mut i = 0usize;
+    while let Some(row_len) = rows.next() {
+        if rows.peek().is_none() {
+            break;
+        }
+        pos += row_len;
         if soft_wrapped.get(i + 1).copied().unwrap_or(false) {
             soft.push(pos);
         } else {
             hard.push(pos);
         }
         pos += 1;
+        i += 1;
     }
     (soft, hard)
 }
+
 fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {
     for span in highlights {
         let meta: SpanMeta = span.meta;
