@@ -638,13 +638,20 @@ impl Ui {
         };
         let leaf_info = self.wins.get(&w).and_then(|win| {
             let scrollable = win.mouse_scroll || win.config.gutters.scrollbar;
-            scrollable.then(|| win.viewport.map(|vp| (win.buf, vp.rect.height)))?
+            scrollable.then(|| {
+                win.viewport
+                    .map(|vp| (win.buf, vp.rect.height, vp.content_width))
+            })?
         });
-        let Some((buf_id, vp_height)) = leaf_info else {
+        let Some((buf_id, vp_height, vp_width)) = leaf_info else {
             return false;
         };
+        if let Some(buf) = self.bufs.get_mut(&buf_id) {
+            buf.ensure_rendered_at(vp_width);
+        }
         let (win, buf) = self.win_and_buf_mut(w, buf_id);
         if let (Some(win), Some(buf)) = (win, buf) {
+            win.ensure_layout(buf, vp_width);
             win.pan_by_lines(buf, delta, vp_height);
             true
         } else {

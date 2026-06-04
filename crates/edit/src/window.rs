@@ -641,7 +641,7 @@ impl Window {
 
     pub fn scroll_row_total(&self, buf: &Buffer) -> RowIndex {
         self.total_rows_override
-            .unwrap_or_else(|| buf.lines().len() as RowIndex)
+            .unwrap_or_else(|| self.visual_row_total(buf))
     }
 
     pub fn max_scroll(&self, buf: &Buffer, viewport_rows: u16) -> RowIndex {
@@ -2563,6 +2563,32 @@ mod tests {
         assert_eq!(w.scroll_top, 0);
         w.pan_by_lines(&buf, -3, viewport);
         assert_eq!(w.scroll_top, 0, "scroll clamps at 0");
+    }
+
+    #[test]
+    fn pan_by_lines_clamps_to_wrapped_visual_bottom() {
+        let mut w = make_win();
+        w.wrap = true;
+        w.wrap_cursor_padding = true;
+        let rows: Vec<String> = (0..20).map(|_| "abcdef".to_string()).collect();
+        let buf = make_buf(rows);
+        let width = 3;
+        let viewport = 5;
+        w.ensure_layout(&buf, width);
+        let total_visual_rows = w.layout().visual_count() as RowIndex;
+        assert!(
+            total_visual_rows > buf.line_count() as RowIndex,
+            "test input must wrap to more visual rows than logical rows"
+        );
+
+        w.jump_to_line_col(&buf, 0, 0, viewport);
+        w.pan_by_lines(&buf, 1000, viewport);
+
+        assert_eq!(
+            w.scroll_top,
+            total_visual_rows.saturating_sub(viewport as RowIndex),
+            "wheel/scrollbar panning must clamp against wrapped visual rows"
+        );
     }
 
     #[test]
