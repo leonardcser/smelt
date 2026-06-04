@@ -4,22 +4,36 @@
 
 Consolidate the transcript rendering stack without losing behavior or performance, while extracting the generic virtualization substrate that should also work for future large buffers/files. The first concrete target is virtualized transcripts: long sessions should render only the rows needed for the current viewport and bounded range APIs.
 
-The broad direction is “generic materialized windows, source-specific materializers”. `Window` should own viewport, scroll state, row-base math, cursor/selection rendering, and scrollbar totals. A content source such as transcript, picker, or a future large-file buffer should own how to produce a materialized `Buffer` slice for a requested absolute row range. The current `Document` abstraction is unused and incomplete, so remove it rather than building on it.
+The broad direction is “generic materialized windows, source-specific materializers”. `Window` owns viewport, scroll state, row-base math, cursor/selection rendering, and scrollbar totals. A content source such as transcript, picker, or a future large-file buffer owns how to produce a materialized `Buffer` slice for a requested absolute row range. The old `Document` abstraction was unused and incomplete, so it has been removed rather than extended.
+
+## Implementation Status
+
+Completed on `transcript-abstractions-plan`:
+
+- Removed the unused `Document` abstraction and moved the surviving shared row primitives into `crates/edit/src/row.rs`.
+- Added generic materialized-window primitives: `MaterializedRows`, `MaterializeRequest`, `Window::apply_materialized_rows`, and the pre-paint `Ui::render_with_paints_prepared` seam.
+- Replaced transcript-specific projection output wrappers with the generic materialized-row metadata.
+- Renamed transcript-private document terminology to `BlockRowIndex` / `BlockRow`.
+- Made transcript range APIs range-native: bounded row requests no longer full-materialize the transcript, and range-local soft/hard break offsets are preserved.
+- Switched normal transcript frames to visible projection by default.
+- Kept mouse selection/copy buffer-local; while a transcript mouse drag is captured, projection is frozen so streaming appends do not invalidate the selected buffer slice.
+- Kept full projection as an explicit internal/test compatibility path, not the normal production frame path.
+- Deferred Lua per-block/window rendering while preserving the materialization seams it will need later.
 
 ## Code Audit Summary
 
 Important existing seams to build on:
 
-- `Document`, `DocPos`, `ViewAnchor`, `BufferDocument`, and `Window::render_document` exist, but repo-wide grep shows no production callers beyond exports and their own unit test. They look like an unfinished performance experiment, not the active abstraction. Remove this code rather than route transcript work through it.
-- `RowIndex` and `row_to_usize` are real shared row primitives currently housed in `document.rs`; move them to a dedicated `crates/edit/src/row.rs` module before deleting the rest of `document.rs`. Re-export them from `smelt_edit` so callers can use `smelt_edit::RowIndex` and `smelt_edit::row_to_usize` without reaching through a document namespace.
-- `Window::render_document` is much simpler than `Window::render`: it currently paints text and row fill only. It does not cover gutters, highlights, virtual text, selections, horizontal scroll, wrapping parity, cursor handling, or copy/selection behavior.
+- `Document`, `DocPos`, `ViewAnchor`, `BufferDocument`, `DisplayRow`, and `Window::render_document` were unused in production and have been removed. The active performance path is materialized buffers feeding `Window::render`, not a parallel document renderer.
+- `RowIndex` and `row_to_usize` are real shared row primitives and now live in `crates/edit/src/row.rs`. They are re-exported as `smelt_edit::RowIndex` and `smelt_edit::row_to_usize` without a document namespace.
+- `Window::render` remains the single production window renderer. The removed document renderer did not cover gutters, highlights, virtual text, selections, horizontal scroll, wrapping parity, cursor handling, or copy/selection behavior.
 - `Window` already has the important virtualization state: `row_base`, `total_rows_override`, `set_materialized_rows`, `local_row`, `absolute_row`, and scroll totals. `scroll_top` is absolute; cursor rows and byte offsets are local to the materialized backing buffer.
 - `materialized_row_range` already exists and picker already uses it with `Window::set_materialized_rows`. That is the generic fixed-height virtualization precedent.
-- `UiHost` exposes text-only compatibility APIs: `rows_for_range`, `breaks_for_range`, and `visible_range`. The default range APIs intentionally fall back to full materialization. Transcript overrides currently still full-materialize for rows and lose soft-wrap information for range breaks.
+- `UiHost` exposes text-only compatibility APIs: `rows_for_range`, `breaks_for_range`, and `visible_range`. The default range APIs intentionally fall back to full materialization, while transcript overrides now use bounded range materialization and preserve soft-wrap information for range breaks.
 - `BufferParser` is a full-source render hook: it rebuilds a buffer's `lines` from `source` for a width. It is not the right virtualization seam for huge files or transcripts. In a virtualized window, the backing `Buffer` should be treated as a materialized row cache, not necessarily as the full source of truth.
-- `Ui::render_with_paints` prepares all windows by calling `Buffer::ensure_rendered_at`, `Window::ensure_layout`, and then `Window::render`. There is no generic pre-paint materialization hook today; transcript has a bespoke `sync_transcript_layer` before render, and picker materializes during picker sync.
-- The normal transcript frame path still projects the full transcript: `render_loop.rs` chooses `ScrollTarget::full_tail()` or `full_row(...)` before `sync_transcript_layer`.
-- Visible transcript projection exists and can reuse a previously materialized slice when the requested viewport stays inside it, but it is not the default frame path.
+- `Ui::render_with_paints_prepared` resolves split/overlay geometry, exposes a pre-paint `MaterializeRequest`, then continues through `Buffer::ensure_rendered_at`, `Window::ensure_layout`, and `Window::render`. Transcript currently uses bespoke sync before render; the generic seam is in place for other virtualized windows.
+- The normal transcript frame path now uses visible projection: tail-follow requests `ScrollTarget::visible_tail()`, and pinned scrolling requests `ScrollTarget::visible_row(...)`.
+- Visible transcript projection reuses a previously materialized slice when the requested viewport stays inside it; it is now the default frame path.
 - Mouse selection for transcript intentionally uses the currently projected buffer and projected-buffer breaks, not full transcript breaks. This avoids stale byte offsets and must not be simplified away.
 - `BufferCopy`, `Buffer::copy_range`, and `Buffer::extract_text` already exist. Transcript copy is not the only copy seam; it is a richer copier layered on generic buffer metadata.
 - Tool blocks already use the safe Lua pre-pass pattern: run Lua on the main thread, convert to owned render data, then allow worker layout to consume only owned data.
@@ -33,10 +47,12 @@ Important existing seams to build on:
 - Move only demonstrably generic behavior into `smelt_edit`/`smelt_buffer`: row primitives, materialized-row math, window coordinate conversion, and safe row metadata copying.
 - Keep variable-height indexing source-specific until a second production surface needs it. Transcript can own block-height indexing; a future large-file buffer may be fixed-height and should not pay for transcript's block model.
 - Do not call Lua from worker threads. Lua block/window rendering is deferred, but future cache/invalidation requirements should influence the materialization API shape.
-- Preserve selection, Vim, mouse, copy, scrollbar, tail-follow, resize anchoring, tool rendering, and Lua compatibility before switching the normal transcript frame to visible-only projection.
+- Preserve selection, Vim, mouse, copy, scrollbar, tail-follow, resize anchoring, tool rendering, and Lua compatibility after switching the normal transcript frame to visible-only projection.
 - Treat byte offsets in a visible projection as local to the materialized slice. Never mix those offsets with full-transcript row/break data.
 
 ## Phase 0 — Freeze behavior and remove the unused document experiment
+
+Status: complete. `RowIndex` and `row_to_usize` now live in `crates/edit/src/row.rs`; `Document`, `DocPos`, `ViewAnchor`, `BufferDocument`, `DisplayRow`, `Window::render_document`, and `crates/edit/src/document.rs` have been removed.
 
 ### 0.1 Add focused regression tests before refactoring
 
@@ -68,6 +84,8 @@ Action:
 Do not sacrifice performance when removing it. The replacement performance path is not “render less through `Document`”; it is “render less through source-specific materializers feeding generic materialized windows”.
 
 ## Phase 1 — Generic materialized-window substrate
+
+Status: complete. `MaterializedRows` and `MaterializeRequest` live in `smelt_edit::row`, are re-exported at the crate root, and are applied through `Window::apply_materialized_rows`. `Ui::render_with_paints_prepared` provides the generic pre-paint materialization callback.
 
 ### 1.1 Keep row primitives and materialized-row helpers in one generic module
 
@@ -149,6 +167,8 @@ A future document-driven rewrite is acceptable only if it deletes the display-bu
 
 ## Phase 2 — Transcript as the first robust virtual source
 
+Status: complete for the consolidation scope. Transcript projection now returns generic `MaterializedRows`, uses private `BlockRowIndex` terminology, and has range-native `rows_for_range` / break materialization that preserves soft and hard breaks relative to the returned range text.
+
 ### 2.1 Collapse duplicate projection output types
 
 `TranscriptData` in `crates/tui/src/app/transcript.rs` and `ProjectOutput` in `crates/tui/src/content/transcript_buf.rs` carry the same row-window fields. Remove the wrapper and return/apply the generic `MaterializedRows` type from Phase 1. Map transcript's current `projected_rows` field to generic `materialized_rows` at the boundary; do not keep transcript terminology in the generic type.
@@ -218,6 +238,8 @@ Important edge case: range-local byte positions are not full-transcript byte pos
 
 ## Phase 3 — Copy and selection consolidation without breaking transcript semantics
 
+Status: partially complete by preservation rather than rewrite. Transcript copy policy remains in `TranscriptCopier`, and mouse selection remains tied to the currently materialized buffer. The visible-projection switch added one important guard: during an active transcript mouse drag, projection is frozen so streaming appends cannot rematerialize the backing buffer and invalidate buffer-local selection offsets.
+
 ### 3.1 Do not replace `TranscriptCopier` with `Buffer::extract_text` in one step
 
 `Buffer::extract_text` already handles unselectable spans and `copy_as`, but transcript copy additionally:
@@ -269,7 +291,9 @@ Make the call site explicit: visible-frame projection is for painting and local 
 
 ## Phase 4 — Enable visible transcript projection by default
 
-Switch the normal render loop from full projection to visible projection only after Phases 1-3 are in place.
+Status: complete for normal frames. The render loop now requests visible transcript projection for both tail-follow and pinned-scroll frames. Full projection remains available as an explicit internal/test compatibility path.
+
+The normal render loop now uses visible projection after Phases 1-3 established the generic materialization substrate, range-native transcript APIs, and buffer-local selection/copy behavior.
 
 Conceptual render-loop change:
 
@@ -281,7 +305,7 @@ let transcript_scroll_target = if self.ui.should_follow_tail(TRANSCRIPT_WIN) {
 };
 ```
 
-Preconditions:
+Implemented preconditions and remaining considerations:
 
 - `UiHost::rows_for_range` and `breaks_for_range` are range-native and preserve soft breaks.
 - Full-transcript operations have explicit full/range paths.
@@ -378,8 +402,8 @@ Add or update tests around:
    - `BufferParser` remains a full-buffer parser, not the virtualization hook.
 
 3. Full-transcript behavior must be explicit after visible projection.
-   - Audit Vim motions/text objects, yank/copy ranges, `blocks()`, and `block_at_row(row)` before switching defaults.
    - Frame rendering and visible plugins should use visible/range APIs.
+   - Full compatibility APIs such as `blocks()` and internal full projection remain explicit paths rather than side effects of normal frame rendering.
 
 4. `smelt.transcript.blocks()` remains exact and full-materializing for compatibility.
    - `visible_blocks()` remains the frame-local API.
@@ -390,3 +414,6 @@ Add or update tests around:
 
 6. Lua renderers should not mutate transcript buffers directly.
    - Declarative output is safer for caching, threading, and invalidation.
+
+7. Transcript mouse selection remains buffer-local under visible projection.
+   - During active transcript drags, projection is frozen to preserve the clicked slice while streaming appends continue.

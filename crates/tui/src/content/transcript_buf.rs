@@ -697,7 +697,7 @@ impl TranscriptProjection {
             clamped_scroll,
             row_base,
             total_rows,
-            materialized_rows: materialized_rows,
+            materialized_rows,
         }
     }
 
@@ -1123,8 +1123,8 @@ fn breaks_for_materialized_rows(
     let mut soft = Vec::new();
     let mut hard = Vec::new();
     let mut pos = 0usize;
-    for i in 0..rows.len().saturating_sub(1) {
-        pos += rows[i].len();
+    for (i, row) in rows.iter().enumerate().take(rows.len().saturating_sub(1)) {
+        pos += row.len();
         if soft_wrapped.get(i + 1).copied().unwrap_or(false) {
             soft.push(pos);
         } else {
