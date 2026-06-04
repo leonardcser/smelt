@@ -8,6 +8,17 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+struct PreparedTurn {
+    content: Content,
+    model: String,
+    reasoning_effort: protocol::ReasoningEffort,
+    api_base: String,
+    api_key: String,
+    model_config_overrides: Option<protocol::ModelConfigOverrides>,
+    permission_overrides: Option<protocol::PermissionOverrides>,
+    permissions: std::sync::Arc<smelt_core::permissions::Permissions>,
+}
+
 impl TuiApp {
     /// Send a permission decision to the local engine.
     pub(crate) fn send_permission_decision(
@@ -43,13 +54,29 @@ impl TuiApp {
         (system_prompt, tools)
     }
 
+    fn prepare_user_visible_turn(&mut self) {
+        self.clear_prompt_prediction();
+        self.sleep_inhibit.acquire();
+        self.begin_turn();
+    }
+
+    fn publish_turn_input(&mut self, submitted: Option<String>) {
+        match submitted {
+            Some(text) if !text.is_empty() => self.publish_input_submit(text),
+            _ => self.invalidate_prompt_prediction(),
+        }
+    }
+
     pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         let _perf = smelt_perf::perf::begin("agent:begin_turn");
-        self.sleep_inhibit.acquire();
-        self.clear_prompt_prediction();
-        self.begin_turn();
-        self.show_user_message(display, content.image_labels());
         let text = content.text_content();
+        let submitted = match text.trim() {
+            "" => None,
+            trimmed => Some(trimmed.to_string()),
+        };
+        self.publish_turn_input(submitted);
+        self.prepare_user_visible_turn();
+        self.show_user_message(display, content.image_labels());
         if self.core.session.first_user_message.is_none() {
             self.core.session.first_user_message = Some(text.clone().into_owned());
         }
@@ -76,6 +103,19 @@ impl TuiApp {
             };
         };
 
+        self.dispatch_prepared_turn(PreparedTurn {
+            content,
+            model: self.core.config.model.clone(),
+            reasoning_effort: self.core.config.reasoning_effort,
+            api_base: self.core.config.api_base.clone(),
+            api_key,
+            model_config_overrides: None,
+            permission_overrides: None,
+            permissions: self.core.permissions.clone(),
+        })
+    }
+
+    fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> TurnState {
         {
             self.working.begin(TurnPhase::Working);
         };
@@ -90,21 +130,22 @@ impl TuiApp {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
+        let permissions = turn.permissions.clone();
         self.core
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
-                content,
+                content: turn.content,
                 mode: self.core.config.mode.clone(),
-                model: self.core.config.model.clone(),
-                reasoning_effort: self.core.config.reasoning_effort,
+                model: turn.model,
+                reasoning_effort: turn.reasoning_effort,
                 history: self.model_history(),
-                api_base: Some(self.core.config.api_base.clone()),
-                api_key: Some(api_key),
+                api_base: Some(turn.api_base),
+                api_key: Some(turn.api_key),
                 session_id: self.core.session.id.clone(),
                 session_dir: smelt_core::session::dir_for(&self.core.session),
-                model_config_overrides: None,
-                permission_overrides: None,
+                model_config_overrides: turn.model_config_overrides,
+                permission_overrides: turn.permission_overrides,
                 system_prompt: Some(system_prompt),
                 tools,
             })));
@@ -112,15 +153,14 @@ impl TuiApp {
         TurnState {
             turn_id,
             pending: Vec::new(),
-            permissions: self.core.permissions.clone(),
+            permissions,
             _perf: smelt_perf::perf::begin("agent:turn"),
         }
     }
 
     pub(crate) fn begin_process_status_turn(&mut self, note: String) -> TurnState {
-        self.sleep_inhibit.acquire();
-        self.clear_prompt_prediction();
-        self.begin_turn();
+        self.invalidate_prompt_prediction();
+        self.prepare_user_visible_turn();
         self.push_block(Block::ProcessStatus { text: note.clone() });
         let history_note = protocol::HistoryNote::process_status(note.clone());
         let model_text = history_note.to_model_text();
@@ -145,6 +185,12 @@ impl TuiApp {
             cmd.body.clone()
         };
         let display = format!("/{}", cmd.display);
+        let submitted = match evaluated.trim() {
+            "" => None,
+            trimmed => Some(trimmed.to_string()),
+        };
+        self.publish_turn_input(submitted);
+        self.prepare_user_visible_turn();
 
         if !evaluated.is_empty() {
             // Publish the expanded command body to session observers before dispatch;
@@ -270,46 +316,21 @@ impl TuiApp {
             .map(|overrides| std::sync::Arc::new(self.core.permissions.with_overrides(overrides)))
             .unwrap_or_else(|| self.core.permissions.clone());
 
-        self.sleep_inhibit.acquire();
-        self.begin_turn();
         self.show_user_message(&display, vec![]);
         if self.core.session.first_user_message.is_none() {
             self.core.session.first_user_message = Some(display.clone());
         }
-        {
-            self.working.begin(TurnPhase::Working);
-        };
 
-        let (system_prompt, tools) = self.prepare_turn_context();
-
-        let turn_id = self.next_turn_id;
-        self.next_turn_id += 1;
-
-        self.core
-            .engine
-            .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
-                turn_id,
-                content: Content::text(evaluated),
-                mode: self.core.config.mode.clone(),
-                model,
-                reasoning_effort: reasoning,
-                history: self.model_history(),
-                api_base: Some(api_base),
-                api_key: Some(api_key),
-                session_id: self.core.session.id.clone(),
-                session_dir: smelt_core::session::dir_for(&self.core.session),
-                model_config_overrides,
-                permission_overrides,
-                system_prompt: Some(system_prompt),
-                tools,
-            })));
-
-        TurnState {
-            turn_id,
-            pending: Vec::new(),
+        self.dispatch_prepared_turn(PreparedTurn {
+            content: Content::text(evaluated),
+            model,
+            reasoning_effort: reasoning,
+            api_base,
+            api_key,
+            model_config_overrides,
+            permission_overrides,
             permissions,
-            _perf: smelt_perf::perf::begin("agent:turn"),
-        }
+        })
     }
 
     /// Stop the engine turn without saving session or triggering auto-compact; used before rewind/clear.

@@ -82,6 +82,7 @@ pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
         ParsedCommand::Slash { name, arg } => (name.to_string(), arg.map(str::to_string)),
         ParsedCommand::Empty | ParsedCommand::Bare { .. } => return CommandAction::Continue,
     };
+    let next_turn_id = app.next_turn_id;
     app.core
         .cells
         .set_dyn("cmd_pre", std::rc::Rc::new(name.clone()));
@@ -92,6 +93,9 @@ pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
     app.core.cells.set_dyn("cmd_post", std::rc::Rc::new(name));
     app.drain_cells_pending();
     app.flush_lua_callbacks();
+    if app.next_turn_id == next_turn_id {
+        app.invalidate_prompt_prediction();
+    }
     CommandAction::Continue
 }
 
@@ -170,11 +174,7 @@ impl TuiApp {
             return None;
         }
         self.start_exec(cmd.to_string());
-        self.bump_epoch("input_epoch");
-        self.core
-            .cells
-            .set_dyn("input_submit", std::rc::Rc::new(format!("!{cmd}")));
-        self.pump_lua();
+        self.publish_input_submit(format!("!{cmd}"));
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let kill = std::sync::Arc::new(tokio::sync::Notify::new());

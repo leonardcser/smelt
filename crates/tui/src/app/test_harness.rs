@@ -2450,6 +2450,41 @@ mod tests {
     }
 
     #[test]
+    fn stale_prompt_prediction_response_after_custom_command_is_ignored() {
+        let mut app = TestApp::builder().build();
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text(
+                "How should I debug this failing test?",
+            )));
+
+        publish_turn_end(&mut app);
+        let ask_ids = engine_ask_ids(app.drain_engine_sends());
+        assert_eq!(
+            ask_ids.len(),
+            1,
+            "prediction should issue one background ask"
+        );
+        let prediction_id = ask_ids[0];
+
+        let cmd = smelt_core::custom_commands::CustomCommand {
+            name: "fuzz-custom".to_string(),
+            display: "fuzz-custom".to_string(),
+            body: "Run the focused test first".to_string(),
+            overrides: smelt_core::custom_commands::CommandOverrides::default(),
+        };
+        let turn = app.app.begin_custom_command_turn(cmd);
+        app.app.agent = Some(turn);
+
+        respond_ask_with_text(&mut app, prediction_id, "Run cargo test");
+
+        let prompt = app.app.well_known.prompt;
+        assert_eq!(app.app.placeholder_text(prompt), None);
+    }
+
+    #[test]
     fn stale_title_response_after_reset_is_ignored() {
         let mut app = TestApp::builder().build();
         let original_session_id = app.app.core.session.id.clone();

@@ -439,6 +439,21 @@ impl TuiApp {
         self.clear_placeholder(self.well_known.prompt);
     }
 
+    pub(crate) fn invalidate_prompt_prediction(&mut self) {
+        self.clear_prompt_prediction();
+        self.bump_epoch("input_epoch");
+    }
+
+    pub(crate) fn publish_input_submit(&mut self, submitted: String) {
+        self.invalidate_prompt_prediction();
+        if !submitted.is_empty() {
+            self.core
+                .cells
+                .set_dyn("input_submit", std::rc::Rc::new(submitted));
+        }
+        self.pump_lua();
+    }
+
     pub(crate) fn bump_epoch(&mut self, name: &str) {
         let next = self
             .core
