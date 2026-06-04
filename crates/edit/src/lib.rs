@@ -68,7 +68,7 @@ pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use vim::VimMode;
 pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, CursorShape, DrawContext, EventCtx,
-    MouseCtx, ScrollbarState, SplitConfig, Window, WindowViewport,
+    MouseCtx, ScrollbarState, SplitConfig, VerticalScroll, Window, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.
@@ -207,7 +207,7 @@ impl Ui {
             .map(|w| {
                 self.wins
                     .get(w)
-                    .map(|win| (win.scroll_top, win.scroll_left))
+                    .map(|win| (win.scroll_top(), win.scroll_left))
                     .unwrap_or((0, 0))
             })
             .collect();
@@ -252,7 +252,7 @@ impl Ui {
                 .map(|w| {
                     self.wins
                         .get(w)
-                        .map(|win| (win.scroll_top, win.scroll_left))
+                        .map(|win| (win.scroll_top(), win.scroll_left))
                         .unwrap_or((0, 0))
                 })
                 .collect();
@@ -266,7 +266,7 @@ impl Ui {
                 if let Some(w) = self.wins.get_mut(wid) {
                     if let Some(t) = v_target {
                         if now[i].0 != t {
-                            w.scroll_top = t;
+                            w.pin_scroll(t);
                         }
                     }
                     if let Some(t) = h_target {
@@ -1244,7 +1244,7 @@ impl Ui {
         let buf = self.bufs.get(&win.buf)?;
         let screen_row = win
             .effective_cursor_row(buf)
-            .checked_sub(win.scroll_top)
+            .checked_sub(win.scroll_top())
             .filter(|r| *r < viewport_h as RowIndex)?;
         let delta = if screen_row == 0 {
             -1
@@ -1344,7 +1344,7 @@ impl Ui {
                             *leaf_rect,
                             content_width,
                             total_rows,
-                            win.scroll_top,
+                            win.scroll_top(),
                             scrollbar,
                         )
                         .with_gutter_width(gutter_width),
@@ -1414,7 +1414,7 @@ impl Ui {
                         *rect,
                         content_width,
                         total_rows,
-                        win.scroll_top,
+                        win.scroll_top(),
                         scrollbar,
                     )
                     .with_gutter_width(gutter_width),
@@ -1949,39 +1949,29 @@ impl Ui {
         Status::Consumed
     }
 
-    /// Whether `win`'s tail-follow should fire this frame: opted in, not frozen
-    /// by a selection / Visual mode, and not the target of an in-flight mouse
-    /// drag on this same window.
+    /// Whether `win`'s tail-follow should fire this frame: tail mode is active,
+    /// there is no active selection, and the same window is not under a mouse drag.
     pub fn should_follow_tail(&self, win: WinId) -> bool {
         let Some(w) = self.wins.get(&win) else {
             return false;
         };
-        if !w.follow_tail || w.tail_follow_frozen() {
+        if !w.is_following_tail() || w.selection_active() {
             return false;
         }
         !matches!(self.capture, Some(HitTarget::Window(d)) if d == win)
     }
 
-    /// Pin `scroll_top` to the tail for every window where
-    /// [`Self::should_follow_tail`] holds. Buffers rebuilt later in the frame
-    /// should resolve tail-follow against their rebuilt row count rather than
-    /// relying on this pre-projection clamp.
-    ///
-    /// The cursor's screen-row offset is preserved so it stays visually fixed
-    /// relative to the viewport instead of drifting with the auto-scroll.
-    pub fn apply_tail_follow(&mut self) {
+    /// Resolve tail-follow windows against their current row count. This is a
+    /// viewport operation only: it never rewrites cursor or selection endpoints.
+    pub fn resolve_tail_scrolls(&mut self) {
         let ids: Vec<WinId> = self.wins.keys().copied().collect();
         for id in ids {
             if !self.should_follow_tail(id) {
                 continue;
             }
-            let (buf_id, viewport_rows, cursor_screen_row) = {
+            let (buf_id, viewport_rows) = {
                 let win = self.wins.get(&id).expect("win exists");
-                (
-                    win.buf,
-                    win.viewport.map(|v| v.rect.height).unwrap_or(0),
-                    win.cursor_screen_row_in_viewport(),
-                )
+                (win.buf, win.viewport.map(|v| v.rect.height).unwrap_or(0))
             };
             let total_rows = match (self.bufs.get(&buf_id), self.wins.get(&id)) {
                 (Some(buf), Some(win)) => win.scroll_row_total(buf),
@@ -1989,14 +1979,7 @@ impl Ui {
             };
             let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
             if let Some(w) = self.wins.get_mut(&id) {
-                w.scroll_top = max_scroll;
-            }
-            if let Some(screen_row) = cursor_screen_row {
-                if let Some(buf) = self.bufs.get(&buf_id) {
-                    if let Some(win) = self.wins.get_mut(&id) {
-                        win.restore_cursor_screen_row(buf, screen_row);
-                    }
-                }
+                w.resolve_tail_scroll(max_scroll);
             }
         }
     }
@@ -2009,14 +1992,14 @@ impl Ui {
     }
 
     /// Fire `WinEvent::Scrolled` on every subscribed window whose
-    /// `(scroll_top, follow_tail)` changed since the last emission.
+    /// `(scroll_top, tail-follow)` changed since the last emission.
     pub fn dispatch_scroll_events(&mut self, lua_invoke: &mut LuaInvoke) {
         let wins: Vec<WinId> = self.callbacks.wins_with_event(WinEvent::Scrolled);
         for win in wins {
             let Some(w) = self.wins.get_mut(&win) else {
                 continue;
             };
-            let cur = (w.scroll_top, w.follow_tail);
+            let cur = (w.scroll_top(), w.is_following_tail());
             if w.last_emitted_scroll == Some(cur) {
                 continue;
             }
@@ -3831,14 +3814,14 @@ mod tests {
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
         assert_eq!(ui.focus(), Some(win), "modal focused first leaf");
-        assert_eq!(ui.win(win).unwrap().scroll_top, 0, "starts at top");
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 0, "starts at top");
         // Wheel-down over a cell inside the leaf rect (centered overlay puts
         // the leaf at left=20..60, top=7..17 on a 80x24 terminal).
         let scroll = mouse_event(crossterm::event::MouseEventKind::ScrollDown, 10, 30);
         let status = ui.dispatch_event(scroll, &mut |_, _, _| {});
         assert_eq!(status, Status::Consumed);
         assert!(
-            ui.win(win).unwrap().scroll_top > 0,
+            ui.win(win).unwrap().scroll_top() > 0,
             "wheel must advance scroll_top via pan_by_lines"
         );
     }
@@ -4223,7 +4206,7 @@ mod tests {
         assert_eq!(status, Status::Consumed);
         assert_eq!(ui.capture(), Some(HitTarget::Scrollbar { owner: win }));
         // Bottom row click → bar snaps to max scroll (90 = total - viewport).
-        assert_eq!(ui.win(win).unwrap().scroll_top, 90);
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 90);
     }
 
     #[test]
@@ -4241,7 +4224,7 @@ mod tests {
         // Capture survives the drag.
         assert_eq!(ui.capture(), Some(HitTarget::Scrollbar { owner: win }));
         // Mid-track drag advances scroll past zero.
-        assert!(ui.win(win).unwrap().scroll_top > 0);
+        assert!(ui.win(win).unwrap().scroll_top() > 0);
     }
 
     #[test]
@@ -4408,10 +4391,10 @@ mod tests {
         assert!(!ui.tick_drag_autoscroll());
 
         // Scroll into the buffer and re-park at viewport top: now it pans.
-        ui.win_mut(win).unwrap().scroll_top = 5;
+        ui.win_mut(win).unwrap().pin_scroll(5);
         park_drag_endpoint_at(&mut ui, win, 5);
         assert!(ui.tick_drag_autoscroll());
-        assert_eq!(ui.win(win).unwrap().scroll_top, 4);
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 4);
     }
 
     #[test]
@@ -4423,7 +4406,7 @@ mod tests {
         park_drag_endpoint_at(&mut ui, win, 9);
         assert!(ui.drag_autoscroll_interval().is_some());
         assert!(ui.tick_drag_autoscroll());
-        assert_eq!(ui.win(win).unwrap().scroll_top, 1);
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 1);
     }
 
     #[test]
@@ -4459,7 +4442,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_tail_follow_respects_frozen() {
+    fn resolve_tail_scrolls_respects_frozen() {
         let mut ui = make_ui();
         let buf = ui.buf_create(BufCreateOpts::default());
         if let Some(b) = ui.buf_mut(buf) {
@@ -4482,36 +4465,41 @@ mod tests {
         let bar = window::ScrollbarState::new(19, 50, 10).unwrap();
         ui.win_mut(win).unwrap().viewport =
             Some(window::WindowViewport::new(rect, 19, 50, 0, Some(bar)));
-        // Start at top with follow_tail enabled.
-        ui.win_mut(win).unwrap().scroll_top = 0;
-        ui.win_mut(win).unwrap().follow_tail = true;
-        // Without frozen, apply_tail_follow snaps to bottom (scroll_top = 40).
-        ui.apply_tail_follow();
+        // Start at top in tail-follow mode.
+        ui.win_mut(win).unwrap().pin_scroll(0);
+        ui.win_mut(win).unwrap().scroll_to_bottom();
+        ui.resolve_tail_scrolls();
         assert_eq!(
-            ui.win(win).unwrap().scroll_top,
+            ui.win(win).unwrap().scroll_top(),
             40,
-            "follow_tail snaps to bottom"
+            "tail-follow snaps to bottom"
         );
 
-        // Move back to top and freeze with a selection anchor.
-        ui.win_mut(win).unwrap().scroll_top = 0;
-        ui.win_mut(win).unwrap().follow_tail = true;
-        ui.win_mut(win).unwrap().selection_anchor = Some(5);
-        ui.apply_tail_follow();
+        // Move back to top and pin with a selection anchor.
+        {
+            let w = ui.win_mut(win).unwrap();
+            w.pin_scroll(0);
+            w.selection_anchor = Some(5);
+        }
+        ui.resolve_tail_scrolls();
         assert_eq!(
-            ui.win(win).unwrap().scroll_top,
+            ui.win(win).unwrap().scroll_top(),
             0,
-            "frozen by selection → scroll stays put"
+            "selection pins scroll in place"
         );
 
-        // Unfreeze and verify follow resumes.
+        // Clearing the selection leaves the window pinned until tail is requested again.
         ui.win_mut(win).unwrap().selection_anchor = None;
-        ui.apply_tail_follow();
+        ui.resolve_tail_scrolls();
         assert_eq!(
-            ui.win(win).unwrap().scroll_top,
-            40,
-            "unfrozen → snaps to bottom again"
+            ui.win(win).unwrap().scroll_top(),
+            0,
+            "clearing selection does not implicitly re-tail"
         );
+
+        ui.win_mut(win).unwrap().scroll_to_bottom();
+        ui.resolve_tail_scrolls();
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 40);
     }
 
     #[test]
@@ -4521,15 +4509,15 @@ mod tests {
         // 100 rows, 10-row viewport → max_scroll = 90.
         // Click at row 0 (top of scrollbar) → scroll_top = 0.
         ui.apply_scrollbar_drag(win, 0);
-        assert_eq!(ui.win(win).unwrap().scroll_top, 0);
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 0);
 
         // Click at row 9 (bottom of scrollbar) → scroll_top = max_scroll = 90.
         ui.apply_scrollbar_drag(win, 9);
-        assert_eq!(ui.win(win).unwrap().scroll_top, 90);
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 90);
 
         // Click in the middle (row 4) → somewhere near middle of scroll range.
         ui.apply_scrollbar_drag(win, 4);
-        let scroll = ui.win(win).unwrap().scroll_top;
+        let scroll = ui.win(win).unwrap().scroll_top();
         assert!(
             scroll > 0 && scroll < 90,
             "mid-thumb maps to mid-scroll: got {scroll}"
@@ -4592,7 +4580,7 @@ mod tests {
         // At width 40 each line still fits on one row ("line N" < 40 chars),
         // so visual row should still be 50.
         assert_eq!(
-            ui.win(win).unwrap().scroll_top,
+            ui.win(win).unwrap().scroll_top(),
             50,
             "anchor restored same logical row after resize"
         );

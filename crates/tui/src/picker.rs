@@ -254,7 +254,7 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
     state.selected = clamp_selected(selected, total);
     let height = picker_height(total, state.max_rows);
     let selected_visual = visual_cursor(state.selected, total, state.reversed);
-    let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
+    let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top()).unwrap_or(0);
     let scroll = match anchor {
         SyncAnchor::Selected => {
             crate::smelt_edit::scroll_to_show(prev_scroll, selected_visual, height)
@@ -285,7 +285,7 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
         );
         let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
         if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
-            w.scroll_top = scroll;
+            w.pin_scroll(scroll);
             w.set_materialized_rows(
                 range.start,
                 range.end.saturating_sub(range.start),

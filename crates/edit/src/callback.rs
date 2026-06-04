@@ -106,7 +106,7 @@ pub enum Payload {
         col: u16,
         button: MouseButton,
     },
-    /// Scroll state changed. `top` is the new `scroll_top`; `follow` is `follow_tail`.
+    /// Scroll state changed. `top` is the new `scroll_top`; `follow` is tail mode.
     Scroll {
         top: RowIndex,
         follow: bool,

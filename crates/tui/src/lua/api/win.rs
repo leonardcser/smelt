@@ -391,8 +391,8 @@ impl mlua::UserData for LuaWin {
 
         // ── scroll: get / set / pin-to-tail ────────────────────────
         // `win:scroll()` returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom }`.
-        // `win:scroll(integer)` sets `scroll_top` and clears `follow_tail`.
-        // `win:scroll("tail")` re-pins (`follow_tail = true`).
+        // `win:scroll(integer)` pins the viewport at that `scroll_top`.
+        // `win:scroll("tail")` switches the viewport into tail-follow mode.
         methods.add_function(
             "scroll",
             |lua, (this_ud, arg): (mlua::AnyUserData, mlua::Value)| -> LuaResult<mlua::Value> {
@@ -408,9 +408,9 @@ impl mlua::UserData for LuaWin {
                                 .unwrap_or(0);
                             let viewport = win.viewport.map(|v| v.rect.height).unwrap_or(0);
                             let max = total.saturating_sub(viewport as u64);
-                            let top = win.scroll_top.min(max);
+                            let top = win.scroll_top().min(max);
                             let overflow = total > viewport as u64;
-                            Some((top, win.follow_tail, total, viewport, max, overflow))
+                            Some((top, win.is_following_tail(), total, viewport, max, overflow))
                         })
                         .flatten();
                         match info {
@@ -446,7 +446,7 @@ impl mlua::UserData for LuaWin {
                                     buf,
                                     viewport_rows,
                                 );
-                                w.follow_tail = false;
+                                w.pin_current_scroll();
                             }
                         });
                         Ok(mlua::Value::UserData(this_ud))
@@ -454,7 +454,7 @@ impl mlua::UserData for LuaWin {
                     mlua::Value::String(s) if s.to_str()?.as_ref() == "tail" => {
                         crate::lua::with_app(|app| {
                             if let Some(w) = app.ui.win_mut(this.id) {
-                                w.follow_tail = true;
+                                w.scroll_to_bottom();
                             }
                         });
                         Ok(mlua::Value::UserData(this_ud))

@@ -82,7 +82,7 @@ fn transcript_mouse_cell(
     row_count: usize,
 ) -> TranscriptMouseCell {
     let rel_row = me.row.saturating_sub(vp.rect.top) as crate::smelt_edit::RowIndex;
-    let abs_row = win.scroll_top.saturating_add(rel_row);
+    let abs_row = win.scroll_top().saturating_add(rel_row);
     let row = (win.local_visual_row(abs_row) as usize).min(row_count.saturating_sub(1));
 
     let content_left =
@@ -634,8 +634,8 @@ mod tests {
             win.cursor_screen_row(vp.rect.height),
             Some(click_row - vp.rect.top),
             "scroll_top={} local_scroll={} cursor_abs={} cursor_local={} cursor_col={} rows={:?}",
-            win.scroll_top,
-            win.local_visual_row(win.scroll_top),
+            win.scroll_top(),
+            win.local_visual_row(win.scroll_top()),
             win.cursor_abs_row(),
             win.cursor_row(),
             win.cursor_col(),
@@ -658,7 +658,7 @@ mod tests {
             .transcript_win()
             .viewport
             .expect("render populated transcript viewport");
-        let top = app.transcript_win().scroll_top;
+        let top = app.transcript_win().scroll_top();
         let start_rel = 2u16;
         let end_rel = 4u16;
         let start_local = app
@@ -707,6 +707,71 @@ mod tests {
     }
 
     #[test]
+    fn transcript_drag_while_streaming_keeps_clicked_anchor() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().scroll_to_bottom();
+        app.render_normal_to(false, &mut std::io::sink());
+
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+        let top = app.transcript_win().scroll_top();
+        let start_rel = 2u16;
+        let end_rel = 4u16;
+        let start_local = app
+            .transcript_win()
+            .local_visual_row(top.saturating_add(start_rel as crate::smelt_edit::RowIndex))
+            as usize;
+        let expected_start = app
+            .ui
+            .buf(app.transcript_win().buf)
+            .and_then(|buf| buf.get_line(start_local))
+            .unwrap_or("")
+            .to_string();
+        assert!(!expected_start.is_empty());
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: vp.rect.top.saturating_add(start_rel),
+            column: vp.rect.left,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row: vp.rect.top.saturating_add(end_rel),
+            ..down
+        };
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..drag
+        };
+
+        app.handle_mouse(down);
+        app.push_block(smelt_core::Block::Text {
+            content: "streamed after selection started".into(),
+        });
+        app.render_normal_to(true, &mut std::io::sink());
+        app.handle_mouse(drag);
+        app.render_normal_to(true, &mut std::io::sink());
+        app.handle_mouse(up);
+
+        let yanked = app.core.clipboard.kill_ring.current();
+        assert!(
+            yanked.contains(&expected_start),
+            "streaming during drag should keep selection anchored at clicked row {expected_start:?}, got {yanked:?}"
+        );
+        assert!(
+            !yanked.contains("streamed after selection started"),
+            "selection anchor jumped to streamed tail content: {yanked:?}"
+        );
+    }
+    #[test]
     fn transcript_click_uses_local_row_in_tail_projection() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         let buf_id = app.transcript_win().buf;
@@ -738,7 +803,7 @@ mod tests {
                 .win_mut(crate::app::TRANSCRIPT_WIN)
                 .expect("transcript window");
             win.set_virtual_rows(20, 22);
-            win.scroll_top = 20;
+            win.pin_scroll(20);
             win.scroll_left = 0;
             win.viewport = Some(viewport);
         }

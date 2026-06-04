@@ -1105,7 +1105,7 @@ impl TuiApp {
             let buf = buf.expect("buffer");
             let now = self.core.clock.instant_now();
             let status = win.handle_key(buf, k, &mut self.core.clipboard, now);
-            win.sync_follow_tail(buf, viewport_rows);
+            win.update_tail_state(buf, viewport_rows);
             if matches!(status, Status::Consumed) {
                 self.sync_viewer_clipboard_from_kill_ring(buf_id, yank_tick_before);
                 return Status::Consumed;
@@ -1211,7 +1211,7 @@ impl TuiApp {
             let win = win.expect("window");
             let buf = buf.expect("buffer");
             win.move_cursor_by_lines(buf, d, viewport_rows);
-            win.sync_follow_tail(buf, viewport_rows);
+            win.update_tail_state(buf, viewport_rows);
             return Status::Consumed;
         }
 

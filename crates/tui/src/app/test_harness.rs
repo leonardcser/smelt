@@ -3131,7 +3131,7 @@ mod tests {
 
         // Render to populate the viewport.
         app.app.render_normal(false);
-        assert_eq!(app.app.ui.win(leaf).map(|w| w.scroll_top), Some(0));
+        assert_eq!(app.app.ui.win(leaf).map(|w| w.scroll_top()), Some(0));
 
         let leaf_rect = app
             .app
@@ -3151,9 +3151,9 @@ mod tests {
         let _ = scroll; // silence unused-warning if path below ignores it
         let _ = MouseButton::Left;
 
-        let pre_scroll = app.app.ui.win(leaf).unwrap().scroll_top;
+        let pre_scroll = app.app.ui.win(leaf).unwrap().scroll_top();
         let _ = app.app.ui.scroll_at(row, col, 3);
-        let post_scroll = app.app.ui.win(leaf).unwrap().scroll_top;
+        let post_scroll = app.app.ui.win(leaf).unwrap().scroll_top();
         assert!(
             post_scroll > pre_scroll,
             "wheel over unfocused picker must pan scroll_top (pre={pre_scroll}, post={post_scroll})",
@@ -3172,7 +3172,7 @@ mod tests {
 
     /// Regression: a prompt-docked picker whose `scroll_top` lands at
     /// `max_scroll` (cursor at the bottom in reversed mode) was getting
-    /// clobbered by `Ui::apply_tail_follow` on the first frame - the new
+    /// clobbered by tail-scroll resolution on the first frame - the new
     /// leaf has no viewport rect yet, so `max_scroll = total_rows - 0`
     /// snapped `scroll_top` past the end and the picker rendered blank
     /// until the user typed a character to force a re-layout.
@@ -3222,10 +3222,10 @@ mod tests {
         let total_rows = buf.line_count() as crate::smelt_edit::RowIndex;
         let max_scroll = total_rows.saturating_sub(viewport_rows as crate::smelt_edit::RowIndex);
         assert!(
-            win.scroll_top <= max_scroll,
+            win.scroll_top() <= max_scroll,
             "picker scroll_top must stay within bounds on first render \
              (scroll_top={}, max_scroll={}, total_rows={}, viewport_rows={})",
-            win.scroll_top,
+            win.scroll_top(),
             max_scroll,
             total_rows,
             viewport_rows,
@@ -3401,7 +3401,7 @@ mod tests {
             .viewport
             .expect("transcript viewport after render");
         let pad_left = transcript_win.config.gutters.pad_left;
-        let scroll_top = transcript_win.scroll_top as usize;
+        let scroll_top = transcript_win.scroll_top() as usize;
         let buf = app
             .app
             .ui

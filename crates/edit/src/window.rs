@@ -250,6 +250,13 @@ pub enum CursorShape {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VerticalScroll {
+    #[default]
+    Pinned,
+    Tail,
+}
+
 pub struct Window {
     pub(crate) id: WinId,
     pub buf: BufId,
@@ -307,7 +314,7 @@ pub struct Window {
     pub selection_anchor: Option<usize>,
     /// Preferred display column for vertical motion; measured in terminal cells.
     pub curswant: Option<usize>,
-    pub scroll_top: RowIndex,
+    scroll_top: RowIndex,
     /// Logical anchor for `scroll_top` - `(changedtick, logical_row, byte_offset)`
     /// of the chunk that was at the top of the viewport when scroll was last
     /// set. Restored after a width/wrap-driven layout rebuild so resize keeps
@@ -333,13 +340,14 @@ pub struct Window {
     /// Cell-column of the cursor within its visual row. Derived from `cpos`
     /// via `sync_from_cpos`.
     pub(crate) cursor_col: u16,
-    /// Keeps viewport snapped to newest row; cleared when the user scrolls away.
+    /// Vertical scroll policy. `scroll_top` is the resolved viewport row used for paint;
+    /// this records whether the next frame should preserve that row or resolve to tail.
+    scroll_state: VerticalScroll,
     /// Leftmost visible cell column. `0` means the row starts at its first
     /// character; non-zero values pan the viewport rightward. Wrapped rows
     /// stay at `0` (wrapping moves overflow to the next visual row); pre-
     /// formatted rows are the primary user of horizontal scroll.
     pub scroll_left: u16,
-    pub follow_tail: bool,
     /// One-shot recenter request (vim `zz`); cleared after the next paint.
     pub pending_recenter: bool,
     /// One-shot "scroll so the cursor row is on-screen"; cleared after the next paint.
@@ -356,7 +364,7 @@ pub struct Window {
     /// Cpos of a single-click press awaiting drag; promoted to a selection on the
     /// first `Drag` event. A bare press-release with no motion leaves no selection.
     pub pending_press: Option<usize>,
-    /// `(scroll_top, follow_tail)` last emitted via `WinEvent::Scrolled`.
+    /// `(scroll_top, tail-follow)` last emitted via `WinEvent::Scrolled`.
     pub(crate) last_emitted_scroll: Option<(RowIndex, bool)>,
     /// `(rect, content_width)` last emitted via `WinEvent::Resized`. Tracked
     /// here so the dispatcher can fire only when the leaf's geometry
@@ -398,13 +406,12 @@ impl Window {
             curswant: None,
             scroll_top: 0,
             scroll_anchor: None,
+            scroll_state: VerticalScroll::Pinned,
             scroll_left: 0,
             cursor_row: 0,
             row_base: 0,
             total_rows_override: None,
             cursor_col: 0,
-            // Opt-in; callers that want sticky-bottom set this true.
-            follow_tail: false,
             pending_recenter: false,
             pending_scroll_to_cursor: false,
             last_render_cpos: None,
@@ -420,6 +427,24 @@ impl Window {
 
     pub fn id(&self) -> WinId {
         self.id
+    }
+
+    pub fn scroll_top(&self) -> RowIndex {
+        self.scroll_top
+    }
+
+    pub fn scroll_state(&self) -> VerticalScroll {
+        self.scroll_state
+    }
+
+    /// Apply a resolved viewport row while preserving tail mode.
+    pub fn set_resolved_scroll(&mut self, row: RowIndex) {
+        self.scroll_top = row;
+    }
+
+    pub fn resolve_tail_scroll(&mut self, row: RowIndex) {
+        self.scroll_top = row;
+        self.scroll_state = VerticalScroll::Tail;
     }
 
     /// Reserved cells for the gutter column for this buffer; `0` when no provider attached.
@@ -541,12 +566,12 @@ impl Window {
 
     /// Re-derive `scroll_top` from `scroll_anchor` against the freshly-built
     /// layout. Called after a width/wrap rebuild in `ensure_layout`. Skips
-    /// when no anchor is set, when `follow_tail` is active (sentinel wins),
-    /// when the buffer's content was replaced since the anchor was stamped
-    /// (changedtick mismatch - the (lrow, byte) is no longer meaningful), or
-    /// when the anchor row no longer exists in the buffer.
+    /// when tail-follow is active (tail wins), when no anchor is set, when the
+    /// buffer's content was replaced since the anchor was stamped (changedtick
+    /// mismatch - the (lrow, byte) is no longer meaningful), or when the anchor
+    /// row no longer exists in the buffer.
     fn restore_scroll_from_anchor(&mut self, buf: &Buffer) {
-        if self.follow_tail {
+        if self.is_following_tail() {
             return;
         }
         let Some((tick, lrow, byte)) = self.scroll_anchor else {
@@ -569,6 +594,9 @@ impl Window {
     /// off-screen as reflow shifts visual rows. Reassigns `cpos` to whatever
     /// byte lands at that visual row using `curswant` as the column target.
     pub fn restore_cursor_screen_row(&mut self, buf: &Buffer, screen_row: u16) {
+        if self.selection_active() {
+            return;
+        }
         let total = self.visual_row_total(buf);
         if total == 0 {
             return;
@@ -653,8 +681,31 @@ impl Window {
         self.scroll_top >= self.max_scroll(buf, viewport_rows)
     }
 
-    pub fn sync_follow_tail(&mut self, buf: &Buffer, viewport_rows: u16) {
-        self.follow_tail = self.is_at_tail(buf, viewport_rows);
+    pub fn is_following_tail(&self) -> bool {
+        matches!(self.scroll_state, VerticalScroll::Tail)
+    }
+
+    pub fn pin_scroll(&mut self, row: RowIndex) {
+        self.scroll_top = row;
+        self.scroll_state = VerticalScroll::Pinned;
+    }
+
+    pub fn pin_current_scroll(&mut self) {
+        self.scroll_state = VerticalScroll::Pinned;
+    }
+
+    pub fn selection_active(&self) -> bool {
+        self.selection_anchor.is_some()
+            || (self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine))
+    }
+
+    pub fn update_tail_state(&mut self, buf: &Buffer, viewport_rows: u16) {
+        if !self.is_following_tail()
+            || self.selection_active()
+            || !self.is_at_tail(buf, viewport_rows)
+        {
+            self.pin_current_scroll();
+        }
     }
 
     pub fn local_visual_row(&self, absolute_row: RowIndex) -> RowIndex {
@@ -859,6 +910,7 @@ impl Window {
 
     /// Set `selection_anchor` to `cpos` if unset. Call before a shift-move.
     pub fn extend_selection(&mut self, cpos: usize) {
+        self.pin_current_scroll();
         if self.selection_anchor.is_none() {
             self.selection_anchor = Some(cpos);
         }
@@ -1121,23 +1173,10 @@ impl Window {
 
     // ── Follow-tail ────────────────────────────────────────────────────
 
-    /// Snap to the bottom. `RowIndex::MAX` is the sentinel; the render loop clamps it.
+    /// Re-engage sticky-bottom scrolling. The next tail-follow pass resolves
+    /// `scroll_top` against the current row count.
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_top = RowIndex::MAX;
-        self.follow_tail = true;
-    }
-
-    /// `true` while an in-flight selection or vim Visual mode should hold the
-    /// viewport still instead of snapping to tail. Mouse-drag capture is
-    /// checked separately at the `Ui` level.
-    pub fn tail_follow_frozen(&self) -> bool {
-        if self.selection_anchor.is_some() {
-            return true;
-        }
-        if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
-            return true;
-        }
-        false
+        self.scroll_state = VerticalScroll::Tail;
     }
 
     // ── Navigation ─────────────────────────────────────────────────────
@@ -1339,6 +1378,7 @@ impl Window {
 
         match ctx.click_count {
             2 => {
+                self.pin_current_scroll();
                 if let Some((s, e)) = self.select_cell_at(click_byte, buf, viewport_rows) {
                     self.drag_anchor_word = Some((s, e));
                     self.drag_anchor_line = None;
@@ -1354,6 +1394,7 @@ impl Window {
                 Status::Capture
             }
             3 => {
+                self.pin_current_scroll();
                 if let Some((s, e)) = self.select_block_at(click_byte, buf, viewport_rows) {
                     self.drag_anchor_line = Some((s, e));
                     self.drag_anchor_word = None;
@@ -1410,6 +1451,7 @@ impl Window {
             self.extend_line_anchored_drag(buf, ctx, text);
         } else {
             if let Some(press) = self.pending_press.take() {
+                self.pin_current_scroll();
                 let press = text::snap(text, press.min(text.len()));
                 if self.vim_enabled {
                     self.vim_state
@@ -1622,7 +1664,7 @@ impl Window {
             }
             _ => self.keep_cursor_visible(buf, total_rows, viewport_rows, viewport_cols),
         }
-        self.sync_follow_tail(buf, viewport_rows);
+        self.update_tail_state(buf, viewport_rows);
         Status::Consumed
     }
 
@@ -1636,7 +1678,7 @@ impl Window {
         let want = self.absolute_cursor_row().saturating_sub(half);
         let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
         self.set_scroll(want.min(max_scroll), buf);
-        self.sync_follow_tail(buf, viewport_rows);
+        self.update_tail_state(buf, viewport_rows);
     }
 
     /// Cursor-led vertical motion: move `cpos` by `delta` rows; viewport pans only
@@ -1653,7 +1695,7 @@ impl Window {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         self.sync_from_cpos(buf, viewport_rows);
-        self.sync_follow_tail(buf, viewport_rows);
+        self.update_tail_state(buf, viewport_rows);
     }
 
     /// Viewport-led horizontal pan: bump `scroll_left` by `delta` cells,
@@ -1721,6 +1763,9 @@ impl Window {
             return;
         }
         let max_scroll = self.clamp_scroll_top(total, viewport_rows, buf);
+        if self.is_following_tail() && self.scroll_top != max_scroll {
+            self.set_scroll(max_scroll, buf);
+        }
         let new_scroll = add_signed_row(self.scroll_top, delta).min(max_scroll);
         self.scroll_to_preserving_cursor_screen_row(new_scroll, buf, viewport_rows);
     }
@@ -1750,9 +1795,14 @@ impl Window {
                 }
             });
         let new_scroll = scroll_top.min(max_scroll);
+        if self.selection_active() {
+            self.set_scroll(new_scroll, buf);
+            self.pin_current_scroll();
+            return;
+        }
         if new_scroll == cur_scroll {
             self.set_scroll(new_scroll, buf);
-            self.sync_follow_tail(buf, viewport_rows);
+            self.update_tail_state(buf, viewport_rows);
             return;
         }
         let target_vrow = self
@@ -1765,10 +1815,10 @@ impl Window {
         self.cursor_col = col;
         self.curswant = Some(want);
         self.set_scroll(new_scroll, buf);
-        self.sync_follow_tail(buf, viewport_rows);
+        self.update_tail_state(buf, viewport_rows);
     }
 
-    /// One-shot positioning. Leaves `follow_tail` alone - callers that want
+    /// One-shot positioning. Leaves tail-follow state alone - callers that want
     /// tail-follow re-engagement (transcript `<C-End>`) call `scroll_to_bottom`
     /// instead; non-streaming surfaces (pickers, dialog lists) get to stay at
     /// their default `false` even when the cursor lands on the last row.
@@ -2420,13 +2470,12 @@ mod tests {
     }
 
     #[test]
-    fn scroll_to_bottom_sets_follow_tail() {
+    fn scroll_to_bottom_sets_tail_mode() {
         let mut w = make_win();
-        w.follow_tail = false;
-        w.scroll_top = 10;
+        w.pin_scroll(10);
         w.scroll_to_bottom();
-        assert_eq!(w.scroll_top, RowIndex::MAX);
-        assert!(w.follow_tail);
+        assert_eq!(w.scroll_top, 10);
+        assert!(w.is_following_tail());
     }
 
     #[test]
@@ -2484,10 +2533,10 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_vim_move_up_clears_follow_tail() {
-        // Regression: vim key dispatch through handle_key must update follow_tail
-        // just like move_cursor_by_lines does, otherwise the render loop resets
-        // scroll_top to the bottom every frame and the cursor disappears.
+    fn handle_key_vim_move_up_pins_scroll_when_leaving_tail() {
+        // Vim key dispatch through handle_key must update tail state just like
+        // move_cursor_by_lines does; otherwise the render loop can keep snapping
+        // scroll_top to the bottom every frame after the cursor moves away.
         use crossterm::event::{KeyEventKind, KeyEventState, KeyModifiers};
         let mut w = make_win();
         w.set_vim_enabled(true);
@@ -2504,8 +2553,8 @@ mod tests {
         ));
         w.jump_to_line_col(&buf, 10, 0, viewport);
         w.scroll_to_bottom();
-        assert!(w.follow_tail);
-        assert_eq!(w.scroll_top, RowIndex::MAX);
+        assert!(w.is_following_tail());
+        assert_eq!(w.scroll_top, 9);
 
         let k = KeyEvent {
             code: KeyCode::Char('k'),
@@ -2515,22 +2564,22 @@ mod tests {
         };
         let mut clipboard = Clipboard::null();
         // One 'k' keeps us in the bottom region (scroll_top == max_scroll == 9),
-        // so follow_tail should still be true.
+        // so tail mode should still be active.
         w.handle_key(&mut buf, k, &mut clipboard, std::time::Instant::now());
         assert_eq!(w.cursor_row, 9);
         assert_eq!(w.scroll_top, 9);
         assert!(
-            w.follow_tail,
-            "still at max_scroll -> follow_tail stays true"
+            w.is_following_tail(),
+            "still at max_scroll -> tail mode stays active"
         );
 
-        // Second 'k' moves above max_scroll; follow_tail must clear.
+        // Second 'k' moves above max_scroll; tail mode must clear.
         w.handle_key(&mut buf, k, &mut clipboard, std::time::Instant::now());
         assert_eq!(w.cursor_row, 8);
         assert_eq!(w.scroll_top, 8);
         assert!(
-            !w.follow_tail,
-            "moving above max_scroll must clear follow_tail"
+            !w.is_following_tail(),
+            "moving above max_scroll must pin scroll"
         );
     }
 
@@ -2551,6 +2600,21 @@ mod tests {
         assert_eq!(w.cursor_row, 7);
         let offsets = smelt_buffer::text::line_start_offsets(&rows);
         assert_eq!(w.cpos, offsets[7] + 3);
+    }
+
+    #[test]
+    fn pan_by_lines_preserves_selection_endpoint() {
+        let mut w = make_win();
+        let rows = sample_rows(30);
+        let buf = make_buf(rows);
+        let viewport = 10;
+        w.jump_to_line_col(&buf, 5, 0, viewport);
+        let endpoint = w.cpos;
+        w.selection_anchor = Some(0);
+        w.pan_by_lines(&buf, 3, viewport);
+        assert_eq!(w.scroll_top, 3);
+        assert_eq!(w.cpos, endpoint);
+        assert_eq!(w.scroll_state(), VerticalScroll::Pinned);
     }
 
     #[test]
@@ -2603,41 +2667,39 @@ mod tests {
         w.pan_by_lines(&buf, 5, viewport);
         assert_eq!(w.scroll_top, max_scroll, "scroll clamps at max");
         assert!(
-            w.follow_tail,
-            "still at the bottom -> follow_tail stays true"
+            !w.is_following_tail(),
+            "manual pan to the bottom stays pinned"
         );
     }
 
     #[test]
-    fn pan_by_lines_collapses_follow_tail_sentinel() {
-        // `follow_tail` mode stores `RowIndex::MAX` as the scroll_top sentinel.
-        // Pan must normalize that to the real max_scroll, not arithmetic on MAX.
+    fn pan_by_lines_down_from_tail_resolves_to_max_scroll() {
         let mut w = make_win();
         let rows = sample_rows(30);
         let buf = make_buf(rows.clone());
         let viewport = 10;
         let max_scroll = (30 - viewport) as RowIndex;
         w.jump_to_line_col(&buf, 29, 0, viewport);
+        w.pin_scroll(0);
         w.scroll_to_bottom();
-        assert_eq!(w.scroll_top, RowIndex::MAX);
         w.pan_by_lines(&buf, 3, viewport);
-        assert_eq!(w.scroll_top, max_scroll, "sentinel collapses to max_scroll");
-        assert!(w.follow_tail);
+        assert_eq!(w.scroll_top, max_scroll, "scroll stays at max_scroll");
+        assert!(w.is_following_tail());
     }
 
     #[test]
-    fn pan_by_lines_up_from_follow_tail_sentinel() {
+    fn pan_by_lines_up_from_tail_pins_scroll() {
         let mut w = make_win();
         let rows = sample_rows(30);
         let buf = make_buf(rows.clone());
         let viewport = 10;
         let max_scroll = (30 - viewport) as RowIndex;
         w.jump_to_line_col(&buf, 29, 0, viewport);
+        w.pin_scroll(0);
         w.scroll_to_bottom();
-        assert_eq!(w.scroll_top, RowIndex::MAX);
         w.pan_by_lines(&buf, -3, viewport);
         assert_eq!(w.scroll_top, max_scroll - 3);
-        assert!(!w.follow_tail);
+        assert!(!w.is_following_tail());
     }
 
     #[test]
@@ -2839,42 +2901,65 @@ mod tests {
     }
 
     #[test]
-    fn follow_tail_default_false() {
+    fn tail_mode_default_false() {
         let w = make_win();
-        assert!(!w.follow_tail);
+        assert!(!w.is_following_tail());
     }
 
     #[test]
-    fn tail_follow_frozen_with_selection() {
+    fn selection_active_with_selection_anchor() {
         let mut w = make_win();
-        w.follow_tail = true;
-        assert!(!w.tail_follow_frozen(), "no selection → not frozen");
+        assert!(!w.selection_active(), "no selection");
         w.selection_anchor = Some(5);
-        assert!(w.tail_follow_frozen(), "selection anchor → frozen");
+        assert!(w.selection_active(), "selection anchor");
         w.selection_anchor = None;
-        assert!(!w.tail_follow_frozen(), "cleared selection → not frozen");
+        assert!(!w.selection_active(), "cleared selection");
     }
 
     #[test]
-    fn tail_follow_frozen_with_visual_mode() {
+    fn selection_active_with_visual_mode() {
         let mut w = make_win();
         w.vim_enabled = true;
-        w.follow_tail = true;
         w.set_vim_mode(VimMode::Normal);
-        assert!(!w.tail_follow_frozen(), "Normal mode → not frozen");
+        assert!(!w.selection_active(), "Normal mode");
         w.set_vim_mode(VimMode::Visual);
-        assert!(w.tail_follow_frozen(), "Visual mode → frozen");
+        assert!(w.selection_active(), "Visual mode");
         w.set_vim_mode(VimMode::VisualLine);
-        assert!(w.tail_follow_frozen(), "VisualLine mode → frozen");
+        assert!(w.selection_active(), "VisualLine mode");
         w.set_vim_mode(VimMode::Insert);
-        assert!(!w.tail_follow_frozen(), "Insert mode → not frozen");
-        // When vim is disabled, Visual mode should not freeze.
+        assert!(!w.selection_active(), "Insert mode");
         w.vim_enabled = false;
         w.set_vim_mode(VimMode::Visual);
-        assert!(
-            !w.tail_follow_frozen(),
-            "vim disabled → not frozen even in Visual"
-        );
+        assert!(!w.selection_active(), "vim disabled");
+    }
+
+    #[test]
+    fn selection_pins_tail_mode_on_update() {
+        let mut w = make_win();
+        let rows = sample_rows(30);
+        let buf = make_buf(rows);
+        let viewport = 10;
+        w.jump_to_line_col(&buf, 29, 0, viewport);
+        w.scroll_to_bottom();
+        assert!(w.is_following_tail());
+        w.selection_anchor = Some(w.cpos.saturating_sub(1));
+        w.update_tail_state(&buf, viewport);
+        assert!(!w.is_following_tail());
+        assert_eq!(w.scroll_state(), VerticalScroll::Pinned);
+    }
+
+    #[test]
+    fn restore_cursor_screen_row_preserves_selection_endpoint() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows);
+        let viewport = 5;
+        w.jump_to_line_col(&buf, 10, 0, viewport);
+        let endpoint = w.cpos;
+        w.selection_anchor = Some(0);
+        w.scroll_top = 0;
+        w.restore_cursor_screen_row(&buf, 0);
+        assert_eq!(w.cpos, endpoint);
     }
 
     #[test]

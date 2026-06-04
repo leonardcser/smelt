@@ -480,7 +480,7 @@ impl PromptState {
             let rows = viewport_rows.max(1) as crate::smelt_edit::RowIndex;
             let max_scroll = total_rows.saturating_sub(rows);
             let s = cursor_line.saturating_sub(rows / 2);
-            ctx.win.scroll_top = s.min(max_scroll);
+            ctx.win.pin_scroll(s.min(max_scroll));
         } else {
             let viewport_cols = ctx.win.viewport.map(|v| v.content_width).unwrap_or(0);
             ctx.win

@@ -61,7 +61,7 @@ impl TuiApp {
         };
         if let Some(w) = self.win_mut(win) {
             w.set_cursor_col_single_line(PREFIX_LEN);
-            w.scroll_top = 0;
+            w.pin_scroll(0);
         }
 
         let layout = LayoutTree::vbox(vec![(

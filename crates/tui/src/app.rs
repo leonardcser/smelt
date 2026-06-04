@@ -607,9 +607,8 @@ impl TuiApp {
                     crate::smelt_edit::gutter::LineNumberGutter::new(),
                 ));
                 // Opt the transcript into per-frame tail-follow. Plugin leaves
-                // keep the default `false`; `Ui::apply_tail_follow` ignores
-                // them and they stay where the caller put them.
-                w.follow_tail = true;
+                // stay pinned unless a caller explicitly requests tail mode.
+                w.scroll_to_bottom();
             }
             assert!(ui.win_open_split_at(
                 crate::app::PROMPT_WIN,

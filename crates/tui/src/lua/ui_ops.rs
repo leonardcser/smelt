@@ -302,8 +302,8 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
             if target == abs {
                 return CallbackResult::Consumed;
             }
-            win.follow_tail = false;
-            win.scroll_top = scroll_to_show(win.scroll_top, target, viewport);
+            let scroll_top = scroll_to_show(win.scroll_top(), target, viewport);
+            win.pin_scroll(scroll_top);
             win.jump_to_row(buf, target, viewport.unwrap_or(0));
             new_abs = Some(target as usize);
         }
@@ -409,8 +409,8 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
     if abs == target {
         return;
     }
-    win.follow_tail = false;
-    win.scroll_top = scroll_to_show(win.scroll_top, target, viewport);
+    let scroll_top = scroll_to_show(win.scroll_top(), target, viewport);
+    win.pin_scroll(scroll_top);
     win.jump_to_row(buf, target, viewport.unwrap_or(0));
     let lua = &app.lua;
     let mut lua_invoke =

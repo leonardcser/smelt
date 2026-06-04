@@ -23,32 +23,16 @@ impl TuiApp {
         let width = term_w as usize;
         let show_queued = agent_running || self.busy_stack.is_busy();
 
-        // Capture the cursor's screen-row offset BEFORE any scroll mutations.
-        // `apply_tail_follow` can change `scroll_top`, so reading this afterward
-        // may underflow and return None, skipping the post-projection restore.
         let transcript_cursor_screen_row = self.transcript_win().cursor_screen_row_in_viewport();
 
-        // The prompt owns cursor/scroll through `sync_input_layer`. A mouse wheel
-        // over its reserved scrollbar can mark the leaf as tail-following via the
-        // generic window pan path; clear that stale display state before the
-        // global tail-follow pass can reinterpret the prompt cursor.
-        if let Some(win) = self.ui.win_mut(crate::app::PROMPT_WIN) {
-            win.follow_tail = false;
-        }
-        self.ui.apply_tail_follow();
+        self.ui.resolve_tail_scrolls();
         self.ui.sync_scroll_links();
-        let transcript_captured = matches!(
-            self.ui.capture(),
-            Some(crate::smelt_edit::HitTarget::Window(win)) if win == crate::app::TRANSCRIPT_WIN
-        );
         let transcript_scroll_target = if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
             crate::content::transcript_buf::ScrollTarget::full_tail()
-        } else if transcript_captured {
-            crate::content::transcript_buf::ScrollTarget::visible_row(
-                self.transcript_win().scroll_top,
-            )
         } else {
-            crate::content::transcript_buf::ScrollTarget::full_row(self.transcript_win().scroll_top)
+            crate::content::transcript_buf::ScrollTarget::full_row(
+                self.transcript_win().scroll_top(),
+            )
         };
 
         let queued_owned: Vec<String> = if show_queued {
@@ -164,7 +148,7 @@ impl TuiApp {
     /// Project the transcript into its display buffer and drive `Ui::wins[TRANSCRIPT_WIN]`.
     /// When content owns focus, surfaces a Block cursor; `Window::render` derives the
     /// position from `effective_endpoint`, so the cursor naturally tracks the live drag.
-    /// `cursor_screen_row` is captured before `apply_tail_follow` so it doesn't underflow
+    /// `cursor_screen_row` is captured before tail-scroll resolution so it doesn't underflow
     /// when read after scroll mutations.
     fn sync_transcript_layer(
         &mut self,
@@ -189,7 +173,7 @@ impl TuiApp {
                 tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
             );
             win.set_materialized_rows(tdata.row_base, tdata.projected_rows, tdata.total_rows);
-            win.scroll_top = tdata.clamped_scroll;
+            win.set_resolved_scroll(tdata.clamped_scroll);
         }
         // After scroll is restored to the new block anchor, pin the cursor to
         // the same screen-row offset so it stays visually fixed across resize
@@ -239,7 +223,6 @@ impl TuiApp {
                 .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
         }
         if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            win.scroll_top = tdata.clamped_scroll;
             win.scroll_left = 0;
         }
     }
