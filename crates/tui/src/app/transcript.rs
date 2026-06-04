@@ -115,6 +115,24 @@ impl TranscriptView {
             .project_planned(buf, &mut self.transcript.history, theme, plan)
     }
 
+    pub(crate) fn rows_for_range(
+        &mut self,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+        start: crate::smelt_edit::RowIndex,
+        count: crate::smelt_edit::RowIndex,
+    ) -> crate::content::transcript_buf::TranscriptRangeRows {
+        self.projection.rows_for_range(
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+            theme,
+            start,
+            count,
+        )
+    }
+
     pub(crate) fn history(&self) -> &BlockHistory {
         &self.transcript.history
     }
@@ -386,16 +404,27 @@ impl TuiApp {
         self.transcript.build_rows(tw, show_thinking, &theme)
     }
 
+    fn transcript_rows_and_breaks_range(
+        &mut self,
+        show_thinking: bool,
+        start: crate::smelt_edit::RowIndex,
+        count: crate::smelt_edit::RowIndex,
+    ) -> crate::content::transcript_buf::TranscriptRangeRows {
+        let _perf = smelt_perf::perf::begin("transcript:materialize_rows_range");
+        let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
+        self.transcript
+            .rows_for_range(tw, show_thinking, &theme, start, count)
+    }
+
     pub(crate) fn transcript_display_rows_range(
         &mut self,
         show_thinking: bool,
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> Vec<String> {
-        let rows = self.full_transcript_display_text(show_thinking);
-        let start_idx = crate::smelt_edit::row_to_usize(start).min(rows.len());
-        let end = crate::smelt_edit::row_to_usize(start.saturating_add(count)).min(rows.len());
-        rows[start_idx..end].to_vec()
+        self.transcript_rows_and_breaks_range(show_thinking, start, count)
+            .rows
     }
 
     /// `\n` byte positions in `full_transcript_display_text(..).join("\n")`,
@@ -420,8 +449,8 @@ impl TuiApp {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> (Vec<usize>, Vec<usize>) {
-        let rows = self.transcript_display_rows_range(show_thinking, start, count);
-        (Vec::new(), crate::smelt_edit::hard_breaks_for_lines(&rows))
+        let range = self.transcript_rows_and_breaks_range(show_thinking, start, count);
+        (range.soft_breaks, range.hard_breaks)
     }
 
     /// Snap a clicked cell column to the nearest selectable cell on `abs_row`.

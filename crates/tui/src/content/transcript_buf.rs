@@ -20,7 +20,7 @@ pub(crate) struct TranscriptProjection {
     visible_total_rows: RowIndex,
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     cached_rows: Option<CachedRows>,
-    document: TranscriptDocument,
+    row_index: BlockRowIndex,
 }
 
 struct CachedRows {
@@ -31,22 +31,22 @@ struct CachedRows {
 }
 
 #[derive(Default)]
-struct TranscriptDocument {
-    nodes: Vec<TranscriptNode>,
+struct BlockRowIndex {
+    nodes: Vec<BlockRow>,
     prefix_rows: Vec<RowIndex>,
     generation: u64,
     width: u16,
     show_thinking: bool,
 }
 
-struct TranscriptNode {
+struct BlockRow {
     id: BlockId,
     key: LayoutKey,
     estimated_height: RowIndex,
     exact_height: Option<RowIndex>,
 }
 
-impl TranscriptDocument {
+impl BlockRowIndex {
     fn rebuild_if_stale(
         &mut self,
         history: &BlockHistory,
@@ -62,7 +62,7 @@ impl TranscriptDocument {
         self.nodes.clear();
         self.nodes.reserve(history.order.len());
         for &id in &history.order {
-            self.nodes.push(TranscriptNode {
+            self.nodes.push(BlockRow {
                 id,
                 key: history.resolve_key(id, base_key),
                 estimated_height: 1,
@@ -290,6 +290,22 @@ struct ProjectRows<'a> {
     layout: &'a mut Vec<LayoutEntry>,
 }
 
+pub(crate) struct TranscriptRangeRows {
+    pub rows: Vec<String>,
+    pub soft_breaks: Vec<usize>,
+    pub hard_breaks: Vec<usize>,
+}
+
+impl TranscriptRangeRows {
+    fn empty() -> Self {
+        Self {
+            rows: Vec::new(),
+            soft_breaks: Vec::new(),
+            hard_breaks: Vec::new(),
+        }
+    }
+}
+
 fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
     LayoutKey {
         view_state: ViewState::Expanded,
@@ -311,7 +327,7 @@ impl TranscriptProjection {
             visible_row_base: 0,
             visible_total_rows: 0,
             cached_rows: None,
-            document: TranscriptDocument::default(),
+            row_index: BlockRowIndex::default(),
         }
     }
 
@@ -334,7 +350,7 @@ impl TranscriptProjection {
             self.visible_row_base = 0;
             self.visible_total_rows = 0;
             self.cached_rows = None;
-            self.document = TranscriptDocument::default();
+            self.row_index = BlockRowIndex::default();
         }
         self.cache_generation = gen;
     }
@@ -349,7 +365,7 @@ impl TranscriptProjection {
         self.visible_row_base = 0;
         self.visible_total_rows = 0;
         self.cached_rows = None;
-        self.document = TranscriptDocument::default();
+        self.row_index = BlockRowIndex::default();
     }
 
     fn target_has_projection(&self, key: ProjectKey, buf: &Buffer) -> bool {
@@ -375,11 +391,11 @@ impl TranscriptProjection {
         });
     }
 
-    fn prepare_document(&mut self, history: &BlockHistory, width: u16, show_thinking: bool) {
+    fn prepare_row_index(&mut self, history: &BlockHistory, width: u16, show_thinking: bool) {
         let gen = history.generation();
         self.gc_if_stale(gen, width);
         let base_key = base_layout_key(width, show_thinking);
-        self.document
+        self.row_index
             .rebuild_if_stale(history, width, show_thinking, base_key);
     }
 
@@ -412,25 +428,25 @@ impl TranscriptProjection {
             mode: scroll_target.mode(viewport_rows),
         };
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
-        self.prepare_document(history, width, show_thinking);
+        self.prepare_row_index(history, width, show_thinking);
         let (first, end) = match scroll_target {
-            ScrollTarget::Full(_) => (0, self.document.nodes.len()),
+            ScrollTarget::Full(_) => (0, self.row_index.nodes.len()),
             ScrollTarget::Visible(ScrollAnchor::Row(row)) => {
                 let first = resize_anchor
-                    .and_then(|(id, _)| self.document.block_index(id))
-                    .unwrap_or_else(|| self.document.start_index_for_row(row));
-                (first, self.document.window_end_index(first, viewport_rows))
+                    .and_then(|(id, _)| self.row_index.block_index(id))
+                    .unwrap_or_else(|| self.row_index.start_index_for_row(row));
+                (first, self.row_index.window_end_index(first, viewport_rows))
             }
             ScrollTarget::Visible(ScrollAnchor::Tail) => {
-                let first = self.document.tail_window_start_index(viewport_rows);
-                (first, self.document.nodes.len())
+                let first = self.row_index.tail_window_start_index(viewport_rows);
+                (first, self.row_index.nodes.len())
             }
         };
-        let block_ids = self.document.nodes[first..end]
+        let block_ids = self.row_index.nodes[first..end]
             .iter()
             .map(|node| node.id)
             .collect();
-        let block_keys = self.document.nodes[first..end]
+        let block_keys = self.row_index.nodes[first..end]
             .iter()
             .map(|node| node.key)
             .collect();
@@ -547,7 +563,7 @@ impl TranscriptProjection {
                 &mut rows,
             );
         }
-        self.document.refresh_height_index();
+        self.row_index.refresh_height_index();
 
         // Streaming fast-path: if only the last block grew, trim the buffer
         // to before the last block and append the new tail instead of
@@ -637,7 +653,7 @@ impl TranscriptProjection {
             .ensure_many(history, &plan.block_ids, &plan.block_keys, theme);
 
         let first = plan.first;
-        let row_base = self.document.prefix_row(first);
+        let row_base = self.row_index.prefix_row(first);
         let mut texts: Vec<String> = Vec::new();
         let mut pending = Vec::new();
         let mut layout = Vec::with_capacity(plan.block_ids.len());
@@ -657,8 +673,8 @@ impl TranscriptProjection {
             self.append_projected_block(history, first + offset, id, bkey, &mut rows);
         }
 
-        self.document.refresh_height_index();
-        let total_rows = self.document.total_rows();
+        self.row_index.refresh_height_index();
+        let total_rows = self.row_index.total_rows();
         let materialized_rows = texts.len() as RowIndex;
         buf.set_all_lines(texts);
         for p in pending {
@@ -695,7 +711,7 @@ impl TranscriptProjection {
         };
         let block_rows = block_buf.line_count();
         let gap = history.rendered_block_gap(block_index, block_rows);
-        self.document.set_exact_height(
+        self.row_index.set_exact_height(
             block_index,
             (gap as usize).saturating_add(block_rows) as RowIndex,
         );
@@ -880,7 +896,7 @@ impl TranscriptProjection {
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
         self.ensure_all(history, width, show_thinking, theme);
         let base_key = base_layout_key(width, show_thinking);
-        self.document
+        self.row_index
             .rebuild_if_stale(history, width, show_thinking, base_key);
 
         let mut row: RowIndex = 0;
@@ -893,7 +909,7 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
-            self.document
+            self.row_index
                 .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
             row = row.saturating_add(gap);
             layout.push(LayoutEntry {
@@ -904,7 +920,7 @@ impl TranscriptProjection {
             });
             row = row.saturating_add(block_rows as RowIndex);
         }
-        self.document.refresh_height_index();
+        self.row_index.refresh_height_index();
         layout.iter().map(|e| (e.id, e.start, e.rows)).collect()
     }
 
@@ -925,7 +941,7 @@ impl TranscriptProjection {
         }
         self.ensure_all(history, width, show_thinking, theme);
         let base_key = base_layout_key(width, show_thinking);
-        self.document
+        self.row_index
             .rebuild_if_stale(history, width, show_thinking, base_key);
         let mut rows: Vec<String> = Vec::new();
         for i in 0..history.order.len() {
@@ -936,7 +952,7 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows);
-            self.document
+            self.row_index
                 .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             for _ in 0..gap {
                 rows.push(String::new());
@@ -945,7 +961,7 @@ impl TranscriptProjection {
                 rows.push(block_buf.get_line(r).unwrap_or("").to_string());
             }
         }
-        self.document.refresh_height_index();
+        self.row_index.refresh_height_index();
         let rows = Arc::new(rows);
         self.cached_rows = Some(CachedRows {
             rows: Arc::clone(&rows),
@@ -956,9 +972,76 @@ impl TranscriptProjection {
         rows
     }
 
-    /// Soft (word-wrap) and hard (`\n`) byte positions in
-    /// `build_rows(..).join("\n")`. Soft positions are transparent to
-    /// word-select; hard positions bound line-select.
+    pub(crate) fn rows_for_range(
+        &mut self,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+        start: RowIndex,
+        count: RowIndex,
+    ) -> TranscriptRangeRows {
+        let end = start.saturating_add(count);
+        if count == 0 || end <= start {
+            return TranscriptRangeRows::empty();
+        }
+
+        let gen = history.generation();
+        self.gc_if_stale(gen, width);
+        let base_key = base_layout_key(width, show_thinking);
+        self.row_index
+            .rebuild_if_stale(history, width, show_thinking, base_key);
+
+        let mut rows = Vec::new();
+        let mut soft_wrapped = Vec::new();
+        let mut abs_row: RowIndex = 0;
+
+        'blocks: for i in 0..history.order.len() {
+            if abs_row >= end {
+                break;
+            }
+            let id = history.order[i];
+            let bkey = history.resolve_key(id, base_key);
+            self.cache.ensure_many(history, &[id], &[bkey], theme);
+            let Some(block_buf) = self.cache.get(id, bkey) else {
+                continue;
+            };
+            let block_rows = block_buf.line_count();
+            let gap = history.rendered_block_gap(i, block_rows);
+            self.row_index
+                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
+
+            for _ in 0..gap {
+                if abs_row >= end {
+                    break 'blocks;
+                }
+                if abs_row >= start {
+                    rows.push(String::new());
+                    soft_wrapped.push(false);
+                }
+                abs_row = abs_row.saturating_add(1);
+            }
+
+            for r in 0..block_rows {
+                if abs_row >= end {
+                    break 'blocks;
+                }
+                if abs_row >= start {
+                    rows.push(block_buf.get_line(r).unwrap_or("").to_string());
+                    soft_wrapped.push(block_buf.decoration_at(r).soft_wrapped);
+                }
+                abs_row = abs_row.saturating_add(1);
+            }
+        }
+        self.row_index.refresh_height_index();
+        let (soft_breaks, hard_breaks) = breaks_for_materialized_rows(&rows, &soft_wrapped);
+        TranscriptRangeRows {
+            rows,
+            soft_breaks,
+            hard_breaks,
+        }
+    }
+
     pub(crate) fn line_breaks(
         &mut self,
         history: &mut BlockHistory,
@@ -968,7 +1051,7 @@ impl TranscriptProjection {
     ) -> (Vec<usize>, Vec<usize>) {
         self.ensure_all(history, width, show_thinking, theme);
         let base_key = base_layout_key(width, show_thinking);
-        self.document
+        self.row_index
             .rebuild_if_stale(history, width, show_thinking, base_key);
 
         // The break ending row r is soft iff r+1 has `decoration.soft_wrapped`.
@@ -997,7 +1080,7 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows);
-            self.document
+            self.row_index
                 .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             for _ in 0..gap {
                 push_row(&mut metas, pos, false);
@@ -1011,7 +1094,7 @@ impl TranscriptProjection {
                 pos += 1;
             }
         }
-        self.document.refresh_height_index();
+        self.row_index.refresh_height_index();
 
         let mut soft = Vec::new();
         let mut hard = Vec::new();
@@ -1030,6 +1113,24 @@ impl TranscriptProjection {
     }
 }
 
+fn breaks_for_materialized_rows(
+    rows: &[String],
+    soft_wrapped: &[bool],
+) -> (Vec<usize>, Vec<usize>) {
+    let mut soft = Vec::new();
+    let mut hard = Vec::new();
+    let mut pos = 0usize;
+    for i in 0..rows.len().saturating_sub(1) {
+        pos += rows[i].len();
+        if soft_wrapped.get(i + 1).copied().unwrap_or(false) {
+            soft.push(pos);
+        } else {
+            hard.push(pos);
+        }
+        pos += 1;
+    }
+    (soft, hard)
+}
 fn apply_row_highlights(buf: &mut Buffer, row: usize, highlights: Vec<Span>) {
     for span in highlights {
         let meta: SpanMeta = span.meta;
@@ -1491,6 +1592,74 @@ mod tests {
         assert_eq!(output.clamped_scroll, output.total_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "line 99"));
         assert!(!buf.lines().iter().any(|line| line == "line 0"));
+    }
+
+    #[test]
+    fn range_rows_match_full_projection_slice() {
+        let mut transcript = Transcript::new();
+        for i in 0..20 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut full_projection = TranscriptProjection::new();
+        let mut full_buf = Buffer::new(crate::smelt_edit::BufId(21), Default::default());
+        full_projection.project(
+            &mut full_buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::full_row(0),
+            10,
+        );
+        let expected = full_buf.lines()[5..12].to_vec();
+
+        let mut range_projection = TranscriptProjection::new();
+        let range =
+            range_projection.rows_for_range(&mut transcript.history, 80, false, &theme, 5, 7);
+
+        assert_eq!(range.rows, expected);
+    }
+
+    #[test]
+    fn range_breaks_match_full_projection_for_wrapped_rows() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "one two three four five six seven eight nine ten".into(),
+        });
+        transcript.push(Block::Text {
+            content: "after".into(),
+        });
+        let theme = Theme::default();
+        let mut full_projection = TranscriptProjection::new();
+        let mut full_buf = Buffer::new(crate::smelt_edit::BufId(22), Default::default());
+        full_projection.project(
+            &mut full_buf,
+            &mut transcript.history,
+            18,
+            false,
+            &theme,
+            ScrollTarget::full_row(0),
+            20,
+        );
+        let (soft, hard) = full_projection.line_breaks(&mut transcript.history, 18, false, &theme);
+        assert!(!soft.is_empty(), "fixture should produce soft wraps");
+
+        let mut range_projection = TranscriptProjection::new();
+        let range = range_projection.rows_for_range(
+            &mut transcript.history,
+            18,
+            false,
+            &theme,
+            0,
+            full_buf.line_count() as RowIndex,
+        );
+
+        assert_eq!(range.rows, full_buf.lines().to_vec());
+        assert_eq!(range.soft_breaks, soft);
+        assert_eq!(range.hard_breaks, hard);
     }
 
     #[test]
