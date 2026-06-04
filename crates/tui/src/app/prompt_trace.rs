@@ -1,13 +1,10 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::OnceLock;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
 use super::{AppFocus, TuiApp};
-
-static PROMPT_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 pub(crate) struct PromptInsertCheck {
     ch: char,
@@ -17,11 +14,7 @@ pub(crate) struct PromptInsertCheck {
 
 impl TuiApp {
     pub(crate) fn prompt_trace_enabled(&self) -> bool {
-        *PROMPT_TRACE_ENABLED.get_or_init(|| {
-            std::env::var("SMELT_PROMPT_TRACE")
-                .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-                .unwrap_or(false)
-        })
+        true
     }
 
     pub(crate) fn trace_prompt_event(&self, label: &str, data: Value) {
