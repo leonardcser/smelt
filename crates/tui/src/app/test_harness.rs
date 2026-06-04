@@ -2303,6 +2303,97 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_question_multiple_questions_wakes_between_dialogs() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        app.start_turn(1);
+
+        let mut args = std::collections::HashMap::new();
+        args.insert(
+            "questions".into(),
+            serde_json::json!([
+                {
+                    "header": "First",
+                    "question": "Pick first?",
+                    "options": [
+                        { "label": "One", "description": "first option" },
+                        { "label": "Two", "description": "second option" }
+                    ],
+                    "multiSelect": false
+                },
+                {
+                    "header": "Second",
+                    "question": "Pick second?",
+                    "options": [
+                        { "label": "Three", "description": "third option" },
+                        { "label": "Four", "description": "fourth option" }
+                    ],
+                    "multiSelect": false
+                }
+            ]),
+        );
+
+        app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+            request_id: 77,
+            call_id: "aq-questions".into(),
+            tool_name: "ask_user_question".into(),
+            args,
+        }));
+
+        let first = app
+            .state()
+            .focused_overlay
+            .expect("first question dialog should open");
+
+        app.press(KeyCode::Enter);
+        assert!(
+            app.app.lua_wakeup_rx.try_recv().is_ok(),
+            "resolving the first dialog should wake the Lua task runtime"
+        );
+        app.feed_one(SourceEvent::LuaWakeup);
+
+        let second = app
+            .state()
+            .focused_overlay
+            .expect("second question dialog should open after first answer");
+        assert_ne!(first, second);
+
+        app.press(KeyCode::Char('2'));
+        assert!(
+            app.app.lua_wakeup_rx.try_recv().is_ok(),
+            "resolving the final dialog should wake the Lua task runtime"
+        );
+        app.feed_one(SourceEvent::LuaWakeup);
+
+        assert!(app.state().focused_overlay.is_none());
+        let result = app
+            .actions()
+            .iter()
+            .filter_map(|action| match action {
+                Action::EngineSend(cmd) => match cmd.as_ref() {
+                    protocol::UiCommand::ToolResult {
+                        request_id,
+                        call_id,
+                        content,
+                        is_error,
+                        ..
+                    } => Some((*request_id, call_id.as_str(), content.as_str(), *is_error)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .next_back()
+            .expect("ask_user_question should send a tool result");
+
+        assert_eq!(result.0, 77);
+        assert_eq!(result.1, "aq-questions");
+        assert_eq!(
+            result.2,
+            "Q: Pick first?\nA: One\n\nQ: Pick second?\nA: Four"
+        );
+        assert!(!result.3);
+    }
+
+    #[test]
     fn question_keymap_after_prompt_attachment_is_not_plain_insertion() {
         let mut app = TestApp::builder()
             .with_vim(true)

@@ -38,6 +38,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         value: key,
                     });
                 }
+                if let Some(tx) = s.wakeup_tx.get() {
+                    let _ = tx.send(());
+                }
                 Ok(())
             },
         )?;

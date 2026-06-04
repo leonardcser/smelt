@@ -104,11 +104,11 @@ pub struct LuaShared {
     /// can mint an id without re-entering the `tasks` mutex.
     pub next_external_id: AtomicU64,
     pub tasks: Mutex<LuaTaskRuntime>,
-    /// Resume-events for Lua coroutines; pumped each tick.
+    /// Resume-events for Lua coroutines; pumped on wakeup/tick.
     pub task_inbox: Mutex<Vec<TaskEvent>>,
     /// Cross-thread inbox: tokio tasks push `(external_id, json)`; main loop drains to `task_inbox`.
     pub json_inbox: Arc<Mutex<Vec<(u64, serde_json::Value)>>>,
-    /// Wakes the main loop when a tokio task pushes a JSON payload. Optional for trivial default.
+    /// Wakes the main loop when a coroutine resume payload is queued.
     pub wakeup_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<()>>,
     pub providers: Mutex<Vec<crate::config::ProviderConfig>>,
     pub permission_rules: Mutex<Option<crate::permissions::rules::RawPerms>>,
