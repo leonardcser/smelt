@@ -196,8 +196,10 @@ impl BufferParser for PromptBufferParser {
         let lines: Vec<String> = visual_lines.iter().map(|(l, _)| l.clone()).collect();
 
         // Determine if we need special command/exec styling on the first line.
+        let command_token_end = smelt_core::commands::registered_command_token(source.trim())
+            .map(|token| token.chars().count())
+            .unwrap_or(0);
         let single_line = !source.contains('\n');
-        let is_command = single_line && smelt_core::commands::is_command(source.trim());
         let is_exec =
             single_line && matches!(source.as_bytes(), [b'!', c, ..] if !c.is_ascii_whitespace());
         let is_exec_invalid = single_line && source == "!";
@@ -211,19 +213,6 @@ impl BufferParser for PromptBufferParser {
         // time, so live theme updates flow through without re-parsing.
         let accent_group = intern("SmeltAccent");
         let exec_group = intern("SmeltExecPrefix");
-
-        // Char index of the first whitespace on the first visual line, which
-        // marks the end of the leading `/command` token. Highlighting only
-        // extends up to here so a typed argument's first char doesn't pick up
-        // the accent.
-        let command_token_end = if is_command {
-            visual_lines
-                .first()
-                .and_then(|(line, _)| line.chars().position(|c| c.is_whitespace()))
-                .unwrap_or(usize::MAX)
-        } else {
-            0
-        };
 
         for (li, (line, kinds)) in visual_lines.iter().enumerate() {
             let mut col = 0u16;
@@ -243,7 +232,7 @@ impl BufferParser for PromptBufferParser {
                         }
                     }
                     SpanKind::Plain => {
-                        if is_command && li == 0 && i < command_token_end && next_col > col {
+                        if li == 0 && i < command_token_end && next_col > col {
                             buf.add_highlight_group_with_meta(
                                 li,
                                 col,
@@ -308,6 +297,32 @@ mod tests {
         assert_eq!(buf.line_count(), 2);
         assert_eq!(buf.get_line(0).unwrap(), "hello world");
         assert_eq!(buf.get_line(1).unwrap(), "second");
+    }
+
+    #[test]
+    fn parser_highlights_multiline_command_token_only() {
+        let _g = crate::COMMAND_RESOLVER_GUARD.lock().unwrap();
+        smelt_core::commands::set_command_resolver(|name| name == "simplify");
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let parser = Arc::new(PromptBufferParser::new(store));
+        let mut buf = make_buf_with_parser(parser);
+        buf.set_source("/simplify first line\nsecond line".into());
+        buf.ensure_rendered_at(80);
+
+        let first_row = buf.highlights_at(0);
+        assert!(
+            first_row.iter().any(|h| h.col_start == 0 && h.col_end == 1),
+            "expected /simplify to be highlighted, got {first_row:?}"
+        );
+        assert!(
+            first_row.iter().all(|h| h.col_end <= 9),
+            "expected command arguments to stay unhighlighted, got {first_row:?}"
+        );
+        assert!(
+            buf.highlights_at(1).is_empty(),
+            "expected following lines to stay unhighlighted, got {:?}",
+            buf.highlights_at(1)
+        );
     }
 
     #[test]

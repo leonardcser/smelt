@@ -5,6 +5,9 @@
 #[global_allocator]
 static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
 
+#[cfg(test)]
+pub(crate) static COMMAND_RESOLVER_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod app;
 pub mod auto_reload;
 pub(crate) mod commands;

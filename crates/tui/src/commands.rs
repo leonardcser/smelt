@@ -139,25 +139,19 @@ impl TuiApp {
             return None;
         };
 
-        if !smelt_core::commands::is_command(&normalized) {
-            return None;
-        }
-
-        let name = normalized
-            .strip_prefix('/')
-            .and_then(|s| s.split_whitespace().next())
-            .unwrap_or("");
+        let token = smelt_core::commands::registered_command_token(&normalized)?;
+        let name = &token[1..];
         // Commands that opt into `queue_when_busy` get one synchronous pass so
         // handlers that build a custom-command turn can capture their evaluated
         // body and enqueue it via `smelt.engine.submit_command`.
-        if !name.is_empty() && self.lua.command_queues_when_busy(name) {
+        if self.lua.command_queues_when_busy(name) {
             return match run_command(self, &normalized) {
                 CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
                 CommandAction::Continue => Some(EventOutcome::Noop),
             };
         }
         // Commands registered with `{ while_busy = false }` are blocked mid-turn.
-        if !name.is_empty() && self.lua.command_blocks_while_busy(name) == Some(true) {
+        if self.lua.command_blocks_while_busy(name) == Some(true) {
             self.notify_error(format!("cannot run /{name} while agent is working"));
             return Some(EventOutcome::Noop);
         }
@@ -503,6 +497,14 @@ mod tests {
         assert_eq!(
             parse_command_line("/model claude-haiku"),
             slash("model", Some("claude-haiku"))
+        );
+    }
+
+    #[test]
+    fn slash_with_multiline_argument_preserves_body() {
+        assert_eq!(
+            parse_command_line("/btw first line\nsecond line"),
+            slash("btw", Some("first line\nsecond line"))
         );
     }
 

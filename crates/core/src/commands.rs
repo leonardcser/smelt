@@ -16,16 +16,39 @@ pub fn set_command_resolver(f: impl Fn(&str) -> bool + Send + Sync + 'static) {
     *RESOLVER.write().unwrap() = Some(Box::new(f));
 }
 
+/// Leading `/name` token from a slash command invocation.
+/// Returns `None` when `text` does not start with a non-empty slash command name.
+pub fn command_token(text: &str) -> Option<&str> {
+    let name = text.strip_prefix('/')?.split_whitespace().next()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(&text[..1 + name.len()])
+}
+
+/// Slash command name without the leading `/`.
+pub fn command_name(text: &str) -> Option<&str> {
+    command_token(text).map(|token| &token[1..])
+}
+
+/// Registered leading `/name` token from a slash command invocation.
+pub fn registered_command_token(text: &str) -> Option<&str> {
+    let token = command_token(text)?;
+    let name = &token[1..];
+    if resolver_has_command(name) {
+        Some(token)
+    } else {
+        None
+    }
+}
+
 /// Returns true when `text` is `/name [args]` and `name` is a registered command.
 /// Returns false when no resolver is installed or the name is empty.
 pub fn is_command(text: &str) -> bool {
-    let name = text
-        .strip_prefix('/')
-        .and_then(|s| s.split_whitespace().next())
-        .unwrap_or("");
-    if name.is_empty() {
-        return false;
-    }
+    command_name(text).is_some_and(resolver_has_command)
+}
+
+fn resolver_has_command(name: &str) -> bool {
     RESOLVER
         .read()
         .ok()
@@ -44,6 +67,24 @@ mod tests {
 
     fn clear_resolver() {
         *RESOLVER.write().unwrap() = None;
+    }
+
+    #[test]
+    fn command_token_and_name_parse_leading_slash_command() {
+        assert_eq!(command_token("/help now"), Some("/help"));
+        assert_eq!(command_name("/help now"), Some("help"));
+        assert_eq!(command_token("/日本語 arg"), Some("/日本語"));
+        assert_eq!(command_token("help"), None);
+        assert_eq!(command_token("/   "), None);
+    }
+
+    #[test]
+    fn registered_command_token_consults_resolver() {
+        let _g = GUARD.lock().unwrap();
+        set_command_resolver(|name| name == "help");
+        assert_eq!(registered_command_token("/help now"), Some("/help"));
+        assert_eq!(registered_command_token("/nope now"), None);
+        clear_resolver();
     }
 
     #[test]

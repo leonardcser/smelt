@@ -19,9 +19,9 @@ pub(super) fn render(out: &mut LineBuilder, command: &str, output: &str, width: 
     let command = crate::content::display_safe_text(&format!("!{command}"));
     let lines = [command];
 
-    let mut rows = super::chrome::render(out, &lines, text_w, |out, chunk, idx| {
+    let mut rows = super::chrome::render(out, &lines, text_w, |out, chunk, pos| {
         // `!` is ASCII, so byte 0 is a safe char boundary on chunk 0.
-        if idx == 0 && chunk.starts_with('!') {
+        if pos.chunk_idx == 0 && chunk.starts_with('!') {
             out.push_fg(exec_fg);
             out.print("!");
             out.pop_style();

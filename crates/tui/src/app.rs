@@ -1410,12 +1410,8 @@ impl TuiApp {
                 if let Some(handle) = self.start_shell_escape(cmd) {
                     self.exec = Some(handle);
                 }
-            } else if trimmed.starts_with('/') && smelt_core::commands::is_command(trimmed) {
-                let name = trimmed
-                    .trim_start_matches('/')
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
+            } else if let Some(token) = smelt_core::commands::registered_command_token(trimmed) {
+                let name = &token[1..];
                 if self.lua.command_startup_ok(name) == Some(true) {
                     self.apply_lua_command(trimmed);
                 } else {
