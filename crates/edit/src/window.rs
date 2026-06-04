@@ -700,10 +700,11 @@ impl Window {
     }
 
     pub fn update_tail_state(&mut self, buf: &Buffer, viewport_rows: u16) {
-        if !self.is_following_tail()
-            || self.selection_active()
-            || !self.is_at_tail(buf, viewport_rows)
-        {
+        if self.selection_active() {
+            self.pin_current_scroll();
+        } else if self.is_at_tail(buf, viewport_rows) {
+            self.scroll_state = VerticalScroll::Tail;
+        } else {
             self.pin_current_scroll();
         }
     }
@@ -2657,19 +2658,42 @@ mod tests {
     }
 
     #[test]
-    fn pan_by_lines_clamps_at_bottom() {
+    fn pan_by_lines_reengages_tail_when_scrolling_to_bottom() {
         let mut w = make_win();
         let rows = sample_rows(30);
         let buf = make_buf(rows.clone());
         let viewport = 10;
-        w.jump_to_line_col(&buf, 29, 0, viewport);
         let max_scroll = (30 - viewport) as RowIndex;
-        assert_eq!(w.scroll_top, max_scroll);
+        w.jump_to_line_col(&buf, 15, 0, viewport);
+        w.pin_scroll(max_scroll - 5);
+        assert!(!w.is_following_tail());
+
         w.pan_by_lines(&buf, 5, viewport);
+
+        assert_eq!(w.scroll_top, max_scroll, "scroll clamps at max");
+        assert!(
+            w.is_following_tail(),
+            "normal scroll to the bottom re-engages tail follow"
+        );
+    }
+
+    #[test]
+    fn pan_by_lines_with_selection_does_not_reengage_tail_at_bottom() {
+        let mut w = make_win();
+        let rows = sample_rows(30);
+        let buf = make_buf(rows.clone());
+        let viewport = 10;
+        let max_scroll = (30 - viewport) as RowIndex;
+        w.jump_to_line_col(&buf, 15, 0, viewport);
+        w.pin_scroll(max_scroll - 5);
+        w.selection_anchor = Some(w.cpos.saturating_sub(1));
+
+        w.pan_by_lines(&buf, 5, viewport);
+
         assert_eq!(w.scroll_top, max_scroll, "scroll clamps at max");
         assert!(
             !w.is_following_tail(),
-            "manual pan to the bottom stays pinned"
+            "selection at the bottom keeps the viewport pinned"
         );
     }
 
