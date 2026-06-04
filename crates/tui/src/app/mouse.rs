@@ -99,6 +99,28 @@ fn transcript_mouse_cell(
     }
 }
 
+fn projected_buf_breaks(buf: &crate::smelt_term::Buffer) -> (Vec<usize>, Vec<usize>) {
+    let lines = buf.lines();
+    let mut soft = Vec::new();
+    let mut hard = Vec::new();
+    let mut pos = 0usize;
+
+    for (row, line) in lines.iter().enumerate() {
+        pos += line.len();
+        if row + 1 == lines.len() {
+            break;
+        }
+        if buf.decoration_at(row + 1).soft_wrapped {
+            soft.push(pos);
+        } else {
+            hard.push(pos);
+        }
+        pos += 1;
+    }
+
+    (soft, hard)
+}
+
 impl TuiApp {
     // ── Mouse event dispatch ─────────────────────────────────────────────
     pub(crate) fn handle_mouse(&mut self, me: MouseEvent) -> EventOutcome {
@@ -366,18 +388,6 @@ impl TuiApp {
         let viewport = crate::smelt_term::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
         let win_id = self.well_known.transcript;
         let buf_id = self.transcript_win().buf;
-        let rows: Vec<String> = self
-            .ui
-            .buf(buf_id)
-            .map(|b| b.lines().to_vec())
-            .unwrap_or_default();
-        if rows.is_empty() {
-            return None;
-        }
-        let snapped = self.snap_event_for_selection(me, &rows, viewport);
-
-        // Breaks only matter for word/line selection and word/line-anchored drags;
-        // skip the full-transcript walk otherwise.
         let needs_breaks = match me.kind {
             MouseEventKind::Down(_) => click_count >= 2,
             MouseEventKind::Drag(_) => {
@@ -386,12 +396,25 @@ impl TuiApp {
             }
             _ => false,
         };
-        let (soft, hard) = if needs_breaks {
-            crate::smelt_term::UiHost::breaks_for(self, crate::app::TRANSCRIPT_WIN)
-                .unwrap_or_default()
-        } else {
-            (Vec::new(), Vec::new())
+        let (rows, soft, hard) = {
+            let buf = self.ui.buf(buf_id)?;
+            let rows = buf.lines().to_vec();
+            let (soft, hard) = if needs_breaks {
+                projected_buf_breaks(buf)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            (rows, soft, hard)
         };
+        if rows.is_empty() {
+            return None;
+        }
+        let snapped = self.snap_event_for_selection(me, &rows, viewport);
+
+        // Breaks only matter for word/line selection and word/line-anchored drags.
+        // They must come from the same projected buffer that mouse selection reads;
+        // rematerializing full transcript breaks can describe a different generation
+        // and produce stale byte offsets.
 
         let range = {
             let mouse_ctx = crate::smelt_term::MouseCtx {

@@ -1,0 +1,62 @@
+{
+  "_about": "Transcript triple-click selection used rematerialized transcript line-break offsets that could be out of sync with the live projected buffer after rendering. A stale hard-break offset made selection_anchor land inside a multibyte glyph.",
+  "_fix": "fix(tui): derive transcript mouse breaks from the projected buffer",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": {
+        "msg_count": 10
+      },
+      "kind": "engine_turn_complete"
+    },
+    {
+      "data": {
+        "variant": 0
+      },
+      "kind": "probe_compaction_prepare_request"
+    },
+    {
+      "data": {
+        "msg_count": 69
+      },
+      "kind": "engine_turn_complete"
+    },
+    {
+      "data": {
+        "button": 0,
+        "col": 0,
+        "kind": 0,
+        "mods": 0,
+        "row": 0
+      },
+      "kind": "mouse"
+    },
+    {
+      "data": {
+        "variant": 0
+      },
+      "kind": "probe_compaction_prepare_request"
+    },
+    {
+      "data": {
+        "button": 0,
+        "col": 0,
+        "kind": 0,
+        "mods": 0,
+        "row": 0
+      },
+      "kind": "mouse"
+    },
+    {
+      "data": {
+        "button": 0,
+        "col": 0,
+        "kind": 56,
+        "mods": 0,
+        "row": 0
+      },
+      "kind": "mouse"
+    }
+  ],
+  "vim": false
+}
