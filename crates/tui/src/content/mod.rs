@@ -6,6 +6,7 @@ pub(crate) mod block_buffers;
 pub(crate) mod layout;
 pub(crate) mod prompt_buf;
 pub(crate) mod prompt_parser;
+pub(crate) mod source_view;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
 pub mod transcript_parsers;

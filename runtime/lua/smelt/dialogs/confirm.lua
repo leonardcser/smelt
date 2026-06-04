@@ -109,7 +109,7 @@ function smelt.confirm.open(handle_id)
   if not req or req.handle_id ~= handle_id then return end
 
   local header_buf  = smelt.buf.new()
-  local preview_buf = smelt.buf.new()
+  local preview_buf = smelt.buf.new({ readonly = true })
   render_header(header_buf, req)
   smelt.confirm.__render_preview(preview_buf, handle_id)
   local first_preview = preview_buf:line(1)
@@ -118,7 +118,11 @@ function smelt.confirm.open(handle_id)
   local labels, decisions = build_options(req)
 
   local header_leaf  = smelt.dialog.content({ buf = header_buf, wrap = false })
-  local preview_leaf = smelt.dialog.content({ buf = preview_buf, interactive = has_preview })
+  local preview_leaf = smelt.dialog.content({
+    buf = preview_buf,
+    interactive = has_preview,
+    readonly = true,
+  })
   local allow_leaf, allow_buf = smelt.dialog.content({ wrap = false })
   allow_buf:styled({ { { text = "Allow?", style = { dim = true } } } })
 

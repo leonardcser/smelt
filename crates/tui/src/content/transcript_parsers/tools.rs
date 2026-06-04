@@ -1,14 +1,12 @@
 use super::metrics::{block_inner_width, BLOCK_GUTTER_SPACE, BLOCK_GUTTER_W};
 use super::MAX_TOOL_BLOCK_ROWS;
+use crate::content::source_view::{render_source_view, SourceView, SourceViewTarget};
 use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
-use smelt_core::content::block_layout::{DiffSpec, FileViewSpec, RenderedLayout, RenderedLeaf};
+use smelt_core::content::block_layout::{RenderedLayout, RenderedLeaf};
 use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
-use smelt_core::content::highlight::{
-    build_file_view_cache, print_cached_inline_diff, print_inline_diff_ext, GutterStyle,
-    InlineSyntax,
-};
+use smelt_core::content::highlight::InlineSyntax;
 use smelt_core::content::wrap::wrap_line_ranges;
 use smelt_core::theme::{intern, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
@@ -390,81 +388,26 @@ fn render_leaf(
     width: u16,
     with_gutter: bool,
 ) -> u16 {
+    let source_view_target = SourceViewTarget::new(
+        if with_gutter {
+            BLOCK_GUTTER_W as u16
+        } else {
+            0
+        },
+        u16::MAX,
+    );
     match leaf {
         RenderedLeaf::Buf(buf) => replay_leaf(out, buf, rows_cap, width, with_gutter),
-        RenderedLeaf::Diff(spec) => render_diff_spec(out, spec, with_gutter),
-        RenderedLeaf::DiffCache(cache) => {
-            let indent = if with_gutter {
-                BLOCK_GUTTER_W as u16
-            } else {
-                0
-            };
-            print_cached_inline_diff(
-                out,
-                cache,
-                GutterStyle::InlineLineNumbers,
-                indent,
-                0,
-                u16::MAX,
-            )
+        RenderedLeaf::Diff(spec) => {
+            render_source_view(out, SourceView::Diff(spec), source_view_target)
         }
-        RenderedLeaf::FileView(spec) => render_file_view_spec(out, spec, with_gutter),
+        RenderedLeaf::DiffCache(cache) => {
+            render_source_view(out, SourceView::DiffCache(cache), source_view_target)
+        }
+        RenderedLeaf::FileView(spec) => {
+            render_source_view(out, SourceView::FileView(spec), source_view_target)
+        }
     }
-}
-
-/// Render a `Diff` spec leaf directly into the worker's block buffer. The
-/// 2-cell indent gets baked into the diff renderer (every row gets it), so
-/// bg, indent, line numbers, content, and trailing pad all share one render
-/// pass and survive the projection seam intact.
-fn render_diff_spec(out: &mut LineBuilder, spec: &DiffSpec, with_gutter: bool) -> u16 {
-    let ext = spec
-        .lang
-        .as_deref()
-        .map(smelt_core::content::highlight::lang_to_ext);
-    let indent = if with_gutter {
-        BLOCK_GUTTER_W as u16
-    } else {
-        0
-    };
-    print_inline_diff_ext(
-        out,
-        &spec.old,
-        &spec.new,
-        &spec.path,
-        &spec.anchor,
-        ext,
-        GutterStyle::InlineLineNumbers,
-        indent,
-        0,
-        u16::MAX,
-    )
-}
-
-/// Render a `FileView` spec leaf - single-line-number column, no diff bg.
-fn render_file_view_spec(out: &mut LineBuilder, spec: &FileViewSpec, with_gutter: bool) -> u16 {
-    let ext = spec
-        .lang
-        .as_deref()
-        .map(smelt_core::content::highlight::lang_to_ext)
-        .or_else(|| {
-            std::path::Path::new(&spec.path)
-                .extension()
-                .and_then(|e| e.to_str())
-        });
-    let cache = build_file_view_cache(&spec.content, ext);
-    let indent = if with_gutter {
-        BLOCK_GUTTER_W as u16
-    } else {
-        0
-    };
-    print_cached_inline_diff(
-        out,
-        &cache,
-        GutterStyle::InlineLineNumbers,
-        indent,
-        0,
-        u16::MAX,
-    )
 }
 
 fn replay_leaf(

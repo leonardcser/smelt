@@ -463,9 +463,10 @@ function smelt.dialog.markdown(text)
 end
 
 -- General-purpose body leaf. Pass `opts.buf` to wrap an existing buffer
--- or `opts.text` to spin up a fresh read-only one. `opts.interactive`
--- enables focus + vim keymaps (when the user has vim mode on);
--- `opts.wrap` mirrors `smelt.win.new`. Returns `(leaf, buf)`.
+-- or `opts.text` to spin up a fresh read-only one. `opts.readonly` can
+-- force the backing buffer's readonly flag when a caller supplies `opts.buf`.
+-- `opts.interactive` enables focus + vim keymaps (when the user has vim mode
+-- on); `opts.wrap` mirrors `smelt.win.new`. Returns `(leaf, buf)`.
 ---@type fun(opts: table?): smelt.win.Win, smelt.buf.Buf
 function smelt.dialog.content(opts)
   opts = opts or {}
@@ -475,6 +476,9 @@ function smelt.dialog.content(opts)
     if opts.text and opts.text ~= "" then
       buf:lines(split_lines(opts.text))
     end
+  end
+  if opts.readonly ~= nil then
+    buf:readonly(opts.readonly and true or false)
   end
   local focusable = opts.focusable
   if focusable == nil then focusable = opts.interactive or false end

@@ -738,7 +738,6 @@ pub fn print_cached_inline_diff(
                     ),
                     CachedDiffLine::Ellipsis => unreachable!(),
                 };
-                let line_fg = sign.map(|(_, color)| color);
                 let visual_rows = split_cached_spans_into_rows(out, text, spans, max_content);
                 let pad_meta = SpanMeta {
                     selectable: false,
@@ -756,15 +755,7 @@ pub fn print_cached_inline_diff(
                     if indent > 0 {
                         out.print_gutter(&indent_str);
                     }
-                    emit_diff_prefix(
-                        out,
-                        gutter,
-                        source_line,
-                        vi,
-                        lineno_digits,
-                        &blank_prefix,
-                        line_fg,
-                    );
+                    emit_diff_prefix(out, gutter, source_line, vi, lineno_digits, &blank_prefix);
                     if let Some((ch, color)) = sign {
                         // bg is None when the theme doesn't define
                         // `SmeltDiffAddBg` / `SmeltDiffDelBg`; in that
@@ -799,9 +790,8 @@ pub fn print_cached_inline_diff(
 
 /// Emit the diff row's left-of-content prefix per the chosen gutter style. `Stamped`
 /// hands off via `SourceLine` (host window's `LineNumberGutter` paints the column);
-/// `InlineLineNumbers` writes ` N ` as text - coloured `line_fg` when set (red/green
-/// for delete/insert rows so the gutter shares the row's diff tint), otherwise the
-/// theme's `Comment` group; `None` writes nothing.
+/// `InlineLineNumbers` writes a local ` N ` column with the theme's `Comment` group;
+/// `None` writes nothing.
 fn emit_diff_prefix(
     out: &mut LineBuilder,
     gutter: GutterStyle,
@@ -809,17 +799,13 @@ fn emit_diff_prefix(
     vi: usize,
     lineno_digits: usize,
     blank_prefix: &str,
-    line_fg: Option<Color>,
 ) {
     match gutter {
         GutterStyle::Stamped => {
             out.stamp_chunk(vi, source_line);
         }
         GutterStyle::InlineLineNumbers => {
-            match line_fg {
-                Some(fg) => out.push_fg(fg),
-                None => out.push_hl(crate::theme::intern("Comment")),
-            }
+            out.push_hl(crate::theme::intern("Comment"));
             if vi == 0 {
                 let lineno = match source_line {
                     smelt_buffer::buffer::SourceLine::Linear { lineno } => Some(lineno),
