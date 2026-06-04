@@ -8,8 +8,8 @@
 //! cross-call state - it's a pure function of the borrowed context.
 
 use super::{Action, History, PromptCtx, PromptState};
-use crate::smelt_term::vim::{self, VimContext};
-use crate::smelt_term::Clipboard;
+use crate::smelt_edit::vim::{self, VimContext};
+use crate::smelt_edit::Clipboard;
 use crossterm::event::{Event, KeyEvent};
 
 /// Outcome of the vim bridge for a single key event.

@@ -23,9 +23,9 @@ impl LuaRuntime {
     #[cfg(test)]
     pub(super) fn invoke_callback(
         &self,
-        handle: crate::smelt_term::LuaHandle,
-        win: crate::smelt_term::WinId,
-        payload: &crate::smelt_term::Payload,
+        handle: crate::smelt_edit::LuaHandle,
+        win: crate::smelt_edit::WinId,
+        payload: &crate::smelt_edit::Payload,
     ) {
         if let Some((func, payload_table)) = self.prepare_invocation(handle, win, payload) {
             if let Err(e) = func.call::<()>(payload_table) {
@@ -40,9 +40,9 @@ impl LuaRuntime {
     /// Returns `None` if the handle is dropped or payload construction fails.
     pub(crate) fn prepare_invocation(
         &self,
-        handle: crate::smelt_term::LuaHandle,
-        win: crate::smelt_term::WinId,
-        payload: &crate::smelt_term::Payload,
+        handle: crate::smelt_edit::LuaHandle,
+        win: crate::smelt_edit::WinId,
+        payload: &crate::smelt_edit::Payload,
     ) -> Option<(mlua::Function, mlua::Table)> {
         let func = {
             let cbs = self.shared.callbacks.lock().ok()?;
@@ -77,9 +77,9 @@ impl LuaRuntime {
     /// collide with the borrow. The host drains the queue after the ui call returns.
     pub(crate) fn queue_invocation(
         &self,
-        handle: crate::smelt_term::LuaHandle,
-        win: crate::smelt_term::WinId,
-        payload: &crate::smelt_term::Payload,
+        handle: crate::smelt_edit::LuaHandle,
+        win: crate::smelt_edit::WinId,
+        payload: &crate::smelt_edit::Payload,
     ) {
         if let Ok(mut q) = self.shared.pending_invocations.lock() {
             q.push(crate::lua::PendingInvocation {
@@ -102,36 +102,36 @@ impl LuaRuntime {
 /// Fill a Lua table with fields derived from `payload`.
 fn populate_payload_table(
     table: &mlua::Table,
-    payload: &crate::smelt_term::Payload,
+    payload: &crate::smelt_edit::Payload,
 ) -> mlua::Result<()> {
     match payload {
-        crate::smelt_term::Payload::None => Ok(()),
-        crate::smelt_term::Payload::Key { code, mods } => {
+        crate::smelt_edit::Payload::None => Ok(()),
+        crate::smelt_edit::Payload::Key { code, mods } => {
             table.set("code", format!("{code:?}"))?;
             table.set("mods", format!("{mods:?}"))?;
             Ok(())
         }
-        crate::smelt_term::Payload::Selection { index } => table.set("index", *index + 1),
-        crate::smelt_term::Payload::Text { content } => table.set("text", content.clone()),
-        crate::smelt_term::Payload::Mouse { row, col, button } => {
+        crate::smelt_edit::Payload::Selection { index } => table.set("index", *index + 1),
+        crate::smelt_edit::Payload::Text { content } => table.set("text", content.clone()),
+        crate::smelt_edit::Payload::Mouse { row, col, button } => {
             table.set("row", *row)?;
             table.set("col", *col)?;
             table.set(
                 "button",
                 match button {
-                    crate::smelt_term::MouseButton::Left => "left",
-                    crate::smelt_term::MouseButton::Right => "right",
-                    crate::smelt_term::MouseButton::Middle => "middle",
+                    crate::smelt_edit::MouseButton::Left => "left",
+                    crate::smelt_edit::MouseButton::Right => "right",
+                    crate::smelt_edit::MouseButton::Middle => "middle",
                 },
             )?;
             Ok(())
         }
-        crate::smelt_term::Payload::Scroll { top, follow } => {
+        crate::smelt_edit::Payload::Scroll { top, follow } => {
             table.set("top", *top)?;
             table.set("follow", *follow)?;
             Ok(())
         }
-        crate::smelt_term::Payload::Rect {
+        crate::smelt_edit::Payload::Rect {
             row,
             col,
             width,

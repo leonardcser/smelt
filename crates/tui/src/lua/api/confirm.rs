@@ -211,7 +211,7 @@ fn outside_dir_string(req: &ConfirmRequest) -> String {
 /// 2-cell tool-block gutter, since the dialog's preview pane owns its own chrome.
 fn render_preview_into(
     app: &mut crate::app::TuiApp,
-    buf_id: crate::smelt_term::BufId,
+    buf_id: crate::smelt_edit::BufId,
     tool_name: &str,
     args: &std::collections::HashMap<String, serde_json::Value>,
 ) -> bool {

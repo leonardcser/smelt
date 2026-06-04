@@ -2,7 +2,7 @@
 
 use crate::app::TuiApp;
 use crate::content::prompt_parser::build_prompt_display_lines;
-use crate::smelt_term::{BufCreateOpts, Buffer, Theme};
+use crate::smelt_edit::{BufCreateOpts, Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 
 use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
@@ -15,10 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct TranscriptData {
-    pub(crate) clamped_scroll: crate::smelt_term::RowIndex,
-    pub(crate) row_base: crate::smelt_term::RowIndex,
-    pub(crate) total_rows: crate::smelt_term::RowIndex,
-    pub(crate) projected_rows: crate::smelt_term::RowIndex,
+    pub(crate) clamped_scroll: crate::smelt_edit::RowIndex,
+    pub(crate) row_base: crate::smelt_edit::RowIndex,
+    pub(crate) total_rows: crate::smelt_edit::RowIndex,
+    pub(crate) projected_rows: crate::smelt_edit::RowIndex,
 }
 
 pub(crate) struct TranscriptView {
@@ -73,8 +73,8 @@ impl TranscriptView {
         theme: &Theme,
     ) -> Vec<(
         BlockId,
-        crate::smelt_term::RowIndex,
-        crate::smelt_term::RowIndex,
+        crate::smelt_edit::RowIndex,
+        crate::smelt_edit::RowIndex,
     )> {
         self.projection.materialize_block_layout(
             &mut self.transcript.history,
@@ -89,8 +89,8 @@ impl TranscriptView {
     ) -> impl Iterator<
         Item = (
             BlockId,
-            crate::smelt_term::RowIndex,
-            crate::smelt_term::RowIndex,
+            crate::smelt_edit::RowIndex,
+            crate::smelt_edit::RowIndex,
         ),
     > + '_ {
         self.projection.visible_block_layout()
@@ -250,8 +250,8 @@ fn collect_tool_render_jobs(
 type TranscriptBlockSnapshot = (
     usize,
     &'static str,
-    crate::smelt_term::RowIndex,
-    crate::smelt_term::RowIndex,
+    crate::smelt_edit::RowIndex,
+    crate::smelt_edit::RowIndex,
     String,
 );
 
@@ -396,13 +396,13 @@ impl TuiApp {
     pub(crate) fn transcript_display_rows_range(
         &mut self,
         show_thinking: bool,
-        start: crate::smelt_term::RowIndex,
-        count: crate::smelt_term::RowIndex,
+        start: crate::smelt_edit::RowIndex,
+        count: crate::smelt_edit::RowIndex,
     ) -> Vec<String> {
         let rows = self.full_transcript_display_text(show_thinking);
-        let start_idx = crate::smelt_term::document::row_to_usize(start).min(rows.len());
+        let start_idx = crate::smelt_edit::document::row_to_usize(start).min(rows.len());
         let end =
-            crate::smelt_term::document::row_to_usize(start.saturating_add(count)).min(rows.len());
+            crate::smelt_edit::document::row_to_usize(start.saturating_add(count)).min(rows.len());
         rows[start_idx..end].to_vec()
     }
 
@@ -425,11 +425,11 @@ impl TuiApp {
     pub(crate) fn transcript_line_breaks_range(
         &mut self,
         show_thinking: bool,
-        start: crate::smelt_term::RowIndex,
-        count: crate::smelt_term::RowIndex,
+        start: crate::smelt_edit::RowIndex,
+        count: crate::smelt_edit::RowIndex,
     ) -> (Vec<usize>, Vec<usize>) {
         let rows = self.transcript_display_rows_range(show_thinking, start, count);
-        (Vec::new(), crate::smelt_term::hard_breaks_for_lines(&rows))
+        (Vec::new(), crate::smelt_edit::hard_breaks_for_lines(&rows))
     }
 
     /// Snap a clicked cell column to the nearest selectable cell on `abs_row`.
@@ -500,8 +500,8 @@ impl TuiApp {
         layout: impl Iterator<
             Item = (
                 BlockId,
-                crate::smelt_term::RowIndex,
-                crate::smelt_term::RowIndex,
+                crate::smelt_edit::RowIndex,
+                crate::smelt_edit::RowIndex,
             ),
         >,
     ) -> Vec<TranscriptBlockSnapshot> {
@@ -523,7 +523,7 @@ impl TuiApp {
 
     pub(crate) fn transcript_block_at_row(
         &mut self,
-        row: crate::smelt_term::RowIndex,
+        row: crate::smelt_edit::RowIndex,
     ) -> Option<TranscriptBlockSnapshot> {
         self.transcript_block_snapshots()
             .into_iter()
@@ -535,8 +535,8 @@ impl TuiApp {
 
     pub(crate) fn transcript_visible_rows(
         &mut self,
-        start: crate::smelt_term::RowIndex,
-        count: crate::smelt_term::RowIndex,
+        start: crate::smelt_edit::RowIndex,
+        count: crate::smelt_edit::RowIndex,
     ) -> Vec<String> {
         self.transcript_display_rows_range(self.core.config.settings.show_thinking, start, count)
     }
@@ -763,15 +763,15 @@ impl TuiApp {
     /// No-op when no vim visual, selection anchor, or yank-flash is active.
     pub(crate) fn transcript_selection_highlights(
         &mut self,
-        scroll_top: crate::smelt_term::RowIndex,
-        row_base: crate::smelt_term::RowIndex,
+        scroll_top: crate::smelt_edit::RowIndex,
+        row_base: crate::smelt_edit::RowIndex,
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
         let win = self.transcript_win();
         let vim_visual = win.vim_enabled
             && matches!(
                 win.vim_mode,
-                crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine
+                crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine
             );
         let anchor_set = win.selection_anchor.is_some();
         let yank_flash = self.ui.focused_overlay().is_none()
@@ -799,8 +799,8 @@ impl TuiApp {
         let endpoint = win.effective_endpoint();
         let active_selection = if win.vim_enabled {
             match win.vim_mode {
-                crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine => {
-                    crate::smelt_term::vim::visual_range(
+                crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine => {
+                    crate::smelt_edit::vim::visual_range(
                         &win.vim_state,
                         &text,
                         endpoint,
@@ -833,7 +833,7 @@ impl TuiApp {
         // including the "1-cell virtual span on empty middle rows" rule.
         let first = scroll_top
             .saturating_sub(row_base)
-            .min(usize::MAX as crate::smelt_term::RowIndex) as usize;
+            .min(usize::MAX as crate::smelt_edit::RowIndex) as usize;
         let last = first + viewport_rows as usize;
         smelt_buffer::coords::selection_to_row_ranges(buf, s, e)
             .into_iter()
@@ -847,7 +847,7 @@ impl TuiApp {
     /// gives the prompt window that many rows in the splits tree.
     pub(crate) fn measure_prompt_input_rows(
         &self,
-        edit_buf: &crate::smelt_term::Buffer,
+        edit_buf: &crate::smelt_edit::Buffer,
         width: usize,
     ) -> u16 {
         let usable = width.saturating_sub(2).min(u16::MAX as usize) as u16;
@@ -865,7 +865,7 @@ impl TuiApp {
 /// to an empty placeholder so a registration race doesn't take down the frame.
 pub(crate) fn extract_rendered_layout(
     layout: &BlockLayout,
-    ui: &mut crate::smelt_term::Ui,
+    ui: &mut crate::smelt_edit::Ui,
 ) -> RenderedLayout {
     use smelt_core::content::block_layout::{LuaLeaf, RenderedLeaf};
     match layout {

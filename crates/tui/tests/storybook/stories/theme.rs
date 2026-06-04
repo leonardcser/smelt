@@ -2,8 +2,8 @@
 
 use smelt_core::style::Color;
 use smelt_core::theme::intern;
-use tui::smelt_term::layout::{Constraint, Gutters};
-use tui::smelt_term::{LayoutTree, SplitConfig};
+use tui::smelt_edit::layout::{Constraint, Gutters};
+use tui::smelt_edit::{LayoutTree, SplitConfig};
 
 fn pane(region: &str) -> SplitConfig {
     SplitConfig {
@@ -45,7 +45,7 @@ story!(theme_swap_repaints_without_buffer_edit, |ctx| {
 story!(theme_unknown_group_returns_default, |ctx| {
     one_line_pane(ctx);
     let unknown = intern("DefinitelyNotRegistered");
-    if let Some(buf) = ctx.ui.buf_mut(tui::smelt_term::BufId(1)) {
+    if let Some(buf) = ctx.ui.buf_mut(tui::smelt_edit::BufId(1)) {
         buf.add_highlight_group_with_meta(
             0,
             0,

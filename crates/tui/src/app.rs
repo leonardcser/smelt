@@ -68,9 +68,9 @@ pub struct TuiApp {
     pub(crate) task_label: Option<String>,
     pub(crate) pending_dialog: bool,
     pub(crate) pending_quit: bool,
-    pub(crate) notification: Option<crate::smelt_term::WinId>,
+    pub(crate) notification: Option<crate::smelt_edit::WinId>,
     pub(crate) cmdline: crate::app::cmdline::CmdlineState,
-    pub(crate) picker_state: HashMap<crate::smelt_term::WinId, crate::picker::PickerState>,
+    pub(crate) picker_state: HashMap<crate::smelt_edit::WinId, crate::picker::PickerState>,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     /// Drives cursor suppression when unfocused so input from another app
     /// doesn't draw a stale cursor in our window.
@@ -116,7 +116,7 @@ pub struct TuiApp {
     /// `notify` failed to subscribe to any of the configured roots.
     pub(crate) auto_reload: Option<crate::auto_reload::AutoReloadHandle>,
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
-    pub ui: crate::smelt_term::Ui,
+    pub ui: crate::smelt_edit::Ui,
     pub(crate) well_known: WellKnown,
     /// Timers + chord state observed and updated by event dispatch.
     pub(crate) timers: Timers,
@@ -139,15 +139,15 @@ pub struct TuiApp {
     /// buffer (extmark) for the prompt; this side-table holds the
     /// accept/dismiss chord policy plugins configure when calling
     /// `Win:placeholder(text, opts)`.
-    pub placeholder_opts: HashMap<crate::smelt_term::WinId, PlaceholderOpts>,
+    pub placeholder_opts: HashMap<crate::smelt_edit::WinId, PlaceholderOpts>,
 }
 
 /// Per-window dispatch policy for a placeholder. Set via Lua's
 /// `Win:placeholder(text, opts)`; the dispatcher consults it on key events.
 #[derive(Default, Clone)]
 pub struct PlaceholderOpts {
-    pub accept_keys: Vec<crate::smelt_term::KeyBind>,
-    pub dismiss_keys: Vec<crate::smelt_term::KeyBind>,
+    pub accept_keys: Vec<crate::smelt_edit::KeyBind>,
+    pub dismiss_keys: Vec<crate::smelt_edit::KeyBind>,
 }
 
 pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
@@ -232,9 +232,9 @@ impl BusyStack {
 /// statusline are Lua-allocated by `runtime/lua/smelt/prompt_bar.lua` and
 /// `runtime/lua/smelt/statusline.lua`.
 pub(crate) struct WellKnown {
-    pub(crate) prompt: crate::smelt_term::WinId,
-    pub(crate) transcript: crate::smelt_term::WinId,
-    pub(crate) cmdline: Option<crate::smelt_term::WinId>,
+    pub(crate) prompt: crate::smelt_edit::WinId,
+    pub(crate) transcript: crate::smelt_edit::WinId,
+    pub(crate) cmdline: Option<crate::smelt_edit::WinId>,
 }
 
 /// Which pane currently holds focus.
@@ -301,7 +301,7 @@ pub(crate) struct PendingChord {
     /// Wall time of the first key; chords older than [`CHORD_TIMEOUT_MS`] are discarded.
     pub(crate) started: Instant,
     /// Vim mode captured before the first key was dispatched; surfaced to chord handlers.
-    pub(crate) vim_mode_at_start: Option<crate::smelt_term::VimMode>,
+    pub(crate) vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
 }
 
 /// Idle time after which a pending chord expires and the next key starts a fresh sequence.
@@ -553,7 +553,7 @@ impl TuiApp {
 
         let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
         let (ui, well_known) = {
-            let mut ui = crate::smelt_term::Ui::new();
+            let mut ui = crate::smelt_edit::Ui::new();
             ui.set_terminal_size(term_w, term_h);
             // Install the baked default theme up-front. `run()` may
             // overwrite it after detecting light/dark, and Lua's
@@ -565,22 +565,22 @@ impl TuiApp {
             let input_display_buf = ui
                 .buf_create_with_id(
                     crate::app::PROMPT_EDIT_BUF,
-                    crate::smelt_term::BufCreateOpts::default(),
+                    crate::smelt_edit::BufCreateOpts::default(),
                 )
                 .expect("PROMPT_EDIT_BUF slot is free");
-            let parser: std::sync::Arc<dyn crate::smelt_term::BufferParser> = std::sync::Arc::new(
+            let parser: std::sync::Arc<dyn crate::smelt_edit::BufferParser> = std::sync::Arc::new(
                 crate::content::prompt_parser::PromptBufferParser::new(input.store.clone()),
             );
-            let copier: std::sync::Arc<dyn crate::smelt_term::BufferCopy> = std::sync::Arc::new(
+            let copier: std::sync::Arc<dyn crate::smelt_edit::BufferCopy> = std::sync::Arc::new(
                 crate::content::prompt_parser::PromptCopier::new(input.store.clone()),
             );
             if let Some(b) = ui.buf_mut(input_display_buf) {
                 b.set_parser(parser);
                 b.set_copier(copier);
-                b.history = crate::smelt_term::UndoHistory::new(Some(100));
+                b.history = crate::smelt_edit::UndoHistory::new(Some(100));
             }
-            let transcript_display_buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
-            let transcript_copier: std::sync::Arc<dyn crate::smelt_term::BufferCopy> =
+            let transcript_display_buf = ui.buf_create(crate::smelt_edit::BufCreateOpts::default());
+            let transcript_copier: std::sync::Arc<dyn crate::smelt_edit::BufferCopy> =
                 std::sync::Arc::new(crate::content::transcript_buf::TranscriptCopier);
             if let Some(b) = ui.buf_mut(transcript_display_buf) {
                 b.readonly = true;
@@ -589,9 +589,9 @@ impl TuiApp {
             assert!(ui.win_open_split_at(
                 crate::app::TRANSCRIPT_WIN,
                 transcript_display_buf,
-                crate::smelt_term::SplitConfig {
+                crate::smelt_edit::SplitConfig {
                     region: "transcript".into(),
-                    gutters: crate::smelt_term::Gutters {
+                    gutters: crate::smelt_edit::Gutters {
                         pad_left: 0,
                         pad_right: 0,
                         scrollbar: true,
@@ -604,7 +604,7 @@ impl TuiApp {
                 // `LineNumberGutter` is strict - text/markdown rows leave no
                 // stamp and contribute no gutter width.
                 w.gutter = Some(std::sync::Arc::new(
-                    crate::smelt_term::gutter::LineNumberGutter::new(),
+                    crate::smelt_edit::gutter::LineNumberGutter::new(),
                 ));
                 // Opt the transcript into per-frame tail-follow. Plugin leaves
                 // keep the default `false`; `Ui::apply_tail_follow` ignores
@@ -614,9 +614,9 @@ impl TuiApp {
             assert!(ui.win_open_split_at(
                 crate::app::PROMPT_WIN,
                 input_display_buf,
-                crate::smelt_term::SplitConfig {
+                crate::smelt_edit::SplitConfig {
                     region: "prompt".into(),
-                    gutters: crate::smelt_term::Gutters {
+                    gutters: crate::smelt_edit::Gutters {
                         // The reserved scrollbar column doubles as the right gutter
                         // when content fits, so `pad_right` stays 0 to avoid a
                         // double-wide gap. When content overflows, the scrollbar
@@ -636,7 +636,7 @@ impl TuiApp {
                 // enabled the first keystroke after startup should insert, not act
                 // as a Normal-mode motion. Other vim-enabled leaves keep the default.
                 if vim_enabled {
-                    w.set_vim_mode(crate::smelt_term::VimMode::Insert);
+                    w.set_vim_mode(crate::smelt_edit::VimMode::Insert);
                 }
             }
             // Seed a minimal splits tree (transcript + prompt) so overlay
@@ -846,10 +846,10 @@ impl TuiApp {
             return String::new();
         };
         match mode {
-            crate::smelt_term::VimMode::Insert => "INSERT",
-            crate::smelt_term::VimMode::Visual => "VISUAL",
-            crate::smelt_term::VimMode::VisualLine => "VISUAL LINE",
-            crate::smelt_term::VimMode::Normal => "NORMAL",
+            crate::smelt_edit::VimMode::Insert => "INSERT",
+            crate::smelt_edit::VimMode::Visual => "VISUAL",
+            crate::smelt_edit::VimMode::VisualLine => "VISUAL LINE",
+            crate::smelt_edit::VimMode::Normal => "NORMAL",
         }
         .into()
     }
@@ -1009,13 +1009,13 @@ impl TuiApp {
 
     /// Returns the current placeholder text on `win`, if any. Stored as an
     /// extmark on the window's buffer in the well-known placeholder namespace.
-    pub(crate) fn placeholder_text(&mut self, win: crate::smelt_term::WinId) -> Option<String> {
+    pub(crate) fn placeholder_text(&mut self, win: crate::smelt_edit::WinId) -> Option<String> {
         let buf = self.ui.win_buf_mut(win)?;
         crate::content::prompt_buf::placeholder_text(buf)
     }
 
     /// Set the placeholder text on `win`. Empty text clears any prior placeholder.
-    pub fn set_placeholder(&mut self, win: crate::smelt_term::WinId, text: String) {
+    pub fn set_placeholder(&mut self, win: crate::smelt_edit::WinId, text: String) {
         if text.is_empty() {
             self.clear_placeholder(win);
             return;
@@ -1027,7 +1027,7 @@ impl TuiApp {
     }
 
     /// Clear the placeholder on `win` (text + opts). Idempotent.
-    pub fn clear_placeholder(&mut self, win: crate::smelt_term::WinId) {
+    pub fn clear_placeholder(&mut self, win: crate::smelt_edit::WinId) {
         if let Some(buf) = self.ui.win_buf_mut(win) {
             crate::content::prompt_buf::set_placeholder_extmark(buf, None);
         }
@@ -1045,7 +1045,7 @@ impl TuiApp {
     /// - the same visibility rule that gates rendering.
     pub(crate) fn dispatch_placeholder_key(
         &mut self,
-        win: crate::smelt_term::WinId,
+        win: crate::smelt_edit::WinId,
         code: crossterm::event::KeyCode,
         mods: crossterm::event::KeyModifiers,
     ) -> Option<EventOutcome> {
@@ -1059,7 +1059,7 @@ impl TuiApp {
         if !buf_empty {
             return None;
         }
-        let kb = crate::smelt_term::KeyBind::new(code, mods);
+        let kb = crate::smelt_edit::KeyBind::new(code, mods);
         if opts.accept_keys.contains(&kb) {
             self.clear_placeholder(win);
             if win == self.well_known.prompt {
@@ -1068,7 +1068,7 @@ impl TuiApp {
             }
             self.fire_placeholder_event(
                 win,
-                crate::smelt_term::WinEvent::PlaceholderAccepted,
+                crate::smelt_edit::WinEvent::PlaceholderAccepted,
                 text,
             );
             return Some(EventOutcome::Redraw);
@@ -1077,7 +1077,7 @@ impl TuiApp {
             self.clear_placeholder(win);
             self.fire_placeholder_event(
                 win,
-                crate::smelt_term::WinEvent::PlaceholderDismissed,
+                crate::smelt_edit::WinEvent::PlaceholderDismissed,
                 text,
             );
             return Some(EventOutcome::Redraw);
@@ -1087,56 +1087,56 @@ impl TuiApp {
 
     fn fire_placeholder_event(
         &mut self,
-        win: crate::smelt_term::WinId,
-        event: crate::smelt_term::WinEvent,
+        win: crate::smelt_edit::WinId,
+        event: crate::smelt_edit::WinEvent,
         text: String,
     ) {
         let lua = &self.lua;
-        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
-                              w: crate::smelt_term::WinId,
-                              payload: &crate::smelt_term::Payload| {
+        let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
+                              w: crate::smelt_edit::WinId,
+                              payload: &crate::smelt_edit::Payload| {
             lua.queue_invocation(handle, w, payload);
         };
         self.ui.fire_win_event(
             win,
             event,
-            crate::smelt_term::Payload::Text { content: text },
+            crate::smelt_edit::Payload::Text { content: text },
             &mut lua_invoke,
         );
         self.flush_lua_callbacks();
     }
 
     /// Gutters configured on the transcript window (single source of truth: `Window.config.gutters`).
-    pub(crate) fn transcript_gutters(&self) -> crate::smelt_term::Gutters {
+    pub(crate) fn transcript_gutters(&self) -> crate::smelt_edit::Gutters {
         self.ui
             .win(crate::app::TRANSCRIPT_WIN)
             .map(|w| w.config.gutters)
             .unwrap_or_default()
     }
 
-    pub(crate) fn transcript_win(&self) -> &crate::smelt_term::Window {
+    pub(crate) fn transcript_win(&self) -> &crate::smelt_edit::Window {
         self.ui
             .win(self.well_known.transcript)
             .expect("transcript window")
     }
 
-    pub(crate) fn transcript_win_mut(&mut self) -> &mut crate::smelt_term::Window {
+    pub(crate) fn transcript_win_mut(&mut self) -> &mut crate::smelt_edit::Window {
         self.ui
             .win_mut(self.well_known.transcript)
             .expect("transcript window")
     }
 
-    pub(crate) fn prompt_buf(&self) -> &crate::smelt_term::Buffer {
+    pub(crate) fn prompt_buf(&self) -> &crate::smelt_edit::Buffer {
         self.ui
             .buf(crate::app::PROMPT_EDIT_BUF)
             .expect("prompt edit buffer")
     }
 
-    pub(crate) fn prompt_win(&self) -> &crate::smelt_term::Window {
+    pub(crate) fn prompt_win(&self) -> &crate::smelt_edit::Window {
         self.ui.win(crate::app::PROMPT_WIN).expect("prompt window")
     }
 
-    pub(crate) fn prompt_win_mut(&mut self) -> &mut crate::smelt_term::Window {
+    pub(crate) fn prompt_win_mut(&mut self) -> &mut crate::smelt_edit::Window {
         self.ui
             .win_mut(crate::app::PROMPT_WIN)
             .expect("prompt window")
@@ -1150,7 +1150,7 @@ impl TuiApp {
 
     /// Resolves a raw leaf id to a live `Window` or a registered paint region (`None` if unrecognised).
     pub(crate) fn resolve_leaf_id(&self, raw_id: u64) -> Option<crate::lua::paint::LeafKind> {
-        let win = crate::smelt_term::WinId(raw_id);
+        let win = crate::smelt_edit::WinId(raw_id);
         if self.ui.win(win).is_some() {
             // Catches a future regression where the smelt-edit allocator
             // grows past the partition boundary into paint-id space.
@@ -1161,7 +1161,7 @@ impl TuiApp {
             );
             return Some(crate::lua::paint::LeafKind::Window(win));
         }
-        let paint_id = crate::smelt_term::layout::PaintId(raw_id);
+        let paint_id = crate::smelt_edit::layout::PaintId(raw_id);
         if self.paint_registry.contains(paint_id) {
             return Some(crate::lua::paint::LeafKind::Paint(paint_id));
         }
@@ -1237,7 +1237,7 @@ impl TuiApp {
 
         let buf = self
             .ui
-            .buf_create(crate::smelt_term::BufCreateOpts::default());
+            .buf_create(crate::smelt_edit::BufCreateOpts::default());
 
         let label_start = indent.len() as u16;
         let label_end = label_start + label.len() as u16;
@@ -1255,7 +1255,7 @@ impl TuiApp {
                 0,
                 label_start,
                 label_end,
-                crate::smelt_term::SpanStyle {
+                crate::smelt_edit::SpanStyle {
                     fg: label_color,
                     bold: true,
                     ..Default::default()
@@ -1265,7 +1265,7 @@ impl TuiApp {
                 0,
                 msg_start,
                 msg_end,
-                crate::smelt_term::SpanStyle {
+                crate::smelt_edit::SpanStyle {
                     dim: true,
                     ..Default::default()
                 },
@@ -1274,7 +1274,7 @@ impl TuiApp {
 
         let Some(win) = self.ui.win_open_split(
             buf,
-            crate::smelt_term::SplitConfig {
+            crate::smelt_edit::SplitConfig {
                 region: "notification".into(),
                 gutters: Default::default(),
             },
@@ -1289,11 +1289,11 @@ impl TuiApp {
             w.selectable = true;
         }
 
-        let layout = crate::smelt_term::LayoutTree::vbox(vec![(
-            crate::smelt_term::Constraint::Length(1),
-            crate::smelt_term::LayoutTree::hbox(vec![(
-                crate::smelt_term::Constraint::Percentage(100),
-                crate::smelt_term::LayoutTree::leaf(win),
+        let layout = crate::smelt_edit::LayoutTree::vbox(vec![(
+            crate::smelt_edit::Constraint::Length(1),
+            crate::smelt_edit::LayoutTree::hbox(vec![(
+                crate::smelt_edit::Constraint::Percentage(100),
+                crate::smelt_edit::LayoutTree::leaf(win),
             )]),
         )]);
         // Float `1` row above the prompt's Lua-allocated top bar (or the
@@ -1302,7 +1302,7 @@ impl TuiApp {
         // placed even when queued/stash rows grow the top bar.
         let anchor = crate::content::layout::anchor_above_prompt_chrome(&self.ui, 1);
         let _overlay_id = self.ui.overlay_open(
-            crate::smelt_term::Overlay::new(layout, anchor)
+            crate::smelt_edit::Overlay::new(layout, anchor)
                 // Sits below dialogs (default overlay z 50) so a toast
                 // never obscures a modal asking for input.
                 .with_z(40),
@@ -1328,9 +1328,9 @@ impl TuiApp {
         {
             let lua = &self.lua;
             let mut lua_invoke =
-                |handle: crate::smelt_term::LuaHandle,
-                 win: crate::smelt_term::WinId,
-                 payload: &crate::smelt_term::Payload| {
+                |handle: crate::smelt_edit::LuaHandle,
+                 win: crate::smelt_edit::WinId,
+                 payload: &crate::smelt_edit::Payload| {
                     lua.queue_invocation(handle, win, payload);
                 };
             if include_tick {

@@ -162,7 +162,7 @@ pub struct LuaMarkOpts {
 /// one of these.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaBuf {
-    pub(crate) id: crate::smelt_term::BufId,
+    pub(crate) id: crate::smelt_edit::BufId,
 }
 
 fn replace_builtin_prompt_source(app: &mut crate::app::TuiApp, text: String) {
@@ -427,7 +427,7 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
 fn create_or_open(
     shared: &Arc<LuaShared>,
     opts: Option<&mlua::Table>,
-) -> LuaResult<crate::smelt_term::BufId> {
+) -> LuaResult<crate::smelt_edit::BufId> {
     let format = match opts {
         Some(t) => match t.get::<Option<String>>("mode")? {
             Some(mode) => Some(
@@ -456,7 +456,7 @@ fn create_or_open(
     // `smelt.buf.new` before an app pointer is installed (the initial
     // autoload pass). The buffer is created for real on the second pass,
     // when `bring_up_lua("launch")` reloads with the app available.
-    let result_id = crate::lua::try_with_app(|app| -> crate::smelt_term::BufId {
+    let result_id = crate::lua::try_with_app(|app| -> crate::smelt_edit::BufId {
         // Named buffer that already exists - refresh mutable opts.
         if let Some(ref n) = name {
             if let Some((bid, buf)) = app.ui.lookup_named_buf_mut(n) {
@@ -471,8 +471,8 @@ fn create_or_open(
             .next_buf_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         match app.ui.buf_create_with_id(
-            crate::smelt_term::BufId(id),
-            crate::smelt_term::BufCreateOpts::default(),
+            crate::smelt_edit::BufId(id),
+            crate::smelt_edit::BufCreateOpts::default(),
         ) {
             Ok(bid) => {
                 if let Some(buf) = app.ui.buf_mut(bid) {
@@ -482,7 +482,7 @@ fn create_or_open(
                     }
                     if editable {
                         let limit = undo_limit.or(Some(100));
-                        buf.history = crate::smelt_term::UndoHistory::new(limit);
+                        buf.history = crate::smelt_edit::UndoHistory::new(limit);
                     }
                 }
                 if let Some(ref n) = name {
@@ -492,18 +492,18 @@ fn create_or_open(
             }
             Err(clash) => {
                 app.notify_error(format!("buf: id {} already in use", clash.0));
-                crate::smelt_term::BufId(0)
+                crate::smelt_edit::BufId(0)
             }
         }
     })
-    .unwrap_or(crate::smelt_term::BufId(0));
+    .unwrap_or(crate::smelt_edit::BufId(0));
 
     Ok(result_id)
 }
 
 /// `buf:styled(spans)` - set a styled line list. Same semantics as the
 /// old `set_styled_lines`; lifted out so `Buf` methods stay tidy.
-fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResult<()> {
+fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResult<()> {
     use crate::content::to_buffer::render_into_buffer;
     use smelt_core::content::highlight::InlineSyntax;
     use smelt_core::style::Style;
@@ -620,7 +620,7 @@ fn set_styled_lines(id: crate::smelt_term::BufId, lines: mlua::Table) -> LuaResu
 /// `buf:mark(ns, row, col, opts?) → extmark id`. Row is 1-based;
 /// `col`/`end_col` are byte offsets into the line.
 fn set_extmark(
-    id: crate::smelt_term::BufId,
+    id: crate::smelt_edit::BufId,
     ns: u32,
     row: u64,
     col: u64,
@@ -699,7 +699,7 @@ fn set_extmark(
     .unwrap_or(0)
 }
 
-fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_term::SpanStyle {
+fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_edit::SpanStyle {
     use smelt_core::style::Style;
 
     let mut style = match opts.hl_group.as_deref() {

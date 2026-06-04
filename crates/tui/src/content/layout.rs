@@ -1,7 +1,7 @@
-pub(crate) use crate::smelt_term::Rect;
+pub(crate) use crate::smelt_edit::Rect;
 
-use crate::smelt_term::layout::Anchor;
-use crate::smelt_term::{Align, Ui};
+use crate::smelt_edit::layout::Anchor;
+use crate::smelt_edit::{Align, Ui};
 
 /// Anchor that floats an overlay `height` rows above the prompt block.
 ///
@@ -42,23 +42,23 @@ pub(crate) struct LayoutState {
 /// bar/statusline windows exist. Keeping a seed tree means anchored
 /// overlays resolve correctly during the brief window between `Ui::new`
 /// and the first Lua-driven render.
-pub(crate) fn seed_layout_tree(prompt_input_rows: u16) -> crate::smelt_term::LayoutTree {
+pub(crate) fn seed_layout_tree(prompt_input_rows: u16) -> crate::smelt_edit::LayoutTree {
     let rows = prompt_input_rows.max(1);
-    crate::smelt_term::LayoutTree::vbox(vec![
+    crate::smelt_edit::LayoutTree::vbox(vec![
         (
-            crate::smelt_term::Constraint::Fill,
-            crate::smelt_term::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
+            crate::smelt_edit::Constraint::Fill,
+            crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
         ),
         (
-            crate::smelt_term::Constraint::Length(rows),
-            crate::smelt_term::LayoutTree::leaf(crate::app::PROMPT_WIN),
+            crate::smelt_edit::Constraint::Length(rows),
+            crate::smelt_edit::LayoutTree::leaf(crate::app::PROMPT_WIN),
         ),
     ])
     .with_gap(1)
 }
 
 impl LayoutState {
-    pub(crate) fn from_ui(ui: &crate::smelt_term::Ui) -> Self {
+    pub(crate) fn from_ui(ui: &crate::smelt_edit::Ui) -> Self {
         Self {
             transcript: ui
                 .split_rect(crate::app::TRANSCRIPT_WIN)
@@ -92,14 +92,14 @@ pub(crate) enum HitRegion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::smelt_term::{Gutters, WinId};
+    use crate::smelt_edit::{Gutters, WinId};
 
-    fn open_split(ui: &mut crate::smelt_term::Ui, win: WinId, region: &str, gutters: Gutters) {
-        let buf = ui.buf_create(crate::smelt_term::BufCreateOpts::default());
+    fn open_split(ui: &mut crate::smelt_edit::Ui, win: WinId, region: &str, gutters: Gutters) {
+        let buf = ui.buf_create(crate::smelt_edit::BufCreateOpts::default());
         assert!(ui.win_open_split_at(
             win,
             buf,
-            crate::smelt_term::SplitConfig {
+            crate::smelt_edit::SplitConfig {
                 region: region.into(),
                 gutters,
             },
@@ -110,8 +110,8 @@ mod tests {
         prompt_input_rows: u16,
         term_width: u16,
         term_height: u16,
-    ) -> crate::smelt_term::Ui {
-        let mut ui = crate::smelt_term::Ui::new();
+    ) -> crate::smelt_edit::Ui {
+        let mut ui = crate::smelt_edit::Ui::new();
         ui.set_terminal_size(term_width, term_height);
         open_split(
             &mut ui,
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn seed_layout_lists_leaves_in_order() {
-        use crate::smelt_term::PaintId;
+        use crate::smelt_edit::PaintId;
         let tree = seed_layout_tree(1);
         let leaves: Vec<PaintId> = tree.leaves_in_order();
         assert_eq!(

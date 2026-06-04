@@ -1,8 +1,8 @@
 //! Lua-value → typed-Rust converters (pure, no `TuiApp` dependencies).
 //! Errors are returned as `String`; call sites wrap them in `LuaError::RuntimeError`.
 
-use crate::smelt_term::layout::{Border, BorderStyle, Constraint, Corner, EdgeStyle};
-use crate::smelt_term::{Line, Span, Style};
+use crate::smelt_edit::layout::{Border, BorderStyle, Constraint, Corner, EdgeStyle};
+use crate::smelt_edit::{Line, Span, Style};
 use smelt_core::style::Color;
 
 // ── color ──────────────────────────────────────────────────────────────
@@ -436,9 +436,9 @@ pub(crate) fn corner(name: Option<&str>, default: Corner) -> Corner {
 /// Falls back to `default` when `name` is `None`; an unknown name errors.
 pub(crate) fn align(
     name: Option<&str>,
-    default: crate::smelt_term::Align,
-) -> Result<crate::smelt_term::Align, String> {
-    use crate::smelt_term::Align;
+    default: crate::smelt_edit::Align,
+) -> Result<crate::smelt_edit::Align, String> {
+    use crate::smelt_edit::Align;
     let Some(raw) = name else {
         return Ok(default);
     };

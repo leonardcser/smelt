@@ -9,8 +9,8 @@ fn block_snapshot_table(
     lua: &Lua,
     idx: usize,
     role: &'static str,
-    first_row: crate::smelt_term::RowIndex,
-    rows: crate::smelt_term::RowIndex,
+    first_row: crate::smelt_edit::RowIndex,
+    rows: crate::smelt_edit::RowIndex,
     first_line: String,
 ) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
@@ -88,7 +88,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "rows",
         "Return rendered transcript display rows in `[start, start + count)`. This is exact and may materialize the full transcript until range-native transcript documents land.",
         &["start", "count"],
-        |lua, (start, count): (crate::smelt_term::RowIndex, crate::smelt_term::RowIndex)| -> LuaResult<mlua::Table> {
+        |lua, (start, count): (crate::smelt_edit::RowIndex, crate::smelt_edit::RowIndex)| -> LuaResult<mlua::Table> {
             let rows = crate::lua::try_with_app(|app| app.transcript_visible_rows(start, count))
                 .unwrap_or_default();
             let out = lua.create_table_with_capacity(rows.len(), 0)?;
@@ -102,7 +102,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "block_at_row",
         "Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.",
         &["row"],
-        |lua, row: crate::smelt_term::RowIndex| -> LuaResult<Option<mlua::Table>> {
+        |lua, row: crate::smelt_edit::RowIndex| -> LuaResult<Option<mlua::Table>> {
             let snap = crate::lua::try_with_app(|app| app.transcript_block_at_row(row)).flatten();
             snap.map(|(idx, role, first_row, rows, first_line)| {
                 block_snapshot_table(lua, idx, role, first_row, rows, first_line)

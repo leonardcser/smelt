@@ -14,7 +14,7 @@ impl TuiApp {
         self.focused_vim_mode().map(|m| format!("{m:?}"))
     }
 
-    pub(crate) fn focused_vim_mode(&self) -> Option<crate::smelt_term::VimMode> {
+    pub(crate) fn focused_vim_mode(&self) -> Option<crate::smelt_edit::VimMode> {
         if let Some(win) = self.ui.focused_window() {
             if win.vim_enabled {
                 return Some(win.vim_mode);
@@ -32,7 +32,7 @@ impl TuiApp {
     }
 
     /// Set the vim mode on whichever pane the user is currently driving. No-op if non-vim.
-    pub(crate) fn set_focused_vim_mode(&mut self, mode: crate::smelt_term::VimMode) {
+    pub(crate) fn set_focused_vim_mode(&mut self, mode: crate::smelt_edit::VimMode) {
         if let Some(win_id) = self.ui.focus() {
             if let Some(w) = self.ui.win_mut(win_id) {
                 if w.vim_enabled {
@@ -75,15 +75,15 @@ impl TuiApp {
         }
         self.last_prompt_text = current_text.clone();
         let lua = &self.lua;
-        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
-                              win: crate::smelt_term::WinId,
-                              payload: &crate::smelt_term::Payload| {
+        let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
+                              win: crate::smelt_edit::WinId,
+                              payload: &crate::smelt_edit::Payload| {
             lua.queue_invocation(handle, win, payload);
         };
         self.ui.fire_win_event(
             crate::app::PROMPT_WIN,
-            crate::smelt_term::WinEvent::TextChanged,
-            crate::smelt_term::Payload::Text {
+            crate::smelt_edit::WinEvent::TextChanged,
+            crate::smelt_edit::Payload::Text {
                 content: current_text.clone(),
             },
             &mut lua_invoke,

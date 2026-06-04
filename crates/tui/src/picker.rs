@@ -10,9 +10,9 @@
 //! Closing the leaf cascades through `overlay_close` to remove the overlay.
 
 use crate::app::TuiApp;
-use crate::smelt_term::layout::Anchor;
-use crate::smelt_term::BufCreateOpts;
-use crate::smelt_term::{
+use crate::smelt_edit::layout::Anchor;
+use crate::smelt_edit::BufCreateOpts;
+use crate::smelt_edit::{
     BufId, Constraint, Corner, Gutters, LayoutTree, Overlay, OverlayId, RowIndex, SplitConfig,
     WinId,
 };
@@ -257,17 +257,17 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
     let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top).unwrap_or(0);
     let scroll = match anchor {
         SyncAnchor::Selected => {
-            crate::smelt_term::scroll_to_show(prev_scroll, selected_visual, height)
+            crate::smelt_edit::scroll_to_show(prev_scroll, selected_visual, height)
         }
         SyncAnchor::ScrollTop => {
-            crate::smelt_term::clamp_scroll(prev_scroll, total as RowIndex, height)
+            crate::smelt_edit::clamp_scroll(prev_scroll, total as RowIndex, height)
         }
     };
     let range_anchor = match anchor {
         SyncAnchor::Selected => selected_visual,
         SyncAnchor::ScrollTop => scroll,
     };
-    let range = crate::smelt_term::materialized_row_range(
+    let range = crate::smelt_edit::materialized_row_range(
         range_anchor,
         total as RowIndex,
         height,
@@ -341,7 +341,7 @@ fn layout_for(leaf: WinId, height: u16) -> LayoutTree {
     )])
 }
 
-fn anchor_for(ui: &crate::smelt_term::Ui, placement: PickerPlacement, height: u16) -> Anchor {
+fn anchor_for(ui: &crate::smelt_edit::Ui, placement: PickerPlacement, height: u16) -> Anchor {
     match placement {
         // Float above the prompt's chrome stack. Anchoring at the top
         // bar's window (rather than offset-from-prompt-input) keeps the
@@ -499,7 +499,7 @@ mod tests {
     ) -> (RowIndex, RowIndex) {
         let cursor = visual_cursor(selected, item_count, reversed);
         let max_scroll = (item_count as RowIndex).saturating_sub(height as RowIndex);
-        let scroll = crate::smelt_term::scroll_to_show(prev_scroll, cursor, height).min(max_scroll);
+        let scroll = crate::smelt_edit::scroll_to_show(prev_scroll, cursor, height).min(max_scroll);
         (cursor, scroll)
     }
 
@@ -574,8 +574,8 @@ mod tests {
 
     // ── anchor_for ───────────────────────────────────────────────────────
 
-    fn fresh_ui() -> crate::smelt_term::Ui {
-        crate::smelt_term::Ui::new()
+    fn fresh_ui() -> crate::smelt_edit::Ui {
+        crate::smelt_edit::Ui::new()
     }
 
     #[test]

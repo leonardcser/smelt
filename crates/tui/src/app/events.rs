@@ -4,7 +4,7 @@ use crate::app::{
 
 use crate::input::Action;
 use crate::keymap::{self, KeyAction};
-use crate::smelt_term::UiHost;
+use crate::smelt_edit::UiHost;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 const APP_ESC: &[&str] = &["<Esc>"];
@@ -100,7 +100,7 @@ impl TuiApp {
                     // Swallow unclaimed keys so split keymaps don't fire over an open cmdline.
                     return false;
                 }
-                if matches!(self.run_key_cascade(k), crate::smelt_term::Status::Consumed) {
+                if matches!(self.run_key_cascade(k), crate::smelt_edit::Status::Consumed) {
                     self.flush_lua_callbacks();
                     return false;
                 }
@@ -297,15 +297,15 @@ impl TuiApp {
             if self.ui.focused_overlay().is_none() {
                 let lua = &self.lua;
                 let mut lua_invoke =
-                    |handle: crate::smelt_term::LuaHandle,
-                     win: crate::smelt_term::WinId,
-                     payload: &crate::smelt_term::Payload| {
+                    |handle: crate::smelt_edit::LuaHandle,
+                     win: crate::smelt_edit::WinId,
+                     payload: &crate::smelt_edit::Payload| {
                         lua.queue_invocation(handle, win, payload);
                     };
                 let result = self
                     .ui
-                    .dispatch_event(crate::smelt_term::Event::Key(k), &mut lua_invoke);
-                if matches!(result, crate::smelt_term::Status::Consumed) {
+                    .dispatch_event(crate::smelt_edit::Event::Key(k), &mut lua_invoke);
+                if matches!(result, crate::smelt_edit::Status::Consumed) {
                     self.flush_lua_callbacks();
                     return Some(EventOutcome::Noop);
                 }
@@ -397,7 +397,7 @@ impl TuiApp {
             let in_insert = match self.app_focus {
                 crate::app::AppFocus::Prompt => {
                     !self.input.vim_enabled(self.prompt_win())
-                        || self.prompt_win().vim_mode == crate::smelt_term::VimMode::Insert
+                        || self.prompt_win().vim_mode == crate::smelt_edit::VimMode::Insert
                 }
                 crate::app::AppFocus::Content => false,
             };
@@ -607,9 +607,9 @@ impl TuiApp {
         if self.input.vim_enabled(self.prompt_win())
             && matches!(
                 self.prompt_win().vim_mode,
-                crate::smelt_term::VimMode::Insert
-                    | crate::smelt_term::VimMode::Visual
-                    | crate::smelt_term::VimMode::VisualLine
+                crate::smelt_edit::VimMode::Insert
+                    | crate::smelt_edit::VimMode::Visual
+                    | crate::smelt_edit::VimMode::VisualLine
             )
         {
             let now = self.core.clock.instant_now();
@@ -647,7 +647,7 @@ impl TuiApp {
         };
         let now = self.core.clock.instant_now();
 
-        if cur_mode == Some(crate::smelt_term::VimMode::Insert) {
+        if cur_mode == Some(crate::smelt_edit::VimMode::Insert) {
             self.apply_prompt_escape_to_input(ev, now);
             return EventOutcome::Noop;
         }
@@ -672,7 +672,7 @@ impl TuiApp {
 
         if matches!(
             cur_mode,
-            Some(crate::smelt_term::VimMode::Visual | crate::smelt_term::VimMode::VisualLine)
+            Some(crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine)
         ) {
             self.apply_prompt_escape_to_input(ev, now);
         }
@@ -766,7 +766,7 @@ impl TuiApp {
         self.last_height = h;
         let _ = self
             .ui
-            .dispatch_event(crate::smelt_term::Event::Resize(w, h), &mut |_, _, _| {});
+            .dispatch_event(crate::smelt_edit::Event::Resize(w, h), &mut |_, _, _| {});
         if width_changed {
             self.invalidate_for_width(w);
         }
@@ -824,7 +824,7 @@ impl TuiApp {
 
     /// Close an overlay leaf and clean up picker/Lua-callback registrations.
     /// `Ui::win_close` cascades to overlay close when the leaf belongs to one.
-    pub(crate) fn close_overlay_leaf(&mut self, win_id: crate::smelt_term::WinId) {
+    pub(crate) fn close_overlay_leaf(&mut self, win_id: crate::smelt_edit::WinId) {
         crate::picker::forget(self, win_id);
         self.placeholder_opts.remove(&win_id);
         for id in self.win_close(win_id) {
@@ -833,7 +833,7 @@ impl TuiApp {
     }
 
     /// Close an overlay by id without assuming its first layout leaf is a window.
-    pub(crate) fn close_overlay(&mut self, overlay_id: crate::smelt_term::OverlayId) {
+    pub(crate) fn close_overlay(&mut self, overlay_id: crate::smelt_edit::OverlayId) {
         for id in self.ui.overlay_close_tree(overlay_id) {
             self.lua.remove_callback(id);
         }
@@ -856,20 +856,20 @@ impl TuiApp {
             .leaves_in_order()
             .into_iter()
             .next()
-            .map(|p| crate::smelt_term::WinId(p.0))
+            .map(|p| crate::smelt_edit::WinId(p.0))
         else {
             return;
         };
         let lua = &self.lua;
-        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
-                              win: crate::smelt_term::WinId,
-                              payload: &crate::smelt_term::Payload| {
+        let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
+                              win: crate::smelt_edit::WinId,
+                              payload: &crate::smelt_edit::Payload| {
             lua.queue_invocation(handle, win, payload);
         };
         self.ui.fire_win_event(
             root,
-            crate::smelt_term::WinEvent::Dismiss,
-            crate::smelt_term::Payload::None,
+            crate::smelt_edit::WinEvent::Dismiss,
+            crate::smelt_edit::Payload::None,
             &mut lua_invoke,
         );
         self.flush_lua_callbacks();
@@ -920,16 +920,16 @@ impl TuiApp {
     /// fallback, without each leaf needing a bespoke carve-out. Overlay-scoped
     /// keymaps sit above global so an open dialog/picker's local intent
     /// (e.g. `Tab` cycles items) beats a site-wide rebinding of the same chord.
-    pub(crate) fn run_key_cascade(&mut self, k: KeyEvent) -> crate::smelt_term::Status {
-        use crate::smelt_term::Status;
+    pub(crate) fn run_key_cascade(&mut self, k: KeyEvent) -> crate::smelt_edit::Status {
+        use crate::smelt_edit::Status;
 
         // Tier 1: specific keymap on the focused leaf.
         {
             let lua = &self.lua;
             let mut lua_invoke =
-                |handle: crate::smelt_term::LuaHandle,
-                 win: crate::smelt_term::WinId,
-                 payload: &crate::smelt_term::Payload| {
+                |handle: crate::smelt_edit::LuaHandle,
+                 win: crate::smelt_edit::WinId,
+                 payload: &crate::smelt_edit::Payload| {
                     lua.queue_invocation(handle, win, payload);
                 };
             if matches!(
@@ -946,9 +946,9 @@ impl TuiApp {
         {
             let lua = &self.lua;
             let mut lua_invoke =
-                |handle: crate::smelt_term::LuaHandle,
-                 win: crate::smelt_term::WinId,
-                 payload: &crate::smelt_term::Payload| {
+                |handle: crate::smelt_edit::LuaHandle,
+                 win: crate::smelt_edit::WinId,
+                 payload: &crate::smelt_edit::Payload| {
                     lua.queue_invocation(handle, win, payload);
                 };
             if matches!(
@@ -987,9 +987,9 @@ impl TuiApp {
         {
             let lua = &self.lua;
             let mut lua_invoke =
-                |handle: crate::smelt_term::LuaHandle,
-                 win: crate::smelt_term::WinId,
-                 payload: &crate::smelt_term::Payload| {
+                |handle: crate::smelt_edit::LuaHandle,
+                 win: crate::smelt_edit::WinId,
+                 payload: &crate::smelt_edit::Payload| {
                     lua.queue_invocation(handle, win, payload);
                 };
             if matches!(
@@ -1003,9 +1003,9 @@ impl TuiApp {
 
         // Tier 5: bare Esc / Ctrl-C dismisses the active modal.
         let lua = &self.lua;
-        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
-                              win: crate::smelt_term::WinId,
-                              payload: &crate::smelt_term::Payload| {
+        let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
+                              win: crate::smelt_edit::WinId,
+                              payload: &crate::smelt_edit::Payload| {
             lua.queue_invocation(handle, win, payload);
         };
         self.ui
@@ -1027,26 +1027,26 @@ impl TuiApp {
             Some(w) => (w.vim_enabled, w.vim_mode, w.vim_state.is_idle()),
             None => return false,
         };
-        let in_insert = vim_enabled && vim_mode == crate::smelt_term::VimMode::Insert;
+        let in_insert = vim_enabled && vim_mode == crate::smelt_edit::VimMode::Insert;
         if in_insert {
             return false;
         }
         if k.code == KeyCode::Esc
             && vim_enabled
-            && vim_mode == crate::smelt_term::VimMode::Normal
+            && vim_mode == crate::smelt_edit::VimMode::Normal
             && vim_idle
         {
             return false;
         }
         matches!(
             self.dispatch_window_viewer_key(win, k),
-            crate::smelt_term::Status::Consumed
+            crate::smelt_edit::Status::Consumed
         )
     }
 
     fn sync_viewer_clipboard_from_kill_ring(
         &mut self,
-        buf_id: crate::smelt_term::BufId,
+        buf_id: crate::smelt_edit::BufId,
         yank_tick_before: u64,
     ) {
         if self.core.clipboard.kill_ring.yank_tick() == yank_tick_before {
@@ -1074,10 +1074,10 @@ impl TuiApp {
     /// branching the call site.
     pub(crate) fn dispatch_window_viewer_key(
         &mut self,
-        win_id: crate::smelt_term::WinId,
+        win_id: crate::smelt_edit::WinId,
         k: KeyEvent,
-    ) -> crate::smelt_term::Status {
-        use crate::smelt_term::Status;
+    ) -> crate::smelt_edit::Status {
+        use crate::smelt_edit::Status;
         let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win_id) {
             Some(w) => (
                 w.vim_enabled,
@@ -1127,13 +1127,13 @@ impl TuiApp {
     /// (read-only buffers).
     fn dispatch_buffer_action(
         &mut self,
-        win_id: crate::smelt_term::WinId,
-        buf_id: crate::smelt_term::BufId,
+        win_id: crate::smelt_edit::WinId,
+        buf_id: crate::smelt_edit::BufId,
         k: KeyEvent,
         viewport_rows: u16,
-    ) -> crate::smelt_term::Status {
+    ) -> crate::smelt_edit::Status {
         use crate::keymap::{lookup, KeyAction, KeyContext};
-        use crate::smelt_term::{Status, VimMode};
+        use crate::smelt_edit::{Status, VimMode};
 
         let (vim_enabled, vim_mode, readonly, buf_empty) =
             match (self.ui.win(win_id), self.ui.buf(buf_id)) {
@@ -1223,29 +1223,29 @@ impl TuiApp {
         let cpos = self.ui.win(win_id).expect("window").cpos;
         let mv: Option<usize> = match action {
             KeyAction::MoveLeft | KeyAction::SelectLeft => {
-                Some(crate::smelt_term::text::prev_char_boundary(&text, cpos))
+                Some(crate::smelt_edit::text::prev_char_boundary(&text, cpos))
             }
             KeyAction::MoveRight | KeyAction::SelectRight => {
-                Some(crate::smelt_term::text::next_char_boundary(&text, cpos))
+                Some(crate::smelt_edit::text::next_char_boundary(&text, cpos))
             }
             KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
-                Some(crate::smelt_term::text::line_start(&text, cpos))
+                Some(crate::smelt_edit::text::line_start(&text, cpos))
             }
             KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
-                Some(crate::smelt_term::text::line_end(&text, cpos))
+                Some(crate::smelt_edit::text::line_end(&text, cpos))
             }
             KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
-                Some(crate::smelt_term::text::word_forward_pos(
+                Some(crate::smelt_edit::text::word_forward_pos(
                     &text,
                     cpos,
-                    crate::smelt_term::text::CharClass::Word,
+                    crate::smelt_edit::text::CharClass::Word,
                 ))
             }
             KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
-                Some(crate::smelt_term::text::word_backward_pos(
+                Some(crate::smelt_edit::text::word_backward_pos(
                     &text,
                     cpos,
-                    crate::smelt_term::text::CharClass::Word,
+                    crate::smelt_edit::text::CharClass::Word,
                 ))
             }
             KeyAction::MoveStartOfBuffer => Some(0),
@@ -1253,8 +1253,8 @@ impl TuiApp {
             KeyAction::CopySelection => {
                 let win = self.ui.win(win_id).expect("window");
                 if let Some((s, e)) = win.selection_range(buf) {
-                    let s = crate::smelt_term::text::snap(&text, s);
-                    let e = crate::smelt_term::text::snap(&text, e);
+                    let s = crate::smelt_edit::text::snap(&text, s);
+                    let e = crate::smelt_edit::text::snap(&text, e);
                     if s < e {
                         let out = buf.copy_range(s..e);
                         if !out.clipboard.is_empty() {
@@ -1309,7 +1309,7 @@ fn input_action_label(action: &Action) -> &'static str {
 struct LuaChordOracle<'a> {
     lua: &'a crate::lua::LuaRuntime,
     vim_mode: Option<&'a str>,
-    vim_mode_at_start: Option<crate::smelt_term::VimMode>,
+    vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
 }
 
 impl smelt_core::keymap::ChordOracle for LuaChordOracle<'_> {
@@ -1378,7 +1378,7 @@ mod tests {
         let mut app = TestApp::builder().build();
         app.install_prompt_placeholder(
             "draft".to_string(),
-            vec![crate::smelt_term::KeyBind {
+            vec![crate::smelt_edit::KeyBind {
                 code: KeyCode::BackTab,
                 mods: KeyModifiers::NONE,
             }],
@@ -1402,22 +1402,22 @@ mod tests {
         let buf = app
             .app
             .ui
-            .buf_create(crate::smelt_term::BufCreateOpts::default());
+            .buf_create(crate::smelt_edit::BufCreateOpts::default());
         let win = app
             .app
             .ui
             .win_open_split(
                 buf,
-                crate::smelt_term::SplitConfig {
+                crate::smelt_edit::SplitConfig {
                     region: "event-test-overlay".into(),
-                    gutters: crate::smelt_term::Gutters::default(),
+                    gutters: crate::smelt_edit::Gutters::default(),
                 },
             )
             .expect("overlay test window opens");
         app.app.ui.overlay_open(
-            crate::smelt_term::Overlay::new(
-                crate::smelt_term::LayoutTree::leaf(win),
-                crate::smelt_term::layout::Anchor::ScreenCenter,
+            crate::smelt_edit::Overlay::new(
+                crate::smelt_edit::LayoutTree::leaf(win),
+                crate::smelt_edit::layout::Anchor::ScreenCenter,
             )
             .modal(true),
         );

@@ -1,47 +1,47 @@
-//! `UiHost` impl for `TuiApp`. Delegates to `crate::smelt_term::Ui`; overrides
+//! `UiHost` impl for `TuiApp`. Delegates to `crate::smelt_edit::Ui`; overrides
 //! `rows_for`/`breaks_for` for the prompt and transcript windows.
 
 use crate::app::TuiApp;
 
-impl crate::smelt_term::UiHost for TuiApp {
-    fn ui(&mut self) -> &mut crate::smelt_term::Ui {
+impl crate::smelt_edit::UiHost for TuiApp {
+    fn ui(&mut self) -> &mut crate::smelt_edit::Ui {
         &mut self.ui
     }
-    fn set_focus(&mut self, win: crate::smelt_term::WinId) -> bool {
+    fn set_focus(&mut self, win: crate::smelt_edit::WinId) -> bool {
         self.ui.set_focus(win)
     }
-    fn buf_create(&mut self, opts: crate::smelt_term::BufCreateOpts) -> crate::smelt_term::BufId {
+    fn buf_create(&mut self, opts: crate::smelt_edit::BufCreateOpts) -> crate::smelt_edit::BufId {
         self.ui.buf_create(opts)
     }
-    fn buf_mut(&mut self, id: crate::smelt_term::BufId) -> Option<&mut crate::smelt_term::Buffer> {
+    fn buf_mut(&mut self, id: crate::smelt_edit::BufId) -> Option<&mut crate::smelt_edit::Buffer> {
         self.ui.buf_mut(id)
     }
     fn win_open_split(
         &mut self,
-        buf: crate::smelt_term::BufId,
-        config: crate::smelt_term::SplitConfig,
-    ) -> Option<crate::smelt_term::WinId> {
+        buf: crate::smelt_edit::BufId,
+        config: crate::smelt_edit::SplitConfig,
+    ) -> Option<crate::smelt_edit::WinId> {
         self.ui.win_open_split(buf, config)
     }
-    fn win_close(&mut self, id: crate::smelt_term::WinId) -> Vec<u64> {
+    fn win_close(&mut self, id: crate::smelt_edit::WinId) -> Vec<u64> {
         self.ui.win_close(id)
     }
-    fn win_mut(&mut self, id: crate::smelt_term::WinId) -> Option<&mut crate::smelt_term::Window> {
+    fn win_mut(&mut self, id: crate::smelt_edit::WinId) -> Option<&mut crate::smelt_edit::Window> {
         self.ui.win_mut(id)
     }
     fn overlay_open(
         &mut self,
-        overlay: crate::smelt_term::Overlay,
-    ) -> crate::smelt_term::OverlayId {
+        overlay: crate::smelt_edit::Overlay,
+    ) -> crate::smelt_edit::OverlayId {
         self.ui.overlay_open(overlay)
     }
     fn viewport_for(
         &self,
-        win: crate::smelt_term::WinId,
-    ) -> Option<crate::smelt_term::WindowViewport> {
+        win: crate::smelt_edit::WinId,
+    ) -> Option<crate::smelt_edit::WindowViewport> {
         self.ui.win(win).and_then(|w| w.viewport)
     }
-    fn rows_for(&mut self, win: crate::smelt_term::WinId) -> Option<Vec<String>> {
+    fn rows_for(&mut self, win: crate::smelt_edit::WinId) -> Option<Vec<String>> {
         if win == crate::app::PROMPT_WIN {
             let buf_id = self.ui.win(self.well_known.prompt)?.buf;
             let buf = self.ui.buf(buf_id)?;
@@ -50,29 +50,29 @@ impl crate::smelt_term::UiHost for TuiApp {
             let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
             Some((*rows).clone())
         } else {
-            crate::smelt_term::UiHost::rows_for(&mut self.ui, win)
+            crate::smelt_edit::UiHost::rows_for(&mut self.ui, win)
         }
     }
-    fn breaks_for(&mut self, win: crate::smelt_term::WinId) -> Option<(Vec<usize>, Vec<usize>)> {
+    fn breaks_for(&mut self, win: crate::smelt_edit::WinId) -> Option<(Vec<usize>, Vec<usize>)> {
         if win == crate::app::PROMPT_WIN {
             let buf_id = self.ui.win(self.well_known.prompt)?.buf;
             let buf = self.ui.buf(buf_id)?;
             Some((
                 Vec::new(),
-                crate::smelt_term::hard_breaks_for_text(buf.source()),
+                crate::smelt_edit::hard_breaks_for_text(buf.source()),
             ))
         } else if win == crate::app::TRANSCRIPT_WIN {
             Some(self.transcript_line_breaks(self.core.config.settings.show_thinking))
         } else {
-            crate::smelt_term::UiHost::breaks_for(&mut self.ui, win)
+            crate::smelt_edit::UiHost::breaks_for(&mut self.ui, win)
         }
     }
 
     fn rows_for_range(
         &mut self,
-        win: crate::smelt_term::WinId,
-        start: crate::smelt_term::RowIndex,
-        count: crate::smelt_term::RowIndex,
+        win: crate::smelt_edit::WinId,
+        start: crate::smelt_edit::RowIndex,
+        count: crate::smelt_edit::RowIndex,
     ) -> Option<Vec<String>> {
         if win == crate::app::TRANSCRIPT_WIN {
             Some(self.transcript_display_rows_range(
@@ -84,20 +84,20 @@ impl crate::smelt_term::UiHost for TuiApp {
             let buf_id = self.ui.win(self.well_known.prompt)?.buf;
             let buf = self.ui.buf(buf_id)?;
             let rows = buf.lines();
-            let start_idx = crate::smelt_term::document::row_to_usize(start).min(rows.len());
-            let end = crate::smelt_term::document::row_to_usize(start.saturating_add(count))
+            let start_idx = crate::smelt_edit::document::row_to_usize(start).min(rows.len());
+            let end = crate::smelt_edit::document::row_to_usize(start.saturating_add(count))
                 .min(rows.len());
             Some(rows[start_idx..end].to_vec())
         } else {
-            crate::smelt_term::UiHost::rows_for_range(&mut self.ui, win, start, count)
+            crate::smelt_edit::UiHost::rows_for_range(&mut self.ui, win, start, count)
         }
     }
 
     fn breaks_for_range(
         &mut self,
-        win: crate::smelt_term::WinId,
-        start: crate::smelt_term::RowIndex,
-        count: crate::smelt_term::RowIndex,
+        win: crate::smelt_edit::WinId,
+        start: crate::smelt_edit::RowIndex,
+        count: crate::smelt_edit::RowIndex,
     ) -> Option<(Vec<usize>, Vec<usize>)> {
         if win == crate::app::TRANSCRIPT_WIN {
             Some(self.transcript_line_breaks_range(
@@ -106,7 +106,7 @@ impl crate::smelt_term::UiHost for TuiApp {
                 count,
             ))
         } else {
-            crate::smelt_term::UiHost::breaks_for_range(&mut self.ui, win, start, count)
+            crate::smelt_edit::UiHost::breaks_for_range(&mut self.ui, win, start, count)
         }
     }
 }

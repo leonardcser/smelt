@@ -5,7 +5,7 @@
 //! Callers must call `Buffer::ensure_rendered_at` with the content width
 //! (after borders, padding, and scrollbar) before sampling for display.
 
-use crate::smelt_term::{Buffer, BufferParser};
+use crate::smelt_edit::{Buffer, BufferParser};
 use std::sync::Arc;
 
 use crate::content::builder::LineBuilder;
@@ -164,7 +164,7 @@ fn emit_wrapped_line<F>(out: &mut LineBuilder, line: &str, width: usize, mut emi
 where
     F: FnMut(&mut LineBuilder, &str),
 {
-    let wrapped = crate::smelt_term::text::wrap_line(line, width);
+    let wrapped = crate::smelt_edit::text::wrap_line(line, width);
     if wrapped.len() > 1 {
         out.mark_wrapped();
     }
@@ -182,8 +182,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::smelt_term::BufId;
-    use crate::smelt_term::{BufCreateOpts, Buffer};
+    use crate::smelt_edit::BufId;
+    use crate::smelt_edit::{BufCreateOpts, Buffer};
 
     fn new_buf() -> Buffer {
         Buffer::new(BufId(1), BufCreateOpts::default())

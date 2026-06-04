@@ -14,7 +14,7 @@ use crate::content::highlight::{
     compute_split_diff, lang_to_ext, print_code_lines, print_split_diff_side,
 };
 use crate::content::to_buffer::render_into_buffer;
-use crate::smelt_term::BufId;
+use crate::smelt_edit::BufId;
 use mlua::prelude::*;
 use smelt_core::content::highlight::SplitSide;
 use smelt_core::lua::doc::Tier;

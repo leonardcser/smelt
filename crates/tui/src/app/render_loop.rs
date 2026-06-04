@@ -39,7 +39,7 @@ impl TuiApp {
         self.ui.sync_scroll_links();
         let transcript_captured = matches!(
             self.ui.capture(),
-            Some(crate::smelt_term::HitTarget::Window(win)) if win == crate::app::TRANSCRIPT_WIN
+            Some(crate::smelt_edit::HitTarget::Window(win)) if win == crate::app::TRANSCRIPT_WIN
         );
         let transcript_scroll_target = if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
             crate::content::transcript_buf::ScrollTarget::full_tail()
@@ -65,7 +65,7 @@ impl TuiApp {
 
         // Hidden is the right baseline; sync paths below set Block when focus owns the caret.
         self.ui
-            .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
+            .set_cursor_shape(crate::smelt_edit::CursorShape::Hidden);
 
         // ── Layout ──
         let (prompt_rect, viewport_rows) = {
@@ -122,7 +122,7 @@ impl TuiApp {
         //     non-focusable leaf like a notification.
         if matches!(
             self.ui.cursor_shape(),
-            crate::smelt_term::CursorShape::Hidden
+            crate::smelt_edit::CursorShape::Hidden
         ) {
             let focus_on_overlay = self
                 .ui
@@ -221,10 +221,10 @@ impl TuiApp {
             viewport_rows,
         );
         if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
-            let ranges: Vec<crate::smelt_term::SelectionRange> = transcript_selection
+            let ranges: Vec<crate::smelt_edit::SelectionRange> = transcript_selection
                 .iter()
                 .map(
-                    |(line, col_start, col_end)| crate::smelt_term::SelectionRange {
+                    |(line, col_start, col_end)| crate::smelt_edit::SelectionRange {
                         line: *line,
                         col_start: *col_start,
                         col_end: *col_end,
@@ -246,7 +246,7 @@ impl TuiApp {
 
     /// Populate the input-leaf buffer, cursor, and viewport. Cursor positions are content-local;
     /// the leaf's gutter shift is applied by `Window::render`.
-    fn sync_input_layer(&mut self, prompt_rect: crate::smelt_term::Rect, has_prompt_cursor: bool) {
+    fn sync_input_layer(&mut self, prompt_rect: crate::smelt_edit::Rect, has_prompt_cursor: bool) {
         let gutters = self
             .ui
             .win(crate::app::PROMPT_WIN)
@@ -292,7 +292,7 @@ impl TuiApp {
                 // Cursor is off-screen - hide it so a stale shape from the prior frame
                 // doesn't draw a stray glyph.
                 self.ui
-                    .set_cursor_shape(crate::smelt_term::CursorShape::Hidden);
+                    .set_cursor_shape(crate::smelt_edit::CursorShape::Hidden);
             }
         }
     }
@@ -308,7 +308,7 @@ impl TuiApp {
         term_w: u16,
         term_h: u16,
         prompt_input_rows: u16,
-    ) -> Option<crate::smelt_term::LayoutTree> {
+    ) -> Option<crate::smelt_edit::LayoutTree> {
         let lua = self.lua.lua();
         let shared = self.lua.shared();
         let composer_func: Option<mlua::Function> = {
@@ -335,7 +335,7 @@ impl TuiApp {
             .ok()?
             .0
             .clone();
-        let mut window_leaves: Vec<crate::smelt_term::WinId> = Vec::new();
+        let mut window_leaves: Vec<crate::smelt_edit::WinId> = Vec::new();
         match crate::lua::api::overlay_layout::build_layout_tree(self, &node, &mut window_leaves) {
             Ok((_constraint, tree)) => Some(tree),
             Err(e) => {
@@ -361,7 +361,7 @@ impl TuiApp {
         // Snapshot (win_id, function) pairs so the registry mutex
         // isn't held across Lua calls (renderers may legitimately
         // re-register or remove themselves mid-frame).
-        let entries: Vec<(crate::smelt_term::WinId, mlua::Function)> = {
+        let entries: Vec<(crate::smelt_edit::WinId, mlua::Function)> = {
             let guard = match shared.win_renderers.lock() {
                 Ok(g) => g,
                 Err(_) => return,
@@ -371,7 +371,7 @@ impl TuiApp {
                 .filter_map(|(raw_id, handle)| {
                     lua.registry_value::<mlua::Function>(&handle.key)
                         .ok()
-                        .map(|f| (crate::smelt_term::WinId(*raw_id), f))
+                        .map(|f| (crate::smelt_edit::WinId(*raw_id), f))
                 })
                 .collect()
         };
@@ -408,7 +408,7 @@ impl TuiApp {
 /// `Window::render` derives the position from the focused leaf's own
 /// `cursor_col` / `cursor_screen_row` and preserves the underlying glyph,
 /// falling back to a space when the cell is empty.
-fn prompt_block_cursor(theme: &crate::smelt_term::Theme) -> crate::smelt_term::CursorShape {
+fn prompt_block_cursor(theme: &crate::smelt_edit::Theme) -> crate::smelt_edit::CursorShape {
     let (fg, bg) = if theme.is_light() {
         (
             smelt_core::style::Color::White,
@@ -420,9 +420,9 @@ fn prompt_block_cursor(theme: &crate::smelt_term::Theme) -> crate::smelt_term::C
             smelt_core::style::Color::White,
         )
     };
-    crate::smelt_term::CursorShape::Block {
+    crate::smelt_edit::CursorShape::Block {
         glyph: ' ',
-        style: crate::smelt_term::Style {
+        style: crate::smelt_edit::Style {
             fg: Some(fg),
             bg: Some(bg),
             ..Default::default()

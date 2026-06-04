@@ -15,7 +15,7 @@ use smelt_core::lua::module::LuaMod;
 /// the same ui_ops helpers the bundled picker plugin already uses.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaPicker {
-    pub(crate) win: crate::smelt_term::WinId,
+    pub(crate) win: crate::smelt_edit::WinId,
 }
 
 impl LuaType for LuaPicker {

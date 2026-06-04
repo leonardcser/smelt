@@ -1,7 +1,7 @@
 //! Low-level buffer editing primitives for `PromptState`.
 
 use super::{PromptCtx, PromptCtxRef, PromptState, ATTACHMENT_MARKER};
-use crate::smelt_term::VimMode;
+use crate::smelt_edit::VimMode;
 use smelt_buffer::text::{next_char_boundary, prev_char_boundary, slice};
 use smelt_core::attachment::AttachmentId;
 
@@ -21,7 +21,7 @@ impl PromptState {
         if ctx.win.vim_enabled && ctx.win.vim_mode == VimMode::Insert {
             return; // insert session groups all edits into one undo step
         }
-        ctx.buf.history.save(crate::smelt_term::UndoEntry::snapshot(
+        ctx.buf.history.save(crate::smelt_edit::UndoEntry::snapshot(
             ctx.buf.source(),
             ctx.win.cpos,
             &ctx.buf.attachment_ids,
@@ -104,10 +104,10 @@ impl PromptState {
         if ctx.win.cpos == 0 {
             return;
         }
-        let target = crate::smelt_term::text::word_backward_pos(
+        let target = crate::smelt_edit::text::word_backward_pos(
             ctx.buf.source(),
             ctx.win.cpos,
-            crate::smelt_term::text::CharClass::Word,
+            crate::smelt_edit::text::CharClass::Word,
         );
         if target == 0 {
             self.from_paste = false;
@@ -130,10 +130,10 @@ impl PromptState {
         if ctx.win.cpos >= ctx.buf.source().len() {
             return;
         }
-        let target = crate::smelt_term::text::word_forward_pos(
+        let target = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
             ctx.win.cpos,
-            crate::smelt_term::text::CharClass::Word,
+            crate::smelt_edit::text::CharClass::Word,
         );
         let cpos = ctx.win.cpos;
         self.safe_shrink(ctx, cpos..target);
@@ -142,7 +142,7 @@ impl PromptState {
     pub(super) fn kill_to_end_of_line(
         &mut self,
         ctx: &mut PromptCtx<'_>,
-        clipboard: &mut crate::smelt_term::Clipboard,
+        clipboard: &mut crate::smelt_edit::Clipboard,
     ) {
         let cpos = ctx.win.cpos;
         let end = slice(ctx.buf.source(), cpos..ctx.buf.source().len())
@@ -157,7 +157,7 @@ impl PromptState {
     pub(super) fn kill_to_start_of_line(
         &mut self,
         ctx: &mut PromptCtx<'_>,
-        clipboard: &mut crate::smelt_term::Clipboard,
+        clipboard: &mut crate::smelt_edit::Clipboard,
     ) {
         let start = slice(ctx.buf.source(), 0..ctx.win.cpos)
             .rfind('\n')
@@ -181,10 +181,10 @@ impl PromptState {
     }
 
     pub(super) fn uppercase_word(&mut self, ctx: &mut PromptCtx<'_>) {
-        let end = crate::smelt_term::text::word_forward_pos(
+        let end = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
             ctx.win.cpos,
-            crate::smelt_term::text::CharClass::Word,
+            crate::smelt_edit::text::CharClass::Word,
         );
         if end == ctx.win.cpos {
             return;
@@ -202,10 +202,10 @@ impl PromptState {
     }
 
     pub(super) fn lowercase_word(&mut self, ctx: &mut PromptCtx<'_>) {
-        let end = crate::smelt_term::text::word_forward_pos(
+        let end = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
             ctx.win.cpos,
-            crate::smelt_term::text::CharClass::Word,
+            crate::smelt_edit::text::CharClass::Word,
         );
         if end == ctx.win.cpos {
             return;
@@ -219,10 +219,10 @@ impl PromptState {
     }
 
     pub(super) fn capitalize_word(&mut self, ctx: &mut PromptCtx<'_>) {
-        let end = crate::smelt_term::text::word_forward_pos(
+        let end = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
             ctx.win.cpos,
-            crate::smelt_term::text::CharClass::Word,
+            crate::smelt_edit::text::CharClass::Word,
         );
         if end == ctx.win.cpos {
             return;
@@ -246,7 +246,7 @@ impl PromptState {
     }
 
     pub(super) fn undo(&mut self, ctx: &mut PromptCtx<'_>) {
-        let current = crate::smelt_term::UndoEntry::snapshot(
+        let current = crate::smelt_edit::UndoEntry::snapshot(
             ctx.buf.source(),
             ctx.win.cpos,
             &ctx.buf.attachment_ids,
@@ -260,10 +260,10 @@ impl PromptState {
         if ctx.win.cpos >= ctx.buf.source().len() {
             return false;
         }
-        let target = crate::smelt_term::text::word_forward_pos(
+        let target = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
             ctx.win.cpos,
-            crate::smelt_term::text::CharClass::Word,
+            crate::smelt_edit::text::CharClass::Word,
         );
         if target != ctx.win.cpos {
             ctx.win.cpos = target;
@@ -277,10 +277,10 @@ impl PromptState {
         if ctx.win.cpos == 0 {
             return false;
         }
-        let target = crate::smelt_term::text::word_backward_pos(
+        let target = crate::smelt_edit::text::word_backward_pos(
             ctx.buf.source(),
             ctx.win.cpos,
-            crate::smelt_term::text::CharClass::Word,
+            crate::smelt_edit::text::CharClass::Word,
         );
         if target != ctx.win.cpos {
             ctx.win.cpos = target;
@@ -365,8 +365,8 @@ impl PromptState {
     /// is the human-readable form pushed to the system clipboard.
     pub(super) fn kill_and_copy(
         &mut self,
-        out: crate::smelt_term::CopyOutput,
-        clipboard: &mut crate::smelt_term::Clipboard,
+        out: crate::smelt_edit::CopyOutput,
+        clipboard: &mut crate::smelt_edit::Clipboard,
     ) {
         if !out.clipboard.is_empty() && clipboard.write(&out.clipboard).is_ok() {
             clipboard

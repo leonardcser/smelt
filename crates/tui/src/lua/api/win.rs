@@ -70,9 +70,9 @@ pub enum LuaWinEvent {
     PlaceholderDismissed,
 }
 
-impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
+impl From<LuaWinEvent> for crate::smelt_edit::WinEvent {
     fn from(e: LuaWinEvent) -> Self {
-        use crate::smelt_term::WinEvent;
+        use crate::smelt_edit::WinEvent;
         match e {
             LuaWinEvent::Open => WinEvent::Open,
             LuaWinEvent::Close => WinEvent::Close,
@@ -97,7 +97,7 @@ impl From<LuaWinEvent> for crate::smelt_term::WinEvent {
 /// Lua-side handle for a `WinId`.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaWin {
-    pub(crate) id: crate::smelt_term::WinId,
+    pub(crate) id: crate::smelt_edit::WinId,
 }
 
 impl LuaType for LuaWin {
@@ -122,7 +122,7 @@ impl FromLua for LuaWin {
 /// Built-in window ids are owned by the app shell; closing them through Lua
 /// would tear down the chrome the host depends on, so `Win:close()` no-ops
 /// for these. Plugin-owned overlay leaves close normally.
-fn is_builtin_win(id: crate::smelt_term::WinId) -> bool {
+fn is_builtin_win(id: crate::smelt_edit::WinId) -> bool {
     matches!(id, crate::app::TRANSCRIPT_WIN | crate::app::PROMPT_WIN)
 }
 
@@ -276,7 +276,7 @@ impl mlua::UserData for LuaWin {
                     let prev = app.ui.win_set_keymap(
                         this.id,
                         key,
-                        crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
+                        crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
                     );
                     crate::lua::drop_displaced_lua_handle(app, prev);
                 });
@@ -360,12 +360,12 @@ impl mlua::UserData for LuaWin {
                 let this = *this_ud.borrow::<LuaWin>()?;
                 let shared = current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
-                let event: crate::smelt_term::WinEvent = event.into();
+                let event: crate::smelt_edit::WinEvent = event.into();
                 let installed = crate::lua::try_with_app(|app| {
                     app.ui.win_on_event(
                         this.id,
                         event,
-                        crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
+                        crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
                     );
                 })
                 .is_some();
@@ -474,7 +474,7 @@ impl mlua::UserData for LuaWin {
              (this_ud, others): (mlua::AnyUserData, mlua::Variadic<LuaWin>)|
              -> LuaResult<mlua::AnyUserData> {
                 let this = *this_ud.borrow::<LuaWin>()?;
-                let mut ids: Vec<crate::smelt_term::WinId> = vec![this.id];
+                let mut ids: Vec<crate::smelt_edit::WinId> = vec![this.id];
                 for w in others {
                     ids.push(w.id);
                 }
@@ -518,7 +518,7 @@ impl mlua::UserData for LuaWin {
 fn parse_chord_list(
     opts: Option<&mlua::Table>,
     field: &str,
-) -> LuaResult<Vec<crate::smelt_term::KeyBind>> {
+) -> LuaResult<Vec<crate::smelt_edit::KeyBind>> {
     let Some(t) = opts else {
         return Ok(Vec::new());
     };
@@ -538,7 +538,7 @@ fn parse_chord_list_with_default(
     opts: Option<&mlua::Table>,
     field: &str,
     defaults: &[&str],
-) -> LuaResult<Vec<crate::smelt_term::KeyBind>> {
+) -> LuaResult<Vec<crate::smelt_edit::KeyBind>> {
     let Some(t) = opts else {
         return parse_default(defaults, field);
     };
@@ -553,7 +553,7 @@ fn parse_chord_list_with_default(
     }
 }
 
-fn parse_default(defaults: &[&str], field: &str) -> LuaResult<Vec<crate::smelt_term::KeyBind>> {
+fn parse_default(defaults: &[&str], field: &str) -> LuaResult<Vec<crate::smelt_edit::KeyBind>> {
     defaults
         .iter()
         .map(|c| {
@@ -566,7 +566,7 @@ fn parse_default(defaults: &[&str], field: &str) -> LuaResult<Vec<crate::smelt_t
         .collect()
 }
 
-fn collect_chords(arr: &mlua::Table, field: &str) -> LuaResult<Vec<crate::smelt_term::KeyBind>> {
+fn collect_chords(arr: &mlua::Table, field: &str) -> LuaResult<Vec<crate::smelt_edit::KeyBind>> {
     let mut out = Vec::new();
     for pair in arr.clone().pairs::<mlua::Value, String>() {
         let (_, chord) = pair?;
@@ -640,7 +640,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     // duplication that could drift on a default change.
     let new_doc: &'static str = Box::leak(format!(
         "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
-        crate::smelt_term::layout::Gutters::default().scrollbar
+        crate::smelt_edit::layout::Gutters::default().scrollbar
     ).into_boxed_str());
     m.fn_(
         "new",
@@ -704,14 +704,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 /// open window, refresh its mutable opts and return the existing id;
 /// otherwise open a fresh split.
 fn open_or_refresh(
-    buf_id: crate::smelt_term::BufId,
+    buf_id: crate::smelt_edit::BufId,
     opts: Option<&mlua::Table>,
-) -> LuaResult<Option<crate::smelt_term::WinId>> {
+) -> LuaResult<Option<crate::smelt_edit::WinId>> {
     // `try_with_app` (rather than `with_app`) lets bootstrap chunks call
     // `smelt.win.new` before an app pointer is installed (the initial
     // autoload pass). The window is opened for real on the second pass,
     // when `bring_up_lua("launch")` reloads with the app available.
-    let Some(win) = crate::lua::try_with_app(|app| -> Option<crate::smelt_term::WinId> {
+    let Some(win) = crate::lua::try_with_app(|app| -> Option<crate::smelt_edit::WinId> {
         let name: Option<String> = opts
             .and_then(|t| t.get::<Option<String>>("name").ok())
             .flatten();
@@ -735,12 +735,12 @@ fn open_or_refresh(
             .unwrap_or(0) as u16;
         let scrollbar = opts
             .and_then(|t| t.get::<Option<bool>>("scrollbar").ok().flatten())
-            .unwrap_or_else(|| crate::smelt_term::layout::Gutters::default().scrollbar);
+            .unwrap_or_else(|| crate::smelt_edit::layout::Gutters::default().scrollbar);
         let win = app.ui.win_open_split(
             buf_id,
-            crate::smelt_term::SplitConfig {
+            crate::smelt_edit::SplitConfig {
                 region,
-                gutters: crate::smelt_term::layout::Gutters {
+                gutters: crate::smelt_edit::layout::Gutters {
                     pad_left,
                     pad_right,
                     scrollbar,
@@ -752,7 +752,7 @@ fn open_or_refresh(
                 // Default gutter is `LineNumberGutter` (strict): buffers
                 // without `SourceLine` stamps get a zero-width column.
                 w.gutter = Some(std::sync::Arc::new(
-                    crate::smelt_term::gutter::LineNumberGutter::new(),
+                    crate::smelt_edit::gutter::LineNumberGutter::new(),
                 ));
                 w.wrap = true;
             }
@@ -796,7 +796,7 @@ fn open_or_refresh(
 /// by `smelt.win.new()` on both the create and named-refresh paths.
 fn apply_window_opts(
     app: &mut crate::app::TuiApp,
-    win_id: crate::smelt_term::WinId,
+    win_id: crate::smelt_edit::WinId,
     opts: &mlua::Table,
 ) {
     let Some(w) = app.ui.win_mut(win_id) else {
@@ -823,7 +823,7 @@ fn apply_window_opts(
     if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
         w.gutter = match gutter.as_str() {
             "line_numbers" => Some(std::sync::Arc::new(
-                crate::smelt_term::gutter::LineNumberGutter::new(),
+                crate::smelt_edit::gutter::LineNumberGutter::new(),
             )),
             "none" | "" => None,
             _ => None,

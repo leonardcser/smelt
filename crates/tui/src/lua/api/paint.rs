@@ -50,12 +50,12 @@ pub enum LuaPaintEvent {
     Drag,
 }
 
-impl From<LuaPaintEvent> for crate::smelt_term::WinEvent {
+impl From<LuaPaintEvent> for crate::smelt_edit::WinEvent {
     fn from(e: LuaPaintEvent) -> Self {
         match e {
-            LuaPaintEvent::Press => crate::smelt_term::WinEvent::Press,
-            LuaPaintEvent::Release => crate::smelt_term::WinEvent::Release,
-            LuaPaintEvent::Drag => crate::smelt_term::WinEvent::Drag,
+            LuaPaintEvent::Press => crate::smelt_edit::WinEvent::Press,
+            LuaPaintEvent::Release => crate::smelt_edit::WinEvent::Release,
+            LuaPaintEvent::Drag => crate::smelt_edit::WinEvent::Drag,
         }
     }
 }
@@ -66,7 +66,7 @@ impl From<LuaPaintEvent> for crate::smelt_term::WinEvent {
 /// to Lua - names are the stable identity surface.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaPaintReg {
-    pub(crate) id: crate::smelt_term::layout::PaintId,
+    pub(crate) id: crate::smelt_edit::layout::PaintId,
 }
 
 impl LuaType for LuaPaintReg {
@@ -123,12 +123,12 @@ impl mlua::UserData for LuaPaintReg {
                 let this = *this_ud.borrow::<LuaPaintReg>()?;
                 let shared = current_shared(lua)?;
                 let id = crate::lua::register_callback_handle(&shared, lua, func.into_inner())?;
-                let event: crate::smelt_term::WinEvent = event.into();
+                let event: crate::smelt_edit::WinEvent = event.into();
                 crate::lua::with_app(|app| {
                     app.ui.leaf_on_event(
                         this.id,
                         event,
-                        crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
+                        crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
                     );
                 });
                 let leaf = this.id;

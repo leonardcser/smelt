@@ -23,7 +23,7 @@
 use insta::{assert_snapshot, with_settings};
 use protocol::{EngineEvent, TokenUsage, ToolOutcome};
 use tui::app::test_harness::TestApp;
-use tui::smelt_term::SnapshotFrame;
+use tui::smelt_edit::SnapshotFrame;
 
 pub struct AppStoryCtx {
     app: TestApp,

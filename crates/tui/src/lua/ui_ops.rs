@@ -10,8 +10,8 @@
 //! writer of `Overlay::size_override`.
 
 use crate::app::TuiApp;
-use crate::smelt_term::layout::{Align, Anchor, Corner, PaintId};
-use crate::smelt_term::{
+use crate::smelt_edit::layout::{Align, Anchor, Corner, PaintId};
+use crate::smelt_edit::{
     Callback, CallbackResult, KeyBind, Overlay, Payload, RowIndex, WinEvent, WinId,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -132,10 +132,10 @@ fn parse_overlay_constraint(
     opts: &mlua::Table,
     key: &str,
     ctx: &str,
-) -> Result<crate::smelt_term::layout::Constraint, String> {
+) -> Result<crate::smelt_edit::layout::Constraint, String> {
     let v: Option<mlua::Value> = opts.get(key).ok();
     if matches!(v, None | Some(mlua::Value::Nil)) {
-        return Ok(crate::smelt_term::layout::Constraint::Fit);
+        return Ok(crate::smelt_edit::layout::Constraint::Fit);
     }
     crate::lua::parse::constraint(v, ctx)
 }
@@ -147,7 +147,7 @@ fn parse_overlay_constraint_opt(
     opts: &mlua::Table,
     key: &str,
     ctx: &str,
-) -> Result<Option<crate::smelt_term::layout::Constraint>, String> {
+) -> Result<Option<crate::smelt_edit::layout::Constraint>, String> {
     let v: Option<mlua::Value> = opts.get(key).ok();
     if matches!(v, None | Some(mlua::Value::Nil)) {
         return Ok(None);
@@ -283,7 +283,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         }
     }
 
-    fn move_cursor(ctx: &mut crate::smelt_term::CallbackCtx<'_>, delta: isize) -> CallbackResult {
+    fn move_cursor(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, delta: isize) -> CallbackResult {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return CallbackResult::Consumed,
@@ -414,13 +414,13 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
     win.jump_to_row(buf, target, viewport.unwrap_or(0));
     let lua = &app.lua;
     let mut lua_invoke =
-        |handle: crate::smelt_term::LuaHandle, win: WinId, payload: &crate::smelt_term::Payload| {
+        |handle: crate::smelt_edit::LuaHandle, win: WinId, payload: &crate::smelt_edit::Payload| {
             lua.queue_invocation(handle, win, payload);
         };
     app.ui.fire_win_event(
         leaf,
-        crate::smelt_term::WinEvent::SelectionChanged,
-        crate::smelt_term::Payload::Selection {
+        crate::smelt_edit::WinEvent::SelectionChanged,
+        crate::smelt_edit::Payload::Selection {
             index: target as usize,
         },
         &mut lua_invoke,
@@ -473,7 +473,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         win.reset_cursor();
     }
 
-    fn current_line(ctx: &crate::smelt_term::CallbackCtx<'_>) -> String {
+    fn current_line(ctx: &crate::smelt_edit::CallbackCtx<'_>) -> String {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return String::new(),
@@ -484,11 +484,11 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
             .unwrap_or_default()
     }
 
-    fn is_placeholder(ctx: &crate::smelt_term::CallbackCtx<'_>, placeholder: &str) -> bool {
+    fn is_placeholder(ctx: &crate::smelt_edit::CallbackCtx<'_>, placeholder: &str) -> bool {
         !placeholder.is_empty() && current_line(ctx).is_empty()
     }
 
-    fn set_placeholder_mark(ctx: &mut crate::smelt_term::CallbackCtx<'_>, placeholder: &str) {
+    fn set_placeholder_mark(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, placeholder: &str) {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return,
@@ -498,12 +498,12 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         }
     }
 
-    fn clear_placeholder_mark(ctx: &mut crate::smelt_term::CallbackCtx<'_>) {
+    fn clear_placeholder_mark(ctx: &mut crate::smelt_edit::CallbackCtx<'_>) {
         set_placeholder_mark(ctx, "");
     }
 
     fn replace_line(
-        ctx: &mut crate::smelt_term::CallbackCtx<'_>,
+        ctx: &mut crate::smelt_edit::CallbackCtx<'_>,
         new: String,
         new_cursor_col: u16,
     ) {
@@ -520,7 +520,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
     }
 
     fn insert_char(
-        ctx: &mut crate::smelt_term::CallbackCtx<'_>,
+        ctx: &mut crate::smelt_edit::CallbackCtx<'_>,
         placeholder: &str,
         c: char,
     ) -> CallbackResult {
@@ -554,7 +554,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
     }
 
-    fn restore_placeholder(ctx: &mut crate::smelt_term::CallbackCtx<'_>, placeholder: &str) {
+    fn restore_placeholder(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, placeholder: &str) {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
             None => return,
@@ -570,7 +570,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
 
     let placeholder_for_backspace = placeholder.clone();
     let backspace: Callback = Callback::Rust(Box::new(
-        move |ctx: &mut crate::smelt_term::CallbackCtx<'_>| -> CallbackResult {
+        move |ctx: &mut crate::smelt_edit::CallbackCtx<'_>| -> CallbackResult {
             if is_placeholder(ctx, &placeholder_for_backspace) {
                 return CallbackResult::Consumed;
             }
@@ -610,7 +610,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
     }
 
     fn move_h(
-        ctx: &mut crate::smelt_term::CallbackCtx<'_>,
+        ctx: &mut crate::smelt_edit::CallbackCtx<'_>,
         placeholder: &str,
         target: HMove,
     ) -> CallbackResult {

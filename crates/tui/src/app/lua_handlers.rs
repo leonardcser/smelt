@@ -172,7 +172,7 @@ impl TuiApp {
                     .win_mut(crate::app::PROMPT_WIN)
                     .expect("prompt window");
                 self.input
-                    .set_vim_mode(win, crate::smelt_term::VimMode::Insert);
+                    .set_vim_mode(win, crate::smelt_edit::VimMode::Insert);
             }
         }
     }

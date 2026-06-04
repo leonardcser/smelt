@@ -11,8 +11,8 @@
 //! `"min:N"`, `"max:N"`, `"pct:N"`, `"ratio:N/M"`, or the long table form
 //! `{ kind = "...", n = N }`.
 
-use crate::smelt_term::layout::Border;
-use crate::smelt_term::{Constraint, LayoutTree, Natural, NaturalRef, StaticNatural};
+use crate::smelt_edit::layout::Border;
+use crate::smelt_edit::{Constraint, LayoutTree, Natural, NaturalRef, StaticNatural};
 use mlua::prelude::*;
 use smelt_core::lua::lua_type::LuaType;
 use smelt_core::lua::module::LuaMod;
@@ -314,7 +314,7 @@ pub(crate) fn register_layout_constructors(m: &LuaMod) -> LuaResult<()> {
 pub(crate) fn build_layout_tree(
     app: &mut crate::app::TuiApp,
     node: &LayoutNode,
-    window_leaves: &mut Vec<crate::smelt_term::WinId>,
+    window_leaves: &mut Vec<crate::smelt_edit::WinId>,
 ) -> Result<(Constraint, LayoutTree), String> {
     match node {
         LayoutNode::Leaf {

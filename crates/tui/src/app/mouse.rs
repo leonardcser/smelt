@@ -2,7 +2,7 @@
 
 use crate::app::{AppFocus, EventOutcome, TuiApp};
 use crate::content::layout::HitRegion;
-use crate::smelt_term::{HitTarget, WinId};
+use crate::smelt_edit::{HitTarget, WinId};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
 /// `true` for the four wheel directions. Used to decide whether an event
@@ -76,12 +76,12 @@ struct TranscriptMouseCell {
 }
 
 fn transcript_mouse_cell(
-    win: &crate::smelt_term::Window,
+    win: &crate::smelt_edit::Window,
     me: MouseEvent,
-    vp: crate::smelt_term::WindowViewport,
+    vp: crate::smelt_edit::WindowViewport,
     row_count: usize,
 ) -> TranscriptMouseCell {
-    let rel_row = me.row.saturating_sub(vp.rect.top) as crate::smelt_term::RowIndex;
+    let rel_row = me.row.saturating_sub(vp.rect.top) as crate::smelt_edit::RowIndex;
     let abs_row = win.scroll_top.saturating_add(rel_row);
     let row = (win.local_visual_row(abs_row) as usize).min(row_count.saturating_sub(1));
 
@@ -99,7 +99,7 @@ fn transcript_mouse_cell(
     }
 }
 
-fn projected_buf_breaks(buf: &crate::smelt_term::Buffer) -> (Vec<usize>, Vec<usize>) {
+fn projected_buf_breaks(buf: &crate::smelt_edit::Buffer) -> (Vec<usize>, Vec<usize>) {
     let lines = buf.lines();
     let mut soft = Vec::new();
     let mut hard = Vec::new();
@@ -129,8 +129,8 @@ impl TuiApp {
         let cap_before = self.ui.capture();
         if matches!(
             self.ui
-                .dispatch_event(crate::smelt_term::Event::Mouse(me), &mut |_, _, _| {}),
-            crate::smelt_term::Status::Consumed
+                .dispatch_event(crate::smelt_edit::Event::Mouse(me), &mut |_, _, _| {}),
+            crate::smelt_edit::Status::Consumed
         ) {
             if let Some(owner) =
                 scrollbar_owner_from_capture_transition(cap_before, self.ui.capture())
@@ -200,16 +200,16 @@ impl TuiApp {
             // Built-in transcript / input / list handling below still runs - pointer
             // events are purely additive for Lua subscribers.
             let pointer_event = if is_down {
-                Some(crate::smelt_term::WinEvent::Press)
+                Some(crate::smelt_edit::WinEvent::Press)
             } else if is_up {
-                Some(crate::smelt_term::WinEvent::Release)
+                Some(crate::smelt_edit::WinEvent::Release)
             } else if is_drag {
-                Some(crate::smelt_term::WinEvent::Drag)
+                Some(crate::smelt_edit::WinEvent::Drag)
             } else {
                 None
             };
             if let Some(ev) = pointer_event {
-                self.fire_pointer_event(win, ev, me, crate::smelt_term::MouseButton::Left);
+                self.fire_pointer_event(win, ev, me, crate::smelt_edit::MouseButton::Left);
             }
             if win == crate::app::PROMPT_WIN {
                 if is_down && self.ui.active_modal().is_none() {
@@ -259,16 +259,16 @@ impl TuiApp {
     fn fire_pointer_event(
         &mut self,
         win: WinId,
-        event: crate::smelt_term::WinEvent,
+        event: crate::smelt_edit::WinEvent,
         me: MouseEvent,
-        button: crate::smelt_term::MouseButton,
+        button: crate::smelt_edit::MouseButton,
     ) {
         let rect = self
             .ui
             .win(win)
             .and_then(|w| w.viewport)
             .map(|v| v.rect)
-            .or_else(|| self.ui.paint_rect(crate::smelt_term::PaintId::from(win)));
+            .or_else(|| self.ui.paint_rect(crate::smelt_edit::PaintId::from(win)));
         let (rel_row, rel_col) = match rect {
             Some(rect) => (
                 me.row.saturating_sub(rect.top),
@@ -277,15 +277,15 @@ impl TuiApp {
             None => (0, 0),
         };
         let lua = &self.lua;
-        let mut lua_invoke = |handle: crate::smelt_term::LuaHandle,
+        let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
                               w: WinId,
-                              payload: &crate::smelt_term::Payload| {
+                              payload: &crate::smelt_edit::Payload| {
             lua.queue_invocation(handle, w, payload);
         };
         self.ui.fire_win_event(
             win,
             event,
-            crate::smelt_term::Payload::Mouse {
+            crate::smelt_edit::Payload::Mouse {
                 row: rel_row,
                 col: rel_col,
                 button,
@@ -294,7 +294,7 @@ impl TuiApp {
         );
     }
 
-    fn yank_to_clipboard(&mut self, out: crate::smelt_term::CopyOutput) {
+    fn yank_to_clipboard(&mut self, out: crate::smelt_edit::CopyOutput) {
         if self.core.clipboard.write(&out.clipboard).is_ok() {
             self.core
                 .clipboard
@@ -313,12 +313,12 @@ impl TuiApp {
     /// the system clipboard while keeping raw markers in the kill ring for
     /// vim paste-back).
     fn handle_prompt_mouse(&mut self, me: MouseEvent, click_count: u8) {
-        let Some(vp) = crate::smelt_term::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
+        let Some(vp) = crate::smelt_edit::UiHost::viewport_for(self, crate::app::PROMPT_WIN) else {
             return;
         };
         let usable = vp.content_width as usize;
         let (soft, hard) =
-            crate::smelt_term::UiHost::breaks_for(self, crate::app::PROMPT_WIN).unwrap_or_default();
+            crate::smelt_edit::UiHost::breaks_for(self, crate::app::PROMPT_WIN).unwrap_or_default();
         let yank = {
             let (win, buf) = self
                 .ui
@@ -326,7 +326,7 @@ impl TuiApp {
             let buf = buf.expect("prompt edit buffer");
             let win = win.expect("prompt window");
             buf.ensure_rendered_at(usable as u16);
-            let mouse_ctx = crate::smelt_term::MouseCtx {
+            let mouse_ctx = crate::smelt_edit::MouseCtx {
                 soft_breaks: &soft,
                 hard_breaks: &hard,
                 viewport: vp,
@@ -348,15 +348,15 @@ impl TuiApp {
     /// word/line expansion. Returns the yanked range on `Up` (caller copies it).
     fn handle_selectable_leaf_mouse(
         &mut self,
-        win: crate::smelt_term::WinId,
+        win: crate::smelt_edit::WinId,
         me: MouseEvent,
         click_count: u8,
-    ) -> Option<crate::smelt_term::CopyOutput> {
-        let viewport = crate::smelt_term::UiHost::viewport_for(self, win)?;
+    ) -> Option<crate::smelt_edit::CopyOutput> {
+        let viewport = crate::smelt_edit::UiHost::viewport_for(self, win)?;
         let buf_id = self.ui.win(win).map(|w| w.buf)?;
-        let (soft, hard) = crate::smelt_term::UiHost::breaks_for(self, win).unwrap_or_default();
+        let (soft, hard) = crate::smelt_edit::UiHost::breaks_for(self, win).unwrap_or_default();
         let range = {
-            let mouse_ctx = crate::smelt_term::MouseCtx {
+            let mouse_ctx = crate::smelt_edit::MouseCtx {
                 soft_breaks: &soft,
                 hard_breaks: &hard,
                 viewport,
@@ -384,8 +384,8 @@ impl TuiApp {
         &mut self,
         me: MouseEvent,
         click_count: u8,
-    ) -> Option<crate::smelt_term::CopyOutput> {
-        let viewport = crate::smelt_term::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
+    ) -> Option<crate::smelt_edit::CopyOutput> {
+        let viewport = crate::smelt_edit::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
         let win_id = self.well_known.transcript;
         let buf_id = self.transcript_win().buf;
         let needs_breaks = match me.kind {
@@ -417,7 +417,7 @@ impl TuiApp {
         // and produce stale byte offsets.
 
         let range = {
-            let mouse_ctx = crate::smelt_term::MouseCtx {
+            let mouse_ctx = crate::smelt_edit::MouseCtx {
                 soft_breaks: &soft,
                 hard_breaks: &hard,
                 viewport,
@@ -445,7 +445,7 @@ impl TuiApp {
         &mut self,
         me: MouseEvent,
         rows: &[String],
-        vp: crate::smelt_term::WindowViewport,
+        vp: crate::smelt_edit::WindowViewport,
     ) -> MouseEvent {
         let cell = transcript_mouse_cell(self.transcript_win(), me, vp, rows.len());
         let snapped = self.snap_col_to_selectable(
@@ -466,7 +466,7 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::smelt_term::HitTarget;
+    use crate::smelt_edit::HitTarget;
 
     fn ev(kind: MouseEventKind) -> MouseEventKind {
         kind
@@ -663,7 +663,7 @@ mod tests {
         let end_rel = 4u16;
         let start_local = app
             .transcript_win()
-            .local_visual_row(top.saturating_add(start_rel as crate::smelt_term::RowIndex))
+            .local_visual_row(top.saturating_add(start_rel as crate::smelt_edit::RowIndex))
             as usize;
         let expected_start = app
             .ui
@@ -725,8 +725,8 @@ mod tests {
             );
         }
 
-        let viewport = crate::smelt_term::WindowViewport::new(
-            crate::smelt_term::Rect::new(5, 3, 40, 2),
+        let viewport = crate::smelt_edit::WindowViewport::new(
+            crate::smelt_edit::Rect::new(5, 3, 40, 2),
             40,
             22,
             20,
@@ -774,8 +774,8 @@ mod tests {
             buf.set_source(source.into());
             buf.ensure_rendered_at(80);
         }
-        let viewport = crate::smelt_term::WindowViewport::new(
-            crate::smelt_term::Rect::new(0, 0, 80, 5),
+        let viewport = crate::smelt_edit::WindowViewport::new(
+            crate::smelt_edit::Rect::new(0, 0, 80, 5),
             80,
             3,
             0,

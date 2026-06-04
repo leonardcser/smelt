@@ -1,5 +1,5 @@
 use crate::input::PromptState;
-use crate::smelt_term::{Buffer, ExtmarkOpts, ExtmarkPayload};
+use crate::smelt_edit::{Buffer, ExtmarkOpts, ExtmarkPayload};
 
 /// Extmark namespace for `Win:placeholder` text rendered as a dim
 /// suggestion when the buffer is empty.
@@ -31,8 +31,8 @@ pub(crate) fn placeholder_text(buf: &mut Buffer) -> Option<String> {
 
 pub(crate) struct InputLeafInput<'a> {
     pub(crate) input: &'a PromptState,
-    pub(crate) win: &'a crate::smelt_term::Window,
-    pub(crate) clipboard: &'a crate::smelt_term::Clipboard,
+    pub(crate) win: &'a crate::smelt_edit::Window,
+    pub(crate) clipboard: &'a crate::smelt_edit::Clipboard,
     /// Host clock at render time; used to compute the yank-flash window.
     pub(crate) now: std::time::Instant,
 }
@@ -88,13 +88,13 @@ mod tests {
     #[test]
     fn sync_prompt_overlays_writes_overlays_only() {
         let input_state = PromptState::default();
-        let test_clipboard = crate::smelt_term::Clipboard::null();
-        let test_win = crate::smelt_term::Window::new(
+        let test_clipboard = crate::smelt_edit::Clipboard::null();
+        let test_win = crate::smelt_edit::Window::new(
             crate::app::PROMPT_WIN,
             crate::app::PROMPT_EDIT_BUF,
-            crate::smelt_term::SplitConfig {
+            crate::smelt_edit::SplitConfig {
                 region: "prompt".into(),
-                gutters: crate::smelt_term::Gutters::default(),
+                gutters: crate::smelt_edit::Gutters::default(),
             },
         );
         let inp = InputLeafInput {
@@ -105,7 +105,7 @@ mod tests {
         };
         let mut input_buf = Buffer::new(
             crate::app::PROMPT_EDIT_BUF,
-            crate::smelt_term::BufCreateOpts::default(),
+            crate::smelt_edit::BufCreateOpts::default(),
         );
         input_buf.set_parser(std::sync::Arc::new(
             crate::content::prompt_parser::PromptBufferParser::new(input_state.store.clone()),
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn window_render_honors_prompt_gutters() {
         use crate::app::PROMPT_WIN;
-        use crate::smelt_term::{
+        use crate::smelt_edit::{
             grid::Grid, BufCreateOpts, CursorShape, DrawContext, Gutters, SplitConfig, Theme,
             Window,
         };
@@ -142,18 +142,18 @@ mod tests {
         );
 
         let mut grid = Grid::new(10, 1);
-        let mut slice = grid.slice_mut(crate::smelt_term::Rect::new(0, 0, 10, 1));
+        let mut slice = grid.slice_mut(crate::smelt_edit::Rect::new(0, 0, 10, 1));
         let ctx = DrawContext {
             terminal_width: 10,
             terminal_height: 1,
             focused: true,
             cursor_shape: CursorShape::Block {
                 glyph: '█',
-                style: crate::smelt_term::grid::Style::default(),
+                style: crate::smelt_edit::grid::Style::default(),
                 pos: None,
             },
             theme,
-            vim_mode: crate::smelt_term::VimMode::Insert,
+            vim_mode: crate::smelt_edit::VimMode::Insert,
         };
         win.render(&buf, &mut slice, &ctx);
 

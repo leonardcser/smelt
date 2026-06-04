@@ -68,11 +68,11 @@ pub(crate) fn chord_string(key: crossterm::event::KeyEvent) -> Option<String> {
     Some(format!("<{prefix}{base}>"))
 }
 
-/// Parse a plugin key spec into a [`crate::smelt_term::KeyBind`].
+/// Parse a plugin key spec into a [`crate::smelt_edit::KeyBind`].
 /// Accepts shorthand (`"c-j"`, `"s-tab"`, `"enter"`) and canonical bracket form
 /// (`"<C-r>"`, `"<S-Tab>"`). Modifiers separate with `-`; case-insensitive.
 /// Returns `None` for unknown keys.
-pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_term::KeyBind> {
+pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_edit::KeyBind> {
     use crossterm::event::{KeyCode, KeyModifiers};
     let raw = spec.trim();
     if raw.is_empty() {
@@ -101,7 +101,7 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_term::KeyBind> {
         "bs" | "backspace" => KeyCode::Backspace,
         "tab" => {
             if mods.contains(KeyModifiers::SHIFT) {
-                return Some(crate::smelt_term::KeyBind::new(
+                return Some(crate::smelt_edit::KeyBind::new(
                     KeyCode::BackTab,
                     mods - KeyModifiers::SHIFT,
                 ));
@@ -130,7 +130,7 @@ pub(crate) fn parse_keybind(spec: &str) -> Option<crate::smelt_term::KeyBind> {
         s if s.chars().count() == 1 => KeyCode::Char(name.chars().next().unwrap()),
         _ => return None,
     };
-    Some(crate::smelt_term::KeyBind::new(code, mods))
+    Some(crate::smelt_edit::KeyBind::new(code, mods))
 }
 
 /// Normalize a mode string to the canonical single-char form (`"n"`, `"i"`, `"v"`, `""`).
@@ -241,9 +241,9 @@ pub(crate) fn register_callback_handle(
 /// Drop the Lua handle displaced by a `win_set_keymap` / `win_clear_*` call, if any.
 pub(crate) fn drop_displaced_lua_handle(
     app: &mut crate::app::TuiApp,
-    displaced: Option<crate::smelt_term::Callback>,
+    displaced: Option<crate::smelt_edit::Callback>,
 ) {
-    if let Some(crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(old))) = displaced {
+    if let Some(crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(old))) = displaced {
         app.lua.remove_callback(old);
     }
 }
@@ -251,9 +251,9 @@ pub(crate) fn drop_displaced_lua_handle(
 /// Callback invocation queued while `&mut Ui` is held.
 /// Drained by TuiApp after the ui call returns, with the TLS app pointer installed.
 pub(crate) struct PendingInvocation {
-    pub(crate) handle: crate::smelt_term::LuaHandle,
-    pub(crate) win: crate::smelt_term::WinId,
-    pub(crate) payload: crate::smelt_term::Payload,
+    pub(crate) handle: crate::smelt_edit::LuaHandle,
+    pub(crate) win: crate::smelt_edit::WinId,
+    pub(crate) payload: crate::smelt_edit::Payload,
 }
 
 /// TUI-specific extension of [`smelt_core::lua::LuaShared`] adding the
@@ -675,9 +675,9 @@ mod tests {
         let func: mlua::Function = rt.lua.load("test_cb").eval().unwrap();
         let id = rt.register_callback(func).unwrap();
         rt.invoke_callback(
-            crate::smelt_term::LuaHandle(id),
-            crate::smelt_term::WinId(0),
-            &crate::smelt_term::Payload::Selection { index: 2 },
+            crate::smelt_edit::LuaHandle(id),
+            crate::smelt_edit::WinId(0),
+            &crate::smelt_edit::Payload::Selection { index: 2 },
         );
         let recorded: u64 = rt.lua.load("return _G.recorded").eval().unwrap();
         assert_eq!(recorded, 3); // Selection is 0-indexed; Lua gets 1-based.
@@ -698,9 +698,9 @@ mod tests {
         let func: mlua::Function = rt.lua.load("cb").eval().unwrap();
         let id = rt.register_callback(func).unwrap();
         rt.invoke_callback(
-            crate::smelt_term::LuaHandle(id),
-            crate::smelt_term::WinId(0),
-            &crate::smelt_term::Payload::Text {
+            crate::smelt_edit::LuaHandle(id),
+            crate::smelt_edit::WinId(0),
+            &crate::smelt_edit::Payload::Text {
                 content: "hi".into(),
             },
         );
@@ -713,9 +713,9 @@ mod tests {
         let rt = LuaRuntime::new();
         // Nothing registered under id 9999 - should silently succeed.
         rt.invoke_callback(
-            crate::smelt_term::LuaHandle(9999),
-            crate::smelt_term::WinId(0),
-            &crate::smelt_term::Payload::None,
+            crate::smelt_edit::LuaHandle(9999),
+            crate::smelt_edit::WinId(0),
+            &crate::smelt_edit::Payload::None,
         );
     }
 
@@ -742,9 +742,9 @@ mod tests {
 
         // Dropped handle must not fire.
         rt.invoke_callback(
-            crate::smelt_term::LuaHandle(id),
-            crate::smelt_term::WinId(0),
-            &crate::smelt_term::Payload::None,
+            crate::smelt_edit::LuaHandle(id),
+            crate::smelt_edit::WinId(0),
+            &crate::smelt_edit::Payload::None,
         );
         let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
         assert_eq!(fired, 0);
@@ -1270,28 +1270,28 @@ mod tests {
         use crossterm::event::{KeyCode, KeyModifiers};
         assert_eq!(
             parse_keybind("enter"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::Enter,
                 KeyModifiers::NONE
             ))
         );
         assert_eq!(
             parse_keybind("esc"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::Esc,
                 KeyModifiers::NONE
             ))
         );
         assert_eq!(
             parse_keybind("c-j"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::Char('j'),
                 KeyModifiers::CONTROL
             ))
         );
         assert_eq!(
             parse_keybind("a-x"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::Char('x'),
                 KeyModifiers::ALT
             ))
@@ -1299,14 +1299,14 @@ mod tests {
         // shift-tab collapses to BackTab with SHIFT removed so crossterm event matches.
         assert_eq!(
             parse_keybind("s-tab"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::BackTab,
                 KeyModifiers::NONE
             ))
         );
         assert_eq!(
             parse_keybind("k"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::Char('k'),
                 KeyModifiers::NONE
             ))
@@ -1314,21 +1314,21 @@ mod tests {
         // Canonical bracket form also accepted.
         assert_eq!(
             parse_keybind("<Esc>"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::Esc,
                 KeyModifiers::NONE
             ))
         );
         assert_eq!(
             parse_keybind("<C-r>"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::Char('r'),
                 KeyModifiers::CONTROL
             ))
         );
         assert_eq!(
             parse_keybind("<S-Tab>"),
-            Some(crate::smelt_term::KeyBind::new(
+            Some(crate::smelt_edit::KeyBind::new(
                 KeyCode::BackTab,
                 KeyModifiers::NONE
             ))

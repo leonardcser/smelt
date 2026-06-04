@@ -970,10 +970,10 @@ fn clamp_dim(d: u16) -> u16 {
 fn placeholder_chord_pair(
     variant: u8,
 ) -> (
-    Vec<tui::smelt_term::KeyBind>,
-    Vec<tui::smelt_term::KeyBind>,
+    Vec<tui::smelt_edit::KeyBind>,
+    Vec<tui::smelt_edit::KeyBind>,
 ) {
-    use tui::smelt_term::KeyBind;
+    use tui::smelt_edit::KeyBind;
     let kb = |code, mods| KeyBind { code, mods };
     let tab = kb(KeyCode::Tab, KeyModifiers::NONE);
     let enter = kb(KeyCode::Enter, KeyModifiers::NONE);

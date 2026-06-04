@@ -2,7 +2,7 @@
 //! `TranscriptProjection` boundary.
 
 use crate::content::transcript_parsers::layout_block_into;
-use crate::smelt_term::{BufCreateOpts, BufId, Buffer};
+use crate::smelt_edit::{BufCreateOpts, BufId, Buffer};
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey};
 use std::collections::HashMap;

@@ -5,8 +5,8 @@
 //! (panic-safe). Methods called outside a paint callback return a clean Lua error instead
 //! of touching a dangling pointer.
 
-use crate::smelt_term::layout::PaintId;
-use crate::smelt_term::{DrawContext, GridSlice};
+use crate::smelt_edit::layout::PaintId;
+use crate::smelt_edit::{DrawContext, GridSlice};
 use mlua::prelude::*;
 use smelt_core::lua::doc::record_class;
 use smelt_core::lua::lua_type::LuaClassDecl;
@@ -26,7 +26,7 @@ pub(crate) const PAINT_ID_BASE: u64 = 1u64 << 32;
 /// Resolved kind of a raw `u64` leaf id from an overlay `items[*].win` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeafKind {
-    Window(crate::smelt_term::WinId),
+    Window(crate::smelt_edit::WinId),
     Paint(PaintId),
 }
 
@@ -192,7 +192,7 @@ impl mlua::UserData for PaintSliceUd {
                 let symbol = ch.chars().next().unwrap_or(' ');
                 let resolved_style = match style {
                     Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
-                    None => crate::smelt_term::Style::new(),
+                    None => crate::smelt_edit::Style::new(),
                 };
                 with_slice(|s| s.set(col, row, symbol, resolved_style))
             },
@@ -202,7 +202,7 @@ impl mlua::UserData for PaintSliceUd {
             |_, _, (row, col, text, style): (u16, u16, String, Option<mlua::Table>)| {
                 let resolved_style = match style {
                     Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
-                    None => crate::smelt_term::Style::new(),
+                    None => crate::smelt_edit::Style::new(),
                 };
                 with_slice(|s| s.put_str(col, row, &text, resolved_style))
             },
@@ -222,9 +222,9 @@ impl mlua::UserData for PaintSliceUd {
                 let symbol = ch.as_deref().and_then(|s| s.chars().next()).unwrap_or(' ');
                 let resolved_style = match style {
                     Some(t) => crate::lua::parse::style(&t).map_err(LuaError::RuntimeError)?,
-                    None => crate::smelt_term::Style::new(),
+                    None => crate::smelt_edit::Style::new(),
                 };
-                let rect = crate::smelt_term::layout::Rect::new(row, col, w, h);
+                let rect = crate::smelt_edit::layout::Rect::new(row, col, w, h);
                 with_slice(|s| s.fill(rect, symbol, resolved_style))
             },
         );

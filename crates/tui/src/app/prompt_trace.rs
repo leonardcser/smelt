@@ -62,7 +62,7 @@ impl TuiApp {
             return None;
         }
         let ctx = crate::input::prompt_ctx_ref(&self.ui);
-        if ctx.win.vim_enabled && ctx.win.vim_mode != crate::smelt_term::VimMode::Insert {
+        if ctx.win.vim_enabled && ctx.win.vim_mode != crate::smelt_edit::VimMode::Insert {
             return None;
         }
         if self.input.selection_range(ctx).is_some() {

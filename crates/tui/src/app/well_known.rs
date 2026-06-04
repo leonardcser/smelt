@@ -1,6 +1,6 @@
 //! Stable IDs for the permanent split-tree windows.
 
-use crate::smelt_term::{BufId, WinId};
+use crate::smelt_edit::{BufId, WinId};
 
 /// Stable id used for Lua callback/keymap registration.
 pub const PROMPT_WIN: WinId = WinId(0);

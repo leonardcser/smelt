@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use crate::app::{AppFocus, TuiApp};
-use crate::smelt_term::{OverlayId, VimMode, WinId};
+use crate::smelt_edit::{OverlayId, VimMode, WinId};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use engine::clock::VirtualClock;
 use engine::EngineHandle;
@@ -521,8 +521,8 @@ impl TestApp {
     pub fn install_prompt_placeholder(
         &mut self,
         text: String,
-        accept: Vec<crate::smelt_term::KeyBind>,
-        dismiss: Vec<crate::smelt_term::KeyBind>,
+        accept: Vec<crate::smelt_edit::KeyBind>,
+        dismiss: Vec<crate::smelt_edit::KeyBind>,
     ) {
         let win = self.app.well_known.prompt;
         if text.is_empty() {
@@ -825,7 +825,7 @@ impl TestApp {
     /// the post-render `ui.snapshot()` reflects the rendered frame. The
     /// ANSI bytes `render_normal` flushes to stdout are captured (and
     /// discarded) by the test harness.
-    pub fn render_to_frame(&mut self) -> crate::smelt_term::SnapshotFrame {
+    pub fn render_to_frame(&mut self) -> crate::smelt_edit::SnapshotFrame {
         let agent_running = self.app.agent.is_some();
         let _guard = crate::lua::install_app_ptr(&mut self.app);
         // The main loop refreshes diff cells once per tick before
@@ -2750,7 +2750,7 @@ mod tests {
         app.install_prompt_placeholder(
             "ghost".to_string(),
             Vec::new(),
-            vec![crate::smelt_term::KeyBind::new(
+            vec![crate::smelt_edit::KeyBind::new(
                 KeyCode::Esc,
                 KeyModifiers::NONE,
             )],
@@ -2815,7 +2815,7 @@ mod tests {
         app.install_prompt_placeholder(
             "ghost".to_string(),
             Vec::new(),
-            vec![crate::smelt_term::KeyBind::new(
+            vec![crate::smelt_edit::KeyBind::new(
                 KeyCode::Esc,
                 KeyModifiers::NONE,
             )],
@@ -3019,7 +3019,7 @@ mod tests {
         let buf = app
             .app
             .ui
-            .buf_create(crate::smelt_term::BufCreateOpts::default());
+            .buf_create(crate::smelt_edit::BufCreateOpts::default());
         {
             let buf = app.app.ui.buf_mut(buf).expect("overlay buffer");
             buf.readonly = true;
@@ -3031,7 +3031,7 @@ mod tests {
             .ui
             .win_open_split(
                 buf,
-                crate::smelt_term::SplitConfig {
+                crate::smelt_edit::SplitConfig {
                     region: "dialog".into(),
                     gutters: Default::default(),
                 },
@@ -3043,9 +3043,9 @@ mod tests {
             win.set_vim_enabled(true);
         }
         app.app.ui.overlay_open(
-            crate::smelt_term::Overlay::new(
-                crate::smelt_term::LayoutTree::leaf(leaf),
-                crate::smelt_term::layout::Anchor::ScreenCenter,
+            crate::smelt_edit::Overlay::new(
+                crate::smelt_edit::LayoutTree::leaf(leaf),
+                crate::smelt_edit::layout::Anchor::ScreenCenter,
             )
             .with_size((40, 5))
             .modal(true),
@@ -3136,7 +3136,7 @@ mod tests {
         let leaf_rect = app
             .app
             .ui
-            .paint_rect(crate::smelt_term::PaintId::from(leaf))
+            .paint_rect(crate::smelt_edit::PaintId::from(leaf))
             .expect("picker leaf has a rect after render");
         // Pick a cell inside the picker rect.
         let row = leaf_rect.top + 1;
@@ -3206,7 +3206,7 @@ mod tests {
         // Locate the prompt-docked picker overlay (the slash completer's
         // own picker is closed on Enter).
         let leaf = (1u32..50)
-            .map(crate::smelt_term::OverlayId)
+            .map(crate::smelt_edit::OverlayId)
             .filter_map(|id| app.app.ui.overlay(id))
             .filter_map(|ov| ov.layout.leaves_in_order().into_iter().next())
             .map(|p| WinId(p.0))
@@ -3219,8 +3219,8 @@ mod tests {
             .viewport
             .map(|v| v.rect.height)
             .expect("picker leaf must have a viewport after render_normal");
-        let total_rows = buf.line_count() as crate::smelt_term::RowIndex;
-        let max_scroll = total_rows.saturating_sub(viewport_rows as crate::smelt_term::RowIndex);
+        let total_rows = buf.line_count() as crate::smelt_edit::RowIndex;
+        let max_scroll = total_rows.saturating_sub(viewport_rows as crate::smelt_edit::RowIndex);
         assert!(
             win.scroll_top <= max_scroll,
             "picker scroll_top must stay within bounds on first render \
@@ -4161,7 +4161,7 @@ mod tests {
         // adds its own short-lived overlay.)
         let named_id = app.app.ui.named_overlay("mix").expect("named");
         let anon_id = (1u32..)
-            .map(crate::smelt_term::OverlayId)
+            .map(crate::smelt_edit::OverlayId)
             .find(|id| *id != named_id && app.app.ui.overlay(*id).is_some())
             .expect("anonymous overlay present");
 
@@ -4266,9 +4266,9 @@ mod tests {
     /// Find the single anonymous paint id (no name binding) currently
     /// registered. Used by paint-reload tests to track the throwaway
     /// slot across `/reload` without needing Lua-side reflection.
-    fn find_anon_paint(app: &crate::app::TuiApp) -> crate::smelt_term::layout::PaintId {
+    fn find_anon_paint(app: &crate::app::TuiApp) -> crate::smelt_edit::layout::PaintId {
         let reg = &app.paint_registry;
-        let named: std::collections::HashSet<crate::smelt_term::layout::PaintId> = ["probe.named"]
+        let named: std::collections::HashSet<crate::smelt_edit::layout::PaintId> = ["probe.named"]
             .iter()
             .filter_map(|n| reg.id_by_name(n))
             .collect();
@@ -4455,7 +4455,7 @@ mod tests {
         assert!(!app.app.core.timers.is_empty());
         assert!(!shared.tasks.lock().unwrap().is_empty());
         let anon_overlay = (1u32..)
-            .map(crate::smelt_term::OverlayId)
+            .map(crate::smelt_edit::OverlayId)
             .find(|id| {
                 Some(*id) != app.app.ui.named_overlay("seed.ov")
                     && app.app.ui.overlay(*id).is_some()

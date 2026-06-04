@@ -32,7 +32,7 @@ pub use smelt_core::state;
 pub(crate) mod input;
 pub(crate) mod term_setup;
 pub mod theme;
-pub use ::smelt_edit as smelt_term;
+pub use ::smelt_edit;
 
 pub use smelt_core::attachment;
 pub use smelt_core::lua::{CliFlagKind, CliFlagSpec, CliFlagValue};

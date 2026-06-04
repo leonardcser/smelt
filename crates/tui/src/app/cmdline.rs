@@ -2,10 +2,10 @@
 
 use crate::app::{CommandAction, TuiApp};
 
-use crate::smelt_term::layout::Anchor;
-use crate::smelt_term::BufCreateOpts;
-use crate::smelt_term::UiHost;
-use crate::smelt_term::{Constraint, LayoutTree, Overlay, SplitConfig};
+use crate::smelt_edit::layout::Anchor;
+use crate::smelt_edit::BufCreateOpts;
+use crate::smelt_edit::UiHost;
+use crate::smelt_edit::{Constraint, LayoutTree, Overlay, SplitConfig};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// Prefix glyph; cursor and editing clamp to `>= PREFIX_LEN` so it cannot be deleted.

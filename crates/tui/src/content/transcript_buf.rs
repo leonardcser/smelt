@@ -1,6 +1,6 @@
 use super::block_buffers::BlockBufferCache;
-use crate::smelt_term::Theme;
-use crate::smelt_term::{clamp_scroll, BufId, Buffer, RowIndex};
+use crate::smelt_edit::Theme;
+use crate::smelt_edit::{clamp_scroll, BufId, Buffer, RowIndex};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
@@ -1275,7 +1275,7 @@ mod tests {
     fn project_fresh(history: &mut smelt_core::transcript_model::BlockHistory) -> Vec<RowSnapshot> {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(99), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(99), Default::default());
         projection.project(
             &mut buf,
             history,
@@ -1296,7 +1296,7 @@ mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
 
         projection.project(
             &mut buf,
@@ -1350,7 +1350,7 @@ mod tests {
 
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(2), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(2), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -1396,7 +1396,7 @@ mod tests {
 
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(3), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(3), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -1441,7 +1441,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(4), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(4), Default::default());
 
         projection.project(
             &mut buf,
@@ -1480,7 +1480,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(12), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(12), Default::default());
 
         let output = projection.project(
             &mut buf,
@@ -1510,7 +1510,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(5), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(5), Default::default());
 
         projection.project(
             &mut buf,
@@ -1553,7 +1553,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(8), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(8), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -1589,7 +1589,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut first_buf = Buffer::new(crate::smelt_term::BufId(8), Default::default());
+        let mut first_buf = Buffer::new(crate::smelt_edit::BufId(8), Default::default());
         projection.project(
             &mut first_buf,
             &mut transcript.history,
@@ -1600,7 +1600,7 @@ mod tests {
             5,
         );
 
-        let mut second_buf = Buffer::new(crate::smelt_term::BufId(9), Default::default());
+        let mut second_buf = Buffer::new(crate::smelt_edit::BufId(9), Default::default());
         second_buf.set_all_lines(vec!["other session".into()]);
         projection.project(
             &mut second_buf,
@@ -1636,7 +1636,7 @@ mod tests {
         let theme = Theme::default();
         let mut first_projection = TranscriptProjection::new();
         let mut second_projection = TranscriptProjection::new();
-        let mut shared = Buffer::new(crate::smelt_term::BufId(11), Default::default());
+        let mut shared = Buffer::new(crate::smelt_edit::BufId(11), Default::default());
 
         first_projection.project(
             &mut shared,
@@ -1684,7 +1684,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(6), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(6), Default::default());
 
         projection.project(
             &mut buf,
@@ -1718,7 +1718,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(7), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(7), Default::default());
 
         let tail = projection.project(
             &mut buf,
@@ -1785,7 +1785,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(10), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(10), Default::default());
 
         projection.project(
             &mut buf,
@@ -1829,7 +1829,7 @@ mod tests {
 
     #[test]
     fn copy_byte_range_basic_text() {
-        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
         buf.set_all_lines(vec!["hello".into(), "world".into()]);
         assert_eq!(copy_byte_range(&buf, 0, 5), "hello");
         assert_eq!(copy_byte_range(&buf, 0, 11), "hello\nworld");
@@ -1856,7 +1856,7 @@ mod tests {
 
     #[test]
     fn copy_skips_non_selectable_chrome() {
-        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
         buf.set_all_lines(vec!["│ hi".into()]);
         buf.add_highlight_group_with_meta(0, 0, 2, hl_for_test(), unselectable_meta());
         let line_bytes = "│ hi".len();
@@ -1865,7 +1865,7 @@ mod tests {
 
     #[test]
     fn copy_applies_copy_as_substitution_once_per_span() {
-        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
         buf.set_all_lines(vec!["+ add".into()]);
         buf.add_highlight_group_with_meta(0, 0, 2, hl_for_test(), copy_as_meta(""));
         assert_eq!(copy_byte_range(&buf, 0, "+ add".len()), "add");
@@ -1873,7 +1873,7 @@ mod tests {
 
     #[test]
     fn copy_uses_source_text_when_full_row_selected() {
-        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
         buf.set_all_lines(vec!["Title".into()]);
         buf.set_decoration(
             0,
@@ -1888,7 +1888,7 @@ mod tests {
 
     #[test]
     fn copy_coalesces_copy_continuation_rows_via_source_text() {
-        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
         buf.set_all_lines(vec!["hello".into(), "world".into()]);
         buf.set_decoration(
             0,
@@ -1909,7 +1909,7 @@ mod tests {
 
     #[test]
     fn copy_copy_continuation_without_source_text_emits_all_rows() {
-        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
         buf.set_all_lines(vec!["abc".into(), "def".into()]);
         buf.set_decoration(
             1,
@@ -1923,7 +1923,7 @@ mod tests {
 
     #[test]
     fn copy_soft_wrap_without_source_text_emits_all_rows() {
-        let mut buf = Buffer::new(crate::smelt_term::BufId(1), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(1), Default::default());
         buf.set_all_lines(vec!["abc".into(), "def".into()]);
         buf.set_decoration(
             1,
@@ -1949,7 +1949,7 @@ mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(3), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(3), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -2004,7 +2004,7 @@ mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(7), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(7), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -2020,7 +2020,7 @@ mod tests {
             soft.is_empty(),
             "unwrapped source lines must be hard breaks"
         );
-        assert_eq!(hard, crate::smelt_term::hard_breaks_for_lines(buf.lines()));
+        assert_eq!(hard, crate::smelt_edit::hard_breaks_for_lines(buf.lines()));
     }
 
     #[test]
@@ -2031,7 +2031,7 @@ mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(4), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(4), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -2056,7 +2056,7 @@ mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(5), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(5), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,
@@ -2099,7 +2099,7 @@ mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_term::BufId(6), Default::default());
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(6), Default::default());
         projection.project(
             &mut buf,
             &mut transcript.history,

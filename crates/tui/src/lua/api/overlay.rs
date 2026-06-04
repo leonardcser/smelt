@@ -18,7 +18,7 @@ use crate::lua::{parse_keybind, LuaShared};
 /// Lua-side handle for an `OverlayId`.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaOverlay {
-    pub(crate) id: crate::smelt_term::OverlayId,
+    pub(crate) id: crate::smelt_edit::OverlayId,
 }
 
 impl LuaType for LuaOverlay {
@@ -57,7 +57,7 @@ impl mlua::UserData for LuaOverlay {
 /// undoes the binding (and drops the Lua callback handle).
 pub(crate) fn install_overlay_key(
     lua: &Lua,
-    overlay: crate::smelt_term::OverlayId,
+    overlay: crate::smelt_edit::OverlayId,
     chord: String,
     func: mlua::Function,
 ) -> LuaResult<LuaReg> {
@@ -72,7 +72,7 @@ pub(crate) fn install_overlay_key(
         let prev = app.ui.overlay_set_keymap(
             overlay,
             key,
-            crate::smelt_term::Callback::Lua(crate::smelt_term::LuaHandle(id)),
+            crate::smelt_edit::Callback::Lua(crate::smelt_edit::LuaHandle(id)),
         );
         crate::lua::drop_displaced_lua_handle(app, prev);
     });
@@ -134,7 +134,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             }
             let id = crate::lua::with_app(|app| crate::lua::ui_ops::open_overlay(app, opts))
                 .map_err(|e| LuaError::RuntimeError(format!("overlay: {e}")))?;
-            let overlay_id = crate::smelt_term::OverlayId(id as u32);
+            let overlay_id = crate::smelt_edit::OverlayId(id as u32);
 
             if let Some(kms) = keymaps {
                 // Clear any prior overlay-scoped bindings on a named re-open so the

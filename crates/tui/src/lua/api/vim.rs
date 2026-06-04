@@ -7,7 +7,7 @@ use smelt_core::lua::module::LuaMod;
 
 /// Vim mode string literal.
 #[derive(Clone, Copy, Debug, LuaAlias)]
-#[lua(name = "smelt.vim.Mode", mirror = "crate::smelt_term::VimMode")]
+#[lua(name = "smelt.vim.Mode", mirror = "crate::smelt_edit::VimMode")]
 pub enum LuaVimMode {
     Insert,
     Normal,
