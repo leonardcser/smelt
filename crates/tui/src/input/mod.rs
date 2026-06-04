@@ -282,7 +282,7 @@ impl PromptState {
     /// install path, `$EDITOR` round-trip. Persisting raw markers
     /// upstream would let them return without backing ids, violating
     /// the marker/id invariant on install.
-    fn strip_attachment_markers(s: &str) -> String {
+    pub(crate) fn strip_attachment_markers(s: &str) -> String {
         s.replace(ATTACHMENT_MARKER, "")
     }
 

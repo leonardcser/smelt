@@ -332,7 +332,7 @@ impl QueuedInput {
     }
 
     pub(crate) fn prompt_replay_text(&self) -> String {
-        self.display()
+        PromptState::strip_attachment_markers(&self.display())
     }
 }
 
