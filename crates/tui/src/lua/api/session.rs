@@ -474,8 +474,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let cache_key = cached_key?;
                 let mut view = cached_view?;
                 let scroll_target = scroll_top
-                    .map(crate::content::transcript_buf::ScrollTarget::VisibleRow)
-                    .unwrap_or(crate::content::transcript_buf::ScrollTarget::Tail);
+                    .map(crate::content::transcript_buf::ScrollTarget::visible_row)
+                    .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail);
                 let plan = view.plan_projection(width, show_thinking, scroll_target, height);
                 app.prerender_tool_blocks_in_history_for_ids(
                     view.history_mut(),

@@ -119,6 +119,22 @@ impl TranscriptDocument {
         end
     }
 
+    fn tail_window_start_index(&self, viewport_rows: u16) -> usize {
+        let target_rows = (viewport_rows as RowIndex).saturating_add(TAIL_OVERSCAN_ROWS);
+        let mut selected_rows: RowIndex = 0;
+        let mut first = self.nodes.len();
+        while first > 0 {
+            first -= 1;
+            let node = &self.nodes[first];
+            selected_rows =
+                selected_rows.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
+            if selected_rows >= target_rows {
+                break;
+            }
+        }
+        first
+    }
+
     fn rebuild_prefix_rows(&mut self) {
         self.prefix_rows.clear();
         self.prefix_rows.reserve(self.nodes.len() + 1);
@@ -145,8 +161,13 @@ struct ProjectKey {
     generation: u64,
     width: u16,
     show_thinking: bool,
-    virtual_viewport_rows: Option<u16>,
-    tail: bool,
+    mode: ProjectionMode,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum ProjectionMode {
+    Full,
+    Visible { viewport_rows: u16 },
 }
 
 #[derive(Clone, Copy)]
@@ -181,19 +202,84 @@ impl ProjectionPlan {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScrollTarget {
-    /// Materialize the full transcript and scroll to an absolute row.
+pub(crate) enum ScrollAnchor {
     Row(RowIndex),
-    /// Keep the current virtual projection when the requested viewport is already materialized.
-    VisibleRow(RowIndex),
     Tail,
 }
 
-impl ScrollTarget {
+impl ScrollAnchor {
     fn as_scroll_top(self) -> RowIndex {
         match self {
-            Self::Row(row) | Self::VisibleRow(row) => row,
+            Self::Row(row) => row,
             Self::Tail => RowIndex::MAX,
+        }
+    }
+
+    fn row(self) -> Option<RowIndex> {
+        match self {
+            Self::Row(row) => Some(row),
+            Self::Tail => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScrollTarget {
+    /// Materialize the full transcript and scroll to the anchor.
+    Full(ScrollAnchor),
+    /// Materialize only the visible window around the anchor.
+    Visible(ScrollAnchor),
+}
+
+impl ScrollTarget {
+    pub(crate) fn full_row(row: RowIndex) -> Self {
+        Self::Full(ScrollAnchor::Row(row))
+    }
+
+    pub(crate) fn full_tail() -> Self {
+        Self::Full(ScrollAnchor::Tail)
+    }
+
+    pub(crate) fn visible_row(row: RowIndex) -> Self {
+        Self::Visible(ScrollAnchor::Row(row))
+    }
+
+    pub(crate) fn visible_tail() -> Self {
+        Self::Visible(ScrollAnchor::Tail)
+    }
+
+    fn anchor(self) -> ScrollAnchor {
+        match self {
+            Self::Full(anchor) | Self::Visible(anchor) => anchor,
+        }
+    }
+
+    fn as_scroll_top(self) -> RowIndex {
+        self.anchor().as_scroll_top()
+    }
+
+    fn mode(self, viewport_rows: u16) -> ProjectionMode {
+        match self {
+            Self::Full(_) => ProjectionMode::Full,
+            Self::Visible(_) => ProjectionMode::Visible { viewport_rows },
+        }
+    }
+
+    fn is_full(self) -> bool {
+        matches!(self, Self::Full(_))
+    }
+
+    fn visible_row_anchor(self) -> Option<RowIndex> {
+        match self {
+            Self::Visible(anchor) => anchor.row(),
+            Self::Full(_) => None,
+        }
+    }
+
+    fn visible_scroll_top(self) -> Option<RowIndex> {
+        match self {
+            Self::Visible(anchor) => Some(anchor.as_scroll_top()),
+            Self::Full(_) => None,
         }
     }
 }
@@ -309,9 +395,7 @@ impl TranscriptProjection {
         width: u16,
         scroll_target: ScrollTarget,
     ) -> Option<(BlockId, RowIndex)> {
-        let ScrollTarget::VisibleRow(row) = scroll_target else {
-            return None;
-        };
+        let row = scroll_target.visible_row_anchor()?;
         let width_changed = self
             .last_project_key()
             .map(|prev| prev.width != width)
@@ -332,21 +416,22 @@ impl TranscriptProjection {
             generation: history.generation(),
             width,
             show_thinking,
-            virtual_viewport_rows: matches!(scroll_target, ScrollTarget::VisibleRow(_))
-                .then_some(viewport_rows),
-            tail: scroll_target == ScrollTarget::Tail,
+            mode: scroll_target.mode(viewport_rows),
         };
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
         self.prepare_document(history, width, show_thinking);
-        let first = match scroll_target {
-            ScrollTarget::Tail | ScrollTarget::Row(_) => 0,
-            ScrollTarget::VisibleRow(row) => resize_anchor
-                .and_then(|(id, _)| self.document.block_index(id))
-                .unwrap_or_else(|| self.document.start_index_for_row(row)),
-        };
-        let end = match scroll_target {
-            ScrollTarget::Tail | ScrollTarget::Row(_) => self.document.nodes.len(),
-            ScrollTarget::VisibleRow(_) => self.document.window_end_index(first, viewport_rows),
+        let (first, end) = match scroll_target {
+            ScrollTarget::Full(_) => (0, self.document.nodes.len()),
+            ScrollTarget::Visible(ScrollAnchor::Row(row)) => {
+                let first = resize_anchor
+                    .and_then(|(id, _)| self.document.block_index(id))
+                    .unwrap_or_else(|| self.document.start_index_for_row(row));
+                (first, self.document.window_end_index(first, viewport_rows))
+            }
+            ScrollTarget::Visible(ScrollAnchor::Tail) => {
+                let first = self.document.tail_window_start_index(viewport_rows);
+                (first, self.document.nodes.len())
+            }
         };
         let block_ids = self.document.nodes[first..end]
             .iter()
@@ -393,7 +478,7 @@ impl TranscriptProjection {
         theme: &Theme,
         plan: ProjectionPlan,
     ) -> ProjectOutput {
-        if let ScrollTarget::VisibleRow(row) = plan.scroll_target {
+        if let Some(row) = plan.scroll_target.visible_scroll_top() {
             if let Some(out) = self.reuse_visible_projection_for_row(
                 buf,
                 plan.key.generation,
@@ -406,13 +491,8 @@ impl TranscriptProjection {
             }
         }
 
-        if !matches!(plan.scroll_target, ScrollTarget::VisibleRow(_))
-            && self.target_has_projection(plan.key, buf)
-        {
-            let total_rows = match plan.scroll_target {
-                ScrollTarget::Row(_) => buf.line_count() as RowIndex,
-                ScrollTarget::VisibleRow(_) | ScrollTarget::Tail => self.visible_total_rows,
-            };
+        if plan.scroll_target.is_full() && self.target_has_projection(plan.key, buf) {
+            let total_rows = buf.line_count() as RowIndex;
             return ProjectOutput {
                 clamped_scroll: clamp_scroll(plan.scroll_top, total_rows, plan.viewport_rows),
                 row_base: self.visible_row_base,
@@ -422,10 +502,8 @@ impl TranscriptProjection {
         }
 
         match plan.scroll_target {
-            ScrollTarget::Tail | ScrollTarget::Row(_) => {
-                self.project_full(buf, history, theme, plan)
-            }
-            ScrollTarget::VisibleRow(_) => {
+            ScrollTarget::Full(_) => self.project_full(buf, history, theme, plan),
+            ScrollTarget::Visible(_) => {
                 let mut out = self.project_visible_range(buf, history, theme, &plan);
                 if let Some((block_id, offset)) = plan.resize_anchor {
                     if let Some(entry) = self
@@ -1204,7 +1282,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
         snapshot(&buf)
@@ -1226,7 +1304,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 
@@ -1279,7 +1357,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 
@@ -1290,7 +1368,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 
@@ -1325,7 +1403,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
         let before = snapshot(&buf);
@@ -1343,7 +1421,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 
@@ -1371,7 +1449,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
         let tail_lines: Vec<String> = buf.lines().to_vec();
@@ -1384,12 +1462,42 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             5,
         );
         let full_lines: Vec<String> = buf.lines().to_vec();
         assert!(full_lines.iter().any(|line| line == "line 0"));
         assert!(full_lines.iter().any(|line| line == "line 99"));
+    }
+
+    #[test]
+    fn visible_tail_projection_materializes_bounded_tail_window() {
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_term::BufId(12), Default::default());
+
+        let output = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_tail(),
+            5,
+        );
+
+        assert!(output.row_base > 0);
+        assert!(output.projected_rows < output.total_rows);
+        assert_eq!(output.projected_rows, buf.line_count() as RowIndex);
+        assert_eq!(output.clamped_scroll, output.total_rows.saturating_sub(5));
+        assert!(buf.lines().iter().any(|line| line == "line 99"));
+        assert!(!buf.lines().iter().any(|line| line == "line 0"));
     }
 
     #[test]
@@ -1410,7 +1518,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             5,
         );
         let full_rows = buf.line_count() as RowIndex;
@@ -1421,7 +1529,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
 
@@ -1452,7 +1560,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
 
@@ -1463,7 +1571,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
 
@@ -1488,7 +1596,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
 
@@ -1500,7 +1608,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
 
@@ -1536,7 +1644,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
         second_projection.project(
@@ -1545,7 +1653,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
 
@@ -1555,7 +1663,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
 
@@ -1584,7 +1692,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
         let visible_count = projection.visible_block_layout().count();
@@ -1618,7 +1726,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Tail,
+            ScrollTarget::full_tail(),
             5,
         );
         assert_eq!(tail.total_rows, 439);
@@ -1633,7 +1741,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::VisibleRow(tail.clamped_scroll.saturating_sub(1)),
+            ScrollTarget::visible_row(tail.clamped_scroll.saturating_sub(1)),
             5,
         );
         assert_eq!(visible.row_base, 0);
@@ -1646,7 +1754,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::VisibleRow(0),
+            ScrollTarget::visible_row(0),
             5,
         );
         assert_eq!(top.row_base, 0);
@@ -1660,7 +1768,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             5,
         );
 
@@ -1685,7 +1793,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             5,
         );
         let anchor_id = transcript.history.order[10];
@@ -1702,7 +1810,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::VisibleRow(anchor_row),
+            ScrollTarget::visible_row(anchor_row),
             5,
         );
         assert!(buf.lines().iter().any(|line| line.contains("block 10")));
@@ -1713,7 +1821,7 @@ mod tests {
             24,
             false,
             &theme,
-            ScrollTarget::VisibleRow(anchor_row),
+            ScrollTarget::visible_row(anchor_row),
             5,
         );
         assert!(buf.lines().iter().any(|line| line.contains("block 10")));
@@ -1848,7 +1956,7 @@ mod tests {
             40,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 
@@ -1903,7 +2011,7 @@ mod tests {
             80,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 
@@ -1930,7 +2038,7 @@ mod tests {
             40,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 
@@ -1955,7 +2063,7 @@ mod tests {
             40,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 
@@ -1998,7 +2106,7 @@ mod tests {
             24,
             false,
             &theme,
-            ScrollTarget::Row(0),
+            ScrollTarget::full_row(0),
             80,
         );
 

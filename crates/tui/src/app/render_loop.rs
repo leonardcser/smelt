@@ -42,13 +42,13 @@ impl TuiApp {
             Some(crate::smelt_term::HitTarget::Window(win)) if win == crate::app::TRANSCRIPT_WIN
         );
         let transcript_scroll_target = if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
-            crate::content::transcript_buf::ScrollTarget::Tail
+            crate::content::transcript_buf::ScrollTarget::full_tail()
         } else if transcript_captured {
-            crate::content::transcript_buf::ScrollTarget::VisibleRow(
+            crate::content::transcript_buf::ScrollTarget::visible_row(
                 self.transcript_win().scroll_top,
             )
         } else {
-            crate::content::transcript_buf::ScrollTarget::Row(self.transcript_win().scroll_top)
+            crate::content::transcript_buf::ScrollTarget::full_row(self.transcript_win().scroll_top)
         };
 
         let queued_owned: Vec<String> = if show_queued {
