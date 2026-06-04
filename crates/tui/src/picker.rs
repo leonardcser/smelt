@@ -286,11 +286,12 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
         let (w, buf_ref) = app.ui.win_and_buf_mut(leaf, buf_id);
         if let (Some(w), Some(buf_ref)) = (w, buf_ref) {
             w.pin_scroll(scroll);
-            w.set_materialized_rows(
-                range.start,
-                range.end.saturating_sub(range.start),
-                total as RowIndex,
-            );
+            w.apply_materialized_rows(crate::smelt_edit::MaterializedRows {
+                clamped_scroll: scroll,
+                row_base: range.start,
+                total_rows: total as RowIndex,
+                materialized_rows: range.end.saturating_sub(range.start),
+            });
             let local_cursor = selected_visual
                 .saturating_sub(range.start)
                 .min(buf_ref.line_count().saturating_sub(1) as RowIndex);

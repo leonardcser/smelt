@@ -64,7 +64,7 @@ pub use callback::{
 pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
-pub use row::{row_to_usize, RowIndex};
+pub use row::{row_to_usize, MaterializeRequest, MaterializedRows, RowIndex};
 pub use vim::VimMode;
 pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, CursorShape, DrawContext, EventCtx,
@@ -1287,77 +1287,133 @@ impl Ui {
     }
 
     fn refresh_overlay_viewports(&mut self, resolved: &[(OverlayId, Rect, Overlay)]) {
+        self.refresh_overlay_viewports_with_prepare(resolved, &mut |_, _| {});
+    }
+
+    fn refresh_overlay_viewports_with_prepare<P>(
+        &mut self,
+        resolved: &[(OverlayId, Rect, Overlay)],
+        prepare: &mut P,
+    ) where
+        P: FnMut(&mut Ui, MaterializeRequest),
+    {
         for (_id, rect, overlay) in resolved {
             let sizer = UiLeafSizer {
                 wins: &self.wins,
                 bufs: &self.bufs,
             };
             let leaf_rects = layout::resolve_layout_with(&overlay.layout, *rect, &sizer);
-            for (paint_id, leaf_rect) in &leaf_rects {
-                let win_id = WinId(paint_id.0);
-                let Some(win) = self.wins.get(&win_id) else {
-                    continue;
-                };
-                let buf_id = win.buf;
-                let gutter_width = self
-                    .bufs
-                    .get(&buf_id)
-                    .map(|buf| win.gutter_width(buf))
-                    .unwrap_or(0)
-                    .min(leaf_rect.width);
-                let content_width = win
-                    .config
-                    .gutters
-                    .content_width(leaf_rect.width)
-                    .min(leaf_rect.width.saturating_sub(gutter_width));
-                if let Some(buf) = self.bufs.get_mut(&buf_id) {
-                    buf.ensure_rendered_at(content_width);
-                }
-                if let (Some(buf), Some(win)) = (self.bufs.get(&buf_id), self.wins.get_mut(&win_id))
-                {
-                    win.ensure_layout(buf, content_width);
-                }
-                let total_rows = match (self.bufs.get(&buf_id), self.wins.get(&win_id)) {
-                    (Some(buf), Some(win)) => win.scroll_row_total(buf),
-                    _ => 0,
-                };
-                if let Some(win) = self.wins.get_mut(&win_id) {
-                    if win.pending_scroll_to_cursor && leaf_rect.height > 0 {
-                        if let Some(buf) = self.bufs.get(&buf_id) {
-                            win.keep_cursor_visible(
-                                buf,
-                                total_rows,
-                                leaf_rect.height,
-                                content_width,
-                            );
-                        }
-                        win.pending_scroll_to_cursor = false;
-                    }
-                    let scrollbar = if win.config.gutters.scrollbar && leaf_rect.width > 0 {
-                        let bar_col = leaf_rect.left + leaf_rect.width.saturating_sub(1);
-                        window::ScrollbarState::new(bar_col, total_rows, leaf_rect.height)
-                    } else {
-                        None
-                    };
-                    win.viewport = Some(
-                        window::WindowViewport::new(
-                            *leaf_rect,
-                            content_width,
-                            total_rows,
-                            win.scroll_top(),
-                            scrollbar,
-                        )
-                        .with_gutter_width(gutter_width),
-                    );
-                }
+            for (paint_id, leaf_rect) in leaf_rects {
+                self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare);
             }
         }
     }
 
+    fn prepare_window_for_render<P>(&mut self, win_id: WinId, rect: Rect, prepare: &mut P)
+    where
+        P: FnMut(&mut Ui, MaterializeRequest),
+    {
+        let Some(win) = self.wins.get(&win_id) else {
+            return;
+        };
+        let buf_id = win.buf;
+        let gutter_width = self
+            .bufs
+            .get(&buf_id)
+            .map(|buf| win.gutter_width(buf))
+            .unwrap_or(0)
+            .min(rect.width);
+        let content_width = win
+            .config
+            .gutters
+            .content_width(rect.width)
+            .min(rect.width.saturating_sub(gutter_width));
+        let request = MaterializeRequest {
+            win: win_id,
+            buf: buf_id,
+            rect,
+            gutter_width,
+            content_width,
+            scroll_top: win.scroll_top(),
+            follow_tail: win.is_following_tail(),
+        };
+        prepare(self, request);
+
+        let Some(win) = self.wins.get(&win_id) else {
+            return;
+        };
+        let buf_id = win.buf;
+        let gutter_width = self
+            .bufs
+            .get(&buf_id)
+            .map(|buf| win.gutter_width(buf))
+            .unwrap_or(0)
+            .min(rect.width);
+        let content_width = win
+            .config
+            .gutters
+            .content_width(rect.width)
+            .min(rect.width.saturating_sub(gutter_width));
+        if let Some(buf) = self.bufs.get_mut(&buf_id) {
+            buf.ensure_rendered_at(content_width);
+        }
+        if let (Some(buf), Some(win)) = (self.bufs.get(&buf_id), self.wins.get_mut(&win_id)) {
+            win.ensure_layout(buf, content_width);
+        }
+        let total_rows = match (self.bufs.get(&buf_id), self.wins.get(&win_id)) {
+            (Some(buf), Some(win)) => win.scroll_row_total(buf),
+            _ => 0,
+        };
+        if let Some(win) = self.wins.get_mut(&win_id) {
+            if win.pending_scroll_to_cursor && rect.height > 0 {
+                if let Some(buf) = self.bufs.get(&buf_id) {
+                    win.keep_cursor_visible(buf, total_rows, rect.height, content_width);
+                }
+                win.pending_scroll_to_cursor = false;
+            }
+            let scrollbar = if win.config.gutters.scrollbar && rect.width > 0 {
+                let bar_col = rect.left + rect.width.saturating_sub(1);
+                window::ScrollbarState::new(bar_col, total_rows, rect.height)
+            } else {
+                None
+            };
+            win.viewport = Some(
+                window::WindowViewport::new(
+                    rect,
+                    content_width,
+                    total_rows,
+                    win.scroll_top(),
+                    scrollbar,
+                )
+                .with_gutter_width(gutter_width),
+            );
+        }
+    }
+
     /// Render one frame, delegating non-Window `Paint(id)` leaves to `paint(id, slice, ctx)`.
-    pub fn render_with_paints<W, F>(&mut self, w: &mut W, mut paint: F) -> std::io::Result<()>
+    pub fn render_with_paints<W, F>(&mut self, w: &mut W, paint: F) -> std::io::Result<()>
     where
         W: std::io::Write,
+        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+    {
+        self.render_with_paints_prepared(w, |_, _| {}, paint)
+    }
+
+    /// Render one frame with a host preparation hook for virtualized windows.
+    ///
+    /// `prepare` runs after split/overlay geometry is known and before the backing
+    /// buffer is rendered/layouted for paint. Virtualized sources can materialize a
+    /// bounded row slice into `request.buf`, apply row metadata to `request.win`,
+    /// and then let the normal `Window::render` path handle painting.
+    pub fn render_with_paints_prepared<W, P, F>(
+        &mut self,
+        w: &mut W,
+        mut prepare: P,
+        mut paint: F,
+    ) -> std::io::Result<()>
+    where
+        W: std::io::Write,
+        P: FnMut(&mut Ui, MaterializeRequest),
         F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
     {
         let resolved = self.resolve_overlays(None);
@@ -1375,51 +1431,9 @@ impl Ui {
                 split_rects.get(&win).map(|r| (win, *r))
             })
             .collect();
-        self.refresh_overlay_viewports(&resolved);
+        self.refresh_overlay_viewports_with_prepare(&resolved, &mut prepare);
         for (win_id, rect) in &painted_splits {
-            let Some(win) = self.wins.get(win_id) else {
-                continue;
-            };
-            let buf_id = win.buf;
-            let gutter_width = self
-                .bufs
-                .get(&buf_id)
-                .map(|buf| win.gutter_width(buf))
-                .unwrap_or(0)
-                .min(rect.width);
-            let content_width = win
-                .config
-                .gutters
-                .content_width(rect.width)
-                .min(rect.width.saturating_sub(gutter_width));
-            if let Some(buf) = self.bufs.get_mut(&buf_id) {
-                buf.ensure_rendered_at(content_width);
-            }
-            if let (Some(buf), Some(win)) = (self.bufs.get(&buf_id), self.wins.get_mut(win_id)) {
-                win.ensure_layout(buf, content_width);
-            }
-            let total_rows = match (self.bufs.get(&buf_id), self.wins.get(win_id)) {
-                (Some(buf), Some(win)) => win.scroll_row_total(buf),
-                _ => 0,
-            };
-            if let Some(win) = self.wins.get_mut(win_id) {
-                let scrollbar = if win.config.gutters.scrollbar && rect.width > 0 {
-                    let bar_col = rect.left + rect.width.saturating_sub(1);
-                    window::ScrollbarState::new(bar_col, total_rows, rect.height)
-                } else {
-                    None
-                };
-                win.viewport = Some(
-                    window::WindowViewport::new(
-                        *rect,
-                        content_width,
-                        total_rows,
-                        win.scroll_top(),
-                        scrollbar,
-                    )
-                    .with_gutter_width(gutter_width),
-                );
-            }
+            self.prepare_window_for_render(*win_id, *rect, &mut prepare);
         }
         self.resolve_tail_scrolls();
         let focus = self.focus;
@@ -2347,6 +2361,50 @@ mod tests {
             .collect();
         leaves.push((Constraint::Fill, LayoutTree::leaf(win_id)));
         ui.set_layout(LayoutTree::vbox(leaves));
+    }
+
+    #[test]
+    fn render_prepare_hook_materializes_before_window_layout() {
+        let mut ui = make_ui();
+        let win = WinId(42);
+        make_split(&mut ui, win);
+        let buf_id = ui.win(win).unwrap().buf;
+        let mut requests = Vec::new();
+        let mut out = Vec::new();
+
+        ui.render_with_paints_prepared(
+            &mut out,
+            |ui, request| {
+                requests.push(request);
+                ui.buf_mut(request.buf)
+                    .unwrap()
+                    .set_all_lines(vec!["prepared".into()]);
+                ui.win_mut(request.win)
+                    .unwrap()
+                    .apply_materialized_rows(MaterializedRows {
+                        clamped_scroll: request.scroll_top,
+                        row_base: 4,
+                        total_rows: 20,
+                        materialized_rows: 1,
+                    });
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].win, win);
+        assert_eq!(requests[0].buf, buf_id);
+        assert_eq!(requests[0].rect.height, 24);
+        assert_eq!(ui.buf(buf_id).unwrap().lines(), &["prepared".to_string()]);
+        let viewport = ui.win(win).unwrap().viewport.expect("render sets viewport");
+        assert_eq!(viewport.total_rows, 20);
+        assert_eq!(
+            ui.win(win)
+                .unwrap()
+                .scroll_row_total(ui.buf(buf_id).unwrap()),
+            20
+        );
     }
 
     #[test]

@@ -595,7 +595,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     view.project_planned(target, &theme, plan)
                 };
                 if let Some(win) = win.and_then(|w| app.ui.win_mut(w.id)) {
-                    win.set_materialized_rows(out.row_base, out.projected_rows, out.total_rows);
+                    win.apply_materialized_rows(out);
                     win.pin_scroll(out.clamped_scroll);
                 }
                 app.resume_preview_cache.store(cache_key, view);

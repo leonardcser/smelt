@@ -14,13 +14,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) struct TranscriptData {
-    pub(crate) clamped_scroll: crate::smelt_edit::RowIndex,
-    pub(crate) row_base: crate::smelt_edit::RowIndex,
-    pub(crate) total_rows: crate::smelt_edit::RowIndex,
-    pub(crate) projected_rows: crate::smelt_edit::RowIndex,
-}
-
 pub(crate) struct TranscriptView {
     transcript: Transcript,
     projection: crate::content::transcript_buf::TranscriptProjection,
@@ -117,7 +110,7 @@ impl TranscriptView {
         buf: &mut Buffer,
         theme: &Theme,
         plan: crate::content::transcript_buf::ProjectionPlan,
-    ) -> crate::content::transcript_buf::ProjectOutput {
+    ) -> crate::smelt_edit::MaterializedRows {
         self.projection
             .project_planned(buf, &mut self.transcript.history, theme, plan)
     }
@@ -664,7 +657,7 @@ impl TuiApp {
         viewport_rows: u16,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         show_thinking: bool,
-    ) -> TranscriptData {
+    ) -> crate::smelt_edit::MaterializedRows {
         let gutters = self.transcript_gutters();
         let tw = (gutters.content_width(width as u16) as usize).max(1);
         let now = self.core.clock.instant_now();
@@ -680,14 +673,7 @@ impl TuiApp {
             .ui
             .win_buf_mut(self.well_known.transcript)
             .expect("transcript window must be registered at startup");
-        let out = self.transcript.project_planned(buf, &theme, plan);
-
-        TranscriptData {
-            clamped_scroll: out.clamped_scroll,
-            row_base: out.row_base,
-            total_rows: out.total_rows,
-            projected_rows: out.projected_rows,
-        }
+        self.transcript.project_planned(buf, &theme, plan)
     }
 
     pub(crate) fn prerender_tool_blocks_in_history_for_ids(

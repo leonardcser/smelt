@@ -1,6 +1,6 @@
 use super::block_buffers::BlockBufferCache;
 use crate::smelt_edit::Theme;
-use crate::smelt_edit::{clamp_scroll, BufId, Buffer, RowIndex};
+use crate::smelt_edit::{clamp_scroll, BufId, Buffer, MaterializedRows, RowIndex};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
@@ -175,13 +175,6 @@ struct MaterializedProjection {
     key: ProjectKey,
     buf_id: BufId,
     changedtick: u64,
-}
-
-pub(crate) struct ProjectOutput {
-    pub clamped_scroll: RowIndex,
-    pub row_base: RowIndex,
-    pub total_rows: RowIndex,
-    pub projected_rows: RowIndex,
 }
 
 pub(crate) struct ProjectionPlan {
@@ -465,7 +458,7 @@ impl TranscriptProjection {
         theme: &Theme,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
-    ) -> ProjectOutput {
+    ) -> MaterializedRows {
         let plan =
             self.plan_projection(history, width, show_thinking, scroll_target, viewport_rows);
         self.project_planned(buf, history, theme, plan)
@@ -477,7 +470,7 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         theme: &Theme,
         plan: ProjectionPlan,
-    ) -> ProjectOutput {
+    ) -> MaterializedRows {
         if let Some(row) = plan.scroll_target.visible_scroll_top() {
             if let Some(out) = self.reuse_visible_projection_for_row(
                 buf,
@@ -493,11 +486,11 @@ impl TranscriptProjection {
 
         if plan.scroll_target.is_full() && self.target_has_projection(plan.key, buf) {
             let total_rows = buf.line_count() as RowIndex;
-            return ProjectOutput {
+            return MaterializedRows {
                 clamped_scroll: clamp_scroll(plan.scroll_top, total_rows, plan.viewport_rows),
                 row_base: self.visible_row_base,
                 total_rows,
-                projected_rows: buf.line_count() as RowIndex,
+                materialized_rows: buf.line_count() as RowIndex,
             };
         }
 
@@ -529,7 +522,7 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         theme: &Theme,
         plan: ProjectionPlan,
-    ) -> ProjectOutput {
+    ) -> MaterializedRows {
         let _perf = smelt_perf::perf::begin("project:render");
         self.cache
             .ensure_many(history, &plan.block_ids, &plan.block_keys, theme);
@@ -590,11 +583,11 @@ impl TranscriptProjection {
             })
             .unwrap_or(plan.scroll_top);
 
-        ProjectOutput {
+        MaterializedRows {
             clamped_scroll: clamp_scroll(restored_scroll, total_rows, plan.viewport_rows),
             row_base: 0,
             total_rows,
-            projected_rows: buf.line_count() as RowIndex,
+            materialized_rows: buf.line_count() as RowIndex,
         }
     }
 
@@ -606,7 +599,7 @@ impl TranscriptProjection {
         show_thinking: bool,
         row: RowIndex,
         viewport_rows: u16,
-    ) -> Option<ProjectOutput> {
+    ) -> Option<MaterializedRows> {
         let prev = self.last_project_key()?;
         if prev.generation != gen || prev.width != width || prev.show_thinking != show_thinking {
             return None;
@@ -623,11 +616,11 @@ impl TranscriptProjection {
             .saturating_add(buf.line_count() as RowIndex);
         let viewport_end = clamped_scroll.saturating_add(viewport_rows as RowIndex);
         if clamped_scroll >= self.visible_row_base && viewport_end <= materialized_end {
-            return Some(ProjectOutput {
+            return Some(MaterializedRows {
                 clamped_scroll,
                 row_base: self.visible_row_base,
                 total_rows,
-                projected_rows: buf.line_count() as RowIndex,
+                materialized_rows: buf.line_count() as RowIndex,
             });
         }
         None
@@ -639,7 +632,7 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         theme: &Theme,
         plan: &ProjectionPlan,
-    ) -> ProjectOutput {
+    ) -> MaterializedRows {
         self.cache
             .ensure_many(history, &plan.block_ids, &plan.block_keys, theme);
 
@@ -681,11 +674,11 @@ impl TranscriptProjection {
         debug_assert!(total_rows >= row_base);
         debug_assert!(row_base.saturating_add(materialized_rows) <= total_rows);
         let clamped_scroll = clamp_scroll(plan.scroll_top, total_rows, plan.viewport_rows);
-        ProjectOutput {
+        MaterializedRows {
             clamped_scroll,
             row_base,
             total_rows,
-            projected_rows: materialized_rows,
+            materialized_rows: materialized_rows,
         }
     }
 
@@ -1493,8 +1486,8 @@ mod tests {
         );
 
         assert!(output.row_base > 0);
-        assert!(output.projected_rows < output.total_rows);
-        assert_eq!(output.projected_rows, buf.line_count() as RowIndex);
+        assert!(output.materialized_rows < output.total_rows);
+        assert_eq!(output.materialized_rows, buf.line_count() as RowIndex);
         assert_eq!(output.clamped_scroll, output.total_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "line 99"));
         assert!(!buf.lines().iter().any(|line| line == "line 0"));
@@ -1536,7 +1529,7 @@ mod tests {
         assert!(buf.line_count() as RowIndex <= full_rows);
         assert!(buf.line_count() as RowIndex >= 5);
         assert_eq!(output.row_base, 0);
-        assert_eq!(output.projected_rows, full_rows);
+        assert_eq!(output.materialized_rows, full_rows);
         assert_eq!(output.total_rows, full_rows);
         assert_eq!(output.clamped_scroll, full_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "block 39"));
@@ -1758,7 +1751,7 @@ mod tests {
             5,
         );
         assert_eq!(top.row_base, 0);
-        assert_eq!(top.projected_rows, top.total_rows);
+        assert_eq!(top.materialized_rows, top.total_rows);
         assert!(buf.lines().iter().any(|line| line == "block 0 line 0"));
         assert!(buf.lines().iter().any(|line| line == "block 39 line 9"));
 

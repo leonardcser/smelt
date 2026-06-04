@@ -172,7 +172,7 @@ impl TuiApp {
             debug_assert!(
                 tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
             );
-            win.set_materialized_rows(tdata.row_base, tdata.projected_rows, tdata.total_rows);
+            win.apply_materialized_rows(tdata);
             win.set_resolved_scroll(tdata.clamped_scroll);
         }
         // After scroll is restored to the new block anchor, pin the cursor to

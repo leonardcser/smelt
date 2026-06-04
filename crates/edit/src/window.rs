@@ -5,7 +5,7 @@ use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
 use super::{BufId, UndoHistory, WinId};
-use crate::row::{row_to_usize, RowIndex};
+use crate::row::{row_to_usize, MaterializedRows, RowIndex};
 use crate::Theme;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::VirtTextPos;
@@ -663,6 +663,10 @@ impl Window {
         } else {
             self.set_virtual_rows(row_base, total_rows);
         }
+    }
+
+    pub fn apply_materialized_rows(&mut self, rows: MaterializedRows) {
+        self.set_materialized_rows(rows.row_base, rows.materialized_rows, rows.total_rows);
     }
 
     pub fn clear_virtual_rows(&mut self) {
