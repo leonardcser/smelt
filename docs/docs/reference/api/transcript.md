@@ -36,7 +36,7 @@ Return `true` when the transcript history holds no blocks (user, assistant, thin
 fun(start: integer, count: integer): table
 ```
 
-Return rendered transcript display rows in `[start, start + count)`. This is exact and may materialize the full transcript until range-native transcript documents land.
+Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.
 
 ## `smelt.transcript.text`
 

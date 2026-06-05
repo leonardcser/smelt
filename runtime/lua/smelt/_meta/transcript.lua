@@ -19,7 +19,7 @@ transcript.blocks = nil
 ---@type fun(): boolean
 transcript.is_empty = nil
 
---- Return rendered transcript display rows in `[start, start + count)`. This is exact and may materialize the full transcript until range-native transcript documents land.
+--- Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.
 ---@type fun(start: integer, count: integer): table
 transcript.rows = nil
 
