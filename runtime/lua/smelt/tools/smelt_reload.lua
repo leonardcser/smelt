@@ -3,24 +3,8 @@
 -- colorschemes, keymaps) so edits made earlier in the turn take effect
 -- without a process restart.
 --
--- The actual reload fires at the next `turn_complete` cell pulse rather
--- than synchronously, because `smelt.engine.reload()` cancels in-flight
--- Lua tasks (including the agent's own tool call). Multiple calls in
--- the same turn collapse into one reload via the `__pending_reload`
--- flag on the smelt table.
-
-local function schedule_reload()
-  if smelt.__pending_reload then return false end
-  smelt.__pending_reload = true
-  local reg
-  reg = smelt.cell.glob("turn_complete", function(_, value)
-    if not value then return end
-    if reg then reg:remove(); reg = nil end
-    smelt.__pending_reload = nil
-    smelt.engine.reload()
-  end)
-  return true
-end
+-- The actual reload is owned by the host and fires at the next safe idle
+-- point, after the current turn and any modal callbacks have unwound.
 
 smelt.tools.register({
   name = "smelt_reload",
@@ -29,9 +13,9 @@ smelt.tools.register({
   effect = "config_reload",
   summary = function() return "schedule end-of-turn reload" end,
   execute = function()
-    if schedule_reload() then
+    if smelt.engine.reload_when_idle() then
       return "Reload scheduled. Config changes will apply when this turn completes."
     end
-    return "Reload already scheduled for this turn."
+    return "Reload already scheduled."
   end,
 })

@@ -212,6 +212,11 @@ pub enum LuaOp {
     /// the production code uses (`Reg:remove`) so the BusyStack release
     /// path with mismatched ids surfaces here too.
     WorkBusyRelease { slot: u8 },
+
+    /// `smelt.engine.reload_when_idle()` - schedule host-owned reload from
+    /// inside a Lua chunk. The runner drains it only after the chunk returns,
+    /// matching the production safe-point behavior.
+    ScheduleReload,
 }
 
 impl LuaOp {
@@ -272,12 +277,13 @@ impl LuaOp {
                 format!("work.busy slot={slot} label={label_slot}")
             }
             WorkBusyRelease { slot } => format!("work.release slot={slot}"),
+            ScheduleReload => "schedule reload".into(),
         }
     }
 }
 
 /// Total `LuaOp` variant count. Keep in lockstep with `build_lua_op`.
-pub const N_LUAOP_VARIANTS: usize = 15;
+pub const N_LUAOP_VARIANTS: usize = 16;
 
 /// Build one `LuaOp` by variant index. Payloads still come from
 /// `u.arbitrary()` so the value space stays unrestricted.
@@ -340,6 +346,7 @@ fn build_lua_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<LuaOp
         14 => LuaOp::WorkBusyRelease {
             slot: u.arbitrary()?,
         },
+        15 => LuaOp::ScheduleReload,
         n => unreachable!("lua_op idx {n} out of range; bump N_LUAOP_VARIANTS or extend dispatch"),
     })
 }
@@ -715,6 +722,9 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
                 emit_work_busy_acquire(&mut out, *slot, *label_slot);
             }
             LuaOp::WorkBusyRelease { slot } => emit_work_busy_release(&mut out, *slot),
+            LuaOp::ScheduleReload => {
+                out.push_str("pcall(function() smelt.engine.reload_when_idle() end)\n");
+            }
         }
     }
     out
@@ -861,6 +871,10 @@ pub fn run_lua_scenario(scenario: LuaScenario) {
             // potentially much later or never. Running it between
             // segments pins the failure to the op batch responsible.
             app.assert_lua_handles_alive();
+            if app.drain_idle_work() {
+                app.assert_lua_handles_alive();
+            }
+            app.assert_invariants();
         }
         // Reload BETWEEN segments (matches the sentinel position).
         // Skipped after the last segment so the final invariant check

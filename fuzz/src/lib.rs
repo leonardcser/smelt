@@ -450,6 +450,11 @@ pub enum FuzzOp {
     StartEngineAsk {
         question: String,
     },
+    /// Side channel: request host-owned reload scheduling. The harness then
+    /// offers the same safe-point drain as the main loop, so active-turn
+    /// schedules stay pending until a later turn-ending op while idle ones
+    /// execute and clear the pending flag immediately.
+    ScheduleReload,
     /// Side channel: deterministic regression probe for #15. Exercises typing
     /// and cursor motion after turn completion/error/cancel/reload/traps,
     /// app-level Escape sequences, and stale prompt side-request callbacks.
@@ -536,6 +541,7 @@ impl FuzzOp {
             InstallPromptCursorTrap { variant } => format!("prompt cursor trap v={variant}"),
             StartCustomCommand { variant } => format!("custom command v={variant}"),
             StartEngineAsk { .. } => "engine ask".into(),
+            ScheduleReload => "schedule reload".into(),
             ProbePromptCursorAfterTurn { variant } => format!("prompt cursor probe v={variant}"),
             ProbeCompactionPrepareRequest { variant } => format!("compaction probe v={variant}"),
         }
@@ -880,6 +886,7 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
             question: u.arbitrary()?,
         })
     },
+    |_| Ok(FuzzOp::ScheduleReload),
     |u| {
         Ok(FuzzOp::ProbePromptCursorAfterTurn {
             variant: u.arbitrary()?,
@@ -1882,6 +1889,7 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         | FuzzOp::InstallPromptCursorTrap { .. }
         | FuzzOp::StartCustomCommand { .. }
         | FuzzOp::StartEngineAsk { .. }
+        | FuzzOp::ScheduleReload
         | FuzzOp::ProbePromptCursorAfterTurn { .. }
         | FuzzOp::ProbeCompactionPrepareRequest { .. }
         | FuzzOp::InsertAttachment { .. }
@@ -2062,6 +2070,22 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
         }
         FuzzOp::StartEngineAsk { question } => {
             app.start_engine_ask_probe(&question);
+        }
+        FuzzOp::ScheduleReload => {
+            let was_running = app.agent_running();
+            let already_pending = app.pending_lua_reload();
+            app.schedule_lua_reload();
+            app.drain_idle_work();
+            if was_running {
+                assert!(
+                    app.pending_lua_reload(),
+                    "scheduled reload ran while an agent turn was active"
+                );
+            } else if !already_pending {
+                // Idle scheduled reloads drain at the next safe point, which
+                // this side channel offers immediately after scheduling.
+                app.assert_lua_handles_alive();
+            }
         }
         FuzzOp::ProbePromptCursorAfterTurn { variant } => {
             app.probe_prompt_cursor_after_turn(variant);

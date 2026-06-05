@@ -270,6 +270,19 @@ impl Permissions {
         self.paths_fn = Some(f);
     }
 
+    /// Carry live session state onto a freshly-built policy snapshot.
+    ///
+    /// Reload rebuilds mode rules and tool defaults from Lua, but runtime
+    /// approvals, workspace restriction, and path resolvers belong to the
+    /// running app and must survive that rebuild.
+    pub fn with_runtime_state_from(mut self, prev: &Self) -> Self {
+        self.restrict_to_workspace = prev.restrict_to_workspace;
+        self.workspace = prev.workspace.clone();
+        self.paths_fn = prev.paths_fn.clone();
+        self.approvals = prev.approvals.clone();
+        self
+    }
+
     fn paths_for_tool(&self, tool_name: &str, args: &HashMap<String, Value>) -> Vec<String> {
         match self.paths_fn.as_ref() {
             Some(f) => f(tool_name, args),

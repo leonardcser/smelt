@@ -14,7 +14,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, Ke
 use engine::clock::VirtualClock;
 use engine::EngineHandle;
 use protocol::{AgentMode, EngineEvent, ReasoningEffort, UiCommand};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -113,6 +113,7 @@ pub struct TestApp {
 pub struct TestAppBuilder {
     vim: bool,
     mode: AgentMode,
+    mode_cycle: Option<Vec<AgentMode>>,
     init_lua: Option<std::path::PathBuf>,
 }
 
@@ -121,6 +122,7 @@ impl Default for TestAppBuilder {
         Self {
             vim: false,
             mode: AgentMode::normal(),
+            mode_cycle: None,
             init_lua: None,
         }
     }
@@ -138,6 +140,11 @@ impl TestAppBuilder {
         self
     }
 
+    pub fn with_mode_cycle(mut self, modes: Vec<AgentMode>) -> Self {
+        self.mode_cycle = Some(modes);
+        self
+    }
+
     /// Run user `init.lua` from this path during build, and from the same
     /// path again on every `reload_lua()`.
     pub fn with_init_lua(mut self, path: impl Into<std::path::PathBuf>) -> Self {
@@ -146,8 +153,17 @@ impl TestAppBuilder {
     }
 
     pub fn build(self) -> TestApp {
-        ensure_test_home();
+        let _home_guard = test_home_guard();
+        reset_test_home();
+        self.build_after_test_home_reset()
+    }
 
+    fn build_with_test_home_guard(self, _guard: &MutexGuard<'static, ()>) -> TestApp {
+        reset_test_home();
+        self.build_after_test_home_reset()
+    }
+
+    fn build_after_test_home_reset(self) -> TestApp {
         let (engine, cmd_rx, event_tx) = EngineHandle::for_test();
 
         let permissions = Arc::new(smelt_core::permissions::Permissions::load());
@@ -161,6 +177,15 @@ impl TestAppBuilder {
             lua.set_init_lua_path(path.clone());
         }
 
+        let mode_cycle = self.mode_cycle.unwrap_or_else(|| {
+            vec![
+                AgentMode::normal(),
+                AgentMode::parse("plan").unwrap(),
+                AgentMode::parse("apply").unwrap(),
+                AgentMode::parse("yolo").unwrap(),
+            ]
+        });
+
         let config = smelt_core::AppConfig {
             model: String::new(),
             api_base: String::new(),
@@ -171,13 +196,9 @@ impl TestAppBuilder {
             cli_model_override: false,
             cli_api_base_override: false,
             cli_api_key_env_override: false,
+            cli_mode_cycle_override: false,
             mode: self.mode,
-            mode_cycle: vec![
-                AgentMode::normal(),
-                AgentMode::parse("plan").unwrap(),
-                AgentMode::parse("apply").unwrap(),
-                AgentMode::parse("yolo").unwrap(),
-            ],
+            mode_cycle,
             reasoning_effort: ReasoningEffort::Off,
             reasoning_cycle: Vec::new(),
             settings,
@@ -316,6 +337,7 @@ impl TestApp {
                     self.app.handle_resize(width, height);
                 }
             }
+            self.app.drain_idle_work();
         }
         self.drain_cmd();
         let (a1, b1) = smelt_perf::alloc::thread_snapshot();
@@ -557,6 +579,20 @@ impl TestApp {
         self.app.reload_lua();
     }
 
+    pub fn schedule_lua_reload(&mut self) -> bool {
+        let _guard = crate::lua::install_app_ptr(&mut self.app);
+        self.app.schedule_lua_reload()
+    }
+
+    pub fn drain_idle_work(&mut self) -> bool {
+        let _guard = crate::lua::install_app_ptr(&mut self.app);
+        self.app.drain_idle_work()
+    }
+
+    pub fn pending_lua_reload(&self) -> bool {
+        self.app.pending_lua_reload
+    }
+
     /// Run an arbitrary Lua snippet against the embedded runtime with
     /// the host pointer installed. Returns whether execution succeeded
     /// (a Lua-level error is *not* a fuzz failure - many generated
@@ -566,6 +602,10 @@ impl TestApp {
     pub fn run_lua(&mut self, snippet: &str) -> bool {
         let _guard = crate::lua::install_app_ptr(&mut self.app);
         self.app.lua.lua.load(snippet).exec().is_ok()
+    }
+
+    pub fn lua_int_global(&self, name: &str) -> Option<i64> {
+        self.app.lua.lua.globals().get(name).ok()
     }
 
     /// Re-publish the cell diff + fire queued subscribers. Production
@@ -2133,6 +2173,14 @@ fn cmdline_text(app: &TuiApp) -> String {
 // ── Process-wide tempdir for $HOME and XDG vars ─────────────────────
 
 static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
+static TEST_HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn test_home_guard() -> MutexGuard<'static, ()> {
+    TEST_HOME_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
 
 /// Initialize `$HOME` + XDG env vars on first call, then wipe the
 /// directory's contents on every call so each `TestApp::build` starts
@@ -2140,7 +2188,7 @@ static TEST_HOME: OnceLock<TempDir> = OnceLock::new();
 /// files written by one scenario survive into the next - a real source
 /// of nondeterminism for libFuzzer, which runs every iteration in the
 /// same process.
-fn ensure_test_home() {
+fn reset_test_home() {
     let dir = TEST_HOME.get_or_init(|| TempDir::new().expect("create test $HOME tempdir"));
     // On macOS `TempDir::new()` returns a path under `/var/folders/…` which
     // `canonicalize` resolves to `/private/var/folders/…`. `AppStoryCtx::new`
@@ -3959,6 +4007,45 @@ mod tests {
         assert!(!dead, "untouched entry is swept");
     }
 
+    #[test]
+    fn sweep_state_prunes_clean_untouched_persistent_entries() {
+        let rt = crate::lua::LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                __smelt_persistent_state__.alive = { dirty = false }
+                __smelt_persistent_state__.dead = { dirty = false }
+                __smelt_persistent_state__.dirty = { dirty = true }
+                __smelt_persistent_state_touched__ = { alive = true }
+                smelt.__sweep_state()
+                "#,
+            )
+            .exec()
+            .expect("sweep");
+
+        let alive: bool = rt
+            .lua
+            .load("return __smelt_persistent_state__.alive ~= nil")
+            .eval()
+            .unwrap();
+        let dead: bool = rt
+            .lua
+            .load("return __smelt_persistent_state__.dead ~= nil")
+            .eval()
+            .unwrap();
+        let dirty: bool = rt
+            .lua
+            .load("return __smelt_persistent_state__.dirty ~= nil")
+            .eval()
+            .unwrap();
+        assert!(alive, "touched persistent entry survives");
+        assert!(!dead, "clean untouched persistent entry is swept");
+        assert!(
+            dirty,
+            "dirty untouched persistent entry is kept for flushing"
+        );
+    }
+
     // ── Full-cycle /reload integration ──────────────────────────────
     //
     // These tests drive `TuiApp::reload_lua()` end-to-end with a real
@@ -4070,6 +4157,87 @@ mod tests {
             .unwrap();
         assert_eq!(width, 80);
         assert_eq!(last, 3);
+    }
+
+    #[test]
+    fn reload_lua_flushes_pending_persistent_state_before_clearing_timers() {
+        let _home_guard = test_home_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(
+            &init,
+            r#"
+            local s = smelt.state.persistent("flush_reload", { debounce_ms = 100000 })
+            s.value = "before-reload"
+            "#,
+        )
+        .unwrap();
+
+        let mut app = TestApp::builder()
+            .with_init_lua(&init)
+            .build_with_test_home_guard(&_home_guard);
+        let state_path = smelt_core::config::state_dir()
+            .join("plugins")
+            .join("flush_reload.json");
+        assert!(
+            !state_path.exists(),
+            "debounced save should not have reached disk before reload"
+        );
+        let dirty_before: bool = app
+            .app
+            .lua
+            .lua
+            .load("return __smelt_persistent_state__.flush_reload.dirty == true")
+            .eval()
+            .unwrap();
+        let pending_before: bool = app
+            .app
+            .lua
+            .lua
+            .load("return __smelt_persistent_state__.flush_reload.pending ~= nil")
+            .eval()
+            .unwrap();
+        assert!(
+            dirty_before,
+            "persistent write should be dirty before reload"
+        );
+        assert!(pending_before, "debounced save should still be pending");
+
+        std::fs::write(&init, "-- no persistent write on reload\n").unwrap();
+        app.reload_lua();
+
+        let raw = std::fs::read_to_string(&state_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", state_path.display()));
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["value"], "before-reload");
+
+        let entry_swept_after: bool = app
+            .app
+            .lua
+            .lua
+            .load("return __smelt_persistent_state__.flush_reload == nil")
+            .eval()
+            .unwrap();
+        assert!(
+            entry_swept_after,
+            "clean persistent state not touched by the new config should be swept"
+        );
+    }
+
+    #[test]
+    fn direct_reload_clears_pending_scheduled_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(&init, "_G.reload_count = (_G.reload_count or 0) + 1\n").unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        assert_eq!(app.lua_int_global("reload_count"), Some(1));
+
+        assert!(app.schedule_lua_reload());
+        app.reload_lua();
+
+        assert!(!app.pending_lua_reload());
+        assert_eq!(app.lua_int_global("reload_count"), Some(2));
     }
 
     /// `_bootstrap.lua` wraps `smelt.tools.register` to inject a default
@@ -4406,7 +4574,18 @@ mod tests {
                 name = "seed_tool",
                 description = "",
                 parameters = { type = "object", properties = {} },
+                permission_defaults = { normal = "deny" },
+                effect = "config_reload",
+                default_allow = { "seed" },
+                subpattern_parser = "bash",
                 execute = function() return "" end,
+            })
+            smelt.permissions.set_rules({ normal = { tools = { deny = { "seed_tool" } } } })
+            smelt.process.set_default_shell({ program = "/bin/zsh", args = { "-fc" } })
+            smelt.provider.register("seed_provider", {
+                type = "openai",
+                api_base = "http://seed.invalid",
+                models = { "seed-model" },
             })
             smelt.tools.middleware("", { before = function() end })
             smelt.provider.middleware({ on_request = function() end })
@@ -4456,6 +4635,20 @@ mod tests {
             .keys()
             .any(|(_, c)| c == "<C-g>"));
         assert!(shared.tools.lock().unwrap().contains_key("seed_tool"));
+        assert!(shared
+            .tool_defaults
+            .lock()
+            .unwrap()
+            .tool_decisions
+            .contains_key("seed_tool"));
+        assert!(shared.permission_rules.lock().unwrap().is_some());
+        assert!(shared.default_shell.lock().unwrap().is_some());
+        assert!(shared
+            .providers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.name.as_deref() == Some("seed_provider")));
         assert!(!shared.hooks.tool_before.is_empty());
         assert!(!shared.hooks.provider_request.is_empty());
         assert!(!app.app.core.timers.is_empty());
@@ -4494,6 +4687,32 @@ mod tests {
         assert!(
             !shared.tools.lock().unwrap().contains_key("seed_tool"),
             "user tool cleared"
+        );
+        let defaults = shared.tool_defaults.lock().unwrap();
+        assert!(
+            !defaults.tool_decisions.contains_key("seed_tool")
+                && !defaults.tool_effects.contains_key("seed_tool")
+                && !defaults.subcommand_allow.contains_key("seed_tool")
+                && !defaults.subpattern_parsers.contains_key("seed_tool"),
+            "tool defaults cleared"
+        );
+        drop(defaults);
+        assert!(
+            shared.permission_rules.lock().unwrap().is_none(),
+            "permission rules cleared"
+        );
+        assert!(
+            shared.default_shell.lock().unwrap().is_none(),
+            "default shell cleared"
+        );
+        assert!(
+            !shared
+                .providers
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.name.as_deref() == Some("seed_provider")),
+            "provider registry cleared"
         );
         assert!(
             shared.hooks.tool_before.is_empty(),
@@ -5056,6 +5275,81 @@ mod tests {
             ov.size_override,
             Some((50, 18)),
             "user resize preserved across reload"
+        );
+    }
+
+    #[test]
+    fn scheduled_reload_runs_after_turn_is_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(&init, "_G.reload_count = (_G.reload_count or 0) + 1\n").unwrap();
+
+        let mut app = TestApp::builder().with_init_lua(&init).build();
+        assert_eq!(app.lua_int_global("reload_count"), Some(1));
+
+        app.start_turn(1);
+        assert!(app.run_lua("return smelt.engine.reload_when_idle()"));
+        assert!(app.app.pending_lua_reload);
+        assert_eq!(app.lua_int_global("reload_count"), Some(1));
+
+        app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+            turn_id: 1,
+            history: vec![],
+            meta: None,
+        }));
+
+        assert!(!app.app.pending_lua_reload);
+        assert_eq!(app.lua_int_global("reload_count"), Some(2));
+    }
+
+    #[test]
+    fn hot_reload_reconciles_plan_mode_cycle_and_permissions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(&init, "-- initially empty\n").unwrap();
+
+        let mut app = TestApp::builder()
+            .with_init_lua(&init)
+            .with_mode_cycle(vec![
+                AgentMode::normal(),
+                AgentMode::parse("apply").unwrap(),
+                AgentMode::parse("yolo").unwrap(),
+            ])
+            .build();
+        let plan = AgentMode::parse("plan").unwrap();
+        assert!(!app.app.core.config.mode_cycle.contains(&plan));
+
+        std::fs::write(&init, "require(\"smelt.plugins.plan_mode\")\n").unwrap();
+        {
+            let _g = crate::lua::install_app_ptr(&mut app.app);
+            app.app.reload_lua();
+        }
+
+        assert!(app.app.core.config.mode_cycle.contains(&plan));
+        let outcome = app.app.core.permissions.evaluate_tool(
+            plan,
+            smelt_core::permissions::ToolOrigin::Lua,
+            "smelt_reload",
+            &std::collections::HashMap::new(),
+        );
+        assert_eq!(outcome.decision, protocol::Decision::Deny);
+    }
+
+    #[test]
+    fn plan_mode_reload_registers_exit_tool_when_already_in_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(&init, "require(\"smelt.plugins.plan_mode\")\n").unwrap();
+        let plan = AgentMode::parse("plan").unwrap();
+
+        let app = TestApp::builder()
+            .with_init_lua(&init)
+            .with_mode(plan.clone())
+            .build();
+        let tools = app.app.lua.tool_defs(plan);
+        assert!(
+            tools.iter().any(|t| t.name == "exit_plan_mode"),
+            "exit_plan_mode should be present after reload while already in plan"
         );
     }
 

@@ -26,11 +26,47 @@ impl TuiApp {
     /// `/reload` entry point. Wraps [`Self::bring_up_lua`] (the
     /// shared cold-start + reload pipeline) with a user-facing toast.
     pub(crate) fn reload_lua(&mut self) {
+        self.pending_lua_reload = false;
         let err = self.bring_up_lua("reload");
         match err {
             Some(e) => self.notify_error(format!("lua reload: {e}")),
             None => self.notify("lua reloaded".into()),
         }
+    }
+
+    pub(crate) fn reload_lua_dismissing_modal(&mut self) {
+        if let Some(modal_id) = self.ui.active_modal() {
+            self.close_overlay(modal_id);
+        }
+        self.reload_lua();
+    }
+
+    /// Mark Lua config for reload at the next point where no turn or modal can
+    /// hold callbacks that the reload would wipe. Returns `true` for a new
+    /// request and `false` when one was already pending.
+    pub(crate) fn schedule_lua_reload(&mut self) -> bool {
+        if self.pending_lua_reload {
+            return false;
+        }
+        self.pending_lua_reload = true;
+        true
+    }
+
+    pub(crate) fn drain_idle_work(&mut self) -> bool {
+        self.try_perform_scheduled_lua_reload()
+    }
+
+    fn try_perform_scheduled_lua_reload(&mut self) -> bool {
+        if !self.pending_lua_reload || !self.can_reload_lua_now() {
+            return false;
+        }
+        self.pending_lua_reload = false;
+        self.reload_lua();
+        true
+    }
+
+    fn can_reload_lua_now(&self) -> bool {
+        !self.agent_is_running() && self.ui.active_modal().is_none()
     }
 
     /// Bring up (or rebuild) the Lua context. Single pipeline shared by
@@ -42,18 +78,20 @@ impl TuiApp {
     /// survives - plugins re-attach via `opts.name` and `smelt.state`.
     ///
     /// Phases:
-    /// 1. [`Self::clear_tui_for_reload`] wipes TUI-side caches that hold
+    /// 1. Pending JSON-backed `smelt.state.persistent` writes are flushed
+    ///    before timers are cleared so reload cannot drop debounced saves.
+    /// 2. [`Self::clear_tui_for_reload`] wipes TUI-side caches that hold
     ///    Lua handles (timers, anonymous paint, anonymous overlays/
     ///    wins/bufs, picker state, busy stack).
-    /// 2. [`LuaRuntime::reload`] wipes every `LuaShared` registry then
+    /// 3. [`LuaRuntime::reload`] wipes every `LuaShared` registry then
     ///    re-runs bootstrap → autoload → init.lua → plugins → state sweep.
-    /// 3. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
+    /// 4. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
     ///    [`engine::SkillLoader`], re-reads `--system-prompt` when present,
     ///    ships the refreshed bundle via
     ///    [`protocol::UiCommand::ReloadAgentConfig`].
-    /// 4. [`Self::reconcile_mcp_servers`] reconciles MCP server state
+    /// 5. [`Self::reconcile_mcp_servers`] reconciles MCP server state
     ///    off-thread against the new `smelt.mcp.register` desired set.
-    /// 5. `smelt.lifecycle.on("ready", fn)` hooks drain with
+    /// 6. `smelt.lifecycle.on("ready", fn)` hooks drain with
     ///    `ctx = { kind }` so hooks that need to distinguish cold start
     ///    from reload can branch on it.
     ///
@@ -61,9 +99,17 @@ impl TuiApp {
     /// Lua load error (if any) so the caller can render it however
     /// makes sense for the phase.
     pub(crate) fn bring_up_lua(&mut self, kind: &'static str) -> Option<String> {
+        if kind == "reload" {
+            if let Some(err) = self.lua.flush_persistent_state() {
+                return Some(format!("flush persistent state: {err}"));
+            }
+        }
         self.clear_tui_for_reload();
         let cwd = std::env::current_dir().ok();
         let err = self.lua.reload(cwd.as_deref());
+        if err.is_none() {
+            self.reconcile_lua_runtime_config();
+        }
         self.refresh_agent_inputs();
         self.reconcile_mcp_servers();
         let hook_errors = self.lua.drain_lifecycle_hooks("ready", move |lua| {
@@ -90,6 +136,29 @@ impl TuiApp {
         self.core
             .engine
             .send(self.prompt_inputs.to_reload_command());
+    }
+
+    fn reconcile_lua_runtime_config(&mut self) {
+        let modes = self.lua.mode_names();
+        if !modes.is_empty() {
+            if !self.core.config.cli_mode_cycle_override {
+                self.core.config.mode_cycle = modes.clone();
+            }
+            if !modes.contains(&self.core.config.mode) {
+                self.set_mode(protocol::AgentMode::normal(), false);
+            }
+        }
+
+        let raw_permissions = self.lua.take_permission_rules().unwrap_or_default();
+        let tool_defaults = self.lua.tool_defaults();
+        let mode_behaviors = self.lua.mode_behaviors();
+        let permissions = smelt_core::permissions::Permissions::from_raw_with_mode_behaviors(
+            &raw_permissions,
+            &tool_defaults,
+            mode_behaviors,
+        )
+        .with_runtime_state_from(self.core.permissions.as_ref());
+        self.core.permissions = std::sync::Arc::new(permissions);
     }
 
     /// Reconcile MCP servers against the post-reload `smelt.mcp.register`

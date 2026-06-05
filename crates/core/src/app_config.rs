@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub cli_model_override: bool,
     pub cli_api_base_override: bool,
     pub cli_api_key_env_override: bool,
+    pub cli_mode_cycle_override: bool,
 
     pub mode: AgentMode,
     pub mode_cycle: Vec<AgentMode>,

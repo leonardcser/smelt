@@ -618,26 +618,57 @@ end
 -- touched this cycle (removed plugins don't leak state).
 __smelt_state__ = __smelt_state__ or {}
 __smelt_state_touched__ = {}
+__smelt_persistent_state__ = __smelt_persistent_state__ or {}
+__smelt_persistent_state_touched__ = {}
 
 -- Persistent wrapper: backed by JSON under
 -- `$XDG_STATE_HOME/smelt/plugins/<name>.json`. Top-level writes are
 -- debounced and auto-saved; nested mutations require an explicit
 -- `s.save()` call. Reads pass through to the loaded table.
+local function persistent_entry(name)
+  __smelt_persistent_state_touched__[name] = true
+  local entry = __smelt_persistent_state__[name]
+  if not entry then
+    entry = { data = smelt.state.__load(name), pending = nil, dirty = false }
+    __smelt_persistent_state__[name] = entry
+  end
+  return entry
+end
+
+function smelt.__flush_persistent_state()
+  local errors = {}
+  for name, entry in pairs(__smelt_persistent_state__) do
+    if entry.pending then entry.pending:remove(); entry.pending = nil end
+    if entry.dirty then
+      local ok, err = pcall(smelt.state.__save, name, entry.data or {})
+      if ok then
+        entry.dirty = false
+      else
+        errors[#errors + 1] = tostring(err)
+      end
+    end
+  end
+  if #errors > 0 then error(table.concat(errors, "\n"), 2) end
+end
+
 ---@type fun(name: string, opts: { debounce_ms: integer? }?): table
 smelt.state.persistent = function(name, opts)
   opts = opts or {}
   local debounce_ms = opts.debounce_ms or 100
-  local data = smelt.state.__load(name)
-  local pending = nil
+  local entry = persistent_entry(name)
+  local data = entry.data
   local function flush()
-    if pending then pending:remove(); pending = nil end
+    if entry.pending then entry.pending:remove(); entry.pending = nil end
     smelt.state.__save(name, data)
+    entry.dirty = false
   end
   local function schedule()
-    if pending then return end
-    pending = smelt.timer.set(debounce_ms, function()
-      pending = nil
+    entry.dirty = true
+    if entry.pending then return end
+    entry.pending = smelt.timer.set(debounce_ms, function()
+      entry.pending = nil
       smelt.state.__save(name, data)
+      entry.dirty = false
     end)
   end
   return setmetatable({}, {
@@ -773,6 +804,11 @@ function smelt.__sweep_state()
   for k in pairs(__smelt_state__) do
     if not __smelt_state_touched__[k] then
       __smelt_state__[k] = nil
+    end
+  end
+  for k, entry in pairs(__smelt_persistent_state__) do
+    if not __smelt_persistent_state_touched__[k] and not entry.dirty then
+      __smelt_persistent_state__[k] = nil
     end
   end
 end

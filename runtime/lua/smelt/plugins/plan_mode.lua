@@ -198,3 +198,9 @@ end)
 smelt.cell("session_started"):subscribe(function()
   if smelt.mode() == "plan" then activate() end
 end)
+
+if smelt.mode() == "plan" then
+  activate()
+else
+  deactivate()
+end

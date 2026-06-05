@@ -343,20 +343,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     app.notify_error("cannot reload while agent is working".into());
                     return;
                 }
-                // Modal overlays (dialogs, confirm pickers) hold Lua
-                // callbacks and park coroutines waiting on user input.
-                // Reload would wipe `package.loaded` and the callback
-                // registry, leaving the painted dialog pointing at
-                // orphaned closures. Dismiss the modal first; the
-                // suspended coroutine joins the other tasks that
-                // `clear_for_reload` cancels. Symmetric with how
-                // reload already drops every in-flight `smelt.spawn`.
-                if let Some(modal_id) = app.ui.active_modal() {
-                    app.close_overlay(modal_id);
-                }
-                app.reload_lua();
+                app.reload_lua_dismissing_modal();
             });
             Ok(())
+        },
+    )?;
+
+    m.fn_(
+        "reload_when_idle",
+        "Schedule a Lua config reload for the next safe idle point. Returns `true` when this call queued a new reload and `false` when one was already pending.",
+        &[],
+        |_, ()| -> LuaResult<bool> {
+            Ok(crate::lua::try_with_app(|app| app.schedule_lua_reload()).unwrap_or(false))
         },
     )?;
 

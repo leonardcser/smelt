@@ -365,6 +365,17 @@ impl LuaRuntime {
         }
     }
 
+    /// Flush dirty `smelt.state.persistent` entries before reload clears the
+    /// timers that would otherwise perform debounced saves.
+    pub fn flush_persistent_state(&self) -> Option<String> {
+        let result: LuaResult<()> = (|| {
+            let smelt: mlua::Table = self.lua.globals().get("smelt")?;
+            let flush: mlua::Function = smelt.get("__flush_persistent_state")?;
+            flush.call(())
+        })();
+        result.err().map(|e| e.to_string())
+    }
+
     /// Clear every Lua-owned registry, wipe non-stdlib `package.loaded`,
     /// re-run bootstrap (idempotent), then re-run autoload → user init →
     /// global plugins → project config. After loading, sweep stale
@@ -407,7 +418,7 @@ impl LuaRuntime {
         if let Ok(mut q) = self.shared.json_inbox.lock() {
             q.clear();
         }
-        self.shared.clear_lua_handles();
+        self.shared.clear_for_reload();
         self.wipe_loaded_modules();
     }
 
@@ -2030,6 +2041,21 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_installs_persistent_state_flush_hook() {
+        let rt = LuaRuntime::new();
+        let (src, name) = read_bootstrap_source("_bootstrap.lua").unwrap();
+        rt.lua.load(&src).set_name(name).exec().unwrap();
+
+        let installed: bool = rt
+            .lua
+            .load("return type(smelt.__flush_persistent_state) == 'function'")
+            .eval()
+            .unwrap();
+        assert!(installed);
+        assert!(rt.flush_persistent_state().is_none());
+    }
+
+    #[test]
     fn project_config_skipped_when_untrusted() {
         let tmp = tempfile::tempdir().unwrap();
         let smelt_dir = tmp.path().join(".smelt");
@@ -2092,6 +2118,55 @@ mod tests {
         assert!(rt.shared.commands.lock().unwrap().is_empty());
         assert!(rt.shared.hooks.tool_before.is_empty());
         assert!(rt.shared.hooks.lifecycle.is_empty());
+    }
+
+    #[test]
+    fn clear_reload_scoped_config_drops_config_registries() {
+        let rt = LuaRuntime::new();
+        rt.shared.providers.lock().unwrap().push(Default::default());
+        rt.shared.mcp_configs.lock().unwrap().insert(
+            "srv".into(),
+            crate::mcp::McpServerConfig::Local {
+                command: vec!["echo".into()],
+                env: Default::default(),
+                timeout: 1,
+                enabled: true,
+            },
+        );
+        *rt.shared.permission_rules.lock().unwrap() =
+            Some(crate::permissions::rules::RawPerms::default());
+        rt.shared
+            .settings_overrides
+            .lock()
+            .unwrap()
+            .insert("vim".into(), crate::config::SettingValue::Bool(true));
+        rt.shared.defaults.lock().unwrap().model = Some("model-a".into());
+        rt.shared.remember.lock().unwrap().model = false;
+        rt.shared.tool_defaults.lock().unwrap().tool_effects.insert(
+            "bash".into(),
+            crate::permissions::rules::ToolEffectKind::ProcessControl,
+        );
+        *rt.shared.default_shell.lock().unwrap() = Some(crate::lua::DefaultShell {
+            program: "zsh".into(),
+            args: vec!["-fc".into()],
+        });
+
+        rt.shared.clear_reload_scoped_config();
+
+        assert!(rt.shared.providers.lock().unwrap().is_empty());
+        assert!(rt.shared.mcp_configs.lock().unwrap().is_empty());
+        assert!(rt.shared.permission_rules.lock().unwrap().is_none());
+        assert!(rt.shared.settings_overrides.lock().unwrap().is_empty());
+        assert!(rt.shared.defaults.lock().unwrap().model.is_none());
+        assert!(rt.shared.remember.lock().unwrap().model);
+        assert!(rt
+            .shared
+            .tool_defaults
+            .lock()
+            .unwrap()
+            .tool_effects
+            .is_empty());
+        assert!(rt.shared.default_shell.lock().unwrap().is_none());
     }
 
     #[test]

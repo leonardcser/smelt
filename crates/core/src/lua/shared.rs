@@ -277,8 +277,7 @@ impl LuaShared {
         self.phase.store(p as u8, Ordering::Release);
     }
 
-    /// Drop every Lua handle from the registries `/reload` repopulates:
-    /// commands, keymaps, layout composer + window renderers, tools, callbacks, hooks.
+    /// Drop every Lua handle from registries repopulated by `/reload`.
     pub fn clear_lua_handles(&self) {
         if let Ok(mut m) = self.commands.lock() {
             m.clear();
@@ -311,12 +310,43 @@ impl LuaShared {
         self.hooks.context_limit.clear();
         self.hooks.prepare_request.clear();
         self.hooks.lifecycle.clear();
+    }
+
+    /// Clear non-handle state whose desired value is declared by Lua config
+    /// on each load cycle.
+    pub fn clear_reload_scoped_config(&self) {
         if let Ok(mut m) = self.watchers.lock() {
             m.clear();
         }
         if let Ok(mut m) = self.mcp_configs.lock() {
             m.clear();
         }
+        if let Ok(mut p) = self.providers.lock() {
+            p.clear();
+        }
+        if let Ok(mut rules) = self.permission_rules.lock() {
+            *rules = None;
+        }
+        if let Ok(mut settings) = self.settings_overrides.lock() {
+            settings.clear();
+        }
+        if let Ok(mut defaults) = self.defaults.lock() {
+            *defaults = crate::config::DefaultsConfig::default();
+        }
+        if let Ok(mut remember) = self.remember.lock() {
+            *remember = crate::config::RememberConfig::default();
+        }
+        if let Ok(mut defaults) = self.tool_defaults.lock() {
+            *defaults = crate::permissions::rules::ToolDefaults::default();
+        }
+        if let Ok(mut shell) = self.default_shell.lock() {
+            *shell = None;
+        }
+    }
+
+    pub fn clear_for_reload(&self) {
+        self.clear_lua_handles();
+        self.clear_reload_scoped_config();
     }
 }
 

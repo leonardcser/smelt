@@ -115,6 +115,9 @@ pub struct TuiApp {
     /// the watcher is disabled (`settings.auto_reload = false`) or when
     /// `notify` failed to subscribe to any of the configured roots.
     pub(crate) auto_reload: Option<crate::auto_reload::AutoReloadHandle>,
+    /// Config reload requested from a busy context. Drained once the app is idle
+    /// enough that wiping Lua callbacks cannot strand an active turn or modal.
+    pub(crate) pending_lua_reload: bool,
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: crate::smelt_edit::Ui,
     pub(crate) well_known: WellKnown,
@@ -714,6 +717,7 @@ impl TuiApp {
             last_prompt_text: String::new(),
             prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
             auto_reload: None,
+            pending_lua_reload: false,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             well_known,
@@ -1487,6 +1491,11 @@ impl TuiApp {
 
             self.drain_host_calls();
 
+            if self.drain_idle_work() {
+                self.render_normal(self.agent.is_some());
+                continue 'main;
+            }
+
             loop {
                 let ev = match self.core.engine.try_recv() {
                     Ok(ev) => ev,
@@ -1512,6 +1521,11 @@ impl TuiApp {
 
             while let Ok(completion) = self.process_completion_rx.try_recv() {
                 self.handle_process_completed(completion.id, completion.exit_code);
+            }
+
+            if self.drain_idle_work() {
+                self.render_normal(self.agent.is_some());
+                continue 'main;
             }
 
             if self.agent.is_none() && !self.queued_inputs.is_empty() && !self.busy_stack.is_busy()
@@ -1684,7 +1698,7 @@ impl TuiApp {
                         while rx.try_recv().is_ok() {}
                     }
                     if self.agent.is_some() || self.ui.active_modal().is_some() {
-                        // Defer: re-arm on the next debounced batch.
+                        self.schedule_lua_reload();
                         continue;
                     }
                     self.reload_lua();
