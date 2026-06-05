@@ -9,17 +9,19 @@
 -- `format_tokens`, `format_cost`) are now in `smelt.text`.
 --
 -- A `Span` is the unit input these functions accept:
---   { text, style?, priority?, separated?, truncatable?, align_right? }
+--   { text, style?, priority?, separated?, truncatable?, align_right?, selectable? }
 -- where `style` is a subset of `smelt.buf.MarkOpts` (`fg`, `bg`,
 -- `hl_group`, `bold`, `dim`, `italic`). `fg` / `bg` accept either a
 -- theme group name (string) or a direct `{ r, g, b }` triple. The same
 -- style table is forwarded verbatim to `buf:mark` so callers don't
--- need to translate.
+-- need to translate. Set `selectable = false` for visible chrome that
+-- should be omitted from drag-copy.
 --
 -- Output is `{ text, highlights }` where each highlight carries
 -- `bytes_start` / `bytes_end` (byte offsets, the unit `buf:mark`
--- expects) and the forwarded `style`. `write_rows(buf, rows, ns)`
--- projects a list of these rows into a buffer.
+-- expects), the forwarded `style`, and optional `selectable` metadata.
+-- `write_rows(buf, rows, ns)` projects a list of these rows into a
+-- buffer.
 
 local M = {}
 
@@ -40,6 +42,7 @@ function M.segments_to_line(segs)
         bytes_start = byte_pos,
         bytes_end = byte_pos + len,
         style = seg.style or {},
+        selectable = seg.selectable,
       }
       byte_pos = byte_pos + len
     end
@@ -101,18 +104,18 @@ function M.compose(width, left, right)
 
   local segs = {}
   for _, s in ipairs(left_kept) do
-    segs[#segs + 1] = { text = s.text, style = s.style or {} }
+    segs[#segs + 1] = { text = s.text, style = s.style or {}, selectable = s.selectable }
   end
   if #left_kept > 0 then
-    segs[#segs + 1] = { text = " ", style = {} }
+    segs[#segs + 1] = { text = " ", style = {}, selectable = false }
   end
-  segs[#segs + 1] = { text = string.rep(DASH, bar_len), style = { fg = "SmeltBar" } }
+  segs[#segs + 1] = { text = string.rep(DASH, bar_len), style = { fg = "SmeltBar" }, selectable = false }
   if #right_kept > 0 then
     for _, s in ipairs(right_kept) do
-      segs[#segs + 1] = { text = s.text, style = s.style or {} }
+      segs[#segs + 1] = { text = s.text, style = s.style or {}, selectable = s.selectable }
     end
-    segs[#segs + 1] = { text = " ", style = {} }
-    segs[#segs + 1] = { text = DASH, style = { fg = "SmeltBar" } }
+    segs[#segs + 1] = { text = " ", style = {}, selectable = false }
+    segs[#segs + 1] = { text = DASH, style = { fg = "SmeltBar" }, selectable = false }
   end
 
   return M.segments_to_line(segs)
@@ -216,9 +219,9 @@ function M.compose_status(items, opts)
     local runs = s.align_right and right_runs or left_runs
     local first = s.align_right and first_right or first_left
     if s.separated and not first then
-      runs[#runs + 1] = { text = STATUS_SEP, style = sep_style }
+      runs[#runs + 1] = { text = STATUS_SEP, style = sep_style, selectable = false }
     end
-    runs[#runs + 1] = { text = s.text, style = with_default_bg(s.style) }
+    runs[#runs + 1] = { text = s.text, style = with_default_bg(s.style), selectable = s.selectable }
     if s.align_right then first_right = false else first_left = false end
   end
 
@@ -235,7 +238,7 @@ function M.compose_status(items, opts)
     col = col + w
   end
   if col < right_start then
-    segs[#segs + 1] = { text = string.rep(" ", right_start - col), style = fill_style }
+    segs[#segs + 1] = { text = string.rep(" ", right_start - col), style = fill_style, selectable = false }
     col = right_start
   end
   for _, r in ipairs(right_runs) do
@@ -245,7 +248,7 @@ function M.compose_status(items, opts)
     col = col + w
   end
   if col < width then
-    segs[#segs + 1] = { text = string.rep(" ", width - col), style = fill_style }
+    segs[#segs + 1] = { text = string.rep(" ", width - col), style = fill_style, selectable = false }
   end
 
   return M.segments_to_line(segs)
@@ -266,6 +269,7 @@ function M.write_rows(buf, rows, ns)
         local opts = {}
         for k, v in pairs(hl.style) do opts[k] = v end
         opts.end_col = hl.bytes_end
+        if hl.selectable ~= nil then opts.selectable = hl.selectable end
         buf:mark(ns, i, hl.bytes_start, opts)
       end
     end

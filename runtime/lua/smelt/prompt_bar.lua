@@ -36,6 +36,12 @@ local function queued_message_rows(queued)
       highlights = {
         {
           bytes_start = 0,
+          bytes_end = #prefix,
+          style = { fg = "Comment" },
+          selectable = false,
+        },
+        {
+          bytes_start = #prefix,
           bytes_end = #text,
           style = { fg = "Comment" },
         },
@@ -52,6 +58,12 @@ local function stash_row()
   return {
     text = text,
     highlights = {
+      {
+        bytes_start = 0,
+        bytes_end = #indent,
+        style = { fg = "Comment" },
+        selectable = false,
+      },
       {
         bytes_start = #indent,
         bytes_end = #text,
@@ -100,6 +112,7 @@ local function indicator_spans()
     text = "\u{2500}",
     style = { fg = "SmeltBar" },
     priority = INDICATOR_PRIORITY,
+    selectable = false,
   }
 
   if active then
@@ -118,6 +131,7 @@ local function indicator_spans()
         text = ch,
         style = { fg = rgb, bold = true },
         priority = codepoint == utf8.codepoint(" ", 1, 1) and LABEL_PRIORITY or INDICATOR_PRIORITY,
+        selectable = label ~= "" and x >= 3,
       }
       x = x + 1
     end
@@ -133,6 +147,7 @@ local function indicator_spans()
         text = " " .. glyph,
         style = style,
         priority = INDICATOR_PRIORITY,
+        selectable = false,
       }
     end
     if label ~= "" then
@@ -204,6 +219,7 @@ local function right_spans()
           text = " ·",
           style = { fg = "SmeltBar" },
           priority = TOKEN_PRIORITY,
+          selectable = false,
         }
       end
       local window = smelt.session.context_window()
@@ -230,6 +246,7 @@ local function right_spans()
           text = " ·",
           style = { fg = "SmeltBar" },
           priority = OPTIONAL_PRIORITY,
+          selectable = false,
         }
       end
       spans[#spans + 1] = {
@@ -274,12 +291,14 @@ M.top_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.top" }), {
   name = "smelt.prompt_bar.top",
   scrollbar = false,
   focusable = false,
+  selectable = true,
   region = "prompt_above",
 })
 M.bottom_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.bottom" }), {
   name = "smelt.prompt_bar.bottom",
   scrollbar = false,
   focusable = false,
+  selectable = false,
   region = "prompt_below",
 })
 
