@@ -27,6 +27,7 @@ smelt.tools.register({
   override = true,
   elapsed_visible = true,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
+  effect = "process_read",
   parameters = {
     type = "object",
     properties = {

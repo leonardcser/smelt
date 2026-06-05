@@ -16,7 +16,7 @@ Allowed tools:
 - exit_plan_mode when the plan is ready for approval
 
 Unavailable or forbidden:
-- edit_file, write_file, stop_process
+- edit_file, write_file, edit_notebook, stop_process, smelt_reload
 - destructive shell commands, package installs, formatters, tests that write artifacts, or anything that changes the workspace
 
 Workflow:
@@ -37,6 +37,7 @@ Your turn should only end with ask_user_question for clarification or exit_plan_
     default_decision = "ask",
     allow_subcommands_by_default = false,
     ask_on_output_redirection = true,
+    read_only = true,
   },
 })
 

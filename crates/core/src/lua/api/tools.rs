@@ -31,6 +31,35 @@ impl From<LuaDecision> for protocol::Decision {
     }
 }
 
+/// Coarse side-effect classification for read-only modes.
+#[derive(Clone, Copy, Debug, LuaAlias)]
+#[lua(name = "smelt.tools.Effect")]
+pub enum LuaToolEffect {
+    Read,
+    Write,
+    Network,
+    UserInteraction,
+    ProcessRead,
+    ProcessControl,
+    ConfigReload,
+    Unknown,
+}
+
+impl From<LuaToolEffect> for crate::permissions::ToolEffectKind {
+    fn from(effect: LuaToolEffect) -> Self {
+        match effect {
+            LuaToolEffect::Read => crate::permissions::ToolEffectKind::PathRead,
+            LuaToolEffect::Write => crate::permissions::ToolEffectKind::PathWrite,
+            LuaToolEffect::Network => crate::permissions::ToolEffectKind::Network,
+            LuaToolEffect::UserInteraction => crate::permissions::ToolEffectKind::UserInteraction,
+            LuaToolEffect::ProcessRead => crate::permissions::ToolEffectKind::ProcessRead,
+            LuaToolEffect::ProcessControl => crate::permissions::ToolEffectKind::ProcessControl,
+            LuaToolEffect::ConfigReload => crate::permissions::ToolEffectKind::ConfigReload,
+            LuaToolEffect::Unknown => crate::permissions::ToolEffectKind::Unknown,
+        }
+    }
+}
+
 /// Per-mode default decisions installed by `smelt.tools.register`.
 /// Keys are mode names and values are `"allow"`, `"ask"`, or `"deny"`.
 #[derive(Default, Debug, LuaOpts)]
@@ -60,6 +89,8 @@ pub struct LuaToolDef {
     pub parameters: Option<mlua::Table>,
     /// Per-mode default decisions.
     pub permission_defaults: Option<LuaToolPermissionDefaults>,
+    /// Coarse side-effect classification used by read-only permission modes.
+    pub effect: Option<LuaToolEffect>,
     /// Subcommand patterns that auto-allow without prompting.
     #[lua(default)]
     pub default_allow: Vec<String>,
@@ -117,6 +148,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     for (mode, decision) in perms.modes {
                         entry.modes.insert(mode, decision.into());
                     }
+                }
+                if let Some(effect) = def.effect {
+                    let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());
+                    defaults.tool_effects.insert(name.clone(), effect.into());
                 }
                 if !def.default_allow.is_empty() {
                     let mut defaults = s.tool_defaults.lock().unwrap_or_else(|e| e.into_inner());

@@ -11,6 +11,7 @@
 //! plain `#[test]` form.
 
 use smelt_core::lua::LuaRuntime;
+use smelt_core::permissions::ToolEffectKind;
 use std::time::{Duration, Instant};
 
 /// Inlined copy of `runtime/lua/smelt/_bootstrap.lua` so the host-only
@@ -71,6 +72,40 @@ fn get_global<T: mlua::FromLua>(rt: &LuaRuntime, name: &str) -> T {
         .globals()
         .get::<T>(name)
         .unwrap_or_else(|e| panic!("global `{name}`: {e}"))
+}
+
+// -- tools.register -------------------------------------------------------
+
+#[test]
+fn tools_register_records_effect_metadata() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "test_write_tool",
+                effect = "write",
+                execute = function() return "ok" end,
+            })
+            smelt.tools.register({
+                name = "test_process_tool",
+                effect = "process_control",
+                execute = function() return "ok" end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("register tools with effects");
+
+    let defaults = rt.tool_defaults();
+    assert_eq!(
+        defaults.tool_effects.get("test_write_tool"),
+        Some(&ToolEffectKind::PathWrite)
+    );
+    assert_eq!(
+        defaults.tool_effects.get("test_process_tool"),
+        Some(&ToolEffectKind::ProcessControl)
+    );
 }
 
 // -- reg.compose / reg.new ----------------------------------------------

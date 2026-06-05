@@ -64,6 +64,7 @@ smelt.tools.register({
   description = "Reads a file from the local filesystem. Supports text files and image files (png, jpg, gif, webp, bmp, tiff, svg).",
   override = true,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
+  effect = "read",
   parameters = {
     type = "object",
     properties = {

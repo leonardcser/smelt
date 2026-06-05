@@ -20,6 +20,7 @@ smelt.tools.register({
   description = "Writes a file to the local filesystem. This tool will overwrite the existing file if there is one at the provided path.",
   override = true,
   permission_defaults = { apply = "allow" },
+  effect = "write",
   parameters = {
     type = "object",
     properties = {

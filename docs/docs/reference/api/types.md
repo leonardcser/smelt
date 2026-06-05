@@ -591,6 +591,7 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `description` | `string` |  | Human-readable description shown to the model. |
 | `parameters` | `table` |  | JSON-schema parameters table passed through to the model. |
 | `permission_defaults` | [smelt.tools.PermissionDefaults](types.md#smelttoolspermissiondefaults) |  | Per-mode default decisions. |
+| `effect` | [smelt.tools.Effect](types.md#smelttoolseffect) |  | Coarse side-effect classification used by read-only permission modes. |
 | `default_allow` | `string[]` |  | Subcommand patterns that auto-allow without prompting. |
 | `subpattern_parser` | `string` |  | Built-in subpattern parser kind (e.g. `"bash"`). |
 | `modes` | `table` |  | Agent modes the tool is available in; nil means all modes. |
@@ -661,6 +662,12 @@ Variants: `"off"` \| `"low"` \| `"medium"` \| `"high"` \| `"max"`
 Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 
 Variants: `"allow"` \| `"ask"` \| `"deny"`
+
+### `smelt.tools.Effect`
+
+Coarse side-effect classification for read-only modes.
+
+Variants: `"read"` \| `"write"` \| `"network"` \| `"user_interaction"` \| `"process_read"` \| `"process_control"` \| `"config_reload"` \| `"unknown"`
 
 ### `smelt.vim.Mode`
 

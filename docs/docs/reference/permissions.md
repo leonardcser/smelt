@@ -29,24 +29,27 @@ to the active mode's registered default decision.
 
 ## Default Tool Permissions
 
-| Tool                  | Normal | Apply | Yolo  |
-| --------------------- | ------ | ----- | ----- |
-| `read_file`           | Allow  | Allow | Allow |
-| `glob`                | Allow  | Allow | Allow |
-| `grep`                | Allow  | Allow | Allow |
-| `ask_user_question`   | Allow  | Allow | Allow |
-| `edit_file`           | Ask    | Allow | Allow |
-| `write_file`          | Ask    | Allow | Allow |
-| `edit_notebook`       | Ask    | Ask   | Allow |
-| `bash`                | Ask    | Ask   | Allow |
-| `web_fetch`           | Ask    | Ask   | Allow |
-| `web_search`          | Ask    | Ask   | Allow |
-| `read_process_output` | Ask    | Ask   | Allow |
-| `stop_process`        | Ask    | Ask   | Allow |
-| `load_skill`          | Ask    | Ask   | Allow |
+| Tool                  | Normal | Plan                    | Apply | Yolo  |
+| --------------------- | ------ | ----------------------- | ----- | ----- |
+| `read_file`           | Allow  | Allow                   | Allow | Allow |
+| `glob`                | Allow  | Allow                   | Allow | Allow |
+| `grep`                | Allow  | Allow                   | Allow | Allow |
+| `ask_user_question`   | Allow  | Allow                   | Allow | Allow |
+| `edit_file`           | Ask    | Deny                    | Allow | Allow |
+| `write_file`          | Ask    | Deny                    | Allow | Allow |
+| `edit_notebook`       | Ask    | Deny                    | Ask   | Allow |
+| `bash`                | Ask    | Allow / Ask / Deny      | Ask   | Allow |
+| `web_fetch`           | Ask    | Ask                     | Ask   | Allow |
+| `web_search`          | Ask    | Ask                     | Ask   | Allow |
+| `read_process_output` | Allow  | Allow                   | Allow | Allow |
+| `stop_process`        | Ask    | Deny                    | Ask   | Allow |
+| `load_skill`          | Ask    | Ask                     | Ask   | Allow |
+| `smelt_reload`        | Ask    | Deny                    | Ask   | Allow |
 
 Plan mode is registered by the optional `smelt.plugins.plan_mode` plugin; when
-enabled, it uses read-only defaults and adds the `exit_plan_mode` tool.
+enabled, it enforces a read-only effect policy and adds the `exit_plan_mode` tool.
+Read-only tools stay allowed, unknown or networked tools require confirmation, and
+write-capable/process-control/config-reload effects are denied without prompting.
 
 ## Default Bash Patterns
 
@@ -96,9 +99,10 @@ command. `cd` is always allowed.
 
 !!! note
 
-    In modes whose metadata enables `ask_on_output_redirection` (Normal and Apply by default),
+    In modes whose metadata enables `ask_on_output_redirection` (Normal and Plan by default),
     otherwise-allowed bash commands that contain output redirection (`>`, `>>`, `&>`)
-    are escalated to Ask.
+    are escalated to Ask. Plan mode's read-only policy then denies redirections that
+    write to real files.
 
 ## Configuring Permissions
 

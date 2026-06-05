@@ -550,6 +550,7 @@ impl LuaRuntime {
                         ask_on_output_redirection: spec
                             .get("ask_on_output_redirection")
                             .unwrap_or(true),
+                        read_only: spec.get("read_only").unwrap_or(false),
                     },
                 );
             }

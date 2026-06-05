@@ -18,6 +18,42 @@ const SHELL_OPERATORS: &[(&str, usize)] = &[
     ("\n", 1),
 ];
 
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "basename",
+    "cat",
+    "cut",
+    "date",
+    "df",
+    "diff",
+    "dirname",
+    "du",
+    "file",
+    "find",
+    "grep",
+    "head",
+    "hexdump",
+    "jq",
+    "less",
+    "ls",
+    "md5sum",
+    "pwd",
+    "realpath",
+    "rg",
+    "sha256sum",
+    "sort",
+    "stat",
+    "strings",
+    "tail",
+    "test",
+    "tr",
+    "tree",
+    "uniq",
+    "wc",
+    "which",
+    "whoami",
+    "xxd",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ShellAnalysis {
     pub risk: ShellRisk,
@@ -447,12 +483,32 @@ fn classify_risk(words: &[String]) -> ShellRisk {
             Some("status" | "diff" | "log" | "show" | "grep" | "ls-files") => ShellRisk::ReadOnly,
             _ => ShellRisk::Unknown,
         },
+        "cargo" => match cargo_subcommand(words) {
+            Some("metadata" | "tree" | "version" | "--version" | "-V") => ShellRisk::ReadOnly,
+            Some(
+                "build" | "check" | "test" | "run" | "bench" | "doc" | "clippy" | "fmt" | "fix"
+                | "clean" | "install" | "add" | "remove" | "update" | "publish" | "nextest"
+                | "llvm-cov" | "xtask",
+            ) => ShellRisk::Writes,
+            _ => ShellRisk::Unknown,
+        },
         "curl" | "wget" | "scp" | "rsync" | "ssh" => ShellRisk::Unknown,
         "python" | "python3" | "node" | "ruby" | "perl" | "bash" | "sh" => ShellRisk::Unknown,
-        "ls" | "tree" | "cat" | "head" | "tail" | "grep" | "rg" | "find" | "wc" | "du" | "df"
-        | "stat" | "file" | "realpath" | "pwd" | "which" | "cargo" => ShellRisk::ReadOnly,
+        cmd if is_read_only_command(cmd) => ShellRisk::ReadOnly,
         _ => ShellRisk::Unknown,
     }
+}
+
+fn is_read_only_command(cmd: &str) -> bool {
+    READ_ONLY_COMMANDS.contains(&cmd)
+}
+
+fn cargo_subcommand(words: &[String]) -> Option<&str> {
+    words
+        .iter()
+        .skip(1)
+        .map(String::as_str)
+        .find(|word| !word.starts_with('+') && !word.starts_with('-'))
 }
 
 fn paths_for_command(words: &[String], cwd: &Path) -> Vec<PathEffect> {
@@ -466,6 +522,9 @@ fn paths_for_command(words: &[String], cwd: &Path) -> Vec<PathEffect> {
         "sed" => paths.extend(sed_paths(words, cwd)),
         "grep" | "rg" => paths.extend(grep_paths(words, cwd)),
         "find" => paths.extend(find_paths(words, cwd)),
+        cmd if is_read_only_command(cmd) => {
+            paths.extend(generic_paths(words.iter().skip(1), cwd, PathAccess::Read))
+        }
         _ => paths.extend(generic_paths(
             words.iter().skip(1),
             cwd,

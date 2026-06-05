@@ -12,7 +12,7 @@ mod tests;
 pub use approvals::RuntimeApprovals;
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
 pub use protocol::Decision;
-pub use rules::{SubpatternParserFn, ToolDefaults};
+pub use rules::{SubpatternParserFn, ToolDefaults, ToolEffectKind};
 
 use bash::{has_output_redirection, is_cd_command};
 
@@ -75,6 +75,7 @@ pub enum ShellRisk {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolEffect {
     Fs(PathEffect),
+    FsAccess(PathAccess),
     Shell {
         command: String,
         risk: ShellRisk,
@@ -85,9 +86,23 @@ pub enum ToolEffect {
         tool: String,
     },
     UserInteraction,
+    ProcessRead,
     ProcessControl,
     ConfigReload,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReadOnlyDisposition {
+    Read,
+    Ask,
+    Deny,
+}
+
+impl ReadOnlyDisposition {
+    fn merge(self, other: Self) -> Self {
+        self.max(other)
+    }
 }
 
 pub struct PermissionRequest<'a> {
@@ -118,6 +133,7 @@ pub struct Permissions {
     restrict_to_workspace: bool,
     workspace: PathBuf,
     paths_fn: Option<Arc<PathsFn>>,
+    tool_effects: HashMap<String, ToolEffectKind>,
     subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
     /// Interior-mutable so `Arc<Permissions>` holders can grant approvals without a writable handle.
     pub approvals: Arc<RwLock<RuntimeApprovals>>,
@@ -134,6 +150,7 @@ impl std::fmt::Debug for Permissions {
             .field("restrict_to_workspace", &self.restrict_to_workspace)
             .field("workspace", &self.workspace)
             .field("paths_fn", &self.paths_fn.as_ref().map(|_| "<fn>"))
+            .field("tool_effects", &self.tool_effects)
             .field(
                 "subpattern_parsers",
                 &self.subpattern_parsers.keys().collect::<Vec<_>>(),
@@ -176,6 +193,7 @@ impl Permissions {
             restrict_to_workspace: true,
             workspace: PathBuf::new(),
             paths_fn: None,
+            tool_effects: tool_defaults.tool_effects.clone(),
             subpattern_parsers: tool_defaults.subpattern_parsers.clone(),
             approvals: Arc::new(RwLock::new(RuntimeApprovals::new())),
         }
@@ -259,11 +277,49 @@ impl Permissions {
         }
     }
 
-    fn path_access_for_tool(tool_name: &str) -> PathAccess {
-        match tool_name {
-            "edit_file" | "write_file" | "edit_notebook" => PathAccess::Write,
-            "bash" => PathAccess::Unknown,
-            _ => PathAccess::Read,
+    fn tool_effect_kind(&self, tool_name: &str) -> ToolEffectKind {
+        self.tool_effects
+            .get(tool_name)
+            .copied()
+            .unwrap_or(ToolEffectKind::Unknown)
+    }
+
+    fn declared_effects_for_tool(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+    ) -> Vec<ToolEffect> {
+        match self.tool_effect_kind(tool_name) {
+            ToolEffectKind::PathRead => {
+                self.path_effects_for_tool(tool_name, args, PathAccess::Read)
+            }
+            ToolEffectKind::PathWrite => {
+                self.path_effects_for_tool(tool_name, args, PathAccess::Write)
+            }
+            ToolEffectKind::Network => vec![ToolEffect::Network],
+            ToolEffectKind::UserInteraction => vec![ToolEffect::UserInteraction],
+            ToolEffectKind::ProcessRead => vec![ToolEffect::ProcessRead],
+            ToolEffectKind::ProcessControl => vec![ToolEffect::ProcessControl],
+            ToolEffectKind::ConfigReload => vec![ToolEffect::ConfigReload],
+            ToolEffectKind::Unknown => vec![ToolEffect::Unknown],
+        }
+    }
+
+    fn path_effects_for_tool(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, Value>,
+        access: PathAccess,
+    ) -> Vec<ToolEffect> {
+        let effects: Vec<_> = self
+            .paths_for_tool(tool_name, args)
+            .into_iter()
+            .map(|p| ToolEffect::Fs(PathEffect::from_raw(p, &self.workspace, access.clone())))
+            .collect();
+        if effects.is_empty() {
+            vec![ToolEffect::FsAccess(access)]
+        } else {
+            effects
         }
     }
 
@@ -287,31 +343,21 @@ impl Permissions {
                     .unwrap_or_default()
                     .to_string();
                 let analysis = bash::analyze_shell_command(&command, &self.workspace);
-                vec![ToolEffect::Shell {
+                let mut effects = vec![ToolEffect::Shell {
                     command,
                     risk: analysis.risk,
                     paths: analysis.paths,
-                }]
-            }
-            "web_fetch" | "web_search" => vec![ToolEffect::Network],
-            "ask_user_question" => vec![ToolEffect::UserInteraction],
-            "read_process_output" | "stop_process" => vec![ToolEffect::ProcessControl],
-            "smelt_reload" => vec![ToolEffect::ConfigReload],
-            _ => {
-                let access = Self::path_access_for_tool(tool_name);
-                let effects: Vec<_> = self
-                    .paths_for_tool(tool_name, args)
-                    .into_iter()
-                    .map(|p| {
-                        ToolEffect::Fs(PathEffect::from_raw(p, &self.workspace, access.clone()))
-                    })
-                    .collect();
-                if effects.is_empty() {
-                    vec![ToolEffect::Unknown]
-                } else {
-                    effects
+                }];
+                if args
+                    .get("background")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    effects.push(ToolEffect::ProcessControl);
                 }
+                effects
             }
+            _ => self.declared_effects_for_tool(tool_name, args),
         }
     }
 
@@ -419,6 +465,7 @@ impl Permissions {
     }
 
     pub fn evaluate_request(&self, request: PermissionRequest<'_>) -> PermissionOutcome {
+        let behavior = self.mode_behavior(&request.mode);
         let base = match request.origin {
             ToolOrigin::Mcp => {
                 self.check_subcommand(request.mode.clone(), "mcp", request.tool_name)
@@ -427,6 +474,7 @@ impl Permissions {
                 decide_base(self, request.mode.clone(), request.tool_name, request.args)
             }
         };
+        let base = read_only_adjusted_decision(&behavior, base, &request.effects);
         let outside_workspace_paths = self.outside_workspace_effect_paths(&request.effects);
         let downgraded_by_workspace =
             base == Decision::Allow && !outside_workspace_paths.is_empty();
@@ -440,6 +488,76 @@ impl Permissions {
             outside_workspace_paths,
             downgraded_by_workspace,
         }
+    }
+}
+
+fn read_only_adjusted_decision(
+    behavior: &ModeBehavior,
+    base: Decision,
+    effects: &[ToolEffect],
+) -> Decision {
+    if !behavior.read_only || base == Decision::Deny {
+        return base;
+    }
+
+    match read_only_disposition(effects) {
+        ReadOnlyDisposition::Deny => Decision::Deny,
+        ReadOnlyDisposition::Ask if base == Decision::Allow => Decision::Ask,
+        _ => base,
+    }
+}
+
+fn read_only_disposition(effects: &[ToolEffect]) -> ReadOnlyDisposition {
+    effects
+        .iter()
+        .map(effect_read_only_disposition)
+        .fold(ReadOnlyDisposition::Read, ReadOnlyDisposition::merge)
+}
+
+fn effect_read_only_disposition(effect: &ToolEffect) -> ReadOnlyDisposition {
+    match effect {
+        ToolEffect::Fs(path) => path_access_disposition(&path.access),
+        ToolEffect::FsAccess(access) => path_access_disposition(access),
+        ToolEffect::Shell { risk, paths, .. } => {
+            let path_disposition = paths
+                .iter()
+                .map(|path| path_access_disposition(&path.access))
+                .fold(ReadOnlyDisposition::Read, ReadOnlyDisposition::merge);
+            shell_risk_disposition(risk).merge(path_disposition)
+        }
+        ToolEffect::Network | ToolEffect::Unknown => ReadOnlyDisposition::Ask,
+        ToolEffect::Mcp { tool } => mcp_tool_name_disposition(tool),
+        ToolEffect::UserInteraction | ToolEffect::ProcessRead => ReadOnlyDisposition::Read,
+        ToolEffect::ProcessControl | ToolEffect::ConfigReload => ReadOnlyDisposition::Deny,
+    }
+}
+
+fn path_access_disposition(access: &PathAccess) -> ReadOnlyDisposition {
+    match access {
+        PathAccess::Read => ReadOnlyDisposition::Read,
+        PathAccess::Write => ReadOnlyDisposition::Deny,
+        PathAccess::Unknown => ReadOnlyDisposition::Ask,
+    }
+}
+
+fn shell_risk_disposition(risk: &ShellRisk) -> ReadOnlyDisposition {
+    match risk {
+        ShellRisk::ReadOnly => ReadOnlyDisposition::Read,
+        ShellRisk::Unknown => ReadOnlyDisposition::Ask,
+        ShellRisk::Writes | ShellRisk::Destructive => ReadOnlyDisposition::Deny,
+    }
+}
+
+fn mcp_tool_name_disposition(name: &str) -> ReadOnlyDisposition {
+    let lower = name.to_ascii_lowercase();
+    let write_words = [
+        "write", "edit", "create", "delete", "remove", "update", "patch", "rename", "move",
+        "mkdir", "rmdir",
+    ];
+    if write_words.iter().any(|word| lower.contains(word)) {
+        ReadOnlyDisposition::Deny
+    } else {
+        ReadOnlyDisposition::Ask
     }
 }
 

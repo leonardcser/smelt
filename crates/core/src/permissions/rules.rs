@@ -83,6 +83,7 @@ pub struct ModeBehavior {
     pub default_decision: Decision,
     pub allow_subcommands_by_default: bool,
     pub ask_on_output_redirection: bool,
+    pub read_only: bool,
 }
 
 impl Default for ModeBehavior {
@@ -91,6 +92,7 @@ impl Default for ModeBehavior {
             default_decision: Decision::Ask,
             allow_subcommands_by_default: false,
             ask_on_output_redirection: true,
+            read_only: false,
         }
     }
 }
@@ -134,10 +136,25 @@ impl ToolPermDefaults {
     }
 }
 
+/// Coarse effect declared by a tool at registration time.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ToolEffectKind {
+    PathRead,
+    PathWrite,
+    Network,
+    UserInteraction,
+    ProcessRead,
+    ProcessControl,
+    ConfigReload,
+    #[default]
+    Unknown,
+}
+
 /// Aggregated tool-declared defaults consumed by `Permissions::from_raw`.
 #[derive(Default, Clone)]
 pub struct ToolDefaults {
     pub tool_decisions: HashMap<String, ToolPermDefaults>,
+    pub tool_effects: HashMap<String, ToolEffectKind>,
     pub subcommand_allow: HashMap<String, Vec<String>>,
     pub subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
 }
@@ -146,6 +163,7 @@ impl std::fmt::Debug for ToolDefaults {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolDefaults")
             .field("tool_decisions", &self.tool_decisions)
+            .field("tool_effects", &self.tool_effects)
             .field("subcommand_allow", &self.subcommand_allow)
             .field(
                 "subpattern_parsers",

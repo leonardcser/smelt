@@ -14,6 +14,7 @@ smelt.tools.register({
   description = "Fast file pattern matching tool that works with any codebase size. Returns matching file paths sorted by modification time.",
   override = true,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
+  effect = "read",
   parameters = {
     type = "object",
     properties = {

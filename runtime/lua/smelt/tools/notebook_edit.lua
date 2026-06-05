@@ -5,6 +5,7 @@ smelt.tools.register({
   name = "edit_notebook",
   description = "Edit a Jupyter notebook (.ipynb) cell. Supports replacing, inserting, and deleting cells. Identify cells by cell_id or cell_number (0-indexed).",
   override = true,
+  effect = "write",
   parameters = {
     type = "object",
     properties = {

@@ -207,6 +207,7 @@ smelt.tools.register({
     .. "The page is fetched, converted to markdown, then an isolated LLM call "
     .. "extracts only what the prompt asks for.",
   override = true,
+  effect = "network",
   parameters = {
     type = "object",
     properties = {

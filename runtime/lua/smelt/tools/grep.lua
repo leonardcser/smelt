@@ -107,6 +107,7 @@ smelt.tools.register({
   description = "A powerful search tool built on ripgrep. Supports full regex syntax, file type filtering, glob filtering, and multiple output modes.",
   override = true,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
+  effect = "read",
   parameters = {
     type = "object",
     properties = {

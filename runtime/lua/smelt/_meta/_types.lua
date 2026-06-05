@@ -401,6 +401,7 @@
 ---@field description? string Human-readable description shown to the model.
 ---@field parameters? table JSON-schema parameters table passed through to the model.
 ---@field permission_defaults? smelt.tools.PermissionDefaults Per-mode default decisions.
+---@field effect? smelt.tools.Effect Coarse side-effect classification used by read-only permission modes.
 ---@field default_allow? string[] Subcommand patterns that auto-allow without prompting.
 ---@field subpattern_parser? string Built-in subpattern parser kind (e.g. `"bash"`).
 ---@field modes? table Agent modes the tool is available in; nil means all modes.
@@ -447,6 +448,9 @@
 
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 ---@alias smelt.tools.Decision "allow"|"ask"|"deny"
+
+--- Coarse side-effect classification for read-only modes.
+---@alias smelt.tools.Effect "read"|"write"|"network"|"user_interaction"|"process_read"|"process_control"|"config_reload"|"unknown"
 
 --- Vim mode string literal.
 ---@alias smelt.vim.Mode "insert"|"normal"|"visual"|"visual_line"

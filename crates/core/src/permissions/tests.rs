@@ -62,6 +62,26 @@ fn bash_parser_map() -> HashMap<String, std::sync::Arc<crate::permissions::Subpa
     m
 }
 
+fn test_tool_effects() -> HashMap<String, ToolEffectKind> {
+    [
+        ("read_file", ToolEffectKind::PathRead),
+        ("glob", ToolEffectKind::PathRead),
+        ("grep", ToolEffectKind::PathRead),
+        ("edit_file", ToolEffectKind::PathWrite),
+        ("write_file", ToolEffectKind::PathWrite),
+        ("edit_notebook", ToolEffectKind::PathWrite),
+        ("web_fetch", ToolEffectKind::Network),
+        ("web_search", ToolEffectKind::Network),
+        ("ask_user_question", ToolEffectKind::UserInteraction),
+        ("read_process_output", ToolEffectKind::ProcessRead),
+        ("stop_process", ToolEffectKind::ProcessControl),
+        ("smelt_reload", ToolEffectKind::ConfigReload),
+    ]
+    .into_iter()
+    .map(|(name, effect)| (name.to_string(), effect))
+    .collect()
+}
+
 fn permissions_from_mode(
     mode: ModePerms,
     restrict_to_workspace: bool,
@@ -77,6 +97,7 @@ fn permissions_from_mode(
             default_decision: Decision::Allow,
             allow_subcommands_by_default: true,
             ask_on_output_redirection: false,
+            read_only: false,
         },
     )]);
     Permissions {
@@ -85,6 +106,7 @@ fn permissions_from_mode(
         restrict_to_workspace,
         workspace,
         paths_fn: None,
+        tool_effects: test_tool_effects(),
         subpattern_parsers: bash_parser_map(),
         approvals: std::sync::Arc::new(std::sync::RwLock::new(RuntimeApprovals::new())),
     }
@@ -101,6 +123,17 @@ fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
     std::sync::Arc::new(|name, args| match name {
         "read_file" | "write_file" | "edit_file" => {
             let p = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            if p.is_empty() {
+                vec![]
+            } else {
+                vec![p.to_string()]
+            }
+        }
+        "edit_notebook" => {
+            let p = args
+                .get("notebook_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if p.is_empty() {
                 vec![]
             } else {
@@ -1069,6 +1102,7 @@ fn yolo_allow_permissions() -> Permissions {
                 default_decision: Decision::Allow,
                 allow_subcommands_by_default: true,
                 ask_on_output_redirection: false,
+                read_only: false,
             },
         )]),
     )
@@ -1102,6 +1136,128 @@ fn configured_allow_mode_bash_allows_everything_by_default() {
 fn normal_unknown_tool_defaults_ask() {
     let p = Permissions::load();
     assert_eq!(p.check_tool(normal(), "some_unknown_tool"), Decision::Ask);
+}
+
+fn read_only_permissions() -> Permissions {
+    let mut tools = HashMap::new();
+    for name in [
+        "read_file",
+        "glob",
+        "grep",
+        "ask_user_question",
+        "read_process_output",
+        "edit_file",
+        "write_file",
+        "edit_notebook",
+        "bash",
+        "web_fetch",
+        "web_search",
+        "stop_process",
+        "smelt_reload",
+        "custom_tool",
+    ] {
+        tools.insert(name.to_string(), Decision::Allow);
+    }
+    let mode = mode_perms(tools, &[("bash", ruleset(&["*"], &[], &[]))]);
+    let mut p = permissions_from_mode(mode, false, PathBuf::new());
+    p.mode_behaviors.insert(
+        "plan".to_string(),
+        ModeBehavior {
+            default_decision: Decision::Ask,
+            allow_subcommands_by_default: false,
+            ask_on_output_redirection: true,
+            read_only: true,
+        },
+    );
+    p.set_paths_fn(stub_paths_fn());
+    p
+}
+
+#[test]
+fn read_only_mode_classifies_registered_tools() {
+    let p = read_only_permissions();
+    let cases = [
+        (
+            "read_file",
+            args_with("file_path", "src/lib.rs"),
+            Decision::Allow,
+        ),
+        ("glob", args_with("path", "src"), Decision::Allow),
+        ("grep", args_with("path", "src"), Decision::Allow),
+        ("ask_user_question", HashMap::new(), Decision::Allow),
+        ("read_process_output", HashMap::new(), Decision::Allow),
+        (
+            "edit_file",
+            args_with("file_path", "src/lib.rs"),
+            Decision::Deny,
+        ),
+        (
+            "write_file",
+            args_with("file_path", "src/lib.rs"),
+            Decision::Deny,
+        ),
+        (
+            "edit_notebook",
+            args_with("notebook_path", "notebook.ipynb"),
+            Decision::Deny,
+        ),
+        ("edit_file", HashMap::new(), Decision::Deny),
+        ("write_file", HashMap::new(), Decision::Deny),
+        ("edit_notebook", HashMap::new(), Decision::Deny),
+        ("custom_tool", HashMap::new(), Decision::Ask),
+        (
+            "web_fetch",
+            args_with("url", "https://example.com"),
+            Decision::Ask,
+        ),
+        ("web_search", HashMap::new(), Decision::Ask),
+        ("stop_process", HashMap::new(), Decision::Deny),
+        ("smelt_reload", HashMap::new(), Decision::Deny),
+    ];
+    for (tool, args, expected) in cases {
+        assert_eq!(decide(&p, plan(), tool, &args), expected, "tool={tool}");
+    }
+}
+
+#[test]
+fn read_only_mode_classifies_bash_by_effects() {
+    let p = read_only_permissions();
+    let mut background_ls = args_with("command", "ls src");
+    background_ls.insert("background".to_string(), Value::Bool(true));
+    let cases = [
+        (args_with("command", "ls src"), Decision::Allow),
+        (args_with("command", "python3 script.py"), Decision::Ask),
+        (args_with("command", "echo hi > out.txt"), Decision::Deny),
+        (args_with("command", "cargo test"), Decision::Deny),
+        (args_with("command", "cargo +nightly test"), Decision::Deny),
+        (args_with("command", "rm -rf target"), Decision::Deny),
+        (background_ls, Decision::Deny),
+    ];
+    for (args, expected) in cases {
+        let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(
+            decide(&p, plan(), "bash", &args),
+            expected,
+            "command={command}"
+        );
+    }
+}
+
+#[test]
+fn read_only_mode_classifies_mcp_by_name() {
+    let p = read_only_permissions();
+    let cases = [
+        ("filesystem_write_file", Decision::Deny),
+        ("filesystem_read_file", Decision::Ask),
+    ];
+    for (tool, expected) in cases {
+        assert_eq!(
+            p.evaluate_tool(plan(), ToolOrigin::Mcp, tool, &HashMap::new())
+                .decision,
+            expected,
+            "tool={tool}"
+        );
+    }
 }
 
 // --- output redirection escalation ---
