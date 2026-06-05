@@ -1203,6 +1203,12 @@ impl TestApp {
     }
 
     fn focus_prompt_without_clearing_transients(&mut self) {
+        // Prompt-docked pickers can open from pending Lua tasks after the
+        // probe's initial cleanup. Reloading drops their prompt keymaps while
+        // leaving the prediction placeholder intact for the oracle below.
+        if !self.app.picker_state.is_empty() {
+            self.reload_lua();
+        }
         self.app.app_focus = AppFocus::Prompt;
         self.app.term_focused = true;
         let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
