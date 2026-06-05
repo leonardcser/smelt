@@ -768,6 +768,7 @@ impl TuiApp {
             .ui
             .dispatch_event(crate::smelt_edit::Event::Resize(w, h), &mut |_, _, _| {});
         if width_changed {
+            self.ui.cancel_pointer_interaction();
             self.invalidate_for_width(w);
         }
     }
