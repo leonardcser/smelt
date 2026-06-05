@@ -46,6 +46,12 @@ struct BlockRow {
     exact_height: Option<RowIndex>,
 }
 
+impl BlockRow {
+    fn measured_or_estimated_height(&self) -> RowIndex {
+        self.exact_height.unwrap_or(self.estimated_height)
+    }
+}
+
 impl BlockRowIndex {
     fn rebuild_if_stale(
         &mut self,
@@ -59,14 +65,39 @@ impl BlockRowIndex {
             return;
         }
 
+        let keep_measurements = self.width == width && self.show_thinking == show_thinking;
+        let old_nodes = if keep_measurements {
+            std::mem::take(&mut self.nodes)
+        } else {
+            Vec::new()
+        };
         self.nodes.clear();
         self.nodes.reserve(history.order.len());
-        for &id in &history.order {
+        for (index, &id) in history.order.iter().enumerate() {
+            let key = history.resolve_key(id, base_key);
+            let old_same_index = old_nodes.get(index).filter(|node| node.id == id);
+            let estimated_height = old_same_index
+                .map(BlockRow::measured_or_estimated_height)
+                .or_else(|| {
+                    old_nodes
+                        .iter()
+                        .find(|node| node.id == id)
+                        .map(BlockRow::measured_or_estimated_height)
+                })
+                .unwrap_or(1);
+            let same_previous = index == 0
+                || old_nodes
+                    .get(index.saturating_sub(1))
+                    .zip(self.nodes.get(index.saturating_sub(1)))
+                    .is_some_and(|(old, new)| old.id == new.id && old.key == new.key);
+            let exact_height = old_same_index
+                .filter(|node| node.key == key && same_previous)
+                .and_then(|node| node.exact_height);
             self.nodes.push(BlockRow {
                 id,
-                key: history.resolve_key(id, base_key),
-                estimated_height: 1,
-                exact_height: None,
+                key,
+                estimated_height,
+                exact_height,
             });
         }
         self.generation = gen;
@@ -1443,6 +1474,60 @@ mod tests {
         assert_eq!(output.clamped_scroll, full_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "block 39"));
         assert!(!buf.lines().iter().any(|line| line == "block 0"));
+    }
+
+    #[test]
+    fn visible_projection_keeps_pinned_row_stable_while_tail_streams() {
+        let mut transcript = Transcript::new();
+        for i in 0..30 {
+            let content = (0..5)
+                .map(|j| format!("block {i} line {j}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            transcript.push(Block::Text { content });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(13), Default::default());
+        let anchor_id = transcript.history.order[10];
+        let anchor_row = projection
+            .materialize_block_layout(&mut transcript.history, 80, false, &theme)
+            .into_iter()
+            .find(|(id, _, _)| *id == anchor_id)
+            .map(|(_, start, _)| start)
+            .expect("anchor block layout");
+
+        let before = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(anchor_row),
+            5,
+        );
+        assert!(buf.lines().iter().any(|line| line == "block 10 line 0"));
+
+        let tail_id = *transcript.history.order.last().expect("tail block");
+        transcript.history.rewrite(
+            tail_id,
+            Block::Text {
+                content: format!("{}\nstreamed tail line", "tail\n".repeat(20)),
+            },
+        );
+        let after = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(anchor_row),
+            5,
+        );
+
+        assert_eq!(after.clamped_scroll, before.clamped_scroll);
+        assert_eq!(after.row_base, before.row_base);
+        assert!(buf.lines().iter().any(|line| line == "block 10 line 0"));
     }
 
     #[test]
