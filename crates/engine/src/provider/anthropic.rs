@@ -48,12 +48,13 @@ fn count_cache_breakpoints(body: &serde_json::Value) -> usize {
 }
 
 fn supports_adaptive_thinking(model: &str) -> bool {
-    model.contains("opus-4-6")
-        || model.contains("opus-4.6")
-        || model.contains("opus-4-7")
-        || model.contains("opus-4.7")
-        || model.contains("sonnet-4-6")
-        || model.contains("sonnet-4.6")
+    let Some(version) = super::parse_claude_model_version(model) else {
+        return false;
+    };
+    matches!(
+        version.family,
+        Some(super::ClaudeModelFamily::Opus | super::ClaudeModelFamily::Sonnet)
+    ) && version.at_least(4, 6)
 }
 
 /// Default per-level thinking budgets. Mirrors pi-mono.

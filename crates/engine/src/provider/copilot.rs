@@ -359,8 +359,12 @@ pub(crate) struct CopilotModel {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) vendor: Option<String>,
+    pub(crate) family: Option<String>,
+    pub(crate) capability_type: Option<String>,
     pub(crate) context_window: Option<u32>,
     pub(crate) max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub(crate) supported_reasoning_efforts: Vec<String>,
 }
 
 async fn fetch_available_models(
@@ -396,6 +400,24 @@ async fn fetch_available_models(
 }
 
 /// Filter, sort, and dedup chat-capable models from the `/models` endpoint payload. Pure.
+fn infer_family(id: &str, name: &str, vendor: Option<&str>) -> Option<String> {
+    let id_lower = id.to_ascii_lowercase();
+    let name_lower = name.to_ascii_lowercase();
+    if id_lower.starts_with("claude-") || name_lower.contains("claude") {
+        return Some("claude".to_string());
+    }
+    if id_lower.starts_with("gpt-") || name_lower.starts_with("gpt-") {
+        return Some("gpt".to_string());
+    }
+    if id_lower.starts_with("gemini-") || name_lower.contains("gemini") {
+        return Some("gemini".to_string());
+    }
+    if id_lower.starts_with("oswe-") || name_lower.contains("raptor") {
+        return Some("oswe".to_string());
+    }
+    vendor.map(|v| v.to_ascii_lowercase())
+}
+
 fn parse_models_response(data: &serde_json::Value) -> Option<Vec<CopilotModel>> {
     let entries = data.get("data").and_then(|v| v.as_array())?;
     let mut out: Vec<CopilotModel> = Vec::with_capacity(entries.len());
@@ -427,6 +449,28 @@ fn parse_models_response(data: &serde_json::Value) -> Option<Vec<CopilotModel>> 
             .get("vendor")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let family = m
+            .get("family")
+            .and_then(|v| v.as_str())
+            .or_else(|| m.get("model_family").and_then(|v| v.as_str()))
+            .or_else(|| m.pointer("/capabilities/family").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .or_else(|| infer_family(&id, &name, vendor.as_deref()));
+        let capability_type = if capability_type.is_empty() {
+            None
+        } else {
+            Some(capability_type.to_string())
+        };
+        let supported_reasoning_efforts = m
+            .get("supportedReasoningEfforts")
+            .or_else(|| m.get("supported_reasoning_efforts"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let context_window = m
             .pointer("/capabilities/limits/max_context_window_tokens")
             .and_then(|v| v.as_u64())
@@ -443,8 +487,11 @@ fn parse_models_response(data: &serde_json::Value) -> Option<Vec<CopilotModel>> 
             id,
             name,
             vendor,
+            family,
+            capability_type,
             context_window,
             max_output_tokens,
+            supported_reasoning_efforts,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -512,11 +559,16 @@ pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<Copilo
     models
 }
 
+pub(crate) fn cached_model(model: &str) -> Option<CopilotModel> {
+    load_cached_models().into_iter().find(|m| m.id == model)
+}
+
 pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
-    load_cached_models()
-        .into_iter()
-        .find(|m| m.id == model)
-        .and_then(|m| m.context_window)
+    cached_model(model).and_then(|m| m.context_window)
+}
+
+pub(crate) fn cached_output_tokens(model: &str) -> Option<u32> {
+    cached_model(model).and_then(|m| m.max_output_tokens)
 }
 
 fn open_browser(url: &str) {
@@ -784,5 +836,37 @@ mod tests {
         let v = serde_json::json!({"data": [model("m", Some("chat"), Some(true))]});
         let ms = parse_models_response(&v).unwrap();
         assert!(ms[0].vendor.is_none());
+    }
+
+    #[test]
+    fn parse_models_captures_family_and_capability_type() {
+        let v = serde_json::json!({"data": [{
+            "id": "m", "name": "M", "family": "claude", "model_picker_enabled": true,
+            "capabilities": {"type": "chat"}
+        }]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms[0].family.as_deref(), Some("claude"));
+        assert_eq!(ms[0].capability_type.as_deref(), Some("chat"));
+    }
+
+    #[test]
+    fn parse_models_infers_family_when_missing() {
+        let v = serde_json::json!({"data": [{
+            "id": "claude-sonnet-4.6", "name": "Claude Sonnet 4.6", "model_picker_enabled": true,
+            "capabilities": {"type": "chat"}
+        }]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms[0].family.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn parse_models_captures_supported_reasoning_efforts() {
+        let v = serde_json::json!({"data": [{
+            "id": "m", "model_picker_enabled": true,
+            "supportedReasoningEfforts": ["low", "high"],
+            "capabilities": {"type": "chat"}
+        }]});
+        let ms = parse_models_response(&v).unwrap();
+        assert_eq!(ms[0].supported_reasoning_efforts, vec!["low", "high"]);
     }
 }

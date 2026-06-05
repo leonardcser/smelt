@@ -359,6 +359,176 @@ impl ProviderKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireApi {
+    ChatCompletions,
+    OpenAiResponses,
+    AnthropicMessages,
+}
+
+impl WireApi {
+    fn is_anthropic(self) -> bool {
+        self == Self::AnthropicMessages
+    }
+
+    fn copilot_url(self, base: &str) -> String {
+        let base = base.trim_end_matches('/');
+        match self {
+            Self::ChatCompletions => format!("{base}/chat/completions"),
+            Self::OpenAiResponses => format!("{base}/responses"),
+            Self::AnthropicMessages => format!("{base}/v1/messages"),
+        }
+    }
+
+    fn parse_response(self, data: &serde_json::Value) -> Result<ParsedResponse, ProviderError> {
+        match self {
+            Self::ChatCompletions => chat_completions::parse_response(data),
+            Self::OpenAiResponses => openai::parse_response(data),
+            Self::AnthropicMessages => anthropic::parse_response(data),
+        }
+    }
+
+    async fn read_stream(
+        self,
+        resp: reqwest::Response,
+        cancel: &CancellationToken,
+        on_delta: &(dyn Fn(StreamDelta<'_>) + Send + Sync),
+    ) -> Result<ParsedResponse, ProviderError> {
+        match self {
+            Self::ChatCompletions => chat_completions::read_stream(resp, cancel, on_delta).await,
+            Self::OpenAiResponses => openai::read_stream(resp, cancel, on_delta).await,
+            Self::AnthropicMessages => anthropic::read_stream(resp, cancel, on_delta).await,
+        }
+    }
+}
+
+impl ProviderKind {
+    fn wire_api(self) -> WireApi {
+        match self {
+            Self::OpenAiCompatible | Self::Copilot => WireApi::ChatCompletions,
+            Self::OpenAi | Self::Codex => WireApi::OpenAiResponses,
+            Self::AnthropicCompatible | Self::Anthropic => WireApi::AnthropicMessages,
+        }
+    }
+}
+
+fn select_copilot_wire_api(model: &str, metadata: Option<&copilot::CopilotModel>) -> WireApi {
+    let model_lower = model.to_ascii_lowercase();
+    if metadata.is_some_and(copilot_model_is_anthropic) || model_lower.starts_with("claude-") {
+        return WireApi::AnthropicMessages;
+    }
+    if copilot_model_needs_responses(&model_lower, metadata) {
+        return WireApi::OpenAiResponses;
+    }
+    WireApi::ChatCompletions
+}
+
+#[cfg(test)]
+fn copilot_wire_api(model: &str) -> WireApi {
+    select_copilot_wire_api(model, None)
+}
+
+fn copilot_model_is_anthropic(model: &copilot::CopilotModel) -> bool {
+    model
+        .vendor
+        .as_deref()
+        .is_some_and(|vendor| vendor.eq_ignore_ascii_case("anthropic"))
+        || model
+            .family
+            .as_deref()
+            .is_some_and(|family| family.eq_ignore_ascii_case("claude"))
+        || model.id.starts_with("claude-")
+}
+
+fn copilot_model_needs_responses(model: &str, metadata: Option<&copilot::CopilotModel>) -> bool {
+    let id = metadata.map_or(model, |m| m.id.as_str());
+    id.starts_with("gpt-5") || id.starts_with("oswe") || id.contains("codex")
+}
+
+fn copilot_chat_completions_body(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    effort: ReasoningEffort,
+    config: &crate::config::ModelConfig,
+) -> serde_json::Value {
+    let mut body = chat_completions::build_body(messages, tools, model, effort, config);
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("chat_template_kwargs");
+        obj.remove("reasoning_effort");
+    }
+    body
+}
+
+fn copilot_body(
+    wire: WireApi,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    effort: ReasoningEffort,
+    config: &crate::config::ModelConfig,
+    cache: &CacheConfig,
+) -> serde_json::Value {
+    match wire {
+        WireApi::ChatCompletions => {
+            copilot_chat_completions_body(messages, tools, model, effort, config)
+        }
+        WireApi::OpenAiResponses => {
+            let mut body = openai::build_body(messages, tools, model, effort, config);
+            body["store"] = serde_json::json!(false);
+            body
+        }
+        WireApi::AnthropicMessages => {
+            anthropic::build_body(messages, tools, model, effort, config, cache)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaudeModelFamily {
+    Haiku,
+    Opus,
+    Sonnet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClaudeModelVersion {
+    pub(crate) family: Option<ClaudeModelFamily>,
+    pub(crate) major: u16,
+    pub(crate) minor: u16,
+}
+
+impl ClaudeModelVersion {
+    pub(crate) fn at_least(self, major: u16, minor: u16) -> bool {
+        (self.major, self.minor) >= (major, minor)
+    }
+}
+
+pub(crate) fn parse_claude_model_version(model: &str) -> Option<ClaudeModelVersion> {
+    let lower = model.to_ascii_lowercase();
+    if !lower.contains("claude") {
+        return None;
+    }
+    let tokens: Vec<&str> = lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let family = tokens.iter().find_map(|token| match *token {
+        "haiku" => Some(ClaudeModelFamily::Haiku),
+        "opus" => Some(ClaudeModelFamily::Opus),
+        "sonnet" => Some(ClaudeModelFamily::Sonnet),
+        _ => None,
+    });
+    let mut numbers = tokens.iter().filter_map(|token| token.parse::<u16>().ok());
+    let major = numbers.next()?;
+    let minor = numbers.next().unwrap_or(0);
+    Some(ClaudeModelVersion {
+        family,
+        major,
+        minor,
+    })
+}
+
 /// Structured JSON output schema. Each provider adapter maps this to its native field.
 #[derive(Clone)]
 pub struct ResponseFormat {
@@ -520,10 +690,19 @@ impl Provider {
         effort: ReasoningEffort,
         opts: &ChatOptions<'_>,
     ) -> Result<LLMResponse, ProviderError> {
-        let is_anthropic =
+        let is_provider_anthropic =
             self.kind == ProviderKind::Anthropic || self.kind == ProviderKind::AnthropicCompatible;
         let is_codex = self.kind == ProviderKind::Codex;
         let is_copilot = self.kind == ProviderKind::Copilot;
+        let copilot_model = if is_copilot {
+            copilot::cached_model(model)
+        } else {
+            None
+        };
+        let copilot_wire =
+            is_copilot.then(|| select_copilot_wire_api(model, copilot_model.as_ref()));
+        let request_wire = copilot_wire.unwrap_or_else(|| self.kind.wire_api());
+        let is_anthropic_wire = is_provider_anthropic || request_wire.is_anthropic();
 
         let mut codex_auth = if is_codex {
             Some(
@@ -549,11 +728,23 @@ impl Provider {
 
         let mut config = self.model_config.clone();
         if config.max_tokens.is_none() {
-            crate::catalog::ensure_loaded(&self.client).await;
-            if let Some(tokens) =
-                crate::catalog::output_tokens(self.kind.as_str(), &self.api_base, model)
-            {
+            let copilot_output_tokens = if is_copilot {
+                copilot_model
+                    .as_ref()
+                    .and_then(|m| m.max_output_tokens)
+                    .or_else(|| copilot::cached_output_tokens(model))
+            } else {
+                None
+            };
+            if let Some(tokens) = copilot_output_tokens {
                 config.max_tokens = Some(tokens);
+            } else {
+                crate::catalog::ensure_loaded(&self.client).await;
+                if let Some(tokens) =
+                    crate::catalog::output_tokens(self.kind.as_str(), &self.api_base, model)
+                {
+                    config.max_tokens = Some(tokens);
+                }
             }
         }
 
@@ -591,8 +782,9 @@ impl Provider {
                     .as_ref()
                     .map(|t| t.api_base.as_str())
                     .unwrap_or(copilot::DEFAULT_COPILOT_API_BASE);
-                let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-                let body = chat_completions::build_body(messages, tools, model, effort, &config);
+                let wire = copilot_wire.expect("copilot wire api is set for Copilot provider");
+                let url = wire.copilot_url(base);
+                let body = copilot_body(wire, messages, tools, model, effort, &config, &opts.cache);
                 (url, body)
             }
         };
@@ -608,7 +800,7 @@ impl Provider {
         let copilot_has_images = is_copilot && messages_have_images(messages);
 
         if let Some(fmt) = opts.response_format.as_ref() {
-            apply_response_format(&mut body, self.kind, fmt);
+            apply_response_format(&mut body, request_wire, fmt);
         }
 
         // OpenAI / Codex routing hint: keeps follow-up requests landing on
@@ -669,13 +861,13 @@ impl Provider {
                     req = req.header("Copilot-Vision-Request", "true");
                 }
             } else if !self.api_key.is_empty() {
-                if is_anthropic {
+                if is_provider_anthropic {
                     req = req.header("x-api-key", &self.api_key);
                 } else {
                     req = req.bearer_auth(&self.api_key);
                 }
             }
-            if is_anthropic {
+            if is_anthropic_wire {
                 req = req.header("anthropic-version", "2023-06-01");
             }
 
@@ -752,10 +944,10 @@ impl Provider {
                                 "copilot_401_recovery",
                                 &serde_json::json!({ "expires_at": refreshed.expires_at }),
                             );
-                            url = format!(
-                                "{}/chat/completions",
-                                refreshed.api_base.trim_end_matches('/')
-                            );
+                            let base = refreshed.api_base.trim_end_matches('/');
+                            url = copilot_wire
+                                .expect("copilot wire api is set for Copilot provider")
+                                .copilot_url(base);
                             copilot_auth = Some(refreshed);
                             continue;
                         }
@@ -788,17 +980,7 @@ impl Provider {
             let on_delta = opts.on_delta.unwrap_or(noop_delta);
 
             let parsed_result = if use_stream {
-                match self.kind {
-                    ProviderKind::OpenAiCompatible | ProviderKind::Copilot => {
-                        chat_completions::read_stream(resp, opts.cancel, on_delta).await
-                    }
-                    ProviderKind::OpenAi | ProviderKind::Codex => {
-                        openai::read_stream(resp, opts.cancel, on_delta).await
-                    }
-                    ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
-                        anthropic::read_stream(resp, opts.cancel, on_delta).await
-                    }
-                }
+                request_wire.read_stream(resp, opts.cancel, on_delta).await
             } else {
                 let data: serde_json::Value = resp
                     .json()
@@ -812,20 +994,13 @@ impl Provider {
                         &serde_json::json!({
                             "url": url,
                             "provider_kind": format!("{:?}", self.kind),
+                            "wire_api": format!("{:?}", request_wire),
                             "data": data,
                         }),
                     );
                 }
 
-                match self.kind {
-                    ProviderKind::OpenAiCompatible | ProviderKind::Copilot => {
-                        chat_completions::parse_response(&data)
-                    }
-                    ProviderKind::OpenAi | ProviderKind::Codex => openai::parse_response(&data),
-                    ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
-                        anthropic::parse_response(&data)
-                    }
-                }
+                request_wire.parse_response(&data)
             };
 
             let parsed = match parsed_result {
@@ -988,9 +1163,9 @@ fn context_window_from_models_entry(entry: &serde_json::Value) -> Option<u32> {
     None
 }
 
-fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: &ResponseFormat) {
-    match kind {
-        ProviderKind::OpenAiCompatible | ProviderKind::Copilot => {
+fn apply_response_format(body: &mut serde_json::Value, wire: WireApi, fmt: &ResponseFormat) {
+    match wire {
+        WireApi::ChatCompletions => {
             body["response_format"] = serde_json::json!({
                 "type": "json_schema",
                 "json_schema": {
@@ -1000,7 +1175,7 @@ fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: 
                 }
             });
         }
-        ProviderKind::OpenAi | ProviderKind::Codex => {
+        WireApi::OpenAiResponses => {
             body["text"] = serde_json::json!({
                 "format": {
                     "type": "json_schema",
@@ -1010,7 +1185,7 @@ fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: 
                 }
             });
         }
-        ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
+        WireApi::AnthropicMessages => {
             // Older models (Haiku 3.5, Sonnet 3.7, etc.) 400 if this field is sent.
             let model = body["model"].as_str().unwrap_or("");
             if !anthropic_supports_structured_output(model) {
@@ -1033,7 +1208,8 @@ fn apply_response_format(body: &mut serde_json::Value, kind: ProviderKind, fmt: 
 }
 
 fn anthropic_supports_structured_output(model: &str) -> bool {
-    model.contains("-4-5") || model.contains("-4-6") || model.contains("mythos")
+    model.contains("mythos")
+        || parse_claude_model_version(model).is_some_and(|version| version.at_least(4, 5))
 }
 
 fn messages_have_images(messages: &[Message]) -> bool {
@@ -1504,7 +1680,7 @@ mod tests {
     #[test]
     fn apply_response_format_openai_compatible_writes_response_format_json_schema() {
         let mut body = json!({});
-        apply_response_format(&mut body, ProviderKind::OpenAiCompatible, &fmt());
+        apply_response_format(&mut body, WireApi::ChatCompletions, &fmt());
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert_eq!(body["response_format"]["json_schema"]["name"], "out");
         assert_eq!(body["response_format"]["json_schema"]["strict"], true);
@@ -1513,14 +1689,14 @@ mod tests {
     #[test]
     fn apply_response_format_copilot_uses_same_shape_as_openai_compatible() {
         let mut body = json!({});
-        apply_response_format(&mut body, ProviderKind::Copilot, &fmt());
+        apply_response_format(&mut body, WireApi::ChatCompletions, &fmt());
         assert_eq!(body["response_format"]["json_schema"]["name"], "out");
     }
 
     #[test]
     fn apply_response_format_openai_writes_text_format_block() {
         let mut body = json!({});
-        apply_response_format(&mut body, ProviderKind::OpenAi, &fmt());
+        apply_response_format(&mut body, WireApi::OpenAiResponses, &fmt());
         assert_eq!(body["text"]["format"]["type"], "json_schema");
         assert_eq!(body["text"]["format"]["name"], "out");
     }
@@ -1528,21 +1704,21 @@ mod tests {
     #[test]
     fn apply_response_format_codex_writes_text_format_block() {
         let mut body = json!({});
-        apply_response_format(&mut body, ProviderKind::Codex, &fmt());
+        apply_response_format(&mut body, WireApi::OpenAiResponses, &fmt());
         assert_eq!(body["text"]["format"]["name"], "out");
     }
 
     #[test]
     fn apply_response_format_anthropic_modern_model_creates_output_config_format() {
         let mut body = json!({"model": "claude-sonnet-4-6"});
-        apply_response_format(&mut body, ProviderKind::Anthropic, &fmt());
+        apply_response_format(&mut body, WireApi::AnthropicMessages, &fmt());
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
     }
 
     #[test]
     fn apply_response_format_anthropic_merges_into_existing_output_config_object() {
         let mut body = json!({"model": "claude-opus-4-6", "output_config": {"effort": "high"}});
-        apply_response_format(&mut body, ProviderKind::Anthropic, &fmt());
+        apply_response_format(&mut body, WireApi::AnthropicMessages, &fmt());
         assert_eq!(body["output_config"]["effort"], "high");
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
     }
@@ -1550,7 +1726,7 @@ mod tests {
     #[test]
     fn apply_response_format_anthropic_legacy_model_does_not_write_field() {
         let mut body = json!({"model": "claude-3-5-sonnet"});
-        apply_response_format(&mut body, ProviderKind::Anthropic, &fmt());
+        apply_response_format(&mut body, WireApi::AnthropicMessages, &fmt());
         assert!(body.get("output_config").is_none());
     }
 
@@ -1567,6 +1743,24 @@ mod tests {
     fn anthropic_supports_structured_output_rejects_older_models() {
         assert!(!anthropic_supports_structured_output("claude-3-5-sonnet"));
         assert!(!anthropic_supports_structured_output("claude-3-7-sonnet"));
+    }
+
+    #[test]
+    fn parse_claude_model_version_handles_dash_and_dot_versions() {
+        let dashed = parse_claude_model_version("claude-sonnet-4-6-20260101").unwrap();
+        assert_eq!(dashed.family, Some(ClaudeModelFamily::Sonnet));
+        assert_eq!((dashed.major, dashed.minor), (4, 6));
+
+        let dotted = parse_claude_model_version("claude-opus-4.8").unwrap();
+        assert_eq!(dotted.family, Some(ClaudeModelFamily::Opus));
+        assert_eq!((dotted.major, dotted.minor), (4, 8));
+    }
+
+    #[test]
+    fn parse_claude_model_version_handles_legacy_order() {
+        let version = parse_claude_model_version("claude-3-5-sonnet").unwrap();
+        assert_eq!(version.family, Some(ClaudeModelFamily::Sonnet));
+        assert_eq!((version.major, version.minor), (3, 5));
     }
 
     // ---- slugify ----
@@ -1627,6 +1821,87 @@ mod tests {
             is_error: false,
         };
         assert!(!messages_have_images(&[m]));
+    }
+
+    // ---- Copilot wire routing ----
+
+    fn copilot_model(
+        id: &str,
+        vendor: Option<&str>,
+        family: Option<&str>,
+    ) -> copilot::CopilotModel {
+        copilot::CopilotModel {
+            id: id.into(),
+            name: id.into(),
+            vendor: vendor.map(|s| s.to_string()),
+            family: family.map(|s| s.to_string()),
+            capability_type: Some("chat".into()),
+            context_window: Some(123_000),
+            max_output_tokens: Some(32_000),
+            supported_reasoning_efforts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn copilot_wire_uses_cached_anthropic_metadata() {
+        let model = copilot_model("enterprise-claude-alias", Some("Anthropic"), None);
+        assert_eq!(
+            select_copilot_wire_api("enterprise-claude-alias", Some(&model)),
+            WireApi::AnthropicMessages
+        );
+    }
+
+    #[test]
+    fn copilot_wire_uses_cached_family_metadata() {
+        let model = copilot_model("corp-sonnet", None, Some("claude"));
+        assert_eq!(
+            select_copilot_wire_api("corp-sonnet", Some(&model)),
+            WireApi::AnthropicMessages
+        );
+    }
+
+    #[test]
+    fn copilot_wire_routes_claude_models_to_anthropic_messages() {
+        assert_eq!(
+            copilot_wire_api("claude-sonnet-4.6"),
+            WireApi::AnthropicMessages
+        );
+        assert_eq!(
+            copilot_wire_api("claude-opus-4.8"),
+            WireApi::AnthropicMessages
+        );
+    }
+
+    #[test]
+    fn copilot_wire_routes_gpt5_codex_and_oswe_models_to_responses() {
+        assert_eq!(copilot_wire_api("gpt-5-mini"), WireApi::OpenAiResponses);
+        assert_eq!(copilot_wire_api("gpt-5.4"), WireApi::OpenAiResponses);
+        assert_eq!(copilot_wire_api("gpt-5.2-codex"), WireApi::OpenAiResponses);
+        assert_eq!(
+            copilot_wire_api("oswe-vscode-prime"),
+            WireApi::OpenAiResponses
+        );
+    }
+
+    #[test]
+    fn copilot_wire_keeps_gemini_on_chat_completions() {
+        assert_eq!(
+            copilot_wire_api("gemini-3.5-flash"),
+            WireApi::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn copilot_chat_completions_body_drops_local_reasoning_fields() {
+        let body = copilot_chat_completions_body(
+            &[user_msg("hi")],
+            &[],
+            "gemini-3.5-flash",
+            ReasoningEffort::High,
+            &crate::config::ModelConfig::default(),
+        );
+        assert!(body.get("chat_template_kwargs").is_none());
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     // ---- Provider basics ----
