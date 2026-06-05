@@ -89,19 +89,21 @@ impl TranscriptView {
         self.projection.visible_block_layout()
     }
 
-    pub(crate) fn plan_projection(
+    pub(crate) fn plan_projection_measured(
         &mut self,
         width: u16,
         show_thinking: bool,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
+        theme: &Theme,
     ) -> crate::content::transcript_buf::ProjectionPlan {
-        self.projection.plan_projection(
-            &self.transcript.history,
+        self.projection.plan_projection_measured(
+            &mut self.transcript.history,
             width,
             show_thinking,
             scroll_target,
             viewport_rows,
+            theme,
         )
     }
 
@@ -692,11 +694,16 @@ impl TuiApp {
         let now = self.core.clock.instant_now();
         self.parser
             .sync_active_tool_elapsed_at(self.transcript.history_mut(), now);
-        let plan =
-            self.transcript
-                .plan_projection(tw as u16, show_thinking, scroll_target, viewport_rows);
-        self.prerender_transcript_tool_blocks_for_ids(tw as u16, plan.block_ids());
         let theme = self.ui.theme().clone();
+        let block_ids = self.transcript.history().order.clone();
+        self.prerender_transcript_tool_blocks_for_ids(tw as u16, &block_ids);
+        let plan = self.transcript.plan_projection_measured(
+            tw as u16,
+            show_thinking,
+            scroll_target,
+            viewport_rows,
+            &theme,
+        );
 
         let buf = self
             .ui
