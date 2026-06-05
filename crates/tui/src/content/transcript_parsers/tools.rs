@@ -156,7 +156,6 @@ fn print_tool_line(
 
     let total: usize = wlines.iter().map(|w| w.ranges.len()).sum();
     let show = total.min(MAX_TOOL_BLOCK_ROWS);
-    let selectable_source = selectable_plain_text(&summary);
     let mut rows = 0u16;
     let mut emitted = 0usize;
 
@@ -166,6 +165,7 @@ fn print_tool_line(
             .get(li)
             .map(Vec::as_slice)
             .unwrap_or(&[] as &[StyledSpan]);
+        let line_source = selectable_line_text(spans);
         for (seg_idx, &(rs, re)) in w.ranges.iter().enumerate() {
             if emitted >= show {
                 break 'outer;
@@ -177,8 +177,8 @@ fn print_tool_line(
                     out.mark_soft_wrap_continuation();
                 }
             }
-            if is_first {
-                out.set_source_text(&selectable_source);
+            if seg_idx == 0 {
+                out.set_source_text(&tool_title_source_text(name, &line_source, is_first));
             }
 
             for (sp_idx, span) in spans.iter().enumerate() {
@@ -326,19 +326,26 @@ fn print_nonselectable_styled_span(out: &mut LineBuilder, span: &StyledSpan) {
     out.pop_style();
 }
 
-fn selectable_plain_text(lines: &StyledLines) -> String {
+fn selectable_line_text(spans: &[StyledSpan]) -> String {
     let mut out = String::new();
-    for (i, line) in lines.0.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        for span in line {
-            if span.selectable {
-                out.push_str(&span.text);
-            }
+    for span in spans {
+        if span.selectable {
+            out.push_str(&span.text);
         }
     }
     out
+}
+
+fn tool_title_source_text(name: &str, line_source: &str, include_title: bool) -> String {
+    if include_title {
+        if line_source.is_empty() {
+            format!("\u{23fa} {name}")
+        } else {
+            format!("\u{23fa} {name} {line_source}")
+        }
+    } else {
+        line_source.to_string()
+    }
 }
 
 fn replay_rendered(out: &mut LineBuilder, layout: &RenderedLayout, inner_width: u16) -> u16 {

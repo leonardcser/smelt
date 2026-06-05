@@ -1793,6 +1793,72 @@ mod tests {
         assert_eq!(copy_byte_range(&buf, 6, 11), "world");
     }
 
+    fn project_tool_title(name: &str, summary: protocol::StyledLines) -> Buffer {
+        let mut transcript = Transcript::new();
+        let mut parser = StreamParser::new();
+        parser.start_tool(
+            &mut transcript.history,
+            "call-1".into(),
+            name.into(),
+            summary,
+            std::collections::HashMap::new(),
+            std::time::Instant::now(),
+        );
+
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(7), Default::default());
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(0),
+            80,
+        );
+        buf
+    }
+
+    fn copy_first_row(buf: &Buffer) -> String {
+        let end = buf.get_line(0).unwrap_or("").len();
+        copy_byte_range(buf, 0, end)
+    }
+
+    #[test]
+    fn copy_tool_title_includes_pill_name_and_summary() {
+        let buf = project_tool_title("bash", protocol::StyledLines::from_plain("ls -la"));
+
+        assert_eq!(copy_first_row(&buf), "\u{23fa} bash ls -la");
+    }
+
+    #[test]
+    fn copy_tool_title_includes_pill_and_name_when_summary_is_empty() {
+        let buf = project_tool_title("bash", protocol::StyledLines::empty());
+
+        assert_eq!(copy_first_row(&buf), "\u{23fa} bash");
+    }
+
+    #[test]
+    fn copy_tool_title_excludes_non_selectable_suffix() {
+        let summary = protocol::StyledLines(vec![vec![
+            protocol::StyledSpan {
+                text: "echo hi".into(),
+                ..Default::default()
+            },
+            protocol::StyledSpan {
+                text: "(timeout: 2m)".into(),
+                selectable: false,
+                title_suffix: true,
+                ..Default::default()
+            },
+        ]]);
+        let buf = project_tool_title("bash", summary);
+
+        assert!(buf.get_line(0).unwrap_or("").contains("timeout"));
+        assert_eq!(copy_first_row(&buf), "\u{23fa} bash echo hi");
+    }
+
     fn unselectable_meta() -> SpanMeta {
         SpanMeta {
             selectable: false,
