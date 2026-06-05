@@ -1,6 +1,6 @@
 [package]
 name = "smelt-edit"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 edition = "2021"
 description = "Editor layer over smelt-term: Window + DrawContext, Buffer dispatch, vim modes, callbacks, overlays, focus + capture + click-tracking. The Ui struct that ties windows to layout."
 license = "MIT"
