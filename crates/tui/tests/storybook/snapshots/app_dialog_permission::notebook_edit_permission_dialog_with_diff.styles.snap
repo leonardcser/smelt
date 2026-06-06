@@ -4,44 +4,15 @@ assertion_line: 385
 expression: frame.styles_text()
 ---
 dim: 80 28
-  9   0  80 fg=AnsiValue(208)
- 10   1  13 fg=AnsiValue(208)
- 11   0  80 fg=AnsiValue(244)
- 12   1  29 attrs=dim
- 13   1   4 fg=AnsiValue(244)
- 13   7   6 fg=Rgb { r: 249, g: 38, b: 114 }
- 13  13   8 fg=Rgb { r: 248, g: 248, b: 242 }
- 13  21   2 fg=Rgb { r: 249, g: 38, b: 114 }
- 13  23   3 fg=Rgb { r: 248, g: 248, b: 242 }
- 14   1   4 fg=AnsiValue(244)
- 14   7   3 fg=Rgb { r: 248, g: 248, b: 242 }
- 14  10   1 fg=Rgb { r: 249, g: 38, b: 114 }
- 14  11  13 fg=Rgb { r: 248, g: 248, b: 242 }
- 14  24  10 fg=Rgb { r: 230, g: 219, b: 116 }
- 14  34   1 fg=Rgb { r: 248, g: 248, b: 242 }
- 15   1   4 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
- 15   5   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
- 15   7   5 fg=Rgb { r: 102, g: 217, b: 239 } bg=Rgb { r: 20, g: 50, b: 20 }
- 15  12  11 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
- 15  23  55 bg=Rgb { r: 20, g: 50, b: 20 }
- 16   1   4 fg=AnsiValue(244)
- 16   7   6 fg=Rgb { r: 248, g: 248, b: 242 }
- 16  13  10 fg=Rgb { r: 230, g: 219, b: 116 }
- 16  23   5 fg=Rgb { r: 248, g: 248, b: 242 }
- 17   1   4 fg=AnsiValue(244)
- 17   7   6 fg=Rgb { r: 248, g: 248, b: 242 }
- 17  13   7 fg=Rgb { r: 230, g: 219, b: 116 }
- 17  20   3 fg=Rgb { r: 248, g: 248, b: 242 }
- 18   1   4 fg=AnsiValue(244)
- 18   7  10 fg=Rgb { r: 248, g: 248, b: 242 }
- 18  17  11 fg=Rgb { r: 230, g: 219, b: 116 }
- 18  28   2 fg=Rgb { r: 248, g: 248, b: 242 }
- 18  30  10 fg=Rgb { r: 230, g: 219, b: 116 }
- 18  40   2 fg=Rgb { r: 248, g: 248, b: 242 }
- 18  42   4 fg=Rgb { r: 230, g: 219, b: 116 }
- 18  46   2 fg=Rgb { r: 248, g: 248, b: 242 }
- 18  48   7 fg=Rgb { r: 230, g: 219, b: 116 }
- 18  55   1 fg=Rgb { r: 248, g: 248, b: 242 }
+ 14   0  80 fg=AnsiValue(208)
+ 15   1  13 fg=AnsiValue(208)
+ 16   0  80 fg=AnsiValue(244)
+ 17   1  29 attrs=dim
+ 18   1   3 fg=AnsiValue(244) bg=Rgb { r: 20, g: 50, b: 20 }
+ 18   4   2 fg=Green bg=Rgb { r: 20, g: 50, b: 20 }
+ 18   6   5 fg=Rgb { r: 102, g: 217, b: 239 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 18  11  11 fg=Rgb { r: 248, g: 248, b: 242 } bg=Rgb { r: 20, g: 50, b: 20 }
+ 18  22  56 bg=Rgb { r: 20, g: 50, b: 20 }
  19   0  80 fg=AnsiValue(244)
  20   1   6 attrs=dim
  21   0   1 bg=AnsiValue(237)

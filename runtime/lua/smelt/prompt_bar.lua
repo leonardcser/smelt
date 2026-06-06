@@ -59,12 +59,6 @@ local function stash_row()
     text = text,
     highlights = {
       {
-        bytes_start = 0,
-        bytes_end = #indent,
-        style = { fg = "Comment" },
-        selectable = false,
-      },
-      {
         bytes_start = #indent,
         bytes_end = #text,
         style = { fg = "Comment" },

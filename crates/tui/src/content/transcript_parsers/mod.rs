@@ -721,7 +721,7 @@ mod tests {
         );
         assert_eq!(
             display[0].source_text.as_deref(),
-            Some("echo hello && echo world && echo done"),
+            Some("\u{23fa} bash echo hello && echo world && echo done"),
         );
         assert!(!display[0].soft_wrapped);
         for line in &display[1..] {

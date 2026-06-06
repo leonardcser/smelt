@@ -1,6 +1,34 @@
 -- Built-in edit_notebook tool. Replace/insert/delete a Jupyter cell with
 -- staleness preflight and per-path flock.
 
+local function preview_layout(meta)
+  local lang = meta.syntax_ext
+  local path = meta.path or ""
+  local body
+  if meta.edit_mode == "insert" then
+    body = smelt.layout.file_view({
+      content = meta.new_source or "",
+      path    = path .. "." .. (lang or "py"),
+      lang    = lang,
+    })
+  else
+    body = smelt.layout.diff({
+      old = meta.old_source or "",
+      new = meta.new_source or "",
+      path = lang and (path .. "." .. lang) or path,
+      lang = lang,
+    })
+  end
+
+  local title = meta.title or ""
+  if title == "" then
+    return body
+  end
+  local title_buf = smelt.buf.new({ readonly = true })
+  title_buf:styled({ { { text = title, style = { dim = true } } } })
+  return smelt.layout.vbox({ smelt.layout.leaf(title_buf), body })
+end
+
 smelt.tools.register({
   name = "edit_notebook",
   description = "Edit a Jupyter notebook (.ipynb) cell. Supports replacing, inserting, and deleting cells. Identify cells by cell_id or cell_number (0-indexed).",
@@ -53,21 +81,18 @@ smelt.tools.register({
       return smelt.layout.tool_output(output, ctx)
     end
     local meta = output.metadata or {}
-    if meta.edit_mode == "insert" then
-      return smelt.layout.file_view({
-        content = meta.new_source or "",
-        path    = (meta.path or "") .. ".py",
-      })
-    end
-    return smelt.layout.diff({
-      old = meta.old_source or "",
-      new = meta.new_source or "",
-      path = meta.path or "",
-    })
+    return preview_layout(meta)
   end,
   paths_for_workspace = function(args)
     local p = args.notebook_path or ""
     return p ~= "" and { p } or {}
+  end,
+  preview = function(args)
+    local meta = smelt.notebook.preview_data(args)
+    if not meta then
+      return nil
+    end
+    return preview_layout(meta)
   end,
   execute = function(args)
     local path = args.notebook_path or ""
