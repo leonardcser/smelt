@@ -145,7 +145,7 @@ pub async fn resolve(
         if ids.is_empty() {
             ids = engine::auth::refresh_models_cache(
                 engine::auth::AuthProvider::Copilot,
-                &http_client,
+                http_client,
             )
             .await;
         }
