@@ -383,7 +383,11 @@ pub fn render_notebook_text(path: &str, offset: usize, limit: usize) -> Result<S
     render_notebook_text_from_raw(&raw, offset, limit)
 }
 
-pub fn render_notebook_text_from_raw(raw: &str, offset: usize, limit: usize) -> Result<String, String> {
+pub fn render_notebook_text_from_raw(
+    raw: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<String, String> {
     let r = render_notebook_raw(raw, offset, limit);
     if r.is_error {
         Err(r.content)

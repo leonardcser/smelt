@@ -591,7 +591,11 @@ pub struct EditFileOutcome {
     pub new_content: String,
 }
 
-pub fn checked_write_file(path: &str, content: &str, cache: &FileStateCache) -> Result<usize, String> {
+pub fn checked_write_file(
+    path: &str,
+    content: &str,
+    cache: &FileStateCache,
+) -> Result<usize, String> {
     if path.is_empty() {
         return Err("missing required parameter: file_path".into());
     }
@@ -609,7 +613,10 @@ pub fn checked_write_file(path: &str, content: &str, cache: &FileStateCache) -> 
         None
     };
 
-    if let Some(parent) = Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()) {
+    if let Some(parent) = Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 

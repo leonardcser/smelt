@@ -104,8 +104,9 @@ pub(super) fn register(
             "__start_read",
             &["task_id", "path", "offset", "limit"],
             move |_, (task_id, path, offset, limit): (u64, String, u64, u64)| -> LuaResult<()> {
-                sink.clone().spawn_blocking_resolve(task_id, move || {
-                    match std::fs::read_to_string(&path) {
+                sink.clone().spawn_blocking_resolve(
+                    task_id,
+                    move || match std::fs::read_to_string(&path) {
                         Ok(raw) => match smelt_core::notebook::render_notebook_text_from_raw(
                             &raw,
                             offset as usize,
@@ -122,8 +123,8 @@ pub(super) fn register(
                             Err(err) => serde_json::json!({ "err": err }),
                         },
                         Err(err) => serde_json::json!({ "err": err.to_string() }),
-                    }
-                });
+                    },
+                );
                 Ok(())
             },
         )?;
