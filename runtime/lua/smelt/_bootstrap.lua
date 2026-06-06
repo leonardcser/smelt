@@ -412,22 +412,73 @@ end
 -- Read `path` off the main thread. Must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
 -- task runtime). Returns `(content, nil)` on success or `(nil, err)` on
--- failure - same convention as `smelt.fs.read`.
----@type fun(path: string): string?, string?
+-- failure - same convention as `smelt.fs.read`. Third return value is the
+-- file mtime in milliseconds when available.
+---@type fun(path: string): string?, string?, integer?
 function smelt.fs.read_async(path)
   local result = smelt.task.external(function(id) smelt.fs.__start_read(id, path) end)
-  if result.content ~= nil then return result.content, nil end
-  return nil, result.err
+  if result.content ~= nil then return result.content, nil, result.mtime_ms end
+  return nil, result.err, nil
 end
 
 -- Write `contents` to `path` off the main thread. Same yielding rules as
--- `smelt.fs.read_async`. Returns `(true, nil)` on success or
--- `(false, err)` on failure - mirrors `smelt.fs.write`.
----@type fun(path: string, contents: string): boolean, string?
+-- `smelt.fs.read_async`. Returns `(true, nil, mtime_ms)` on success or
+-- `(false, err, nil)` on failure - mirrors `smelt.fs.write`.
+---@type fun(path: string, contents: string): boolean, string?, integer?
 function smelt.fs.write_async(path, contents)
   local result = smelt.task.external(function(id) smelt.fs.__start_write(id, path, contents) end)
+  if result.ok then return true, nil, result.mtime_ms end
+  return false, result.err, nil
+end
+
+-- Create `path` and parents off the main thread. Same return shape as
+-- `smelt.fs.mkdir_all`.
+---@type fun(path: string): boolean, string?
+function smelt.fs.mkdir_all_async(path)
+  local result = smelt.task.external(function(id) smelt.fs.__start_mkdir_all(id, path) end)
   if result.ok then return true, nil end
   return false, result.err
+end
+
+-- Find paths matching `pattern` under `path` off the main thread. `opts`
+-- accepts `max`, `max_scanned`, and `timeout_ms`. Returns a table with
+-- `{ paths, scanned, truncated, timed_out }` or `(nil, err)`.
+---@type fun(pattern: string, path: string?, opts: table?): table?, string?
+function smelt.fs.glob_async(pattern, path, opts)
+  return external_or_err(function(id) smelt.fs.__start_glob(id, pattern, path or "", opts or {}) end)
+end
+
+-- Read and base64-encode an image off the main thread. Same return shape as
+-- `smelt.image.read_as_data_url`.
+---@type fun(path: string): string?, string?
+function smelt.image.read_as_data_url_async(path)
+  local result = smelt.task.external(function(id) smelt.image.__start_read_as_data_url(id, path) end)
+  if result.url ~= nil then return result.url, nil end
+  return nil, result.err
+end
+
+if smelt.notebook then
+  -- Render a notebook off the main thread. Same return shape as
+  -- `smelt.notebook.read`, plus raw notebook JSON and mtime on success.
+  ---@type fun(path: string, offset: integer, limit: integer): string?, string?, string?, integer?
+  function smelt.notebook.read_async(path, offset, limit)
+    local result = smelt.task.external(function(id)
+      smelt.notebook.__start_read(id, path, offset, limit)
+    end)
+    if result.content ~= nil then return result.content, nil, result.raw, result.mtime_ms end
+    return nil, result.err, nil, nil
+  end
+
+  -- Apply a notebook edit off the main thread. Same return shape as
+  -- `smelt.notebook.apply_edit`.
+  ---@type fun(args: table): table?, string?
+  function smelt.notebook.apply_edit_async(args)
+    local result = smelt.task.external(function(id)
+      smelt.notebook.__start_apply_edit(id, args or {})
+    end)
+    if result.err ~= nil then return nil, result.err end
+    return { message = result.message, metadata = result.metadata }, nil
+  end
 end
 
 -- Run `cmd` with `args` off the main thread. Yields the calling

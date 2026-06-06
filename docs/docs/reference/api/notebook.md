@@ -14,6 +14,15 @@ fun(args: table): any?, string?
 
 Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file. Returns `(message_table, nil)` on success or `(nil, err_msg)` on failure. Callers are expected to hold the per-path advisory flock.
 
+## `smelt.notebook.apply_edit_async`
+
+```lua
+fun(args: table): table?, string?
+```
+
+Apply a notebook edit off the main thread. Same return shape as
+`smelt.notebook.apply_edit`.
+
 ## `smelt.notebook.is_notebook_path`
 
 ```lua
@@ -45,4 +54,13 @@ fun(path: string, offset: integer, limit: integer): string?, string?
 ```
 
 Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure - same output the built-in `read_file` tool produces.
+
+## `smelt.notebook.read_async`
+
+```lua
+fun(path: string, offset: integer, limit: integer): string?, string?, string?, integer?
+```
+
+Render a notebook off the main thread. Same return shape as
+`smelt.notebook.read`, plus raw notebook JSON and mtime on success.
 

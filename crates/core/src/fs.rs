@@ -2,6 +2,7 @@
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     std::fs::read_to_string(path)
@@ -91,10 +92,28 @@ pub(crate) struct GlobMatch {
     pub path: String,
 }
 
+pub(crate) struct GlobSearch {
+    pub matches: Vec<GlobMatch>,
+    pub scanned: usize,
+    pub match_limit_hit: bool,
+    pub scan_limit_hit: bool,
+    pub timed_out: bool,
+}
+
 /// Walk the narrowest literal subtree implied by `pattern`, honouring
 /// `.gitignore`, and match against paths relative to `search_dir`. Stops after
 /// `max` matches; returns unsorted.
 pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<GlobMatch>, String> {
+    Ok(glob_with_limits(pattern, search_dir, max, None, None)?.matches)
+}
+
+pub(crate) fn glob_with_limits(
+    pattern: &str,
+    search_dir: &str,
+    max: usize,
+    max_scanned: Option<usize>,
+    timeout: Option<Duration>,
+) -> Result<GlobSearch, String> {
     let matcher = match globset::Glob::new(pattern) {
         Ok(g) => g.compile_matcher(),
         Err(e) => return Err(format!("invalid glob pattern: {e}")),
@@ -104,18 +123,42 @@ pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<Gl
     } else {
         Path::new(search_dir)
     };
+    let deadline = timeout.map(|d| Instant::now() + d);
+    let scan_limit = max_scanned.unwrap_or(usize::MAX);
+
+    if max == 0 {
+        return Ok(GlobSearch {
+            matches: Vec::new(),
+            scanned: 0,
+            match_limit_hit: true,
+            scan_limit_hit: false,
+            timed_out: false,
+        });
+    }
 
     if !has_glob_meta(pattern) {
         let path = dir.join(pattern);
         if !path.is_file() || !matcher.is_match(Path::new(pattern)) {
-            return Ok(Vec::new());
+            return Ok(GlobSearch {
+                matches: Vec::new(),
+                scanned: 1,
+                match_limit_hit: false,
+                scan_limit_hit: false,
+                timed_out: false,
+            });
         }
         let meta = path.metadata().map_err(|e| e.to_string())?;
         let mtime = meta.modified().map_err(|e| e.to_string())?;
-        return Ok(vec![GlobMatch {
-            mtime,
-            path: path.display().to_string(),
-        }]);
+        return Ok(GlobSearch {
+            matches: vec![GlobMatch {
+                mtime,
+                path: path.display().to_string(),
+            }],
+            scanned: 1,
+            match_limit_hit: false,
+            scan_limit_hit: false,
+            timed_out: false,
+        });
     }
 
     let walk_root = match literal_prefix_before_meta(pattern) {
@@ -123,7 +166,13 @@ pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<Gl
         None => dir.to_path_buf(),
     };
     if !walk_root.exists() {
-        return Ok(Vec::new());
+        return Ok(GlobSearch {
+            matches: Vec::new(),
+            scanned: 0,
+            match_limit_hit: false,
+            scan_limit_hit: false,
+            timed_out: false,
+        });
     }
 
     let walker = ignore::WalkBuilder::new(&walk_root)
@@ -132,11 +181,24 @@ pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<Gl
         .build();
 
     let mut out = Vec::new();
+    let mut scanned = 0usize;
+    let mut match_limit_hit = false;
+    let mut scan_limit_hit = false;
+    let mut timed_out = false;
     for entry in walker {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            timed_out = true;
+            break;
+        }
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
+        if scanned >= scan_limit {
+            scan_limit_hit = true;
+            break;
+        }
+        scanned += 1;
         let path = entry.path();
         let relative = path.strip_prefix(dir).unwrap_or(path);
         if !matcher.is_match(relative) {
@@ -151,10 +213,17 @@ pub(crate) fn glob(pattern: &str, search_dir: &str, max: usize) -> Result<Vec<Gl
             }
         }
         if out.len() >= max {
+            match_limit_hit = true;
             break;
         }
     }
-    Ok(out)
+    Ok(GlobSearch {
+        matches: out,
+        scanned,
+        match_limit_hit,
+        scan_limit_hit,
+        timed_out,
+    })
 }
 
 fn has_glob_meta(pattern: &str) -> bool {
@@ -216,6 +285,27 @@ mod tests {
         let matches = glob("crates/term/**/*.rs", tmp.path().to_str().unwrap(), 200).unwrap();
         assert_eq!(matches.len(), 1);
         assert!(matches[0].path.ends_with("crates/term/src/lib.rs"));
+    }
+
+    #[test]
+    fn glob_with_limits_stops_after_scan_cap() {
+        let tmp = TempDir::new().unwrap();
+        mkdir_all(tmp.path().join("src")).unwrap();
+        write(tmp.path().join("src/a.txt"), "a").unwrap();
+        write(tmp.path().join("src/b.txt"), "b").unwrap();
+
+        let result = glob_with_limits(
+            "**/*.missing",
+            tmp.path().to_str().unwrap(),
+            200,
+            Some(1),
+            None,
+        )
+        .unwrap();
+        assert!(result.matches.is_empty());
+        assert!(result.scan_limit_hit);
+        assert!(!result.match_limit_hit);
+        assert_eq!(result.scanned, 1);
     }
 
     #[test]
@@ -320,11 +410,13 @@ fn normalize_path(p: &str) -> String {
 pub fn file_mtime_ms(path: &str) -> std::io::Result<u64> {
     let meta = std::fs::metadata(path)?;
     let mtime = meta.modified()?;
-    let ms = mtime
-        .duration_since(UNIX_EPOCH)
+    Ok(system_time_ms(mtime))
+}
+
+pub fn system_time_ms(time: std::time::SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    Ok(ms)
+        .unwrap_or(0)
 }
 
 /// Shared cache of recent file observations. Arc-backed, cheap to clone.
@@ -375,6 +467,37 @@ impl FileStateCache {
                 content,
                 mtime_ms,
                 read_range: Some(range),
+            },
+        );
+    }
+
+    /// Cache a just-read file with an mtime already observed by the caller.
+    pub fn record_read_with_mtime(
+        &self,
+        path: &str,
+        content: String,
+        range: (usize, usize),
+        mtime_ms: u64,
+    ) {
+        self.set(
+            path,
+            FileState {
+                content,
+                mtime_ms,
+                read_range: Some(range),
+            },
+        );
+    }
+
+    /// Cache a just-written file (dedup-eligible only after a later read) with
+    /// an mtime already observed by the caller.
+    pub fn record_write_with_mtime(&self, path: &str, content: String, mtime_ms: u64) {
+        self.set(
+            path,
+            FileState {
+                content,
+                mtime_ms,
+                read_range: None,
             },
         );
     }
@@ -461,6 +584,89 @@ pub fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option
             ))
         }
     }
+}
+
+pub struct EditFileOutcome {
+    pub old_content: String,
+    pub new_content: String,
+}
+
+pub fn checked_write_file(path: &str, content: &str, cache: &FileStateCache) -> Result<usize, String> {
+    if path.is_empty() {
+        return Err("missing required parameter: file_path".into());
+    }
+
+    let exists = Path::new(path).exists();
+    let _lock = if exists {
+        if !cache.has(path) {
+            return Err("File already exists. Use edit_file to modify existing files, or read_file then write_file to replace.".into());
+        }
+        if let Some(err) = staleness_error(cache, path, "file") {
+            return Err(err);
+        }
+        Some(try_flock(path)?)
+    } else {
+        None
+    };
+
+    if let Some(parent) = Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    std::fs::write(path, content.as_bytes()).map_err(|e| e.to_string())?;
+    let mtime_ms = file_mtime_ms(path).unwrap_or(0);
+    cache.record_write_with_mtime(path, content.to_string(), mtime_ms);
+    Ok(content.len())
+}
+
+pub fn checked_edit_file(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+    replace_all: bool,
+    cache: &FileStateCache,
+) -> Result<EditFileOutcome, String> {
+    if path.is_empty() {
+        return Err("missing required parameter: file_path".into());
+    }
+    if let Some(err) = staleness_error(cache, path, "file") {
+        return Err(err);
+    }
+
+    let _lock = try_flock(path)?;
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+
+    if old_string == new_string {
+        return Err("old_string and new_string are identical".into());
+    }
+    if old_string.is_empty() {
+        return Err("old_string not found in file".into());
+    }
+
+    let count = content.matches(old_string).count();
+    if count == 0 {
+        return Err("old_string not found in file".into());
+    }
+    if count > 1 && !replace_all {
+        return Err(format!(
+            "old_string found {count} times - must be unique, or set replace_all to true"
+        ));
+    }
+
+    let new_content = if replace_all {
+        content.replace(old_string, new_string)
+    } else {
+        content.replacen(old_string, new_string, 1)
+    };
+
+    std::fs::write(path, new_content.as_bytes()).map_err(|e| e.to_string())?;
+    let mtime_ms = file_mtime_ms(path).unwrap_or(0);
+    cache.record_write_with_mtime(path, new_content.clone(), mtime_ms);
+
+    Ok(EditFileOutcome {
+        old_content: content,
+        new_content,
+    })
 }
 
 // ── Advisory file locking ─────────────────────────────────────────────────

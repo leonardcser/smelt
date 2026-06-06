@@ -640,6 +640,8 @@ Sync filesystem primitives.
   Return `true` if a filesystem entry exists at `p`.
 - `smelt.fs.glob` :: `fun(pattern: string, path: string?, opts: table?): string[]?, string?`
   Find paths matching `pattern` under `path` (defaults to cwd).
+- `smelt.fs.glob_async` :: `fun(pattern: string, path: string?, opts: table?): table?, string?`
+  Find paths matching `pattern` under `path` off the main thread.
 - `smelt.fs.invalidate_workspace_files` :: `fun(): nil`
   Clear the cached workspace file list.
 - `smelt.fs.is_dir` :: `fun(p: string): boolean`
@@ -650,9 +652,11 @@ Sync filesystem primitives.
   Create directory `p` (parents must exist).
 - `smelt.fs.mkdir_all` :: `fun(p: string): boolean, string?`
   Create directory `p` along with any missing parent directories.
+- `smelt.fs.mkdir_all_async` :: `fun(path: string): boolean, string?`
+  Create `path` and parents off the main thread.
 - `smelt.fs.read` :: `fun(p: string): string?, string?`
   Read `p` into a string.
-- `smelt.fs.read_async` :: `fun(path: string): string?, string?`
+- `smelt.fs.read_async` :: `fun(path: string): string?, string?, integer?`
   Read `path` off the main thread.
 - `smelt.fs.read_dir` :: `fun(p: string): string[]?, string?`
   List the immediate entries of directory `p`.
@@ -676,7 +680,7 @@ Sync filesystem primitives.
   Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically.
 - `smelt.fs.write` :: `fun(p: string, contents: string): boolean, string?`
   Write `contents` to file `p`, creating it if necessary.
-- `smelt.fs.write_async` :: `fun(path: string, contents: string): boolean, string?`
+- `smelt.fs.write_async` :: `fun(path: string, contents: string): boolean, string?, integer?`
   Write `contents` to `path` off the main thread.
 
 #### `smelt.fs.file_state`
@@ -691,6 +695,8 @@ Cached file-state tracker used by tools to detect external modifications between
   Return the modification time of `p` in milliseconds since the UNIX epoch.
 - `smelt.fs.file_state.record_read` :: `fun(p: string, content: string, offset: integer, limit: integer): nil`
   Record that `p` was read at byte range `[offset, offset+limit)` with `content` so subsequent staleness checks know what the agent has seen.
+- `smelt.fs.file_state.record_read_with_mtime` :: `fun(p: string, content: string, offset: integer, limit: integer, mtime_ms: integer): nil`
+  Record that `p` was read with a caller-provided mtime in milliseconds, avoiding an extra stat call.
 - `smelt.fs.file_state.record_write` :: `fun(p: string, content: string): nil`
   Record that `p` was written with `content` so subsequent staleness checks see the latest state.
 - `smelt.fs.file_state.staleness_error` :: `fun(p: string, noun: string?): string?`
@@ -757,6 +763,8 @@ Image file detection and base64 data-URL loading.
   Return `true` if `p` looks like an image file (matched by extension/sniffing).
 - `smelt.image.read_as_data_url` :: `fun(p: string): string?, string?`
   Read the image at `p` and encode it as a `data:` URL.
+- `smelt.image.read_as_data_url_async` :: `fun(path: string): string?, string?`
+  Read and base64-encode an image off the main thread.
 
 #### `smelt.layout`
 
@@ -1229,6 +1237,8 @@ Parse, read, and apply notebook cell edits, plus compute preview data for the ed
 
 - `smelt.notebook.apply_edit` :: `fun(args: table): any?, string?`
   Apply a notebook edit (cell insert/replace/delete) described by `args` and persist the new file.
+- `smelt.notebook.apply_edit_async` :: `fun(args: table): table?, string?`
+  Apply a notebook edit off the main thread.
 - `smelt.notebook.is_notebook_path` :: `fun(path: string): boolean`
   Return `true` if `path` looks like a Jupyter notebook (`.ipynb` extension).
 - `smelt.notebook.parse` :: `fun(json: string): table?, string?`
@@ -1237,6 +1247,8 @@ Parse, read, and apply notebook cell edits, plus compute preview data for the ed
   Compute the preview payload for an `edit_notebook` call.
 - `smelt.notebook.read` :: `fun(path: string, offset: integer, limit: integer): string?, string?`
   Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells.
+- `smelt.notebook.read_async` :: `fun(path: string, offset: integer, limit: integer): string?, string?, string?, integer?`
+  Render a notebook off the main thread.
 
 #### `smelt.notify`
 

@@ -19,6 +19,12 @@ fs.exists = nil
 ---@type fun(pattern: string, path: string?, opts: table?): string[]?, string?
 fs.glob = nil
 
+--- Find paths matching `pattern` under `path` off the main thread. `opts`
+--- accepts `max`, `max_scanned`, and `timeout_ms`. Returns a table with
+--- `{ paths, scanned, truncated, timed_out }` or `(nil, err)`.
+---@type fun(pattern: string, path: string?, opts: table?): table?, string?
+fs.glob_async = nil
+
 --- Clear the cached workspace file list. The next `workspace_file_matches` call rebuilds it for the current cwd.
 ---@type fun(): nil
 fs.invalidate_workspace_files = nil
@@ -39,6 +45,12 @@ fs.mkdir = nil
 ---@type fun(p: string): boolean, string?
 fs.mkdir_all = nil
 
+--- Create `path` and parents off the main thread. Same return shape as
+--- `smelt.fs.mkdir_all`.
+---@see smelt.fs.mkdir_all
+---@type fun(path: string): boolean, string?
+fs.mkdir_all_async = nil
+
 --- Read `p` into a string. Returns `(content, nil)` on success or `(nil, err_string)` on failure.
 ---@type fun(p: string): string?, string?
 fs.read = nil
@@ -46,9 +58,10 @@ fs.read = nil
 --- Read `path` off the main thread. Must be called from inside
 --- `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
 --- task runtime). Returns `(content, nil)` on success or `(nil, err)` on
---- failure - same convention as `smelt.fs.read`.
+--- failure - same convention as `smelt.fs.read`. Third return value is the
+--- file mtime in milliseconds when available.
 ---@see smelt.fs.read
----@type fun(path: string): string?, string?
+---@type fun(path: string): string?, string?, integer?
 fs.read_async = nil
 
 --- List the immediate entries of directory `p`. Returns `(entries, nil)` on success or `(nil, err_string)` on failure.
@@ -101,11 +114,11 @@ fs.workspace_files = nil
 fs.write = nil
 
 --- Write `contents` to `path` off the main thread. Same yielding rules as
---- `smelt.fs.read_async`. Returns `(true, nil)` on success or
---- `(false, err)` on failure - mirrors `smelt.fs.write`.
+--- `smelt.fs.read_async`. Returns `(true, nil, mtime_ms)` on success or
+--- `(false, err, nil)` on failure - mirrors `smelt.fs.write`.
 ---@see smelt.fs.read_async
 ---@see smelt.fs.write
----@type fun(path: string, contents: string): boolean, string?
+---@type fun(path: string, contents: string): boolean, string?, integer?
 fs.write_async = nil
 
 return fs

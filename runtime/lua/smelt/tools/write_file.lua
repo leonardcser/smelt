@@ -1,20 +1,5 @@
 -- Built-in write_file tool. Refuses to overwrite unread files and detects mtime drift.
 
-local UNREAD_OVERWRITE_ERR = "File already exists. Use edit_file to modify existing files, or read_file then write_file to replace."
-
-local function preflight_message(file_path)
-  if file_path == "" then
-    return nil
-  end
-  if not smelt.fs.exists(file_path) then
-    return nil
-  end
-  if not smelt.fs.file_state.has(file_path) then
-    return UNREAD_OVERWRITE_ERR
-  end
-  return smelt.fs.file_state.staleness_error(file_path, "file")
-end
-
 smelt.tools.register({
   name = "write_file",
   description = "Writes a file to the local filesystem. This tool will overwrite the existing file if there is one at the provided path.",
@@ -37,9 +22,6 @@ smelt.tools.register({
   },
   summary = function(args)
     return smelt.path.display(args.file_path or "")
-  end,
-  preflight = function(args)
-    return preflight_message(args.file_path or "")
   end,
   render = function(args, output, ctx)
     if output.is_error then
@@ -74,41 +56,13 @@ smelt.tools.register({
       }
     end
 
-    local exists = smelt.fs.exists(path)
-    local lock = nil
-    if exists then
-      if not smelt.fs.file_state.has(path) then
-        return { content = UNREAD_OVERWRITE_ERR, is_error = true }
-      end
-      local stale = smelt.fs.file_state.staleness_error(path, "file")
-      if stale then
-        return { content = stale, is_error = true }
-      end
-      local guard, err = smelt.fs.try_flock(path)
-      if not guard then
-        return { content = err or "could not lock file", is_error = true }
-      end
-      lock = guard
+    local result = smelt.task.external(function(id)
+      smelt.fs.__start_write_file(id, path, content)
+    end)
+    if result.err then
+      return { content = result.err, is_error = true }
     end
 
-    local parent = smelt.path.parent(path)
-    if parent and parent ~= "" then
-      local _, mkdir_err = smelt.fs.mkdir_all(parent)
-      if mkdir_err then
-        return { content = mkdir_err, is_error = true }
-      end
-    end
-
-    local len = #content
-    local _, write_err = smelt.fs.write(path, content)
-    if write_err then
-      if lock then lock:release() end
-      return { content = write_err, is_error = true }
-    end
-
-    smelt.fs.file_state.record_write(path, content)
-    if lock then lock:release() end
-
-    return string.format("wrote %d bytes to %s", len, smelt.path.display(path))
+    return string.format("wrote %d bytes to %s", result.bytes or #content, smelt.path.display(path))
   end,
 })

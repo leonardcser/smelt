@@ -48,13 +48,39 @@ smelt.tools.register({
       return { content = "missing required parameter: pattern", is_error = true }
     end
     local path = args.path or ""
-    local results, err = smelt.fs.glob(pattern, path, { max = 200 })
+    local max = tonumber(args.max) or 200
+    local timeout_ms = tonumber(args.timeout_ms) or 30000
+    local results, err = smelt.fs.glob_async(pattern, path, {
+      max = max,
+      max_scanned = tonumber(args.max_scanned) or 100000,
+      timeout_ms = timeout_ms,
+    })
     if err then
       return { content = err, is_error = true }
     end
-    if not results or #results == 0 then
+    local paths = results and results.paths or {}
+    if results and results.timed_out then
+      return {
+        content = string.format(
+          "timed out after %.1fs while scanning %d files%s",
+          timeout_ms / 1000,
+          results.scanned or 0,
+          #paths > 0 and ("\n" .. table.concat(paths, "\n")) or ""
+        ),
+        is_error = true,
+      }
+    end
+    if results and results.scan_limit_hit then
+      local suffix = #paths > 0 and ("\n" .. table.concat(paths, "\n")) or ""
+      return string.format("search stopped after scanning %d files%s", results.scanned or 0, suffix)
+    end
+    if results and results.truncated then
+      local suffix = #paths > 0 and ("\n" .. table.concat(paths, "\n")) or ""
+      return string.format("showing first %d matches%s", #paths, suffix)
+    end
+    if #paths == 0 then
       return "no matches found"
     end
-    return table.concat(results, "\n")
+    return table.concat(paths, "\n")
   end,
 })

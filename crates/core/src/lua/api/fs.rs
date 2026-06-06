@@ -276,6 +276,23 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
 
     file_state.fn_(
+        "record_read_with_mtime",
+        "Record that `p` was read with a caller-provided mtime in milliseconds, avoiding an extra stat call.",
+        &["p", "content", "offset", "limit", "mtime_ms"],
+        |_, (p, content, offset, limit, mtime_ms): (String, String, u64, u64, u64)| {
+            crate::host::try_with_core(|core| {
+                core.files.record_read_with_mtime(
+                    &p,
+                    content,
+                    (offset as usize, limit as usize),
+                    mtime_ms,
+                );
+            });
+            Ok(())
+        },
+    )?;
+
+    file_state.fn_(
         "record_write",
         "Record that `p` was written with `content` so subsequent staleness checks see the latest state.",
         &["p", "content"],
@@ -326,7 +343,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match std::fs::read_to_string(&path) {
-                        Ok(content) => serde_json::json!({ "content": content }),
+                        Ok(content) => {
+                            let mtime_ms = crate::fs::file_mtime_ms(&path).unwrap_or(0);
+                            serde_json::json!({ "content": content, "mtime_ms": mtime_ms })
+                        }
                         Err(err) => serde_json::json!({ "err": err.to_string() }),
                     }
                 });
@@ -344,8 +364,146 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let bytes = contents.as_bytes().to_vec();
                 s.resume_sink().spawn_blocking_resolve(task_id, move || {
                     match std::fs::write(&path, &bytes) {
+                        Ok(()) => {
+                            let mtime_ms = crate::fs::file_mtime_ms(&path).unwrap_or(0);
+                            serde_json::json!({ "ok": true, "mtime_ms": mtime_ms })
+                        }
+                        Err(err) => serde_json::json!({ "err": err.to_string() }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.private_fn(
+            "__start_write_file",
+            &["task_id", "path", "contents"],
+            move |_, (task_id, path, contents): (u64, String, String)| -> LuaResult<()> {
+                let files = crate::host::try_with_core(|core| core.files.clone());
+                let Some(files) = files else {
+                    s.resume_sink().resolve_json(
+                        task_id,
+                        serde_json::json!({ "err": "write_file: no app context" }),
+                    );
+                    return Ok(());
+                };
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match crate::fs::checked_write_file(&path, &contents, &files) {
+                        Ok(bytes) => serde_json::json!({ "bytes": bytes }),
+                        Err(err) => serde_json::json!({ "err": err }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.private_fn(
+            "__start_edit_file",
+            &["task_id", "path", "old_string", "new_string", "replace_all"],
+            move |_,
+                  (task_id, path, old_string, new_string, replace_all): (
+                u64,
+                String,
+                String,
+                String,
+                bool,
+            )|
+                  -> LuaResult<()> {
+                let files = crate::host::try_with_core(|core| core.files.clone());
+                let Some(files) = files else {
+                    s.resume_sink().resolve_json(
+                        task_id,
+                        serde_json::json!({ "err": "edit_file: no app context" }),
+                    );
+                    return Ok(());
+                };
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match crate::fs::checked_edit_file(
+                        &path,
+                        &old_string,
+                        &new_string,
+                        replace_all,
+                        &files,
+                    ) {
+                        Ok(outcome) => serde_json::json!({
+                            "old_content": outcome.old_content,
+                            "new_content": outcome.new_content,
+                        }),
+                        Err(err) => serde_json::json!({ "err": err }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.private_fn(
+            "__start_mkdir_all",
+            &["task_id", "path"],
+            move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match std::fs::create_dir_all(&path) {
                         Ok(()) => serde_json::json!({ "ok": true }),
                         Err(err) => serde_json::json!({ "err": err.to_string() }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        fs.private_fn(
+            "__start_glob",
+            &["task_id", "pattern", "path", "opts"],
+            move |_,
+                  (task_id, pattern, path, opts): (u64, String, String, Option<mlua::Table>)|
+                  -> LuaResult<()> {
+                let max = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<u64>>("max").ok().flatten())
+                    .map(|n| n as usize)
+                    .unwrap_or(200);
+                let max_scanned = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<u64>>("max_scanned").ok().flatten())
+                    .map(|n| n as usize)
+                    .unwrap_or(100_000);
+                let timeout = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<Option<u64>>("timeout_ms").ok().flatten())
+                    .map(std::time::Duration::from_millis)
+                    .unwrap_or_else(|| std::time::Duration::from_secs(30));
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match crate::fs::glob_with_limits(
+                        &pattern,
+                        &path,
+                        max,
+                        Some(max_scanned),
+                        Some(timeout),
+                    ) {
+                        Ok(mut search) => {
+                            search.matches.sort_by_key(|m| std::cmp::Reverse(m.mtime));
+                            let paths: Vec<String> =
+                                search.matches.into_iter().map(|m| m.path).collect();
+                            serde_json::json!({
+                                "paths": paths,
+                                "scanned": search.scanned,
+                                "truncated": search.match_limit_hit,
+                                "scan_limit_hit": search.scan_limit_hit,
+                                "timed_out": search.timed_out,
+                            })
+                        }
+                        Err(err) => serde_json::json!({ "err": err }),
                     }
                 });
                 Ok(())

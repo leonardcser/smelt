@@ -379,7 +379,12 @@ pub fn preview_render_data(args: &HashMap<String, Value>) -> Option<NotebookRend
 
 /// Render notebook cells as line-numbered human-readable text (same format as `read_file` for `.ipynb`).
 pub fn render_notebook_text(path: &str, offset: usize, limit: usize) -> Result<String, String> {
-    let r = read_notebook(path, offset, limit);
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    render_notebook_text_from_raw(&raw, offset, limit)
+}
+
+pub fn render_notebook_text_from_raw(raw: &str, offset: usize, limit: usize) -> Result<String, String> {
+    let r = render_notebook_raw(raw, offset, limit);
     if r.is_error {
         Err(r.content)
     } else {
@@ -414,13 +419,18 @@ impl NbResult {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_notebook(path: &str, offset: usize, limit: usize) -> NbResult {
     let raw = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => return NbResult::err(e.to_string()),
     };
 
-    let nb: Value = match serde_json::from_str(&raw) {
+    render_notebook_raw(&raw, offset, limit)
+}
+
+fn render_notebook_raw(raw: &str, offset: usize, limit: usize) -> NbResult {
+    let nb: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => return NbResult::err(format!("failed to parse notebook JSON: {e}")),
     };

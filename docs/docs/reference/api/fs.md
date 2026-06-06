@@ -30,6 +30,16 @@ fun(pattern: string, path: string?, opts: table?): string[]?, string?
 
 Find paths matching `pattern` under `path` (defaults to cwd). Returns the matches sorted newest-first, capped at `opts.max` (default 200). On error returns `(nil, err_string)`.
 
+## `smelt.fs.glob_async`
+
+```lua
+fun(pattern: string, path: string?, opts: table?): table?, string?
+```
+
+Find paths matching `pattern` under `path` off the main thread. `opts`
+accepts `max`, `max_scanned`, and `timeout_ms`. Returns a table with
+`{ paths, scanned, truncated, timed_out }` or `(nil, err)`.
+
 ## `smelt.fs.invalidate_workspace_files`
 
 ```lua
@@ -70,6 +80,15 @@ fun(p: string): boolean, string?
 
 Create directory `p` along with any missing parent directories. Returns `(true, nil)` on success or `(false, err_string)` on failure.
 
+## `smelt.fs.mkdir_all_async`
+
+```lua
+fun(path: string): boolean, string?
+```
+
+Create `path` and parents off the main thread. Same return shape as
+`smelt.fs.mkdir_all`.
+
 ## `smelt.fs.read`
 
 ```lua
@@ -81,13 +100,14 @@ Read `p` into a string. Returns `(content, nil)` on success or `(nil, err_string
 ## `smelt.fs.read_async`
 
 ```lua
-fun(path: string): string?, string?
+fun(path: string): string?, string?, integer?
 ```
 
 Read `path` off the main thread. Must be called from inside
 `smelt.spawn(fn)` or a `tool.execute` (anything that runs on the Lua
 task runtime). Returns `(content, nil)` on success or `(nil, err)` on
-failure - same convention as `smelt.fs.read`.
+failure - same convention as `smelt.fs.read`. Third return value is the
+file mtime in milliseconds when available.
 
 ## `smelt.fs.read_dir`
 
@@ -187,10 +207,10 @@ Write `contents` to file `p`, creating it if necessary. Returns `(true, nil)` on
 ## `smelt.fs.write_async`
 
 ```lua
-fun(path: string, contents: string): boolean, string?
+fun(path: string, contents: string): boolean, string?, integer?
 ```
 
 Write `contents` to `path` off the main thread. Same yielding rules as
-`smelt.fs.read_async`. Returns `(true, nil)` on success or
-`(false, err)` on failure - mirrors `smelt.fs.write`.
+`smelt.fs.read_async`. Returns `(true, nil, mtime_ms)` on success or
+`(false, err, nil)` on failure - mirrors `smelt.fs.write`.
 

@@ -100,7 +100,7 @@ impl LuaRuntime {
         theme::register(lua, &smelt)?;
         confirm::register(lua, &smelt)?;
         layout::register(lua, &smelt, shared)?;
-        notebook::register(lua, &smelt)?;
+        notebook::register(lua, &smelt, shared)?;
         paint::register(lua, &smelt, shared)?;
         render::register(lua, &smelt)?;
         text::register(lua, &smelt)?;

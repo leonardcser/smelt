@@ -23,6 +23,10 @@ fs_file_state.mtime_ms = nil
 ---@type fun(p: string, content: string, offset: integer, limit: integer): nil
 fs_file_state.record_read = nil
 
+--- Record that `p` was read with a caller-provided mtime in milliseconds, avoiding an extra stat call.
+---@type fun(p: string, content: string, offset: integer, limit: integer, mtime_ms: integer): nil
+fs_file_state.record_read_with_mtime = nil
+
 --- Record that `p` was written with `content` so subsequent staleness checks see the latest state.
 ---@type fun(p: string, content: string): nil
 fs_file_state.record_write = nil

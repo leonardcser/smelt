@@ -2,9 +2,11 @@
 
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::lua::LuaShared;
 use mlua::prelude::*;
+use std::sync::Arc;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -37,6 +39,23 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(engine::image::data_url_from_bytes(&bytes.as_bytes(), &mime))
         },
     )?;
+
+    {
+        let s = shared.clone();
+        m.private_fn(
+            "__start_read_as_data_url",
+            &["task_id", "path"],
+            move |_, (task_id, path): (u64, String)| -> LuaResult<()> {
+                s.resume_sink().spawn_blocking_resolve(task_id, move || {
+                    match engine::image::read_image_as_data_url(&path) {
+                        Ok(url) => serde_json::json!({ "url": url }),
+                        Err(err) => serde_json::json!({ "err": err }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
 
     Ok(())
 }

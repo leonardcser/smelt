@@ -38,6 +38,14 @@ fun(p: string, content: string, offset: integer, limit: integer): nil
 
 Record that `p` was read at byte range `[offset, offset+limit)` with `content` so subsequent staleness checks know what the agent has seen.
 
+## `smelt.fs.file_state.record_read_with_mtime`
+
+```lua
+fun(p: string, content: string, offset: integer, limit: integer, mtime_ms: integer): nil
+```
+
+Record that `p` was read with a caller-provided mtime in milliseconds, avoiding an extra stat call.
+
 ## `smelt.fs.file_state.record_write`
 
 ```lua

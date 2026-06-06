@@ -15,20 +15,13 @@ local function effective_range(args)
   return offset, limit
 end
 
-local function dedup_stub(path, offset, limit)
+local function cached_read_range(path, offset, limit)
   local cached = smelt.fs.file_state.get(path)
   if not cached or not cached.read_range then
     return nil
   end
-  if cached.read_range.offset ~= offset or cached.read_range.limit ~= limit then
-    return nil
-  end
-  local current_mtime, _ = smelt.fs.file_state.mtime_ms(path)
-  if not current_mtime then
-    return nil
-  end
-  if current_mtime == cached.mtime_ms then
-    return FILE_UNCHANGED_STUB
+  if cached.read_range.offset == offset and cached.read_range.limit == limit then
+    return cached
   end
   return nil
 end
@@ -103,7 +96,7 @@ smelt.tools.register({
     end
 
     if smelt.image.is_image_file(path) then
-      local data_url, err = smelt.image.read_as_data_url(path)
+      local data_url, err = smelt.image.read_as_data_url_async(path)
       if not data_url then
         return { content = err or "could not read image", is_error = true }
       end
@@ -111,31 +104,38 @@ smelt.tools.register({
     end
 
     local offset, limit = effective_range(args)
-    local stub = dedup_stub(path, offset, limit)
-    if stub then
-      return stub
-    end
+    local cached = cached_read_range(path, offset, limit)
 
     if smelt.notebook.is_notebook_path(path) then
-      local raw, raw_err = smelt.fs.read(path)
-      if not raw then
-        return { content = raw_err or "could not read notebook", is_error = true }
-      end
-      smelt.fs.file_state.record_read(path, raw, offset, limit)
-      local rendered, render_err = smelt.notebook.read(path, offset, limit)
+      local rendered, render_err, raw, mtime_ms = smelt.notebook.read_async(path, offset, limit)
       if not rendered then
         return { content = render_err or "could not render notebook", is_error = true }
+      end
+      if cached and mtime_ms and cached.mtime_ms == mtime_ms then
+        return FILE_UNCHANGED_STUB
+      end
+      if raw and mtime_ms then
+        smelt.fs.file_state.record_read_with_mtime(path, raw, offset, limit, mtime_ms)
+      elseif raw then
+        smelt.fs.file_state.record_read(path, raw, offset, limit)
       end
       return rendered
     end
 
-    local content, read_err = smelt.fs.read(path)
+    local content, read_err, mtime_ms = smelt.fs.read_async(path)
     if not content then
       return { content = read_err or "could not read file", is_error = true }
     end
+    if cached and mtime_ms and cached.mtime_ms == mtime_ms then
+      return FILE_UNCHANGED_STUB
+    end
 
     local formatted = format_text_window(content, offset, limit)
-    smelt.fs.file_state.record_read(path, content, offset, limit)
+    if mtime_ms then
+      smelt.fs.file_state.record_read_with_mtime(path, content, offset, limit, mtime_ms)
+    else
+      smelt.fs.file_state.record_read(path, content, offset, limit)
+    end
     if formatted == nil then
       return "offset beyond end of file"
     end

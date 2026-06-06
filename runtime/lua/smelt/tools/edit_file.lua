@@ -1,22 +1,5 @@
 -- Built-in edit_file tool. Exact-string find/replace under flock + mtime staleness check.
 
-local function count_occurrences(haystack, needle)
-  if needle == "" then
-    return 0
-  end
-  local count = 0
-  local start = 1
-  while true do
-    local s, e = string.find(haystack, needle, start, true)
-    if not s then
-      break
-    end
-    count = count + 1
-    start = e + 1
-  end
-  return count
-end
-
 local function replace_first(haystack, needle, replacement)
   local s, e = string.find(haystack, needle, 1, true)
   if not s then
@@ -54,12 +37,14 @@ end
 
 local function planned_diff(args)
   local path, old_string, new_string, do_all = edit_fields(args)
-  local content = path ~= "" and smelt.fs.read(path) or nil
+  local cached = path ~= "" and smelt.fs.file_state.get(path) or nil
+  local content = cached and cached.content or nil
   if not content then
     return smelt.layout.diff({
       old = old_string,
       new = new_string,
       path = path,
+      anchor = old_string,
     })
   end
 
@@ -104,10 +89,10 @@ smelt.tools.register({
   end,
   preflight = function(args)
     local path = args.file_path or ""
-    if path == "" then
+    if path == "" or smelt.fs.file_state.has(path) then
       return nil
     end
-    return smelt.fs.file_state.staleness_error(path, "file")
+    return "You must use read_file before editing. Read the file first."
   end,
   render = function(args, output, ctx)
     if output.is_error then
@@ -145,59 +130,18 @@ smelt.tools.register({
       }
     end
 
-    local stale = smelt.fs.file_state.staleness_error(path, "file")
-    if stale then
-      return { content = stale, is_error = true }
+    local result = smelt.task.external(function(id)
+      smelt.fs.__start_edit_file(id, path, old_string, new_string, do_all)
+    end)
+    if result.err then
+      return { content = result.err, is_error = true }
     end
-
-    local lock, lock_err = smelt.fs.try_flock(path)
-    if not lock then
-      return { content = lock_err or "could not lock file", is_error = true }
-    end
-
-    local content, read_err = smelt.fs.read(path)
-    if not content then
-      lock:release()
-      return { content = read_err or "could not read file", is_error = true }
-    end
-
-    if old_string == new_string then
-      lock:release()
-      return { content = "old_string and new_string are identical", is_error = true }
-    end
-
-    local count = count_occurrences(content, old_string)
-    if count == 0 then
-      lock:release()
-      return { content = "old_string not found in file", is_error = true }
-    end
-    if count > 1 and not do_all then
-      lock:release()
-      return {
-        content = string.format(
-          "old_string found %d times - must be unique, or set replace_all to true",
-          count
-        ),
-        is_error = true,
-      }
-    end
-
-    local new_content = apply_edit(content, old_string, new_string, do_all)
-
-    local _, write_err = smelt.fs.write(path, new_content)
-    if write_err then
-      lock:release()
-      return { content = write_err, is_error = true }
-    end
-
-    smelt.fs.file_state.record_write(path, new_content)
-    lock:release()
 
     return {
       content = string.format("edited %s", smelt.path.display(path)),
       metadata = {
-        old_content = content,
-        new_content = new_content,
+        old_content = result.old_content or "",
+        new_content = result.new_content or "",
         path = path,
       },
     }

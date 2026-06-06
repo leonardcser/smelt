@@ -19,4 +19,10 @@ image.is_image_file = nil
 ---@type fun(p: string): string?, string?
 image.read_as_data_url = nil
 
+--- Read and base64-encode an image off the main thread. Same return shape as
+--- `smelt.image.read_as_data_url`.
+---@see smelt.image.read_as_data_url
+---@type fun(path: string): string?, string?
+image.read_as_data_url_async = nil
+
 return image

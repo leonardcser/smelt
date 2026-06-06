@@ -11,6 +11,12 @@ local notebook = {}
 ---@type fun(args: table): any?, string?
 notebook.apply_edit = nil
 
+--- Apply a notebook edit off the main thread. Same return shape as
+--- `smelt.notebook.apply_edit`.
+---@see smelt.notebook.apply_edit
+---@type fun(args: table): table?, string?
+notebook.apply_edit_async = nil
+
 --- Return `true` if `path` looks like a Jupyter notebook (`.ipynb` extension).
 ---@type fun(path: string): boolean
 notebook.is_notebook_path = nil
@@ -26,5 +32,11 @@ notebook.preview_data = nil
 --- Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure - same output the built-in `read_file` tool produces.
 ---@type fun(path: string, offset: integer, limit: integer): string?, string?
 notebook.read = nil
+
+--- Render a notebook off the main thread. Same return shape as
+--- `smelt.notebook.read`, plus raw notebook JSON and mtime on success.
+---@see smelt.notebook.read
+---@type fun(path: string, offset: integer, limit: integer): string?, string?, string?, integer?
+notebook.read_async = nil
 
 return notebook

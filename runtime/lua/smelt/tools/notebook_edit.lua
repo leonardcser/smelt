@@ -43,30 +43,10 @@ smelt.tools.register({
   end,
   preflight = function(args)
     local path = args.notebook_path or ""
-    if path == "" then
+    if path == "" or smelt.fs.file_state.has(path) then
       return nil
     end
-    return smelt.fs.file_state.staleness_error(path, "notebook")
-  end,
-  preview = function(args)
-    local data = smelt.notebook.preview_data(args)
-    if not data then return nil end
-    local title = smelt.layout.text(data.title)
-    local body
-    if data.edit_mode == "insert" then
-      body = smelt.layout.file_view({
-        content = data.new_source,
-        lang    = data.syntax_ext,
-      })
-    else
-      body = smelt.layout.diff({
-        old  = data.old_source,
-        new  = data.new_source,
-        lang = data.syntax_ext,
-        path = data.path,
-      })
-    end
-    return smelt.layout.vbox({ title, body })
+    return "You must use read_file before editing. Read the notebook first."
   end,
   render = function(_, output, ctx)
     if output.is_error then
@@ -94,25 +74,11 @@ smelt.tools.register({
     if path == "" then
       return { content = "notebook_path is required", is_error = true }
     end
-    if not smelt.fs.exists(path) then
-      return {
-        content = "file not found: " .. smelt.path.display(path),
-        is_error = true,
-      }
-    end
-
-    local lock, lock_err = smelt.fs.try_flock(path)
-    if not lock then
-      return { content = lock_err or "could not lock notebook", is_error = true }
-    end
-
-    local result, err = smelt.notebook.apply_edit(args)
+    local result, err = smelt.notebook.apply_edit_async(args)
     if not result then
-      lock:release()
       return { content = err or "notebook edit failed", is_error = true }
     end
 
-    lock:release()
     return {
       content = result.message,
       metadata = result.metadata,

@@ -1031,8 +1031,8 @@ mod tests {
 
         let pending_layout = edit_file_layout(&mut app, &args, None, "pending");
         assert!(
-            layout_text(pending_layout.clone()).contains("line 2"),
-            "pending edit_file render should use the same full-file planned diff as preview"
+            layout_text(pending_layout.clone()).contains("inserted line"),
+            "pending edit_file render should show the planned replacement without blocking on a disk read"
         );
 
         std::fs::write(&path, &after).unwrap();

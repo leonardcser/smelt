@@ -30,3 +30,12 @@ fun(p: string): string?, string?
 
 Read the image at `p` and encode it as a `data:` URL. Returns `(url, nil)` on success or `(nil, err_string)` on failure.
 
+## `smelt.image.read_as_data_url_async`
+
+```lua
+fun(path: string): string?, string?
+```
+
+Read and base64-encode an image off the main thread. Same return shape as
+`smelt.image.read_as_data_url`.
+

@@ -6,7 +6,11 @@ use smelt_core::lua::module::LuaMod;
 use smelt_core::notebook;
 use std::collections::HashMap;
 
-pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
+pub(super) fn register(
+    lua: &Lua,
+    smelt: &mlua::Table,
+    shared: &std::sync::Arc<crate::lua::LuaShared>,
+) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
         smelt,
@@ -93,6 +97,81 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
         },
     )?;
+
+    {
+        let sink = shared.core.resume_sink();
+        m.private_fn(
+            "__start_read",
+            &["task_id", "path", "offset", "limit"],
+            move |_, (task_id, path, offset, limit): (u64, String, u64, u64)| -> LuaResult<()> {
+                sink.clone().spawn_blocking_resolve(task_id, move || {
+                    match std::fs::read_to_string(&path) {
+                        Ok(raw) => match smelt_core::notebook::render_notebook_text_from_raw(
+                            &raw,
+                            offset as usize,
+                            limit as usize,
+                        ) {
+                            Ok(content) => {
+                                let mtime_ms = smelt_core::fs::file_mtime_ms(&path).unwrap_or(0);
+                                serde_json::json!({
+                                    "content": content,
+                                    "raw": raw,
+                                    "mtime_ms": mtime_ms,
+                                })
+                            }
+                            Err(err) => serde_json::json!({ "err": err }),
+                        },
+                        Err(err) => serde_json::json!({ "err": err.to_string() }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let sink = shared.core.resume_sink();
+        m.private_fn(
+            "__start_apply_edit",
+            &["task_id", "args"],
+            move |_, (task_id, args): (u64, mlua::Table)| -> LuaResult<()> {
+                let args_map = lua_table_to_json_map(&args).map_err(|e| {
+                    LuaError::RuntimeError(format!("notebook.apply_edit_async: {e}"))
+                })?;
+                let files = crate::lua::try_with_app(|app| app.core.files.clone());
+                let Some(files) = files else {
+                    sink.resolve_json(
+                        task_id,
+                        serde_json::json!({ "err": "notebook.apply_edit: no app context" }),
+                    );
+                    return Ok(());
+                };
+                let path = args_map
+                    .get("notebook_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                sink.clone().spawn_blocking_resolve(task_id, move || {
+                    let _lock = if !path.is_empty() && std::path::Path::new(&path).exists() {
+                        match smelt_core::fs::try_flock(&path) {
+                            Ok(lock) => Some(lock),
+                            Err(err) => return serde_json::json!({ "err": err }),
+                        }
+                    } else {
+                        None
+                    };
+                    match smelt_core::notebook::apply_edit(&args_map, &files) {
+                        Ok(outcome) => serde_json::json!({
+                            "message": outcome.message,
+                            "metadata": outcome.metadata,
+                        }),
+                        Err(err) => serde_json::json!({ "err": err }),
+                    }
+                });
+                Ok(())
+            },
+        )?;
+    }
 
     Ok(())
 }
