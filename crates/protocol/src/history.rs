@@ -274,6 +274,17 @@ pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
     None
 }
 
+/// Convert user-role wire content into semantic history.
+///
+/// Reserved `[smelt:*]` prefixes are legacy/model-visible encodings for
+/// internal notes, not real user turns.
+pub fn history_item_from_user_content(content: Content) -> HistoryItem {
+    match note_from_user_content(&content) {
+        Some(note) => HistoryItem::Note(note),
+        None => HistoryItem::User { content },
+    }
+}
+
 /// Fold a legacy `Vec<Message>` into `Vec<HistoryItem>`.
 ///
 /// Pairs each assistant message that has `tool_calls` with the immediately
@@ -295,11 +306,7 @@ pub fn history_from_messages(messages: Vec<Message>) -> Vec<HistoryItem> {
             }
             Role::User => {
                 if let Some(c) = m.content.clone() {
-                    if let Some(note) = note_from_user_content(&c) {
-                        out.push(HistoryItem::Note(note));
-                    } else {
-                        out.push(HistoryItem::User { content: c });
-                    }
+                    out.push(history_item_from_user_content(c));
                 }
                 i += 1;
             }
@@ -532,6 +539,33 @@ mod tests {
             .text_content()
             .starts_with(crate::mode::MODE_NOTE_PREFIX)));
         assert_eq!(history_from_messages(messages), vec![item]);
+    }
+
+    #[test]
+    fn user_content_helper_classifies_reserved_notes() {
+        let process = history_item_from_user_content(Content::text(
+            crate::mode::process_status_note("Background process 751225 exited with code 1."),
+        ));
+        assert_eq!(
+            process,
+            HistoryItem::note(HistoryNote::process_status(
+                "Background process 751225 exited with code 1."
+            ))
+        );
+
+        let mode = history_item_from_user_content(Content::text(crate::mode::mode_change_note(
+            "now in apply mode.",
+        )));
+        assert_eq!(
+            mode,
+            HistoryItem::note(HistoryNote::mode_change("now in apply mode."))
+        );
+    }
+
+    #[test]
+    fn ordinary_user_content_stays_user() {
+        let item = history_item_from_user_content(Content::text("hello"));
+        assert!(matches!(item, HistoryItem::User { content } if content.text_content() == "hello"));
     }
 
     #[test]

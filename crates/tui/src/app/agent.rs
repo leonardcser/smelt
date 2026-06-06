@@ -81,9 +81,10 @@ impl TuiApp {
             self.core.session.first_user_message = Some(text.clone().into_owned());
         }
         if !content.is_empty() {
-            self.core.session.history.push(HistoryItem::User {
-                content: content.clone(),
-            });
+            self.core
+                .session
+                .history
+                .push(protocol::history_item_from_user_content(content.clone()));
             self.sync_session_snapshot();
             self.core.session.history.pop();
         }
@@ -195,9 +196,12 @@ impl TuiApp {
         if !evaluated.is_empty() {
             // Publish the expanded command body to session observers before dispatch;
             // the engine receives the same text as this turn's user content below.
-            self.core.session.history.push(HistoryItem::User {
-                content: Content::text(evaluated.clone()),
-            });
+            self.core
+                .session
+                .history
+                .push(protocol::history_item_from_user_content(Content::text(
+                    evaluated.clone(),
+                )));
             self.sync_session_snapshot();
             self.core.session.history.pop();
         }
@@ -900,6 +904,70 @@ mod tests {
         assert!(app.app.agent_is_running());
         assert_eq!(process_status_blocks(&app), vec![note]);
         assert!(user_blocks(&app).is_empty());
+    }
+
+    #[test]
+    fn process_status_history_update_stays_out_of_lua_conversation() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+
+        app.app.handle_process_completed("751225".into(), Some(1));
+        let turn_id = app
+            .app
+            .active_agent_turn_id()
+            .expect("process turn started");
+        let start_content = app
+            .drain_engine_sends()
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                protocol::UiCommand::StartTurn(payload) => Some(payload.content),
+                _ => None,
+            })
+            .expect("process turn dispatched to engine");
+        assert_eq!(
+            start_content.text_content(),
+            protocol::process_status_note("Background process 751225 exited with code 1.")
+        );
+
+        app.feed_one(crate::app::test_harness::SourceEvent::Engine(
+            protocol::EngineEvent::HistoryUpdated {
+                turn_id,
+                history: vec![
+                    HistoryItem::user(Content::text("previous user message")),
+                    protocol::history_item_from_user_content(start_content),
+                ],
+            },
+        ));
+
+        assert!(matches!(
+            &app.app.core.session.history[1],
+            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text })
+                if text == "Background process 751225 exited with code 1."
+        ));
+
+        let (count, first_content, contains_marker): (i64, String, bool) = {
+            let _guard = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .lua
+                .lua
+                .load(
+                    r#"
+                    local rows = smelt.session.conversation()
+                    local contains_marker = false
+                    for _, row in ipairs(rows) do
+                        if string.find(row.content, "%[smelt:process%]") then
+                            contains_marker = true
+                        end
+                    end
+                    return #rows, rows[1] and rows[1].content or "", contains_marker
+                    "#,
+                )
+                .eval()
+                .expect("conversation query succeeds")
+        };
+
+        assert_eq!(count, 1);
+        assert_eq!(first_content, "previous user message");
+        assert!(!contains_marker);
     }
 
     #[tokio::test]

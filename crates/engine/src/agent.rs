@@ -656,6 +656,15 @@ impl<'a> Turn<'a> {
         self.history.push(HistoryItem::User { content });
     }
 
+    /// Append current-turn content that may be a synthetic internal note.
+    fn push_turn_content(&mut self, mut content: Content) {
+        if self.config.redact_secrets {
+            crate::redact::redact_content(&mut content);
+        }
+        self.history
+            .push(protocol::history_item_from_user_content(content));
+    }
+
     /// Append an assistant step atomically. When `invocations` is non-empty,
     /// every entry already carries its `ToolOutcome` - the only way to
     /// satisfy `AssistantStep`'s shape - so the on-disk and on-wire
@@ -927,7 +936,7 @@ impl<'a> Turn<'a> {
         self.history.extend(history);
 
         if !content.is_empty() {
-            self.push_user(content);
+            self.push_turn_content(content);
         }
         self.emit_messages_snapshot();
 
@@ -2195,6 +2204,77 @@ mod tests {
             provider_type: "openai".into(),
             model_config: ModelConfig::default(),
         }
+    }
+
+    #[test]
+    fn current_turn_content_classifies_internal_notes() {
+        let client = reqwest::Client::new();
+        let dispatcher = crate::tools::EmptyDispatcher::new();
+        let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let (host_tx, _host_rx) = mpsc::unbounded_channel();
+        let clock: std::sync::Arc<dyn crate::clock::Clock> =
+            std::sync::Arc::new(crate::clock::RealClock);
+        let config = EngineConfig {
+            api: api_cfg(),
+            model: "m".into(),
+            instructions: None,
+            system_prompt_override: Some("sys".into()),
+            cwd: std::path::PathBuf::from("/tmp"),
+            skill_section: None,
+            redact_secrets: false,
+            cache_ttl_long: false,
+            clock: clock.clone(),
+        };
+        let provider = Provider::new(
+            "https://x".into(),
+            "k".into(),
+            "openai",
+            client.clone(),
+            clock,
+        );
+        let mut turn = Turn {
+            provider,
+            dispatcher: &dispatcher,
+            cmd_rx: &mut cmd_rx,
+            event_tx: &event_tx,
+            host_tx: &host_tx,
+            config: &config,
+            http_client: &client,
+            cancel: crate::cancel::CancellationToken::new(),
+            bg_cancel: crate::cancel::CancellationToken::new(),
+            history: vec![HistoryItem::system("sys")],
+            mode: AgentMode::normal(),
+            reasoning_effort: ReasoningEffort::Off,
+            turn_id: 1,
+            model: "m".into(),
+            system_prompt: "sys".into(),
+            tools: Vec::new(),
+            permission_overrides: None,
+            pending_history_items: Vec::new(),
+            session_id: "s".into(),
+            started_at: Instant::now(),
+            tps_samples: Vec::new(),
+            tool_elapsed: HashMap::new(),
+        };
+
+        turn.push_turn_content(Content::text(protocol::process_status_note(
+            "Background process 751225 exited with code 1.",
+        )));
+        turn.push_turn_content(Content::text(protocol::mode_change_note(
+            "now in apply mode.",
+        )));
+
+        assert!(matches!(
+            &turn.history[1],
+            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text })
+                if text == "Background process 751225 exited with code 1."
+        ));
+        assert!(matches!(
+            &turn.history[2],
+            HistoryItem::Note(protocol::HistoryNote::ModeChange { text, .. })
+                if text == "now in apply mode."
+        ));
     }
 
     // ---- next_request_id ----
