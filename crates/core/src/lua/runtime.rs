@@ -15,6 +15,10 @@ use crate::lua::{
 /// Embedded `runtime/lua/smelt/` tree; every `.lua` file is `require`-able as `smelt.<path>`.
 static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/lua/smelt");
 
+/// Embedded `runtime/skills/` tree; extracted alongside Lua built-ins so
+/// built-in skills have real on-disk locations for `/skills` and `load_skill`.
+static EMBEDDED_SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/skills");
+
 /// Lua chunks executed at `register_api` time, in order: primitives before consumers.
 pub const BOOTSTRAP_FILES: &[&str] = &[
     "_bootstrap.lua",
@@ -1701,7 +1705,9 @@ pub fn ensure_builtins_extracted() -> std::io::Result<PathBuf> {
     let version_file = target.join(".version");
     let expected = env!("CARGO_PKG_VERSION");
     if let Ok(found) = std::fs::read_to_string(&version_file) {
-        if found.trim() == expected {
+        let has_lua = target.join("lua").join("smelt").exists();
+        let has_skills = target.join("skills").exists();
+        if found.trim() == expected && has_lua && has_skills {
             return Ok(target);
         }
     }
@@ -1711,6 +1717,11 @@ pub fn ensure_builtins_extracted() -> std::io::Result<PathBuf> {
     let lua_root = target.join("lua").join("smelt");
     std::fs::create_dir_all(&lua_root)?;
     write_dir_recursive(&EMBEDDED_LUA, &lua_root)?;
+
+    let skills_root = target.join("skills");
+    std::fs::create_dir_all(&skills_root)?;
+    write_dir_recursive(&EMBEDDED_SKILLS, &skills_root)?;
+
     std::fs::write(&version_file, expected)?;
     Ok(target)
 }

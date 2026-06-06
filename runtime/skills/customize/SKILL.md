@@ -1018,6 +1018,8 @@ List and load skill content from the SkillLoader populated at startup.
 
 - `smelt.skills.content` :: `fun(name: string): string?, string?`
   Load the skill named `name` and return `(content, nil)` on success or `(nil, err_string)` if the skill is missing or failed to load.
+- `smelt.skills.info` :: `fun(): table`
+  Return every discovered skill as `{ name, description, location }` rows sorted by name.
 - `smelt.skills.list` :: `fun(): table`
   Return the names of every skill discovered by the loader as a Lua array.
 
@@ -1026,7 +1028,7 @@ List and load skill content from the SkillLoader populated at startup.
 Per-plugin state.
 
 - `smelt.state.persistent` :: `fun(name: string, opts: { debounce_ms: integer? }?): table`
-  Persistent wrapper: backed by JSON under `$XDG_STATE_HOME/smelt/plugins/<name>.json`.
+  
 
 #### `smelt.task`
 

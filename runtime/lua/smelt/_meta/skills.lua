@@ -11,6 +11,10 @@ local skills = {}
 ---@type fun(name: string): string?, string?
 skills.content = nil
 
+--- Return every discovered skill as `{ name, description, location }` rows sorted by name.
+---@type fun(): table
+skills.info = nil
+
 --- Return the names of every skill discovered by the loader as a Lua array. Empty when no skills are loaded.
 ---@type fun(): table
 skills.list = nil

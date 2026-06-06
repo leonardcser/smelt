@@ -25,7 +25,8 @@ Type `/` to open the command picker with fuzzy search.
 | `/permissions`            | Manage saved permissions                                   |
 | `/ps`                     | Manage background processes                                |
 | `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                |
-| `/messages`               | Show recorded errors, warnings, and notices               |
+| `/messages`               | Show recorded errors, warnings, and notices                |
+| `/skills`                 | Show loaded skills and their source locations              |
 | `/help`                   | Show keybindings (also `?` on an empty prompt)             |
 | `/docs`                   | Open the smelt documentation in your browser               |
 | `/btw <question>`         | Ask a side question; answer streams into a dialog          |

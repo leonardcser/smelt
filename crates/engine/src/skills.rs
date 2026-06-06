@@ -7,9 +7,17 @@ struct SkillFrontmatter {
 }
 
 #[derive(Debug, Clone)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub location: String,
+}
+
+#[derive(Debug, Clone)]
 struct SkillEntry {
     name: String,
     description: String,
+    location: String,
     formatted: String,
 }
 
@@ -39,7 +47,8 @@ impl SkillLoader {
         let mut skills = HashMap::new();
 
         for (name, body) in BUILTIN_SKILLS {
-            match parse_skill_text(body, None) {
+            let location = builtin_skill_path(name).display().to_string();
+            match parse_skill_text(body, None, &location) {
                 Some(entry) => {
                     skills.insert(entry.name.clone(), entry);
                 }
@@ -52,8 +61,14 @@ impl SkillLoader {
         let global = crate::config_dir().join("skills");
         scan_dir(&global, &mut skills);
 
+        let home = crate::home_dir();
+        scan_dir(&home.join(".claude/skills"), &mut skills);
+        scan_dir(&home.join(".agents/skills"), &mut skills);
+
         if let Ok(cwd) = std::env::current_dir() {
             scan_dir(&cwd.join(".smelt/skills"), &mut skills);
+            scan_dir(&cwd.join(".claude/skills"), &mut skills);
+            scan_dir(&cwd.join(".agents/skills"), &mut skills);
         }
 
         for path in extra_paths {
@@ -91,9 +106,31 @@ impl SkillLoader {
         out
     }
 
+    pub fn info(&self) -> Vec<SkillInfo> {
+        let mut out: Vec<SkillInfo> = self
+            .skills
+            .values()
+            .map(|entry| SkillInfo {
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                location: entry.location.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     pub fn prompt_section(&self) -> Option<&str> {
         self.prompt_section.as_deref()
     }
+}
+
+fn builtin_skill_path(name: &str) -> PathBuf {
+    crate::data_dir()
+        .join("builtins")
+        .join("skills")
+        .join(name)
+        .join("SKILL.md")
 }
 
 fn build_prompt_section(skills: &HashMap<String, SkillEntry>) -> Option<String> {
@@ -131,13 +168,14 @@ fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
 
 fn parse_skill(path: &Path) -> Option<SkillEntry> {
     let text = std::fs::read_to_string(path).ok()?;
-    parse_skill_text(&text, path.parent())
+    let location = path.display().to_string();
+    parse_skill_text(&text, path.parent(), &location)
 }
 
 /// Parse a `SKILL.md` body into a [`SkillEntry`]. `dir` is the on-disk
 /// directory the skill came from - used to enumerate bundled files. Pass
 /// `None` for built-ins, which have no on-disk base directory.
-fn parse_skill_text(text: &str, dir: Option<&Path>) -> Option<SkillEntry> {
+fn parse_skill_text(text: &str, dir: Option<&Path>, location: &str) -> Option<SkillEntry> {
     let (fm, body) = split_frontmatter(text)?;
     let meta = parse_frontmatter(fm)?;
 
@@ -159,6 +197,7 @@ fn parse_skill_text(text: &str, dir: Option<&Path>) -> Option<SkillEntry> {
     Some(SkillEntry {
         name: meta.name,
         description: meta.description,
+        location: location.to_string(),
         formatted,
     })
 }
@@ -179,17 +218,40 @@ fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
 fn parse_frontmatter(yaml: &str) -> Option<SkillFrontmatter> {
     let mut name = None;
     let mut description = String::new();
-    for line in yaml.lines() {
-        let line = line.trim();
+    let mut reading_description = false;
+
+    for raw_line in yaml.lines() {
+        let line = raw_line.trim();
         if line.is_empty() {
             continue;
         }
+
         if let Some(rest) = line.strip_prefix("name:") {
             name = Some(unquote_yaml(rest.trim()));
-        } else if let Some(rest) = line.strip_prefix("description:") {
-            description = unquote_yaml(rest.trim());
+            reading_description = false;
+            continue;
         }
+
+        if let Some(rest) = line.strip_prefix("description:") {
+            description = unquote_yaml(rest.trim());
+            reading_description = true;
+            continue;
+        }
+
+        if reading_description && raw_line.starts_with(char::is_whitespace) {
+            let continuation = unquote_yaml(line);
+            if !continuation.is_empty() {
+                if !description.is_empty() {
+                    description.push(' ');
+                }
+                description.push_str(&continuation);
+            }
+            continue;
+        }
+
+        reading_description = false;
     }
+
     name.map(|name| SkillFrontmatter { name, description })
 }
 
@@ -295,6 +357,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_frontmatter_reads_indented_multiline_description() {
+        let yaml =
+            "name: customize\ndescription:\n  Change theme/colors, rebind keys,\n  write skills.";
+        let fm = parse_frontmatter(yaml).unwrap();
+        assert_eq!(fm.name, "customize");
+        assert_eq!(
+            fm.description,
+            "Change theme/colors, rebind keys, write skills."
+        );
+    }
+
+    #[test]
     fn unquote_yaml_strips_matched_quotes() {
         assert_eq!(unquote_yaml("\"x\""), "x");
         assert_eq!(unquote_yaml("'x'"), "x");
@@ -318,6 +392,7 @@ mod tests {
                 SkillEntry {
                     name: name.into(),
                     description: description.into(),
+                    location: format!("/skills/{name}/SKILL.md"),
                     formatted: formatted.into(),
                 },
             );
@@ -327,6 +402,20 @@ mod tests {
             skills,
             prompt_section,
         }
+    }
+
+    #[test]
+    fn builtin_customize_has_description_and_real_location() {
+        let l = SkillLoader::load(&[]);
+        let info = l
+            .info()
+            .into_iter()
+            .find(|skill| skill.name == "customize")
+            .unwrap();
+        assert!(info.description.contains("Customize smelt"));
+        assert!(info
+            .location
+            .ends_with("builtins/skills/customize/SKILL.md"));
     }
 
     #[test]
@@ -355,6 +444,16 @@ mod tests {
     fn names_returns_sorted_skill_names() {
         let l = loader_with(vec![("z", "", ""), ("a", "", ""), ("m", "", "")]);
         assert_eq!(l.names(), vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn info_returns_sorted_skill_metadata() {
+        let l = loader_with(vec![("z", "Z desc", ""), ("a", "A desc", "")]);
+        let info = l.info();
+        assert_eq!(info[0].name, "a");
+        assert_eq!(info[0].description, "A desc");
+        assert_eq!(info[0].location, "/skills/a/SKILL.md");
+        assert_eq!(info[1].name, "z");
     }
 
     #[test]
@@ -395,6 +494,10 @@ mod tests {
         assert!(map.contains_key("my"));
         let entry = &map["my"];
         assert_eq!(entry.description, "cool");
+        assert_eq!(
+            entry.location,
+            skill_dir.join("SKILL.md").display().to_string()
+        );
         assert!(entry.formatted.contains("<skill name=\"my\">"));
         assert!(entry.formatted.contains("use me wisely"));
         assert!(entry.formatted.ends_with("</skill>"));

@@ -47,9 +47,10 @@ and tool surface, not just Lua:
 
 - `AGENTS.md` (global `~/.config/smelt/AGENTS.md` plus the nearest project
   copy) is re-read.
-- Every `SKILL.md` under `~/.config/smelt/skills/` and `.smelt/skills/` is
-  rescanned, so new skills, renamed skills, and edits to descriptions or
-  bodies all show up on the next turn.
+- Every `SKILL.md` under `~/.config/smelt/skills/`, `~/.claude/skills/`,
+  `~/.agents/skills/`, `.smelt/skills/`, `.claude/skills/`, and
+  `.agents/skills/` is rescanned, so new skills, renamed skills, and edits to
+  descriptions or bodies all show up on the next turn.
 - MCP servers declared with `smelt.mcp.register` are reconciled: new
   registrations spawn, removed registrations stop, and servers whose
   config changed are restarted. Pending tool calls finish on the old

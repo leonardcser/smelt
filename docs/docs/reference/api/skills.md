@@ -14,6 +14,14 @@ fun(name: string): string?, string?
 
 Load the skill named `name` and return `(content, nil)` on success or `(nil, err_string)` if the skill is missing or failed to load.
 
+## `smelt.skills.info`
+
+```lua
+fun(): table
+```
+
+Return every discovered skill as `{ name, description, location }` rows sorted by name.
+
 ## `smelt.skills.list`
 
 ```lua

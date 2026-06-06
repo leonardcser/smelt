@@ -321,7 +321,11 @@ tokens.
 They are scanned from these directories (later entries override):
 
 1. `~/.config/smelt/skills/*/SKILL.md` — global user skills
-2. `.smelt/skills/*/SKILL.md` — project-local skills
+2. `~/.claude/skills/*/SKILL.md` — global Claude-compatible skills
+3. `~/.agents/skills/*/SKILL.md` — global Agent Skills-compatible skills
+4. `.smelt/skills/*/SKILL.md` — project-local smelt skills
+5. `.claude/skills/*/SKILL.md` — project-local Claude-compatible skills
+6. `.agents/skills/*/SKILL.md` — project-local Agent Skills-compatible skills
 
 ### Skill Format
 

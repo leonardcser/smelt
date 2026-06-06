@@ -12,8 +12,5 @@ Per-plugin state. `smelt.state(name)` returns an ephemeral table that survives `
 fun(name: string, opts: { debounce_ms: integer? }?): table
 ```
 
-Persistent wrapper: backed by JSON under
-`$XDG_STATE_HOME/smelt/plugins/<name>.json`. Top-level writes are
-debounced and auto-saved; nested mutations require an explicit
-`s.save()` call. Reads pass through to the loaded table.
+
 
