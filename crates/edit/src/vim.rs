@@ -9,8 +9,8 @@ use super::text::{
     word_forward_pos, CharClass,
 };
 use super::text_objects::text_object;
-use super::Clipboard;
-use super::{UndoEntry, UndoHistory};
+use super::window::ViewerCommand;
+use super::{Clipboard, UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use smelt_buffer::attached::AttachedTextMut;
 use smelt_buffer::attachment::ATTACHMENT_MARKER;
@@ -346,6 +346,150 @@ pub fn visual_range(
 pub fn visual_anchor(state: &VimWindowState, buf: &str, mode: VimMode) -> Option<usize> {
     match mode {
         VimMode::Visual | VimMode::VisualLine => Some(state.visual_anchor_at(buf)),
+        _ => None,
+    }
+}
+
+pub fn handle_virtual_viewer_key(
+    key: KeyEvent,
+    mode: &mut VimMode,
+    state: &mut VimWindowState,
+) -> Option<ViewerCommand> {
+    if *mode == VimMode::Insert {
+        state.set_mode(mode, VimMode::Normal);
+        return Some(ViewerCommand::MoveRows(0));
+    }
+
+    match state.sub {
+        SubState::WaitingOp(Op::Yank) => {
+            state.sub = SubState::Ready;
+            let cmd = match key.code {
+                KeyCode::Char('y') => {
+                    ViewerCommand::YankLines(state.effective_count() as crate::RowIndex)
+                }
+                _ => ViewerCommand::MoveRows(0),
+            };
+            state.count1 = None;
+            state.count2 = None;
+            return Some(cmd);
+        }
+        SubState::WaitingG => {
+            state.sub = SubState::Ready;
+            let cmd = match key.code {
+                KeyCode::Char('g') => {
+                    let row = state
+                        .count1
+                        .take()
+                        .map(|n| n.saturating_sub(1))
+                        .unwrap_or(0);
+                    ViewerCommand::GotoRow(row as crate::RowIndex)
+                }
+                _ => ViewerCommand::MoveRows(0),
+            };
+            state.count1 = None;
+            state.count2 = None;
+            return Some(cmd);
+        }
+        SubState::WaitingZ => {
+            state.sub = SubState::Ready;
+            let cmd = match key.code {
+                KeyCode::Char('z') => ViewerCommand::CenterScroll,
+                KeyCode::Char('h') => ViewerCommand::PanColumns(-1),
+                KeyCode::Char('l') => ViewerCommand::PanColumns(1),
+                _ => ViewerCommand::MoveRows(0),
+            };
+            state.count1 = None;
+            state.count2 = None;
+            return Some(cmd);
+        }
+        _ => {}
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('u') => Some(ViewerCommand::PageRows(-1)),
+            KeyCode::Char('d') => Some(ViewerCommand::PageRows(1)),
+            KeyCode::Char('b') => Some(ViewerCommand::PageRows(-1)),
+            KeyCode::Char('f') => Some(ViewerCommand::PageRows(1)),
+            KeyCode::Char('y') => Some(ViewerCommand::ScrollRows(-1)),
+            KeyCode::Char('e') => Some(ViewerCommand::ScrollRows(1)),
+            _ => None,
+        };
+    }
+
+    let count = |state: &mut VimWindowState| state.take_count() as isize;
+    match key.code {
+        KeyCode::Char(c @ '1'..='9') => {
+            let digit = c.to_digit(10).unwrap() as usize;
+            let prev = state.count1.unwrap_or(0);
+            state.count1 = Some(prev.saturating_mul(10).saturating_add(digit));
+            Some(ViewerCommand::MoveRows(0))
+        }
+        KeyCode::Char('0') if state.count1.is_some() => {
+            let prev = state.count1.unwrap_or(0);
+            state.count1 = Some(prev.saturating_mul(10));
+            Some(ViewerCommand::MoveRows(0))
+        }
+        KeyCode::Char('g') => {
+            state.sub = SubState::WaitingG;
+            Some(ViewerCommand::MoveRows(0))
+        }
+        KeyCode::Char('G') => {
+            if let Some(n) = state.count1.take() {
+                Some(ViewerCommand::GotoRow(
+                    n.saturating_sub(1) as crate::RowIndex
+                ))
+            } else {
+                Some(ViewerCommand::BufferEnd)
+            }
+        }
+        KeyCode::Char('j') | KeyCode::Down => Some(ViewerCommand::MoveRows(count(state))),
+        KeyCode::Char('k') | KeyCode::Up => Some(ViewerCommand::MoveRows(-count(state))),
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
+            Some(ViewerCommand::PanColumns(-count(state)))
+        }
+        KeyCode::Char('l') | KeyCode::Right => Some(ViewerCommand::PanColumns(count(state))),
+        KeyCode::Char('0') => Some(ViewerCommand::LineStart),
+        KeyCode::Char('$') => Some(ViewerCommand::LineEnd),
+        KeyCode::Char('^' | '_') => Some(ViewerCommand::LineStart),
+        KeyCode::Char('w') => Some(ViewerCommand::WordForward(
+            state.take_count() as crate::RowIndex
+        )),
+        KeyCode::Char('b') => Some(ViewerCommand::WordBackward(
+            state.take_count() as crate::RowIndex
+        )),
+        KeyCode::Char('e') => Some(ViewerCommand::WordEnd(state.take_count() as crate::RowIndex)),
+        KeyCode::Char('v') => {
+            state.set_mode(mode, VimMode::Visual);
+            Some(ViewerCommand::StartVisual)
+        }
+        KeyCode::Char('V') => {
+            state.set_mode(mode, VimMode::VisualLine);
+            Some(ViewerCommand::StartVisualLine)
+        }
+        KeyCode::Char('y') => {
+            if matches!(*mode, VimMode::Visual | VimMode::VisualLine) {
+                let linewise = matches!(*mode, VimMode::VisualLine);
+                state.set_mode(mode, VimMode::Normal);
+                Some(if linewise {
+                    ViewerCommand::YankSelectionLinewise
+                } else {
+                    ViewerCommand::YankSelection
+                })
+            } else {
+                state.sub = SubState::WaitingOp(Op::Yank);
+                Some(ViewerCommand::MoveRows(0))
+            }
+        }
+        KeyCode::Esc => {
+            state.reset_pending();
+            state.set_mode(mode, VimMode::Normal);
+            Some(ViewerCommand::ClearSelection)
+        }
+        KeyCode::Char('z') => {
+            state.sub = SubState::WaitingZ;
+            Some(ViewerCommand::MoveRows(0))
+        }
         _ => None,
     }
 }

@@ -1,6 +1,9 @@
 use super::block_buffers::BlockBufferCache;
 use crate::smelt_edit::Theme;
-use crate::smelt_edit::{clamp_scroll, BufId, Buffer, MaterializedRows, RowIndex};
+use crate::smelt_edit::{
+    clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DocRange,
+    MaterializedRows, RowIndex,
+};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
@@ -197,7 +200,6 @@ pub(crate) struct ProjectionPlan {
     viewport_rows: u16,
     first: usize,
     block_ids: Vec<BlockId>,
-    block_keys: Vec<LayoutKey>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -271,6 +273,14 @@ struct ProjectRows<'a> {
     texts: &'a mut Vec<String>,
     pending: &'a mut Vec<PendingRow>,
     layout: &'a mut Vec<LayoutEntry>,
+}
+
+struct MaterializedTranscriptRange {
+    row_base: RowIndex,
+    total_rows: RowIndex,
+    texts: Vec<String>,
+    pending: Vec<PendingRow>,
+    layout: Vec<LayoutEntry>,
 }
 
 pub(crate) struct TranscriptRangeRows {
@@ -488,10 +498,6 @@ impl TranscriptProjection {
             .iter()
             .map(|node| node.id)
             .collect();
-        let block_keys = self.row_index.nodes[first..end]
-            .iter()
-            .map(|node| node.key)
-            .collect();
         ProjectionPlan {
             key,
             scroll_target,
@@ -499,7 +505,6 @@ impl TranscriptProjection {
             viewport_rows,
             first,
             block_ids,
-            block_keys,
         }
     }
 
@@ -597,41 +602,19 @@ impl TranscriptProjection {
         theme: &Theme,
         plan: &ProjectionPlan,
     ) -> MaterializedRows {
-        self.cache
-            .ensure_many(history, &plan.block_ids, &plan.block_keys, theme);
-
-        let first = plan.first;
-        let row_base = self.row_index.prefix_row(first);
-        let mut texts: Vec<String> = Vec::new();
-        let mut pending = Vec::new();
-        let mut layout = Vec::with_capacity(plan.block_ids.len());
-        let mut rows = ProjectRows {
-            row_base,
-            texts: &mut texts,
-            pending: &mut pending,
-            layout: &mut layout,
-        };
-
-        for (offset, (&id, &bkey)) in plan
-            .block_ids
-            .iter()
-            .zip(plan.block_keys.iter())
-            .enumerate()
-        {
-            self.append_projected_block(history, first + offset, id, bkey, &mut rows);
-        }
-
-        self.row_index.refresh_height_index();
-        let total_rows = self.row_index.total_rows();
-        let materialized_rows = texts.len() as RowIndex;
-        buf.set_all_lines(texts);
-        for p in pending {
+        let block_range = plan.first..plan.first.saturating_add(plan.block_ids.len());
+        let materialized = self.collect_blocks_range(history, theme, block_range);
+        let row_base = materialized.row_base;
+        let total_rows = materialized.total_rows;
+        let materialized_rows = materialized.texts.len() as RowIndex;
+        buf.set_all_lines(materialized.texts);
+        for p in materialized.pending {
             apply_row_highlights(buf, p.row, p.highlights);
             if p.decoration != LineDecoration::default() {
                 buf.set_decoration(p.row, p.decoration);
             }
         }
-        self.visible_layout = layout;
+        self.visible_layout = materialized.layout;
         self.visible_row_base = row_base;
         self.visible_total_rows = total_rows;
         self.mark_projected_into(plan.key, buf);
@@ -643,6 +626,42 @@ impl TranscriptProjection {
             row_base,
             total_rows,
             materialized_rows,
+        }
+    }
+
+    fn collect_blocks_range(
+        &mut self,
+        history: &BlockHistory,
+        theme: &Theme,
+        block_range: std::ops::Range<usize>,
+    ) -> MaterializedTranscriptRange {
+        let start = block_range.start.min(self.row_index.nodes.len());
+        let end = block_range.end.min(self.row_index.nodes.len());
+        let row_base = self.row_index.prefix_row(start);
+        let mut texts = Vec::new();
+        let mut pending = Vec::new();
+        let mut layout = Vec::with_capacity(end.saturating_sub(start));
+        let mut rows = ProjectRows {
+            row_base,
+            texts: &mut texts,
+            pending: &mut pending,
+            layout: &mut layout,
+        };
+
+        for block_index in start..end {
+            let id = self.row_index.nodes[block_index].id;
+            let key = self.row_index.nodes[block_index].key;
+            self.cache.ensure_many(history, &[id], &[key], theme);
+            self.append_projected_block(history, block_index, id, key, &mut rows);
+        }
+
+        self.row_index.refresh_height_index();
+        MaterializedTranscriptRange {
+            row_base,
+            total_rows: self.row_index.total_rows(),
+            texts,
+            pending,
+            layout,
         }
     }
 
@@ -836,59 +855,84 @@ impl TranscriptProjection {
             return TranscriptRangeRows::empty();
         }
 
-        let gen = history.generation();
-        self.gc_if_stale(gen, width);
-        let base_key = base_layout_key(width, show_thinking);
-        self.row_index
-            .rebuild_if_stale(history, width, show_thinking, base_key);
+        self.materialize_block_layout(history, width, show_thinking, theme);
+        let total_rows = self.row_index.total_rows();
+        if total_rows == 0 || start >= total_rows {
+            return TranscriptRangeRows::empty();
+        }
+        let end = end.min(total_rows);
+        let block_range = self.row_index.block_range_for_rows(start..end);
+        if block_range.start >= block_range.end {
+            return TranscriptRangeRows::empty();
+        }
 
-        let mut rows = Vec::new();
-        let mut soft_wrapped = Vec::new();
-        let mut abs_row: RowIndex = 0;
-
-        'blocks: for i in 0..history.order.len() {
-            if abs_row >= end {
-                break;
-            }
-            let id = history.order[i];
-            let bkey = history.resolve_key(id, base_key);
-            self.cache.ensure_many(history, &[id], &[bkey], theme);
-            let Some(block_buf) = self.cache.get(id, bkey) else {
-                continue;
-            };
-            let block_rows = block_buf.line_count();
-            let gap = history.rendered_block_gap(i, block_rows);
-            self.row_index
-                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
-
-            for _ in 0..gap {
-                if abs_row >= end {
-                    break 'blocks;
-                }
-                if abs_row >= start {
-                    rows.push(String::new());
-                    soft_wrapped.push(false);
-                }
-                abs_row = abs_row.saturating_add(1);
-            }
-
-            for r in 0..block_rows {
-                if abs_row >= end {
-                    break 'blocks;
-                }
-                if abs_row >= start {
-                    rows.push(block_buf.get_line(r).unwrap_or("").to_string());
-                    soft_wrapped.push(block_buf.decoration_at(r).soft_wrapped);
-                }
-                abs_row = abs_row.saturating_add(1);
+        let materialized = self.collect_blocks_range(history, theme, block_range);
+        let local_start = row_to_usize(start.saturating_sub(materialized.row_base));
+        let local_end =
+            row_to_usize(end.saturating_sub(materialized.row_base)).min(materialized.texts.len());
+        if local_start >= local_end {
+            return TranscriptRangeRows::empty();
+        }
+        let mut soft_wrapped = vec![false; materialized.texts.len()];
+        for p in materialized.pending {
+            if let Some(slot) = soft_wrapped.get_mut(p.row) {
+                *slot = p.decoration.soft_wrapped;
             }
         }
-        self.row_index.refresh_height_index();
+        let rows = materialized.texts[local_start..local_end].to_vec();
+        let soft_wrapped = soft_wrapped[local_start..local_end].to_vec();
         let (soft_breaks, hard_breaks) = breaks_for_materialized_rows(&rows, &soft_wrapped);
         TranscriptRangeRows {
             rows,
             soft_breaks,
             hard_breaks,
+        }
+    }
+
+    pub(crate) fn copy_range(
+        &mut self,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+        range: DocRange,
+    ) -> CopyOutput {
+        if (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col) {
+            return CopyOutput::default();
+        }
+        self.materialize_block_layout(history, width, show_thinking, theme);
+        let total_rows = self.row_index.total_rows();
+        if total_rows == 0 || range.start.row >= total_rows {
+            return CopyOutput::default();
+        }
+        let end_row = range.end.row.min(total_rows.saturating_sub(1));
+        let block_range = self
+            .row_index
+            .block_range_for_rows(range.start.row..end_row.saturating_add(1));
+        if block_range.start >= block_range.end {
+            return CopyOutput::default();
+        }
+
+        let mut scratch = Buffer::new(BufId(0), BufCreateOpts::default());
+        let materialized = self.collect_blocks_range(history, theme, block_range);
+        let row_base = materialized.row_base;
+        scratch.set_all_lines(materialized.texts);
+        for p in materialized.pending {
+            apply_row_highlights(&mut scratch, p.row, p.highlights);
+            if p.decoration != LineDecoration::default() {
+                scratch.set_decoration(p.row, p.decoration);
+            }
+        }
+
+        let start_local = range.start.row.saturating_sub(row_base);
+        let end_local = range.end.row.saturating_sub(row_base);
+        let start = scratch.byte_at_display_pos(row_to_usize(start_local), range.start.byte_col);
+        let end = scratch.byte_at_display_pos(row_to_usize(end_local), range.end.byte_col);
+        let clipboard = copy_byte_range(&scratch, start, end);
+        let raw = smelt_buffer::text::slice(&scratch.text(), start..end).to_string();
+        CopyOutput {
+            kill_ring: raw,
+            clipboard,
         }
     }
 
@@ -899,35 +943,18 @@ impl TranscriptProjection {
         show_thinking: bool,
         theme: &Theme,
     ) -> (Vec<usize>, Vec<usize>) {
-        self.ensure_all(history, width, show_thinking, theme);
-        let base_key = base_layout_key(width, show_thinking);
-        self.row_index
-            .rebuild_if_stale(history, width, show_thinking, base_key);
-
-        let mut row_lengths: Vec<usize> = Vec::new();
-        let mut soft_wrapped: Vec<bool> = Vec::new();
-
-        for i in 0..history.order.len() {
-            let id = history.order[i];
-            let bkey = history.resolve_key(id, base_key);
-            let Some(block_buf) = self.cache.get(id, bkey) else {
-                continue;
-            };
-            let block_rows = block_buf.line_count();
-            let gap = history.rendered_block_gap(i, block_rows);
-            self.row_index
-                .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
-            for _ in 0..gap {
-                row_lengths.push(0);
-                soft_wrapped.push(false);
-            }
-            for r in 0..block_rows {
-                row_lengths.push(block_buf.get_line(r).unwrap_or("").len());
-                soft_wrapped.push(block_buf.decoration_at(r).soft_wrapped);
+        self.materialize_block_layout(history, width, show_thinking, theme);
+        if self.row_index.nodes.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let materialized = self.collect_blocks_range(history, theme, 0..self.row_index.nodes.len());
+        let mut soft_wrapped = vec![false; materialized.texts.len()];
+        for p in materialized.pending {
+            if let Some(slot) = soft_wrapped.get_mut(p.row) {
+                *slot = p.decoration.soft_wrapped;
             }
         }
-        self.row_index.refresh_height_index();
-        breaks_for_row_lengths(row_lengths, &soft_wrapped)
+        breaks_for_materialized_rows(&materialized.texts, &soft_wrapped)
     }
 }
 

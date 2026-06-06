@@ -1100,6 +1100,38 @@ impl TuiApp {
         }
 
         if vim_enabled {
+            let is_virtual = self.ui.win(win_id).is_some_and(|win| win.is_virtual_rows());
+            if is_virtual {
+                let command = {
+                    let win = self.ui.win_mut(win_id).expect("window");
+                    crate::smelt_edit::vim::handle_virtual_viewer_key(
+                        k,
+                        &mut win.vim_mode,
+                        &mut win.vim_state,
+                    )
+                };
+                if let Some(command) = command {
+                    let command = self
+                        .resolve_virtual_viewer_command(win_id, command)
+                        .unwrap_or(command);
+                    let now = self.core.clock.instant_now();
+                    let copied = {
+                        let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                        let win = win.expect("window");
+                        let buf = buf.expect("buffer");
+                        win.execute_virtual_viewer_command(buf, command, viewport_rows, now)
+                    };
+                    if let Some(range) = copied {
+                        if let Some(out) =
+                            crate::smelt_edit::UiHost::copy_virtual_range(self, win_id, range)
+                        {
+                            self.yank_to_clipboard(out);
+                        }
+                    }
+                    return Status::Consumed;
+                }
+            }
+
             let yank_tick_before = self.core.clipboard.kill_ring.yank_tick();
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             let win = win.expect("window");
@@ -1117,6 +1149,84 @@ impl TuiApp {
         }
 
         self.dispatch_buffer_action(win_id, buf_id, k, viewport_rows)
+    }
+
+    fn resolve_virtual_viewer_command(
+        &mut self,
+        win_id: crate::smelt_edit::WinId,
+        command: crate::smelt_edit::ViewerCommand,
+    ) -> Option<crate::smelt_edit::ViewerCommand> {
+        use crate::smelt_edit::{text, DocPosition, UiHost, ViewerCommand};
+
+        #[derive(Clone, Copy)]
+        enum WordKind {
+            Forward,
+            Backward,
+            End,
+        }
+
+        let (kind, count) = match command {
+            ViewerCommand::WordForward(count) => (WordKind::Forward, count.max(1)),
+            ViewerCommand::WordBackward(count) => (WordKind::Backward, count.max(1)),
+            ViewerCommand::WordEnd(count) => (WordKind::End, count.max(1)),
+            _ => return Some(command),
+        };
+        let total_rows = UiHost::virtual_total_rows(self, win_id)?;
+        if total_rows == 0 {
+            return None;
+        }
+        let mut pos = self.ui.win(win_id)?.virtual_cursor()?;
+        pos.row = pos.row.min(total_rows.saturating_sub(1));
+
+        for _ in 0..count {
+            match kind {
+                WordKind::Forward => {
+                    let line = self.virtual_line(win_id, pos.row)?;
+                    let col = text::word_forward_pos(&line, pos.byte_col, text::CharClass::Word);
+                    if col < line.len() || pos.row + 1 >= total_rows {
+                        pos.byte_col = col;
+                    } else {
+                        pos.row = pos.row.saturating_add(1).min(total_rows.saturating_sub(1));
+                        pos.byte_col = 0;
+                    }
+                }
+                WordKind::Backward => {
+                    let line = self.virtual_line(win_id, pos.row)?;
+                    let col = text::word_backward_pos(&line, pos.byte_col, text::CharClass::Word);
+                    if col > 0 || pos.row == 0 {
+                        pos.byte_col = col;
+                    } else {
+                        pos.row = pos.row.saturating_sub(1);
+                        pos.byte_col = self.virtual_line(win_id, pos.row)?.len();
+                    }
+                }
+                WordKind::End => {
+                    let line = self.virtual_line(win_id, pos.row)?;
+                    let col = text::word_end_pos(&line, pos.byte_col, text::CharClass::Word);
+                    if col > pos.byte_col || pos.row + 1 >= total_rows {
+                        pos.byte_col = col;
+                    } else {
+                        pos.row = pos.row.saturating_add(1).min(total_rows.saturating_sub(1));
+                        pos.byte_col = 0;
+                    }
+                }
+            }
+        }
+
+        Some(ViewerCommand::GotoPosition(DocPosition {
+            row: pos.row,
+            byte_col: pos.byte_col,
+        }))
+    }
+
+    fn virtual_line(
+        &mut self,
+        win_id: crate::smelt_edit::WinId,
+        row: crate::smelt_edit::RowIndex,
+    ) -> Option<String> {
+        crate::smelt_edit::UiHost::rows_for_range(self, win_id, row, 1)?
+            .into_iter()
+            .next()
     }
 
     /// Keymap-driven dispatcher: looks up the binding under the window's
@@ -1154,6 +1264,89 @@ impl TuiApp {
         let Some(action) = lookup(k.code, k.modifiers, &ctx) else {
             return Status::Ignored;
         };
+
+        if self.ui.win(win_id).is_some_and(|win| win.is_virtual_rows()) {
+            let extending = matches!(
+                action,
+                KeyAction::SelectUp
+                    | KeyAction::SelectDown
+                    | KeyAction::SelectStartOfLine
+                    | KeyAction::SelectEndOfLine
+                    | KeyAction::SelectWordForward
+                    | KeyAction::SelectWordBackward
+            );
+            let command = match action {
+                KeyAction::MoveUp | KeyAction::SelectUp => {
+                    Some(crate::smelt_edit::ViewerCommand::MoveRows(-1))
+                }
+                KeyAction::MoveDown | KeyAction::SelectDown => {
+                    Some(crate::smelt_edit::ViewerCommand::MoveRows(1))
+                }
+                KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
+                    Some(crate::smelt_edit::ViewerCommand::WordForward(1))
+                }
+                KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
+                    Some(crate::smelt_edit::ViewerCommand::WordBackward(1))
+                }
+                KeyAction::PageUp => Some(crate::smelt_edit::ViewerCommand::PageRows(-1)),
+                KeyAction::PageDown => Some(crate::smelt_edit::ViewerCommand::PageRows(1)),
+                KeyAction::HalfPageUp => Some(crate::smelt_edit::ViewerCommand::MoveRows(
+                    -((viewport_rows as isize) / 2).max(1),
+                )),
+                KeyAction::HalfPageDown => Some(crate::smelt_edit::ViewerCommand::MoveRows(
+                    ((viewport_rows as isize) / 2).max(1),
+                )),
+                KeyAction::ScrollLineUp => Some(crate::smelt_edit::ViewerCommand::ScrollRows(-1)),
+                KeyAction::ScrollLineDown => Some(crate::smelt_edit::ViewerCommand::ScrollRows(1)),
+                KeyAction::MoveStartOfBuffer => Some(crate::smelt_edit::ViewerCommand::BufferStart),
+                KeyAction::MoveEndOfBuffer => Some(crate::smelt_edit::ViewerCommand::BufferEnd),
+                KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
+                    Some(crate::smelt_edit::ViewerCommand::LineStart)
+                }
+                KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
+                    Some(crate::smelt_edit::ViewerCommand::LineEnd)
+                }
+                KeyAction::CopySelection => Some(crate::smelt_edit::ViewerCommand::YankSelection),
+                _ => None,
+            };
+            if let Some(command) = command {
+                let command = self
+                    .resolve_virtual_viewer_command(win_id, command)
+                    .unwrap_or(command);
+                let now = self.core.clock.instant_now();
+                let copied = {
+                    let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                    let win = win.expect("window");
+                    let buf = buf.expect("buffer");
+                    if extending && !win.virtual_selection_anchor_active() {
+                        win.execute_virtual_viewer_command(
+                            buf,
+                            crate::smelt_edit::ViewerCommand::StartVisual,
+                            viewport_rows,
+                            now,
+                        );
+                    } else if !extending
+                        && !matches!(command, crate::smelt_edit::ViewerCommand::YankSelection)
+                    {
+                        win.execute_virtual_viewer_command(
+                            buf,
+                            crate::smelt_edit::ViewerCommand::ClearSelection,
+                            viewport_rows,
+                            now,
+                        );
+                    }
+                    win.execute_virtual_viewer_command(buf, command, viewport_rows, now)
+                };
+                if let Some(range) = copied {
+                    if let Some(out) =
+                        crate::smelt_edit::UiHost::copy_virtual_range(self, win_id, range)
+                    {
+                        self.yank_to_clipboard(out);
+                    }
+                }
+                return Status::Consumed;
+            }
+        }
 
         let extending = matches!(
             action,

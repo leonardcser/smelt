@@ -4,7 +4,19 @@ use std::ops::Range;
 
 pub type RowIndex = u64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocPosition {
+    pub row: RowIndex,
+    pub byte_col: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocRange {
+    pub start: DocPosition,
+    pub end: DocPosition,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaterializedRows {
     pub clamped_scroll: RowIndex,
     pub row_base: RowIndex,

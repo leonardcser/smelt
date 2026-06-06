@@ -21,7 +21,7 @@ fn strip_markers(text: String) -> String {
 const KILL_RING_MAX: usize = 32;
 
 /// Duration of the post-yank highlight flash.
-pub(crate) const YANK_FLASH_DURATION: Duration = Duration::from_millis(200);
+pub const YANK_FLASH_DURATION: Duration = Duration::from_millis(200);
 
 /// Kill ring shared by emacs-style edits and vim yank/paste operations.
 pub struct KillRing {

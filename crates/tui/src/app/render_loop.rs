@@ -23,17 +23,8 @@ impl TuiApp {
         let width = term_w as usize;
         let show_queued = agent_running || self.busy_stack.is_busy();
 
-        let transcript_cursor_screen_row = self.transcript_win().cursor_screen_row_in_viewport();
-
         self.ui.resolve_tail_scrolls();
         self.ui.sync_scroll_links();
-        let transcript_scroll_target = if self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN) {
-            crate::content::transcript_buf::ScrollTarget::visible_tail()
-        } else {
-            crate::content::transcript_buf::ScrollTarget::visible_row(
-                self.transcript_win().scroll_top(),
-            )
-        };
 
         let queued_owned: Vec<String> = if show_queued {
             self.queued_inputs
@@ -46,13 +37,14 @@ impl TuiApp {
         let queued: &[String] = &queued_owned;
 
         let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
+        let transcript_should_follow_tail = self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN);
 
         // Hidden is the right baseline; sync paths below set Block when focus owns the caret.
         self.ui
             .set_cursor_shape(crate::smelt_edit::CursorShape::Hidden);
 
         // ── Layout ──
-        let (prompt_rect, viewport_rows) = {
+        let (prompt_rect, _viewport_rows) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
             let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width);
             // Cap the prompt block at half the screen so a very long
@@ -78,23 +70,18 @@ impl TuiApp {
         }
         // Suppress unused-variable warning when queued is only forwarded into Lua state.
         let _ = queued;
-        {
-            let _p = smelt_perf::perf::begin("compositor:transcript");
-            if self.ui.drag_capture_window() == Some(crate::app::TRANSCRIPT_WIN) {
-                self.sync_frozen_transcript_layer(has_transcript_cursor);
-            } else {
-                self.sync_transcript_layer(
-                    width,
-                    viewport_rows,
-                    transcript_scroll_target,
-                    has_transcript_cursor,
-                    transcript_cursor_screen_row,
-                );
-            }
-        }
+        // Transcript projection is materialized by the render-prep hook below,
+        // after split geometry is resolved. Drag capture keeps the current slice
+        // frozen so local byte ranges remain valid until MouseUp commits/copies.
+        let transcript_frozen = self.ui.drag_capture_window() == Some(crate::app::TRANSCRIPT_WIN);
         {
             let _p = smelt_perf::perf::begin("compositor:input");
             self.sync_input_layer(prompt_rect, has_prompt_cursor);
+        }
+
+        if has_transcript_cursor {
+            self.ui
+                .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
         }
 
         self.finalize_layer_rects();
@@ -124,14 +111,85 @@ impl TuiApp {
         }
 
         let _p = smelt_perf::perf::begin("compositor:render_flush");
-        // Split-borrow paint registry and lua out of `self` to avoid aliasing with `&mut self.ui`.
+        if transcript_frozen {
+            self.sync_frozen_transcript_layer(has_transcript_cursor);
+        } else {
+            let now = self.core.clock.instant_now();
+            self.parser
+                .sync_active_tool_elapsed_at(self.transcript.history_mut(), now);
+            let tw = self.transcript_width() as u16;
+            let block_ids = self.transcript.history().order.clone();
+            self.prerender_transcript_tool_blocks_for_ids(tw, &block_ids);
+        }
+
+        // Split-borrow app fields so the render-prep hook can materialize the
+        // transcript through the generic `Ui` path while paint callbacks still
+        // invoke Lua without borrowing all of `self`.
+        let show_thinking = self.core.config.settings.show_thinking;
+        let transcript = &mut self.transcript;
         let paint_registry = &self.paint_registry;
         let lua = &self.lua;
-        let _ = self.ui.render_with_paints(out, |id, slice, ctx| {
-            if let Some(handle_id) = paint_registry.lookup(id) {
-                crate::lua::paint::invoke_paint(lua, handle_id, slice, ctx);
-            }
-        });
+        let theme = self.ui.theme().clone();
+        let render_now = self.core.clock.instant_now();
+        let ui = &mut self.ui;
+        let _ = ui.render_with_paints_prepared(
+            out,
+            |ui, request| {
+                if request.win != crate::app::TRANSCRIPT_WIN || transcript_frozen {
+                    return;
+                }
+                let _p = smelt_perf::perf::begin("compositor:project_transcript");
+                let scroll_target = if transcript_should_follow_tail {
+                    crate::content::transcript_buf::ScrollTarget::visible_tail()
+                } else {
+                    crate::content::transcript_buf::ScrollTarget::visible_row(request.scroll_top)
+                };
+                let width = request.content_width.max(1);
+                let viewport_rows = request.rect.height;
+                let plan = transcript.plan_projection_measured(
+                    width,
+                    show_thinking,
+                    scroll_target,
+                    viewport_rows,
+                    &theme,
+                );
+                let Some(buf) = ui.buf_mut(request.buf) else {
+                    return;
+                };
+                let tdata = transcript.project_planned(buf, &theme, plan);
+                if let Some(win) = ui.win_mut(request.win) {
+                    debug_assert!(tdata.total_rows >= tdata.row_base);
+                    debug_assert!(
+                        tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
+                    );
+                    win.apply_materialized_rows(tdata);
+                    win.set_resolved_scroll(tdata.clamped_scroll);
+                }
+                let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
+                if let (Some(win), Some(buf)) = (win, buf) {
+                    win.sync_virtual_cursor_to_local(buf, viewport_rows);
+                    let text = buf.text();
+                    win.clamp_anchors_to_source(&text);
+                    let now = render_now;
+                    win.clear_expired_virtual_yank_flash(now);
+                    let ranges = crate::app::transcript::virtual_selection_highlights_from_window(
+                        win,
+                        buf,
+                        tdata.clamped_scroll,
+                        tdata.row_base,
+                        viewport_rows,
+                        now,
+                    );
+                    buf.set_selection(ranges);
+                    win.scroll_left = 0;
+                }
+            },
+            |id, slice, ctx| {
+                if let Some(handle_id) = paint_registry.lookup(id) {
+                    crate::lua::paint::invoke_paint(lua, handle_id, slice, ctx);
+                }
+            },
+        );
     }
 
     /// Compute which pane owns the cursor this frame.
@@ -153,88 +211,6 @@ impl TuiApp {
         if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
             buf.set_selection(Vec::new());
         }
-        if has_transcript_cursor {
-            self.ui
-                .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
-        }
-        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            win.scroll_left = 0;
-        }
-    }
-
-    /// Project the transcript into its display buffer and drive `Ui::wins[TRANSCRIPT_WIN]`.
-    /// When content owns focus, surfaces a Block cursor; `Window::render` derives the
-    /// position from `effective_endpoint`, so the cursor naturally tracks the live drag.
-    /// `cursor_screen_row` is captured before tail-scroll resolution so it doesn't underflow
-    /// when read after scroll mutations.
-    fn sync_transcript_layer(
-        &mut self,
-        width: usize,
-        viewport_rows: u16,
-        scroll_target: crate::content::transcript_buf::ScrollTarget,
-        has_transcript_cursor: bool,
-        cursor_screen_row: Option<u16>,
-    ) {
-        let tdata = {
-            let _p = smelt_perf::perf::begin("compositor:project_transcript");
-            self.project_transcript_buffer(
-                width,
-                viewport_rows,
-                scroll_target,
-                self.core.config.settings.show_thinking,
-            )
-        };
-        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            debug_assert!(tdata.total_rows >= tdata.row_base);
-            debug_assert!(
-                tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
-            );
-            win.apply_materialized_rows(tdata);
-            win.set_resolved_scroll(tdata.clamped_scroll);
-        }
-        // After scroll is restored to the new block anchor, pin the cursor to
-        // the same screen-row offset so it stays visually fixed across resize
-        // instead of drifting off-viewport as reflow shifts visual rows.
-        if let Some(screen_row) = cursor_screen_row {
-            let buf_id = self.transcript_win().buf;
-            let (win, buf) = self.ui.win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
-            if let (Some(win), Some(buf)) = (win, buf) {
-                win.restore_cursor_screen_row(buf, screen_row);
-            }
-        }
-        // The projection rebuilt `lines` via `set_all_lines`, which can shrink
-        // the readonly buffer (e.g. blocks removed by `/clear`, a reload that
-        // reset transcript state). Any cursor anchor a vim motion or click
-        // parked past the new text length now points beyond it. Reclamp here
-        // so the rest of the frame sees coherent offsets.
-        {
-            let buf_id = self.transcript_win().buf;
-            let (win, buf) = self.ui.win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
-            if let (Some(win), Some(buf)) = (win, buf) {
-                let text = buf.text();
-                win.clamp_anchors_to_source(&text);
-            }
-        }
-
-        let transcript_selection = self.transcript_selection_highlights(
-            tdata.clamped_scroll,
-            tdata.row_base,
-            viewport_rows,
-        );
-        if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
-            let ranges: Vec<crate::smelt_edit::SelectionRange> = transcript_selection
-                .iter()
-                .map(
-                    |(line, col_start, col_end)| crate::smelt_edit::SelectionRange {
-                        line: *line,
-                        col_start: *col_start,
-                        col_end: *col_end,
-                    },
-                )
-                .collect();
-            buf.set_selection(ranges);
-        }
-
         if has_transcript_cursor {
             self.ui
                 .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
@@ -404,10 +380,6 @@ impl TuiApp {
     }
 }
 
-/// Inverted-block cursor for input surfaces (prompt, focused overlay leaves).
-/// `Window::render` derives the position from the focused leaf's own
-/// `cursor_col` / `cursor_screen_row` and preserves the underlying glyph,
-/// falling back to a space when the cell is empty.
 fn prompt_block_cursor(theme: &crate::smelt_edit::Theme) -> crate::smelt_edit::CursorShape {
     let (fg, bg) = if theme.is_light() {
         (

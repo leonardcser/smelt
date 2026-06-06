@@ -64,11 +64,14 @@ pub use callback::{
 pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
-pub use row::{row_to_usize, MaterializeRequest, MaterializedRows, RowIndex};
+pub use row::{
+    row_to_usize, DocPosition, DocRange, MaterializeRequest, MaterializedRows, RowIndex,
+};
 pub use vim::VimMode;
 pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, CursorShape, DrawContext, EventCtx,
-    MouseCtx, ScrollbarState, SplitConfig, VerticalScroll, Window, WindowViewport,
+    MouseCtx, ScrollbarState, SplitConfig, VerticalScroll, ViewerCommand, VirtualRowsState,
+    VirtualYankFlash, Window, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.
@@ -2117,6 +2120,18 @@ pub trait UiHost {
     ) -> Option<(Vec<usize>, Vec<usize>)> {
         let rows = self.rows_for_range(win, start, count)?;
         Some((Vec::new(), hard_breaks_for_lines(&rows)))
+    }
+
+    /// Total rows for a virtual document. `None` means `win` is backed by its
+    /// materialized buffer and `Window::scroll_row_total` is authoritative.
+    fn virtual_total_rows(&mut self, _win: WinId) -> Option<RowIndex> {
+        None
+    }
+
+    /// Copy an absolute document range for a virtual window. `None` falls back to
+    /// local buffer byte-range copy at the call site.
+    fn copy_virtual_range(&mut self, _win: WinId, _range: DocRange) -> Option<CopyOutput> {
+        None
     }
 
     /// Last-painted visible row range for `win`.

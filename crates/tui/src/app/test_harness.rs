@@ -3439,6 +3439,102 @@ mod tests {
         )
     }
 
+    fn virtual_transcript_app(rows: usize, vim: bool) -> TestApp {
+        let mut app = TestApp::builder().with_vim(vim).build();
+        app.app.handle_resize(80, 16);
+        for i in 0..rows {
+            app.app
+                .push_block(smelt_core::transcript_model::Block::Text {
+                    content: format!("row {i:03} alpha beta"),
+                });
+        }
+        app.render_silent();
+        app.app.app_focus = AppFocus::Content;
+        app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        let win = app.app.transcript_win_mut();
+        win.vim_enabled = vim;
+        win.set_vim_mode(VimMode::Normal);
+        app
+    }
+
+    fn transcript_virtual_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
+        app.app
+            .transcript_win()
+            .virtual_cursor()
+            .expect("virtual transcript cursor")
+            .row
+    }
+
+    fn transcript_total_rows(app: &TestApp) -> crate::smelt_edit::RowIndex {
+        let win = app.app.transcript_win();
+        let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+        win.scroll_row_total(buf)
+    }
+
+    #[test]
+    fn transcript_vim_gg_g_and_count_g_use_virtual_rows() {
+        let mut app = virtual_transcript_app(100, true);
+        let total_rows = transcript_total_rows(&app);
+        assert!(total_rows > 40, "test transcript should be virtualized");
+
+        app.type_char('g');
+        app.type_char('g');
+        assert_eq!(transcript_virtual_cursor_row(&app), 0);
+
+        app.type_char('G');
+        assert_eq!(transcript_virtual_cursor_row(&app), total_rows - 1);
+
+        app.type_char('2');
+        app.type_char('5');
+        app.type_char('G');
+        assert_eq!(transcript_virtual_cursor_row(&app), 24);
+    }
+
+    #[test]
+    fn transcript_vim_visual_yank_copies_virtual_range() {
+        let mut app = virtual_transcript_app(100, true);
+
+        app.type_char('g');
+        app.type_char('g');
+        app.type_char('V');
+        app.type_char('6');
+        app.type_char('0');
+        app.type_char('G');
+        app.type_char('y');
+
+        let yank = app.app.core.clipboard.kill_ring.current();
+        assert!(yank.contains("row 000 alpha beta"), "yank was {yank:?}");
+        assert!(yank.contains("row 029 alpha beta"), "yank was {yank:?}");
+        let now = app.app.core.clock.instant_now();
+        assert!(app
+            .app
+            .transcript_win()
+            .virtual_selection_range(now)
+            .is_some());
+        app.feed_one(SourceEvent::Tick(300));
+        let now = app.app.core.clock.instant_now();
+        assert!(app
+            .app
+            .transcript_win()
+            .virtual_selection_range(now)
+            .is_none());
+    }
+
+    #[test]
+    fn transcript_shift_selection_copy_copies_virtual_range() {
+        let mut app = virtual_transcript_app(80, false);
+
+        app.press_mod(KeyCode::Up, KeyModifiers::SUPER);
+        for _ in 0..30 {
+            app.press_mod(KeyCode::Down, KeyModifiers::SHIFT);
+        }
+        app.press_mod(KeyCode::Char('c'), KeyModifiers::SUPER);
+
+        let yank = app.app.core.clipboard.kill_ring.current();
+        assert!(yank.contains("row 000 alpha beta"), "yank was {yank:?}");
+        assert!(yank.contains("row 014 alpha beta"), "yank was {yank:?}");
+    }
+
     #[test]
     fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};

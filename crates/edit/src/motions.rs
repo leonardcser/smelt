@@ -1,8 +1,8 @@
 //! Pure cursor-motion primitives over `&str` byte positions.
 
 use super::text::{
-    byte_to_cell, cell_to_byte, char_class, line_end, line_start, next_char_boundary,
-    prev_char_boundary, CharClass,
+    byte_to_cell, cell_to_byte, line_end, line_start, next_char_boundary, prev_char_boundary,
+    CharClass,
 };
 
 /// Direction + variant for `f`/`F`/`t`/`T`-style find-char motions.
@@ -60,26 +60,7 @@ pub(crate) fn move_right_inclusive(buf: &str, cpos: usize) -> usize {
 }
 
 pub(crate) fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
-    let next = next_char_boundary(buf, cpos);
-    if next >= buf.len() {
-        return cpos;
-    }
-    let chars: Vec<(usize, char)> = buf[next..].char_indices().collect();
-    if chars.is_empty() {
-        return cpos;
-    }
-    let mut i = 0;
-    while i < chars.len() && char_class(chars[i].1, mode) == 0 {
-        i += 1;
-    }
-    if i >= chars.len() {
-        return prev_char_boundary(buf, buf.len());
-    }
-    let target_class = char_class(chars[i].1, mode);
-    while i + 1 < chars.len() && char_class(chars[i + 1].1, mode) == target_class {
-        i += 1;
-    }
-    next + chars[i].0
+    super::text::word_end_pos(buf, cpos, mode)
 }
 
 /// End of line for normal mode (on last char, not past it).

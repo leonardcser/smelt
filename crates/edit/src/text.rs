@@ -115,6 +115,29 @@ pub fn word_backward_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
     chars[i].0
 }
 
+pub fn word_end_pos(buf: &str, cpos: usize, mode: CharClass) -> usize {
+    let next = next_char_boundary(buf, cpos);
+    if next >= buf.len() {
+        return cpos;
+    }
+    let chars: Vec<(usize, char)> = buf[next..].char_indices().collect();
+    if chars.is_empty() {
+        return cpos;
+    }
+    let mut i = 0;
+    while i < chars.len() && char_class(chars[i].1, mode) == 0 {
+        i += 1;
+    }
+    if i >= chars.len() {
+        return prev_char_boundary(buf, buf.len());
+    }
+    let target_class = char_class(chars[i].1, mode);
+    while i + 1 < chars.len() && char_class(chars[i + 1].1, mode) == target_class {
+        i += 1;
+    }
+    next + chars[i].0
+}
+
 pub fn line_start(buf: &str, cpos: usize) -> usize {
     let cpos = snap(buf, cpos);
     buf[..cpos].rfind('\n').map(|i| i + 1).unwrap_or(0)

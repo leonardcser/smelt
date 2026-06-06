@@ -108,4 +108,35 @@ impl crate::smelt_edit::UiHost for TuiApp {
             crate::smelt_edit::UiHost::breaks_for_range(&mut self.ui, win, start, count)
         }
     }
+
+    fn virtual_total_rows(
+        &mut self,
+        win: crate::smelt_edit::WinId,
+    ) -> Option<crate::smelt_edit::RowIndex> {
+        if win == crate::app::TRANSCRIPT_WIN {
+            let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
+            Some(rows.len() as crate::smelt_edit::RowIndex)
+        } else {
+            crate::smelt_edit::UiHost::virtual_total_rows(&mut self.ui, win)
+        }
+    }
+
+    fn copy_virtual_range(
+        &mut self,
+        win: crate::smelt_edit::WinId,
+        range: crate::smelt_edit::DocRange,
+    ) -> Option<crate::smelt_edit::CopyOutput> {
+        if win == crate::app::TRANSCRIPT_WIN {
+            let tw = self.transcript_width() as u16;
+            let theme = self.ui.theme().clone();
+            Some(self.transcript.copy_range(
+                tw,
+                self.core.config.settings.show_thinking,
+                &theme,
+                range,
+            ))
+        } else {
+            crate::smelt_edit::UiHost::copy_virtual_range(&mut self.ui, win, range)
+        }
+    }
 }

@@ -135,6 +135,22 @@ impl TranscriptView {
         )
     }
 
+    pub(crate) fn copy_range(
+        &mut self,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+        range: crate::smelt_edit::DocRange,
+    ) -> crate::smelt_edit::CopyOutput {
+        self.projection.copy_range(
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+            theme,
+            range,
+        )
+    }
+
     pub(crate) fn history(&self) -> &BlockHistory {
         &self.transcript.history
     }
@@ -287,6 +303,68 @@ fn transcript_block_first_line(block: &Block) -> String {
         .raw_text()
         .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
         .unwrap_or_default()
+}
+
+pub(crate) fn virtual_selection_highlights_from_window(
+    win: &crate::smelt_edit::Window,
+    buf: &crate::smelt_edit::Buffer,
+    scroll_top: crate::smelt_edit::RowIndex,
+    row_base: crate::smelt_edit::RowIndex,
+    viewport_rows: u16,
+    now: std::time::Instant,
+) -> Vec<crate::smelt_edit::SelectionRange> {
+    let Some(range) = win.virtual_selection_range(now) else {
+        return Vec::new();
+    };
+    let rows = buf.lines();
+    if rows.is_empty()
+        || (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col)
+    {
+        return Vec::new();
+    }
+    let visible_start = scroll_top;
+    let visible_end = scroll_top.saturating_add(viewport_rows as crate::smelt_edit::RowIndex);
+    let start_row = range.start.row.max(visible_start);
+    let selection_end_row = if range.end.byte_col == 0 {
+        range.end.row.saturating_sub(1)
+    } else {
+        range.end.row
+    };
+    let end_row = selection_end_row.min(visible_end.saturating_sub(1));
+    if start_row > end_row {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for abs_row in start_row..=end_row {
+        let local = abs_row.saturating_sub(row_base) as usize;
+        let Some(line) = rows.get(local) else {
+            continue;
+        };
+        let line_width = smelt_buffer::text::byte_to_cell(line, line.len()) as u16;
+        let col_start = if abs_row == range.start.row {
+            smelt_buffer::text::byte_to_cell(
+                line,
+                smelt_buffer::text::snap(line, range.start.byte_col.min(line.len())),
+            ) as u16
+        } else {
+            0
+        };
+        let col_end = if abs_row == range.end.row {
+            smelt_buffer::text::byte_to_cell(
+                line,
+                smelt_buffer::text::snap(line, range.end.byte_col.min(line.len())),
+            ) as u16
+        } else {
+            line_width
+        };
+        out.push(crate::smelt_edit::SelectionRange {
+            line: local,
+            col_start,
+            col_end: col_end.max(col_start.saturating_add(1)),
+        });
+    }
+    out
 }
 
 impl TuiApp {
@@ -682,36 +760,6 @@ impl TuiApp {
         changed
     }
 
-    pub(crate) fn project_transcript_buffer(
-        &mut self,
-        width: usize,
-        viewport_rows: u16,
-        scroll_target: crate::content::transcript_buf::ScrollTarget,
-        show_thinking: bool,
-    ) -> crate::smelt_edit::MaterializedRows {
-        let gutters = self.transcript_gutters();
-        let tw = (gutters.content_width(width as u16) as usize).max(1);
-        let now = self.core.clock.instant_now();
-        self.parser
-            .sync_active_tool_elapsed_at(self.transcript.history_mut(), now);
-        let theme = self.ui.theme().clone();
-        let block_ids = self.transcript.history().order.clone();
-        self.prerender_transcript_tool_blocks_for_ids(tw as u16, &block_ids);
-        let plan = self.transcript.plan_projection_measured(
-            tw as u16,
-            show_thinking,
-            scroll_target,
-            viewport_rows,
-            &theme,
-        );
-
-        let buf = self
-            .ui
-            .win_buf_mut(self.well_known.transcript)
-            .expect("transcript window must be registered at startup");
-        self.transcript.project_planned(buf, &theme, plan)
-    }
-
     pub(crate) fn prerender_tool_blocks_in_history_for_ids(
         &mut self,
         history: &mut BlockHistory,
@@ -726,7 +774,7 @@ impl TuiApp {
     /// Main-thread pre-pass: run plugin `render` hooks for the tool blocks the
     /// next projection can actually materialize. The Lua VM is single-threaded;
     /// worker layout downstream only reads the cached owned buffers.
-    fn prerender_transcript_tool_blocks_for_ids(&mut self, width: u16, ids: &[BlockId]) {
+    pub(crate) fn prerender_transcript_tool_blocks_for_ids(&mut self, width: u16, ids: &[BlockId]) {
         let jobs = collect_tool_render_jobs(self.transcript.history(), width, ids.iter().copied());
         let rendered = self.render_tool_jobs(width, jobs);
         Self::store_tool_render_results(self.transcript.history_mut(), width, rendered);
@@ -782,6 +830,7 @@ impl TuiApp {
 
     /// Per-line selection ranges (line, col_start, col_end) in display-cell units.
     /// No-op when no vim visual, selection anchor, or yank-flash is active.
+    #[cfg(test)]
     pub(crate) fn transcript_selection_highlights(
         &mut self,
         scroll_top: crate::smelt_edit::RowIndex,
@@ -789,6 +838,25 @@ impl TuiApp {
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
         let win = self.transcript_win();
+        let now = self.core.clock.instant_now();
+        if win.virtual_selection_range(now).is_some() {
+            let buf_id = win.buf;
+            let buf = match self.ui.buf(buf_id) {
+                Some(b) => b,
+                None => return Vec::new(),
+            };
+            return virtual_selection_highlights_from_window(
+                win,
+                buf,
+                scroll_top,
+                row_base,
+                viewport_rows,
+                now,
+            )
+            .into_iter()
+            .map(|r| (r.line, r.col_start, r.col_end))
+            .collect();
+        }
         let vim_visual = win.vim_enabled
             && matches!(
                 win.vim_mode,

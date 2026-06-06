@@ -305,17 +305,22 @@ impl TuiApp {
         );
     }
 
-    fn yank_to_clipboard(&mut self, out: crate::smelt_edit::CopyOutput) {
-        if self.core.clipboard.write(&out.clipboard).is_ok() {
+    pub(crate) fn yank_to_clipboard(&mut self, out: crate::smelt_edit::CopyOutput) {
+        if out.clipboard.is_empty() && out.kill_ring.is_empty() {
+            return;
+        }
+        if !out.clipboard.is_empty() && self.core.clipboard.write(&out.clipboard).is_ok() {
             self.core
                 .clipboard
                 .kill_ring
                 .record_clipboard_write(out.clipboard);
         }
-        self.core
-            .clipboard
-            .kill_ring
-            .set_with_linewise(out.kill_ring, false);
+        if !out.kill_ring.is_empty() {
+            self.core
+                .clipboard
+                .kill_ring
+                .set_with_linewise(out.kill_ring, false);
+        }
     }
 
     /// Drive a prompt mouse event through `Window::handle_mouse`. On `Up` with
@@ -421,6 +426,29 @@ impl TuiApp {
             return None;
         }
         let snapped = self.snap_event_for_selection(me, &rows, viewport);
+
+        if self.transcript_win().is_virtual_rows() {
+            let now = self.core.clock.instant_now();
+            let range = {
+                let mouse_ctx = crate::smelt_edit::MouseCtx {
+                    soft_breaks: &soft,
+                    hard_breaks: &hard,
+                    viewport,
+                    click_count,
+                };
+                let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                let (_, range) = win
+                    .expect("transcript window")
+                    .handle_virtual_mouse(buf?, snapped, mouse_ctx, now);
+                range?
+            };
+            let out = crate::smelt_edit::UiHost::copy_virtual_range(self, win_id, range)?;
+            return if out.clipboard.is_empty() && out.kill_ring.is_empty() {
+                None
+            } else {
+                Some(out)
+            };
+        }
 
         // Breaks only matter for word/line selection and word/line-anchored drags.
         // They must come from the same projected buffer that mouse selection reads;
@@ -657,6 +685,42 @@ mod tests {
             win.cursor_row(),
             win.cursor_col(),
             app.ui.buf(win.buf).unwrap().lines(),
+        );
+    }
+
+    #[test]
+    fn transcript_tail_follow_tracks_growth_through_render_projection() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().scroll_to_bottom();
+        app.render_normal_to(false, &mut std::io::sink());
+        let before_top = app.transcript_win().scroll_top();
+
+        app.push_block(smelt_core::Block::Text {
+            content: "line 100".into(),
+        });
+        app.render_normal_to(false, &mut std::io::sink());
+
+        let win = app.transcript_win();
+        let vp = win.viewport.expect("render populated transcript viewport");
+        let buf = app.ui.buf(win.buf).expect("transcript buffer");
+        assert!(
+            win.is_at_tail(buf, vp.rect.height),
+            "tail-follow render should end at tail after transcript growth"
+        );
+        assert!(
+            win.scroll_top() >= before_top,
+            "tail-follow should not move upward when rows are appended"
+        );
+        let rendered_rows = buf.lines();
+        assert!(rendered_rows.iter().any(|line| line == "line 100"));
+        assert!(
+            !rendered_rows.iter().any(|line| line == "line 0"),
+            "tail projection should stay bounded after growth"
         );
     }
 
