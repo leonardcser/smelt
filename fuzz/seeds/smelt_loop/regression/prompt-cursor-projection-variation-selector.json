@@ -1,0 +1,24 @@
+{
+  "_about": "Prompt cursor projection regression: a digit followed by U+FE0F changes display width only when measured as a string prefix. Byte-to-cell and cell-to-byte projection must use the same prefix-width model so a cursor after the variation selector does not project past the following visible character.",
+  "_fix": "fix(buffer): use prefix widths for cell projection",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": 57,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 65039,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 738206976,
+      "kind": "key_unicode"
+    },
+    {
+      "data": 253,
+      "kind": "key_special"
+    }
+  ],
+  "vim": true
+}

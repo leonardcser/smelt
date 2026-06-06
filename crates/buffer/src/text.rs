@@ -11,16 +11,27 @@ pub fn byte_to_cell(line: &str, byte: usize) -> usize {
 }
 
 /// Terminal column → byte offset at which the preceding text occupies `cell` columns.
+///
+/// This is the inverse of [`byte_to_cell`]: widths are measured on whole string
+/// prefixes so presentation selectors and ZWJ/combining sequences are handled
+/// the same way in both directions.
 pub fn cell_to_byte(line: &str, cell: usize) -> usize {
-    use unicode_width::UnicodeWidthChar;
-    let mut acc = 0usize;
-    for (b, ch) in line.char_indices() {
-        if acc >= cell {
-            return b;
-        }
-        acc += UnicodeWidthChar::width(ch).unwrap_or(0);
+    use unicode_width::UnicodeWidthStr;
+    if cell == 0 {
+        return 0;
     }
-    line.len()
+
+    let mut exact = None;
+    for (b, ch) in line.char_indices() {
+        let end = b + ch.len_utf8();
+        let width = UnicodeWidthStr::width(&line[..end]);
+        if width == cell {
+            exact = Some(end);
+        } else if width > cell {
+            return exact.unwrap_or(end);
+        }
+    }
+    exact.unwrap_or(line.len())
 }
 
 /// Build byte offsets for the start of each line in `lines.join("\n")`.
@@ -292,6 +303,28 @@ mod tests {
     fn cell_to_byte_lands_at_the_start_of_a_wide_char() {
         // "a日": columns 0(a) and 1..=2(日). Cell 1 lands at byte 1 (start of 日).
         assert_eq!(cell_to_byte("a日", 1), 1);
+    }
+
+    #[test]
+    fn cell_to_byte_handles_wide_chars_after_origin() {
+        let s = "中x";
+        assert_eq!(cell_to_byte(s, 0), 0);
+        assert_eq!(cell_to_byte(s, 1), "中".len());
+        assert_eq!(cell_to_byte(s, 2), "中".len());
+        assert_eq!(cell_to_byte(s, 3), s.len());
+        assert_eq!(cell_to_byte(s, 99), s.len());
+    }
+
+    #[test]
+    fn cell_to_byte_uses_string_prefix_widths() {
+        for (s, pos) in [
+            ("9\u{fe0f}?", "9\u{fe0f}".len()),
+            ("e\u{301}x", "e\u{301}".len()),
+            ("👩\u{200d}💻x", "👩\u{200d}💻".len()),
+        ] {
+            let cell = byte_to_cell(s, pos);
+            assert_eq!(cell_to_byte(s, cell), pos, "{s:?}");
+        }
     }
 
     // ── char_pos / byte_of_char ───────────────────────────────────────────
