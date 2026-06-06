@@ -5,6 +5,7 @@ use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
+const HEAD_OVERSCAN_ROWS: RowIndex = 20;
 const TAIL_OVERSCAN_ROWS: RowIndex = 20;
 
 pub(crate) struct TranscriptProjection {
@@ -134,36 +135,19 @@ impl BlockRowIndex {
         self.nodes.iter().position(|node| node.id == id)
     }
 
-    fn window_end_index(&self, first: usize, viewport_rows: u16) -> usize {
-        let target_rows = (viewport_rows as RowIndex).saturating_add(TAIL_OVERSCAN_ROWS);
-        let mut selected_rows: RowIndex = 0;
-        let mut end = first;
-        while end < self.nodes.len() {
-            let node = &self.nodes[end];
-            selected_rows =
-                selected_rows.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
-            end += 1;
-            if selected_rows >= target_rows {
-                break;
-            }
-        }
-        end
+    fn end_index_for_row_end(&self, row_end: RowIndex) -> usize {
+        self.prefix_rows
+            .partition_point(|prefix| *prefix < row_end)
+            .min(self.nodes.len())
     }
 
-    fn tail_window_start_index(&self, viewport_rows: u16) -> usize {
-        let target_rows = (viewport_rows as RowIndex).saturating_add(TAIL_OVERSCAN_ROWS);
-        let mut selected_rows: RowIndex = 0;
-        let mut first = self.nodes.len();
-        while first > 0 {
-            first -= 1;
-            let node = &self.nodes[first];
-            selected_rows =
-                selected_rows.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
-            if selected_rows >= target_rows {
-                break;
-            }
+    fn block_range_for_rows(&self, rows: std::ops::Range<RowIndex>) -> std::ops::Range<usize> {
+        if rows.start >= rows.end {
+            return 0..0;
         }
-        first
+        let first = self.start_index_for_row(rows.start);
+        let end = self.end_index_for_row_end(rows.end).max(first);
+        first..end
     }
 
     fn rebuild_prefix_rows(&mut self) {
@@ -214,7 +198,6 @@ pub(crate) struct ProjectionPlan {
     first: usize,
     block_ids: Vec<BlockId>,
     block_keys: Vec<LayoutKey>,
-    resize_anchor: Option<(BlockId, RowIndex)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -444,6 +427,24 @@ impl TranscriptProjection {
         )
     }
 
+    fn scroll_top_for_resize_anchor(
+        &self,
+        history: &BlockHistory,
+        anchor: Option<(BlockId, RowIndex)>,
+    ) -> Option<RowIndex> {
+        let (id, offset) = anchor?;
+        let index = self.row_index.block_index(id)?;
+        let key = self.row_index.nodes.get(index)?.key;
+        let block_rows = self.cache.get(id, key)?.line_count();
+        let gap = history.rendered_block_gap(index, block_rows) as RowIndex;
+        Some(
+            self.row_index
+                .prefix_row(index)
+                .saturating_add(gap)
+                .saturating_add(offset),
+        )
+    }
+
     fn plan_projection_from_prepared(
         &self,
         history: &BlockHistory,
@@ -459,23 +460,30 @@ impl TranscriptProjection {
             show_thinking,
             mode: scroll_target.mode(viewport_rows),
         };
-        let scroll_top = clamp_scroll(
-            scroll_target.as_scroll_top(),
-            self.row_index.total_rows(),
-            viewport_rows,
-        );
-        let (first, end) = match scroll_target {
+        let total_rows = self.row_index.total_rows();
+        let requested_scroll_top = self
+            .scroll_top_for_resize_anchor(history, resize_anchor)
+            .unwrap_or_else(|| scroll_target.as_scroll_top());
+        let scroll_top = clamp_scroll(requested_scroll_top, total_rows, viewport_rows);
+        let viewport_end = scroll_top
+            .saturating_add(viewport_rows as RowIndex)
+            .min(total_rows);
+        let row_window = match scroll_target {
             ScrollTarget::Visible(ScrollAnchor::Row(_)) => {
-                let first = resize_anchor
-                    .and_then(|(id, _)| self.row_index.block_index(id))
-                    .unwrap_or_else(|| self.row_index.start_index_for_row(scroll_top));
-                (first, self.row_index.window_end_index(first, viewport_rows))
+                let start = scroll_top.saturating_sub(HEAD_OVERSCAN_ROWS);
+                let end = viewport_end
+                    .saturating_add(TAIL_OVERSCAN_ROWS)
+                    .min(total_rows);
+                start..end
             }
             ScrollTarget::Visible(ScrollAnchor::Tail) => {
-                let first = self.row_index.tail_window_start_index(viewport_rows);
-                (first, self.row_index.nodes.len())
+                let start = scroll_top.saturating_sub(HEAD_OVERSCAN_ROWS);
+                start..total_rows
             }
         };
+        let block_range = self.row_index.block_range_for_rows(row_window);
+        let first = block_range.start;
+        let end = block_range.end;
         let block_ids = self.row_index.nodes[first..end]
             .iter()
             .map(|node| node.id)
@@ -492,7 +500,6 @@ impl TranscriptProjection {
             first,
             block_ids,
             block_keys,
-            resize_anchor,
         }
     }
 
@@ -541,20 +548,7 @@ impl TranscriptProjection {
 
         match plan.scroll_target {
             ScrollTarget::Visible(_) => {
-                let mut out = self.project_visible_range(buf, history, theme, &plan);
-                if let Some((block_id, offset)) = plan.resize_anchor {
-                    if let Some(entry) = self
-                        .visible_layout
-                        .iter()
-                        .find(|entry| entry.id == block_id)
-                    {
-                        out.clamped_scroll = clamp_scroll(
-                            entry.start.saturating_add(offset),
-                            out.total_rows,
-                            plan.viewport_rows,
-                        );
-                    }
-                }
+                let out = self.project_visible_range(buf, history, theme, &plan);
                 debug_assert_materialized_viewport(out, plan.viewport_rows);
                 out
             }
@@ -1617,6 +1611,56 @@ mod tests {
         assert!(output.row_base.saturating_add(output.materialized_rows) >= scroll_top + 8);
         assert!(buf.lines().iter().any(|line| line == "tool output line 50"));
         assert!(!buf.lines().iter().any(|line| line == "after 0"));
+    }
+
+    #[test]
+    fn visible_projection_covers_viewport_crossing_tall_block_boundary() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: (0..80)
+                .map(|i| format!("tool output line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+        transcript.push(Block::Text {
+            content: (0..10)
+                .map(|i| format!("after boundary line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+        let after_id = *transcript.history.order.last().expect("after block id");
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(16), Default::default());
+        let after_start = projection
+            .materialize_block_layout(&mut transcript.history, 80, false, &theme)
+            .into_iter()
+            .find(|(id, _, _)| *id == after_id)
+            .map(|(_, start, _)| start)
+            .expect("after block layout");
+        let scroll_top = after_start.saturating_sub(2);
+        let viewport_rows = 5;
+
+        let output = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(scroll_top),
+            viewport_rows,
+        );
+
+        assert_eq!(output.clamped_scroll, scroll_top);
+        assert!(output.row_base <= scroll_top);
+        assert!(
+            output.row_base.saturating_add(output.materialized_rows)
+                >= scroll_top + viewport_rows as RowIndex
+        );
+        assert!(buf
+            .lines()
+            .iter()
+            .any(|line| line == "after boundary line 0"));
     }
 
     #[test]
