@@ -2274,7 +2274,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smelt-buffer"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 dependencies = [
  "base64",
  "sha2",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-core"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 dependencies = [
  "dirs",
  "ego-tree",
@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-edit"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 dependencies = [
  "crossterm",
  "smelt-buffer",
@@ -2330,7 +2330,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-engine"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 dependencies = [
  "base64",
  "futures-util",
@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-lua-doc-derive"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2384,7 +2384,7 @@ version = "0.1.0"
 
 [[package]]
 name = "smelt-protocol"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-tui"
-version = "0.5.0-alpha.3"
+version = "0.5.0-alpha.4"
 dependencies = [
  "base64",
  "crossterm",
