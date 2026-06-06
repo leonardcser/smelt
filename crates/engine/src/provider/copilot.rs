@@ -163,7 +163,7 @@ pub(crate) async fn device_code_login(
         .save()
         .map_err(|e| format!("failed to save tokens: {e}"))?;
 
-    (callbacks.on_progress)("Enabling Copilot models…");
+    (callbacks.on_progress)("Fetching Copilot models…");
     let models = match fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
     {
         Ok(m) => m,
@@ -176,18 +176,8 @@ pub(crate) async fn device_code_login(
             Vec::new()
         }
     };
-    let mut enabled = 0usize;
-    for m in &models {
-        if enable_model_policy(client, &tokens.access_token, &tokens.api_base, &m.id).await {
-            enabled += 1;
-        }
-    }
     if !models.is_empty() {
-        (callbacks.on_progress)(&format!(
-            "Enabled {}/{} Copilot models",
-            enabled,
-            models.len()
-        ));
+        (callbacks.on_progress)(&format!("Fetched {} Copilot models", models.len()));
         save_models_cache(&models);
     }
 
@@ -363,6 +353,7 @@ pub(crate) struct CopilotModel {
     pub(crate) capability_type: Option<String>,
     pub(crate) context_window: Option<u32>,
     pub(crate) max_output_tokens: Option<u32>,
+    pub(crate) policy_state: Option<String>,
     #[serde(default)]
     pub(crate) supported_reasoning_efforts: Vec<String>,
 }
@@ -436,6 +427,13 @@ fn parse_models_response(data: &serde_json::Value) -> Option<Vec<CopilotModel>> 
         if !model_picker_enabled {
             continue;
         }
+        let policy_state = m
+            .pointer("/policy/state")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if policy_state.as_deref() == Some("disabled") {
+            continue;
+        }
         let id = match m.get("id").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
             None => continue,
@@ -491,40 +489,13 @@ fn parse_models_response(data: &serde_json::Value) -> Option<Vec<CopilotModel>> 
             capability_type,
             context_window,
             max_output_tokens,
+            policy_state,
             supported_reasoning_efforts,
         });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out.dedup_by(|a, b| a.id == b.id);
     Some(out)
-}
-
-async fn enable_model_policy(
-    client: &reqwest::Client,
-    access_token: &str,
-    api_base: &str,
-    model_id: &str,
-) -> bool {
-    let url = format!(
-        "{}/models/{}/policy",
-        api_base.trim_end_matches('/'),
-        model_id
-    );
-    let mut req = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("openai-intent", "chat-policy")
-        .header("x-interaction-type", "chat-policy")
-        .bearer_auth(access_token)
-        .json(&serde_json::json!({ "state": "enabled" }));
-    for (k, v) in base_headers() {
-        req = req.header(k, v);
-    }
-    match req.send().await {
-        Ok(r) => r.status().is_success(),
-        Err(_) => false,
-    }
 }
 
 fn cache_path() -> PathBuf {
@@ -535,7 +506,14 @@ pub(crate) fn load_cached_models() -> Vec<CopilotModel> {
     let Ok(data) = std::fs::read_to_string(cache_path()) else {
         return Vec::new();
     };
-    serde_json::from_str(&data).unwrap_or_default()
+    let models: Vec<CopilotModel> = serde_json::from_str(&data).unwrap_or_default();
+    if !models.is_empty() && models.iter().all(|m| m.policy_state.is_none()) {
+        return Vec::new();
+    }
+    models
+        .into_iter()
+        .filter(|m| m.policy_state.as_deref() != Some("disabled"))
+        .collect()
 }
 
 fn save_models_cache(models: &[CopilotModel]) {
@@ -746,6 +724,19 @@ mod tests {
         let ms = parse_models_response(&v).unwrap();
         assert_eq!(ms.len(), 1);
         assert_eq!(ms[0].id, "on");
+    }
+
+    #[test]
+    fn parse_models_filters_out_policy_disabled_entries() {
+        let v = serde_json::json!({"data": [
+            {"id": "enabled", "capabilities": {"type": "chat"}, "policy": {"state": "enabled"}},
+            {"id": "disabled", "capabilities": {"type": "chat"}, "policy": {"state": "disabled"}},
+            {"id": "unconfigured", "capabilities": {"type": "chat"}, "policy": {"state": "unconfigured"}}
+        ]});
+        let ms = parse_models_response(&v).unwrap();
+        let ids: Vec<_> = ms.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["enabled", "unconfigured"]);
+        assert_eq!(ms[0].policy_state.as_deref(), Some("enabled"));
     }
 
     #[test]

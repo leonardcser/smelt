@@ -229,14 +229,8 @@ async fn run_login(kind: AuthProvider) {
 
     let client = reqwest::Client::new();
     match engine::auth::login(kind, method, &client, &progress).await {
-        Ok(details) => {
+        Ok(_details) => {
             println!("\nLogged in successfully!");
-            if let Some(id) = details.account_id {
-                println!("Account ID: {id}");
-            }
-            if let (Some(base), Some(exp)) = (details.api_base, details.expires_at) {
-                println!("API base: {base}\nToken expires at: {exp}");
-            }
         }
         Err(e) => {
             eprintln!("\nLogin failed: {e}");

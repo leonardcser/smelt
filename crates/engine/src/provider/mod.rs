@@ -1838,6 +1838,7 @@ mod tests {
             capability_type: Some("chat".into()),
             context_window: Some(123_000),
             max_output_tokens: Some(32_000),
+            policy_state: Some("enabled".into()),
             supported_reasoning_efforts: Vec::new(),
         }
     }

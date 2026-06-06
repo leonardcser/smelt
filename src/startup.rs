@@ -141,7 +141,14 @@ pub async fn resolve(
     }
 
     if cfg.has_copilot_provider() {
-        let ids = engine::auth::cached_models(engine::auth::AuthProvider::Copilot);
+        let mut ids = engine::auth::cached_models(engine::auth::AuthProvider::Copilot);
+        if ids.is_empty() {
+            ids = engine::auth::refresh_models_cache(
+                engine::auth::AuthProvider::Copilot,
+                &http_client,
+            )
+            .await;
+        }
         if !ids.is_empty() {
             cfg.inject_copilot_models(&mut available_models, &ids);
         }
