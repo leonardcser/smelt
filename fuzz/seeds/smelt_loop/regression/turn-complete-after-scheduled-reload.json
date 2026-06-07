@@ -1,0 +1,21 @@
+{
+  "_about": "TurnComplete oracle seed: a Lua reload scheduled during an active plan-mode turn runs after the turn ends, falls back to normal mode, and may add a mode-change note after merging the final model history.",
+  "_fix": "The smelt_loop oracle now accounts for the deferred scheduled-reload mode-change history side effect instead of expecting only incoming model messages plus pending active-turn appends.",
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "start_turn",
+      "data": 0
+    },
+    {
+      "kind": "schedule_reload"
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 40
+      }
+    }
+  ],
+  "vim": true
+}

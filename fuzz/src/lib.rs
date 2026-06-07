@@ -1073,6 +1073,7 @@ struct Snapshot {
     context_tokens: Option<u32>,
     checkpoint_first_live_index: Option<usize>,
     pending_history_appends: usize,
+    pending_lua_reload: bool,
     transcript_blocks: usize,
     pending_confirms: usize,
     deferred_dialogs: usize,
@@ -1099,6 +1100,7 @@ impl Snapshot {
             context_tokens: app.context_tokens(),
             checkpoint_first_live_index: app.checkpoint_first_live_index(),
             pending_history_appends: app.pending_history_append_count(),
+            pending_lua_reload: app.pending_lua_reload(),
             transcript_blocks: app.transcript_block_count(),
             pending_confirms: app.pending_confirm_count(),
             deferred_dialogs: app.pending_deferred_dialog_count(),
@@ -1114,13 +1116,27 @@ fn expected_model_history_len(pre: &Snapshot, msg_count: usize) -> usize {
     pre.checkpoint_first_live_index.unwrap_or(0) + msg_count
 }
 
-fn expected_completed_history_len(pre: &Snapshot, msg_count: usize, targeted_active: bool) -> usize {
+fn expected_completed_history_len(
+    pre: &Snapshot,
+    msg_count: usize,
+    targeted_active: bool,
+) -> usize {
     let pending_appends = if targeted_active {
         pre.pending_history_appends
     } else {
         0
     };
     expected_model_history_len(pre, msg_count) + pending_appends
+}
+
+fn scheduled_reload_mode_change(
+    pre: &Snapshot,
+    targeted_active: bool,
+    new_actions: &[Action],
+) -> bool {
+    pre.pending_lua_reload
+        && targeted_active
+        && count_action(new_actions, |c| matches!(c, UiCommand::SetMode { .. })) > 0
 }
 
 fn normalize_prompt_paste_text(text: &str) -> String {
@@ -1322,17 +1338,38 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             let history_path = targeted_active || msg_count > 0;
             if history_path {
                 let expected = expected_completed_history_len(pre, msg_count, targeted_active);
-                assert_eq!(
-                    post.session_messages, expected,
-                    "TurnComplete did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {})",
-                    post.session_messages,
-                    pre.checkpoint_first_live_index,
-                    if targeted_active {
-                        pre.pending_history_appends
-                    } else {
-                        0
-                    },
-                );
+                if scheduled_reload_mode_change(pre, targeted_active, new_actions) {
+                    // A reload deferred until turn end can invalidate the
+                    // active mode and switch back to normal mode. That queues
+                    // a mode-change history note after the final model history
+                    // snapshot has been merged; depending on whether the
+                    // merged tail is already a mode note, it either appends or
+                    // replaces in place.
+                    let max_expected = expected + usize::from(expected > 0);
+                    assert!(
+                        post.session_messages == expected || post.session_messages == max_expected,
+                        "TurnComplete did not merge session.messages with scheduled reload mode change: post {} (expected {expected}..={max_expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {})",
+                        post.session_messages,
+                        pre.checkpoint_first_live_index,
+                        if targeted_active {
+                            pre.pending_history_appends
+                        } else {
+                            0
+                        },
+                    );
+                } else {
+                    assert_eq!(
+                        post.session_messages, expected,
+                        "TurnComplete did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {})",
+                        post.session_messages,
+                        pre.checkpoint_first_live_index,
+                        if targeted_active {
+                            pre.pending_history_appends
+                        } else {
+                            0
+                        },
+                    );
+                }
             }
             if targeted_active {
                 assert!(
