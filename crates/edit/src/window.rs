@@ -595,7 +595,7 @@ impl Window {
     /// current layout - used after a layout/scroll restore so the cursor
     /// stays visually fixed relative to the viewport instead of drifting
     /// off-screen as reflow shifts visual rows. Reassigns `cpos` to whatever
-    /// byte lands at that visual row using `curswant` as the column target.
+    /// byte lands at that visual row using the preferred display column.
     pub fn restore_cursor_screen_row(&mut self, buf: &Buffer, screen_row: u16) {
         if self.selection_active() {
             return;
@@ -609,8 +609,15 @@ impl Window {
             .saturating_add(screen_row as RowIndex)
             .min(self.scroll_row_total(buf).saturating_sub(1));
         if let Some(mut state) = self.virtual_rows {
-            state.cursor.row = target_abs_row;
-            self.sync_virtual_cursor_to_backing_buffer(&mut state, buf);
+            let mut cursor = state.cursor;
+            self.move_virtual_cursor_to_row_preserving_cell(
+                &mut state,
+                buf,
+                &mut cursor,
+                target_abs_row,
+            );
+            state.cursor = cursor;
+            self.project_virtual_cursor_to_local(state, buf);
             self.virtual_rows = Some(state);
             return;
         }
@@ -726,21 +733,83 @@ impl Window {
         (local < self.visual_row_total(buf)).then_some(local)
     }
 
-    fn sync_virtual_cursor_to_backing_buffer(
-        &mut self,
-        state: &mut VirtualRowsState,
-        buf: &Buffer,
-    ) -> bool {
-        let Some(local) = self.backed_local_row(*state, buf, state.cursor.row) else {
+    fn project_virtual_cursor_to_local(&mut self, state: VirtualRowsState, buf: &Buffer) -> bool {
+        let Some(local) = self.backed_local_row(state, buf, state.cursor.row) else {
             return false;
         };
-        let cpos = self.cpos_at_visual(buf, row_to_usize(local), state.cursor.byte_col);
+        let Some(vcell) = state
+            .preferred_cell_col
+            .or_else(|| self.virtual_position_cell(state, buf, state.cursor))
+        else {
+            return false;
+        };
+        let cpos = self.cpos_at_visual(buf, row_to_usize(local), vcell);
         let (row, col) = self.cursor_visual(buf, cpos);
         self.cpos = cpos;
         self.cursor_row = row;
         self.cursor_col = col;
-        state.cursor.byte_col = buf.display_byte_pos(cpos).1;
         true
+    }
+
+    fn move_virtual_cursor_to_row_preserving_cell(
+        &self,
+        state: &mut VirtualRowsState,
+        buf: &Buffer,
+        cursor: &mut DocPosition,
+        row: RowIndex,
+    ) {
+        let cell = state
+            .preferred_cell_col
+            .or_else(|| self.virtual_position_cell(*state, buf, *cursor));
+        cursor.row = row.min(state.materialized.total_rows.saturating_sub(1));
+        if let Some(cell) = cell {
+            state.preferred_cell_col = Some(cell);
+            if let Some(byte_col) = self.virtual_byte_col_at_cell(*state, buf, cursor.row, cell) {
+                cursor.byte_col = byte_col;
+            }
+        }
+    }
+
+    fn virtual_position_cell(
+        &self,
+        state: VirtualRowsState,
+        buf: &Buffer,
+        position: DocPosition,
+    ) -> Option<usize> {
+        let local = self.backed_local_row(state, buf, position.row)?;
+        Some(self.visual_cell_for_byte_col(buf, local, position.byte_col))
+    }
+
+    fn virtual_byte_col_at_cell(
+        &self,
+        state: VirtualRowsState,
+        buf: &Buffer,
+        row: RowIndex,
+        cell: usize,
+    ) -> Option<usize> {
+        let local = self.backed_local_row(state, buf, row)?;
+        let cpos = self.cpos_at_visual(buf, row_to_usize(local), cell);
+        Some(buf.display_byte_pos(cpos).1)
+    }
+
+    fn visual_cell_for_byte_col(&self, buf: &Buffer, vrow: RowIndex, byte_col: usize) -> usize {
+        let vrow = row_to_usize(vrow);
+        if self.layout_matches(buf) {
+            if let Some((lrow, chunk_idx)) = self.layout.logical_at_visual(vrow) {
+                let line = buf.get_line(lrow).unwrap_or("");
+                let byte = text::snap(line, byte_col.min(line.len()));
+                let chunk_start = self
+                    .layout
+                    .chunks_of(lrow)
+                    .get(chunk_idx)
+                    .map(|&(start, _)| start)
+                    .unwrap_or(0);
+                return text::byte_to_cell(line, byte)
+                    .saturating_sub(text::byte_to_cell(line, chunk_start));
+            }
+        }
+        let line = buf.get_line(vrow).unwrap_or("");
+        text::byte_to_cell(line, text::snap(line, byte_col.min(line.len())))
     }
 
     /// Project `cpos` to a visual `(row, cell_col)` through this window's
@@ -897,6 +966,9 @@ impl Window {
         self.drag_anchor_word = None;
         self.drag_anchor_line = None;
         self.pending_press = None;
+        if let Some(state) = self.virtual_rows.as_mut() {
+            state.drag_endpoint = None;
+        }
     }
 
     /// Finish a staged single-click because keyboard input is taking over.
@@ -1317,6 +1389,7 @@ impl Window {
                 row: state.materialized.absolute_row(row),
                 byte_col: buf.display_byte_pos(self.cpos).1,
             };
+            state.preferred_cell_col = Some(col as usize);
         }
         let total_rows = self.scroll_row_total(buf);
         let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
@@ -1835,10 +1908,18 @@ impl Window {
             return;
         }
         if let Some(mut state) = self.virtual_rows {
-            state.cursor.row = new_scroll
+            let mut cursor = state.cursor;
+            let target_row = new_scroll
                 .saturating_add(screen_row as RowIndex)
                 .min(total_visual.saturating_sub(1));
-            self.sync_virtual_cursor_to_backing_buffer(&mut state, buf);
+            self.move_virtual_cursor_to_row_preserving_cell(
+                &mut state,
+                buf,
+                &mut cursor,
+                target_row,
+            );
+            state.cursor = cursor;
+            self.project_virtual_cursor_to_local(state, buf);
             self.virtual_rows = Some(state);
             self.set_scroll(new_scroll, buf);
             self.update_tail_state(buf, viewport_rows);
@@ -1853,12 +1934,6 @@ impl Window {
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
         self.cursor_col = col;
-        if let Some(state) = self.virtual_rows.as_mut() {
-            state.cursor = DocPosition {
-                row: state.materialized.absolute_row(row),
-                byte_col: buf.display_byte_pos(self.cpos).1,
-            };
-        }
         self.curswant = Some(want);
         self.set_scroll(new_scroll, buf);
         self.update_tail_state(buf, viewport_rows);
@@ -3022,6 +3097,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn virtual_mouse_click_sets_preferred_cell_for_vertical_motion() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["abcdef".into(), "uvwxyz".into()]);
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 12,
+            materialized_rows: 2,
+        });
+        w.set_resolved_scroll(10);
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport: WindowViewport::new(Rect::new(0, 0, 20, 2), 20, 12, 10, None),
+            click_count: 1,
+        };
+        let now = Instant::now();
+
+        w.handle_virtual_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 4),
+            ctx,
+            now,
+        );
+        assert_eq!(w.virtual_rows.unwrap().preferred_cell_col, Some(4));
+
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::MoveRows(1), 2, now);
+        w.sync_virtual_cursor_to_local(&buf, 2);
+        assert_eq!(w.virtual_cursor().unwrap().row, 11);
+        assert_eq!(w.cursor_col, 4);
+    }
+
     fn click_event(kind: MouseEventKind, row: u16, col: u16) -> MouseEvent {
         use crossterm::event::KeyModifiers;
         MouseEvent {
@@ -3269,6 +3377,146 @@ mod tests {
         assert_eq!(w.scroll_top, 110);
         assert_eq!(w.virtual_cursor().unwrap().row, 114);
         assert_eq!(w.cursor_screen_row(viewport), Some(4));
+    }
+
+    #[test]
+    fn virtual_cursor_sync_keeps_byte_column_on_multibyte_chrome_rows() {
+        let mut w = make_win();
+        let mut buf = make_buf(vec!["│ hello".into()]);
+        let chrome = smelt_buffer::buffer::SpanMeta {
+            selectable: false,
+            ..Default::default()
+        };
+        buf.add_highlight_with_meta(0, 0, 2, crate::SpanStyle::new(), chrome);
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 42,
+            row_base: 42,
+            total_rows: 50,
+            materialized_rows: 1,
+        });
+        w.set_resolved_scroll(42);
+        let now = Instant::now();
+        w.execute_virtual_viewer_command(
+            &buf,
+            ViewerCommand::GotoPosition(DocPosition {
+                row: 42,
+                byte_col: "│ he".len(),
+            }),
+            5,
+            now,
+        );
+
+        w.sync_virtual_cursor_to_local(&buf, 5);
+        assert_eq!(w.virtual_cursor().unwrap().byte_col, "│ he".len());
+        assert_eq!(w.cursor_col, 4);
+
+        w.sync_virtual_cursor_to_local(&buf, 5);
+        assert_eq!(w.virtual_cursor().unwrap().byte_col, "│ he".len());
+        assert_eq!(w.cursor_col, 4);
+    }
+
+    #[test]
+    fn virtual_cursor_sync_does_not_mutate_authoritative_byte_column() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["abcdef".into(), String::new(), "uvwxyz".into()]);
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 13,
+            materialized_rows: 3,
+        });
+        w.set_resolved_scroll(10);
+        {
+            let state = w.virtual_rows.as_mut().unwrap();
+            state.cursor = DocPosition {
+                row: 11,
+                byte_col: 4,
+            };
+            state.preferred_cell_col = Some(4);
+        }
+
+        w.sync_virtual_cursor_to_local(&buf, 3);
+
+        assert_eq!(w.cursor_col, 0);
+        let state = w.virtual_rows.unwrap();
+        assert_eq!(state.cursor.row, 11);
+        assert_eq!(state.cursor.byte_col, 4);
+        assert_eq!(state.preferred_cell_col, Some(4));
+    }
+
+    #[test]
+    fn virtual_vertical_motion_preserves_preferred_cell_across_short_rows() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["abcdef".into(), String::new(), "uvwxyz".into()]);
+        let viewport = 3;
+        let now = Instant::now();
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 13,
+            materialized_rows: 3,
+        });
+        w.set_resolved_scroll(10);
+        w.execute_virtual_viewer_command(
+            &buf,
+            ViewerCommand::GotoPosition(DocPosition {
+                row: 10,
+                byte_col: 4,
+            }),
+            viewport,
+            now,
+        );
+        w.sync_virtual_cursor_to_local(&buf, viewport);
+        assert_eq!(w.cursor_col, 4);
+        w.curswant = Some(0);
+
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::MoveRows(1), viewport, now);
+        w.sync_virtual_cursor_to_local(&buf, viewport);
+        assert_eq!(w.virtual_cursor().unwrap().row, 11);
+        assert_eq!(w.cursor_col, 0);
+        assert_eq!(w.virtual_rows.unwrap().preferred_cell_col, Some(4));
+
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::MoveRows(1), viewport, now);
+        w.sync_virtual_cursor_to_local(&buf, viewport);
+        assert_eq!(w.virtual_cursor().unwrap().row, 12);
+        assert_eq!(w.cursor_col, 4);
+        assert_eq!(w.virtual_cursor().unwrap().byte_col, 4);
+    }
+
+    #[test]
+    fn virtual_pan_preserves_preferred_cell_across_short_rows() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["abcdef".into(), String::new(), "uvwxyz".into()]);
+        let viewport = 1;
+        let now = Instant::now();
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 13,
+            materialized_rows: 3,
+        });
+        w.set_resolved_scroll(10);
+        w.execute_virtual_viewer_command(
+            &buf,
+            ViewerCommand::GotoPosition(DocPosition {
+                row: 10,
+                byte_col: 4,
+            }),
+            viewport,
+            now,
+        );
+        w.sync_virtual_cursor_to_local(&buf, viewport);
+        assert_eq!(w.cursor_col, 4);
+
+        w.pan_by_lines(&buf, 1, viewport);
+        assert_eq!(w.virtual_cursor().unwrap().row, 11);
+        assert_eq!(w.cursor_col, 0);
+        assert_eq!(w.virtual_rows.unwrap().preferred_cell_col, Some(4));
+
+        w.pan_by_lines(&buf, 1, viewport);
+        assert_eq!(w.virtual_cursor().unwrap().row, 12);
+        assert_eq!(w.cursor_col, 4);
+        assert_eq!(w.virtual_cursor().unwrap().byte_col, 4);
     }
 
     #[test]

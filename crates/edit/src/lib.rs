@@ -1019,12 +1019,7 @@ impl Ui {
     /// and routes `cursor_shape` accordingly so only one leaf paints a block.
     pub fn active_cursor_leaf(&self) -> Option<WinId> {
         if let Some(HitTarget::Window(w)) = self.capture {
-            if self
-                .wins
-                .get(&w)
-                .and_then(|win| win.drag_endpoint)
-                .is_some()
-            {
+            if self.wins.get(&w).is_some_and(|win| win.drag_active()) {
                 return Some(w);
             }
         }
@@ -1037,11 +1032,7 @@ impl Ui {
     /// no visible cursor.
     pub fn any_drag_active(&self) -> bool {
         if let Some(HitTarget::Window(w)) = self.capture {
-            return self
-                .wins
-                .get(&w)
-                .and_then(|win| win.drag_endpoint)
-                .is_some();
+            return self.wins.get(&w).is_some_and(|win| win.drag_active());
         }
         false
     }

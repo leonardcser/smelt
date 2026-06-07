@@ -71,8 +71,9 @@ impl TuiApp {
         // Suppress unused-variable warning when queued is only forwarded into Lua state.
         let _ = queued;
         // Transcript projection is materialized by the render-prep hook below,
-        // after split geometry is resolved. Drag capture keeps the current slice
-        // frozen so local byte ranges remain valid until MouseUp commits/copies.
+        // after split geometry is resolved. Drag capture freezes only
+        // materialization; cursor and selection render state still syncs so
+        // drag feedback stays live while the backing slice remains stable.
         let transcript_frozen = self.ui.drag_capture_window() == Some(crate::app::TRANSCRIPT_WIN);
         {
             let _p = smelt_perf::perf::begin("compositor:input");
@@ -111,16 +112,12 @@ impl TuiApp {
         }
 
         let _p = smelt_perf::perf::begin("compositor:render_flush");
-        if transcript_frozen {
-            self.sync_frozen_transcript_layer(has_transcript_cursor);
-        } else {
-            let now = self.core.clock.instant_now();
-            self.parser
-                .sync_active_tool_elapsed_at(self.transcript.history_mut(), now);
-            let tw = self.transcript_width() as u16;
-            let block_ids = self.transcript.history().order.clone();
-            self.prerender_transcript_tool_blocks_for_ids(tw, &block_ids);
-        }
+        let now = self.core.clock.instant_now();
+        self.parser
+            .sync_active_tool_elapsed_at(self.transcript.history_mut(), now);
+        let tw = self.transcript_width() as u16;
+        let block_ids = self.transcript.history().order.clone();
+        self.prerender_transcript_tool_blocks_for_ids(tw, &block_ids);
 
         // Split-borrow app fields so the render-prep hook can materialize the
         // transcript through the generic `Ui` path while paint callbacks still
@@ -135,53 +132,50 @@ impl TuiApp {
         let _ = ui.render_with_paints_prepared(
             out,
             |ui, request| {
-                if request.win != crate::app::TRANSCRIPT_WIN || transcript_frozen {
+                if request.win != crate::app::TRANSCRIPT_WIN {
                     return;
                 }
-                let _p = smelt_perf::perf::begin("compositor:project_transcript");
-                let scroll_target = if transcript_should_follow_tail {
-                    crate::content::transcript_buf::ScrollTarget::visible_tail()
-                } else {
-                    crate::content::transcript_buf::ScrollTarget::visible_row(request.scroll_top)
-                };
-                let width = request.content_width.max(1);
                 let viewport_rows = request.rect.height;
-                let plan = transcript.plan_projection_measured(
-                    width,
-                    show_thinking,
-                    scroll_target,
-                    viewport_rows,
-                    &theme,
-                );
-                let Some(buf) = ui.buf_mut(request.buf) else {
-                    return;
-                };
-                let tdata = transcript.project_planned(buf, &theme, plan);
-                if let Some(win) = ui.win_mut(request.win) {
-                    debug_assert!(tdata.total_rows >= tdata.row_base);
-                    debug_assert!(
-                        tdata.clamped_scroll <= tdata.total_rows.saturating_sub(viewport_rows as _)
+                if !transcript_frozen {
+                    let _p = smelt_perf::perf::begin("compositor:project_transcript");
+                    let scroll_target = if transcript_should_follow_tail {
+                        crate::content::transcript_buf::ScrollTarget::visible_tail()
+                    } else {
+                        crate::content::transcript_buf::ScrollTarget::visible_row(
+                            request.scroll_top,
+                        )
+                    };
+                    let width = request.content_width.max(1);
+                    let plan = transcript.plan_projection_measured(
+                        width,
+                        show_thinking,
+                        scroll_target,
+                        viewport_rows,
+                        &theme,
                     );
-                    win.apply_materialized_rows(tdata);
-                    win.set_resolved_scroll(tdata.clamped_scroll);
+                    let Some(buf) = ui.buf_mut(request.buf) else {
+                        return;
+                    };
+                    let tdata = transcript.project_planned(buf, &theme, plan);
+                    if let Some(win) = ui.win_mut(request.win) {
+                        debug_assert!(tdata.total_rows >= tdata.row_base);
+                        debug_assert!(
+                            tdata.clamped_scroll
+                                <= tdata.total_rows.saturating_sub(viewport_rows as _)
+                        );
+                        win.apply_materialized_rows(tdata);
+                        win.set_resolved_scroll(tdata.clamped_scroll);
+                    }
                 }
                 let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
                 if let (Some(win), Some(buf)) = (win, buf) {
-                    win.sync_virtual_cursor_to_local(buf, viewport_rows);
-                    let text = buf.text();
-                    win.clamp_anchors_to_source(&text);
-                    let now = render_now;
-                    win.clear_expired_virtual_yank_flash(now);
-                    let ranges = crate::app::transcript::virtual_selection_highlights_from_window(
-                        win,
-                        buf,
-                        tdata.clamped_scroll,
-                        tdata.row_base,
-                        viewport_rows,
-                        now,
-                    );
-                    buf.set_selection(ranges);
-                    win.scroll_left = 0;
+                    if win.is_virtual_rows() {
+                        win.sync_virtual_render_state(buf, viewport_rows, render_now);
+                        win.scroll_left = 0;
+                    } else {
+                        buf.set_selection(Vec::new());
+                        win.scroll_left = 0;
+                    }
                 }
             },
             |id, slice, ctx| {
@@ -205,19 +199,6 @@ impl TuiApp {
             && self.term_focused
             && matches!(self.app_focus, crate::app::AppFocus::Content);
         (has_prompt_cursor, has_transcript_cursor)
-    }
-
-    fn sync_frozen_transcript_layer(&mut self, has_transcript_cursor: bool) {
-        if let Some(buf) = self.ui.win_buf_mut(self.well_known.transcript) {
-            buf.set_selection(Vec::new());
-        }
-        if has_transcript_cursor {
-            self.ui
-                .set_cursor_shape(prompt_block_cursor(self.ui.theme()));
-        }
-        if let Some(win) = self.ui.win_mut(crate::app::TRANSCRIPT_WIN) {
-            win.scroll_left = 0;
-        }
     }
 
     /// Populate the input-leaf buffer, cursor, and viewport. Cursor positions are content-local;

@@ -35,7 +35,12 @@ pub struct VirtualYankFlash {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VirtualRowsState {
     pub materialized: MaterializedRows,
+    /// Authoritative virtual cursor position. `byte_col` is a byte column in
+    /// the materialized/virtual row text, not a terminal cell column.
     pub cursor: DocPosition,
+    /// Preferred display column for virtual vertical motion, measured in
+    /// terminal cells so multibyte chrome/text does not drift.
+    pub preferred_cell_col: Option<usize>,
     pub selection_anchor: Option<DocPosition>,
     pub drag_endpoint: Option<DocPosition>,
     pub yank_flash: Option<VirtualYankFlash>,
@@ -119,6 +124,13 @@ impl Window {
         self.virtual_rows.map(|state| state.cursor)
     }
 
+    pub fn drag_active(&self) -> bool {
+        self.drag_endpoint.is_some()
+            || self
+                .virtual_rows
+                .is_some_and(|state| state.drag_endpoint.is_some())
+    }
+
     pub fn virtual_selection_anchor_active(&self) -> bool {
         self.virtual_rows
             .map(|state| state.selection_anchor.is_some())
@@ -150,6 +162,82 @@ impl Window {
         })
     }
 
+    pub fn virtual_selection_ranges(
+        &self,
+        buf: &Buffer,
+        viewport_rows: u16,
+        now: Instant,
+    ) -> Vec<smelt_buffer::buffer::SelectionRange> {
+        let Some(state) = self.virtual_rows else {
+            return Vec::new();
+        };
+        let Some(range) = self.virtual_selection_range(now) else {
+            return Vec::new();
+        };
+        let rows = buf.lines();
+        if rows.is_empty()
+            || (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col)
+        {
+            return Vec::new();
+        }
+
+        let visible_start = self.scroll_top;
+        let visible_end = self.scroll_top.saturating_add(viewport_rows as RowIndex);
+        let start_row = range.start.row.max(visible_start);
+        let selection_end_row = if range.end.byte_col == 0 {
+            range.end.row.saturating_sub(1)
+        } else {
+            range.end.row
+        };
+        let end_row = selection_end_row.min(visible_end.saturating_sub(1));
+        if start_row > end_row {
+            return Vec::new();
+        }
+
+        let mut out = Vec::new();
+        for abs_row in start_row..=end_row {
+            let Some(local) = self.backed_local_row(state, buf, abs_row) else {
+                continue;
+            };
+            let Some(line) = rows.get(row_to_usize(local)) else {
+                continue;
+            };
+            let line_width = text::byte_to_cell(line, line.len()) as u16;
+            let col_start = if abs_row == range.start.row {
+                text::byte_to_cell(line, text::snap(line, range.start.byte_col.min(line.len())))
+                    as u16
+            } else {
+                0
+            };
+            let col_end = if abs_row == range.end.row {
+                text::byte_to_cell(line, text::snap(line, range.end.byte_col.min(line.len())))
+                    as u16
+            } else {
+                line_width
+            };
+            out.push(smelt_buffer::buffer::SelectionRange {
+                line: row_to_usize(local),
+                col_start,
+                col_end: col_end.max(col_start.saturating_add(1)),
+            });
+        }
+        out
+    }
+
+    pub fn sync_virtual_render_state(
+        &mut self,
+        buf: &mut Buffer,
+        viewport_rows: u16,
+        now: Instant,
+    ) {
+        self.sync_virtual_cursor_to_local(buf, viewport_rows);
+        let text = buf.text();
+        self.clamp_anchors_to_source(&text);
+        self.clear_expired_virtual_yank_flash(now);
+        let ranges = self.virtual_selection_ranges(buf, viewport_rows, now);
+        buf.set_selection(ranges);
+    }
+
     pub fn virtual_yank_flash_until(&self) -> Option<Instant> {
         self.virtual_rows
             .and_then(|state| state.yank_flash.map(|flash| flash.until))
@@ -166,18 +254,14 @@ impl Window {
     }
 
     pub fn sync_virtual_cursor_to_local(&mut self, buf: &Buffer, viewport_rows: u16) {
-        let Some(mut state) = self.virtual_rows else {
+        let Some(state) = self.virtual_rows else {
             return;
         };
         if buf.lines().is_empty() {
             self.reset_cursor();
             return;
         }
-        let local_cursor_synced = self.sync_virtual_cursor_to_backing_buffer(&mut state, buf);
-        if local_cursor_synced {
-            self.curswant = Some(state.cursor.byte_col);
-        }
-        self.virtual_rows = Some(state);
+        let local_cursor_synced = self.project_virtual_cursor_to_local(state, buf);
         if viewport_rows > 0 {
             let viewport_cols = if local_cursor_synced {
                 self.viewport.map(|v| v.content_width).unwrap_or(0)
@@ -210,6 +294,9 @@ impl Window {
             return (Status::Consumed, None);
         }
         let pos = self.virtual_doc_pos_at_mouse(buf, event, ctx.viewport);
+        if let Some(cell) = self.virtual_position_cell(state, buf, pos) {
+            state.preferred_cell_col = Some(cell);
+        }
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 state.cursor = pos;
@@ -318,11 +405,13 @@ impl Window {
         let mut copy = None;
         match command {
             ViewerCommand::MoveRows(delta) => {
-                next.row = add_signed_row(current.row, delta).min(total_rows.saturating_sub(1));
+                let row = add_signed_row(current.row, delta).min(total_rows.saturating_sub(1));
+                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::PageRows(delta) => {
                 let rows = (viewport_rows as isize).saturating_mul(delta);
-                next.row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
+                let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
+                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::ScrollRows(delta) => {
                 let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
@@ -336,9 +425,10 @@ impl Window {
                 let new_scroll = add_signed_row(cur_scroll, delta).min(max_scroll);
                 self.set_scroll(new_scroll, buf);
                 self.update_tail_state(buf, viewport_rows);
-                next.row = new_scroll
+                let row = new_scroll
                     .saturating_add(screen_row)
                     .min(total_rows.saturating_sub(1));
+                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::BufferStart => {
                 next.row = 0;
@@ -348,7 +438,7 @@ impl Window {
                 next.row = total_rows.saturating_sub(1);
             }
             ViewerCommand::GotoRow(row) => {
-                next.row = row.min(total_rows.saturating_sub(1));
+                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::GotoPosition(pos) => {
                 next.row = pos.row.min(total_rows.saturating_sub(1));
@@ -484,6 +574,21 @@ impl Window {
                 state.selection_anchor = None;
                 state.drag_endpoint = None;
                 state.yank_flash = None;
+            }
+        }
+        if matches!(
+            command,
+            ViewerCommand::BufferStart
+                | ViewerCommand::BufferEnd
+                | ViewerCommand::GotoPosition(_)
+                | ViewerCommand::LineStart
+                | ViewerCommand::LineEnd
+                | ViewerCommand::WordForward(_)
+                | ViewerCommand::WordBackward(_)
+                | ViewerCommand::WordEnd(_)
+        ) {
+            if let Some(cell) = self.virtual_position_cell(state, buf, next) {
+                state.preferred_cell_col = Some(cell);
             }
         }
         state.cursor = next;

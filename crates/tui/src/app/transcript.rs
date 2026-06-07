@@ -305,68 +305,6 @@ fn transcript_block_first_line(block: &Block) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn virtual_selection_highlights_from_window(
-    win: &crate::smelt_edit::Window,
-    buf: &crate::smelt_edit::Buffer,
-    scroll_top: crate::smelt_edit::RowIndex,
-    row_base: crate::smelt_edit::RowIndex,
-    viewport_rows: u16,
-    now: std::time::Instant,
-) -> Vec<crate::smelt_edit::SelectionRange> {
-    let Some(range) = win.virtual_selection_range(now) else {
-        return Vec::new();
-    };
-    let rows = buf.lines();
-    if rows.is_empty()
-        || (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col)
-    {
-        return Vec::new();
-    }
-    let visible_start = scroll_top;
-    let visible_end = scroll_top.saturating_add(viewport_rows as crate::smelt_edit::RowIndex);
-    let start_row = range.start.row.max(visible_start);
-    let selection_end_row = if range.end.byte_col == 0 {
-        range.end.row.saturating_sub(1)
-    } else {
-        range.end.row
-    };
-    let end_row = selection_end_row.min(visible_end.saturating_sub(1));
-    if start_row > end_row {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    for abs_row in start_row..=end_row {
-        let local = abs_row.saturating_sub(row_base) as usize;
-        let Some(line) = rows.get(local) else {
-            continue;
-        };
-        let line_width = smelt_buffer::text::byte_to_cell(line, line.len()) as u16;
-        let col_start = if abs_row == range.start.row {
-            smelt_buffer::text::byte_to_cell(
-                line,
-                smelt_buffer::text::snap(line, range.start.byte_col.min(line.len())),
-            ) as u16
-        } else {
-            0
-        };
-        let col_end = if abs_row == range.end.row {
-            smelt_buffer::text::byte_to_cell(
-                line,
-                smelt_buffer::text::snap(line, range.end.byte_col.min(line.len())),
-            ) as u16
-        } else {
-            line_width
-        };
-        out.push(crate::smelt_edit::SelectionRange {
-            line: local,
-            col_start,
-            col_end: col_end.max(col_start.saturating_add(1)),
-        });
-    }
-    out
-}
-
 impl TuiApp {
     pub(crate) fn begin_turn(&mut self) {
         self.context_tokens_updated_this_turn = false;
@@ -845,17 +783,11 @@ impl TuiApp {
                 Some(b) => b,
                 None => return Vec::new(),
             };
-            return virtual_selection_highlights_from_window(
-                win,
-                buf,
-                scroll_top,
-                row_base,
-                viewport_rows,
-                now,
-            )
-            .into_iter()
-            .map(|r| (r.line, r.col_start, r.col_end))
-            .collect();
+            return win
+                .virtual_selection_ranges(buf, viewport_rows, now)
+                .into_iter()
+                .map(|r| (r.line, r.col_start, r.col_end))
+                .collect();
         }
         let vim_visual = win.vim_enabled
             && matches!(

@@ -788,6 +788,49 @@ mod tests {
     }
 
     #[test]
+    fn virtual_transcript_drag_renders_cursor_and_selection_while_captured() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().scroll_to_bottom();
+        app.render_normal_to(false, &mut std::io::sink());
+
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+        let start_rel = 2u16;
+        let end_rel = 4u16;
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: vp.rect.top.saturating_add(start_rel),
+            column: vp.rect.left,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row: vp.rect.top.saturating_add(end_rel),
+            ..down
+        };
+
+        app.handle_mouse(down);
+        app.render_normal_to(false, &mut std::io::sink());
+        app.handle_mouse(drag);
+        app.render_normal_to(false, &mut std::io::sink());
+
+        let win = app.transcript_win();
+        assert_eq!(win.cursor_screen_row(vp.rect.height), Some(end_rel));
+        let selection = app.ui.buf(win.buf).expect("transcript buffer").selection();
+        assert!(
+            !selection.is_empty(),
+            "virtual drag selection should be projected while capture freezes transcript materialization"
+        );
+    }
+
+    #[test]
     fn transcript_drag_while_streaming_keeps_clicked_anchor() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
