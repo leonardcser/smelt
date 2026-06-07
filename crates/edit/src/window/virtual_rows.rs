@@ -139,10 +139,12 @@ impl Window {
     }
 
     pub fn virtual_selection_range(&self, now: Instant) -> Option<DocRange> {
+        self.virtual_yank_flash_range(now)
+            .or_else(|| self.virtual_selection_anchor_range())
+    }
+
+    pub fn virtual_selection_anchor_range(&self) -> Option<DocRange> {
         let state = self.virtual_rows?;
-        if let Some(flash) = state.yank_flash.filter(|flash| now < flash.until) {
-            return Some(flash.range);
-        }
         state.selection_anchor.map(|anchor| {
             if matches!(self.vim_mode, VimMode::VisualLine) {
                 let start = anchor.row.min(state.cursor.row);
@@ -163,16 +165,33 @@ impl Window {
         })
     }
 
+    pub fn virtual_yank_flash_range(&self, now: Instant) -> Option<DocRange> {
+        let state = self.virtual_rows?;
+        state
+            .yank_flash
+            .filter(|flash| now < flash.until)
+            .map(|flash| flash.range)
+    }
+
     pub fn virtual_selection_ranges(
         &self,
         buf: &Buffer,
         viewport_rows: u16,
         now: Instant,
     ) -> Vec<smelt_buffer::buffer::SelectionRange> {
-        let Some(state) = self.virtual_rows else {
+        let Some(range) = self.virtual_selection_range(now) else {
             return Vec::new();
         };
-        let Some(range) = self.virtual_selection_range(now) else {
+        self.doc_range_to_row_ranges(buf, viewport_rows, range)
+    }
+
+    fn doc_range_to_row_ranges(
+        &self,
+        buf: &Buffer,
+        viewport_rows: u16,
+        range: DocRange,
+    ) -> Vec<smelt_buffer::buffer::SelectionRange> {
+        let Some(state) = self.virtual_rows else {
             return Vec::new();
         };
         let rows = buf.lines();
@@ -235,8 +254,16 @@ impl Window {
         let text = buf.text();
         self.clamp_anchors_to_source(&text);
         self.clear_expired_virtual_yank_flash(now);
-        let ranges = self.virtual_selection_ranges(buf, viewport_rows, now);
-        buf.set_selection(ranges);
+        let selection_ranges = self
+            .virtual_selection_anchor_range()
+            .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
+            .unwrap_or_default();
+        buf.set_selection(selection_ranges);
+        let flash_ranges = self
+            .virtual_yank_flash_range(now)
+            .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
+            .unwrap_or_default();
+        buf.set_yank_flash(flash_ranges);
     }
 
     pub fn virtual_yank_flash_until(&self) -> Option<Instant> {

@@ -767,7 +767,7 @@ impl TuiApp {
     }
 
     /// Per-line selection ranges (line, col_start, col_end) in display-cell units.
-    /// No-op when no vim visual, selection anchor, or yank-flash is active.
+    /// No-op when no vim visual or selection anchor is active.
     #[cfg(test)]
     pub(crate) fn transcript_selection_highlights(
         &mut self,
@@ -776,13 +776,13 @@ impl TuiApp {
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
         let win = self.transcript_win();
-        let now = self.core.clock.instant_now();
-        if win.virtual_selection_range(now).is_some() {
+        if win.virtual_selection_anchor_range().is_some() {
             let buf_id = win.buf;
             let buf = match self.ui.buf(buf_id) {
                 Some(b) => b,
                 None => return Vec::new(),
             };
+            let now = self.core.clock.instant_now();
             return win
                 .virtual_selection_ranges(buf, viewport_rows, now)
                 .into_iter()
@@ -795,14 +795,7 @@ impl TuiApp {
                 crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine
             );
         let anchor_set = win.selection_anchor.is_some();
-        let yank_flash = self.ui.focused_overlay().is_none()
-            && self
-                .core
-                .clipboard
-                .kill_ring
-                .yank_flash_range(self.core.clock.instant_now())
-                .is_some();
-        if !vim_visual && !anchor_set && !yank_flash {
+        if !vim_visual && !anchor_set {
             return Vec::new();
         }
 
@@ -833,16 +826,7 @@ impl TuiApp {
         } else {
             win.selection_range_at(endpoint, &text)
         };
-        // Fall back to yank-flash range (mirrors nvim's `vim.highlight.on_yank`).
-        let flash_range = if self.ui.focused_overlay().is_none() {
-            self.core
-                .clipboard
-                .kill_ring
-                .yank_flash_range(self.core.clock.instant_now())
-        } else {
-            None
-        };
-        let (s, e) = match active_selection.or(flash_range) {
+        let (s, e) = match active_selection {
             Some(range) => range,
             None => return Vec::new(),
         };
@@ -856,7 +840,7 @@ impl TuiApp {
             .saturating_sub(row_base)
             .min(usize::MAX as crate::smelt_edit::RowIndex) as usize;
         let last = first + viewport_rows as usize;
-        smelt_buffer::coords::selection_to_row_ranges(buf, s, e)
+        smelt_buffer::coords::byte_range_to_row_ranges(buf, s, e)
             .into_iter()
             .filter(|r| r.line >= first && r.line < last)
             .map(|r| (r.line, r.col_start, r.col_end))

@@ -83,7 +83,7 @@ impl ProjectionMaps {
 /// For rows that contain only non-selectable chrome (e.g. a thinking-block
 /// gutter `│ ` or a user-block padding space), the virtual cell is placed
 /// *after* the chrome so the selection highlight doesn't paint over it.
-pub fn selection_to_row_ranges(
+pub fn byte_range_to_row_ranges(
     buf: &Buffer,
     start_byte: usize,
     end_byte: usize,
@@ -184,7 +184,7 @@ mod tests {
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         buf.set_source("aaa\n\nccc".into());
         buf.set_all_lines(vec!["aaa".into(), "".into(), "ccc".into()]);
-        let ranges = selection_to_row_ranges(&buf, 0, 8);
+        let ranges = byte_range_to_row_ranges(&buf, 0, 8);
         assert_eq!(ranges.len(), 3);
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 3));
         assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 1));
@@ -197,7 +197,7 @@ mod tests {
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         buf.set_source("\nbbb".into());
         buf.set_all_lines(vec!["".into(), "bbb".into()]);
-        let ranges = selection_to_row_ranges(&buf, 0, 3);
+        let ranges = byte_range_to_row_ranges(&buf, 0, 3);
         assert_eq!(ranges.len(), 2);
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 1));
         assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 2));
@@ -222,7 +222,7 @@ mod tests {
         );
         // "│ hello" = 9 bytes + newline + "│ " = 4 bytes + newline + "│ world" = 9 bytes
         // Total bytes = 9 + 1 + 4 + 1 + 9 = 24. Select all: 0..24.
-        let ranges = selection_to_row_ranges(&buf, 0, 24);
+        let ranges = byte_range_to_row_ranges(&buf, 0, 24);
         assert_eq!(ranges.len(), 3);
         // Row 0: content row, normal range.
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 7));
@@ -249,7 +249,7 @@ mod tests {
         );
         // " hello " = 7 bytes + newline + " " = 1 byte + newline + " world " = 7 bytes
         // Total = 7 + 1 + 1 + 1 + 7 = 17.
-        let ranges = selection_to_row_ranges(&buf, 0, 17);
+        let ranges = byte_range_to_row_ranges(&buf, 0, 17);
         assert_eq!(ranges.len(), 3);
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 7));
         // Virtual span after the 1-char padding.
@@ -274,7 +274,7 @@ mod tests {
             },
         );
         // "│ " = 4 bytes + newline + "│ content" = 11 bytes. Total = 16.
-        let ranges = selection_to_row_ranges(&buf, 0, 16);
+        let ranges = byte_range_to_row_ranges(&buf, 0, 16);
         assert_eq!(ranges.len(), 2);
         // Start row (also middle row): virtual span after gutter.
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (2, 3));
@@ -287,7 +287,7 @@ mod tests {
         buf.set_source("a\n你b".into());
         buf.set_all_lines(vec!["a".into(), "你b".into()]);
 
-        let ranges = selection_to_row_ranges(&buf, 0, "a\n你b".len());
+        let ranges = byte_range_to_row_ranges(&buf, 0, "a\n你b".len());
         assert_eq!(ranges.len(), 2);
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 1));
         assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 3));
@@ -308,7 +308,7 @@ mod tests {
             },
         );
 
-        let ranges = selection_to_row_ranges(&buf, 0, "你 \ndone".len());
+        let ranges = byte_range_to_row_ranges(&buf, 0, "你 \ndone".len());
         assert_eq!(ranges.len(), 2);
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (3, 4));
         assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 4));

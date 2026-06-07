@@ -107,7 +107,7 @@ story!(table_selection_masks_chrome_and_padding, |ctx| {
         render_into(buf, 18, &theme, |out| {
             render_markdown_table(out, &rows, &[], 18, false, None, "");
         });
-        let selection = smelt_buffer::coords::selection_to_row_ranges(buf, 0, buf.text().len());
+        let selection = smelt_buffer::coords::byte_range_to_row_ranges(buf, 0, buf.text().len());
         buf.set_selection(selection);
     }
     let win = ctx.open_split(buf_id, pane("only"));

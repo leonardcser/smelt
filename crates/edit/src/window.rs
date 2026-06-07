@@ -1094,7 +1094,7 @@ impl Window {
         let Some((s, e)) = range else {
             return Vec::new();
         };
-        smelt_buffer::coords::selection_to_row_ranges(buf, s, e)
+        smelt_buffer::coords::byte_range_to_row_ranges(buf, s, e)
     }
 
     /// Select the WORD (whitespace-delimited, punctuation included) at `cpos`.
@@ -2013,6 +2013,7 @@ impl Window {
         let normal_style = ctx.theme.get("Normal");
         let cursor_style = ctx.theme.get("CursorLine");
         let visual_style = ctx.theme.get("Visual");
+        let yank_flash_style = ctx.theme.get("YankFlash");
         // Buffer override wins; fall back to window anchors.
         let selection_owned: Vec<smelt_buffer::buffer::SelectionRange>;
         let selection_ranges: &[smelt_buffer::buffer::SelectionRange] =
@@ -2022,6 +2023,7 @@ impl Window {
                 selection_owned = self.auto_selection_ranges(buf, ctx.vim_mode);
                 &selection_owned[..]
             };
+        let yank_flash_ranges = buf.yank_flash();
         // Reused per-row scratch - avoids `height` allocations of each Vec.
         let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
         let mut line_chars: Vec<char> = Vec::with_capacity(content_width as usize);
@@ -2187,14 +2189,15 @@ impl Window {
             // Mask out cells under `selectable = false` spans so chrome (e.g. inline
             // gutter, line-number column) doesn't receive the Visual bg. Skip the mask
             // when the row has only chrome and no selectable cells - the virtual
-            // selection span placed after the chrome by `selection_to_row_ranges` will
+            // selection span placed after the chrome by `byte_range_to_row_ranges` will
             // paint there, keeping multi-line selections visually continuous without
             // highlighting the chrome itself.
-            let line_has_selection = selection_ranges.iter().any(|r| r.line == logical_row);
+            let line_has_highlight = selection_ranges.iter().any(|r| r.line == logical_row)
+                || yank_flash_ranges.iter().any(|r| r.line == logical_row);
             let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
             let any_selectable =
                 cell_range_contains_selectable(&spans_buf, 0, text::byte_to_cell(line, line.len()));
-            let mask_slice: Option<&[bool]> = if line_has_selection && any_chrome && any_selectable
+            let mask_slice: Option<&[bool]> = if line_has_highlight && any_chrome && any_selectable
             {
                 mask_buf.clear();
                 mask_buf.resize(content_width as usize, true);
@@ -2210,24 +2213,31 @@ impl Window {
                 None
             };
             if logical.is_some() {
-                for r in selection_ranges.iter().filter(|r| r.line == logical_row) {
-                    let style = merge_span_style(row_style, &visual_style);
-                    let start = to_viewport_col(r.col_start);
-                    let end = to_viewport_col(r.col_end);
-                    if end > start {
-                        paint_span_cells(
-                            slice,
-                            content_offset,
-                            row,
-                            start,
-                            end,
-                            &col_to_char,
-                            &line_chars,
-                            style,
-                            mask_slice,
-                        );
-                    }
-                }
+                let mut paint_ranges =
+                    |ranges: &[smelt_buffer::buffer::SelectionRange], style: crate::grid::Style| {
+                        for r in ranges.iter().filter(|r| r.line == logical_row) {
+                            let start = to_viewport_col(r.col_start);
+                            let end = to_viewport_col(r.col_end);
+                            if end > start {
+                                paint_span_cells(
+                                    slice,
+                                    content_offset,
+                                    row,
+                                    start,
+                                    end,
+                                    &col_to_char,
+                                    &line_chars,
+                                    style,
+                                    mask_slice,
+                                );
+                            }
+                        }
+                    };
+                paint_ranges(selection_ranges, merge_span_style(row_style, &visual_style));
+                paint_ranges(
+                    yank_flash_ranges,
+                    merge_span_style(row_style, &yank_flash_style),
+                );
             }
             vt_buf.clear();
             // Virtual text attaches to the logical row's first chunk only; we

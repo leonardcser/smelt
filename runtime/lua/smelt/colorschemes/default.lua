@@ -42,6 +42,7 @@ return {
   SmeltCodeBlockBg    = bg(dl(233, 253)),
   SmeltBar            = fg(dl(237, 250)),
   SmeltSelection      = bg(dl(238, 153)),
+  SmeltYankFlash      = bg(dl(240, 195)),
   SmeltCursorLineBg   = bg(dl(237, 251)),
   SmeltScrollbarTrack = bg(dl(235, 253)),
   SmeltScrollbarThumb = bg(dl(243, 245)),
@@ -80,6 +81,7 @@ return {
   -- ── Semantic / nvim-standard names: aliases into the base set. ────
   Comment             = "SmeltMuted",
   Visual              = "SmeltSelection",
+  YankFlash           = "SmeltYankFlash",
   CursorLine          = "SmeltCursorLineBg",
   ErrorMsg            = fg({ ansi = 9 }),   -- bright red
   WarningMsg          = fg({ ansi = 11 }),  -- bright yellow

@@ -133,18 +133,15 @@ impl PromptState {
         ctx.win.selection_range_at(endpoint, ctx.buf.source())
     }
 
-    /// Selection range for rendering. Falls back to yank-flash so vim copy ops get the
-    /// brief post-yank highlight (nvim's `vim.highlight.on_yank`).
-    /// Editing must use `selection_range` - the flash must never affect mutations.
-    pub(crate) fn display_selection_range(
+    /// Yank-flash range for rendering. The brief post-yank highlight (nvim's
+    /// `vim.highlight.on_yank`) is painted via a separate theme group so it
+    /// never affects editing/mutations.
+    pub(crate) fn yank_flash_range(
         &self,
         ctx: PromptCtxRef<'_>,
         clipboard: &crate::smelt_edit::Clipboard,
         now: std::time::Instant,
     ) -> Option<(usize, usize)> {
-        if let Some(range) = self.selection_range(ctx) {
-            return Some(range);
-        }
         clipboard
             .kill_ring
             .yank_flash_range(now)

@@ -128,6 +128,8 @@ impl TuiApp {
         let lua = &self.lua;
         let theme = self.ui.theme().clone();
         let render_now = self.core.clock.instant_now();
+        let clipboard = &self.core.clipboard;
+        let focused_overlay = self.ui.focused_overlay().is_some();
         let ui = &mut self.ui;
         let _ = ui.render_with_paints_prepared(
             out,
@@ -174,6 +176,17 @@ impl TuiApp {
                         win.scroll_left = 0;
                     } else {
                         buf.set_selection(Vec::new());
+                        if !focused_overlay {
+                            if let Some((s, e)) = clipboard.kill_ring.yank_flash_range(render_now) {
+                                let ranges =
+                                    smelt_buffer::coords::byte_range_to_row_ranges(buf, s, e);
+                                buf.set_yank_flash(ranges);
+                            } else {
+                                buf.clear_yank_flash();
+                            }
+                        } else {
+                            buf.clear_yank_flash();
+                        }
                         win.scroll_left = 0;
                     }
                 }

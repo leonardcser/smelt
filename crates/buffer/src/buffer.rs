@@ -569,6 +569,7 @@ pub struct Buffer {
     pub attachment_ids: Vec<AttachmentId>,
     pub readonly: bool,
     selection: Vec<SelectionRange>,
+    yank_flash: Vec<SelectionRange>,
     /// Source↔display coord maps. Written by parsers in `parse()` when source
     /// bytes don't map 1:1 to display chars. `None` falls back to identity.
     projection_maps: Option<crate::coords::ProjectionMaps>,
@@ -604,6 +605,7 @@ impl Buffer {
             attachment_ids: Vec::new(),
             readonly: false,
             selection: Vec::new(),
+            yank_flash: Vec::new(),
             projection_maps: None,
         }
     }
@@ -624,6 +626,23 @@ impl Buffer {
 
     pub fn clear_selection(&mut self) {
         self.selection.clear();
+    }
+
+    /// Override the per-row yank-flash highlight. Empty `ranges` clears.
+    pub fn set_yank_flash(&mut self, ranges: Vec<SelectionRange>) {
+        if self.yank_flash == ranges {
+            return;
+        }
+        self.yank_flash = ranges;
+    }
+
+    /// Returns the yank-flash ranges set by [`Self::set_yank_flash`].
+    pub fn yank_flash(&self) -> &[SelectionRange] {
+        &self.yank_flash
+    }
+
+    pub fn clear_yank_flash(&mut self) {
+        self.yank_flash.clear();
     }
 
     /// Attach a parser, firing `on_attach` once and invalidating the render cache.
@@ -816,6 +835,7 @@ impl Buffer {
             self.extmarks.clear_namespace(ns, start, end);
         }
         self.selection.retain(|r| r.line < start || r.line >= end);
+        self.yank_flash.retain(|r| r.line < start || r.line >= end);
         self.changedtick += 1;
         self.last_line_edit = Some(LineEdit {
             before_tick,
@@ -839,6 +859,7 @@ impl Buffer {
             self.extmarks.clear_namespace(ns, 0, usize::MAX);
         }
         self.selection.clear();
+        self.yank_flash.clear();
         self.changedtick += 1;
         self.last_line_edit = None;
     }

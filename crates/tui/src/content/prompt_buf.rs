@@ -54,15 +54,24 @@ pub(crate) fn sync_prompt_overlays(inp: &InputLeafInput<'_>, buf: &mut Buffer) {
         }
     });
 
-    let pctx_ref = crate::input::PromptCtxRef { buf, win: inp.win };
     if let Some((start, end)) = inp
         .input
-        .display_selection_range(pctx_ref, inp.clipboard, inp.now)
+        .selection_range(crate::input::PromptCtxRef { buf, win: inp.win })
     {
-        let ranges = smelt_buffer::coords::selection_to_row_ranges(buf, start, end);
+        let ranges = smelt_buffer::coords::byte_range_to_row_ranges(buf, start, end);
         buf.set_selection(ranges);
     } else {
         buf.set_selection(Vec::new());
+    }
+    if let Some((start, end)) = inp.input.yank_flash_range(
+        crate::input::PromptCtxRef { buf, win: inp.win },
+        inp.clipboard,
+        inp.now,
+    ) {
+        let ranges = smelt_buffer::coords::byte_range_to_row_ranges(buf, start, end);
+        buf.set_yank_flash(ranges);
+    } else {
+        buf.clear_yank_flash();
     }
 
     buf.clear_namespace(placeholder_ns, 0, usize::MAX);
