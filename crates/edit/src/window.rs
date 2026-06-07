@@ -604,9 +604,17 @@ impl Window {
         if total == 0 {
             return;
         }
-        let target_vrow = self
-            .local_row(self.scroll_top.saturating_add(screen_row as RowIndex))
-            .min(total.saturating_sub(1));
+        let target_abs_row = self
+            .scroll_top
+            .saturating_add(screen_row as RowIndex)
+            .min(self.scroll_row_total(buf).saturating_sub(1));
+        if let Some(mut state) = self.virtual_rows {
+            state.cursor.row = target_abs_row;
+            self.sync_virtual_cursor_to_backing_buffer(&mut state, buf);
+            self.virtual_rows = Some(state);
+            return;
+        }
+        let target_vrow = self.local_row(target_abs_row).min(total.saturating_sub(1));
         let want = self.curswant.unwrap_or(self.cursor_col as usize);
         self.cpos = self.cpos_at_visual(buf, row_to_usize(target_vrow), want);
         let (row, col) = self.cursor_visual(buf, self.cpos);
@@ -701,6 +709,38 @@ impl Window {
         self.virtual_rows
             .map(|state| state.cursor.row)
             .unwrap_or_else(|| self.absolute_row(self.cursor_row))
+    }
+
+    fn backed_local_row(
+        &self,
+        state: VirtualRowsState,
+        buf: &Buffer,
+        absolute_row: RowIndex,
+    ) -> Option<RowIndex> {
+        if absolute_row < state.materialized.row_base
+            || absolute_row >= state.materialized.total_rows
+        {
+            return None;
+        }
+        let local = state.materialized.local_row(absolute_row);
+        (local < self.visual_row_total(buf)).then_some(local)
+    }
+
+    fn sync_virtual_cursor_to_backing_buffer(
+        &mut self,
+        state: &mut VirtualRowsState,
+        buf: &Buffer,
+    ) -> bool {
+        let Some(local) = self.backed_local_row(*state, buf, state.cursor.row) else {
+            return false;
+        };
+        let cpos = self.cpos_at_visual(buf, row_to_usize(local), state.cursor.byte_col);
+        let (row, col) = self.cursor_visual(buf, cpos);
+        self.cpos = cpos;
+        self.cursor_row = row;
+        self.cursor_col = col;
+        state.cursor.byte_col = buf.display_byte_pos(cpos).1;
+        true
     }
 
     /// Project `cpos` to a visual `(row, cell_col)` through this window's
@@ -808,8 +848,22 @@ impl Window {
     }
 
     pub fn cursor_screen_row_at(&self, scroll_top: RowIndex, viewport_rows: u16) -> Option<u16> {
-        let rel = self.absolute_cursor_row().checked_sub(scroll_top)?;
+        Self::screen_row_at(self.absolute_cursor_row(), scroll_top, viewport_rows)
+    }
+
+    fn screen_row_at(row: RowIndex, scroll_top: RowIndex, viewport_rows: u16) -> Option<u16> {
+        let rel = row.checked_sub(scroll_top)?;
         (rel < viewport_rows as RowIndex).then_some(rel as u16)
+    }
+
+    fn screen_row_or_edge(row: RowIndex, scroll_top: RowIndex, viewport_rows: u16) -> u16 {
+        Self::screen_row_at(row, scroll_top, viewport_rows).unwrap_or_else(|| {
+            if row < scroll_top {
+                0
+            } else {
+                viewport_rows.saturating_sub(1)
+            }
+        })
     }
 
     pub fn cursor_row(&self) -> RowIndex {
@@ -1767,15 +1821,8 @@ impl Window {
         let max_scroll = self.clamp_scroll_top(total_visual, viewport_rows, buf);
         let cur_scroll = self.scroll_top;
 
-        let screen_row = self
-            .cursor_screen_row_at(cur_scroll, viewport_rows)
-            .unwrap_or_else(|| {
-                if self.absolute_cursor_row() < cur_scroll {
-                    0
-                } else {
-                    viewport_rows.saturating_sub(1)
-                }
-            });
+        let screen_row =
+            Self::screen_row_or_edge(self.absolute_cursor_row(), cur_scroll, viewport_rows);
         let new_scroll = scroll_top.min(max_scroll);
         if self.selection_active() {
             self.set_scroll(new_scroll, buf);
@@ -1787,6 +1834,17 @@ impl Window {
             self.update_tail_state(buf, viewport_rows);
             return;
         }
+        if let Some(mut state) = self.virtual_rows {
+            state.cursor.row = new_scroll
+                .saturating_add(screen_row as RowIndex)
+                .min(total_visual.saturating_sub(1));
+            self.sync_virtual_cursor_to_backing_buffer(&mut state, buf);
+            self.virtual_rows = Some(state);
+            self.set_scroll(new_scroll, buf);
+            self.update_tail_state(buf, viewport_rows);
+            return;
+        }
+
         let target_vrow = self
             .local_row(new_scroll.saturating_add(screen_row as RowIndex))
             .min(self.visual_row_total(buf).saturating_sub(1));
@@ -1872,10 +1930,7 @@ impl Window {
         // selection-aware spans always work.
         let cursor_screen_row = {
             let effective_row = self.absolute_row(self.effective_cursor_row(buf));
-            effective_row
-                .checked_sub(self.scroll_top)
-                .filter(|rel| *rel < height as RowIndex)
-                .map(|rel| rel as u16)
+            Self::screen_row_at(effective_row, self.scroll_top, height)
         };
         // Two opt-ins; `selection_highlight` always paints (picker semantics),
         // `cursor_line` paints only when this window owns focus (caret semantics).
@@ -2160,10 +2215,8 @@ impl Window {
                     .map(|(lr, _)| lr)
                     .unwrap_or_else(|| row_to_usize(row));
                 let col = snap_col_past_chrome(buf, logical_row, col);
-                self.absolute_row(row)
-                    .checked_sub(self.scroll_top)
-                    .filter(|rel| *rel < height as RowIndex)
-                    .map(|screen_row| (col, screen_row as u16))
+                Self::screen_row_at(self.absolute_row(row), self.scroll_top, height)
+                    .map(|screen_row| (col, screen_row))
             });
             if let Some((col, screen_row)) = resolved {
                 // `col` is in source-row cells; shift into viewport coords. Off
@@ -3146,6 +3199,76 @@ mod tests {
         assert_eq!(w.cursor_screen_row(viewport), Some(4));
         let offsets = smelt_buffer::text::line_start_offsets(&rows);
         assert_eq!(w.cpos, offsets[17]);
+    }
+
+    #[test]
+    fn virtual_rows_pan_preserves_screen_row_beyond_materialized_slice() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(20));
+        let viewport = 5;
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 90,
+            row_base: 80,
+            total_rows: 200,
+            materialized_rows: 20,
+        });
+        w.set_resolved_scroll(90);
+        let now = Instant::now();
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::GotoRow(94), viewport, now);
+        assert_eq!(w.virtual_cursor().unwrap().row, 94);
+        assert_eq!(w.cursor_screen_row(viewport), Some(4));
+
+        w.pan_by_lines(&buf, 20, viewport);
+
+        assert_eq!(w.scroll_top, 110);
+        assert_eq!(w.virtual_cursor().unwrap().row, 114);
+        assert_eq!(w.cursor_screen_row(viewport), Some(4));
+    }
+
+    #[test]
+    fn virtual_rows_pan_preserves_screen_row_before_materialized_slice() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(20));
+        let viewport = 5;
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 90,
+            row_base: 80,
+            total_rows: 200,
+            materialized_rows: 20,
+        });
+        w.set_resolved_scroll(90);
+        let now = Instant::now();
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::GotoRow(94), viewport, now);
+        assert_eq!(w.virtual_cursor().unwrap().row, 94);
+        assert_eq!(w.cursor_screen_row(viewport), Some(4));
+
+        w.pan_by_lines(&buf, -20, viewport);
+
+        assert_eq!(w.scroll_top, 70);
+        assert_eq!(w.virtual_cursor().unwrap().row, 74);
+        assert_eq!(w.cursor_screen_row(viewport), Some(4));
+    }
+
+    #[test]
+    fn virtual_scroll_command_preserves_screen_row_beyond_materialized_slice() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(20));
+        let viewport = 5;
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 90,
+            row_base: 80,
+            total_rows: 200,
+            materialized_rows: 20,
+        });
+        w.set_resolved_scroll(90);
+        let now = Instant::now();
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::GotoRow(94), viewport, now);
+
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::ScrollRows(20), viewport, now);
+
+        assert_eq!(w.scroll_top, 110);
+        assert_eq!(w.virtual_cursor().unwrap().row, 114);
+        assert_eq!(w.cursor_screen_row(viewport), Some(4));
     }
 
     #[test]

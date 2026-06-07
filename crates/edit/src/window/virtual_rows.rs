@@ -166,24 +166,24 @@ impl Window {
     }
 
     pub fn sync_virtual_cursor_to_local(&mut self, buf: &Buffer, viewport_rows: u16) {
-        let Some(state) = self.virtual_rows else {
+        let Some(mut state) = self.virtual_rows else {
             return;
         };
         if buf.lines().is_empty() {
             self.reset_cursor();
             return;
         }
-        let local_row = state
-            .materialized
-            .local_row(state.cursor.row)
-            .min(self.visual_row_total(buf).saturating_sub(1));
-        self.cpos = self.cpos_at_visual(buf, row_to_usize(local_row), state.cursor.byte_col);
-        let (row, col) = self.cursor_visual(buf, self.cpos);
-        self.cursor_row = row;
-        self.cursor_col = col;
-        self.curswant = Some(state.cursor.byte_col);
+        let local_cursor_synced = self.sync_virtual_cursor_to_backing_buffer(&mut state, buf);
+        if local_cursor_synced {
+            self.curswant = Some(state.cursor.byte_col);
+        }
+        self.virtual_rows = Some(state);
         if viewport_rows > 0 {
-            let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
+            let viewport_cols = if local_cursor_synced {
+                self.viewport.map(|v| v.content_width).unwrap_or(0)
+            } else {
+                0
+            };
             self.keep_cursor_visible(
                 buf,
                 state.materialized.total_rows,
@@ -325,10 +325,18 @@ impl Window {
                 next.row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
             }
             ViewerCommand::ScrollRows(delta) => {
-                self.pan_by_lines(buf, delta, viewport_rows);
-                let screen_row = self.cursor_screen_row(viewport_rows).unwrap_or(0) as RowIndex;
-                next.row = self
-                    .scroll_top
+                let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
+                let cur_scroll = if self.is_following_tail() && self.scroll_top != max_scroll {
+                    max_scroll
+                } else {
+                    self.scroll_top
+                };
+                let screen_row =
+                    Self::screen_row_or_edge(current.row, cur_scroll, viewport_rows) as RowIndex;
+                let new_scroll = add_signed_row(cur_scroll, delta).min(max_scroll);
+                self.set_scroll(new_scroll, buf);
+                self.update_tail_state(buf, viewport_rows);
+                next.row = new_scroll
                     .saturating_add(screen_row)
                     .min(total_rows.saturating_sub(1));
             }
