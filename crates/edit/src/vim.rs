@@ -407,8 +407,8 @@ pub fn handle_virtual_viewer_key(
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
-            KeyCode::Char('u') => Some(ViewerCommand::PageRows(-1)),
-            KeyCode::Char('d') => Some(ViewerCommand::PageRows(1)),
+            KeyCode::Char('u') => Some(ViewerCommand::HalfPageRows(-1)),
+            KeyCode::Char('d') => Some(ViewerCommand::HalfPageRows(1)),
             KeyCode::Char('b') => Some(ViewerCommand::PageRows(-1)),
             KeyCode::Char('f') => Some(ViewerCommand::PageRows(1)),
             KeyCode::Char('y') => Some(ViewerCommand::ScrollRows(-1)),

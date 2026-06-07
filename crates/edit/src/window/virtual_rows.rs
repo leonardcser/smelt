@@ -6,6 +6,7 @@ use std::time::Instant;
 pub enum ViewerCommand {
     MoveRows(isize),
     PageRows(isize),
+    HalfPageRows(isize),
     ScrollRows(isize),
     BufferStart,
     BufferEnd,
@@ -410,6 +411,11 @@ impl Window {
             }
             ViewerCommand::PageRows(delta) => {
                 let rows = (viewport_rows as isize).saturating_mul(delta);
+                let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
+                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+            }
+            ViewerCommand::HalfPageRows(delta) => {
+                let rows = (viewport_rows as isize / 2).max(1).saturating_mul(delta);
                 let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
                 self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }

@@ -3380,6 +3380,91 @@ mod tests {
     }
 
     #[test]
+    fn virtual_half_page_rows_moves_by_half_viewport() {
+        let mut w = make_win();
+        let buf = make_buf(sample_rows(100));
+        let viewport = 10;
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 0,
+            row_base: 0,
+            total_rows: 100,
+            materialized_rows: 50,
+        });
+        w.set_resolved_scroll(0);
+        let now = Instant::now();
+        w.execute_virtual_viewer_command(
+            &buf,
+            ViewerCommand::GotoPosition(DocPosition {
+                row: 5,
+                byte_col: 0,
+            }),
+            viewport,
+            now,
+        );
+
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::HalfPageRows(1), viewport, now);
+        assert_eq!(w.virtual_cursor().unwrap().row, 10);
+
+        w.execute_virtual_viewer_command(&buf, ViewerCommand::HalfPageRows(-1), viewport, now);
+        assert_eq!(w.virtual_cursor().unwrap().row, 5);
+    }
+
+    #[test]
+    fn virtual_ctrl_u_and_ctrl_d_use_half_page_in_vim_handler() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let mut mode = VimMode::Normal;
+        let mut state = VimWindowState::default();
+
+        let up = vim::handle_virtual_viewer_key(
+            KeyEvent {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            },
+            &mut mode,
+            &mut state,
+        );
+        assert_eq!(up, Some(ViewerCommand::HalfPageRows(-1)));
+
+        let down = vim::handle_virtual_viewer_key(
+            KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            },
+            &mut mode,
+            &mut state,
+        );
+        assert_eq!(down, Some(ViewerCommand::HalfPageRows(1)));
+
+        let back = vim::handle_virtual_viewer_key(
+            KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            },
+            &mut mode,
+            &mut state,
+        );
+        assert_eq!(back, Some(ViewerCommand::PageRows(-1)));
+
+        let forward = vim::handle_virtual_viewer_key(
+            KeyEvent {
+                code: KeyCode::Char('f'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            },
+            &mut mode,
+            &mut state,
+        );
+        assert_eq!(forward, Some(ViewerCommand::PageRows(1)));
+    }
+
+    #[test]
     fn virtual_cursor_sync_keeps_byte_column_on_multibyte_chrome_rows() {
         let mut w = make_win();
         let mut buf = make_buf(vec!["│ hello".into()]);
