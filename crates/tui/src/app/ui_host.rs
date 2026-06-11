@@ -1,5 +1,6 @@
 //! `UiHost` impl for `TuiApp`. Delegates to `crate::smelt_edit::Ui`; overrides
-//! `rows_for`/`breaks_for` for the prompt and transcript windows.
+//! row-range access for prompt and transcript windows, with explicitly named
+//! full-document fallbacks for export/debug-style callers.
 
 use crate::app::TuiApp;
 
@@ -41,7 +42,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
     ) -> Option<crate::smelt_edit::WindowViewport> {
         self.ui.win(win).and_then(|w| w.viewport)
     }
-    fn rows_for(&mut self, win: crate::smelt_edit::WinId) -> Option<Vec<String>> {
+    fn full_rows_for(&mut self, win: crate::smelt_edit::WinId) -> Option<Vec<String>> {
         if win == crate::app::PROMPT_WIN {
             let buf_id = self.ui.win(self.well_known.prompt)?.buf;
             let buf = self.ui.buf(buf_id)?;
@@ -50,10 +51,13 @@ impl crate::smelt_edit::UiHost for TuiApp {
             let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
             Some((*rows).clone())
         } else {
-            crate::smelt_edit::UiHost::rows_for(&mut self.ui, win)
+            crate::smelt_edit::UiHost::full_rows_for(&mut self.ui, win)
         }
     }
-    fn breaks_for(&mut self, win: crate::smelt_edit::WinId) -> Option<(Vec<usize>, Vec<usize>)> {
+    fn full_breaks_for(
+        &mut self,
+        win: crate::smelt_edit::WinId,
+    ) -> Option<(Vec<usize>, Vec<usize>)> {
         if win == crate::app::PROMPT_WIN {
             let buf_id = self.ui.win(self.well_known.prompt)?.buf;
             let buf = self.ui.buf(buf_id)?;
@@ -64,7 +68,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
         } else if win == crate::app::TRANSCRIPT_WIN {
             Some(self.transcript_line_breaks(self.core.config.settings.show_thinking))
         } else {
-            crate::smelt_edit::UiHost::breaks_for(&mut self.ui, win)
+            crate::smelt_edit::UiHost::full_breaks_for(&mut self.ui, win)
         }
     }
 

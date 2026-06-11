@@ -313,8 +313,8 @@ impl TuiApp {
             return;
         };
         let usable = vp.content_width as usize;
-        let (soft, hard) =
-            crate::smelt_edit::UiHost::breaks_for(self, crate::app::PROMPT_WIN).unwrap_or_default();
+        let (soft, hard) = crate::smelt_edit::UiHost::full_breaks_for(self, crate::app::PROMPT_WIN)
+            .unwrap_or_default();
         let yank = {
             let (win, buf) = self
                 .ui
@@ -363,7 +363,8 @@ impl TuiApp {
     ) -> Option<crate::smelt_edit::CopyOutput> {
         let viewport = crate::smelt_edit::UiHost::viewport_for(self, win)?;
         let buf_id = self.ui.win(win).map(|w| w.buf)?;
-        let (soft, hard) = crate::smelt_edit::UiHost::breaks_for(self, win).unwrap_or_default();
+        let (soft, hard) =
+            crate::smelt_edit::UiHost::full_breaks_for(self, win).unwrap_or_default();
         let range = {
             let mouse_ctx = crate::smelt_edit::MouseCtx {
                 soft_breaks: &soft,

@@ -330,18 +330,17 @@ Recommended direction: Smelt should use a hybrid model.
 
 ### 3. Current Smelt hotspots
 
-The current code already has the right visible-buffer direction, but several seams still force full materialization:
+The code now has the right visible-buffer direction, and the Phase 1 work has removed the accidental full-row paths from correctness-sensitive transcript operations:
 
 - render path plans visible projection in `render_loop.rs`, then applies `MaterializedRows`: `crates/tui/src/app/render_loop.rs:151`
-- planning currently calls `plan_projection_measured`, which calls `measure_all_heights`: `crates/tui/src/content/transcript_buf.rs:419`
-- `measure_all_heights` calls `ensure_all`, rendering every block into the cache before selecting the visible range: `crates/tui/src/content/transcript_buf.rs:381`
-- `virtual_total_rows` calls `full_transcript_display_text`, which builds/clones all display rows just to return a length: `crates/tui/src/app/ui_host.rs:112`
-- `rows_for_range` calls `materialize_block_layout`, which currently ensures all blocks first: `crates/tui/src/content/transcript_buf.rs:844`
-- `copy_range` does the same before materializing the selected block range: `crates/tui/src/content/transcript_buf.rs:892`
-- `line_breaks` materializes all blocks and then collects all rows: `crates/tui/src/content/transcript_buf.rs:939`
-- `build_rows` caches a full `Arc<Vec<String>>` for legacy/full-text consumers: `crates/tui/src/content/transcript_buf.rs:796`
+- exact total rows are provided by `TranscriptProjection::exact_total_rows` and `TuiApp::transcript_total_rows`; `UiHost::virtual_total_rows` no longer calls `full_transcript_display_text`.
+- `rows_for_range` prepares exact heights, then materializes only the intersecting block range.
+- transcript `copy_range` prepares exact heights, then materializes only the selected/intersecting block range.
+- `materialize_block_layout` is an exact metadata query backed by `BlockRowIndex`, not a full row concatenation path.
+- `line_breaks` remains the explicit full break-vector path; `line_breaks_range` is used by ranged callers.
+- `build_rows` / `full_transcript_display_text` remain intentionally full-row APIs for legacy/full-text/export/debug-style consumers.
 
-`BlockRowIndex` is the right seed of the tmux-like backing coordinate space: it stores block ids, layout keys, estimated/exact heights, and prefix rows: `crates/tui/src/content/transcript_buf.rs:37`. The issue is that exactness is obtained by rendering every block too often and some callers still ask for the whole row vector.
+`BlockRowIndex` is the right seed of the tmux-like backing coordinate space: it stores block ids, layout keys, estimated/exact heights, and prefix rows: `crates/tui/src/content/transcript_buf.rs:37`. The remaining work is to turn this Phase 1 row-index/range seam into the final `DisplayDocument`/rendered-block-cache model and delete the older row-state compatibility storage.
 
 ### 4. Proposed virtualization architecture
 
@@ -409,7 +408,7 @@ Implementation note: `TranscriptProjection::exact_total_rows` now measures exact
 
 ### 6. Off-viewport display access
 
-Replace correctness-sensitive plain-row host seams with `DisplayDocument` operations:
+Use bounded display-row operations as the correctness-sensitive host seam:
 
 - ranged materialization for word motions/search/local text needs
 - `copy_range` for transcript-owned copy semantics
@@ -422,6 +421,8 @@ Cost model:
 - line-break APIs should have a range form for virtual word motion; full break vectors are explicit full-text/export/debug operations only.
 
 Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `BlockRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
+
+Implementation note: `UiHost::rows_for_range` and `UiHost::breaks_for_range` are now the primary display-row vocabulary. The full-document operations are explicitly named `full_rows_for` and `full_breaks_for`; their default implementations go through the ranged seam and exist for export/debug/full-scan callers. This keeps accidental full materialization visible at call sites while avoiding a premature `DisplayDocument` trait split before search consumes row metadata.
 
 ### 7. Operations allowed to scan the full transcript
 
@@ -757,20 +758,16 @@ Search behavior:
 8. Search targets the currently focused overlay/dialog/window, not always the transcript.
 9. Search match ranges survive rematerialization of the target viewport and are cleared on incompatible target generation changes.
 
-### Phase 1: window surface and text interaction rewrite
+### Phase 1: window surface and transcript selection foundation
 
-Do the full interaction/document-state migration in one coherent phase. Do not keep compatibility fields as parallel truth.
+Phase 1 is the coherent foundation that fixes the current chrome/selection bugs and removes accidental full transcript materialization from selection/navigation seams. It deliberately stops short of moving every text/list state field into the final enum shape; that larger state deletion is safer after search/display-row metadata consumes the same document vocabulary.
 
-Scope:
+Completion criteria:
 
-- introduce `WindowSurface` and move interaction behavior/state into it.
-- replace `focusable`, `selectable`, and `mouse_scroll` authority with `WindowSurface` methods.
-- introduce `BufferTextState`, `RowTextState`, `ListDocState`, and `TextDocState`.
-- delete `virtual_rows: Option<VirtualRowsState>` as a bolted-on mode; row viewers use `WindowSurface::ReadonlyText(TextDocState::Rows(...))`.
-- delete or privatize stale byte cursor/selection/drag/yank state for rows/list/inert surfaces.
-- introduce `SelectionState<P>`, `TextRange`, and `RangeLayer` as the core text-range vocabulary.
+- introduce `WindowSurface` and make it the authority for focus, caret, text-selection, and wheel-scroll policy.
+- remove `focusable`, `selectable`, and `mouse_scroll` as parallel decision sources.
 - introduce `TextHit` / `TextHitKind` and make mouse selection/caret placement use hit kind plus surface policy.
-- route focus-on-click, caret ownership, search eligibility, text-selection eligibility, and chrome-click policy through `WindowSurface`.
+- route focus-on-click, caret ownership, search eligibility, text-selection eligibility, and chrome-click policy through `WindowSurface` methods.
 - make prompt top-bar chrome/fill clicks inert; selectable text drag-copy still works.
 - make bottom prompt bar `WindowSurface::Inert` unless explicitly changed to selectable text.
 - change blank user/exec chrome rows to semantic empty rows with row background fill.
@@ -778,8 +775,11 @@ Scope:
 - if real pad cells are required for a right border, emit them as non-selectable chrome.
 - replace transcript-specific TUI snapping with edit/window hit-testing over display row spans/decorations.
 - keep TUI responsible for dispatch/capture/focus/clipboard, not cell snapping.
+- make `virtual_total_rows` use exact height/index metadata rather than full row concatenation.
+- make ranged transcript rows/copy materialize only intersecting block ranges after exact-height prep.
+- make full-row/full-break host APIs explicitly named `full_rows_for` / `full_breaks_for`; correctness-sensitive paths use `rows_for_range` / `breaks_for_range`.
 
-This phase should eliminate the prompt-bar `────` bug, the code-block padding cursor bug, all-chrome selection bugs, and duplicate transcript snapping offsets while also deleting the old dual byte/row window state.
+This phase eliminates the prompt-bar `────` bug, the code-block padding cursor bug, all-chrome selection bugs, and duplicate transcript snapping offsets while establishing exact transcript row coordinates without concatenating full display rows. The old byte/row state fields still exist as implementation storage; deleting that remaining dual state moves to the display-document/state-cleanup phases once the final `DisplayDocument`/`TextRange` consumers are in place.
 
 ### Phase 2: display document and transcript virtualization rewrite
 
@@ -844,7 +844,7 @@ After the new model is green, delete the old model rather than preserving shims.
 Scope:
 
 - delete old `virtual_rows` APIs and compatibility wrappers that are no longer used.
-- delete old `rows_for`/`breaks_for` APIs if display documents replace them; keep only explicit full-text/export APIs that are intentionally expensive.
+- delete explicit full-row/full-break APIs if display documents replace them; keep only full-text/export APIs that are intentionally expensive.
 - delete old `focusable`/`selectable`/`mouse_scroll` authority if not already removed.
 - delete old byte/doc projection duplication after `TextRange` projection is authoritative.
 - delete or update Lua APIs freely; no Lua compatibility is required.

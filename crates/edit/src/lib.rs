@@ -2073,31 +2073,26 @@ pub trait UiHost {
     /// Last-painted viewport for `win`. Hosts override when they project geometry differently.
     fn viewport_for(&self, win: WinId) -> Option<WindowViewport>;
 
-    /// Display rows for `win`. Default reads the backing buffer's lines.
-    /// Hosts override for windows whose painted rows differ from the source
-    /// (wrapped prompt, transcript projection).
-    fn rows_for(&mut self, win: WinId) -> Option<Vec<String>>;
-
-    /// Soft (word-wrap) and hard (`\n`) break byte positions in `rows_for(win)?.join("\n")`.
-    /// Default returns no soft breaks and hard breaks at join points.
-    fn breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)>;
-
-    /// Display rows for a bounded range in `win`. Default slices `rows_for`, which keeps
-    /// compatibility for existing hosts and makes full materialization explicit at this seam.
+    /// Display rows for a bounded range in `win`. This is the primary host seam
+    /// for off-viewport text access; virtual documents must override it with a
+    /// range-aware implementation.
     fn rows_for_range(
         &mut self,
         win: WinId,
         start: RowIndex,
         count: RowIndex,
     ) -> Option<Vec<String>> {
-        let rows = self.rows_for(win)?;
+        let ui = self.ui();
+        let buf_id = ui.win(win)?.buf;
+        let buf = ui.buf(buf_id)?;
+        let rows = buf.lines();
         let start_idx = row_to_usize(start).min(rows.len());
         let end = row_to_usize(start.saturating_add(count)).min(rows.len());
         Some(rows[start_idx..end].to_vec())
     }
 
     /// Soft and hard breaks for `rows_for_range`. Hosts with virtual documents should
-    /// override this to avoid collecting the full document.
+    /// override this to avoid collecting more rows than the requested range.
     fn breaks_for_range(
         &mut self,
         win: WinId,
@@ -2105,6 +2100,27 @@ pub trait UiHost {
         count: RowIndex,
     ) -> Option<(Vec<usize>, Vec<usize>)> {
         let rows = self.rows_for_range(win, start, count)?;
+        Some((Vec::new(), hard_breaks_for_lines(&rows)))
+    }
+
+    /// Full display rows for `win`. This is intentionally named as a full-document
+    /// operation; correctness-sensitive viewer paths should prefer `rows_for_range`.
+    fn full_rows_for(&mut self, win: WinId) -> Option<Vec<String>> {
+        let count = if let Some(total) = self.virtual_total_rows(win) {
+            total
+        } else {
+            let ui = self.ui();
+            let buf_id = ui.win(win)?.buf;
+            ui.buf(buf_id)?.lines().len() as RowIndex
+        };
+        self.rows_for_range(win, 0, count)
+    }
+
+    /// Full soft/hard break vectors for `full_rows_for(win)?.join("\n")`.
+    /// Prefer `breaks_for_range` unless the caller is explicitly scanning the
+    /// whole displayed document.
+    fn full_breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)> {
+        let rows = self.full_rows_for(win)?;
         Some((Vec::new(), hard_breaks_for_lines(&rows)))
     }
 
@@ -2159,16 +2175,6 @@ impl UiHost for Ui {
     }
     fn viewport_for(&self, win: WinId) -> Option<WindowViewport> {
         Ui::win(self, win).and_then(|w| w.viewport)
-    }
-    fn rows_for(&mut self, win: WinId) -> Option<Vec<String>> {
-        let buf_id = Ui::win(self, win)?.buf;
-        let buf = Ui::buf(self, buf_id)?;
-        Some(buf.lines().to_vec())
-    }
-    fn breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)> {
-        let buf_id = Ui::win(self, win)?.buf;
-        let buf = Ui::buf(self, buf_id)?;
-        Some((Vec::new(), hard_breaks_for_lines(buf.lines())))
     }
 }
 
@@ -4153,12 +4159,14 @@ mod tests {
         fn assert_default_shape(host: &mut dyn UiHost, win: WinId) {
             let vp = host.viewport_for(win).unwrap();
             assert_eq!(vp.rect.width, 20);
-            let rows = host.rows_for(win).unwrap();
+            let range_rows = host.rows_for_range(win, 1, 2).unwrap();
+            assert_eq!(range_rows, vec!["world!", "ok"]);
+            let rows = host.full_rows_for(win).unwrap();
             assert_eq!(rows, vec!["hello", "world!", "ok"]);
             // "hello\nworld!\nok" - `\n` after "hello" lives at byte 5,
             // `\n` after "world!" at byte 12. Both are hard breaks; soft
             // breaks are empty for an unwrapped buffer.
-            let (soft, hard) = host.breaks_for(win).unwrap();
+            let (soft, hard) = host.full_breaks_for(win).unwrap();
             assert!(soft.is_empty(), "default impl emits no soft breaks");
             assert_eq!(hard, vec![5, 12]);
         }
@@ -4167,8 +4175,8 @@ mod tests {
         // Unknown window → `None` for every accessor.
         let stranger = WinId(9999);
         assert!(UiHost::viewport_for(&ui, stranger).is_none());
-        assert!(UiHost::rows_for(&mut ui, stranger).is_none());
-        assert!(UiHost::breaks_for(&mut ui, stranger).is_none());
+        assert!(UiHost::full_rows_for(&mut ui, stranger).is_none());
+        assert!(UiHost::full_breaks_for(&mut ui, stranger).is_none());
     }
 
     #[test]
