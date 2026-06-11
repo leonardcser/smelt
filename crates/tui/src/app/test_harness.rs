@@ -3092,8 +3092,7 @@ mod tests {
             )
             .expect("overlay leaf");
         if let Some(win) = app.app.ui.win_mut(leaf) {
-            win.focusable = true;
-            win.selectable = true;
+            win.set_surface(crate::smelt_edit::WindowSurface::ReadonlyText);
             win.set_vim_enabled(true);
         }
         app.app.ui.overlay_open(

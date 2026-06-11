@@ -81,6 +81,15 @@ enum WindowSurface {
 
 `WindowSurface` should replace the old boolean authority and the bolted-on `virtual_rows` mode, not sit beside them as a compatibility label.
 
+Implementation note: the first Phase 1 surface step replaced the direct
+`focusable`, `selectable`, and `mouse_scroll` booleans with a `WindowSurface`
+interaction role (`EditableText`, `ReadonlyText`, `SelectableText`, `List`,
+`Inert`). This is intentionally not the full end state yet: text/list document
+state still lives in the existing `Window` fields, and `virtual_rows` is still
+separate. The important line is that focus, generic text selection, caret commit,
+and wheel-scroll policy now ask the surface instead of reinterpreting three
+booleans at each call site.
+
 ### 2. Materialized row space and interaction mode should be separate concepts
 
 Virtual rows are not only transcript. They are also used by:

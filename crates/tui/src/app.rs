@@ -602,6 +602,7 @@ impl TuiApp {
                 },
             ));
             if let Some(w) = ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+                w.set_surface(crate::smelt_edit::WindowSurface::ReadonlyText);
                 w.set_vim_enabled(vim_enabled);
                 // Transcript blocks (code, diff) stamp `SourceLine` per row;
                 // `LineNumberGutter` is strict - text/markdown rows leave no
@@ -1285,11 +1286,7 @@ impl TuiApp {
             return;
         };
         if let Some(w) = self.ui.win_mut(win) {
-            // Non-focusable surface: text-selectable for drag-copy, but the
-            // caret-leaf predicate (focusable && !mouse_scroll) keeps `cpos`
-            // untouched on click - notification rows have no meaningful caret.
-            w.focusable = false;
-            w.selectable = true;
+            w.set_surface(crate::smelt_edit::WindowSurface::SelectableText);
         }
 
         let layout = crate::smelt_edit::LayoutTree::vbox(vec![(

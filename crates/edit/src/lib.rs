@@ -71,7 +71,7 @@ pub use vim::VimMode;
 pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, CursorShape, DrawContext, EventCtx,
     MouseCtx, ScrollbarState, SplitConfig, VerticalScroll, ViewerCommand, VirtualRowsState,
-    VirtualYankFlash, Window, WindowViewport,
+    VirtualYankFlash, Window, WindowSurface, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.
@@ -571,7 +571,7 @@ impl Ui {
                         return Some(removed);
                     }
                     if self.splits().contains_leaf(prior)
-                        && self.wins.get(&prior).map(|w| w.focusable).unwrap_or(false)
+                        && self.wins.get(&prior).is_some_and(|w| w.accepts_focus())
                     {
                         self.focus = Some(prior);
                         return Some(removed);
@@ -640,8 +640,7 @@ impl Ui {
             return false;
         };
         let leaf_info = self.wins.get(&w).and_then(|win| {
-            let scrollable = win.mouse_scroll || win.config.gutters.scrollbar;
-            scrollable.then(|| {
+            win.supports_wheel_scroll().then(|| {
                 win.viewport
                     .map(|vp| (win.buf, vp.rect.height, vp.content_width))
             })?
@@ -677,8 +676,8 @@ impl Ui {
             return false;
         };
         let vp_width = self.wins.get(&w).and_then(|win| {
-            let scrollable = win.mouse_scroll || win.config.gutters.scrollbar;
-            scrollable.then(|| win.viewport.map(|vp| vp.content_width))?
+            win.supports_wheel_scroll()
+                .then(|| win.viewport.map(|vp| vp.content_width))?
         });
         let Some(vp_width) = vp_width else {
             return false;
@@ -1045,7 +1044,7 @@ impl Ui {
             return true;
         }
         let is_split_leaf = self.splits().contains_leaf(win)
-            && self.wins.get(&win).map(|w| w.focusable).unwrap_or(false);
+            && self.wins.get(&win).is_some_and(|w| w.accepts_focus());
         let is_overlay_leaf = self.overlay_for_leaf(win).is_some();
         if !is_split_leaf && !is_overlay_leaf {
             return false;
@@ -1613,11 +1612,10 @@ impl Ui {
                         let drag_target: Option<(OverlayId, overlay::ChromeZone)> = match hit {
                             Some(HitTarget::Chrome { owner, zone }) => Some((owner, zone)),
                             Some(HitTarget::Window(w)) => {
-                                let (leaf_focusable, leaf_selectable) = self
-                                    .wins
-                                    .get(&w)
-                                    .map(|win| (win.focusable, win.selectable))
-                                    .unwrap_or((true, false));
+                                let leaf = self.wins.get(&w);
+                                let leaf_focusable = leaf.is_some_and(|win| win.accepts_focus());
+                                let leaf_selectable =
+                                    leaf.is_some_and(|win| win.supports_text_selection());
                                 self.overlay_for_leaf(w).and_then(|owner| {
                                     let ov_draggable =
                                         self.overlay(owner).map(|o| o.draggable).unwrap_or(false);
@@ -2822,7 +2820,7 @@ mod tests {
                 gutters: Default::default(),
             }
         ));
-        ui.win_mut(leaf).unwrap().focusable = false;
+        ui.win_mut(leaf).unwrap().set_focusable(false);
 
         let perf_layout = LayoutTree::hbox(vec![(
             Constraint::Length(10),
@@ -2876,7 +2874,7 @@ mod tests {
         ));
         // Mark the leaf non-focusable (matches `perf_panel.lua`'s
         // `smelt.win.new(buf, { focusable = false })`).
-        ui.win_mut(leaf).unwrap().focusable = false;
+        ui.win_mut(leaf).unwrap().set_focusable(false);
 
         let perf_layout = LayoutTree::hbox(vec![(
             Constraint::Length(10),
@@ -3188,7 +3186,7 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.win_mut(win).unwrap().focusable = false;
+        ui.win_mut(win).unwrap().set_focusable(false);
         ui.set_layout(LayoutTree::vbox(vec![(
             Constraint::Fill,
             LayoutTree::leaf(win),
@@ -3875,7 +3873,7 @@ mod tests {
             )
             .unwrap();
         if let Some(w) = ui.win_mut(win) {
-            w.focusable = true;
+            w.set_focusable(true);
         }
         let layout = LayoutTree::vbox(vec![(
             Constraint::Length(10),

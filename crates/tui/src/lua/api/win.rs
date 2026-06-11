@@ -806,7 +806,7 @@ fn apply_window_opts(
         w.wrap = wrap;
     }
     if let Ok(focusable) = opts.get::<bool>("focusable") {
-        w.focusable = focusable;
+        w.set_focusable(focusable);
     }
     if let Ok(cursor_line) = opts.get::<bool>("cursor_line") {
         w.cursor_line = cursor_line;
@@ -818,7 +818,7 @@ fn apply_window_opts(
         w.set_vim_enabled(vim_enabled);
     }
     if let Ok(selectable) = opts.get::<bool>("selectable") {
-        w.selectable = selectable;
+        w.set_text_selectable(selectable);
     }
     if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
         w.gutter = match gutter.as_str() {

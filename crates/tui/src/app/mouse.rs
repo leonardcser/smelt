@@ -234,7 +234,11 @@ impl TuiApp {
                         self.yank_to_clipboard(out);
                     }
                 }
-            } else if self.ui.win(win).is_some_and(|w| w.selectable) {
+            } else if self
+                .ui
+                .win(win)
+                .is_some_and(|w| w.supports_text_selection())
+            {
                 // Generic selectable leaf: notifications, dialog bodies, future popups.
                 // On Down, promote keyboard focus to this leaf if it's focusable -
                 // overlays with multiple leaves (e.g. side-by-side panes) need click
@@ -244,7 +248,7 @@ impl TuiApp {
                     self.ui.cancel_pointer_interaction();
                     return EventOutcome::Noop;
                 }
-                if is_down && self.ui.win(win).is_some_and(|w| w.focusable) {
+                if is_down && self.ui.win(win).is_some_and(|w| w.accepts_focus()) {
                     self.ui.set_focus(win);
                 }
                 let yank = self.handle_selectable_leaf_mouse(win, me, count);
@@ -733,8 +737,7 @@ mod tests {
         {
             let win = app.ui.win_mut(top).expect("top bar win");
             win.viewport = Some(vp);
-            win.selectable = true;
-            win.focusable = false;
+            win.set_surface(crate::smelt_edit::WindowSurface::SelectableText);
         }
         app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
         app

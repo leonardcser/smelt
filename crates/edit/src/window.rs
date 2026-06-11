@@ -284,6 +284,45 @@ pub enum VerticalScroll {
     Tail,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowSurface {
+    /// Editable text such as the prompt input. Keyboard-focusable, with a caret.
+    #[default]
+    EditableText,
+    /// Readonly/viewer text such as transcript or dialog bodies. Keyboard-focusable,
+    /// with caret/search/text-selection state but no edits.
+    ReadonlyText,
+    /// Non-focusable text that supports drag-copy when the press lands on text.
+    SelectableText,
+    /// Row/list widget. May be keyboard-focusable, scrollable, and highlighted by row;
+    /// it does not expose a text caret.
+    List { focusable: bool },
+    /// Pure chrome/fill. No focus, caret, text selection, or wheel scroll.
+    Inert,
+}
+
+impl WindowSurface {
+    pub fn accepts_focus(self) -> bool {
+        match self {
+            Self::EditableText | Self::ReadonlyText => true,
+            Self::List { focusable } => focusable,
+            Self::SelectableText | Self::Inert => false,
+        }
+    }
+
+    pub fn has_caret(self) -> bool {
+        matches!(self, Self::EditableText | Self::ReadonlyText)
+    }
+
+    pub fn supports_text_selection(self) -> bool {
+        matches!(self, Self::ReadonlyText | Self::SelectableText)
+    }
+
+    pub fn accepts_wheel_scroll(self) -> bool {
+        matches!(self, Self::List { .. })
+    }
+}
+
 pub struct Window {
     pub(crate) id: WinId,
     pub buf: BufId,
@@ -305,7 +344,7 @@ pub struct Window {
     /// `(source_tick, width, wrap, wrap_cursor_padding)` last used to compute
     /// `layout`; `None` forces a rebuild on the next `ensure_layout`.
     layout_key: Option<(u64, u16, bool, bool)>,
-    pub focusable: bool,
+    surface: WindowSurface,
     /// Caret-style cursorline: paints `CursorLine` bg on the cursor row
     /// **only when this window is focused**. Models Neovim's `'cursorline'`:
     /// the cursor lives in this window, this is where it is. Off by default.
@@ -318,17 +357,6 @@ pub struct Window {
     /// whose selection state needs to remain visible while an external
     /// input (e.g. a sibling search box) drives navigation.
     pub selection_highlight: bool,
-    /// Whether mouse-wheel events over this leaf scroll the viewport. List leaves opt in
-    /// so the wheel pans the rows; one-line inputs leave it off so wheeling near them
-    /// stays inert. The host hit-tests on every scroll event and routes accordingly.
-    pub mouse_scroll: bool,
-    /// Whether click-drag inside this leaf produces a copy selection. Independent of
-    /// `focusable`: a notification can be `selectable: true, focusable: false` so the
-    /// user can highlight its text without the leaf stealing keyboard focus. Dialog
-    /// bodies set it so a row can both be list-navigated and text-selected. The host
-    /// routes Down/Drag/Up through `Window::handle_mouse` + `Buffer::copy_range` when
-    /// this is set.
-    pub selectable: bool,
 
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
@@ -416,11 +444,9 @@ impl Window {
             wrap_cursor_padding: false,
             layout: WrappedLayout::default(),
             layout_key: None,
-            focusable: true,
+            surface: WindowSurface::default(),
             cursor_line: false,
             selection_highlight: false,
-            mouse_scroll: false,
-            selectable: false,
             viewport: None,
             cpos: 0,
             vim_enabled: false,
@@ -450,6 +476,52 @@ impl Window {
 
     pub fn id(&self) -> WinId {
         self.id
+    }
+
+    pub fn surface(&self) -> WindowSurface {
+        self.surface
+    }
+
+    pub fn set_surface(&mut self, surface: WindowSurface) {
+        self.surface = surface;
+    }
+
+    pub fn accepts_focus(&self) -> bool {
+        self.surface.accepts_focus()
+    }
+
+    pub fn supports_text_selection(&self) -> bool {
+        self.surface.supports_text_selection()
+    }
+
+    pub fn supports_wheel_scroll(&self) -> bool {
+        self.surface.accepts_wheel_scroll() || self.config.gutters.scrollbar
+    }
+
+    pub fn set_focusable(&mut self, focusable: bool) {
+        if matches!(self.surface, WindowSurface::List { .. }) {
+            self.surface = WindowSurface::List { focusable };
+            return;
+        }
+        self.surface = match (focusable, self.supports_text_selection()) {
+            (true, true) => WindowSurface::ReadonlyText,
+            (true, false) => WindowSurface::EditableText,
+            (false, true) => WindowSurface::SelectableText,
+            (false, false) => WindowSurface::Inert,
+        };
+    }
+
+    pub fn set_text_selectable(&mut self, selectable: bool) {
+        self.surface = match (self.accepts_focus(), selectable) {
+            (true, true) => WindowSurface::ReadonlyText,
+            (true, false) => WindowSurface::EditableText,
+            (false, true) => WindowSurface::SelectableText,
+            (false, false) => WindowSurface::Inert,
+        };
+    }
+
+    pub fn set_list_surface(&mut self, focusable: bool) {
+        self.surface = WindowSurface::List { focusable };
     }
 
     pub fn scroll_top(&self) -> RowIndex {
@@ -1762,12 +1834,10 @@ impl Window {
         if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
-        // Commit-or-discard the drag endpoint. A "caret leaf" is any focusable,
-        // non-list-style window - its `cpos` is the visible cursor, so a click
-        // should park the caret at the release byte. List leaves (`mouse_scroll`,
-        // selection driven by an index) and non-focusable surfaces (notifications)
-        // skip the commit: their `cpos` either has no visible meaning or is
-        // owned by another widget.
+        // Commit-or-discard the drag endpoint. Caret leaves keep a visible
+        // text cursor, so a click should park that cursor at the release byte.
+        // List, selectable-text, and inert surfaces skip the commit: their
+        // `cpos` either has no visible meaning or is owned by another widget.
         if let Some(end) = self.drag_endpoint.take() {
             if self.is_caret_leaf() {
                 // The drag endpoint was computed at mouse-down against the
@@ -1793,7 +1863,7 @@ impl Window {
 
     /// Caret-leaf predicate. Mouse-up writes `cpos` only for these.
     fn is_caret_leaf(&self) -> bool {
-        self.focusable && !self.mouse_scroll
+        self.surface.has_caret()
     }
 
     /// Extend drag by WORD units, keeping the original double-clicked word inside the selection.

@@ -147,11 +147,7 @@ pub(crate) fn open(
     sync_selected(app, leaf, selected);
     if let Some(w) = app.ui.win_mut(leaf) {
         w.selection_highlight = true;
-        // Mouse-scroll opt-in: doubles as the caret-leaf opt-out so a click
-        // doesn't commit `cpos` mid-line. Wheel pans the viewport and shifts
-        // the highlight visually (same as `dialog.list` / resume).
-        w.mouse_scroll = true;
-        w.focusable = focusable;
+        w.set_list_surface(focusable);
     }
     if focusable {
         app.ui.set_focus(leaf);
