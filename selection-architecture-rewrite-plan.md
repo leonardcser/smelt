@@ -342,7 +342,7 @@ The code now has the right visible-buffer direction, and the Phase 1 work has re
 - `line_breaks` remains the explicit full break-vector path; `line_breaks_range` is used by ranged callers.
 - `build_rows` / `full_transcript_display_text` remain intentionally full-row APIs for legacy/full-text/export/debug-style consumers.
 
-`ExactRowIndex` is the transcript backing coordinate seed for the tmux-like model: it stores block ids, layout keys, estimated/exact heights, and prefix rows: `crates/tui/src/content/transcript_buf.rs:50`. The remaining work is to turn this row-index/range seam into the final `DisplayDocument` model, make `RenderedBlockCache` bounded, and delete the older row-state compatibility storage.
+`ExactRowIndex` is the transcript backing coordinate seed for the tmux-like model: it stores block ids, layout keys, estimated/exact heights, and prefix rows: `crates/tui/src/content/transcript_buf.rs:50`. `RenderedBlockCache` is now the separate bounded cache for rendered block buffers: `crates/tui/src/content/block_buffers.rs:16`. The remaining work is to turn these row-index/range seams into the final `DisplayDocument` model and delete the older row-state compatibility storage.
 
 ### 4. Proposed virtualization architecture
 
@@ -372,7 +372,7 @@ struct TranscriptProjection {
 - eviction: LRU or generational, with visible/overscan blocks pinned for the current frame
 - width or show-thinking changes invalidate layout keys; theme changes invalidate color/span rendering but should not require throwing away height information unless layout actually depends on theme
 
-Implementation note: `TranscriptProjection` now names these responsibilities directly as `exact_rows: ExactRowIndex` and `rendered_blocks: RenderedBlockCache`. This is a seam/naming split only; `RenderedBlockCache` still needs bounded eviction/pinning before the cache portion of Phase 2 is complete.
+Implementation note: `TranscriptProjection` now names these responsibilities directly as `exact_rows: ExactRowIndex` and `rendered_blocks: RenderedBlockCache`. `RenderedBlockCache` has bounded LRU-style eviction with the current ensure batch pinned; exact-height and full-row compatibility paths render and consume blocks one at a time so they can scan more blocks than the cache capacity without exposing approximate row coordinates.
 
 `visible` should be the only thing copied into the edit `Buffer` on normal render:
 

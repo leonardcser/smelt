@@ -5,7 +5,9 @@ use crate::content::transcript_parsers::layout_block_into;
 use crate::smelt_edit::{BufCreateOpts, BufId, Buffer};
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+const MAX_RENDERED_BLOCKS: usize = 512;
 
 struct CachedBlock {
     key: LayoutKey,
@@ -15,6 +17,7 @@ struct CachedBlock {
 /// Rendered block cache keyed by block id and layout key. Owned by `TranscriptProjection`.
 pub struct RenderedBlockCache {
     blocks: HashMap<BlockId, CachedBlock>,
+    recency: VecDeque<BlockId>,
     next_buf_id: u64,
 }
 
@@ -25,10 +28,40 @@ impl Default for RenderedBlockCache {
 }
 
 impl RenderedBlockCache {
+    pub(crate) const MAX_BLOCKS: usize = MAX_RENDERED_BLOCKS;
+
     pub fn new() -> Self {
         Self {
             blocks: HashMap::new(),
+            recency: VecDeque::new(),
             next_buf_id: 1,
+        }
+    }
+
+    fn touch(&mut self, id: BlockId) {
+        self.recency.retain(|cached| *cached != id);
+        self.recency.push_back(id);
+    }
+
+    fn evict_unpinned(&mut self, pinned: &[BlockId]) {
+        let mut deferred = Vec::new();
+        while self.blocks.len() > Self::MAX_BLOCKS {
+            let Some(id) = self.recency.pop_front() else {
+                break;
+            };
+            if pinned.contains(&id) {
+                deferred.push(id);
+                if deferred.len() >= self.blocks.len() {
+                    break;
+                }
+                continue;
+            }
+            self.blocks.remove(&id);
+        }
+        for id in deferred {
+            if self.blocks.contains_key(&id) {
+                self.recency.push_back(id);
+            }
         }
     }
 
@@ -55,6 +88,7 @@ impl RenderedBlockCache {
         let mut tasks: Vec<Task<'_>> = Vec::new();
         for (id, key) in ids.iter().zip(keys.iter()) {
             if self.blocks.get(id).is_some_and(|c| c.key == *key) {
+                self.touch(*id);
                 continue;
             }
             let block = &history.blocks[id];
@@ -110,7 +144,9 @@ impl RenderedBlockCache {
 
         for (id, key, buf) in results {
             self.blocks.insert(id, CachedBlock { key, buf });
+            self.touch(id);
         }
+        self.evict_unpinned(ids);
         rendered
     }
 
@@ -122,7 +158,13 @@ impl RenderedBlockCache {
             .map(|c| &c.buf)
     }
 
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
     pub fn clear(&mut self) {
         self.blocks.clear();
+        self.recency.clear();
     }
 }

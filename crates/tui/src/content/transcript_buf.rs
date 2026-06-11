@@ -360,6 +360,16 @@ impl TranscriptProjection {
     }
 
     #[cfg(test)]
+    pub(crate) fn rendered_block_cache_len(&self) -> usize {
+        self.rendered_blocks.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rendered_block_cache_capacity(&self) -> usize {
+        RenderedBlockCache::MAX_BLOCKS
+    }
+
+    #[cfg(test)]
     pub(crate) fn counters(&self) -> TranscriptProjectionCounters {
         self.counters
     }
@@ -445,18 +455,6 @@ impl TranscriptProjection {
             return;
         }
 
-        let mut missing_ids = Vec::new();
-        let mut missing_keys = Vec::new();
-        for node in self
-            .exact_rows
-            .nodes
-            .iter()
-            .filter(|node| node.exact_height.is_none())
-        {
-            missing_ids.push(node.id);
-            missing_keys.push(node.key);
-        }
-        self.ensure_blocks(history, &missing_ids, &missing_keys, theme);
         for i in 0..history.order.len() {
             if self
                 .exact_rows
@@ -468,6 +466,7 @@ impl TranscriptProjection {
             }
             let id = history.order[i];
             let key = history.resolve_key(id, base_key);
+            self.ensure_blocks(history, &[id], &[key], theme);
             let Some(block_buf) = self.rendered_blocks.get(id, key) else {
                 continue;
             };
@@ -856,29 +855,6 @@ impl TranscriptProjection {
         Some((entry.id, offset))
     }
 
-    /// Render every block into the rendered block cache. For full-text consumers that may run
-    /// before the next `project()`.
-    pub(crate) fn ensure_all(
-        &mut self,
-        history: &mut BlockHistory,
-        width: u16,
-        show_thinking: bool,
-        theme: &Theme,
-    ) {
-        let gen = history.generation();
-        self.gc_if_stale(gen, width);
-        let base_key = base_layout_key(width, show_thinking);
-        let n = history.order.len();
-        let mut ids = Vec::with_capacity(n);
-        let mut keys = Vec::with_capacity(n);
-        for i in 0..n {
-            let id = history.order[i];
-            ids.push(id);
-            keys.push(history.resolve_key(id, base_key));
-        }
-        self.ensure_blocks(history, &ids, &keys, theme);
-    }
-
     /// Exact full block layout for compatibility APIs. This may measure every
     /// transcript block, but it does not concatenate display rows and does not
     /// re-render blocks when the exact height index is already current.
@@ -906,6 +882,7 @@ impl TranscriptProjection {
         theme: &Theme,
     ) -> Arc<Vec<String>> {
         let gen = history.generation();
+        self.gc_if_stale(gen, width);
         if let Some(c) = &self.cached_rows {
             if c.generation == gen && c.width == width && c.show_thinking == show_thinking {
                 return Arc::clone(&c.rows);
@@ -915,7 +892,6 @@ impl TranscriptProjection {
         {
             self.counters.full_row_builds += 1;
         }
-        self.ensure_all(history, width, show_thinking, theme);
         let base_key = base_layout_key(width, show_thinking);
         self.exact_rows
             .rebuild_if_stale(history, width, show_thinking, base_key);
@@ -923,6 +899,7 @@ impl TranscriptProjection {
         for i in 0..history.order.len() {
             let id = history.order[i];
             let bkey = history.resolve_key(id, base_key);
+            self.ensure_blocks(history, &[id], &[bkey], theme);
             let Some(block_buf) = self.rendered_blocks.get(id, bkey) else {
                 continue;
             };
@@ -1417,6 +1394,31 @@ mod tests {
             TranscriptProjectionCounters::default(),
             "repeated exact row-count queries should use the exact height index"
         );
+    }
+
+    #[test]
+    fn exact_total_rows_keeps_rendered_block_cache_bounded() {
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let block_count = projection.rendered_block_cache_capacity() + 25;
+        let mut transcript = Transcript::new();
+        for i in 0..block_count {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+
+        let total = projection.exact_total_rows(&mut transcript.history, 80, false, &theme);
+
+        assert_eq!(total, (block_count as RowIndex).saturating_mul(2) - 1);
+        assert!(
+            projection.rendered_block_cache_len() <= projection.rendered_block_cache_capacity(),
+            "rendered block cache should stay bounded after scanning {block_count} blocks"
+        );
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.rendered_blocks, block_count);
+        assert_eq!(counters.exact_height_measured_blocks, block_count);
     }
 
     #[test]
