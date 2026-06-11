@@ -353,11 +353,6 @@ impl Window {
         if let Some(cell) = self.virtual_position_cell(state, buf, pos) {
             state.preferred_cell_col = Some(cell);
         }
-        eprintln!(
-            "[virt_mouse] kind={:?} pos.row={} pos.byte_col={} cursor.row={} cursor.byte_col={} anchor={:?} drag_ep={:?} scroll_top={}",
-            event.kind, pos.row, pos.byte_col, state.cursor.row, state.cursor.byte_col,
-            state.selection_anchor, state.drag_endpoint, self.scroll_top
-        );
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 state.cursor = pos;
