@@ -580,6 +580,8 @@ Required policies:
 
 This replaces transcript-specific TUI pre-snapping and fixes prompt-bar chrome, code-block padding, all-chrome rows, and edge-row drag offsets through one path.
 
+Implementation note: selectable-text chrome inertness now lives in edit/window mouse policy. `Window::mouse_down` asks `TextHit` before staging a `SelectableText` drag and returns `Status::Ignored` for chrome/fill; TUI observes that status to cancel capture/no-op but no longer performs a duplicate selectable-hit pre-check.
+
 ### D. Use `DisplayDocument` for displayed selectable text
 
 Search/selection/copy operate over displayed selectable text, not raw row strings. Replace correctness-sensitive `Vec<String>` seams with displayed row data:
@@ -793,7 +795,7 @@ Scope:
 - introduce `DisplayDocument`, `DisplaySnapshot`, `DisplayRows`, and `DisplayRow`.
 - implement display documents for buffer-backed text, transcript projection, readonly overlay/dialog text, and selectable bars where applicable.
 - make search, hit-testing, selection projection, and copy consume `DisplayRow` text/spans/decorations.
-- move selectable-text chrome inertness fully into edit/window mouse policy so TUI does not need a separate pre-check before dispatch.
+- selectable-text chrome inertness is owned by edit/window mouse policy; TUI should continue to observe edit status rather than duplicating hit tests.
 - split transcript `ExactRowIndex` from bounded `RenderedBlockCache`.
 - implement the invalidation matrix for append, block replacement, width change, show-thinking change, and theme changes.
 - make exact heights the authority for total rows, scrollbar math, `gg`, `G`, search origins/results, selection ranges, and copy ranges.

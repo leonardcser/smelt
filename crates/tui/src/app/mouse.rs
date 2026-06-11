@@ -213,14 +213,16 @@ impl TuiApp {
                 // overlays with multiple leaves (e.g. side-by-side panes) need click
                 // to follow keyboard focus, not just the first leaf the overlay opened.
                 // A non-focusable selectable leaf must not steal app_focus.
-                if is_down && !self.selectable_leaf_press_hits_text(win, me) {
-                    self.ui.cancel_pointer_interaction();
+                let (status, yank) = self.handle_selectable_leaf_mouse(win, me, count);
+                if matches!(status, crate::smelt_edit::Status::Ignored) {
+                    if is_down {
+                        self.ui.cancel_pointer_interaction();
+                    }
                     return EventOutcome::Noop;
                 }
                 if is_down && self.ui.win(win).is_some_and(|w| w.accepts_focus()) {
                     self.ui.set_focus(win);
                 }
-                let yank = self.handle_selectable_leaf_mouse(win, me, count);
                 if is_up {
                     if let Some(out) = yank {
                         self.yank_to_clipboard(out);
@@ -339,33 +341,26 @@ impl TuiApp {
     }
 
     /// Generic selectable-leaf path used by notifications, dialog bodies, and any other
-    /// leaf that sets `Window::selectable = true`. Skips the snap + word/line-break
-    /// machinery the transcript needs - drag-select only, no double/triple-click
-    /// word/line expansion. Returns the yanked range on `Up` (caller copies it).
-    fn selectable_leaf_press_hits_text(&self, win: WinId, me: MouseEvent) -> bool {
-        let Some(viewport) = crate::smelt_edit::UiHost::viewport_for(self, win) else {
-            return false;
-        };
-        let Some(win_ref) = self.ui.win(win) else {
-            return false;
-        };
-        let Some(buf) = self.ui.buf(win_ref.buf) else {
-            return false;
-        };
-        win_ref.text_hit_at_mouse(buf, me, viewport).is_selectable()
-    }
-
+    /// leaf that supports text selection. Edit/window owns chrome-hit policy;
+    /// this host path only dispatches the event and applies copied text on `Up`.
     fn handle_selectable_leaf_mouse(
         &mut self,
         win: crate::smelt_edit::WinId,
         me: MouseEvent,
         click_count: u8,
-    ) -> Option<crate::smelt_edit::CopyOutput> {
-        let viewport = crate::smelt_edit::UiHost::viewport_for(self, win)?;
-        let buf_id = self.ui.win(win).map(|w| w.buf)?;
+    ) -> (
+        crate::smelt_edit::Status,
+        Option<crate::smelt_edit::CopyOutput>,
+    ) {
+        let Some(viewport) = crate::smelt_edit::UiHost::viewport_for(self, win) else {
+            return (crate::smelt_edit::Status::Ignored, None);
+        };
+        let Some(buf_id) = self.ui.win(win).map(|w| w.buf) else {
+            return (crate::smelt_edit::Status::Ignored, None);
+        };
         let (soft, hard) =
             crate::smelt_edit::UiHost::full_breaks_for(self, win).unwrap_or_default();
-        let range = {
+        let (status, range) = {
             let mouse_ctx = crate::smelt_edit::MouseCtx {
                 soft_breaks: &soft,
                 hard_breaks: &hard,
@@ -373,17 +368,21 @@ impl TuiApp {
                 click_count,
             };
             let (win_mut, buf_mut) = self.ui.win_and_buf_mut(win, buf_id);
-            let (_, range) = win_mut?.handle_mouse(buf_mut?, me, mouse_ctx);
-            range?
+            match (win_mut, buf_mut) {
+                (Some(win_mut), Some(buf_mut)) => win_mut.handle_mouse(buf_mut, me, mouse_ctx),
+                _ => return (crate::smelt_edit::Status::Ignored, None),
+            }
         };
-        let buf = self.ui.buf(buf_id)?;
+        let Some(range) = range else {
+            return (status, None);
+        };
+        let Some(buf) = self.ui.buf(buf_id) else {
+            return (status, None);
+        };
         let text = smelt_buffer::coords::copy_byte_range(buf, range.0, range.1);
         let out = crate::smelt_edit::CopyOutput::same(text);
-        if out.is_empty() {
-            None
-        } else {
-            Some(out)
-        }
+        let out = if out.is_empty() { None } else { Some(out) };
+        (status, out)
     }
 
     /// Drive a transcript-pane mouse event through `Window::handle_mouse`.

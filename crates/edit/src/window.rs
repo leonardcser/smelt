@@ -1709,7 +1709,18 @@ impl Window {
             .saturating_sub(ctx.viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left);
         if buf.lines().is_empty() {
-            return Status::Consumed;
+            return if matches!(self.surface, WindowSurface::SelectableText) {
+                Status::Ignored
+            } else {
+                Status::Consumed
+            };
+        }
+        if matches!(self.surface, WindowSurface::SelectableText)
+            && !self
+                .text_hit_at_mouse(buf, event, ctx.viewport)
+                .is_selectable()
+        {
+            return Status::Ignored;
         }
 
         let viewport_rows = ctx.viewport.rect.height;
@@ -2844,6 +2855,86 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
         assert!(!w.text_hit_at_mouse(&buf, trailing, vp).is_selectable());
+    }
+
+    #[test]
+    fn selectable_text_mouse_down_ignores_empty_buffer() {
+        let mut w = make_win();
+        w.set_surface(WindowSurface::SelectableText);
+        let buf = make_buf(Vec::new());
+        let soft = Vec::new();
+        let hard = Vec::new();
+        let ctx = MouseCtx {
+            soft_breaks: &soft,
+            hard_breaks: &hard,
+            viewport: viewport(20, 1),
+            click_count: 1,
+        };
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 0,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+
+        let (status, range) = w.handle_mouse(&buf, event, ctx);
+
+        assert_eq!(status, Status::Ignored);
+        assert!(range.is_none());
+        assert!(w.pending_press.is_none());
+        assert!(w.drag_endpoint.is_none());
+    }
+
+    #[test]
+    fn selectable_text_mouse_down_ignores_chrome_in_edit_policy() {
+        let mut w = make_win();
+        w.set_surface(WindowSurface::SelectableText);
+        let mut buf = make_buf(vec!["abc----xyz".into()]);
+        buf.add_highlight_group_with_meta(
+            0,
+            3,
+            7,
+            smelt_buffer::theme::intern("Normal"),
+            smelt_buffer::buffer::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+        let vp = viewport(20, 1);
+        let soft = Vec::new();
+        let hard = Vec::new();
+        let ctx = MouseCtx {
+            soft_breaks: &soft,
+            hard_breaks: &hard,
+            viewport: vp,
+            click_count: 1,
+        };
+        let chrome = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 4,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+
+        let (status, range) = w.handle_mouse(&buf, chrome, ctx);
+
+        assert_eq!(status, Status::Ignored);
+        assert!(range.is_none());
+        assert!(w.pending_press.is_none());
+        assert!(w.drag_endpoint.is_none());
+
+        let text = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 8,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let (status, range) = w.handle_mouse(&buf, text, ctx);
+
+        assert_eq!(status, Status::Capture);
+        assert!(range.is_none());
+        assert!(w.pending_press.is_some());
+        assert!(w.drag_endpoint.is_some());
     }
 
     fn ctx() -> DrawContext {
