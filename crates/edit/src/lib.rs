@@ -1213,11 +1213,18 @@ impl Ui {
         let viewport_h = win.viewport.expect("edge_drag_delta validated").rect.height;
         let buf_id = win.buf;
         let (win, buf) = self.win_and_buf_mut(win_id, buf_id);
-        win.expect("captured window").drag_autoscroll_step(
-            buf.expect("captured buffer"),
-            viewport_h,
-            delta,
-        )
+        let w = win.expect("captured window");
+        let scroll_before = w.scroll_top();
+        let cursor_before = w.virtual_cursor();
+        let stepped = w.drag_autoscroll_step(buf.expect("captured buffer"), viewport_h, delta);
+        if stepped {
+            let w = self.wins.get(&win_id).expect("window still present");
+            eprintln!(
+                "[tick_autoscroll] delta={} scroll_before={} scroll_after={} cursor_before={:?} cursor_after={:?}",
+                delta, scroll_before, w.scroll_top(), cursor_before, w.virtual_cursor()
+            );
+        }
+        stepped
     }
 
     /// `(win, delta)` when an in-flight drag's endpoint sits exactly at the
@@ -1236,8 +1243,8 @@ impl Ui {
         // Mouse must still be held (drag in flight). `Window::mouse_up` clears
         // `drag_endpoint`, so this also blocks autoscroll after release.
         let buf = self.bufs.get(&win.buf)?;
-        let screen_row = win
-            .effective_cursor_row(buf)
+        let abs_row = win.drag_endpoint_absolute_row(buf);
+        let screen_row = abs_row
             .checked_sub(win.scroll_top())
             .filter(|r| *r < viewport_h as RowIndex)?;
         let delta = if screen_row == 0 {
@@ -1247,6 +1254,10 @@ impl Ui {
         } else {
             return None;
         };
+        eprintln!(
+            "[edge_drag_delta] win={:?} abs_row={} scroll_top={} screen_row={} delta={} viewport_h={}",
+            win_id, abs_row, win.scroll_top(), screen_row, delta, viewport_h
+        );
         Some((win_id, delta))
     }
 
@@ -4504,6 +4515,76 @@ mod tests {
         park_drag_endpoint_at(&mut ui, win, 0);
         assert!(ui.drag_autoscroll_interval().is_none());
         assert!(!ui.tick_drag_autoscroll());
+    }
+
+    #[test]
+    fn drag_autoscroll_virtual_rows_fires_at_bottom_edge() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines((0..20).map(|i| format!("line {i}")).collect());
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
+        let rect = Rect::new(0, 0, 20, 10);
+        ui.wins.get_mut(&win).unwrap().viewport = Some(WindowViewport {
+            rect,
+            content_width: 20,
+            total_rows: 20,
+            scroll_top: 0,
+            scrollbar: None,
+            gutter_width: 0,
+        });
+        ui.wins.get_mut(&win).unwrap().set_virtual_rows(0, 20);
+
+        ui.set_capture(HitTarget::Window(win));
+        // Park virtual drag endpoint at bottom edge (row 9).
+        ui.wins
+            .get_mut(&win)
+            .unwrap()
+            .virtual_rows
+            .as_mut()
+            .unwrap()
+            .cursor = DocPosition {
+            row: 9,
+            byte_col: 0,
+        };
+        ui.wins
+            .get_mut(&win)
+            .unwrap()
+            .virtual_rows
+            .as_mut()
+            .unwrap()
+            .drag_endpoint = Some(DocPosition {
+            row: 9,
+            byte_col: 0,
+        });
+        // Sync local cursor to match the virtual state (row 9 is local 9 when row_base=0).
+        ui.wins.get_mut(&win).unwrap().cursor_row = 9;
+
+        assert!(ui.drag_autoscroll_interval().is_some());
+        assert!(ui.tick_drag_autoscroll());
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 1);
+        let state = ui.win(win).unwrap().virtual_rows.unwrap();
+        assert_eq!(state.cursor.row, 10);
+        assert_eq!(
+            state.drag_endpoint,
+            Some(DocPosition {
+                row: 10,
+                byte_col: 0
+            })
+        );
     }
 
     #[test]

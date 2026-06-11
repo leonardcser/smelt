@@ -25,6 +25,17 @@ pub(crate) struct TranscriptProjection {
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     cached_rows: Option<CachedRows>,
     row_index: BlockRowIndex,
+    #[cfg(test)]
+    counters: TranscriptProjectionCounters,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TranscriptProjectionCounters {
+    pub full_row_builds: usize,
+    pub rendered_blocks: usize,
+    pub exact_height_measured_blocks: usize,
+    pub range_materialized_blocks: usize,
 }
 
 struct CachedRows {
@@ -321,6 +332,8 @@ impl TranscriptProjection {
             visible_total_rows: 0,
             cached_rows: None,
             row_index: BlockRowIndex::default(),
+            #[cfg(test)]
+            counters: TranscriptProjectionCounters::default(),
         }
     }
 
@@ -331,6 +344,31 @@ impl TranscriptProjection {
         &self,
     ) -> impl Iterator<Item = (BlockId, RowIndex, RowIndex)> + '_ {
         self.visible_layout.iter().map(|e| (e.id, e.start, e.rows))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn counters(&self) -> TranscriptProjectionCounters {
+        self.counters
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_counters(&mut self) {
+        self.counters = TranscriptProjectionCounters::default();
+    }
+
+    fn ensure_blocks(
+        &mut self,
+        history: &BlockHistory,
+        ids: &[BlockId],
+        keys: &[LayoutKey],
+        theme: &Theme,
+    ) {
+        let rendered = self.cache.ensure_many(history, ids, keys, theme);
+        #[cfg(test)]
+        {
+            self.counters.rendered_blocks += rendered;
+        }
+        let _ = rendered;
     }
 
     fn clear_materialized_state(&mut self) {
@@ -399,6 +437,10 @@ impl TranscriptProjection {
             let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
             self.row_index
                 .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
+            #[cfg(test)]
+            {
+                self.counters.exact_height_measured_blocks += 1;
+            }
         }
         self.row_index.refresh_height_index();
     }
@@ -637,6 +679,10 @@ impl TranscriptProjection {
     ) -> MaterializedTranscriptRange {
         let start = block_range.start.min(self.row_index.nodes.len());
         let end = block_range.end.min(self.row_index.nodes.len());
+        #[cfg(test)]
+        {
+            self.counters.range_materialized_blocks += end.saturating_sub(start);
+        }
         let row_base = self.row_index.prefix_row(start);
         let mut texts = Vec::new();
         let mut pending = Vec::new();
@@ -651,7 +697,7 @@ impl TranscriptProjection {
         for block_index in start..end {
             let id = self.row_index.nodes[block_index].id;
             let key = self.row_index.nodes[block_index].key;
-            self.cache.ensure_many(history, &[id], &[key], theme);
+            self.ensure_blocks(history, &[id], &[key], theme);
             self.append_projected_block(history, block_index, id, key, &mut rows);
         }
 
@@ -682,6 +728,10 @@ impl TranscriptProjection {
             block_index,
             (gap as usize).saturating_add(block_rows) as RowIndex,
         );
+        #[cfg(test)]
+        {
+            self.counters.exact_height_measured_blocks += 1;
+        }
         for _ in 0..gap {
             rows.texts.push(String::new());
         }
@@ -752,7 +802,7 @@ impl TranscriptProjection {
             ids.push(id);
             keys.push(history.resolve_key(id, base_key));
         }
-        self.cache.ensure_many(history, &ids, &keys, theme);
+        self.ensure_blocks(history, &ids, &keys, theme);
     }
 
     /// Exact full block layout for compatibility APIs. This may materialize every
@@ -781,6 +831,10 @@ impl TranscriptProjection {
             let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
             self.row_index
                 .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
+            #[cfg(test)]
+            {
+                self.counters.exact_height_measured_blocks += 1;
+            }
             row = row.saturating_add(gap);
             layout.push(LayoutEntry {
                 id,
@@ -808,6 +862,10 @@ impl TranscriptProjection {
                 return Arc::clone(&c.rows);
             }
         }
+        #[cfg(test)]
+        {
+            self.counters.full_row_builds += 1;
+        }
         self.ensure_all(history, width, show_thinking, theme);
         let base_key = base_layout_key(width, show_thinking);
         self.row_index
@@ -823,6 +881,10 @@ impl TranscriptProjection {
             let gap = history.rendered_block_gap(i, block_rows);
             self.row_index
                 .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
+            #[cfg(test)]
+            {
+                self.counters.exact_height_measured_blocks += 1;
+            }
             for _ in 0..gap {
                 rows.push(String::new());
             }
@@ -1420,6 +1482,18 @@ mod tests {
 
         assert!(rows.iter().any(|line| line == "line 99"));
         assert!(rows.iter().any(|line| line == "line 0"));
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 1);
+        assert_eq!(counters.rendered_blocks, 100);
+        assert_eq!(counters.exact_height_measured_blocks, 100);
+
+        projection.reset_counters();
+        let cached = projection.build_rows(&mut transcript.history, 80, false, &theme);
+        assert_eq!(cached.len(), rows.len());
+        assert_eq!(
+            projection.counters(),
+            TranscriptProjectionCounters::default()
+        );
     }
 
     #[test]
@@ -1450,6 +1524,10 @@ mod tests {
         assert_eq!(output.clamped_scroll, output.total_rows.saturating_sub(5));
         assert!(buf.lines().iter().any(|line| line == "line 99"));
         assert!(!buf.lines().iter().any(|line| line == "line 0"));
+        assert!(
+            projection.counters().range_materialized_blocks < transcript.history.order.len(),
+            "tail projection should materialize a bounded block range"
+        );
     }
 
     #[test]

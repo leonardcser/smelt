@@ -34,13 +34,14 @@ impl BlockBufferCache {
 
     /// Ensure every `(id, key)` is cached, rendering misses in parallel.
     /// Capped at 8 workers to avoid oversubscribing the syntect/markdown layout.
+    /// Returns the number of blocks rendered on cache misses.
     pub fn ensure_many(
         &mut self,
         history: &BlockHistory,
         ids: &[BlockId],
         keys: &[LayoutKey],
         theme: &Theme,
-    ) {
+    ) -> usize {
         debug_assert_eq!(ids.len(), keys.len());
 
         struct Task<'a> {
@@ -72,9 +73,9 @@ impl BlockBufferCache {
             });
         }
         if tasks.is_empty() {
-            return;
+            return 0;
         }
-
+        let rendered = tasks.len();
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
@@ -110,6 +111,7 @@ impl BlockBufferCache {
         for (id, key, buf) in results {
             self.blocks.insert(id, CachedBlock { key, buf });
         }
+        rendered
     }
 
     /// Cached buffer for `id`, or `None` if not yet laid out (or stale).

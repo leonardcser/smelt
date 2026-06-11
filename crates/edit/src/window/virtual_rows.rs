@@ -24,6 +24,7 @@ pub enum ViewerCommand {
     YankLines(RowIndex),
     CenterScroll,
     PanColumns(isize),
+    MoveCursorCol(isize),
     ClearSelection,
 }
 
@@ -185,7 +186,7 @@ impl Window {
         self.doc_range_to_row_ranges(buf, viewport_rows, range)
     }
 
-    fn doc_range_to_row_ranges(
+    pub(crate) fn doc_range_to_row_ranges(
         &self,
         buf: &Buffer,
         viewport_rows: u16,
@@ -223,18 +224,38 @@ impl Window {
                 continue;
             };
             let line_width = text::byte_to_cell(line, line.len()) as u16;
-            let col_start = if abs_row == range.start.row {
+            let mut col_start = if abs_row == range.start.row {
                 text::byte_to_cell(line, text::snap(line, range.start.byte_col.min(line.len())))
                     as u16
             } else {
                 0
             };
-            let col_end = if abs_row == range.end.row {
+            let mut col_end = if abs_row == range.end.row {
                 text::byte_to_cell(line, text::snap(line, range.end.byte_col.min(line.len())))
                     as u16
             } else {
                 line_width
             };
+            // A row that's part of the selection but has no selectable text gets a
+            // one-cell virtual span placed after any leading non-selectable chrome
+            // (gutter, padding) so the highlight doesn't paint over chrome cells.
+            // This mirrors the rule in `smelt_buffer::coords::byte_range_to_row_ranges`.
+            if line_width > 0
+                && !smelt_buffer::coords::range_contains_selectable(
+                    buf,
+                    row_to_usize(local),
+                    0,
+                    line_width as usize,
+                )
+            {
+                let chrome_end = smelt_buffer::coords::last_non_selectable_end(
+                    buf,
+                    row_to_usize(local),
+                    line_width as usize,
+                ) as u16;
+                col_start = col_start.max(chrome_end);
+                col_end = col_start + 1;
+            }
             out.push(smelt_buffer::buffer::SelectionRange {
                 line: row_to_usize(local),
                 col_start,
@@ -254,10 +275,17 @@ impl Window {
         let text = buf.text();
         self.clamp_anchors_to_source(&text);
         self.clear_expired_virtual_yank_flash(now);
-        let selection_ranges = self
-            .virtual_selection_anchor_range()
+        let anchor_range = self.virtual_selection_anchor_range();
+        let selection_ranges = anchor_range
             .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
             .unwrap_or_default();
+        eprintln!(
+            "[sync_virt] cursor={:?} anchor_range={:?} selection_ranges={:?} vim_mode={:?}",
+            self.virtual_cursor(),
+            anchor_range,
+            selection_ranges,
+            self.vim_mode
+        );
         buf.set_selection(selection_ranges);
         let flash_ranges = self
             .virtual_yank_flash_range(now)
@@ -325,14 +353,68 @@ impl Window {
         if let Some(cell) = self.virtual_position_cell(state, buf, pos) {
             state.preferred_cell_col = Some(cell);
         }
+        eprintln!(
+            "[virt_mouse] kind={:?} pos.row={} pos.byte_col={} cursor.row={} cursor.byte_col={} anchor={:?} drag_ep={:?} scroll_top={}",
+            event.kind, pos.row, pos.byte_col, state.cursor.row, state.cursor.byte_col,
+            state.selection_anchor, state.drag_endpoint, self.scroll_top
+        );
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 state.cursor = pos;
                 state.drag_endpoint = Some(pos);
                 state.selection_anchor = None;
                 state.yank_flash = None;
+                match ctx.click_count {
+                    2 => {
+                        let local = state
+                            .materialized
+                            .local_row(pos.row)
+                            .min(self.visual_row_total(buf).saturating_sub(1));
+                        if let Some(line) = buf.get_line(row_to_usize(local)) {
+                            let snap_col = text::snap(line, pos.byte_col.min(line.len()));
+                            if let Some((start, end)) =
+                                text::big_word_range_at_transparent(line, snap_col, &[])
+                            {
+                                state.selection_anchor = Some(DocPosition {
+                                    row: pos.row,
+                                    byte_col: start,
+                                });
+                                state.cursor = DocPosition {
+                                    row: pos.row,
+                                    byte_col: end,
+                                };
+                            }
+                        }
+                    }
+                    3 => {
+                        let local = state
+                            .materialized
+                            .local_row(pos.row)
+                            .min(self.visual_row_total(buf).saturating_sub(1));
+                        if let Some(line) = buf.get_line(row_to_usize(local)) {
+                            state.selection_anchor = Some(DocPosition {
+                                row: pos.row,
+                                byte_col: 0,
+                            });
+                            state.cursor = DocPosition {
+                                row: pos.row,
+                                byte_col: line.len(),
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(cell) = self.virtual_position_cell(state, buf, state.cursor) {
+                    state.preferred_cell_col = Some(cell);
+                }
                 self.virtual_rows = Some(state);
-                self.pin_scroll(ctx.viewport.scroll_top);
+                // A new mouse gesture starts fresh: exit any existing visual
+                // mode so the old anchor doesn't pollute the new selection.
+                if self.vim_enabled
+                    && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
+                {
+                    self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+                }
                 (Status::Capture, None)
             }
             MouseEventKind::Drag(MouseButton::Left) => {
@@ -346,14 +428,18 @@ impl Window {
                 (Status::Consumed, None)
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                state.cursor = pos;
+                // Use the cursor position that was built up during the gesture
+                // (e.g. word_end for double-click, line_end for triple-click,
+                // or the last drag position for a normal drag) rather than
+                // the release coordinates, which may truncate the selection.
                 let copy = state
                     .selection_anchor
-                    .map(|anchor| order_doc_range(anchor, pos))
+                    .map(|anchor| order_doc_range(anchor, state.cursor))
                     .filter(|range| {
                         (range.start.row, range.start.byte_col)
                             < (range.end.row, range.end.byte_col)
                     });
+                state.cursor = pos;
                 state.drag_endpoint = None;
                 state.selection_anchor = None;
                 state.yank_flash = copy.map(|range| VirtualYankFlash {
@@ -361,6 +447,13 @@ impl Window {
                     until: now + YANK_FLASH_DURATION,
                 });
                 self.virtual_rows = Some(state);
+                // Mouse-up concludes the gesture: exit visual mode so the
+                // selection is not left dangling.
+                if self.vim_enabled
+                    && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
+                {
+                    self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+                }
                 (Status::Consumed, copy)
             }
             _ => (Status::Ignored, None),
@@ -377,18 +470,10 @@ impl Window {
             return DocPosition::default();
         };
         let height = viewport.rect.height.max(1);
-        let mut scroll_top = viewport.scroll_top;
-        if event.row < viewport.rect.top {
-            scroll_top = scroll_top.saturating_sub(1);
-        } else if event.row >= viewport.rect.bottom() {
-            scroll_top = scroll_top.saturating_add(1).min(
-                state
-                    .materialized
-                    .total_rows
-                    .saturating_sub(height as RowIndex),
-            );
-        }
-        self.pin_scroll(scroll_top);
+        // Use the authoritative scroll_top on self, not the stale viewport copy
+        // (viewport is set during render prep; autoscroll may have changed
+        // scroll_top since then).
+        let scroll_top = self.scroll_top;
         let rel_row = event
             .row
             .saturating_sub(viewport.rect.top)
@@ -399,8 +484,7 @@ impl Window {
             .saturating_sub(viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left)
             .min(viewport.content_width.saturating_sub(1));
-        let row = self
-            .scroll_top
+        let row = scroll_top
             .saturating_add(rel_row as RowIndex)
             .min(state.materialized.total_rows.saturating_sub(1));
         let local = state
@@ -466,6 +550,7 @@ impl Window {
             ViewerCommand::BufferStart => {
                 next.row = 0;
                 next.byte_col = 0;
+                state.preferred_cell_col = None;
             }
             ViewerCommand::BufferEnd => {
                 next.row = total_rows.saturating_sub(1);
@@ -476,19 +561,29 @@ impl Window {
             ViewerCommand::GotoPosition(pos) => {
                 next.row = pos.row.min(total_rows.saturating_sub(1));
                 next.byte_col = pos.byte_col;
+                state.preferred_cell_col = None;
             }
-            ViewerCommand::LineStart => next.byte_col = 0,
+            ViewerCommand::LineStart => {
+                next.byte_col = 0;
+                state.preferred_cell_col = None;
+            }
             ViewerCommand::LineEnd => {
                 let local = state.materialized.local_row(current.row);
                 next.byte_col = buf
                     .get_line(row_to_usize(local))
                     .map(|line| line.len())
                     .unwrap_or(0);
+                state.preferred_cell_col = None;
             }
             ViewerCommand::StartVisual => {
+                eprintln!("[StartVisual] anchor={:?} current={:?}", current, current);
                 state.selection_anchor = Some(current);
             }
             ViewerCommand::StartVisualLine => {
+                eprintln!(
+                    "[StartVisualLine] anchor={:?} current={:?}",
+                    current, current
+                );
                 state.selection_anchor = Some(DocPosition {
                     row: current.row,
                     byte_col: 0,
@@ -554,6 +649,44 @@ impl Window {
             ViewerCommand::PanColumns(delta) => {
                 let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
                 self.pan_by_columns(delta, viewport_cols);
+            }
+            ViewerCommand::MoveCursorCol(delta) => {
+                let local = state.materialized.local_row(next.row);
+                if let Some(line) = buf.get_line(row_to_usize(local)) {
+                    let old = next.byte_col;
+                    if delta < 0 {
+                        for _ in 0..(-delta) as usize {
+                            next.byte_col = text::prev_char_boundary(line, next.byte_col);
+                        }
+                    } else {
+                        for _ in 0..delta as usize {
+                            next.byte_col = text::next_char_boundary(line, next.byte_col);
+                        }
+                    }
+                    // In Normal mode `l` must stop on the last character of the
+                    // line, not move past it. Visual/VisualLine allow the
+                    // cursor to sit past the last char so the selection is
+                    // inclusive.
+                    if !matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
+                        && delta > 0
+                        && next.byte_col > 0
+                        && next.byte_col >= line.len()
+                    {
+                        next.byte_col = text::prev_char_boundary(line, line.len());
+                    }
+                    // Update the preferred cell from the new byte position so
+                    // vertical motion preserves the intended column, but only
+                    // when the cursor actually moved (vim curswant semantics).
+                    if next.byte_col != old {
+                        if let Some(cell) = self.virtual_position_cell(state, buf, next) {
+                            state.preferred_cell_col = Some(cell);
+                        }
+                    }
+                    eprintln!(
+                        "[MoveCursorCol] delta={} row={} old_byte_col={} new_byte_col={} line_len={} vim_mode={:?} preferred_cell={:?}",
+                        delta, next.row, old, next.byte_col, line.len(), self.vim_mode, state.preferred_cell_col
+                    );
+                }
             }
             ViewerCommand::WordForward(count) => {
                 for _ in 0..count.max(1) {

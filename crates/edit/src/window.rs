@@ -1079,6 +1079,13 @@ impl Window {
         buf: &Buffer,
         vim_mode: VimMode,
     ) -> Vec<smelt_buffer::buffer::SelectionRange> {
+        // Virtual rows manage selection via sync_virtual_render_state (which
+        // writes buf.selection()); falling back to non-virtual vim::visual_range
+        // uses vim_state.visual_anchor which is never set for virtual rows and
+        // would spuriously select from byte 0.
+        if self.is_virtual_rows() {
+            return Vec::new();
+        }
         let in_vim_visual =
             self.vim_enabled && matches!(vim_mode, VimMode::Visual | VimMode::VisualLine);
         if !in_vim_visual && self.selection_anchor.is_none() {
@@ -1255,6 +1262,11 @@ impl Window {
             self.cursor_positioned = false;
             return;
         }
+        // Virtual rows manage their own cursor; refocus would overwrite it
+        // from the stale local cpos.
+        if self.is_virtual_rows() {
+            return;
+        }
         if self.vim_enabled && self.vim_mode != VimMode::Normal {
             self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
@@ -1302,6 +1314,20 @@ impl Window {
         match self.drag_endpoint {
             Some(end) => self.cursor_visual(buf, end).0,
             None => self.cursor_row,
+        }
+    }
+
+    /// Absolute visual row of the drag endpoint (or cursor if no drag).
+    /// For virtual rows this is the virtual row; for non-virtual it is the
+    /// local row from `effective_cursor_row`, which is already absolute.
+    pub fn drag_endpoint_absolute_row(&self, buf: &Buffer) -> RowIndex {
+        if let Some(state) = self.virtual_rows {
+            state
+                .drag_endpoint
+                .map(|ep| ep.row)
+                .unwrap_or(state.cursor.row)
+        } else {
+            self.effective_cursor_row(buf)
         }
     }
 
@@ -1539,6 +1565,12 @@ impl Window {
         let viewport_rows = ctx.viewport.rect.height;
         if viewport_rows == 0 || buf.lines().is_empty() {
             return Status::Consumed;
+        }
+        // A new mouse drag gesture should start fresh: exit any existing
+        // visual/visual-line mode so the old anchor doesn't pollute the new
+        // drag selection.
+        if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
+            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
         }
         let rel_row = event
             .row
@@ -1846,6 +1878,39 @@ impl Window {
         if new_scroll == self.scroll_top {
             return false;
         }
+
+        // Virtual-row path: update the virtual cursor and drag endpoint.
+        if let Some(mut state) = self.virtual_rows {
+            let col = state.preferred_cell_col.unwrap_or_else(|| {
+                self.virtual_position_cell(state, buf, state.drag_endpoint.unwrap_or(state.cursor))
+                    .unwrap_or(0)
+            });
+            self.set_scroll(new_scroll, buf);
+            let edge_vrow = if delta < 0 {
+                new_scroll
+            } else {
+                new_scroll
+                    .saturating_add(viewport_rows.saturating_sub(1) as RowIndex)
+                    .min(total.saturating_sub(1))
+            };
+            state.cursor.row = edge_vrow;
+            state.drag_endpoint = Some(DocPosition {
+                row: edge_vrow,
+                byte_col: state.cursor.byte_col,
+            });
+            if let Some(byte_col) = self.virtual_byte_col_at_cell(state, buf, edge_vrow, col) {
+                state.cursor.byte_col = byte_col;
+                if let Some(ref mut de) = state.drag_endpoint {
+                    de.byte_col = byte_col;
+                }
+            }
+            self.virtual_rows = Some(state);
+            if let Some(state) = self.virtual_rows {
+                self.project_virtual_cursor_to_local(state, buf);
+            }
+            return true;
+        }
+
         let col = self.cursor_visual(buf, self.effective_endpoint()).1 as usize;
         self.set_scroll(new_scroll, buf);
         let edge_vrow = if delta < 0 {
@@ -1897,7 +1962,10 @@ impl Window {
         let screen_row =
             Self::screen_row_or_edge(self.absolute_cursor_row(), cur_scroll, viewport_rows);
         let new_scroll = scroll_top.min(max_scroll);
-        if self.selection_active() {
+        // Pin scroll for shift+mouse drag selection, but preserve cursor screen
+        // row for vim visual/visual-line mode (the cursor should stay fixed
+        // relative to the viewport while wheel-scrolling).
+        if self.selection_anchor.is_some() {
             self.set_scroll(new_scroll, buf);
             self.pin_current_scroll();
             return;
@@ -3641,6 +3709,535 @@ mod tests {
         let mut w = make_win();
         w.scroll_top = 100_000;
         assert_eq!(w.visible_range(3), 100_000..100_003);
+    }
+
+    #[test]
+    fn virtual_mouse_double_click_selects_word() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(0, 20);
+        w.scroll_top = 0;
+
+        let viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 0,
+            total_rows: 20,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let mouse_ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 2,
+        };
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 3, // on "line 0", column 3 is the 'e'
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let (status, range) = w.handle_virtual_mouse(&buf, event, mouse_ctx, now);
+        assert_eq!(status, Status::Capture);
+        assert!(range.is_none());
+
+        // selection_anchor should be set to the word range
+        let state = w.virtual_rows.unwrap();
+        assert_eq!(
+            state.selection_anchor,
+            Some(DocPosition {
+                row: 0,
+                byte_col: 0
+            })
+        );
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 0,
+                byte_col: 4
+            }
+        );
+    }
+
+    #[test]
+    fn virtual_mouse_triple_click_selects_line() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(0, 20);
+        w.scroll_top = 0;
+
+        let viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 0,
+            total_rows: 20,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let mouse_ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 3,
+        };
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let (status, range) = w.handle_virtual_mouse(&buf, event, mouse_ctx, now);
+        assert_eq!(status, Status::Capture);
+        assert!(range.is_none());
+
+        let state = w.virtual_rows.unwrap();
+        assert_eq!(
+            state.selection_anchor,
+            Some(DocPosition {
+                row: 0,
+                byte_col: 0
+            })
+        );
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 0,
+                byte_col: 6
+            }
+        );
+    }
+
+    #[test]
+    fn virtual_drag_autoscroll_steps_scroll_and_updates_virtual_cursor() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(0, 20);
+        w.scroll_top = 0;
+
+        // Start a drag with the endpoint at the bottom edge (viewport height = 10).
+        let viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 0,
+            total_rows: 20,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 9,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let mouse_ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 1,
+        };
+        w.handle_virtual_mouse(&buf, event, mouse_ctx, now);
+        assert_eq!(w.virtual_rows.unwrap().cursor.row, 9);
+
+        // Auto-scroll down by one row.
+        let stepped = w.drag_autoscroll_step(&buf, 10, 1);
+        assert!(stepped, "autoscroll should have stepped");
+        assert_eq!(w.scroll_top, 1);
+        let state = w.virtual_rows.unwrap();
+        assert_eq!(
+            state.cursor.row, 10,
+            "virtual cursor should follow scroll to row 10"
+        );
+        assert_eq!(
+            state.drag_endpoint,
+            Some(DocPosition {
+                row: 10,
+                byte_col: state.cursor.byte_col
+            })
+        );
+
+        // Auto-scroll up by one row.
+        let stepped = w.drag_autoscroll_step(&buf, 10, -1);
+        assert!(stepped, "autoscroll should have stepped back");
+        assert_eq!(w.scroll_top, 0);
+        let state = w.virtual_rows.unwrap();
+        assert_eq!(
+            state.cursor.row, 0,
+            "virtual cursor should follow scroll to row 0"
+        );
+    }
+
+    #[test]
+    fn virtual_drag_autoscroll_top_edge_keeps_cursor_parked() {
+        let mut w = make_win();
+        let rows = sample_rows(100);
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(0, 100);
+        w.scroll_top = 50;
+
+        let mut viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 50,
+            total_rows: 100,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let mouse_ctx = |vp: WindowViewport| MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport: vp,
+            click_count: 1,
+        };
+
+        // Mouse down in the middle of the viewport (terminal row 5 => abs 55).
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 5,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        w.handle_virtual_mouse(&buf, down, mouse_ctx(viewport), now);
+        assert_eq!(w.virtual_rows.unwrap().cursor.row, 55);
+
+        // Drag up to the top edge (terminal row 0 => abs 50).
+        let drag_top = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row: 0,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        w.handle_virtual_mouse(&buf, drag_top, mouse_ctx(viewport), now);
+        assert_eq!(w.virtual_rows.unwrap().cursor.row, 50);
+
+        // Simulate a few autoscroll ticks upward.
+        for expected_scroll in [49, 48, 47, 46, 45] {
+            let stepped = w.drag_autoscroll_step(&buf, 10, -1);
+            assert!(
+                stepped,
+                "autoscroll should step when scroll_top={}",
+                w.scroll_top
+            );
+            assert_eq!(w.scroll_top, expected_scroll);
+            let state = w.virtual_rows.unwrap();
+            assert_eq!(
+                state.cursor.row, expected_scroll,
+                "cursor should park at the new top edge after autoscroll to {}",
+                expected_scroll
+            );
+            assert_eq!(
+                state.drag_endpoint.map(|e| e.row),
+                Some(expected_scroll),
+                "drag endpoint should park at the new top edge"
+            );
+
+            // A fresh drag event at the same terminal row 0 must resolve to the
+            // new absolute top row, not drift downward.
+            viewport.scroll_top = w.scroll_top;
+            w.handle_virtual_mouse(&buf, drag_top, mouse_ctx(viewport), now);
+            let state = w.virtual_rows.unwrap();
+            assert_eq!(
+                state.cursor.row, expected_scroll,
+                "cursor should stay at top edge after drag at scroll_top={}",
+                expected_scroll
+            );
+        }
+    }
+
+    #[test]
+    fn virtual_mouse_click_preserves_scroll_top() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(0, 20);
+        w.scroll_top = 5;
+
+        let viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 5,
+            total_rows: 20,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let mouse_ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 1,
+        };
+        // Click inside the viewport at terminal row 2, which maps to absolute row 7.
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 2,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        w.handle_virtual_mouse(&buf, event, mouse_ctx, now);
+        // scroll_top must NOT be clobbered by the mouse handler.
+        assert_eq!(w.scroll_top, 5, "scroll_top should remain 5 after click");
+        let state = w.virtual_rows.unwrap();
+        assert_eq!(state.cursor.row, 7, "cursor should be at absolute row 7");
+    }
+
+    #[test]
+    fn virtual_mouse_drag_outside_viewport_does_not_desync_scroll() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(0, 20);
+        w.scroll_top = 5;
+
+        let viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 5,
+            total_rows: 20,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let mouse_ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 1,
+        };
+        // Drag to a row below the viewport (row 20, viewport bottom is 10).
+        let event = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row: 20,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        w.handle_virtual_mouse(&buf, event, mouse_ctx, now);
+        // scroll_top must NOT be modified by the drag handler.
+        assert_eq!(
+            w.scroll_top, 5,
+            "scroll_top should remain 5 after drag outside viewport"
+        );
+    }
+
+    #[test]
+    fn virtual_mouse_double_click_yank_flash_covers_full_word() {
+        let mut w = make_win();
+        let rows = sample_rows(20);
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(0, 20);
+        w.scroll_top = 0;
+
+        let viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 0,
+            total_rows: 20,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let mouse_ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 2,
+        };
+        // Double-click on "line 0" at column 3 ('e').
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        w.handle_virtual_mouse(&buf, down, mouse_ctx, now);
+
+        let up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            row: 0,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let (_, copy) = w.handle_virtual_mouse(&buf, up, mouse_ctx, now);
+        let range = copy.expect("double-click should yield a range");
+        // double-click selects the word under cursor: "line" → bytes 0..4
+        assert_eq!(range.start.row, 0);
+        assert_eq!(range.start.byte_col, 0);
+        assert_eq!(range.end.row, 0);
+        assert_eq!(range.end.byte_col, 4);
+
+        // The yank flash must cover the same full range.
+        let state = w.virtual_rows.unwrap();
+        let flash = state.yank_flash.expect("yank flash should be set");
+        assert_eq!(flash.range, range);
+    }
+
+    #[test]
+    fn virtual_visual_mode_h_and_l_move_cursor_and_preserve_column() {
+        let mut w = make_win();
+        let rows = vec![
+            "short".into(),
+            "much much longer line".into(),
+            "tiny".into(),
+            "another long line here".into(),
+        ];
+        let buf = make_buf(rows.clone());
+        w.set_virtual_rows(0, 4);
+        w.scroll_top = 0;
+        w.vim_enabled = true;
+        w.set_vim_mode(VimMode::Normal);
+
+        // Place cursor at row 1, byte_col 5 on the long line.
+        w.virtual_rows.as_mut().unwrap().cursor = DocPosition {
+            row: 1,
+            byte_col: 5,
+        };
+
+        // Enter visual mode.
+        let now = std::time::Instant::now();
+        let cmd = crate::vim::handle_virtual_viewer_key(
+            crossterm::event::KeyEvent {
+                code: crossterm::event::KeyCode::Char('v'),
+                modifiers: crossterm::event::KeyModifiers::empty(),
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            },
+            &mut w.vim_mode,
+            &mut w.vim_state,
+        );
+        assert_eq!(cmd, Some(crate::ViewerCommand::StartVisual));
+        w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
+
+        // Move down to the short row 2; byte_col should clamp to line width.
+        let cmd = crate::vim::handle_virtual_viewer_key(
+            crossterm::event::KeyEvent {
+                code: crossterm::event::KeyCode::Char('j'),
+                modifiers: crossterm::event::KeyModifiers::empty(),
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            },
+            &mut w.vim_mode,
+            &mut w.vim_state,
+        );
+        assert_eq!(cmd, Some(crate::ViewerCommand::MoveRows(1)));
+        w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
+        assert_eq!(w.virtual_rows.unwrap().cursor.row, 2);
+        assert_eq!(
+            w.virtual_rows.unwrap().cursor.byte_col,
+            4,
+            "cursor should clamp to end of short line"
+        );
+
+        // Move down to the longer row 3; byte_col should recover toward the
+        // original column, not get stuck at the clamped short-line width.
+        let cmd = crate::vim::handle_virtual_viewer_key(
+            crossterm::event::KeyEvent {
+                code: crossterm::event::KeyCode::Char('j'),
+                modifiers: crossterm::event::KeyModifiers::empty(),
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            },
+            &mut w.vim_mode,
+            &mut w.vim_state,
+        );
+        assert_eq!(cmd, Some(crate::ViewerCommand::MoveRows(1)));
+        w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
+        assert_eq!(w.virtual_rows.unwrap().cursor.row, 3);
+        assert_eq!(
+            w.virtual_rows.unwrap().cursor.byte_col,
+            5,
+            "cursor should recover to original byte column after short line"
+        );
+
+        // Move right to the end of the long line with 'l'.
+        let line3_len = rows[3].len();
+        for _ in 0..(line3_len - 5) {
+            let cmd = crate::vim::handle_virtual_viewer_key(
+                crossterm::event::KeyEvent {
+                    code: crossterm::event::KeyCode::Char('l'),
+                    modifiers: crossterm::event::KeyModifiers::empty(),
+                    kind: crossterm::event::KeyEventKind::Press,
+                    state: crossterm::event::KeyEventState::NONE,
+                },
+                &mut w.vim_mode,
+                &mut w.vim_state,
+            );
+            assert_eq!(cmd, Some(crate::ViewerCommand::MoveCursorCol(1)));
+            w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
+        }
+        assert_eq!(
+            w.virtual_rows.unwrap().cursor.byte_col,
+            line3_len,
+            "cursor should park past last char"
+        );
+
+        // Pressing 'l' again at the end should be a no-op.
+        let cmd = crate::vim::handle_virtual_viewer_key(
+            crossterm::event::KeyEvent {
+                code: crossterm::event::KeyCode::Char('l'),
+                modifiers: crossterm::event::KeyModifiers::empty(),
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            },
+            &mut w.vim_mode,
+            &mut w.vim_state,
+        );
+        assert_eq!(cmd, Some(crate::ViewerCommand::MoveCursorCol(1)));
+        w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
+        assert_eq!(
+            w.virtual_rows.unwrap().cursor.byte_col,
+            line3_len,
+            "l at end of line should stay put"
+        );
+    }
+
+    #[test]
+    fn virtual_doc_range_to_row_ranges_skips_chrome_on_empty_line() {
+        let mut w = make_win();
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        // Thinking-block style: chrome "│ " is non-selectable.
+        buf.set_all_lines(vec!["│ hello".into(), "│ ".into(), "│ world".into()]);
+        buf.add_highlight_group_with_meta(
+            1,
+            0,
+            2,
+            smelt_buffer::theme::intern("Normal"),
+            smelt_buffer::buffer::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+        w.set_virtual_rows(0, 3);
+        w.scroll_top = 0;
+
+        // Select across all three rows.
+        let ranges = w.doc_range_to_row_ranges(
+            &buf,
+            10,
+            DocRange {
+                start: DocPosition {
+                    row: 0,
+                    byte_col: 0,
+                },
+                end: DocPosition {
+                    row: 2,
+                    byte_col: 9,
+                },
+            },
+        );
+        assert_eq!(ranges.len(), 3);
+        // Row 0: normal range.
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 7));
+        // Row 1: empty chrome-only row; virtual span placed after the 2-char gutter.
+        assert_eq!((ranges[1].col_start, ranges[1].col_end), (2, 3));
+        // Row 2: end row.
+        assert_eq!((ranges[2].col_start, ranges[2].col_end), (0, 7));
     }
 
     #[test]

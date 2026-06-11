@@ -127,7 +127,12 @@ pub fn byte_range_to_row_ranges(
 /// True if any column in `[col_start, col_end)` on `row` is selectable.
 /// Unstyled cells (not covered by any highlight span) are implicitly
 /// selectable. Empty ranges always return `false`.
-fn range_contains_selectable(buf: &Buffer, row: usize, col_start: usize, col_end: usize) -> bool {
+pub fn range_contains_selectable(
+    buf: &Buffer,
+    row: usize,
+    col_start: usize,
+    col_end: usize,
+) -> bool {
     let line = buf.get_line(row).unwrap_or_default();
     let line_width = UnicodeWidthStr::width(line);
     if col_start >= col_end || line_width == 0 {
@@ -158,7 +163,7 @@ fn range_contains_selectable(buf: &Buffer, row: usize, col_start: usize, col_end
 
 /// The largest `col_end` among non-selectable spans on `row`, clamped to the
 /// row display width. Returns `0` when there is no non-selectable span.
-fn last_non_selectable_end(buf: &Buffer, row: usize, line_width: usize) -> usize {
+pub fn last_non_selectable_end(buf: &Buffer, row: usize, line_width: usize) -> usize {
     let highlights = buf.highlights_at(row);
     let mut max_end = 0;
     for span in highlights {

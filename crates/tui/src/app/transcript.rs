@@ -776,7 +776,7 @@ impl TuiApp {
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
         let win = self.transcript_win();
-        if win.virtual_selection_anchor_range().is_some() {
+        if win.is_virtual_rows() {
             let buf_id = win.buf;
             let buf = match self.ui.buf(buf_id) {
                 Some(b) => b,

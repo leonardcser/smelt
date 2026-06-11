@@ -888,6 +888,11 @@ impl TuiApp {
     pub(crate) fn snap_transcript_cursor(&mut self) {
         let win_id = self.well_known.transcript;
         let buf_id = self.transcript_win().buf;
+        // Virtual rows manage their own cursor; snapping the local cpos would
+        // overwrite the virtual cursor via sync_from_cpos in resync.
+        if self.ui.win(win_id).is_some_and(|w| w.is_virtual_rows()) {
+            return;
+        }
         let cpos = self.transcript_win().cpos;
         let show_thinking = self.core.config.settings.show_thinking;
         let rows: Vec<String> = self

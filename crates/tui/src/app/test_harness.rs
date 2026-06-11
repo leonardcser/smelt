@@ -3521,6 +3521,136 @@ mod tests {
     }
 
     #[test]
+    fn transcript_vim_visual_char_starts_at_cursor() {
+        let mut app = virtual_transcript_app(100, true);
+
+        // Move to row 003 (1-indexed in vim, so 0-indexed row 2)
+        app.type_char('3');
+        app.type_char('G');
+        assert_eq!(transcript_virtual_cursor_row(&app), 2);
+
+        // Enter visual mode
+        app.type_char('v');
+
+        // Render and inspect selection highlights
+        app.render_silent();
+        let win = app.app.transcript_win();
+        let scroll_top = win.scroll_top();
+        let row_base = 0;
+        let highlights = app
+            .app
+            .transcript_selection_highlights(scroll_top, row_base, 16);
+        // In visual mode with no movement, the anchor equals the cursor, so
+        // there should be no selection painted.
+        assert!(
+            highlights.is_empty(),
+            "empty visual selection should paint nothing, got {highlights:?}"
+        );
+
+        // Move down one row
+        app.type_char('j');
+        app.render_silent();
+        let highlights = app
+            .app
+            .transcript_selection_highlights(scroll_top, row_base, 16);
+        // Should highlight rows 2
+        let rows: Vec<usize> = highlights.iter().map(|(line, _, _)| *line).collect();
+        assert!(
+            rows.contains(&2),
+            "visual selection should include row 2, got rows {rows:?}"
+        );
+        assert!(
+            !rows.contains(&0),
+            "visual selection should not include row 0, got rows {rows:?}"
+        );
+
+        // Now simulate mouse down while in visual mode.
+        // This clears selection_anchor but NOT vim_mode, which used to trigger
+        // the fallback path and select the whole buffer.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 5,
+            column: 10,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })));
+        app.render_silent();
+        let highlights = app
+            .app
+            .transcript_selection_highlights(scroll_top, row_base, 16);
+        assert!(
+            highlights.is_empty(),
+            "mouse down after visual should clear selection, got {highlights:?}"
+        );
+    }
+
+    #[test]
+    fn wheel_scroll_in_visual_mode_preserves_cursor_screen_row() {
+        let mut app = virtual_transcript_app(100, true);
+
+        // Move cursor to row 5.
+        app.type_char('5');
+        app.type_char('G');
+        let row_before = transcript_virtual_cursor_row(&app);
+        assert_eq!(row_before, 4);
+
+        // Enter visual mode.
+        app.type_char('v');
+
+        // Scroll down with the mouse wheel (coalesced delta is 3 rows per tick).
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            row: 5,
+            column: 10,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })));
+
+        let row_after = transcript_virtual_cursor_row(&app);
+        // With the fix the cursor follows the viewport, so it should have
+        // moved down by 3 rows (screen row preserved).
+        assert_eq!(
+            row_after,
+            row_before + 3,
+            "cursor should follow viewport in visual mode"
+        );
+    }
+
+    #[test]
+    fn mouse_drag_clears_visual_line_mode() {
+        let mut app = virtual_transcript_app(100, true);
+
+        // Enter visual-line mode.
+        app.type_char('V');
+        assert!(
+            matches!(app.app.transcript_win().vim_mode, VimMode::VisualLine),
+            "should start in visual-line mode"
+        );
+
+        // Start a mouse drag on the transcript.
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 5,
+            column: 10,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })));
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row: 6,
+            column: 10,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        })));
+
+        // Visual-line mode should have been exited by the drag.
+        assert!(
+            matches!(app.app.transcript_win().vim_mode, VimMode::Normal),
+            "mouse drag should exit visual-line mode, got {:?}",
+            app.app.transcript_win().vim_mode
+        );
+    }
+
+    #[test]
     fn transcript_shift_selection_copy_copies_virtual_range() {
         let mut app = virtual_transcript_app(80, false);
 

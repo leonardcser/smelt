@@ -446,9 +446,23 @@ pub fn handle_virtual_viewer_key(
         KeyCode::Char('j') | KeyCode::Down => Some(ViewerCommand::MoveRows(count(state))),
         KeyCode::Char('k') | KeyCode::Up => Some(ViewerCommand::MoveRows(-count(state))),
         KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
-            Some(ViewerCommand::PanColumns(-count(state)))
+            let c = -count(state);
+            eprintln!(
+                "[virt_key] h/Left count={} -> MoveCursorCol({})",
+                count(state),
+                c
+            );
+            Some(ViewerCommand::MoveCursorCol(c))
         }
-        KeyCode::Char('l') | KeyCode::Right => Some(ViewerCommand::PanColumns(count(state))),
+        KeyCode::Char('l') | KeyCode::Right => {
+            let c = count(state);
+            eprintln!(
+                "[virt_key] l/Right count={} -> MoveCursorCol({})",
+                count(state),
+                c
+            );
+            Some(ViewerCommand::MoveCursorCol(c))
+        }
         KeyCode::Char('0') => Some(ViewerCommand::LineStart),
         KeyCode::Char('$') => Some(ViewerCommand::LineEnd),
         KeyCode::Char('^' | '_') => Some(ViewerCommand::LineStart),
@@ -460,10 +474,12 @@ pub fn handle_virtual_viewer_key(
         )),
         KeyCode::Char('e') => Some(ViewerCommand::WordEnd(state.take_count() as crate::RowIndex)),
         KeyCode::Char('v') => {
+            eprintln!("[virt_key] v -> StartVisual (mode {:?})", mode);
             state.set_mode(mode, VimMode::Visual);
             Some(ViewerCommand::StartVisual)
         }
         KeyCode::Char('V') => {
+            eprintln!("[virt_key] V -> StartVisualLine (mode {:?})", mode);
             state.set_mode(mode, VimMode::VisualLine);
             Some(ViewerCommand::StartVisualLine)
         }
