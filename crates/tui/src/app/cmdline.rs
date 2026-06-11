@@ -1,6 +1,6 @@
-//! Nvim-style `:` command line: a Buffer-backed modal overlay with history and Tab completion.
+//! Nvim-style status input: a Buffer-backed modal overlay with history and Tab completion.
 
-use crate::app::{CommandAction, TuiApp};
+use crate::app::{search::SearchDirection, CommandAction, TuiApp};
 
 use crate::smelt_edit::layout::Anchor;
 use crate::smelt_edit::BufCreateOpts;
@@ -8,14 +8,41 @@ use crate::smelt_edit::UiHost;
 use crate::smelt_edit::{Constraint, LayoutTree, Overlay, SplitConfig};
 use crossterm::event::{KeyCode, KeyEvent};
 
-/// Prefix glyph; cursor and editing clamp to `>= PREFIX_LEN` so it cannot be deleted.
-const PREFIX: &str = ":";
+/// Prefix glyph; cursor and editing clamp past the one-cell prefix so it cannot be deleted.
 const PREFIX_LEN: u16 = 1;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CmdlineMode {
+    #[default]
+    Command,
+    Search {
+        target: crate::smelt_edit::WinId,
+        direction: SearchDirection,
+    },
+}
+
+impl CmdlineMode {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Command => ":",
+            Self::Search {
+                direction: SearchDirection::Forward,
+                ..
+            } => "/",
+            Self::Search {
+                direction: SearchDirection::Backward,
+                ..
+            } => "?",
+        }
+    }
+}
 
 /// Cmdline state persisted across open/close cycles.
 #[derive(Default)]
 pub(crate) struct CmdlineState {
+    pub(crate) mode: CmdlineMode,
     pub(crate) history: Vec<String>,
+    pub(crate) search_history: Vec<String>,
     /// Index into `history` while browsing with Up/Down; `None` otherwise.
     pub(crate) history_browse: Option<usize>,
     /// Live input snapshot saved when history browsing begins; restored on Down past the newest entry.
@@ -41,13 +68,27 @@ impl TuiApp {
     }
 
     pub(crate) fn open_cmdline(&mut self) {
+        self.open_status_input(CmdlineMode::Command);
+    }
+
+    pub(crate) fn open_search_cmdline(
+        &mut self,
+        target: crate::smelt_edit::WinId,
+        direction: SearchDirection,
+    ) {
+        self.open_status_input(CmdlineMode::Search { target, direction });
+    }
+
+    fn open_status_input(&mut self, mode: CmdlineMode) {
         if self.well_known.cmdline.is_some() {
             return;
         }
+        self.cmdline.mode = mode;
+        let prefix = mode.prefix();
 
         let buf = self.buf_create(BufCreateOpts::default());
         if let Some(b) = self.buf_mut(buf) {
-            b.set_all_lines(vec![PREFIX.to_string()]);
+            b.set_all_lines(vec![prefix.to_string()]);
         }
 
         let Some(win) = self.win_open_split(
@@ -103,6 +144,7 @@ impl TuiApp {
             self.close_overlay_leaf(win);
         }
         self.cmdline.completer = None;
+        self.cmdline.mode = CmdlineMode::Command;
     }
 
     fn cmdline_text(&self) -> String {
@@ -114,14 +156,16 @@ impl TuiApp {
             .and_then(|b| self.ui.buf(b))
             .and_then(|b| b.get_line(0).map(|s| s.to_string()))
             .unwrap_or_default();
-        line.strip_prefix(PREFIX).unwrap_or(&line).to_string()
+        let prefix = self.cmdline.mode.prefix();
+        line.strip_prefix(prefix).unwrap_or(&line).to_string()
     }
 
     fn cmdline_set_payload(&mut self, payload: &str, cursor_in_payload: usize) {
         let Some(win) = self.well_known.cmdline else {
             return;
         };
-        let new_line = format!("{PREFIX}{payload}");
+        let prefix = self.cmdline.mode.prefix();
+        let new_line = format!("{prefix}{payload}");
         if let Some(buf_id) = self.ui.win(win).map(|w| w.buf) {
             if let Some(b) = self.ui.buf_mut(buf_id) {
                 b.set_lines(0, 1, vec![new_line]);
@@ -150,7 +194,12 @@ impl TuiApp {
         use crossterm::event::KeyModifiers as M;
         match (k.code, k.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => {
-                self.close_cmdline();
+                if matches!(self.cmdline.mode, CmdlineMode::Search { .. }) {
+                    self.clear_search();
+                    self.close_cmdline();
+                } else {
+                    self.close_cmdline();
+                }
                 Some(false)
             }
             (KeyCode::Enter, _) => Some(self.cmdline_submit()),
@@ -291,22 +340,27 @@ impl TuiApp {
         }
     }
 
+    fn active_history(&self) -> &[String] {
+        match self.cmdline.mode {
+            CmdlineMode::Command => &self.cmdline.history,
+            CmdlineMode::Search { .. } => &self.cmdline.search_history,
+        }
+    }
+
     fn cmdline_history_up(&mut self) {
         let current = self.cmdline_text();
+        let history = self.active_history().to_vec();
         let owned =
-            super::cmdline_edit::history_up(&self.cmdline.history, self.cmdline.history_browse)
-                .into_owned();
+            super::cmdline_edit::history_up(&history, self.cmdline.history_browse).into_owned();
         self.apply_history_step(owned, current);
     }
 
     fn cmdline_history_down(&mut self) {
         let stash = self.cmdline.history_stash.clone();
-        let owned = super::cmdline_edit::history_down(
-            &self.cmdline.history,
-            self.cmdline.history_browse,
-            &stash,
-        )
-        .into_owned();
+        let history = self.active_history().to_vec();
+        let owned =
+            super::cmdline_edit::history_down(&history, self.cmdline.history_browse, &stash)
+                .into_owned();
         self.apply_history_step(owned, String::new());
     }
 
@@ -346,25 +400,42 @@ impl TuiApp {
 
     fn cmdline_submit(&mut self) -> bool {
         let line = self.cmdline_text();
-        let last = self.cmdline.history.last().cloned();
-        if !line.is_empty() && last.as_deref() != Some(line.as_str()) {
-            self.cmdline.history.push(line.clone());
-        }
-        self.close_cmdline();
-        if line.is_empty() {
-            return false;
-        }
-        let action = crate::commands::run_command(self, &format!(":{line}"));
-        match action {
-            CommandAction::Exec(handle) => {
-                self.exec = Some(handle);
+        let mode = self.cmdline.mode;
+        match mode {
+            CmdlineMode::Command => {
+                let last = self.cmdline.history.last().cloned();
+                if !line.is_empty() && last.as_deref() != Some(line.as_str()) {
+                    self.cmdline.history.push(line.clone());
+                }
+                self.close_cmdline();
+                if line.is_empty() {
+                    return false;
+                }
+                let action = crate::commands::run_command(self, &format!(":{line}"));
+                match action {
+                    CommandAction::Exec(handle) => {
+                        self.exec = Some(handle);
+                        false
+                    }
+                    CommandAction::Continue => self.pending_quit,
+                }
+            }
+            CmdlineMode::Search { target, direction } => {
+                let last = self.cmdline.search_history.last().cloned();
+                if !line.is_empty() && last.as_deref() != Some(line.as_str()) {
+                    self.cmdline.search_history.push(line.clone());
+                }
+                self.close_cmdline();
+                self.submit_search(target, direction, line);
                 false
             }
-            CommandAction::Continue => self.pending_quit,
         }
     }
 
     fn cmdline_cycle_completer(&mut self, next: bool) {
+        if !matches!(self.cmdline.mode, CmdlineMode::Command) {
+            return;
+        }
         if self.cmdline.completer.is_none() {
             let typed = self.cmdline_text();
             let labels = self.lua.command_names();

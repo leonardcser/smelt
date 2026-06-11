@@ -318,6 +318,10 @@ impl WindowSurface {
         matches!(self, Self::ReadonlyText | Self::SelectableText)
     }
 
+    pub fn supports_search(self) -> bool {
+        matches!(self, Self::ReadonlyText)
+    }
+
     pub fn accepts_wheel_scroll(self) -> bool {
         matches!(self, Self::List { .. })
     }
@@ -492,6 +496,10 @@ impl Window {
 
     pub fn supports_text_selection(&self) -> bool {
         self.surface.supports_text_selection()
+    }
+
+    pub fn supports_search(&self) -> bool {
+        self.surface.supports_search()
     }
 
     pub fn supports_wheel_scroll(&self) -> bool {
@@ -826,6 +834,14 @@ impl Window {
         }
         let local = state.materialized.local_row(absolute_row);
         (local < self.visual_row_total(buf)).then_some(local)
+    }
+
+    fn backed_display_row(&self, buf: &Buffer, absolute_row: RowIndex) -> Option<RowIndex> {
+        if let Some(state) = self.virtual_rows {
+            self.backed_local_row(state, buf, absolute_row)
+        } else {
+            (absolute_row < self.visual_row_total(buf)).then_some(absolute_row)
+        }
     }
 
     fn project_virtual_cursor_to_local(&mut self, state: VirtualRowsState, buf: &Buffer) -> bool {
@@ -2300,6 +2316,7 @@ impl Window {
         let normal_style = ctx.theme.get("Normal");
         let cursor_style = ctx.theme.get("CursorLine");
         let visual_style = ctx.theme.get("Visual");
+        let search_style = ctx.theme.get("Search");
         let yank_flash_style = ctx.theme.get("YankFlash");
         // Buffer override wins; fall back to window anchors.
         let selection_owned: Vec<smelt_buffer::buffer::SelectionRange>;
@@ -2311,6 +2328,7 @@ impl Window {
                 &selection_owned[..]
             };
         let yank_flash_ranges = buf.yank_flash();
+        let search_ranges = buf.search_highlights();
         // Reused per-row scratch - avoids `height` allocations of each Vec.
         let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
         let mut line_chars: Vec<char> = Vec::with_capacity(content_width as usize);
@@ -2480,7 +2498,8 @@ impl Window {
             // paint there, keeping multi-line selections visually continuous without
             // highlighting the chrome itself.
             let line_has_highlight = selection_ranges.iter().any(|r| r.line == logical_row)
-                || yank_flash_ranges.iter().any(|r| r.line == logical_row);
+                || yank_flash_ranges.iter().any(|r| r.line == logical_row)
+                || search_ranges.iter().any(|r| r.line == logical_row);
             let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
             let any_selectable =
                 cell_range_contains_selectable(&spans_buf, 0, text::byte_to_cell(line, line.len()));
@@ -2520,6 +2539,7 @@ impl Window {
                             }
                         }
                     };
+                paint_ranges(search_ranges, merge_span_style(row_style, &search_style));
                 paint_ranges(selection_ranges, merge_span_style(row_style, &visual_style));
                 paint_ranges(
                     yank_flash_ranges,

@@ -1,6 +1,7 @@
+use std::ops::Range;
+
 use crate::{BufId, WinId};
 use smelt_term::Rect;
-use std::ops::Range;
 
 pub type RowIndex = u64;
 
@@ -21,6 +22,9 @@ pub struct DisplayRows {
     pub rows: Vec<String>,
     pub soft_breaks: Vec<usize>,
     pub hard_breaks: Vec<usize>,
+    /// Byte ranges in each row that are selectable/searchable display text.
+    /// `None` means callers should treat every row's text as selectable.
+    pub selectable_ranges: Option<Vec<Vec<Range<usize>>>>,
 }
 
 impl DisplayRows {

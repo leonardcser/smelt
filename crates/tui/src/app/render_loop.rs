@@ -130,6 +130,7 @@ impl TuiApp {
         let render_now = self.core.clock.instant_now();
         let clipboard = &self.core.clipboard;
         let focused_overlay = self.ui.focused_overlay().is_some();
+        let search_session = self.search.session.clone();
         let ui = &mut self.ui;
         let _ = ui.render_with_paints_prepared(
             out,
@@ -188,6 +189,18 @@ impl TuiApp {
                             buf.clear_yank_flash();
                         }
                         win.scroll_left = 0;
+                    }
+                    if let Some(search) =
+                        search_session.as_ref().filter(|s| s.target == request.win)
+                    {
+                        let ranges = win.doc_ranges_to_row_ranges(
+                            buf,
+                            viewport_rows,
+                            search.matches.iter().copied(),
+                        );
+                        buf.set_search_highlights(ranges);
+                    } else {
+                        buf.clear_search_highlights();
                     }
                 }
             },

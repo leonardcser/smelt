@@ -849,6 +849,10 @@ Search rules:
 - no disk index; no full row concatenation.
 - the first implementation may scan synchronously on Enter, but keep the scan isolated enough to chunk/cancel later without placeholder async machinery.
 
+Implementation note: `/` and `?` now open the existing bottom status input in search mode for the focused searchable readonly surface. Submit scans the target through bounded `UiHost::display_rows_for_range` chunks, stores document-coordinate matches in a `SearchSession`, paints visible matches through buffer search-highlight ranges, and `n`/`N` jump through the stored match vector without rescanning. Editable prompt focus does not open viewer search, and readonly overlay leaves use the same target capture path as the transcript.
+
+Implementation note: `DisplayRows` now carries optional row-local selectable byte ranges. Buffer-backed and transcript-backed search scans use those ranges so non-selectable chrome/padding is not searched, while older callers that only need text/breaks can ignore the metadata. The first search implementation is line-local; multi-line queries remain out of scope for this phase.
+
 ### Phase 4: deletion and simplification pass
 
 After the new model is green, delete the old model rather than preserving shims.

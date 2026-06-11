@@ -100,6 +100,12 @@ impl TuiApp {
                     // Swallow unclaimed keys so split keymaps don't fire over an open cmdline.
                     return false;
                 }
+                if self.handle_focused_search_key(k) {
+                    return false;
+                }
+                if self.try_open_search_for_key(k) {
+                    return false;
+                }
                 if matches!(self.run_key_cascade(k), crate::smelt_edit::Status::Consumed) {
                     self.flush_lua_callbacks();
                     return false;
@@ -276,6 +282,25 @@ impl TuiApp {
         EventOutcome::CancelAgent
     }
 
+    fn handle_focused_search_key(&mut self, k: KeyEvent) -> bool {
+        let Some(win) = self.ui.focus() else {
+            return false;
+        };
+        self.handle_search_key_for_target(win, k)
+    }
+
+    fn try_open_search_for_key(&mut self, k: KeyEvent) -> bool {
+        match (k.code, k.modifiers) {
+            (KeyCode::Char('/'), KeyModifiers::NONE) => {
+                self.open_search_input(crate::app::search::SearchDirection::Forward)
+            }
+            (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.open_search_input(crate::app::search::SearchDirection::Backward)
+            }
+            _ => false,
+        }
+    }
+
     // ── Idle event handler ───────────────────────────────────────────────
 
     /// Shared preamble for idle and agent-running paths.
@@ -290,6 +315,13 @@ impl TuiApp {
         }
         if let Event::Mouse(me) = *ev {
             return Some(self.handle_mouse(me));
+        }
+        // Viewer search has nvim priority over global `?`/`/` mappings when
+        // focus is on a searchable readonly surface.
+        if let Event::Key(k) = *ev {
+            if self.try_open_search_for_key(k) {
+                return Some(EventOutcome::Noop);
+            }
         }
         // Buffer-local Lua keymaps win over global (nvim priority). Skipped when an overlay
         // owns focus - overlay-leaf dispatch happens upstream.
@@ -1084,6 +1116,9 @@ impl TuiApp {
         k: KeyEvent,
     ) -> crate::smelt_edit::Status {
         use crate::smelt_edit::Status;
+        if self.handle_search_key_for_target(win_id, k) {
+            return Status::Consumed;
+        }
         let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win_id) {
             Some(w) => (
                 w.vim_enabled,

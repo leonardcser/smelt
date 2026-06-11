@@ -1,0 +1,270 @@
+use crate::app::TuiApp;
+use crate::smelt_edit::{DocPosition, DocRange, RowIndex, UiHost, WinId};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+const SEARCH_SCAN_ROWS: RowIndex = 512;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SearchDirection {
+    Forward,
+    Backward,
+}
+
+impl SearchDirection {
+    fn reversed(self) -> Self {
+        match self {
+            Self::Forward => Self::Backward,
+            Self::Backward => Self::Forward,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SearchSession {
+    pub(crate) target: WinId,
+    pub(crate) query: String,
+    pub(crate) direction: SearchDirection,
+    pub(crate) matches: Vec<DocRange>,
+    pub(crate) current: Option<usize>,
+}
+
+#[derive(Default)]
+pub(crate) struct SearchState {
+    pub(crate) session: Option<SearchSession>,
+}
+
+impl TuiApp {
+    pub(crate) fn open_search_input(&mut self, direction: SearchDirection) -> bool {
+        let Some(target) = self.search_target() else {
+            return false;
+        };
+        self.open_search_cmdline(target, direction);
+        true
+    }
+
+    pub(crate) fn clear_search(&mut self) {
+        self.search.session = None;
+        for buf in self.ui.buffers_mut() {
+            buf.clear_search_highlights();
+        }
+    }
+
+    pub(crate) fn handle_search_key_for_target(&mut self, target: WinId, k: KeyEvent) -> bool {
+        match (k.code, k.modifiers) {
+            (KeyCode::Esc, _)
+                if self
+                    .search
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.target == target) =>
+            {
+                self.clear_search();
+                true
+            }
+            (KeyCode::Char('n'), KeyModifiers::NONE) => self.repeat_search(target, false),
+            (KeyCode::Char('N'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                self.repeat_search(target, true)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn submit_search(
+        &mut self,
+        target: WinId,
+        direction: SearchDirection,
+        query: String,
+    ) {
+        if query.is_empty() || query.contains('\n') {
+            self.clear_search();
+            return;
+        }
+        let matches = self.scan_search_matches(target, &query);
+        let origin = self.search_origin(target).unwrap_or_default();
+        let current = initial_match(&matches, origin, direction);
+        self.search.session = Some(SearchSession {
+            target,
+            query,
+            direction,
+            matches,
+            current,
+        });
+        if let Some(index) = current {
+            self.jump_to_search_match(index);
+        }
+    }
+
+    fn repeat_search(&mut self, target: WinId, reverse: bool) -> bool {
+        let Some(session) = self.search.session.as_ref() else {
+            return false;
+        };
+        if session.target != target || session.query.is_empty() || session.matches.is_empty() {
+            return false;
+        }
+        let direction = if reverse {
+            session.direction.reversed()
+        } else {
+            session.direction
+        };
+        let len = session.matches.len();
+        let current = session.current.unwrap_or_else(|| {
+            initial_match(
+                &session.matches,
+                self.search_origin(target).unwrap_or_default(),
+                direction,
+            )
+            .unwrap_or(0)
+        });
+        let next = match direction {
+            SearchDirection::Forward => (current + 1) % len,
+            SearchDirection::Backward => (current + len - 1) % len,
+        };
+        self.jump_to_search_match(next);
+        true
+    }
+
+    fn search_target(&self) -> Option<WinId> {
+        let focused = self.ui.focus();
+        let content =
+            (self.app_focus == crate::app::AppFocus::Content).then_some(crate::app::TRANSCRIPT_WIN);
+        [focused, content]
+            .into_iter()
+            .flatten()
+            .find(|&win| self.ui.win(win).is_some_and(|w| w.supports_search()))
+    }
+
+    fn display_total_rows(&mut self, win: WinId) -> Option<RowIndex> {
+        if let Some(total) = UiHost::virtual_total_rows(self, win) {
+            return Some(total);
+        }
+        let buf_id = self.ui.win(win)?.buf;
+        Some(self.ui.buf(buf_id)?.line_count() as RowIndex)
+    }
+
+    fn scan_search_matches(&mut self, win: WinId, query: &str) -> Vec<DocRange> {
+        let Some(total_rows) = self.display_total_rows(win) else {
+            return Vec::new();
+        };
+        let mut matches = Vec::new();
+        let mut start = 0;
+        while start < total_rows {
+            let count = SEARCH_SCAN_ROWS.min(total_rows - start);
+            let Some(display) = UiHost::display_rows_for_range(self, win, start, count) else {
+                break;
+            };
+            for (offset, row) in display.rows.iter().enumerate() {
+                let row_index = start.saturating_add(offset as RowIndex);
+                let selectable = display
+                    .selectable_ranges
+                    .as_ref()
+                    .and_then(|ranges| ranges.get(offset));
+                for (byte_col, _) in row.match_indices(query) {
+                    let end_col = byte_col + query.len();
+                    if selectable.is_some_and(|ranges| {
+                        !ranges
+                            .iter()
+                            .any(|range| range.start <= byte_col && end_col <= range.end)
+                    }) {
+                        continue;
+                    }
+                    matches.push(DocRange {
+                        start: DocPosition {
+                            row: row_index,
+                            byte_col,
+                        },
+                        end: DocPosition {
+                            row: row_index,
+                            byte_col: byte_col + query.len(),
+                        },
+                    });
+                }
+            }
+            start = start.saturating_add(count);
+        }
+        matches
+    }
+
+    fn search_origin(&self, win: WinId) -> Option<DocPosition> {
+        let window = self.ui.win(win)?;
+        if let Some(pos) = window.virtual_cursor() {
+            return Some(pos);
+        }
+        let buf = self.ui.buf(window.buf)?;
+        let (row, byte_col) = buf.display_byte_pos(window.cpos);
+        Some(DocPosition {
+            row: row as RowIndex,
+            byte_col,
+        })
+    }
+
+    fn jump_to_search_match(&mut self, index: usize) {
+        let Some(session) = self.search.session.as_mut() else {
+            return;
+        };
+        let Some(range) = session.matches.get(index).copied() else {
+            return;
+        };
+        session.current = Some(index);
+        let target = session.target;
+        let Some((buf_id, viewport_rows, is_virtual)) = self.ui.win(target).map(|w| {
+            (
+                w.buf,
+                w.viewport.map(|v| v.rect.height).unwrap_or(1).max(1),
+                w.is_virtual_rows(),
+            )
+        }) else {
+            return;
+        };
+        let now = self.core.clock.instant_now();
+        let (win, buf) = self.ui.win_and_buf_mut(target, buf_id);
+        let (Some(win), Some(buf)) = (win, buf) else {
+            return;
+        };
+        if is_virtual {
+            win.execute_virtual_viewer_command(
+                buf,
+                crate::smelt_edit::ViewerCommand::GotoPosition(range.start),
+                viewport_rows,
+                now,
+            );
+        } else {
+            if let Some(cpos) = byte_offset_for_doc_position(buf, range.start) {
+                win.cpos = cpos;
+                win.resync(buf, viewport_rows);
+            }
+        }
+    }
+}
+
+fn initial_match(
+    matches: &[DocRange],
+    origin: DocPosition,
+    direction: SearchDirection,
+) -> Option<usize> {
+    match direction {
+        SearchDirection::Forward => matches
+            .iter()
+            .position(|m| (m.start.row, m.start.byte_col) >= (origin.row, origin.byte_col))
+            .or_else(|| (!matches.is_empty()).then_some(0)),
+        SearchDirection::Backward => matches
+            .iter()
+            .rposition(|m| (m.start.row, m.start.byte_col) <= (origin.row, origin.byte_col))
+            .or_else(|| (!matches.is_empty()).then_some(matches.len() - 1)),
+    }
+}
+
+fn byte_offset_for_doc_position(
+    buf: &crate::smelt_edit::Buffer,
+    pos: DocPosition,
+) -> Option<usize> {
+    let row = crate::smelt_edit::row_to_usize(pos.row);
+    let line = buf.get_line(row)?;
+    let byte_col = crate::smelt_edit::text::snap(line, pos.byte_col.min(line.len()));
+    let prior: usize = buf
+        .lines()
+        .iter()
+        .take(row)
+        .map(|line| line.len() + 1)
+        .sum();
+    Some(prior + byte_col)
+}

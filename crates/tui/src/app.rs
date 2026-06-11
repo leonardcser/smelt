@@ -12,6 +12,7 @@ pub(crate) mod mouse;
 pub(crate) mod pane_focus;
 pub(crate) mod prompt_trace;
 pub(crate) mod render_loop;
+pub(crate) mod search;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
 pub(crate) mod transcript;
@@ -70,6 +71,7 @@ pub struct TuiApp {
     pub(crate) pending_quit: bool,
     pub(crate) notification: Option<crate::smelt_edit::WinId>,
     pub(crate) cmdline: crate::app::cmdline::CmdlineState,
+    pub(crate) search: crate::app::search::SearchState,
     pub(crate) picker_state: HashMap<crate::smelt_edit::WinId, crate::picker::PickerState>,
     pub(crate) paint_registry: crate::lua::paint::PaintRegistry,
     /// Drives cursor suppression when unfocused so input from another app
@@ -694,6 +696,7 @@ impl TuiApp {
             pending_quit: false,
             notification: None,
             cmdline: crate::app::cmdline::CmdlineState::default(),
+            search: crate::app::search::SearchState::default(),
             picker_state: HashMap::new(),
             paint_registry: crate::lua::paint::PaintRegistry::default(),
             term_focused: true,

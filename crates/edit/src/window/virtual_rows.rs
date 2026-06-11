@@ -186,19 +186,35 @@ impl Window {
         self.doc_range_to_row_ranges(buf, viewport_rows, range)
     }
 
+    pub fn doc_ranges_to_row_ranges(
+        &self,
+        buf: &Buffer,
+        viewport_rows: u16,
+        ranges: impl IntoIterator<Item = DocRange>,
+    ) -> Vec<smelt_buffer::buffer::SelectionRange> {
+        ranges
+            .into_iter()
+            .flat_map(|range| self.doc_range_to_row_ranges(buf, viewport_rows, range))
+            .collect()
+    }
+
     pub(crate) fn doc_range_to_row_ranges(
         &self,
         buf: &Buffer,
         viewport_rows: u16,
         range: DocRange,
     ) -> Vec<smelt_buffer::buffer::SelectionRange> {
-        let Some(state) = self.virtual_rows else {
-            return Vec::new();
-        };
         let rows = buf.lines();
         if rows.is_empty()
             || (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col)
         {
+            return Vec::new();
+        }
+        let total_rows = self
+            .virtual_rows
+            .map(|state| state.materialized.total_rows)
+            .unwrap_or_else(|| self.visual_row_total(buf));
+        if total_rows == 0 {
             return Vec::new();
         }
 
@@ -217,7 +233,7 @@ impl Window {
 
         let mut out = Vec::new();
         for abs_row in start_row..=end_row {
-            let Some(local) = self.backed_local_row(state, buf, abs_row) else {
+            let Some(local) = self.backed_display_row(buf, abs_row) else {
                 continue;
             };
             let Some(line) = rows.get(row_to_usize(local)) else {

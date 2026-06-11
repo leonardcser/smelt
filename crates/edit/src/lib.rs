@@ -94,6 +94,53 @@ pub fn hard_breaks_for_lines(lines: &[String]) -> Vec<usize> {
     hard
 }
 
+/// Byte ranges in `line` that are selectable/searchable after non-selectable
+/// display spans are removed.
+pub fn selectable_byte_ranges_for_line(
+    line: &str,
+    spans: &[smelt_buffer::buffer::Span],
+) -> Vec<std::ops::Range<usize>> {
+    if line.is_empty() {
+        return Vec::new();
+    }
+    let line_cells = text::byte_to_cell(line, line.len());
+    let mut blocked: Vec<(usize, usize)> = spans
+        .iter()
+        .filter(|span| !span.meta.selectable)
+        .map(|span| {
+            (
+                (span.col_start as usize).min(line_cells),
+                (span.col_end as usize).min(line_cells),
+            )
+        })
+        .filter(|(start, end)| start < end)
+        .collect();
+    if blocked.is_empty() {
+        return std::iter::once(0..line.len()).collect();
+    }
+    blocked.sort_unstable();
+
+    let mut ranges = Vec::new();
+    let mut cell = 0usize;
+    for (start, end) in blocked {
+        if start > cell {
+            let byte_start = text::cell_to_byte(line, cell);
+            let byte_end = text::cell_to_byte(line, start);
+            if byte_start < byte_end {
+                ranges.push(byte_start..byte_end);
+            }
+        }
+        cell = cell.max(end);
+    }
+    if cell < line_cells {
+        let byte_start = text::cell_to_byte(line, cell);
+        if byte_start < line.len() {
+            ranges.push(byte_start..line.len());
+        }
+    }
+    ranges
+}
+
 use std::collections::HashMap;
 
 pub struct Ui {
@@ -405,6 +452,10 @@ impl Ui {
 
     pub fn buf_mut(&mut self, id: BufId) -> Option<&mut Buffer> {
         self.bufs.get_mut(&id)
+    }
+
+    pub fn buffers_mut(&mut self) -> impl Iterator<Item = &mut Buffer> {
+        self.bufs.values_mut()
     }
 
     pub fn buf_destroy(&mut self, id: BufId) -> Option<Buffer> {
@@ -2090,11 +2141,20 @@ pub trait UiHost {
         let start_idx = row_to_usize(start).min(rows.len());
         let end = row_to_usize(start.saturating_add(count)).min(rows.len());
         let rows = rows[start_idx..end].to_vec();
+        let selectable_ranges = rows
+            .iter()
+            .enumerate()
+            .map(|(offset, row)| {
+                let spans = buf.highlights_at(start_idx + offset);
+                selectable_byte_ranges_for_line(row, &spans)
+            })
+            .collect();
         let hard_breaks = hard_breaks_for_lines(&rows);
         Some(DisplayRows {
             rows,
             soft_breaks: Vec::new(),
             hard_breaks,
+            selectable_ranges: Some(selectable_ranges),
         })
     }
 

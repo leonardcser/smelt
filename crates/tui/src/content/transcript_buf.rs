@@ -977,18 +977,37 @@ impl TranscriptProjection {
             return DisplayRows::empty();
         }
         let mut soft_wrapped = vec![false; materialized.texts.len()];
-        for p in materialized.pending {
+        let mut selectable_ranges: Vec<Vec<std::ops::Range<usize>>> = materialized
+            .texts
+            .iter()
+            .map(|row| {
+                if row.is_empty() {
+                    Vec::new()
+                } else {
+                    std::iter::once(0..row.len()).collect()
+                }
+            })
+            .collect();
+        for p in &materialized.pending {
             if let Some(slot) = soft_wrapped.get_mut(p.row) {
                 *slot = p.decoration.soft_wrapped;
+            }
+            if let (Some(row), Some(slot)) = (
+                materialized.texts.get(p.row),
+                selectable_ranges.get_mut(p.row),
+            ) {
+                *slot = crate::smelt_edit::selectable_byte_ranges_for_line(row, &p.highlights);
             }
         }
         let rows = materialized.texts[local_start..local_end].to_vec();
         let soft_wrapped = soft_wrapped[local_start..local_end].to_vec();
+        let selectable_ranges = selectable_ranges[local_start..local_end].to_vec();
         let (soft_breaks, hard_breaks) = breaks_for_materialized_rows(&rows, &soft_wrapped);
         DisplayRows {
             rows,
             soft_breaks,
             hard_breaks,
+            selectable_ranges: Some(selectable_ranges),
         }
     }
 

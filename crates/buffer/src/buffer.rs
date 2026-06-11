@@ -570,6 +570,7 @@ pub struct Buffer {
     pub readonly: bool,
     selection: Vec<SelectionRange>,
     yank_flash: Vec<SelectionRange>,
+    search_highlights: Vec<SelectionRange>,
     /// Source↔display coord maps. Written by parsers in `parse()` when source
     /// bytes don't map 1:1 to display chars. `None` falls back to identity.
     projection_maps: Option<crate::coords::ProjectionMaps>,
@@ -606,6 +607,7 @@ impl Buffer {
             readonly: false,
             selection: Vec::new(),
             yank_flash: Vec::new(),
+            search_highlights: Vec::new(),
             projection_maps: None,
         }
     }
@@ -643,6 +645,23 @@ impl Buffer {
 
     pub fn clear_yank_flash(&mut self) {
         self.yank_flash.clear();
+    }
+
+    /// Override the per-row search highlights. Empty `ranges` clears.
+    pub fn set_search_highlights(&mut self, ranges: Vec<SelectionRange>) {
+        if self.search_highlights == ranges {
+            return;
+        }
+        self.search_highlights = ranges;
+    }
+
+    /// Returns the search highlight ranges set by [`Self::set_search_highlights`].
+    pub fn search_highlights(&self) -> &[SelectionRange] {
+        &self.search_highlights
+    }
+
+    pub fn clear_search_highlights(&mut self) {
+        self.search_highlights.clear();
     }
 
     /// Attach a parser, firing `on_attach` once and invalidating the render cache.
@@ -836,6 +855,8 @@ impl Buffer {
         }
         self.selection.retain(|r| r.line < start || r.line >= end);
         self.yank_flash.retain(|r| r.line < start || r.line >= end);
+        self.search_highlights
+            .retain(|r| r.line < start || r.line >= end);
         self.changedtick += 1;
         self.last_line_edit = Some(LineEdit {
             before_tick,
@@ -860,6 +881,7 @@ impl Buffer {
         }
         self.selection.clear();
         self.yank_flash.clear();
+        self.search_highlights.clear();
         self.changedtick += 1;
         self.last_line_edit = None;
     }
