@@ -114,8 +114,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
         win: crate::smelt_edit::WinId,
     ) -> Option<crate::smelt_edit::RowIndex> {
         if win == crate::app::TRANSCRIPT_WIN {
-            let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
-            Some(rows.len() as crate::smelt_edit::RowIndex)
+            Some(self.transcript_total_rows(self.core.config.settings.show_thinking))
         } else {
             crate::smelt_edit::UiHost::virtual_total_rows(&mut self.ui, win)
         }

@@ -49,6 +49,16 @@ impl TranscriptView {
             .build_rows(&mut self.transcript.history, width, show_thinking, theme)
     }
 
+    pub(crate) fn exact_total_rows(
+        &mut self,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+    ) -> crate::smelt_edit::RowIndex {
+        self.projection
+            .exact_total_rows(&mut self.transcript.history, width, show_thinking, theme)
+    }
+
     pub(crate) fn line_breaks(
         &mut self,
         width: u16,
@@ -420,6 +430,16 @@ impl TuiApp {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         self.transcript.build_rows(tw, show_thinking, &theme)
+    }
+
+    pub(crate) fn transcript_total_rows(
+        &mut self,
+        show_thinking: bool,
+    ) -> crate::smelt_edit::RowIndex {
+        let _perf = smelt_perf::perf::begin("transcript:measure_rows_exact");
+        let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
+        self.transcript.exact_total_rows(tw, show_thinking, &theme)
     }
 
     fn transcript_rows_and_breaks_range(

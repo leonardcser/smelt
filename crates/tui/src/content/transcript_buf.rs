@@ -121,11 +121,23 @@ impl BlockRowIndex {
         self.rebuild_prefix_rows();
     }
 
-    fn set_exact_height(&mut self, index: usize, rows: RowIndex) {
+    fn set_exact_height(&mut self, index: usize, rows: RowIndex) -> bool {
         let Some(node) = self.nodes.get_mut(index) else {
-            return;
+            return false;
         };
+        if node.exact_height == Some(rows) {
+            return false;
+        }
         node.exact_height = Some(rows);
+        true
+    }
+
+    fn is_exact_for(&self, history: &BlockHistory, width: u16, show_thinking: bool) -> bool {
+        self.generation == history.generation()
+            && self.width == width
+            && self.show_thinking == show_thinking
+            && self.nodes.len() == history.order.len()
+            && self.nodes.iter().all(|node| node.exact_height.is_some())
     }
 
     fn refresh_height_index(&mut self) {
@@ -423,10 +435,16 @@ impl TranscriptProjection {
         show_thinking: bool,
         theme: &Theme,
     ) {
-        self.ensure_all(history, width, show_thinking, theme);
+        let gen = history.generation();
+        self.gc_if_stale(gen, width);
         let base_key = base_layout_key(width, show_thinking);
         self.row_index
             .rebuild_if_stale(history, width, show_thinking, base_key);
+        if self.row_index.is_exact_for(history, width, show_thinking) {
+            return;
+        }
+
+        self.ensure_all(history, width, show_thinking, theme);
         for i in 0..history.order.len() {
             let id = history.order[i];
             let key = history.resolve_key(id, base_key);
@@ -435,14 +453,26 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
-            self.row_index
+            let _measured = self
+                .row_index
                 .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
             #[cfg(test)]
-            {
+            if _measured {
                 self.counters.exact_height_measured_blocks += 1;
             }
         }
         self.row_index.refresh_height_index();
+    }
+
+    pub(crate) fn exact_total_rows(
+        &mut self,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+    ) -> RowIndex {
+        self.measure_all_heights(history, width, show_thinking, theme);
+        self.row_index.total_rows()
     }
 
     fn resize_anchor_for(
@@ -724,12 +754,12 @@ impl TranscriptProjection {
         };
         let block_rows = block_buf.line_count();
         let gap = history.rendered_block_gap(block_index, block_rows);
-        self.row_index.set_exact_height(
+        let _measured = self.row_index.set_exact_height(
             block_index,
             (gap as usize).saturating_add(block_rows) as RowIndex,
         );
         #[cfg(test)]
-        {
+        if _measured {
             self.counters.exact_height_measured_blocks += 1;
         }
         for _ in 0..gap {
@@ -829,10 +859,11 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
-            self.row_index
+            let _measured = self
+                .row_index
                 .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
             #[cfg(test)]
-            {
+            if _measured {
                 self.counters.exact_height_measured_blocks += 1;
             }
             row = row.saturating_add(gap);
@@ -879,10 +910,11 @@ impl TranscriptProjection {
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows);
-            self.row_index
+            let _measured = self
+                .row_index
                 .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             #[cfg(test)]
-            {
+            if _measured {
                 self.counters.exact_height_measured_blocks += 1;
             }
             for _ in 0..gap {
@@ -1372,6 +1404,30 @@ mod tests {
     }
 
     #[test]
+    fn user_chrome_uses_background_fill_not_fake_blank_text() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::User {
+            text: "hello".into(),
+            image_labels: vec![],
+        });
+
+        let rows = project_fresh(&mut transcript.history);
+
+        assert_eq!(rows.first().map(|row| row.line.as_str()), Some(""));
+        assert_eq!(rows.last().map(|row| row.line.as_str()), Some(""));
+        assert!(rows
+            .first()
+            .is_some_and(|row| row.decoration.fill_bg.is_some()));
+        assert!(rows
+            .last()
+            .is_some_and(|row| row.decoration.fill_bg.is_some()));
+        assert!(rows.first().is_some_and(|row| row.highlights.is_empty()));
+        assert!(rows.last().is_some_and(|row| row.highlights.is_empty()));
+        assert!(rows.iter().any(|row| row.line == " hello"));
+        assert!(!rows.iter().any(|row| row.line.len() >= 80));
+    }
+
+    #[test]
     fn visible_projection_matches_fresh_after_markdown_table_growth() {
         let mut transcript = Transcript::new();
         transcript.push(Block::User {
@@ -1493,6 +1549,37 @@ mod tests {
         assert_eq!(
             projection.counters(),
             TranscriptProjectionCounters::default()
+        );
+    }
+
+    #[test]
+    fn exact_total_rows_measures_without_building_full_rows() {
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let total = projection.exact_total_rows(&mut transcript.history, 80, false, &theme);
+
+        assert_eq!(total, 199);
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.rendered_blocks, 100);
+        assert_eq!(counters.exact_height_measured_blocks, 100);
+
+        projection.reset_counters();
+        assert_eq!(
+            projection.exact_total_rows(&mut transcript.history, 80, false, &theme),
+            total
+        );
+        assert_eq!(
+            projection.counters(),
+            TranscriptProjectionCounters::default(),
+            "repeated exact row-count queries should use the exact height index"
         );
     }
 

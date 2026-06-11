@@ -176,6 +176,8 @@ So blank chrome rows should probably become semantic empty rows with `fill_line_
 
 Non-blank chrome rows may still use explicit left padding plus trailing background, but the blank top/bottom padding rows should not create fake text.
 
+Implementation note: user/exec chrome blank rows now commit semantic empty rows with `fill_line_bg(SmeltUserBg)`, and non-blank rows use the same background-fill primitive for trailing background instead of writing right-side fake spaces. The left inner pad remains real non-selectable chrome because it positions the text.
+
 ### 6. Copy semantics are already rightly transcript-owned
 
 Virtual transcript copy cannot be a normal local byte copy because the buffer is only a materialized slice. The existing seam is good:
@@ -402,6 +404,8 @@ Required behavior:
 - The first implementation may rebuild exact heights synchronously; if that is too slow, switch to chunked exact rebuilds that do not expose approximate coordinates while incomplete.
 
 The key architectural rule is: exact height measurement is allowed to scan blocks, but full row concatenation is not required for exact row counts.
+
+Implementation note: `TranscriptProjection::exact_total_rows` now measures exact block heights and returns `BlockRowIndex`'s total directly. `UiHost::virtual_total_rows` uses that path instead of `full_transcript_display_text`, so exact scrollbar/`G` coordinates no longer require concatenating all rows. The current eager policy may still render blocks to measure heights; it just does not build the full row vector, and repeated exact-count queries reuse the exact height index.
 
 ### 6. Off-viewport display access
 

@@ -24,16 +24,18 @@ pub(super) fn render(
     mut paint: impl FnMut(&mut LineBuilder, &str, ChunkPos),
 ) -> u16 {
     let user_bg = intern("SmeltUserBg");
+    let bg = out
+        .theme()
+        .resolve(user_bg)
+        .bg
+        .unwrap_or(smelt_core::style::Color::Reset);
     let pad_meta = SpanMeta {
         selectable: false,
         copy_as: None,
     };
     let pad: String = " ".repeat(CHROME_INNER_PAD);
     let blank_row = |out: &mut LineBuilder| {
-        out.set_hl(user_bg);
-        out.print_with_meta(&pad, pad_meta.clone());
-        out.pad_row_to_layout_width(pad_meta.clone());
-        out.reset_style();
+        out.fill_line_bg(bg);
         out.newline();
     };
 
@@ -67,7 +69,7 @@ pub(super) fn render(
                 },
             );
             out.set_hl(user_bg);
-            out.pad_row_to_layout_width(pad_meta.clone());
+            out.fill_line_bg(bg);
             out.reset_style();
             out.newline();
             rows += 1;

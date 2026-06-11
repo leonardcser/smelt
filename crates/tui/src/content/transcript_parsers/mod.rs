@@ -1155,9 +1155,10 @@ mod tests {
         };
         let render = |b: &Block, st: Option<&ToolState>| layout_block_test(b, st, &ctx);
 
-        // User: every row in the chrome panel starts with the chrome pad.
+        // User: content rows in the chrome panel start with the chrome pad.
+        // Blank padding rows carry row-fill metadata instead of fake text.
         let lines = render(&user("hello"), None);
-        for line in &lines {
+        for line in lines.iter().filter(|line| !line.text.is_empty()) {
             assert!(
                 line.text.starts_with(&chrome_pad),
                 "user row missing chrome pad: {:?}",
@@ -1165,13 +1166,13 @@ mod tests {
             );
         }
 
-        // Exec command (no output): chrome panel rows start with chrome pad.
+        // Exec command (no output): content rows start with chrome pad.
         let exec_no_output = Block::Exec {
             command: "ls".into(),
             output: String::new(),
         };
         let lines = render(&exec_no_output, None);
-        for line in &lines {
+        for line in lines.iter().filter(|line| !line.text.is_empty()) {
             assert!(
                 line.text.starts_with(&chrome_pad),
                 "exec chrome row missing pad: {:?}",
