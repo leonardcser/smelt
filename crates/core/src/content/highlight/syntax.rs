@@ -7,6 +7,7 @@ use syntect::highlighting::Style;
 use syntect::parsing::SyntaxReference;
 
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
+use crate::buffer::SpanMeta;
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
 use crate::style::Color;
@@ -99,7 +100,17 @@ pub fn render_code_block(
             let pad = content_width.saturating_sub(cols);
             if pad > 0 {
                 out.set_bg(bg);
-                out.print_string(" ".repeat(pad));
+                if bctx.is_some() {
+                    out.print_with_meta(
+                        &" ".repeat(pad),
+                        SpanMeta {
+                            selectable: false,
+                            copy_as: None,
+                        },
+                    );
+                } else {
+                    out.fill_line_bg(bg);
+                }
             }
             if let Some(b) = bctx {
                 if dim {
@@ -502,6 +513,26 @@ mod tests {
         });
         let joined = join_text(&block);
         assert!(joined.contains("│"));
+    }
+
+    #[test]
+    fn render_code_block_without_box_uses_background_fill_not_fake_spaces() {
+        let block = render_test(10, |out| {
+            render_code_block(out, &["hi"], "rust", 10, false, None, false);
+        });
+        assert_eq!(block.lines[0].text, "hi");
+    }
+
+    #[test]
+    fn render_code_block_box_padding_is_not_selectable() {
+        let ctx = bctx(6);
+        let block = render_test(80, |out| {
+            render_code_block(out, &["hi"], "rust", 80, false, Some(&ctx), false);
+        });
+        assert!(block.lines[0]
+            .spans
+            .iter()
+            .any(|span| span.text == "    " && !span.meta.selectable));
     }
 
     #[test]
