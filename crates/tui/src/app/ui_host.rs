@@ -72,44 +72,25 @@ impl crate::smelt_edit::UiHost for TuiApp {
         }
     }
 
-    fn rows_for_range(
+    fn display_rows_for_range(
         &mut self,
         win: crate::smelt_edit::WinId,
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
-    ) -> Option<Vec<String>> {
+    ) -> Option<crate::smelt_edit::DisplayRows> {
         if win == crate::app::TRANSCRIPT_WIN {
-            Some(self.transcript_display_rows_range(
+            let range = self.transcript_rows_and_breaks_range(
                 self.core.config.settings.show_thinking,
                 start,
                 count,
-            ))
-        } else if win == crate::app::PROMPT_WIN {
-            let buf_id = self.ui.win(self.well_known.prompt)?.buf;
-            let buf = self.ui.buf(buf_id)?;
-            let rows = buf.lines();
-            let start_idx = crate::smelt_edit::row_to_usize(start).min(rows.len());
-            let end = crate::smelt_edit::row_to_usize(start.saturating_add(count)).min(rows.len());
-            Some(rows[start_idx..end].to_vec())
+            );
+            Some(crate::smelt_edit::DisplayRows {
+                rows: range.rows,
+                soft_breaks: range.soft_breaks,
+                hard_breaks: range.hard_breaks,
+            })
         } else {
-            crate::smelt_edit::UiHost::rows_for_range(&mut self.ui, win, start, count)
-        }
-    }
-
-    fn breaks_for_range(
-        &mut self,
-        win: crate::smelt_edit::WinId,
-        start: crate::smelt_edit::RowIndex,
-        count: crate::smelt_edit::RowIndex,
-    ) -> Option<(Vec<usize>, Vec<usize>)> {
-        if win == crate::app::TRANSCRIPT_WIN {
-            Some(self.transcript_line_breaks_range(
-                self.core.config.settings.show_thinking,
-                start,
-                count,
-            ))
-        } else {
-            crate::smelt_edit::UiHost::breaks_for_range(&mut self.ui, win, start, count)
+            crate::smelt_edit::UiHost::display_rows_for_range(&mut self.ui, win, start, count)
         }
     }
 

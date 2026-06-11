@@ -16,6 +16,13 @@ pub struct DocRange {
     pub end: DocPosition,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DisplayRows {
+    pub rows: Vec<String>,
+    pub soft_breaks: Vec<usize>,
+    pub hard_breaks: Vec<usize>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaterializedRows {
     pub clamped_scroll: RowIndex,

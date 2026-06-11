@@ -442,7 +442,7 @@ impl TuiApp {
         self.transcript.exact_total_rows(tw, show_thinking, &theme)
     }
 
-    fn transcript_rows_and_breaks_range(
+    pub(crate) fn transcript_rows_and_breaks_range(
         &mut self,
         show_thinking: bool,
         start: crate::smelt_edit::RowIndex,
@@ -479,16 +479,6 @@ impl TuiApp {
         soft.sort_unstable();
         hard.sort_unstable();
         (soft, hard)
-    }
-
-    pub(crate) fn transcript_line_breaks_range(
-        &mut self,
-        show_thinking: bool,
-        start: crate::smelt_edit::RowIndex,
-        count: crate::smelt_edit::RowIndex,
-    ) -> (Vec<usize>, Vec<usize>) {
-        let range = self.transcript_rows_and_breaks_range(show_thinking, start, count);
-        (range.soft_breaks, range.hard_breaks)
     }
 
     pub(crate) fn snap_cpos_to_selectable(

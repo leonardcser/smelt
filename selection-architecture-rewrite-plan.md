@@ -426,7 +426,9 @@ Cost model:
 
 Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `ExactRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
 
-Implementation note: `UiHost::rows_for_range` and `UiHost::breaks_for_range` are now the primary display-row vocabulary. The full-document operations are explicitly named `full_rows_for` and `full_breaks_for`; their default implementations go through the ranged seam and exist for export/debug/full-scan callers. This keeps accidental full materialization visible at call sites while avoiding a premature `DisplayDocument` trait split before search consumes row metadata.
+Implementation note: `UiHost::display_rows_for_range` now returns the bounded row text and row-local break metadata together as `DisplayRows`. Legacy `rows_for_range` and `breaks_for_range` are derived accessors. TUI transcript overrides the combined seam so rows and soft/hard breaks come from one bounded materialization pass.
+
+Implementation note: `UiHost::rows_for_range` and `UiHost::breaks_for_range` remain compatibility vocabulary. The full-document operations are explicitly named `full_rows_for` and `full_breaks_for`; their default implementations go through the ranged seam and exist for export/debug/full-scan callers. This keeps accidental full materialization visible at call sites while avoiding a premature full `DisplayDocument` trait split before search consumes richer row metadata.
 
 ### 7. Operations allowed to scan the full transcript
 
