@@ -1,4 +1,4 @@
-use super::block_buffers::BlockBufferCache;
+use super::block_buffers::RenderedBlockCache;
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DocRange,
@@ -13,9 +13,9 @@ const HEAD_OVERSCAN_ROWS: RowIndex = 20;
 const TAIL_OVERSCAN_ROWS: RowIndex = 20;
 
 pub(crate) struct TranscriptProjection {
-    cache: BlockBufferCache,
-    cache_generation: u64,
-    cache_width: u16,
+    rendered_blocks: RenderedBlockCache,
+    rendered_blocks_generation: u64,
+    rendered_blocks_width: u16,
     materialized: Option<MaterializedProjection>,
     /// Block layout from the last visible `project()`. Surfaced to Lua via `visible_blocks`.
     visible_layout: Vec<LayoutEntry>,
@@ -25,7 +25,7 @@ pub(crate) struct TranscriptProjection {
     visible_total_rows: RowIndex,
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     cached_rows: Option<CachedRows>,
-    row_index: BlockRowIndex,
+    exact_rows: ExactRowIndex,
     #[cfg(test)]
     counters: TranscriptProjectionCounters,
 }
@@ -47,28 +47,28 @@ struct CachedRows {
 }
 
 #[derive(Default)]
-struct BlockRowIndex {
-    nodes: Vec<BlockRow>,
+struct ExactRowIndex {
+    nodes: Vec<ExactBlockRow>,
     prefix_rows: Vec<RowIndex>,
     generation: u64,
     width: u16,
     show_thinking: bool,
 }
 
-struct BlockRow {
+struct ExactBlockRow {
     id: BlockId,
     key: LayoutKey,
     estimated_height: RowIndex,
     exact_height: Option<RowIndex>,
 }
 
-impl BlockRow {
+impl ExactBlockRow {
     fn measured_or_estimated_height(&self) -> RowIndex {
         self.exact_height.unwrap_or(self.estimated_height)
     }
 }
 
-impl BlockRowIndex {
+impl ExactRowIndex {
     fn rebuild_if_stale(
         &mut self,
         history: &BlockHistory,
@@ -93,12 +93,12 @@ impl BlockRowIndex {
             let key = history.resolve_key(id, base_key);
             let old_same_index = old_nodes.get(index).filter(|node| node.id == id);
             let estimated_height = old_same_index
-                .map(BlockRow::measured_or_estimated_height)
+                .map(ExactBlockRow::measured_or_estimated_height)
                 .or_else(|| {
                     old_nodes
                         .iter()
                         .find(|node| node.id == id)
-                        .map(BlockRow::measured_or_estimated_height)
+                        .map(ExactBlockRow::measured_or_estimated_height)
                 })
                 .unwrap_or(1);
             let same_previous = index == 0
@@ -109,7 +109,7 @@ impl BlockRowIndex {
             let exact_height = old_same_index
                 .filter(|node| node.key == key && same_previous)
                 .and_then(|node| node.exact_height);
-            self.nodes.push(BlockRow {
+            self.nodes.push(ExactBlockRow {
                 id,
                 key,
                 estimated_height,
@@ -141,7 +141,7 @@ impl BlockRowIndex {
             && self.nodes.iter().all(|node| node.exact_height.is_some())
     }
 
-    fn refresh_height_index(&mut self) {
+    fn refresh_prefix_rows(&mut self) {
         self.rebuild_prefix_rows();
     }
 
@@ -336,15 +336,15 @@ fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
 impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
-            cache: BlockBufferCache::new(),
-            cache_generation: u64::MAX,
-            cache_width: 0,
+            rendered_blocks: RenderedBlockCache::new(),
+            rendered_blocks_generation: u64::MAX,
+            rendered_blocks_width: 0,
             materialized: None,
             visible_layout: Vec::new(),
             visible_row_base: 0,
             visible_total_rows: 0,
             cached_rows: None,
-            row_index: BlockRowIndex::default(),
+            exact_rows: ExactRowIndex::default(),
             #[cfg(test)]
             counters: TranscriptProjectionCounters::default(),
         }
@@ -376,7 +376,7 @@ impl TranscriptProjection {
         keys: &[LayoutKey],
         theme: &Theme,
     ) {
-        let rendered = self.cache.ensure_many(history, ids, keys, theme);
+        let rendered = self.rendered_blocks.ensure_many(history, ids, keys, theme);
         #[cfg(test)]
         {
             self.counters.rendered_blocks += rendered;
@@ -390,24 +390,24 @@ impl TranscriptProjection {
         self.visible_row_base = 0;
         self.visible_total_rows = 0;
         self.cached_rows = None;
-        self.row_index = BlockRowIndex::default();
+        self.exact_rows = ExactRowIndex::default();
     }
 
     fn gc_if_stale(&mut self, gen: u64, width: u16) {
-        if width != self.cache_width {
+        if width != self.rendered_blocks_width {
             // Width change invalidates all layouts (wrapping changes).
-            self.cache.clear();
-            self.cache_width = width;
+            self.rendered_blocks.clear();
+            self.rendered_blocks_width = width;
             self.clear_materialized_state();
         }
-        self.cache_generation = gen;
+        self.rendered_blocks_generation = gen;
     }
 
     /// Clear every cached layout so the next `project()` rebuilds from scratch.
     /// Called when the theme changes - colors that were baked into anonymous
     /// highlight groups need to be re-resolved against the new palette.
     pub(crate) fn invalidate_theme(&mut self) {
-        self.cache.clear();
+        self.rendered_blocks.clear();
         self.clear_materialized_state();
     }
 
@@ -439,16 +439,16 @@ impl TranscriptProjection {
         let gen = history.generation();
         self.gc_if_stale(gen, width);
         let base_key = base_layout_key(width, show_thinking);
-        self.row_index
+        self.exact_rows
             .rebuild_if_stale(history, width, show_thinking, base_key);
-        if self.row_index.is_exact_for(history, width, show_thinking) {
+        if self.exact_rows.is_exact_for(history, width, show_thinking) {
             return;
         }
 
         let mut missing_ids = Vec::new();
         let mut missing_keys = Vec::new();
         for node in self
-            .row_index
+            .exact_rows
             .nodes
             .iter()
             .filter(|node| node.exact_height.is_none())
@@ -459,7 +459,7 @@ impl TranscriptProjection {
         self.ensure_blocks(history, &missing_ids, &missing_keys, theme);
         for i in 0..history.order.len() {
             if self
-                .row_index
+                .exact_rows
                 .nodes
                 .get(i)
                 .is_some_and(|node| node.exact_height.is_some())
@@ -468,25 +468,25 @@ impl TranscriptProjection {
             }
             let id = history.order[i];
             let key = history.resolve_key(id, base_key);
-            let Some(block_buf) = self.cache.get(id, key) else {
+            let Some(block_buf) = self.rendered_blocks.get(id, key) else {
                 continue;
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
             let _measured = self
-                .row_index
+                .exact_rows
                 .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
             #[cfg(test)]
             if _measured {
                 self.counters.exact_height_measured_blocks += 1;
             }
         }
-        self.row_index.refresh_height_index();
+        self.exact_rows.refresh_prefix_rows();
     }
 
     fn exact_block_layout(&self, history: &BlockHistory) -> Vec<LayoutEntry> {
-        let mut layout = Vec::with_capacity(self.row_index.nodes.len());
-        for (i, node) in self.row_index.nodes.iter().enumerate() {
+        let mut layout = Vec::with_capacity(self.exact_rows.nodes.len());
+        for (i, node) in self.exact_rows.nodes.iter().enumerate() {
             debug_assert!(
                 node.exact_height.is_some(),
                 "exact block layout requested before height measurement"
@@ -501,7 +501,7 @@ impl TranscriptProjection {
             };
             layout.push(LayoutEntry {
                 id: node.id,
-                start: self.row_index.prefix_row(i).saturating_add(gap),
+                start: self.exact_rows.prefix_row(i).saturating_add(gap),
                 rows: exact_height.saturating_sub(gap),
             });
         }
@@ -516,7 +516,7 @@ impl TranscriptProjection {
         theme: &Theme,
     ) -> RowIndex {
         self.measure_all_heights(history, width, show_thinking, theme);
-        self.row_index.total_rows()
+        self.exact_rows.total_rows()
     }
 
     fn resize_anchor_for(
@@ -559,12 +559,12 @@ impl TranscriptProjection {
         anchor: Option<(BlockId, RowIndex)>,
     ) -> Option<RowIndex> {
         let (id, offset) = anchor?;
-        let index = self.row_index.block_index(id)?;
-        let key = self.row_index.nodes.get(index)?.key;
-        let block_rows = self.cache.get(id, key)?.line_count();
+        let index = self.exact_rows.block_index(id)?;
+        let key = self.exact_rows.nodes.get(index)?.key;
+        let block_rows = self.rendered_blocks.get(id, key)?.line_count();
         let gap = history.rendered_block_gap(index, block_rows) as RowIndex;
         Some(
-            self.row_index
+            self.exact_rows
                 .prefix_row(index)
                 .saturating_add(gap)
                 .saturating_add(offset),
@@ -586,7 +586,7 @@ impl TranscriptProjection {
             show_thinking,
             mode: scroll_target.mode(viewport_rows),
         };
-        let total_rows = self.row_index.total_rows();
+        let total_rows = self.exact_rows.total_rows();
         let requested_scroll_top = self
             .scroll_top_for_resize_anchor(history, resize_anchor)
             .unwrap_or_else(|| scroll_target.as_scroll_top());
@@ -607,10 +607,10 @@ impl TranscriptProjection {
                 start..total_rows
             }
         };
-        let block_range = self.row_index.block_range_for_rows(row_window);
+        let block_range = self.exact_rows.block_range_for_rows(row_window);
         let first = block_range.start;
         let end = block_range.end;
-        let block_ids = self.row_index.nodes[first..end]
+        let block_ids = self.exact_rows.nodes[first..end]
             .iter()
             .map(|node| node.id)
             .collect();
@@ -751,13 +751,13 @@ impl TranscriptProjection {
         theme: &Theme,
         block_range: std::ops::Range<usize>,
     ) -> MaterializedTranscriptRange {
-        let start = block_range.start.min(self.row_index.nodes.len());
-        let end = block_range.end.min(self.row_index.nodes.len());
+        let start = block_range.start.min(self.exact_rows.nodes.len());
+        let end = block_range.end.min(self.exact_rows.nodes.len());
         #[cfg(test)]
         {
             self.counters.range_materialized_blocks += end.saturating_sub(start);
         }
-        let row_base = self.row_index.prefix_row(start);
+        let row_base = self.exact_rows.prefix_row(start);
         let mut texts = Vec::new();
         let mut pending = Vec::new();
         let mut layout = Vec::with_capacity(end.saturating_sub(start));
@@ -769,16 +769,16 @@ impl TranscriptProjection {
         };
 
         for block_index in start..end {
-            let id = self.row_index.nodes[block_index].id;
-            let key = self.row_index.nodes[block_index].key;
+            let id = self.exact_rows.nodes[block_index].id;
+            let key = self.exact_rows.nodes[block_index].key;
             self.ensure_blocks(history, &[id], &[key], theme);
             self.append_projected_block(history, block_index, id, key, &mut rows);
         }
 
-        self.row_index.refresh_height_index();
+        self.exact_rows.refresh_prefix_rows();
         MaterializedTranscriptRange {
             row_base,
-            total_rows: self.row_index.total_rows(),
+            total_rows: self.exact_rows.total_rows(),
             texts,
             pending,
             layout,
@@ -793,12 +793,12 @@ impl TranscriptProjection {
         key: LayoutKey,
         rows: &mut ProjectRows<'_>,
     ) {
-        let Some(block_buf) = self.cache.get(id, key) else {
+        let Some(block_buf) = self.rendered_blocks.get(id, key) else {
             return;
         };
         let block_rows = block_buf.line_count();
         let gap = history.rendered_block_gap(block_index, block_rows);
-        let _measured = self.row_index.set_exact_height(
+        let _measured = self.exact_rows.set_exact_height(
             block_index,
             (gap as usize).saturating_add(block_rows) as RowIndex,
         );
@@ -856,7 +856,7 @@ impl TranscriptProjection {
         Some((entry.id, offset))
     }
 
-    /// Render every block into the cache. For full-text consumers that may run
+    /// Render every block into the rendered block cache. For full-text consumers that may run
     /// before the next `project()`.
     pub(crate) fn ensure_all(
         &mut self,
@@ -917,19 +917,19 @@ impl TranscriptProjection {
         }
         self.ensure_all(history, width, show_thinking, theme);
         let base_key = base_layout_key(width, show_thinking);
-        self.row_index
+        self.exact_rows
             .rebuild_if_stale(history, width, show_thinking, base_key);
         let mut rows: Vec<String> = Vec::new();
         for i in 0..history.order.len() {
             let id = history.order[i];
             let bkey = history.resolve_key(id, base_key);
-            let Some(block_buf) = self.cache.get(id, bkey) else {
+            let Some(block_buf) = self.rendered_blocks.get(id, bkey) else {
                 continue;
             };
             let block_rows = block_buf.line_count();
             let gap = history.rendered_block_gap(i, block_rows);
             let _measured = self
-                .row_index
+                .exact_rows
                 .set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             #[cfg(test)]
             if _measured {
@@ -942,7 +942,7 @@ impl TranscriptProjection {
                 rows.push(block_buf.get_line(r).unwrap_or("").to_string());
             }
         }
-        self.row_index.refresh_height_index();
+        self.exact_rows.refresh_prefix_rows();
         let rows = Arc::new(rows);
         self.cached_rows = Some(CachedRows {
             rows: Arc::clone(&rows),
@@ -968,12 +968,12 @@ impl TranscriptProjection {
         }
 
         self.measure_all_heights(history, width, show_thinking, theme);
-        let total_rows = self.row_index.total_rows();
+        let total_rows = self.exact_rows.total_rows();
         if total_rows == 0 || start >= total_rows {
             return TranscriptRangeRows::empty();
         }
         let end = end.min(total_rows);
-        let block_range = self.row_index.block_range_for_rows(start..end);
+        let block_range = self.exact_rows.block_range_for_rows(start..end);
         if block_range.start >= block_range.end {
             return TranscriptRangeRows::empty();
         }
@@ -1013,13 +1013,13 @@ impl TranscriptProjection {
             return CopyOutput::default();
         }
         self.measure_all_heights(history, width, show_thinking, theme);
-        let total_rows = self.row_index.total_rows();
+        let total_rows = self.exact_rows.total_rows();
         if total_rows == 0 || range.start.row >= total_rows {
             return CopyOutput::default();
         }
         let end_row = range.end.row.min(total_rows.saturating_sub(1));
         let block_range = self
-            .row_index
+            .exact_rows
             .block_range_for_rows(range.start.row..end_row.saturating_add(1));
         if block_range.start >= block_range.end {
             return CopyOutput::default();
@@ -1056,10 +1056,11 @@ impl TranscriptProjection {
         theme: &Theme,
     ) -> (Vec<usize>, Vec<usize>) {
         self.measure_all_heights(history, width, show_thinking, theme);
-        if self.row_index.nodes.is_empty() {
+        if self.exact_rows.nodes.is_empty() {
             return (Vec::new(), Vec::new());
         }
-        let materialized = self.collect_blocks_range(history, theme, 0..self.row_index.nodes.len());
+        let materialized =
+            self.collect_blocks_range(history, theme, 0..self.exact_rows.nodes.len());
         let mut soft_wrapped = vec![false; materialized.texts.len()];
         for p in materialized.pending {
             if let Some(slot) = soft_wrapped.get_mut(p.row) {

@@ -12,19 +12,19 @@ struct CachedBlock {
     buf: Buffer,
 }
 
-/// Per-block layout cache. Owned by `TranscriptProjection`.
-pub struct BlockBufferCache {
+/// Rendered block cache keyed by block id and layout key. Owned by `TranscriptProjection`.
+pub struct RenderedBlockCache {
     blocks: HashMap<BlockId, CachedBlock>,
     next_buf_id: u64,
 }
 
-impl Default for BlockBufferCache {
+impl Default for RenderedBlockCache {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl BlockBufferCache {
+impl RenderedBlockCache {
     pub fn new() -> Self {
         Self {
             blocks: HashMap::new(),

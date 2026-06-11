@@ -342,7 +342,7 @@ The code now has the right visible-buffer direction, and the Phase 1 work has re
 - `line_breaks` remains the explicit full break-vector path; `line_breaks_range` is used by ranged callers.
 - `build_rows` / `full_transcript_display_text` remain intentionally full-row APIs for legacy/full-text/export/debug-style consumers.
 
-`BlockRowIndex` is the right seed of the tmux-like backing coordinate space: it stores block ids, layout keys, estimated/exact heights, and prefix rows: `crates/tui/src/content/transcript_buf.rs:37`. The remaining work is to turn this Phase 1 row-index/range seam into the final `DisplayDocument`/rendered-block-cache model and delete the older row-state compatibility storage.
+`ExactRowIndex` is the transcript backing coordinate seed for the tmux-like model: it stores block ids, layout keys, estimated/exact heights, and prefix rows: `crates/tui/src/content/transcript_buf.rs:50`. The remaining work is to turn this row-index/range seam into the final `DisplayDocument` model, make `RenderedBlockCache` bounded, and delete the older row-state compatibility storage.
 
 ### 4. Proposed virtualization architecture
 
@@ -350,13 +350,13 @@ Keep `TranscriptProjection` as the transcript-owned backing projection. Split it
 
 ```rust
 struct TranscriptProjection {
-    row_index: BlockRowIndex,
-    layout_cache: BlockLayoutCache,
+    exact_rows: ExactRowIndex,
+    rendered_blocks: RenderedBlockCache,
     visible: VisibleProjection,
 }
 ```
 
-`BlockRowIndex` should be the durable coordinate authority:
+`ExactRowIndex` is the durable coordinate authority:
 
 - one node per transcript block
 - node key includes block id/content generation, width, show-thinking, and any layout-affecting state
@@ -365,17 +365,19 @@ struct TranscriptProjection {
 - exact heights are updated whenever a block layout is rendered or measured
 - top/bottom and scrollbar math read this index, not a full row vector
 
-`layout_cache` should be bounded and keyed by rendered block identity:
+`RenderedBlockCache` holds rendered block buffers keyed by rendered block identity:
 
 - key: block id + resolved `LayoutKey` + theme/highlight generation if needed for spans/colors
 - value: rendered block buffer rows, decorations, spans, source/copy metadata, and exact line count
 - eviction: LRU or generational, with visible/overscan blocks pinned for the current frame
 - width or show-thinking changes invalidate layout keys; theme changes invalidate color/span rendering but should not require throwing away height information unless layout actually depends on theme
 
+Implementation note: `TranscriptProjection` now names these responsibilities directly as `exact_rows: ExactRowIndex` and `rendered_blocks: RenderedBlockCache`. This is a seam/naming split only; `RenderedBlockCache` still needs bounded eviction/pinning before the cache portion of Phase 2 is complete.
+
 `visible` should be the only thing copied into the edit `Buffer` on normal render:
 
 - absolute `row_base`
-- total rows from `BlockRowIndex`
+- total rows from `ExactRowIndex`
 - block layout entries for visible Lua APIs
 - materialized rows covering viewport plus bounded overscan
 - generation/key of the target buffer materialization
@@ -406,7 +408,7 @@ Required behavior:
 
 The key architectural rule is: exact height measurement is allowed to scan blocks, but full row concatenation is not required for exact row counts.
 
-Implementation note: `TranscriptProjection::exact_total_rows` now measures exact block heights and returns `BlockRowIndex`'s total directly. `UiHost::virtual_total_rows` uses that path instead of `full_transcript_display_text`, so exact scrollbar/`G` coordinates no longer require concatenating all rows. The current eager policy may still render blocks to measure missing heights; it just does not build the full row vector, and repeated exact-count queries reuse the exact height index.
+Implementation note: `TranscriptProjection::exact_total_rows` now measures exact block heights and returns `ExactRowIndex`'s total directly. `UiHost::virtual_total_rows` uses that path instead of `full_transcript_display_text`, so exact scrollbar/`G` coordinates no longer require concatenating all rows. The current eager policy may still render blocks to measure missing heights; it just does not build the full row vector, and repeated exact-count queries reuse the exact row index.
 
 ### 6. Off-viewport display access
 
@@ -422,7 +424,7 @@ Cost model:
 - `copy_range(range)` may materialize the selected block range and scan selected rows; huge selections are explicitly huge operations.
 - line-break APIs should have a range form for virtual word motion; full break vectors are explicit full-text/export/debug operations only.
 
-Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `BlockRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
+Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `ExactRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
 
 Implementation note: `UiHost::rows_for_range` and `UiHost::breaks_for_range` are now the primary display-row vocabulary. The full-document operations are explicitly named `full_rows_for` and `full_breaks_for`; their default implementations go through the ranged seam and exist for export/debug/full-scan callers. This keeps accidental full materialization visible at call sites while avoiding a premature `DisplayDocument` trait split before search consumes row metadata.
 
