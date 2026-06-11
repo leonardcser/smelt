@@ -44,6 +44,29 @@ pub(crate) enum ViewportHit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextHit<P> {
+    pub row: RowIndex,
+    pub cell_col: usize,
+    pub kind: TextHitKind<P>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextHitKind<P> {
+    Selectable { before: P, after: P },
+    LeadingChrome { nearest: Option<P> },
+    TrailingChrome { nearest: Option<P> },
+    AllChrome,
+    EmptyRow,
+    Outside,
+}
+
+impl<P> TextHit<P> {
+    pub fn is_selectable(&self) -> bool {
+        matches!(self.kind, TextHitKind::Selectable { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScrollbarState {
     pub col: u16,
     pub total_rows: RowIndex,
@@ -839,6 +862,141 @@ impl Window {
         self.cpos_at_visual(buf, row_to_usize(vrow), vcell)
     }
 
+    pub fn text_hit_at_mouse(
+        &self,
+        buf: &Buffer,
+        event: MouseEvent,
+        viewport: WindowViewport,
+    ) -> TextHit<usize> {
+        let Some(hit) = viewport.hit(event.row, event.column) else {
+            return TextHit {
+                row: 0,
+                cell_col: 0,
+                kind: TextHitKind::Outside,
+            };
+        };
+        let ViewportHit::Content {
+            row: rel_row,
+            col: viewport_rel_col,
+        } = hit
+        else {
+            return TextHit {
+                row: 0,
+                cell_col: 0,
+                kind: TextHitKind::Outside,
+            };
+        };
+        let rel_col = viewport_rel_col
+            .saturating_sub(viewport.gutter_width)
+            .saturating_sub(self.config.gutters.pad_left);
+        let visual_total = self.visual_row_total(buf);
+        let vrow = self
+            .local_row(self.scroll_top.saturating_add(rel_row as RowIndex))
+            .min(visual_total.max(1).saturating_sub(1));
+        let vcell = rel_col as usize + self.scroll_left as usize;
+        self.text_hit_at_visual(buf, row_to_usize(vrow), vcell)
+    }
+
+    pub fn text_hit_at_visual(&self, buf: &Buffer, vrow: usize, vcell: usize) -> TextHit<usize> {
+        let row = self.absolute_row(vrow as RowIndex);
+        let Some((logical_row, cell)) = self.logical_cell_at_visual(buf, vrow, vcell) else {
+            return TextHit {
+                row,
+                cell_col: vcell,
+                kind: TextHitKind::Outside,
+            };
+        };
+        let Some(line) = buf.get_line(logical_row) else {
+            return TextHit {
+                row,
+                cell_col: cell,
+                kind: TextHitKind::Outside,
+            };
+        };
+        if line.is_empty() {
+            return TextHit {
+                row,
+                cell_col: cell,
+                kind: TextHitKind::EmptyRow,
+            };
+        }
+
+        let line_width = text::byte_to_cell(line, line.len());
+        let line_start = buf.byte_at_display_pos(logical_row, 0);
+        let line_end = buf.byte_at_display_pos(logical_row, line_width);
+        if cell >= line_width {
+            return TextHit {
+                row,
+                cell_col: cell,
+                kind: TextHitKind::TrailingChrome {
+                    nearest: Some(line_end),
+                },
+            };
+        }
+        if !buf.decoration_at(logical_row).cell_selectable {
+            return TextHit {
+                row,
+                cell_col: cell,
+                kind: TextHitKind::AllChrome,
+            };
+        }
+
+        let spans = buf.highlights_at(logical_row);
+        if cell_range_contains_selectable(&spans, cell, cell.saturating_add(1)) {
+            return TextHit {
+                row,
+                cell_col: cell,
+                kind: TextHitKind::Selectable {
+                    before: buf.byte_at_display_pos(logical_row, cell),
+                    after: buf.byte_at_display_pos(logical_row, cell.saturating_add(1)),
+                },
+            };
+        }
+
+        let first_selectable = (0..line_width)
+            .find(|col| cell_range_contains_selectable(&spans, *col, col.saturating_add(1)));
+        let last_selectable_edge = (0..line_width)
+            .filter(|col| cell_range_contains_selectable(&spans, *col, col.saturating_add(1)))
+            .map(|col| col.saturating_add(1))
+            .next_back();
+        let kind = match (first_selectable, last_selectable_edge) {
+            (None, _) => TextHitKind::AllChrome,
+            (Some(first), _) if cell < first => TextHitKind::LeadingChrome {
+                nearest: Some(line_start),
+            },
+            (_, Some(edge)) => TextHitKind::TrailingChrome {
+                nearest: Some(buf.byte_at_display_pos(logical_row, edge)),
+            },
+            _ => TextHitKind::AllChrome,
+        };
+        TextHit {
+            row,
+            cell_col: cell,
+            kind,
+        }
+    }
+
+    fn logical_cell_at_visual(
+        &self,
+        buf: &Buffer,
+        vrow: usize,
+        vcell: usize,
+    ) -> Option<(usize, usize)> {
+        if buf.lines().is_empty() {
+            return None;
+        }
+        let last_logical = buf.lines().len() - 1;
+        if !self.layout_matches(buf) {
+            return Some((vrow.min(last_logical), vcell));
+        }
+        let (lrow, chunk_idx) = self.layout.logical_at_visual(vrow)?;
+        let chunks = self.layout.chunks_of(lrow);
+        let &(chunk_start_byte, _) = chunks.get(chunk_idx)?;
+        let logical_line = buf.lines().get(lrow).map(String::as_str).unwrap_or("");
+        let chunk_start_cell = smelt_buffer::text::byte_to_cell(logical_line, chunk_start_byte);
+        Some((lrow, chunk_start_cell.saturating_add(vcell)))
+    }
+
     /// Project a visual `(row, cell_col)` hit to a buffer cpos via the layout.
     /// Used by mouse hit-test and pan-preserving-cursor.
     fn cpos_at_visual(&self, buf: &Buffer, vrow: usize, vcell: usize) -> usize {
@@ -846,22 +1004,10 @@ impl Window {
             return 0;
         }
         let last_logical = buf.lines().len() - 1;
-        if !self.layout_matches(buf) {
-            let lrow = vrow.min(last_logical);
-            let cell = snap_col_past_chrome(buf, lrow, vcell as u16) as usize;
-            return buf.byte_at_display_pos(lrow, cell);
-        }
-        let (lrow, chunk_idx) = match self.layout.logical_at_visual(vrow) {
-            Some(p) => p,
-            None => return buf.byte_at_display_pos(last_logical, 0),
+        let Some((lrow, cell)) = self.logical_cell_at_visual(buf, vrow, vcell) else {
+            return buf.byte_at_display_pos(last_logical, 0);
         };
-        let chunks = self.layout.chunks_of(lrow);
-        let Some(&(chunk_start_byte, _)) = chunks.get(chunk_idx) else {
-            return buf.byte_at_display_pos(lrow, 0);
-        };
-        let logical_line = buf.lines().get(lrow).map(String::as_str).unwrap_or("");
-        let chunk_start_cell = smelt_buffer::text::byte_to_cell(logical_line, chunk_start_byte);
-        let cell = snap_col_past_chrome(buf, lrow, (chunk_start_cell + vcell) as u16) as usize;
+        let cell = snap_col_past_chrome(buf, lrow, cell as u16) as usize;
         buf.byte_at_display_pos(lrow, cell)
     }
 
@@ -2584,6 +2730,65 @@ mod tests {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(rows);
         buf
+    }
+
+    fn viewport(width: u16, height: u16) -> WindowViewport {
+        WindowViewport {
+            rect: Rect::new(0, 0, width, height),
+            gutter_width: 0,
+            content_width: width,
+            scroll_top: 0,
+            total_rows: height as RowIndex,
+            scrollbar: None,
+        }
+    }
+
+    #[test]
+    fn text_hit_at_mouse_distinguishes_selectable_text_from_chrome() {
+        let w = make_win();
+        let mut buf = make_buf(vec!["abc----xyz".into()]);
+        buf.set_decoration(
+            0,
+            smelt_buffer::buffer::LineDecoration {
+                cell_selectable: true,
+                ..Default::default()
+            },
+        );
+        buf.add_highlight_group_with_meta(
+            0,
+            3,
+            7,
+            smelt_buffer::theme::intern("Normal"),
+            smelt_buffer::buffer::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+        let vp = viewport(20, 1);
+
+        let chrome = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 4,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        assert!(!w.text_hit_at_mouse(&buf, chrome, vp).is_selectable());
+
+        let text = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 8,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        assert!(w.text_hit_at_mouse(&buf, text, vp).is_selectable());
+
+        let trailing = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 0,
+            column: 11,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        assert!(!w.text_hit_at_mouse(&buf, trailing, vp).is_selectable());
     }
 
     fn ctx() -> DrawContext {

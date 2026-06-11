@@ -240,6 +240,10 @@ impl TuiApp {
                 // overlays with multiple leaves (e.g. side-by-side panes) need click
                 // to follow keyboard focus, not just the first leaf the overlay opened.
                 // A non-focusable selectable leaf must not steal app_focus.
+                if is_down && !self.selectable_leaf_press_hits_text(win, me) {
+                    self.ui.cancel_pointer_interaction();
+                    return EventOutcome::Noop;
+                }
                 if is_down && self.ui.win(win).is_some_and(|w| w.focusable) {
                     self.ui.set_focus(win);
                 }
@@ -362,6 +366,19 @@ impl TuiApp {
     /// leaf that sets `Window::selectable = true`. Skips the snap + word/line-break
     /// machinery the transcript needs - drag-select only, no double/triple-click
     /// word/line expansion. Returns the yanked range on `Up` (caller copies it).
+    fn selectable_leaf_press_hits_text(&self, win: WinId, me: MouseEvent) -> bool {
+        let Some(viewport) = crate::smelt_edit::UiHost::viewport_for(self, win) else {
+            return false;
+        };
+        let Some(win_ref) = self.ui.win(win) else {
+            return false;
+        };
+        let Some(buf) = self.ui.buf(win_ref.buf) else {
+            return false;
+        };
+        win_ref.text_hit_at_mouse(buf, me, viewport).is_selectable()
+    }
+
     fn handle_selectable_leaf_mouse(
         &mut self,
         win: crate::smelt_edit::WinId,
