@@ -471,20 +471,6 @@ impl TuiApp {
         (range.soft_breaks, range.hard_breaks)
     }
 
-    /// Snap a clicked cell column to the nearest selectable cell on `abs_row`.
-    pub(crate) fn snap_col_to_selectable(
-        &mut self,
-        abs_row: usize,
-        col: usize,
-        _show_thinking: bool,
-    ) -> usize {
-        let buf_id = self.transcript_win().buf;
-        let Some(buf) = self.ui.buf(buf_id) else {
-            return col;
-        };
-        crate::content::transcript_buf::snap_col_to_selectable(buf, abs_row, col)
-    }
-
     pub(crate) fn snap_cpos_to_selectable(
         &mut self,
         rows: &[String],

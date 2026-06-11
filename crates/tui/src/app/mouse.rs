@@ -68,37 +68,6 @@ pub(crate) fn focus_for_region_click(
     }
 }
 
-struct TranscriptMouseCell {
-    row: usize,
-    source_col: usize,
-    scroll_left: usize,
-    content_left: usize,
-}
-
-fn transcript_mouse_cell(
-    win: &crate::smelt_edit::Window,
-    me: MouseEvent,
-    vp: crate::smelt_edit::WindowViewport,
-    row_count: usize,
-) -> TranscriptMouseCell {
-    let rel_row = me.row.saturating_sub(vp.rect.top) as crate::smelt_edit::RowIndex;
-    let abs_row = win.scroll_top().saturating_add(rel_row);
-    let row = (win.local_visual_row(abs_row) as usize).min(row_count.saturating_sub(1));
-
-    let content_left =
-        (vp.gutter_width as usize).saturating_add(win.config.gutters.pad_left as usize);
-    let viewport_col = me.column.saturating_sub(vp.rect.left) as usize;
-    let content_col = viewport_col.saturating_sub(content_left);
-    let scroll_left = win.scroll_left as usize;
-
-    TranscriptMouseCell {
-        row,
-        source_col: content_col.saturating_add(scroll_left),
-        scroll_left,
-        content_left,
-    }
-}
-
 fn projected_buf_breaks(buf: &crate::smelt_edit::Buffer) -> (Vec<usize>, Vec<usize>) {
     let lines = buf.lines();
     let mut soft = Vec::new();
@@ -417,7 +386,6 @@ impl TuiApp {
     }
 
     /// Drive a transcript-pane mouse event through `Window::handle_mouse`.
-    /// Snaps the click column to a selectable cell (hidden-thinking rows route to fold markers).
     /// On `MouseUp`, returns the yanked range as `CopyOutput` via `Buffer::copy_range` -
     /// the transcript's `BufferCopy` impl walks the latest snapshot so `copy_as`
     /// substitutions, soft-wrap merging, and non-selectable cells are honored.
@@ -437,20 +405,19 @@ impl TuiApp {
             }
             _ => false,
         };
-        let (rows, soft, hard) = {
+        let (has_rows, soft, hard) = {
             let buf = self.ui.buf(buf_id)?;
-            let rows = buf.lines().to_vec();
+            let has_rows = !buf.lines().is_empty();
             let (soft, hard) = if needs_breaks {
                 projected_buf_breaks(buf)
             } else {
                 (Vec::new(), Vec::new())
             };
-            (rows, soft, hard)
+            (has_rows, soft, hard)
         };
-        if rows.is_empty() {
+        if !has_rows {
             return None;
         }
-        let snapped = self.snap_event_for_selection(me, &rows, viewport);
 
         if self.transcript_win().is_virtual_rows() {
             let now = self.core.clock.instant_now();
@@ -464,7 +431,7 @@ impl TuiApp {
                 let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
                 let (_, range) = win
                     .expect("transcript window")
-                    .handle_virtual_mouse(buf?, snapped, mouse_ctx, now);
+                    .handle_virtual_mouse(buf?, me, mouse_ctx, now);
                 range?
             };
             let out = crate::smelt_edit::UiHost::copy_virtual_range(self, win_id, range)?;
@@ -490,7 +457,7 @@ impl TuiApp {
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             let (_, range) = win
                 .expect("transcript window")
-                .handle_mouse(buf?, snapped, mouse_ctx);
+                .handle_mouse(buf?, me, mouse_ctx);
             range?
         };
         let buf = self.ui.buf(buf_id)?;
@@ -499,30 +466,6 @@ impl TuiApp {
             None
         } else {
             Some(out)
-        }
-    }
-
-    /// Translate `me`'s column to the nearest selectable cell for the clicked display row.
-    /// Accounts for horizontal scroll so the snap operates on source-cell columns, not
-    /// viewport-relative ones.
-    fn snap_event_for_selection(
-        &mut self,
-        me: MouseEvent,
-        rows: &[String],
-        vp: crate::smelt_edit::WindowViewport,
-    ) -> MouseEvent {
-        let cell = transcript_mouse_cell(self.transcript_win(), me, vp, rows.len());
-        let snapped = self.snap_col_to_selectable(
-            cell.row,
-            cell.source_col,
-            self.core.config.settings.show_thinking,
-        );
-        let screen_col = snapped
-            .saturating_sub(cell.scroll_left)
-            .saturating_add(cell.content_left);
-        MouseEvent {
-            column: vp.rect.left.saturating_add(screen_col as u16),
-            ..me
         }
     }
 }

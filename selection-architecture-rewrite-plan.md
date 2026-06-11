@@ -145,6 +145,12 @@ These two paths can disagree about viewport-edge row clamping, materialized row 
 
 Plan change: remove transcript-specific pre-snapping from TUI. TUI should pass raw `MouseEvent`, `WindowViewport`, and click count. `Window` should perform one visible-row hit-test using the backing buffer's spans.
 
+Implementation note: the TUI pre-snap path (`transcript_mouse_cell` and
+`snap_event_for_selection`) has been removed. Transcript mouse handling now
+passes the raw `MouseEvent` into `Window::handle_mouse` /
+`Window::handle_virtual_mouse`; edit-side hit-testing owns row clamping,
+horizontal scroll, gutter/padding subtraction, and selectable-span snapping.
+
 ### 4. Existing buffer metadata is enough for generic selectable snapping
 
 Selection/cursor snapping can be generic because rows already expose:

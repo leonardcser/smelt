@@ -279,13 +279,6 @@ impl Window {
         let selection_ranges = anchor_range
             .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
             .unwrap_or_default();
-        eprintln!(
-            "[sync_virt] cursor={:?} anchor_range={:?} selection_ranges={:?} vim_mode={:?}",
-            self.virtual_cursor(),
-            anchor_range,
-            selection_ranges,
-            self.vim_mode
-        );
         buf.set_selection(selection_ranges);
         let flash_ranges = self
             .virtual_yank_flash_range(now)
@@ -571,14 +564,9 @@ impl Window {
                 state.preferred_cell_col = None;
             }
             ViewerCommand::StartVisual => {
-                eprintln!("[StartVisual] anchor={:?} current={:?}", current, current);
                 state.selection_anchor = Some(current);
             }
             ViewerCommand::StartVisualLine => {
-                eprintln!(
-                    "[StartVisualLine] anchor={:?} current={:?}",
-                    current, current
-                );
                 state.selection_anchor = Some(DocPosition {
                     row: current.row,
                     byte_col: 0,
@@ -677,10 +665,6 @@ impl Window {
                             state.preferred_cell_col = Some(cell);
                         }
                     }
-                    eprintln!(
-                        "[MoveCursorCol] delta={} row={} old_byte_col={} new_byte_col={} line_len={} vim_mode={:?} preferred_cell={:?}",
-                        delta, next.row, old, next.byte_col, line.len(), self.vim_mode, state.preferred_cell_col
-                    );
                 }
             }
             ViewerCommand::WordForward(count) => {

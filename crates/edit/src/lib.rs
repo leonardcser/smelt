@@ -1213,17 +1213,7 @@ impl Ui {
         let buf_id = win.buf;
         let (win, buf) = self.win_and_buf_mut(win_id, buf_id);
         let w = win.expect("captured window");
-        let scroll_before = w.scroll_top();
-        let cursor_before = w.virtual_cursor();
-        let stepped = w.drag_autoscroll_step(buf.expect("captured buffer"), viewport_h, delta);
-        if stepped {
-            let w = self.wins.get(&win_id).expect("window still present");
-            eprintln!(
-                "[tick_autoscroll] delta={} scroll_before={} scroll_after={} cursor_before={:?} cursor_after={:?}",
-                delta, scroll_before, w.scroll_top(), cursor_before, w.virtual_cursor()
-            );
-        }
-        stepped
+        w.drag_autoscroll_step(buf.expect("captured buffer"), viewport_h, delta)
     }
 
     /// `(win, delta)` when an in-flight drag's endpoint sits exactly at the
@@ -1253,10 +1243,6 @@ impl Ui {
         } else {
             return None;
         };
-        eprintln!(
-            "[edge_drag_delta] win={:?} abs_row={} scroll_top={} screen_row={} delta={} viewport_h={}",
-            win_id, abs_row, win.scroll_top(), screen_row, delta, viewport_h
-        );
         Some((win_id, delta))
     }
 
