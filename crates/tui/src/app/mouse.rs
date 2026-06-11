@@ -403,7 +403,8 @@ impl TuiApp {
             range?
         };
         let buf = self.ui.buf(buf_id)?;
-        let out = buf.copy_range(range.0..range.1);
+        let text = crate::content::transcript_buf::copy_byte_range(buf, range.0, range.1);
+        let out = crate::smelt_edit::CopyOutput::same(text);
         if out.is_empty() {
             None
         } else {
@@ -665,8 +666,25 @@ mod tests {
         }
     }
 
-    #[test]
-    fn prompt_top_bar_chrome_click_does_not_focus_prompt() {
+    fn left_drag(row: u16, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row,
+            column,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn left_up(row: u16, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            row,
+            column,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn app_with_seeded_prompt_top_bar() -> crate::app::TuiApp {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         app.push_block(smelt_core::Block::Text {
             content: "content focus target".into(),
@@ -719,6 +737,12 @@ mod tests {
             win.focusable = false;
         }
         app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        app
+    }
+
+    #[test]
+    fn prompt_top_bar_chrome_click_does_not_focus_prompt() {
+        let mut app = app_with_seeded_prompt_top_bar();
         let down = left_down(0, 4);
 
         app.handle_mouse(down);
@@ -727,6 +751,19 @@ mod tests {
         assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
         assert_eq!(app.ui.capture(), None);
         assert!(app.core.clipboard.kill_ring.current().is_empty());
+    }
+
+    #[test]
+    fn prompt_top_bar_selectable_text_drag_copies_without_focus() {
+        let mut app = app_with_seeded_prompt_top_bar();
+
+        app.handle_mouse(left_down(0, 0));
+        app.handle_mouse(left_drag(0, 3));
+        app.handle_mouse(left_up(0, 3));
+
+        assert_eq!(app.app_focus, AppFocus::Content);
+        assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
+        assert_eq!(app.core.clipboard.kill_ring.current(), "abc");
     }
 
     #[test]
