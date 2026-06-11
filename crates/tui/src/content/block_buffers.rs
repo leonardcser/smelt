@@ -5,7 +5,7 @@ use crate::content::transcript_parsers::layout_block_into;
 use crate::smelt_edit::{BufCreateOpts, BufId, Buffer};
 use smelt_core::theme::Theme;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const MAX_RENDERED_BLOCKS: usize = 512;
 
@@ -44,6 +44,7 @@ impl RenderedBlockCache {
     }
 
     fn evict_unpinned(&mut self, pinned: &[BlockId]) {
+        let pinned: HashSet<BlockId> = pinned.iter().copied().collect();
         let mut deferred = Vec::new();
         while self.blocks.len() > Self::MAX_BLOCKS {
             let Some(id) = self.recency.pop_front() else {
@@ -76,6 +77,10 @@ impl RenderedBlockCache {
         theme: &Theme,
     ) -> usize {
         debug_assert_eq!(ids.len(), keys.len());
+        assert!(
+            ids.len() <= Self::MAX_BLOCKS,
+            "rendered block cache batches must fit inside the pinned cache capacity"
+        );
 
         struct Task<'a> {
             id: BlockId,

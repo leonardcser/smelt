@@ -23,6 +23,12 @@ pub struct DisplayRows {
     pub hard_breaks: Vec<usize>,
 }
 
+impl DisplayRows {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MaterializedRows {
     pub clamped_scroll: RowIndex,

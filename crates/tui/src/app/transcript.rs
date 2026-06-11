@@ -134,7 +134,7 @@ impl TranscriptView {
         theme: &Theme,
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
-    ) -> crate::content::transcript_buf::TranscriptRangeRows {
+    ) -> crate::smelt_edit::DisplayRows {
         self.projection.rows_for_range(
             &mut self.transcript.history,
             width,
@@ -447,7 +447,7 @@ impl TuiApp {
         show_thinking: bool,
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
-    ) -> crate::content::transcript_buf::TranscriptRangeRows {
+    ) -> crate::smelt_edit::DisplayRows {
         let _perf = smelt_perf::perf::begin("transcript:materialize_rows_range");
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();

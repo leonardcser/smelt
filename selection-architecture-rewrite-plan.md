@@ -372,7 +372,7 @@ struct TranscriptProjection {
 - eviction: LRU or generational, with visible/overscan blocks pinned for the current frame
 - width or show-thinking changes invalidate layout keys; theme changes invalidate color/span rendering but should not require throwing away height information unless layout actually depends on theme
 
-Implementation note: `TranscriptProjection` now names these responsibilities directly as `exact_rows: ExactRowIndex` and `rendered_blocks: RenderedBlockCache`. `RenderedBlockCache` has bounded LRU-style eviction with the current ensure batch pinned; exact-height and full-row compatibility paths render and consume blocks one at a time so they can scan more blocks than the cache capacity without exposing approximate row coordinates.
+Implementation note: `TranscriptProjection` now names these responsibilities directly as `exact_rows: ExactRowIndex` and `rendered_blocks: RenderedBlockCache`. `RenderedBlockCache` has bounded LRU-style eviction with every pinned batch capped to cache capacity; exact-height and full-row compatibility paths render and consume capacity-sized chunks so they can scan more blocks than the cache capacity without exposing approximate row coordinates or falling back to serial one-block rendering.
 
 `visible` should be the only thing copied into the edit `Buffer` on normal render:
 
@@ -426,7 +426,9 @@ Cost model:
 
 Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `ExactRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
 
-Implementation note: `UiHost::display_rows_for_range` now returns the bounded row text and row-local break metadata together as `DisplayRows`. Legacy `rows_for_range` and `breaks_for_range` are derived accessors. TUI transcript overrides the combined seam so rows and soft/hard breaks come from one bounded materialization pass.
+Implementation note: `UiHost::display_rows_for_range` now returns the bounded row text and row-local break metadata together as `DisplayRows`. Legacy `rows_for_range` and `breaks_for_range` are derived accessors. TUI transcript materialization returns `DisplayRows` directly, so rows and soft/hard breaks come from one bounded materialization pass with no transcript-local duplicate row container.
+
+Design note: do not add an empty `DisplayRow` metadata shell until a consumer can delete existing logic. The next expansion should happen with search/copy/hit-test work and should add real selectable spans, decorations, and copy/source mapping to the displayed-row seam in the same slice.
 
 Implementation note: `UiHost::rows_for_range` and `UiHost::breaks_for_range` remain compatibility vocabulary. The full-document operations are explicitly named `full_rows_for` and `full_breaks_for`; their default implementations go through the ranged seam and exist for export/debug/full-scan callers. This keeps accidental full materialization visible at call sites while avoiding a premature full `DisplayDocument` trait split before search consumes richer row metadata.
 

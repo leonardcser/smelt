@@ -79,16 +79,11 @@ impl crate::smelt_edit::UiHost for TuiApp {
         count: crate::smelt_edit::RowIndex,
     ) -> Option<crate::smelt_edit::DisplayRows> {
         if win == crate::app::TRANSCRIPT_WIN {
-            let range = self.transcript_rows_and_breaks_range(
+            Some(self.transcript_rows_and_breaks_range(
                 self.core.config.settings.show_thinking,
                 start,
                 count,
-            );
-            Some(crate::smelt_edit::DisplayRows {
-                rows: range.rows,
-                soft_breaks: range.soft_breaks,
-                hard_breaks: range.hard_breaks,
-            })
+            ))
         } else {
             crate::smelt_edit::UiHost::display_rows_for_range(&mut self.ui, win, start, count)
         }
