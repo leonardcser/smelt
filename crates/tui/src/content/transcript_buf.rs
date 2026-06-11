@@ -444,8 +444,27 @@ impl TranscriptProjection {
             return;
         }
 
-        self.ensure_all(history, width, show_thinking, theme);
+        let mut missing_ids = Vec::new();
+        let mut missing_keys = Vec::new();
+        for node in self
+            .row_index
+            .nodes
+            .iter()
+            .filter(|node| node.exact_height.is_none())
+        {
+            missing_ids.push(node.id);
+            missing_keys.push(node.key);
+        }
+        self.ensure_blocks(history, &missing_ids, &missing_keys, theme);
         for i in 0..history.order.len() {
+            if self
+                .row_index
+                .nodes
+                .get(i)
+                .is_some_and(|node| node.exact_height.is_some())
+            {
+                continue;
+            }
             let id = history.order[i];
             let key = history.resolve_key(id, base_key);
             let Some(block_buf) = self.cache.get(id, key) else {
@@ -462,6 +481,30 @@ impl TranscriptProjection {
             }
         }
         self.row_index.refresh_height_index();
+    }
+
+    fn exact_block_layout(&self, history: &BlockHistory) -> Vec<LayoutEntry> {
+        let mut layout = Vec::with_capacity(self.row_index.nodes.len());
+        for (i, node) in self.row_index.nodes.iter().enumerate() {
+            debug_assert!(
+                node.exact_height.is_some(),
+                "exact block layout requested before height measurement"
+            );
+            let Some(exact_height) = node.exact_height else {
+                continue;
+            };
+            let gap = if exact_height == 0 {
+                0
+            } else {
+                (history.block_gap(i) as RowIndex).min(exact_height)
+            };
+            layout.push(LayoutEntry {
+                id: node.id,
+                start: self.row_index.prefix_row(i).saturating_add(gap),
+                rows: exact_height.saturating_sub(gap),
+            });
+        }
+        layout
     }
 
     pub(crate) fn exact_total_rows(
@@ -835,8 +878,9 @@ impl TranscriptProjection {
         self.ensure_blocks(history, &ids, &keys, theme);
     }
 
-    /// Exact full block layout for compatibility APIs. This may materialize every
-    /// transcript block, but does not rewrite the backing display buffer.
+    /// Exact full block layout for compatibility APIs. This may measure every
+    /// transcript block, but it does not concatenate display rows and does not
+    /// re-render blocks when the exact height index is already current.
     pub(crate) fn materialize_block_layout(
         &mut self,
         history: &mut BlockHistory,
@@ -844,38 +888,11 @@ impl TranscriptProjection {
         show_thinking: bool,
         theme: &Theme,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
-        self.ensure_all(history, width, show_thinking, theme);
-        let base_key = base_layout_key(width, show_thinking);
-        self.row_index
-            .rebuild_if_stale(history, width, show_thinking, base_key);
-
-        let mut row: RowIndex = 0;
-        let mut layout = Vec::with_capacity(history.order.len());
-        for i in 0..history.order.len() {
-            let id = history.order[i];
-            let bkey = history.resolve_key(id, base_key);
-            let Some(block_buf) = self.cache.get(id, bkey) else {
-                continue;
-            };
-            let block_rows = block_buf.line_count();
-            let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
-            let _measured = self
-                .row_index
-                .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
-            #[cfg(test)]
-            if _measured {
-                self.counters.exact_height_measured_blocks += 1;
-            }
-            row = row.saturating_add(gap);
-            layout.push(LayoutEntry {
-                id,
-                start: row,
-                rows: block_rows as RowIndex,
-            });
-            row = row.saturating_add(block_rows as RowIndex);
-        }
-        self.row_index.refresh_height_index();
-        layout.iter().map(|e| (e.id, e.start, e.rows)).collect()
+        self.measure_all_heights(history, width, show_thinking, theme);
+        self.exact_block_layout(history)
+            .into_iter()
+            .map(|e| (e.id, e.start, e.rows))
+            .collect()
     }
 
     /// Full display rows. Cached by `(generation, width, show_thinking)`; repeat
@@ -949,7 +966,7 @@ impl TranscriptProjection {
             return TranscriptRangeRows::empty();
         }
 
-        self.materialize_block_layout(history, width, show_thinking, theme);
+        self.measure_all_heights(history, width, show_thinking, theme);
         let total_rows = self.row_index.total_rows();
         if total_rows == 0 || start >= total_rows {
             return TranscriptRangeRows::empty();
@@ -994,7 +1011,7 @@ impl TranscriptProjection {
         if (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col) {
             return CopyOutput::default();
         }
-        self.materialize_block_layout(history, width, show_thinking, theme);
+        self.measure_all_heights(history, width, show_thinking, theme);
         let total_rows = self.row_index.total_rows();
         if total_rows == 0 || range.start.row >= total_rows {
             return CopyOutput::default();
@@ -1037,7 +1054,7 @@ impl TranscriptProjection {
         show_thinking: bool,
         theme: &Theme,
     ) -> (Vec<usize>, Vec<usize>) {
-        self.materialize_block_layout(history, width, show_thinking, theme);
+        self.measure_all_heights(history, width, show_thinking, theme);
         if self.row_index.nodes.is_empty() {
             return (Vec::new(), Vec::new());
         }
@@ -1580,6 +1597,80 @@ mod tests {
             projection.counters(),
             TranscriptProjectionCounters::default(),
             "repeated exact row-count queries should use the exact height index"
+        );
+    }
+
+    #[test]
+    fn range_rows_reuse_exact_height_index_without_full_rows() {
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        assert_eq!(
+            projection.exact_total_rows(&mut transcript.history, 80, false, &theme),
+            199
+        );
+
+        projection.reset_counters();
+        let rows = projection.rows_for_range(&mut transcript.history, 80, false, &theme, 150, 3);
+
+        assert_eq!(rows.rows, vec!["line 75", "", "line 76"]);
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.rendered_blocks, 0);
+        assert_eq!(counters.exact_height_measured_blocks, 0);
+        assert!(
+            counters.range_materialized_blocks < transcript.history.order.len(),
+            "range rows should materialize only intersecting blocks, got {counters:?}"
+        );
+    }
+
+    #[test]
+    fn copy_range_reuses_exact_height_index_without_full_rows() {
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        assert_eq!(
+            projection.exact_total_rows(&mut transcript.history, 80, false, &theme),
+            199
+        );
+
+        projection.reset_counters();
+        let copied = projection.copy_range(
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: 150,
+                    byte_col: 0,
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: 150,
+                    byte_col: "line 75".len(),
+                },
+            },
+        );
+
+        assert_eq!(copied.clipboard, "line 75");
+        assert_eq!(copied.kill_ring, "line 75");
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.rendered_blocks, 0);
+        assert_eq!(counters.exact_height_measured_blocks, 0);
+        assert!(
+            counters.range_materialized_blocks < transcript.history.order.len(),
+            "copy should materialize only intersecting blocks, got {counters:?}"
         );
     }
 

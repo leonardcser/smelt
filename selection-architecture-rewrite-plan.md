@@ -405,7 +405,7 @@ Required behavior:
 
 The key architectural rule is: exact height measurement is allowed to scan blocks, but full row concatenation is not required for exact row counts.
 
-Implementation note: `TranscriptProjection::exact_total_rows` now measures exact block heights and returns `BlockRowIndex`'s total directly. `UiHost::virtual_total_rows` uses that path instead of `full_transcript_display_text`, so exact scrollbar/`G` coordinates no longer require concatenating all rows. The current eager policy may still render blocks to measure heights; it just does not build the full row vector, and repeated exact-count queries reuse the exact height index.
+Implementation note: `TranscriptProjection::exact_total_rows` now measures exact block heights and returns `BlockRowIndex`'s total directly. `UiHost::virtual_total_rows` uses that path instead of `full_transcript_display_text`, so exact scrollbar/`G` coordinates no longer require concatenating all rows. The current eager policy may still render blocks to measure missing heights; it just does not build the full row vector, and repeated exact-count queries reuse the exact height index.
 
 ### 6. Off-viewport display access
 
@@ -420,6 +420,8 @@ Cost model:
 - `materialize(start..end)` may render blocks intersecting that range plus minimal context; it must not call full layout unless the requested range itself spans the full transcript.
 - `copy_range(range)` may materialize the selected block range and scan selected rows; huge selections are explicitly huge operations.
 - line-break APIs should have a range form for virtual word motion; full break vectors are explicit full-text/export/debug operations only.
+
+Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `BlockRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
 
 ### 7. Operations allowed to scan the full transcript
 
