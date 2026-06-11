@@ -16,7 +16,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "list",
-        "Return an array of `{ key, name, provider }` records for every model the active config can switch to.",
+        "Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
@@ -26,6 +26,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     entry.set("key", m.key.clone())?;
                     entry.set("name", m.model_name.clone())?;
                     entry.set("provider", m.provider_name.clone())?;
+                    entry.set("api_base", m.api_base.clone())?;
+                    entry.set("provider_type", m.provider_type.clone())?;
                     out.set(i + 1, entry)?;
                 }
                 Ok(())

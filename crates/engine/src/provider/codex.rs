@@ -451,6 +451,17 @@ pub(crate) struct CodexModel {
     pub(crate) context_window: Option<u32>,
 }
 
+impl From<CodexModel> for protocol::ModelMetadata {
+    fn from(model: CodexModel) -> Self {
+        Self {
+            id: model.slug,
+            display_name: Some(model.display_name),
+            context_window: model.context_window,
+            supports_reasoning: None,
+        }
+    }
+}
+
 async fn fetch_models(client: &reqwest::Client) -> Result<Vec<CodexModel>, String> {
     let (access_token, account_id) = ensure_access_token(client).await?;
 

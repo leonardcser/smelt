@@ -42,6 +42,7 @@ fn parse_request(provider: String, opts: mlua::Table) -> LuaResult<AuthRequest> 
     let provider = match provider.as_str() {
         "codex" => engine::auth::AuthProvider::Codex,
         "copilot" => engine::auth::AuthProvider::Copilot,
+        "kimi-code" => engine::auth::AuthProvider::KimiCode,
         other => {
             return Err(mlua::Error::external(format!(
                 "unsupported authenticated provider: {other}"

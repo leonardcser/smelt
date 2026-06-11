@@ -29,6 +29,10 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     /// Per-level token budgets for budget-based thinking.
     pub thinking_budgets: Option<protocol::ThinkingBudgets>,
+    /// Total context window, in tokens, from provider/catalog metadata.
+    pub context_window: Option<u32>,
+    /// Whether metadata says this model supports reasoning/thinking parameters.
+    pub supports_reasoning: Option<bool>,
 }
 
 impl From<&ModelConfig> for engine::ModelConfig {
@@ -47,6 +51,8 @@ impl From<&ModelConfig> for engine::ModelConfig {
             cache_write_cost: c.cache_write_cost,
             max_tokens: c.max_tokens,
             thinking_budgets: c.thinking_budgets,
+            context_window: c.context_window,
+            supports_reasoning: c.supports_reasoning,
         }
     }
 }
@@ -327,6 +333,8 @@ pub struct ResolvedModel {
     pub config: ModelConfig,
 }
 
+pub type DynamicModel = protocol::ModelMetadata;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveModelRefError {
     NotFound {
@@ -437,6 +445,14 @@ pub fn resolve_provider_ref<'a>(
     }
 }
 
+fn is_kimi_code_provider(provider: &ProviderConfig) -> bool {
+    provider.name.as_deref() == Some("kimi-code")
+        || provider
+            .api_base
+            .as_deref()
+            .is_some_and(engine::provider::kimi_code::is_api_base)
+}
+
 impl Config {
     /// Flatten providers + models into a list of resolved model entries.
     pub fn resolve_models(&self) -> Vec<ResolvedModel> {
@@ -492,35 +508,66 @@ impl Config {
         out
     }
 
-    /// Replace codex placeholders with dynamically fetched model slugs.
-    pub fn inject_codex_models(&self, resolved: &mut Vec<ResolvedModel>, slugs: &[String]) {
-        let Some(codex_provider) = self
+    fn inject_dynamic_models(
+        &self,
+        resolved: &mut Vec<ResolvedModel>,
+        provider: &ProviderConfig,
+        provider_type: &str,
+        models: &[DynamicModel],
+        replace_existing: bool,
+    ) {
+        let provider_name = provider.name.clone().unwrap_or_default();
+        let api_base = provider.api_base.clone().unwrap_or_default();
+        if replace_existing {
+            resolved.retain(|m| m.provider_name != provider_name);
+        }
+        let existing: std::collections::HashSet<String> = resolved
+            .iter()
+            .filter(|m| m.provider_name == provider_name)
+            .map(|m| m.model_name.clone())
+            .collect();
+
+        for model in models {
+            for resolved_model in resolved
+                .iter_mut()
+                .filter(|m| m.provider_name == provider_name && model.matches_name(&m.model_name))
+            {
+                resolved_model.config.context_window = model.context_window;
+                resolved_model.config.supports_reasoning = model.supports_reasoning;
+            }
+        }
+
+        for model in models {
+            if existing.contains(&model.id) {
+                continue;
+            }
+            resolved.push(ResolvedModel {
+                key: format!("{provider_name}/{}", model.id),
+                provider_name: provider_name.clone(),
+                model_name: model.id.clone(),
+                api_base: api_base.clone(),
+                api_key_env: String::new(),
+                provider_type: provider_type.to_string(),
+                config: ModelConfig {
+                    name: Some(model.id.clone()),
+                    context_window: model.context_window,
+                    supports_reasoning: model.supports_reasoning,
+                    ..ModelConfig::default()
+                },
+            });
+        }
+    }
+
+    /// Replace codex placeholders with dynamically fetched model metadata.
+    pub fn inject_codex_models(&self, resolved: &mut Vec<ResolvedModel>, models: &[DynamicModel]) {
+        let Some(provider) = self
             .providers
             .iter()
             .find(|p| p.provider_type.as_deref() == Some("codex"))
         else {
             return;
         };
-
-        let provider_name = codex_provider.name.clone().unwrap_or_default();
-        let api_base = codex_provider.api_base.clone().unwrap_or_default();
-
-        resolved.retain(|m| m.provider_type != "codex");
-
-        for slug in slugs {
-            resolved.push(ResolvedModel {
-                key: format!("{provider_name}/{slug}"),
-                provider_name: provider_name.clone(),
-                model_name: slug.clone(),
-                api_base: api_base.clone(),
-                api_key_env: String::new(),
-                provider_type: "codex".to_string(),
-                config: ModelConfig {
-                    name: Some(slug.clone()),
-                    ..ModelConfig::default()
-                },
-            });
-        }
+        self.inject_dynamic_models(resolved, provider, "codex", models, true);
     }
 
     /// Returns true if the config has a codex provider.
@@ -530,35 +577,20 @@ impl Config {
             .any(|p| p.provider_type.as_deref() == Some("codex"))
     }
 
-    /// Replace copilot placeholders with dynamically fetched model IDs.
-    pub fn inject_copilot_models(&self, resolved: &mut Vec<ResolvedModel>, ids: &[String]) {
-        let Some(copilot_provider) = self
+    /// Replace copilot placeholders with dynamically fetched model metadata.
+    pub fn inject_copilot_models(
+        &self,
+        resolved: &mut Vec<ResolvedModel>,
+        models: &[DynamicModel],
+    ) {
+        let Some(provider) = self
             .providers
             .iter()
             .find(|p| p.provider_type.as_deref() == Some("copilot"))
         else {
             return;
         };
-
-        let provider_name = copilot_provider.name.clone().unwrap_or_default();
-        let api_base = copilot_provider.api_base.clone().unwrap_or_default();
-
-        resolved.retain(|m| m.provider_type != "copilot");
-
-        for id in ids {
-            resolved.push(ResolvedModel {
-                key: format!("{provider_name}/{id}"),
-                provider_name: provider_name.clone(),
-                model_name: id.clone(),
-                api_base: api_base.clone(),
-                api_key_env: String::new(),
-                provider_type: "copilot".to_string(),
-                config: ModelConfig {
-                    name: Some(id.clone()),
-                    ..ModelConfig::default()
-                },
-            });
-        }
+        self.inject_dynamic_models(resolved, provider, "copilot", models, true);
     }
 
     pub fn has_copilot_provider(&self) -> bool {
@@ -567,7 +599,25 @@ impl Config {
             .any(|p| p.provider_type.as_deref() == Some("copilot"))
     }
 
-    /// Auto-inject OAuth providers (Codex, Copilot) when the user has stored
+    /// Add Kimi Code models fetched from the provider without clobbering
+    /// statically configured aliases.
+    pub fn inject_kimi_code_models(
+        &self,
+        resolved: &mut Vec<ResolvedModel>,
+        models: &[DynamicModel],
+    ) {
+        let Some(provider) = self.providers.iter().find(|p| is_kimi_code_provider(p)) else {
+            return;
+        };
+        self.inject_dynamic_models(resolved, provider, "kimi-code", models, false);
+    }
+
+    /// Returns true if the config has a Kimi Code provider.
+    pub fn has_kimi_code_provider(&self) -> bool {
+        self.providers.iter().any(is_kimi_code_provider)
+    }
+
+    /// Auto-inject OAuth providers (Codex, Copilot, Kimi Code) when the user has stored
     /// credentials but no explicit config entry. This eliminates the need for
     /// `smelt auth` to mutate the user's config file.
     pub fn inject_oauth_providers(&mut self) {
@@ -591,6 +641,20 @@ impl Config {
                 api_base: Some(engine::provider::copilot::DEFAULT_COPILOT_API_BASE.to_string()),
                 api_key_env: None,
                 models: vec![],
+            });
+        }
+        if !self.has_kimi_code_provider()
+            && engine::auth::is_logged_in(engine::auth::AuthProvider::KimiCode)
+        {
+            self.providers.push(ProviderConfig {
+                name: Some("kimi-code".to_string()),
+                provider_type: Some("kimi-code".to_string()),
+                api_base: Some(engine::provider::kimi_code::API_BASE.to_string()),
+                api_key_env: None,
+                models: vec![ModelConfig {
+                    name: Some("kimi-for-coding".to_string()),
+                    ..ModelConfig::default()
+                }],
             });
         }
     }

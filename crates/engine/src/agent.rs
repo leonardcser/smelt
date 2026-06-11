@@ -872,6 +872,16 @@ impl<'a> Turn<'a> {
         }
     }
 
+    fn apply_reasoning_effort(&mut self, effort: ReasoningEffort) {
+        // Kimi's Anthropic-compatible endpoint rejects requests when reasoning
+        // is toggled mid-turn because earlier assistant tool-call messages lack
+        // the reasoning_content the backend now expects. The UI/session state
+        // already records the new choice; keep this turn on its starting effort.
+        if self.provider.supports_mid_turn_reasoning_changes() {
+            self.reasoning_effort = effort;
+        }
+    }
+
     fn handle_turn_cmd(&mut self, cmd: UiCommand) -> bool {
         match cmd {
             UiCommand::Steer { text } => {
@@ -904,7 +914,7 @@ impl<'a> Turn<'a> {
                 true
             }
             UiCommand::SetReasoningEffort { effort } => {
-                self.reasoning_effort = effort;
+                self.apply_reasoning_effort(effort);
                 true
             }
             UiCommand::SetMode { mode } => {
@@ -1933,6 +1943,8 @@ impl<'a> Turn<'a> {
         let partial_text = std::sync::Mutex::new(String::new());
         let partial_reasoning = std::sync::Mutex::new(String::new());
 
+        let reasoning_changes_apply_now = self.provider.supports_mid_turn_reasoning_changes();
+
         // Model changes received mid-request are applied after the future resolves.
         let result = {
             let on_retry = |delay: std::time::Duration, attempt: u32| {
@@ -2004,7 +2016,11 @@ impl<'a> Turn<'a> {
                             cancel_received = true;
                             self.bg_cancel.cancel();
                         }
-                        UiCommand::SetReasoningEffort { effort } => self.reasoning_effort = effort,
+                        UiCommand::SetReasoningEffort { effort } => {
+                            if reasoning_changes_apply_now {
+                                self.reasoning_effort = effort;
+                            }
+                        }
                         UiCommand::SetMode { mode } => self.mode = mode,
                         UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                             pending_model = Some((model, api_base, api_key, provider_type));
@@ -2054,7 +2070,9 @@ impl<'a> Turn<'a> {
                 }) => {
                     self.queue_history_item(item, replace_note_kind);
                 }
-                Some(UiCommand::SetReasoningEffort { effort }) => self.reasoning_effort = effort,
+                Some(UiCommand::SetReasoningEffort { effort }) => {
+                    self.apply_reasoning_effort(effort)
+                }
                 Some(UiCommand::SetMode { mode }) => self.mode = mode,
                 Some(UiCommand::SetModel {
                     model,

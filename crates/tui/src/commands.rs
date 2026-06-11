@@ -291,10 +291,12 @@ impl TuiApp {
         let api_key = self.resolve_api_key().unwrap_or_default();
         let provider_type = self.core.config.provider_type.clone();
         let model = self.core.config.model.clone();
+        let model_config = self.core.config.model_config.clone();
         let update_api_base = api_base.clone();
         let clock = std::sync::Arc::clone(&self.core.clock);
         tokio::spawn(async move {
-            let provider = engine::Provider::new(api_base, api_key, &provider_type, client, clock);
+            let provider = engine::Provider::new(api_base, api_key, &provider_type, client, clock)
+                .with_model_config(model_config);
             let value = provider.fetch_context_window(&model).await;
             let _ = tx.send(ContextWindowUpdate {
                 request_id,

@@ -61,6 +61,7 @@ pub struct ModelEntry {
     pub pricing: Option<ModelPricing>,
     pub context_window: Option<u32>,
     pub output_tokens: Option<u32>,
+    pub supports_reasoning: Option<bool>,
 }
 
 const MODELS_API_URL: &str = "https://models.dev/api.json";
@@ -129,6 +130,10 @@ pub fn output_tokens(provider_type: &str, api_base: &str, model: &str) -> Option
     lookup(provider_type, api_base, model).and_then(|e| e.output_tokens)
 }
 
+pub fn supports_reasoning(provider_type: &str, api_base: &str, model: &str) -> Option<bool> {
+    lookup(provider_type, api_base, model).and_then(|e| e.supports_reasoning)
+}
+
 async fn load_or_fetch(client: &reqwest::Client) -> HashMap<(String, String), ModelEntry> {
     if let Some(json) = cache_get(CACHE_KEY) {
         if let Some(map) = parse(&json) {
@@ -174,10 +179,12 @@ fn push_unique(keys: &mut Vec<String>, key: String) {
 /// generic provider for it.  The `api_base` is used to disambiguate
 /// providers that share a wire format.
 pub(crate) fn catalog_key<'a>(provider_type: &'a str, api_base: &'a str) -> Option<&'a str> {
-    if provider_type == "anthropic-compatible" && api_base.contains("api.kimi.com/coding") {
-        return Some("kimi-for-coding");
-    }
     match provider_type {
+        "kimi-code" => Some("kimi-for-coding"),
+        // Compatibility for configs written before Kimi Code had its own provider kind.
+        "anthropic-compatible" if crate::provider::kimi_code::is_api_base(api_base) => {
+            Some("kimi-for-coding")
+        }
         "openai" | "codex" => Some("openai"),
         "anthropic" | "anthropic-compatible" => Some("anthropic"),
         "copilot" | "github-copilot" => Some("github-copilot"),
@@ -248,6 +255,8 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
         last_updated: Option<String>,
         cost: Option<CatalogCost>,
         limit: Option<CatalogLimit>,
+        #[serde(default)]
+        reasoning: Option<bool>,
     }
     // `Option<f64>` (not `#[serde(default)] f64`) so a stray null / string for any single
     // cost field doesn't fail the whole catalog - fall back to 0.0 per field.
@@ -309,13 +318,19 @@ fn parse(json: &str) -> Option<HashMap<(String, String), ModelEntry>> {
                 .as_ref()
                 .and_then(|l| l.output)
                 .filter(|v| *v > 0);
-            if pricing.is_none() && context_window.is_none() && output_tokens.is_none() {
+            let supports_reasoning = model_val.reasoning;
+            if pricing.is_none()
+                && context_window.is_none()
+                && output_tokens.is_none()
+                && supports_reasoning.is_none()
+            {
                 continue;
             }
             let entry = ModelEntry {
                 pricing,
                 context_window,
                 output_tokens,
+                supports_reasoning,
             };
             let mut model_keys = vec![model_id.clone()];
             if let Some(name) = model_val.name.as_deref() {
@@ -391,6 +406,34 @@ mod tests {
         assert_eq!(
             catalog_keys("openai-compatible", "https://OpenRouter.ai/api/v1/"),
             vec!["api:https://openrouter.ai/api/v1".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_extracts_reasoning_capability() {
+        let json = r#"{
+            "kimi-for-coding": {"models": {
+                "moonshot-v1": {
+                    "limit": {"context": 131072},
+                    "reasoning": false
+                },
+                "moonshot-think": {
+                    "reasoning": true
+                }
+            }}
+        }"#;
+        let map = parse(json).unwrap();
+        assert_eq!(
+            map.get(&("kimi-for-coding".into(), "moonshot-v1".into()))
+                .unwrap()
+                .supports_reasoning,
+            Some(false)
+        );
+        assert_eq!(
+            map.get(&("kimi-for-coding".into(), "moonshot-think".into()))
+                .unwrap()
+                .supports_reasoning,
+            Some(true)
         );
     }
 

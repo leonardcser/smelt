@@ -7,7 +7,10 @@ use crate::provider;
 pub enum AuthProvider {
     Codex,
     Copilot,
+    KimiCode,
 }
+
+pub type AuthModelInfo = protocol::ModelMetadata;
 
 /// Login method for providers that support multiple flows.
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +42,7 @@ pub async fn login(
     match provider {
         AuthProvider::Codex => codex_login(method, client).await,
         AuthProvider::Copilot => copilot_login(client, progress).await,
+        AuthProvider::KimiCode => kimi_code_login(client, progress).await,
     }
 }
 
@@ -46,19 +50,31 @@ pub fn logout(provider: AuthProvider) {
     match provider {
         AuthProvider::Codex => provider::codex::CodexTokens::delete(),
         AuthProvider::Copilot => provider::copilot::CopilotTokens::delete(),
+        AuthProvider::KimiCode => provider::kimi_code::logout(),
     }
 }
 
 /// Return cached model identifiers for a provider (Codex slug, Copilot id).
 pub fn cached_models(kind: AuthProvider) -> Vec<String> {
+    cached_model_info(kind)
+        .into_iter()
+        .map(|model| model.id)
+        .collect()
+}
+
+pub fn cached_model_info(kind: AuthProvider) -> Vec<AuthModelInfo> {
     match kind {
         AuthProvider::Codex => provider::codex::load_cached_models()
             .into_iter()
-            .map(|m| m.slug)
+            .map(Into::into)
             .collect(),
         AuthProvider::Copilot => provider::copilot::load_cached_models()
             .into_iter()
-            .map(|m| m.id)
+            .map(Into::into)
+            .collect(),
+        AuthProvider::KimiCode => provider::kimi_code::load_cached_model_info()
+            .into_iter()
+            .map(Into::into)
             .collect(),
     }
 }
@@ -67,6 +83,7 @@ pub fn is_logged_in(provider: AuthProvider) -> bool {
     match provider {
         AuthProvider::Codex => provider::codex::CodexTokens::load().is_some(),
         AuthProvider::Copilot => provider::copilot::CopilotTokens::load().is_some(),
+        AuthProvider::KimiCode => provider::kimi_code::is_logged_in(),
     }
 }
 
@@ -88,6 +105,9 @@ pub async fn authenticated_request(
         AuthProvider::Copilot => {
             Err("authenticated Copilot requests are not supported".to_string())
         }
+        AuthProvider::KimiCode => {
+            provider::kimi_code::authenticated_request(method, path, body, client).await
+        }
     }
 }
 
@@ -103,16 +123,32 @@ async fn codex_authenticated_request(
         provider::codex::CHATGPT_BACKEND_API_BASE,
         authenticated_path(path)?
     );
-    let mut req = match method.to_ascii_uppercase().as_str() {
+    send_authenticated_request(client, method, url, body, |req| tokens.apply_headers(req)).await
+}
+
+pub(crate) fn authenticated_path(path: &str) -> Result<String, String> {
+    if !path.starts_with('/') || path.starts_with("//") || path.contains("://") {
+        return Err("authenticated request path must be an absolute path without a scheme".into());
+    }
+    Ok(path.to_string())
+}
+
+pub(crate) async fn send_authenticated_request<F>(
+    client: &reqwest::Client,
+    method: &str,
+    url: String,
+    body: Option<Vec<u8>>,
+    apply_auth: F,
+) -> Result<AuthenticatedResponse, String>
+where
+    F: FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+{
+    let req = match method.to_ascii_uppercase().as_str() {
         "GET" => client.get(url),
         "POST" => client.post(url).body(body.unwrap_or_default()),
         other => return Err(format!("unsupported authenticated request method: {other}")),
     };
-    req = tokens
-        .apply_headers(req)
-        .header("Accept", "application/json");
-
-    let resp = req
+    let resp = apply_auth(req.header("Accept", "application/json"))
         .send()
         .await
         .map_err(|e| format!("authenticated request failed: {e}"))?;
@@ -121,24 +157,34 @@ async fn codex_authenticated_request(
     Ok(AuthenticatedResponse { status, body })
 }
 
-fn authenticated_path(path: &str) -> Result<String, String> {
-    if !path.starts_with('/') || path.starts_with("//") || path.contains("://") {
-        return Err("authenticated request path must be an absolute path without a scheme".into());
-    }
-    Ok(path.to_string())
+pub async fn refresh_models_cache(kind: AuthProvider, client: &reqwest::Client) -> Vec<String> {
+    refresh_model_info(kind, client)
+        .await
+        .into_iter()
+        .map(|model| model.id)
+        .collect()
 }
 
-pub async fn refresh_models_cache(kind: AuthProvider, client: &reqwest::Client) -> Vec<String> {
+pub async fn refresh_model_info(
+    kind: AuthProvider,
+    client: &reqwest::Client,
+) -> Vec<AuthModelInfo> {
     match kind {
         AuthProvider::Codex => provider::codex::refresh_models_cache(client)
             .await
             .into_iter()
-            .map(|m| m.slug)
+            .map(Into::into)
             .collect(),
         AuthProvider::Copilot => provider::copilot::refresh_models_cache(client)
             .await
             .into_iter()
-            .map(|m| m.id)
+            .map(Into::into)
+            .collect(),
+        AuthProvider::KimiCode => provider::kimi_code::fetch_model_info(client)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
             .collect(),
     }
 }
@@ -168,6 +214,22 @@ async fn copilot_login(
     let tokens = provider::copilot::device_code_login(client, &callbacks).await?;
     Ok(LoginDetails {
         api_base: Some(tokens.api_base),
+        expires_at: Some(tokens.expires_at.to_string()),
+        ..Default::default()
+    })
+}
+
+async fn kimi_code_login(
+    client: &reqwest::Client,
+    progress: &LoginProgress<'_>,
+) -> Result<LoginDetails, String> {
+    let callbacks = provider::kimi_code::LoginCallbacks {
+        on_prompt: progress.on_prompt,
+        on_progress: progress.on_message,
+    };
+    let tokens = provider::kimi_code::login(client, &callbacks).await?;
+    Ok(LoginDetails {
+        api_base: Some(provider::kimi_code::api_base()),
         expires_at: Some(tokens.expires_at.to_string()),
         ..Default::default()
     })

@@ -129,6 +129,42 @@ fn parse_usage(u: &serde_json::Value) -> TokenUsage {
     usage
 }
 
+fn anthropic_image_source(url: &str) -> serde_json::Value {
+    if let Some(rest) = url.strip_prefix("data:") {
+        if let Some((media_type, data)) = rest.split_once(";base64,") {
+            return serde_json::json!({
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            });
+        }
+    }
+    serde_json::json!({"type": "url", "url": url})
+}
+
+fn anthropic_content_blocks(content: Option<&protocol::Content>) -> Vec<serde_json::Value> {
+    match content {
+        Some(protocol::Content::Text(text)) => vec![serde_json::json!({
+            "type": "text",
+            "text": text,
+        })],
+        Some(protocol::Content::Parts(parts)) => parts
+            .iter()
+            .map(|part| match part {
+                protocol::ContentPart::Text { text } => serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                }),
+                protocol::ContentPart::ImageUrl { url, .. } => serde_json::json!({
+                    "type": "image",
+                    "source": anthropic_image_source(url),
+                }),
+            })
+            .collect(),
+        None => vec![serde_json::json!({"type": "text", "text": ""})],
+    }
+}
+
 pub(super) fn build_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -154,14 +190,9 @@ pub(super) fn build_body(
                 }
             }
             Role::User => {
-                let text = m
-                    .content
-                    .as_ref()
-                    .map(|c| c.as_text().to_string())
-                    .unwrap_or_default();
                 content.push(serde_json::json!({
                     "role": "user",
-                    "content": [{"type": "text", "text": text}],
+                    "content": anthropic_content_blocks(m.content.as_ref()),
                 }));
                 last_user_idx = Some(content.len() - 1);
             }
@@ -195,10 +226,11 @@ pub(super) fn build_body(
                         }));
                     }
                 }
-                content.push(serde_json::json!({
+                let message = serde_json::json!({
                     "role": "assistant",
                     "content": message_content,
-                }));
+                });
+                content.push(message);
             }
             Role::Tool => {
                 let output = m.content.as_ref().map(|c| c.as_text()).unwrap_or_default();
@@ -587,7 +619,7 @@ mod tests {
     use super::*;
     use crate::provider::FunctionSchema;
     use crate::test_util::{assistant_calls, assistant_text, system, tool_msg, user};
-    use protocol::{FunctionCall, ToolCall};
+    use protocol::{Content, ContentPart, FunctionCall, Message, Role, ToolCall};
     use serde_json::json;
 
     fn cfg() -> ModelConfig {
@@ -844,6 +876,41 @@ mod tests {
     }
 
     #[test]
+    fn build_body_preserves_user_image_parts() {
+        let msg = Message {
+            role: Role::User,
+            content: Some(Content::Parts(vec![
+                ContentPart::Text {
+                    text: "look".into(),
+                },
+                ContentPart::ImageUrl {
+                    url: "data:image/png;base64,abc123".into(),
+                    label: None,
+                },
+            ])),
+            reasoning_content: None,
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: None,
+            is_error: false,
+        };
+        let body = build_body(
+            &[msg],
+            &[],
+            "m",
+            ReasoningEffort::Off,
+            &cfg(),
+            &CacheConfig::default(),
+        );
+        let content = &body["messages"][0]["content"];
+        assert_eq!(content[0], json!({"type": "text", "text": "look"}));
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "abc123");
+    }
+
+    #[test]
     fn build_body_emits_user_message_with_text_content() {
         let body = build_body(
             &[user("hello")],
@@ -858,6 +925,50 @@ mod tests {
         assert_eq!(msg["content"][0]["type"], "text");
         assert_eq!(msg["content"][0]["text"], "hello");
         assert!(msg["content"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn thinking_replays_tool_turns_with_anthropic_reasoning_blocks() {
+        let call = ToolCall::new(
+            "call_1".into(),
+            FunctionCall {
+                name: "bash".into(),
+                arguments: "{}".into(),
+            },
+        );
+        let assistant = Message::assistant_with_reasoning(
+            None,
+            Some("thought".into()),
+            Some(vec![ReasoningBlock {
+                provider: ReasoningBlock::ANTHROPIC.into(),
+                data: json!({
+                    "type": "thinking",
+                    "thinking": "thought",
+                    "signature": "sig",
+                }),
+            }]),
+            Some(vec![call]),
+        );
+        let body = build_body(
+            &[
+                user("run it"),
+                assistant,
+                tool_msg(Some("call_1"), "done"),
+                user("next"),
+            ],
+            &[],
+            "claude-sonnet-4-5",
+            ReasoningEffort::Low,
+            &cfg(),
+            &CacheConfig::default(),
+        );
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "thinking");
+        assert_eq!(messages[1]["content"][1]["type"], "tool_use");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
     }
 
     #[test]
@@ -1529,6 +1640,37 @@ mod tests {
         let content = &body["messages"][0]["content"];
         assert_eq!(content.as_array().unwrap().len(), 1);
         assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn build_body_preserves_tool_turn_when_thinking_is_enabled_later() {
+        let messages = vec![
+            user("inspect"),
+            assistant_calls(
+                None,
+                vec![ToolCall::new(
+                    "tc1".into(),
+                    FunctionCall {
+                        name: "read_file".into(),
+                        arguments: json!({"path":"a"}).to_string(),
+                    },
+                )],
+            ),
+            tool_msg(Some("tc1"), "file contents"),
+        ];
+        let body = build_body(
+            &messages,
+            &[],
+            "m",
+            ReasoningEffort::Low,
+            &cfg(),
+            &CacheConfig::default(),
+        );
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "tool_use");
+        assert_eq!(messages[2]["content"][0]["type"], "tool_result");
     }
 
     // ── Cache stability regression tests ─────────────────────────────────

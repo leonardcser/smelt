@@ -25,24 +25,11 @@ local function usage_unavailable(provider, message, data, style)
   return { text_row(provider .. ": " .. message, style or DIM) }
 end
 
-local function join_path(...)
-  local out = table.concat({ ... }, "/")
-  return out:gsub("/+/", "/")
-end
-
-local function read_json(path)
-  local raw, err = smelt.fs.read_async(path)
-  if not raw then return nil, err end
-  local value = smelt.parse.json(raw)
-  if value == nil then return nil, "invalid json" end
-  return value, nil
-end
-
 local function active_provider()
   local active = smelt.model()
   for _, model in ipairs(smelt.model.list() or {}) do
     if model.key == active or model.name == active then
-      return model.provider or "", model.key or active or ""
+      return model.provider or "", model.key or active or "", model.api_base or ""
     end
   end
   return "", active or ""
@@ -53,9 +40,10 @@ local function is_codex_provider(provider)
   return provider:find("codex", 1, true) ~= nil or provider:find("chatgpt", 1, true) ~= nil
 end
 
-local function is_kimi_provider(provider)
+local function is_kimi_provider(provider, api_base)
   provider = (provider or ""):lower()
-  return provider == "managed:kimi-code" or provider:find("kimi", 1, true) ~= nil
+  api_base = (api_base or ""):lower()
+  return provider == "kimi-code" or api_base:find("api.kimi.com/coding", 1, true) ~= nil
 end
 
 local function pct(value)
@@ -252,38 +240,16 @@ local function kimi_limit_label(item, detail, window, idx)
   return "Limit #" .. tostring(idx)
 end
 
-local function kimi_token_file()
-  local home = smelt.os.getenv("KIMI_CODE_HOME") or smelt.os.getenv("KIMI_HOME") or join_path(smelt.os.home() or "", ".kimi-code")
-  local path = join_path(home, "credentials", "kimi-code.json")
-  if not smelt.fs.exists(path) and not smelt.os.getenv("KIMI_CODE_HOME") and not smelt.os.getenv("KIMI_HOME") then
-    local legacy = join_path(smelt.os.home() or "", ".kimi", "credentials", "kimi-code.json")
-    if smelt.fs.exists(legacy) then path = legacy end
-  end
-  return path
-end
-
 local function kimi_usage_lines()
-  local token_payload, err = read_json(kimi_token_file())
-  if not token_payload then
-    if err and not err:match("No such file") and not err:match("os error 2") then
-      return { text_row("Kimi Code: failed to read credentials: " .. err, ERR) }
-    end
-    return { text_row("Kimi Code: not logged in", DIM) }
-  end
-  local token = token_payload.access_token
-  if not token then return { text_row("Kimi Code: no access token in credentials", DIM) } end
-
-  local base = smelt.os.getenv("KIMI_CODE_BASE_URL") or "https://api.kimi.com/coding/v1"
-  base = base:gsub("/+$", "")
-  local res, http_err = smelt.http.get(base .. "/usages", {
-    headers = { Authorization = "Bearer " .. token, Accept = "application/json" },
-    timeout_secs = 20,
-  })
+  local res, auth_err = smelt.auth.request("kimi-code", { path = "/usages" })
   if not res then
+    local msg = tostring(auth_err or "")
+    if msg:find("not logged in", 1, true) then
+      return { text_row("Kimi Code: not logged in", DIM) }
+    end
     return usage_unavailable("Kimi Code", "usage unavailable - check your connection and try again", {
-      kind = "network",
-      error = tostring(http_err),
-      url = base .. "/usages",
+      kind = "auth",
+      error = msg,
     })
   end
 
@@ -356,12 +322,12 @@ local function cost_and_pricing_lines()
 end
 
 local function provider_usage_lines()
-  local provider, model = active_provider()
+  local provider, model, api_base = active_provider()
   local usage_provider = provider ~= "" and provider or model
 
   if is_codex_provider(usage_provider) then
     return codex_usage_lines()
-  elseif is_kimi_provider(usage_provider) then
+  elseif is_kimi_provider(usage_provider, api_base) then
     return kimi_usage_lines()
   end
 
@@ -377,10 +343,10 @@ local function usage_lines()
 end
 
 local function loading_lines()
-  local provider, model = active_provider()
+  local provider, model, api_base = active_provider()
   local usage_provider = provider ~= "" and provider or model
   local title = is_codex_provider(usage_provider) and "Codex"
-    or (is_kimi_provider(usage_provider) and "Kimi Code" or "Usage")
+    or (is_kimi_provider(usage_provider, api_base) and "Kimi Code" or "Usage")
   local lines = {}
   append(lines, cost_and_pricing_lines())
   lines[#lines + 1] = blank()

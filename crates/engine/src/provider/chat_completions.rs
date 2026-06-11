@@ -62,6 +62,13 @@ pub(super) fn build_body(
                     }
                 }
                 super::sanitize_tool_call_arguments(obj);
+                if effort != ReasoningEffort::Off
+                    && m.role == Role::Assistant
+                    && m.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty())
+                    && !obj.contains_key("reasoning_content")
+                {
+                    obj.insert("reasoning_content".into(), serde_json::json!(""));
+                }
             }
             v
         })
@@ -371,6 +378,41 @@ mod tests {
         let body = build_body(&[m], &[], "m", ReasoningEffort::Off, &cfg());
         let args = &body["messages"][0]["tool_calls"][0]["function"]["arguments"];
         assert_eq!(args, "{}");
+    }
+
+    #[test]
+    fn build_body_preserves_tool_call_history_when_thinking_is_enabled_later() {
+        let assistant = Message {
+            role: Role::Assistant,
+            content: None,
+            reasoning_content: None,
+
+            reasoning_details: None,
+            tool_calls: Some(vec![ToolCall::new(
+                "id".into(),
+                FunctionCall {
+                    name: "f".into(),
+                    arguments: "{}".into(),
+                },
+            )]),
+            tool_call_id: None,
+            is_error: false,
+        };
+        let body = build_body(
+            &[
+                user("before compaction"),
+                assistant,
+                tool_msg("id", "tool output"),
+                user("continue with thinking on"),
+            ],
+            &[],
+            "m",
+            ReasoningEffort::Low,
+            &cfg(),
+        );
+        assert_eq!(body["messages"][1]["reasoning_content"], "");
+        assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "id");
+        assert_eq!(body["messages"][2]["tool_call_id"], "id");
     }
 
     #[test]

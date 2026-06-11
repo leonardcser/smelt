@@ -538,6 +538,8 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `cache_write_cost` | `number` |  | Cost per cache-write token in USD. |
 | `max_tokens` | `integer` |  | Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown. |
 | `thinking_budgets` | `table` |  | Per-level token budgets for budget-based thinking. |
+| `context_window` | `integer` |  | Total context window, in tokens. |
+| `supports_reasoning` | `boolean` |  | Whether this model supports reasoning/thinking parameters. |
 
 ### `smelt.theme.ColorDecl`
 

@@ -49,7 +49,7 @@ smelt.provider.register("openai", {
 
 | Field         | Description                                                                            |
 | ------------- | -------------------------------------------------------------------------------------- |
-| `type`        | `openai-compatible` (default), `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot` |
+| `type`        | `openai-compatible` (default), `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot`, `kimi-code` |
 | `api_base`    | API endpoint URL                                                                       |
 | `api_key_env` | Environment variable holding the API key (omit for `codex` and `copilot`)              |
 | `models`      | Array of model names (optional for `codex`/`copilot` — fetched via API)                |
@@ -64,9 +64,10 @@ fall back to `openai-compatible`.
 | `openai-compatible`    | `/v1/chat/completions`                             | Ollama, vLLM, SGLang, llama.cpp, Google Gemini |
 | `openai`               | `/v1/responses`                                    | OpenAI, OpenRouter                             |
 | `codex`                | `chatgpt.com/backend-api/codex` (OAuth)            | OpenAI Codex (ChatGPT subscription)            |
-| `anthropic-compatible` | `/v1/messages` + thinking                          | Kimi Code, other Anthropic-compatible APIs     |
+| `anthropic-compatible` | `/v1/messages` + thinking                          | Anthropic-compatible APIs                      |
 | `anthropic`            | `/v1/messages` + thinking                          | Anthropic                                      |
 | `copilot`              | `api.*.githubcopilot.com/chat/completions` (OAuth) | GitHub Copilot subscription                    |
+| `kimi-code`            | `api.kimi.com/coding/v1/messages` (OAuth)          | Kimi Code subscription                         |
 
 ### Model Configuration
 

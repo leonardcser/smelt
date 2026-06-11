@@ -23,6 +23,10 @@ pub struct ModelConfig {
     pub max_tokens: Option<u32>,
     /// Per-level token budgets for budget-based thinking.
     pub thinking_budgets: Option<ThinkingBudgets>,
+    /// Total context window, in tokens, from provider/catalog metadata.
+    pub context_window: Option<u32>,
+    /// Whether metadata says this model supports reasoning/thinking parameters.
+    pub supports_reasoning: Option<bool>,
 }
 
 impl ModelConfig {

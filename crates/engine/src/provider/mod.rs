@@ -4,6 +4,7 @@ mod chat_completions;
 pub mod codex;
 pub mod copilot;
 mod extract;
+pub mod kimi_code;
 mod openai;
 mod sse;
 
@@ -274,6 +275,38 @@ fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {
         .map(Duration::from_secs_f64)
 }
 
+fn reasoning_support_from_metadata(
+    config: &crate::config::ModelConfig,
+    provider_type: &str,
+    api_base: &str,
+    model: &str,
+) -> Option<bool> {
+    config.supports_reasoning.or_else(|| {
+        if kimi_code::is_api_base(api_base) {
+            kimi_code::cached_supports_reasoning(model)
+                .or_else(|| crate::catalog::supports_reasoning(provider_type, api_base, model))
+        } else {
+            crate::catalog::supports_reasoning(provider_type, api_base, model)
+        }
+    })
+}
+
+fn effective_reasoning_effort(
+    requested: ReasoningEffort,
+    config: &crate::config::ModelConfig,
+    provider_type: &str,
+    api_base: &str,
+    model: &str,
+) -> ReasoningEffort {
+    if requested != ReasoningEffort::Off
+        && reasoning_support_from_metadata(config, provider_type, api_base, model) == Some(false)
+    {
+        ReasoningEffort::Off
+    } else {
+        requested
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderKind {
     OpenAiCompatible,
@@ -282,6 +315,7 @@ pub enum ProviderKind {
     AnthropicCompatible,
     Anthropic,
     Copilot,
+    KimiCode,
 }
 
 impl ProviderKind {
@@ -297,7 +331,8 @@ impl ProviderKind {
             | Self::Codex
             | Self::AnthropicCompatible
             | Self::Anthropic
-            | Self::Copilot => &[
+            | Self::Copilot
+            | Self::KimiCode => &[
                 ReasoningEffort::Off,
                 ReasoningEffort::Low,
                 ReasoningEffort::Medium,
@@ -313,8 +348,17 @@ impl ProviderKind {
             "codex" => Self::Codex,
             "anthropic-compatible" => Self::AnthropicCompatible,
             "anthropic" => Self::Anthropic,
+            "kimi-code" => Self::KimiCode,
             "copilot" | "github-copilot" => Self::Copilot,
             _ => Self::OpenAiCompatible,
+        }
+    }
+
+    pub fn from_config_and_url(provider_type: &str, api_base: &str) -> Self {
+        if kimi_code::is_api_base(api_base) {
+            Self::KimiCode
+        } else {
+            Self::from_config(provider_type)
         }
     }
 
@@ -327,13 +371,14 @@ impl ProviderKind {
             Self::AnthropicCompatible => "anthropic-compatible",
             Self::Anthropic => "anthropic",
             Self::Copilot => "copilot",
+            Self::KimiCode => "kimi-code",
             Self::OpenAiCompatible => "openai-compatible",
         }
     }
 
     pub fn detect_from_url(api_base: &str) -> Self {
-        if api_base.contains("api.kimi.com/coding") {
-            Self::AnthropicCompatible
+        if kimi_code::is_api_base(api_base) {
+            Self::KimiCode
         } else if api_base.contains("api.anthropic.com") {
             Self::Anthropic
         } else if api_base.contains("api.openai.com") {
@@ -355,8 +400,97 @@ impl ProviderKind {
             Self::AnthropicCompatible => "anthropic-compatible",
             Self::Anthropic => "anthropic",
             Self::Copilot => "copilot",
+            Self::KimiCode => "kimi-code",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiKeyAuth {
+    Bearer,
+    XApiKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderAuth {
+    ApiKey,
+    KimiCodeOAuth,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProviderDescriptor {
+    wire_api: WireApi,
+    auth: Option<ProviderAuth>,
+    api_key_auth: Option<ApiKeyAuth>,
+    anthropic_cache: bool,
+    mid_turn_reasoning_changes: bool,
+}
+
+impl ProviderKind {
+    fn descriptor(self) -> ProviderDescriptor {
+        match self {
+            Self::OpenAiCompatible => ProviderDescriptor {
+                wire_api: WireApi::ChatCompletions,
+                auth: Some(ProviderAuth::ApiKey),
+                api_key_auth: Some(ApiKeyAuth::Bearer),
+                anthropic_cache: false,
+                mid_turn_reasoning_changes: true,
+            },
+            Self::OpenAi => ProviderDescriptor {
+                wire_api: WireApi::OpenAiResponses,
+                auth: Some(ProviderAuth::ApiKey),
+                api_key_auth: Some(ApiKeyAuth::Bearer),
+                anthropic_cache: false,
+                mid_turn_reasoning_changes: true,
+            },
+            Self::Codex => ProviderDescriptor {
+                wire_api: WireApi::OpenAiResponses,
+                auth: None,
+                api_key_auth: None,
+                anthropic_cache: false,
+                mid_turn_reasoning_changes: true,
+            },
+            Self::AnthropicCompatible => ProviderDescriptor {
+                wire_api: WireApi::AnthropicMessages,
+                auth: Some(ProviderAuth::ApiKey),
+                api_key_auth: Some(ApiKeyAuth::XApiKey),
+                anthropic_cache: true,
+                mid_turn_reasoning_changes: true,
+            },
+            Self::Anthropic => ProviderDescriptor {
+                wire_api: WireApi::AnthropicMessages,
+                auth: Some(ProviderAuth::ApiKey),
+                api_key_auth: Some(ApiKeyAuth::XApiKey),
+                anthropic_cache: true,
+                mid_turn_reasoning_changes: true,
+            },
+            Self::Copilot => ProviderDescriptor {
+                wire_api: WireApi::ChatCompletions,
+                auth: None,
+                api_key_auth: None,
+                anthropic_cache: false,
+                mid_turn_reasoning_changes: true,
+            },
+            Self::KimiCode => ProviderDescriptor {
+                wire_api: WireApi::AnthropicMessages,
+                auth: Some(ProviderAuth::KimiCodeOAuth),
+                api_key_auth: Some(ApiKeyAuth::Bearer),
+                anthropic_cache: false,
+                mid_turn_reasoning_changes: false,
+            },
+        }
+    }
+
+    fn wire_api(self) -> WireApi {
+        self.descriptor().wire_api
+    }
+}
+
+fn api_key_auth(kind: ProviderKind, api_key: &str) -> Option<ApiKeyAuth> {
+    if api_key.is_empty() {
+        return None;
+    }
+    kind.descriptor().api_key_auth
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,16 +532,6 @@ impl WireApi {
             Self::ChatCompletions => chat_completions::read_stream(resp, cancel, on_delta).await,
             Self::OpenAiResponses => openai::read_stream(resp, cancel, on_delta).await,
             Self::AnthropicMessages => anthropic::read_stream(resp, cancel, on_delta).await,
-        }
-    }
-}
-
-impl ProviderKind {
-    fn wire_api(self) -> WireApi {
-        match self {
-            Self::OpenAiCompatible | Self::Copilot => WireApi::ChatCompletions,
-            Self::OpenAi | Self::Codex => WireApi::OpenAiResponses,
-            Self::AnthropicCompatible | Self::Anthropic => WireApi::AnthropicMessages,
         }
     }
 }
@@ -595,6 +719,7 @@ pub struct Provider {
     api_key: String,
     client: Client,
     kind: ProviderKind,
+    auth: Option<ProviderAuth>,
     model_config: crate::config::ModelConfig,
     /// Sticky routing token for Codex: set from the first response, echoed on subsequent requests within the same turn.
     turn_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -617,6 +742,10 @@ pub(crate) fn sanitize_tool_call_arguments(obj: &mut serde_json::Map<String, ser
 }
 
 impl Provider {
+    pub(crate) fn supports_mid_turn_reasoning_changes(&self) -> bool {
+        self.kind.descriptor().mid_turn_reasoning_changes
+    }
+
     pub fn new(
         api_base: String,
         api_key: String,
@@ -625,12 +754,14 @@ impl Provider {
         clock: std::sync::Arc<dyn crate::clock::Clock>,
     ) -> Self {
         let api_base = api_base.trim_end_matches('/').to_string();
-        let kind = ProviderKind::from_config(provider_type);
+        let kind = ProviderKind::from_config_and_url(provider_type, &api_base);
+        let auth = kind.descriptor().auth;
         Self {
             api_base,
             api_key,
             client,
             kind,
+            auth,
             model_config: Default::default(),
             turn_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             clock,
@@ -656,7 +787,7 @@ impl Provider {
         &self.model_config
     }
 
-    pub(crate) fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
+    pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
         self.model_config = config;
         self
     }
@@ -668,10 +799,7 @@ impl Provider {
     /// Whether this provider speaks the Anthropic wire format and accepts
     /// `cache_control` markers on system, tools, and message content.
     pub fn supports_anthropic_cache(&self) -> bool {
-        matches!(
-            self.kind,
-            ProviderKind::Anthropic | ProviderKind::AnthropicCompatible
-        )
+        self.kind.descriptor().anthropic_cache
     }
 
     pub fn default_cache_config(&self, ttl_long: bool, session_id: Option<&str>) -> CacheConfig {
@@ -748,6 +876,9 @@ impl Provider {
             }
         }
 
+        let effort =
+            effective_reasoning_effort(effort, &config, self.kind.as_str(), &self.api_base, model);
+
         let (mut url, mut body) = match self.kind {
             ProviderKind::OpenAiCompatible => {
                 let url = format!("{}/chat/completions", self.api_base);
@@ -770,7 +901,9 @@ impl Provider {
                 }
                 (url, body)
             }
-            ProviderKind::AnthropicCompatible | ProviderKind::Anthropic => {
+            ProviderKind::AnthropicCompatible
+            | ProviderKind::Anthropic
+            | ProviderKind::KimiCode => {
                 let url = format!("{}/messages", self.api_base);
                 let body =
                     anthropic::build_body(messages, tools, model, effort, &config, &opts.cache);
@@ -787,6 +920,13 @@ impl Provider {
                 let body = copilot_body(wire, messages, tools, model, effort, &config, &opts.cache);
                 (url, body)
             }
+        };
+
+        let request_api_key = match self.auth {
+            Some(ProviderAuth::KimiCodeOAuth) => kimi_code::access_token(&self.client)
+                .await
+                .map_err(ProviderError::Auth)?,
+            Some(ProviderAuth::ApiKey) | None => self.api_key.clone(),
         };
 
         let copilot_initiator: &'static str = if is_copilot {
@@ -840,6 +980,9 @@ impl Provider {
             let request_start = self.clock.instant_now();
 
             let mut req = self.client.post(&url).json(&body);
+            if self.auth == Some(ProviderAuth::KimiCodeOAuth) {
+                req = kimi_code::apply_default_headers(req);
+            }
             if is_codex {
                 if let Some(ref tokens) = codex_auth {
                     req = tokens.apply_headers(req).header("originator", "smelt");
@@ -860,11 +1003,10 @@ impl Provider {
                 if copilot_has_images {
                     req = req.header("Copilot-Vision-Request", "true");
                 }
-            } else if !self.api_key.is_empty() {
-                if is_provider_anthropic {
-                    req = req.header("x-api-key", &self.api_key);
-                } else {
-                    req = req.bearer_auth(&self.api_key);
+            } else if let Some(auth) = api_key_auth(self.kind, &request_api_key) {
+                match auth {
+                    ApiKeyAuth::Bearer => req = req.bearer_auth(&request_api_key),
+                    ApiKeyAuth::XApiKey => req = req.header("x-api-key", &request_api_key),
                 }
             }
             if is_anthropic_wire {
@@ -1057,6 +1199,19 @@ impl Provider {
 
     pub async fn fetch_context_window(&self, model: &str) -> Option<u32> {
         let provider_label = self.kind.as_str();
+        if let Some(v) = self.model_config.context_window {
+            crate::log::entry(
+                crate::log::Level::Info,
+                "fetch_context_window",
+                &serde_json::json!({
+                    "model": model,
+                    "provider": provider_label,
+                    "from_config": v,
+                    "result": v,
+                }),
+            );
+            return Some(v);
+        }
         // Hit the provider's own `/v1/models` first - that's the
         // authoritative source. Fall through to the models.dev catalog
         // if it doesn't expose a window field.
@@ -1066,9 +1221,17 @@ impl Provider {
             }
             ProviderKind::OpenAi => None,
             ProviderKind::Codex => codex::cached_context_window(model),
+            ProviderKind::KimiCode => match kimi_code::cached_context_window(model) {
+                Some(v) => Some(v),
+                None => kimi_code::fetch_model_info(&self.client)
+                    .await
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .find(|info| info.matches_name(model))
+                    .and_then(|info| info.context_length),
+            },
             ProviderKind::Anthropic => self.fetch_context_window_anthropic(model).await,
-            // Kimi's `/coding` endpoint is Anthropic-shaped for chat but
-            // OpenAI-shaped for `/models`; fall back to the listing.
             ProviderKind::AnthropicCompatible => {
                 match self.fetch_context_window_anthropic(model).await {
                     Some(v) => Some(v),
@@ -1284,6 +1447,82 @@ mod tests {
             tool_call_id: None,
             is_error: false,
         }
+    }
+
+    #[test]
+    fn kimi_code_api_base_uses_anthropic_messages_wire_even_for_old_configs() {
+        let provider = Provider::new(
+            kimi_code::API_BASE.to_string(),
+            "token".to_string(),
+            "openai-compatible",
+            Client::new(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
+
+        assert_eq!(provider.kind, ProviderKind::KimiCode);
+        assert_eq!(provider.kind.wire_api(), WireApi::AnthropicMessages);
+    }
+
+    #[test]
+    fn kimi_code_defers_mid_turn_reasoning_changes() {
+        let kimi = Provider::new(
+            kimi_code::API_BASE.to_string(),
+            "token".to_string(),
+            "kimi-code",
+            Client::new(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
+        let openai = Provider::new(
+            "https://api.openai.com/v1".to_string(),
+            "token".to_string(),
+            "openai",
+            Client::new(),
+            std::sync::Arc::new(crate::clock::RealClock),
+        );
+
+        assert!(!kimi.supports_mid_turn_reasoning_changes());
+        assert!(openai.supports_mid_turn_reasoning_changes());
+    }
+
+    // ---- api_key_auth ----
+
+    #[test]
+    fn api_key_auth_uses_bearer_for_kimi_code_oauth_tokens() {
+        assert_eq!(
+            api_key_auth(ProviderKind::KimiCode, "token"),
+            Some(ApiKeyAuth::Bearer)
+        );
+    }
+
+    #[test]
+    fn api_key_auth_keeps_x_api_key_for_anthropic_wire_providers() {
+        assert_eq!(
+            api_key_auth(ProviderKind::Anthropic, "key"),
+            Some(ApiKeyAuth::XApiKey)
+        );
+        assert_eq!(
+            api_key_auth(ProviderKind::AnthropicCompatible, "key"),
+            Some(ApiKeyAuth::XApiKey)
+        );
+    }
+
+    #[test]
+    fn api_key_auth_uses_bearer_for_openai_family_keys() {
+        assert_eq!(
+            api_key_auth(ProviderKind::OpenAiCompatible, "key"),
+            Some(ApiKeyAuth::Bearer)
+        );
+        assert_eq!(
+            api_key_auth(ProviderKind::OpenAi, "key"),
+            Some(ApiKeyAuth::Bearer)
+        );
+    }
+
+    #[test]
+    fn api_key_auth_returns_none_without_key_or_for_managed_auth_providers() {
+        assert_eq!(api_key_auth(ProviderKind::OpenAiCompatible, ""), None);
+        assert_eq!(api_key_auth(ProviderKind::Codex, "key"), None);
+        assert_eq!(api_key_auth(ProviderKind::Copilot, "key"), None);
     }
 
     // ---- non_empty ----
@@ -1546,6 +1785,10 @@ mod tests {
             ProviderKind::from_config("github-copilot"),
             ProviderKind::Copilot
         );
+        assert_eq!(
+            ProviderKind::from_config("kimi-code"),
+            ProviderKind::KimiCode
+        );
     }
 
     #[test]
@@ -1564,7 +1807,7 @@ mod tests {
     fn provider_kind_detect_from_url_matches_host_substrings() {
         assert_eq!(
             ProviderKind::detect_from_url("https://api.kimi.com/coding"),
-            ProviderKind::AnthropicCompatible
+            ProviderKind::KimiCode
         );
         assert_eq!(
             ProviderKind::detect_from_url("https://api.anthropic.com"),
@@ -1595,6 +1838,7 @@ mod tests {
             ProviderKind::Codex,
             ProviderKind::Anthropic,
             ProviderKind::AnthropicCompatible,
+            ProviderKind::KimiCode,
             ProviderKind::Copilot,
             ProviderKind::OpenAiCompatible,
         ] {

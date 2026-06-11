@@ -358,6 +358,17 @@ pub(crate) struct CopilotModel {
     pub(crate) supported_reasoning_efforts: Vec<String>,
 }
 
+impl From<CopilotModel> for protocol::ModelMetadata {
+    fn from(model: CopilotModel) -> Self {
+        Self {
+            id: model.id,
+            display_name: Some(model.name),
+            context_window: model.context_window,
+            supports_reasoning: (!model.supported_reasoning_efforts.is_empty()).then_some(true),
+        }
+    }
+}
+
 async fn fetch_available_models(
     client: &reqwest::Client,
     access_token: &str,

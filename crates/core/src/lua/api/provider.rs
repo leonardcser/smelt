@@ -44,6 +44,10 @@ pub struct LuaProviderModel {
     pub max_tokens: Option<u32>,
     /// Per-level token budgets for budget-based thinking.
     pub thinking_budgets: Option<LuaThinkingBudgets>,
+    /// Total context window, in tokens.
+    pub context_window: Option<u32>,
+    /// Whether this model supports reasoning/thinking parameters.
+    pub supports_reasoning: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -120,6 +124,8 @@ impl FromLua for LuaModelEntry {
                     cache_write_cost: m.cache_write_cost,
                     max_tokens: m.max_tokens,
                     thinking_budgets: m.thinking_budgets.map(Into::into),
+                    context_window: m.context_window,
+                    supports_reasoning: m.supports_reasoning,
                 }))
             }
             other => Err(mlua::Error::external(format!(

@@ -22,8 +22,8 @@
 ## Run
 
 Just run `smelt`. The first launch opens a wizard that picks a provider, logs
-you into ChatGPT or GitHub Copilot if needed, and writes
-`~/.config/smelt/init.lua`.
+you into ChatGPT, GitHub Copilot, or Kimi Code if needed, and writes
+`~/.config/smelt/init.lua` for API-key providers.
 
 To skip the wizard, pass connection flags directly:
 
@@ -80,18 +80,18 @@ To skip the wizard, pass connection flags directly:
 
 === ":simple-moonshotai: Kimi Code"
 
-    Uses your Kimi Code subscription. Create an API key in your
-    [Kimi account](https://www.kimi.com/code/console) and pass it:
+    No API key; uses your Kimi Code subscription.
 
     ```bash
-    export KIMI_API_KEY=...
-    smelt --model kimi-for-coding \
-          --api-base https://api.kimi.com/coding/v1 \
-          --api-key-env KIMI_API_KEY
+    smelt auth                # device-code login
+    smelt --model kimi-for-coding
     ```
 
-    Or run `smelt auth`, pick "Kimi Code", and paste the generated block into
-    `~/.config/smelt/init.lua`.
+    The login flow stores OAuth credentials in Smelt's state directory and
+    registers the `kimi-code` provider automatically. Kimi Code uses the
+    Anthropic messages API with Smelt-owned OAuth credentials; it does not read
+    Kimi CLI credential storage. `/usage` reads Kimi Code subscription usage
+    from the Kimi API.
 
 ## Save your config
 

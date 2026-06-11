@@ -12,6 +12,7 @@ pub mod event;
 pub mod history;
 pub mod message;
 pub mod mode;
+pub mod model;
 pub mod style;
 pub mod usage;
 
@@ -31,6 +32,7 @@ pub use mode::{
     mode_change_note, process_status_note, AgentMode, ReasoningEffort, MODE_NOTE_PREFIX,
     PROCESS_STATUS_NOTE_PREFIX,
 };
+pub use model::ModelMetadata;
 pub use style::{StyledLines, StyledSpan};
 pub use usage::{
     ModelConfigOverrides, PermissionOverrides, RuleSetOverride, ThinkingBudgets, TokenUsage,

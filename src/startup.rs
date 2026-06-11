@@ -76,6 +76,57 @@ fn resolve_model_reference(
     }
 }
 
+fn has_managed_provider(
+    cfg: &smelt_core::config::Config,
+    provider: engine::auth::AuthProvider,
+) -> bool {
+    match provider {
+        engine::auth::AuthProvider::Codex => cfg.has_codex_provider(),
+        engine::auth::AuthProvider::Copilot => cfg.has_copilot_provider(),
+        engine::auth::AuthProvider::KimiCode => cfg.has_kimi_code_provider(),
+    }
+}
+
+fn inject_managed_models(
+    cfg: &smelt_core::config::Config,
+    available_models: &mut Vec<smelt_core::config::ResolvedModel>,
+    provider: engine::auth::AuthProvider,
+    models: &[smelt_core::config::DynamicModel],
+) {
+    match provider {
+        engine::auth::AuthProvider::Codex => cfg.inject_codex_models(available_models, models),
+        engine::auth::AuthProvider::Copilot => cfg.inject_copilot_models(available_models, models),
+        engine::auth::AuthProvider::KimiCode => {
+            cfg.inject_kimi_code_models(available_models, models)
+        }
+    }
+}
+
+async fn inject_managed_provider_models(
+    cfg: &smelt_core::config::Config,
+    available_models: &mut Vec<smelt_core::config::ResolvedModel>,
+    provider: engine::auth::AuthProvider,
+    http_client: &reqwest::Client,
+    refresh_if_empty: bool,
+) {
+    if !has_managed_provider(cfg, provider) {
+        return;
+    }
+
+    let mut models = engine::auth::cached_model_info(provider);
+    if refresh_if_empty && models.is_empty() {
+        models = engine::auth::refresh_model_info(provider, http_client).await;
+    }
+    if !models.is_empty() {
+        inject_managed_models(cfg, available_models, provider, &models);
+    }
+
+    let client = http_client.clone();
+    tokio::spawn(async move {
+        let _ = engine::auth::refresh_model_info(provider, &client).await;
+    });
+}
+
 /// Resolve all startup configuration: Lua registries, `--set` overrides, model lists, API keys, and defaults.
 ///
 /// `http_client` is reused for Codex / Copilot auth refresh tasks so they don't each
@@ -128,37 +179,30 @@ pub async fn resolve(
     let recent = smelt_core::state::Recent::load();
     let mut available_models = cfg.resolve_models();
 
-    if cfg.has_codex_provider() {
-        let ids = engine::auth::cached_models(engine::auth::AuthProvider::Codex);
-        if !ids.is_empty() {
-            cfg.inject_codex_models(&mut available_models, &ids);
-        }
-        let client = http_client.clone();
-        tokio::spawn(async move {
-            let _ = engine::auth::refresh_models_cache(engine::auth::AuthProvider::Codex, &client)
-                .await;
-        });
-    }
-
-    if cfg.has_copilot_provider() {
-        let mut ids = engine::auth::cached_models(engine::auth::AuthProvider::Copilot);
-        if ids.is_empty() {
-            ids = engine::auth::refresh_models_cache(
-                engine::auth::AuthProvider::Copilot,
-                http_client,
-            )
-            .await;
-        }
-        if !ids.is_empty() {
-            cfg.inject_copilot_models(&mut available_models, &ids);
-        }
-        let client = http_client.clone();
-        tokio::spawn(async move {
-            let _ =
-                engine::auth::refresh_models_cache(engine::auth::AuthProvider::Copilot, &client)
-                    .await;
-        });
-    }
+    inject_managed_provider_models(
+        &cfg,
+        &mut available_models,
+        engine::auth::AuthProvider::Codex,
+        http_client,
+        false,
+    )
+    .await;
+    inject_managed_provider_models(
+        &cfg,
+        &mut available_models,
+        engine::auth::AuthProvider::Copilot,
+        http_client,
+        true,
+    )
+    .await;
+    inject_managed_provider_models(
+        &cfg,
+        &mut available_models,
+        engine::auth::AuthProvider::KimiCode,
+        http_client,
+        true,
+    )
+    .await;
 
     let mut startup_auth_error: Option<String> = None;
 
@@ -171,11 +215,16 @@ pub async fn resolve(
                 .api_key_env
                 .clone()
                 .unwrap_or_else(|| r.api_key_env.clone());
-            let key = match resolve_api_key(&key_env) {
-                Ok(key) => key,
-                Err(err) => {
-                    startup_auth_error = Some(err);
-                    String::new()
+            let provider_kind = engine::ProviderKind::from_config_and_url(&r.provider_type, &base);
+            let key = if provider_kind == engine::ProviderKind::KimiCode {
+                String::new()
+            } else {
+                match resolve_api_key(&key_env) {
+                    Ok(key) => key,
+                    Err(err) => {
+                        startup_auth_error = Some(err);
+                        String::new()
+                    }
                 }
             };
             (
@@ -188,11 +237,16 @@ pub async fn resolve(
             )
         } else if let Some(base) = args.api_base.clone() {
             let key_env = args.api_key_env.clone().unwrap_or_default();
-            let key = match resolve_api_key(&key_env) {
-                Ok(key) => key,
-                Err(err) => {
-                    startup_auth_error = Some(err);
-                    String::new()
+            let provider_kind = engine::ProviderKind::detect_from_url(&base);
+            let key = if provider_kind == engine::ProviderKind::KimiCode {
+                String::new()
+            } else {
+                match resolve_api_key(&key_env) {
+                    Ok(key) => key,
+                    Err(err) => {
+                        startup_auth_error = Some(err);
+                        String::new()
+                    }
                 }
             };
             let Some(model) = args.model.clone() else {
@@ -203,9 +257,7 @@ pub async fn resolve(
                 base.clone(),
                 key,
                 key_env,
-                engine::ProviderKind::detect_from_url(&base)
-                    .as_config_str()
-                    .to_string(),
+                provider_kind.as_config_str().to_string(),
                 model,
                 smelt_core::config::ModelConfig::default(),
             )
@@ -292,7 +344,7 @@ pub async fn resolve(
         default_effort.unwrap_or(ReasoningEffort::Off)
     };
 
-    let provider_kind = engine::ProviderKind::from_config(&provider_type);
+    let provider_kind = engine::ProviderKind::from_config_and_url(&provider_type, &api_base);
     let mut reasoning_cycle = args
         .reasoning_cycle
         .as_deref()

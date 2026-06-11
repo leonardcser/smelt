@@ -28,7 +28,7 @@ pub struct Args {
     #[arg(
         long,
         value_name = "TYPE",
-        help = "Provider type: openai-compatible, openai, codex, anthropic-compatible, anthropic, copilot"
+        help = "Provider type: openai-compatible, openai, codex, anthropic-compatible, anthropic, copilot, kimi-code"
     )]
     r#type: Option<String>,
     #[arg(short, long)]

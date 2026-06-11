@@ -1223,7 +1223,7 @@ Perf instrumentation toggle, clear, and snapshot.
 Model selector.
 
 - `smelt.model.list` :: `fun(): table`
-  Return an array of `{ key, name, provider }` records for every model the active config can switch to.
+  Return an array of `{ key, name, provider, api_base, provider_type }` records for every model the active config can switch to.
 - `smelt.model.max_tokens` :: `fun(): integer?`
   Resolved maximum output tokens for the active model.
 - `smelt.model.preferred` :: `fun(name: any, value: any): any`

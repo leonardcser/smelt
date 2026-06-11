@@ -368,6 +368,8 @@
 ---@field cache_write_cost? number Cost per cache-write token in USD.
 ---@field max_tokens? integer Maximum output tokens for this model. Defaults to the model's own limit, falling back to 4096 if unknown.
 ---@field thinking_budgets? table Per-level token budgets for budget-based thinking.
+---@field context_window? integer Total context window, in tokens.
+---@field supports_reasoning? boolean Whether this model supports reasoning/thinking parameters.
 
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 ---@class smelt.theme.ColorDecl

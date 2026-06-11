@@ -110,12 +110,12 @@ const PROVIDERS: &[ProviderTemplate] = &[
     ProviderTemplate {
         name: "kimi-code",
         label: "Kimi Code",
-        provider_type: "anthropic-compatible",
+        provider_type: "kimi-code",
         api_base: "https://api.kimi.com/coding/v1",
-        api_key_env: "KIMI_API_KEY",
+        api_key_env: "",
         default_model: "kimi-for-coding",
         needs_api_base: false,
-        oauth: None,
+        oauth: Some(AuthProvider::KimiCode),
     },
 ];
 
@@ -211,6 +211,10 @@ async fn run_login(kind: AuthProvider) {
         }
         AuthProvider::Copilot => {
             println!("\n  Starting GitHub device-code login…\n");
+            LoginMethod::DeviceCode
+        }
+        AuthProvider::KimiCode => {
+            println!("\n  Starting Kimi Code device-code login…\n");
             LoginMethod::DeviceCode
         }
     };
