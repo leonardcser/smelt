@@ -198,9 +198,11 @@ Do not force edit/window to own full transcript data. Edit should own visible hi
 
 ### 8. Soft-wrap/copy-continuation is mostly copy, not selection painting
 
-`copy_continuation`, `source_text`, and `soft_wrapped` are crucial in `copy_byte_range`: `crates/tui/src/content/transcript_buf.rs:1045`.
+`copy_continuation`, `source_text`, and `soft_wrapped` are crucial in `copy_byte_range`: `crates/buffer/src/coords.rs:182`.
 
 Selection painting mostly needs rows, cells, empty-row behavior, and selectable masks. The shared projector should not overfit copy semantics. Copy/render share the same normalized range, but they may consume different row metadata.
+
+Implementation note: the displayed-buffer byte-range renderer now lives in `smelt_buffer::coords::copy_byte_range`, alongside selectable coordinate helpers. Transcript still owns virtual `DocRange` materialization/copy because it must map absolute rows through the projection, but once a bounded scratch/visible buffer exists, generic selectable leaves and transcript use the same copy primitive.
 
 ### 9. Code-block padding is currently real selectable text
 
@@ -777,6 +779,7 @@ Completion criteria:
 - keep TUI responsible for dispatch/capture/focus/clipboard, not cell snapping.
 - make `virtual_total_rows` use exact height/index metadata rather than full row concatenation.
 - make ranged transcript rows/copy materialize only intersecting block ranges after exact-height prep.
+- move displayed-buffer byte-range copy and selectable-cell snapping into `smelt_buffer::coords`; transcript owns virtual range materialization, not generic copy rendering.
 - make full-row/full-break host APIs explicitly named `full_rows_for` / `full_breaks_for`; correctness-sensitive paths use `rows_for_range` / `breaks_for_range`.
 
 This phase eliminates the prompt-bar `────` bug, the code-block padding cursor bug, all-chrome selection bugs, and duplicate transcript snapping offsets while establishing exact transcript row coordinates without concatenating full display rows. The old byte/row state fields still exist as implementation storage; deleting that remaining dual state moves to the display-document/state-cleanup phases once the final `DisplayDocument`/`TextRange` consumers are in place.
@@ -790,6 +793,7 @@ Scope:
 - introduce `DisplayDocument`, `DisplaySnapshot`, `DisplayRows`, and `DisplayRow`.
 - implement display documents for buffer-backed text, transcript projection, readonly overlay/dialog text, and selectable bars where applicable.
 - make search, hit-testing, selection projection, and copy consume `DisplayRow` text/spans/decorations.
+- move selectable-text chrome inertness fully into edit/window mouse policy so TUI does not need a separate pre-check before dispatch.
 - split transcript `ExactRowIndex` from bounded `RenderedBlockCache`.
 - implement the invalidation matrix for append, block replacement, width change, show-thinking change, and theme changes.
 - make exact heights the authority for total rows, scrollbar math, `gg`, `G`, search origins/results, selection ranges, and copy ranges.

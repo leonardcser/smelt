@@ -8,9 +8,9 @@
 //! are indexed by display characters internally; `Buffer` converts public
 //! columns to and from terminal cells.
 
-use crate::buffer::{Buffer, SelectionRange};
+use crate::buffer::{Buffer, SelectionRange, Span};
 use crate::text;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Bidirectional source↔display char maps + per-row offsets.
 /// Stored on [`Buffer`] after parse for buffers whose source-byte stream
@@ -174,11 +174,194 @@ pub fn last_non_selectable_end(buf: &Buffer, row: usize, line_width: usize) -> u
     max_end.min(line_width)
 }
 
+/// Render a byte range as user-facing display text.
+///
+/// This drops non-selectable cells, applies `copy_as`, prefers `source_text`
+/// when a row's selectable cells are fully covered, and coalesces soft-wrapped
+/// or copy-continuation rows.
+pub fn copy_byte_range(buf: &Buffer, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+    let lines = buf.lines();
+    let (sr, sc) = byte_to_row_col(lines, start);
+    let (er, ec) = byte_to_row_col(lines, end);
+    let er = er.min(lines.len().saturating_sub(1));
+
+    let mut out = String::new();
+    let mut source_text_emitted = false;
+    for (r, line) in lines.iter().enumerate().take(er + 1).skip(sr) {
+        let line_width = text::byte_to_cell(line, line.len());
+        let dec = buf.decoration_at(r);
+        let is_soft = dec.soft_wrapped;
+        let is_copy_cont = dec.copy_continuation;
+        if r > sr && !is_soft && !is_copy_cont {
+            out.push('\n');
+            source_text_emitted = false;
+        }
+
+        let is_first = r == sr;
+        let is_last = r == er;
+        let c_start = if is_first { sc } else { 0 };
+        let c_end = if is_last {
+            ec.min(line_width)
+        } else {
+            line_width
+        };
+
+        let highlights = buf.highlights_at(r);
+        let unselectable_intervals = collect_unselectable(&highlights, line_width);
+        let all_selectable_covered =
+            all_selectable_in_range(&unselectable_intervals, line_width, c_start, c_end);
+
+        if all_selectable_covered && is_copy_cont && source_text_emitted {
+            continue;
+        }
+
+        if all_selectable_covered {
+            if let Some(src) = dec.source_text.as_deref() {
+                out.push_str(src);
+                source_text_emitted = true;
+                continue;
+            }
+        }
+
+        emit_row_cells(line, &highlights, c_start, c_end, &mut out);
+    }
+    out
+}
+
+fn byte_to_row_col(lines: &[String], byte: usize) -> (usize, usize) {
+    let mut acc = 0usize;
+    for (r, row) in lines.iter().enumerate() {
+        let row_end = acc + row.len();
+        if byte <= row_end {
+            let col_byte = byte.saturating_sub(acc).min(row.len());
+            let col = text::byte_to_cell(row, col_byte);
+            return (r, col);
+        }
+        acc = row_end + 1;
+    }
+    let last_row = lines.len().saturating_sub(1);
+    let last_col = lines
+        .last()
+        .map(|r| text::byte_to_cell(r, r.len()))
+        .unwrap_or(0);
+    (last_row, last_col)
+}
+
+fn collect_unselectable(highlights: &[Span], line_width: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for h in highlights {
+        if h.meta.selectable {
+            continue;
+        }
+        let s = (h.col_start as usize).min(line_width);
+        let e = (h.col_end as usize).min(line_width);
+        if e > s {
+            out.push((s, e));
+        }
+    }
+    out
+}
+
+fn all_selectable_in_range(
+    unselectable: &[(usize, usize)],
+    line_width: usize,
+    c_start: usize,
+    c_end: usize,
+) -> bool {
+    'outer: for i in 0..line_width {
+        for (s, e) in unselectable {
+            if i >= *s && i < *e {
+                continue 'outer;
+            }
+        }
+        if i < c_start || i >= c_end {
+            return false;
+        }
+    }
+    true
+}
+
+fn emit_row_cells(line: &str, highlights: &[Span], c_start: usize, c_end: usize, out: &mut String) {
+    let mut emitted_copy_as: Vec<usize> = Vec::new();
+    let mut col = 0usize;
+    for ch in line.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        let ch_end = col.saturating_add(w);
+        if ch_end <= c_start || col >= c_end {
+            col = ch_end;
+            continue;
+        }
+        let mut selectable = true;
+        let mut copy_as_hit: Option<(usize, &str)> = None;
+        for (idx, span) in highlights.iter().enumerate() {
+            let s = span.col_start as usize;
+            let e = span.col_end as usize;
+            if ch_end <= s || col >= e {
+                continue;
+            }
+            if !span.meta.selectable {
+                selectable = false;
+                break;
+            }
+            if let Some(s_str) = span.meta.copy_as.as_deref() {
+                copy_as_hit = Some((idx, s_str));
+            }
+        }
+        if !selectable {
+            col = ch_end;
+            continue;
+        }
+        if let Some((idx, s)) = copy_as_hit {
+            if !emitted_copy_as.contains(&idx) {
+                out.push_str(s);
+                emitted_copy_as.push(idx);
+            }
+        } else {
+            out.push(ch);
+        }
+        col = ch_end;
+    }
+}
+
+/// Snap `col` (display cell on `row`) to the nearest selectable cell.
+pub fn snap_col_to_selectable(buf: &Buffer, row: usize, col: usize) -> usize {
+    let Some(line) = buf.get_line(row) else {
+        return col;
+    };
+    let line_width = text::byte_to_cell(line, line.len());
+    if line_width == 0 {
+        return col;
+    }
+    let highlights = buf.highlights_at(row);
+    let unselectable = collect_unselectable(&highlights, line_width);
+    let is_selectable =
+        |c: usize| c < line_width && !unselectable.iter().any(|(s, e)| c >= *s && c < *e);
+    if is_selectable(col) {
+        return col;
+    }
+    for c in (col + 1)..line_width {
+        if is_selectable(c) {
+            return c;
+        }
+    }
+    if col > 0 {
+        for c in (0..col.min(line_width)).rev() {
+            if is_selectable(c) {
+                return c;
+            }
+        }
+    }
+    col
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::buffer::{BufCreateOpts, BufId, Buffer};
+    use crate::buffer::{BufCreateOpts, BufId, Buffer, LineDecoration, SpanMeta};
 
     #[test]
     fn selection_paints_one_cell_on_empty_middle_row() {
@@ -317,6 +500,114 @@ mod tests {
         assert_eq!(ranges.len(), 2);
         assert_eq!((ranges[0].col_start, ranges[0].col_end), (3, 4));
         assert_eq!((ranges[1].col_start, ranges[1].col_end), (0, 4));
+    }
+
+    fn unselectable_meta() -> SpanMeta {
+        SpanMeta {
+            selectable: false,
+            copy_as: None,
+        }
+    }
+
+    fn copy_as_meta(s: &str) -> SpanMeta {
+        SpanMeta {
+            selectable: true,
+            copy_as: Some(s.to_string()),
+        }
+    }
+
+    fn hl_for_test() -> crate::theme::HlGroup {
+        crate::theme::intern("Normal")
+    }
+
+    #[test]
+    fn copy_byte_range_basic_text() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["hello".into(), "world".into()]);
+        assert_eq!(copy_byte_range(&buf, 0, 5), "hello");
+        assert_eq!(copy_byte_range(&buf, 0, 11), "hello\nworld");
+        assert_eq!(copy_byte_range(&buf, 6, 11), "world");
+    }
+
+    #[test]
+    fn copy_skips_non_selectable_chrome() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["│ hi".into()]);
+        buf.add_highlight_group_with_meta(0, 0, 2, hl_for_test(), unselectable_meta());
+        let line_bytes = "│ hi".len();
+        assert_eq!(copy_byte_range(&buf, 0, line_bytes), "hi");
+    }
+
+    #[test]
+    fn copy_applies_copy_as_substitution_once_per_span() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["+ add".into()]);
+        buf.add_highlight_group_with_meta(0, 0, 2, hl_for_test(), copy_as_meta(""));
+        assert_eq!(copy_byte_range(&buf, 0, "+ add".len()), "add");
+    }
+
+    #[test]
+    fn copy_uses_source_text_when_full_row_selected() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["Title".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                source_text: Some("# Title".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(copy_byte_range(&buf, 0, 5), "# Title");
+        assert_eq!(copy_byte_range(&buf, 1, 4), "itl");
+    }
+
+    #[test]
+    fn copy_coalesces_copy_continuation_rows_via_source_text() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["hello".into(), "world".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                source_text: Some("hello world".into()),
+                ..Default::default()
+            },
+        );
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                copy_continuation: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(copy_byte_range(&buf, 0, 11), "hello world");
+    }
+
+    #[test]
+    fn copy_copy_continuation_without_source_text_emits_all_rows() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["abc".into(), "def".into()]);
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                copy_continuation: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(copy_byte_range(&buf, 0, 7), "abcdef");
+    }
+
+    #[test]
+    fn copy_soft_wrap_without_source_text_emits_all_rows() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["abc".into(), "def".into()]);
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                soft_wrapped: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(copy_byte_range(&buf, 0, 7), "abcdef");
     }
 
     #[test]

@@ -377,7 +377,7 @@ impl TuiApp {
             range?
         };
         let buf = self.ui.buf(buf_id)?;
-        let text = crate::content::transcript_buf::copy_byte_range(buf, range.0, range.1);
+        let text = smelt_buffer::coords::copy_byte_range(buf, range.0, range.1);
         let out = crate::smelt_edit::CopyOutput::same(text);
         if out.is_empty() {
             None
