@@ -253,6 +253,9 @@ impl TuiApp {
                         self.yank_to_clipboard(out);
                     }
                 }
+            } else if is_down {
+                self.ui.cancel_pointer_interaction();
+                return EventOutcome::Noop;
             }
             return EventOutcome::Redraw;
         }
@@ -651,6 +654,108 @@ mod tests {
     #[test]
     fn region_click_outside_does_not_change_focus() {
         assert_eq!(focus_for_region_click(HitRegion::Outside, true), None);
+    }
+
+    fn left_down(row: u16, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row,
+            column,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn prompt_top_bar_chrome_click_does_not_focus_prompt() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        app.push_block(smelt_core::Block::Text {
+            content: "content focus target".into(),
+        });
+        app.app_focus = AppFocus::Content;
+        app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        app.render_normal_to(false, &mut std::io::sink());
+
+        let top = app
+            .ui
+            .named_win("smelt.prompt_bar.top")
+            .expect("prompt top bar window");
+        app.ui.set_terminal_size(20, 2);
+        app.ui.set_layout(crate::smelt_edit::LayoutTree::vbox(vec![
+            (
+                crate::smelt_edit::Constraint::Length(1),
+                crate::smelt_edit::LayoutTree::leaf(top),
+            ),
+            (
+                crate::smelt_edit::Constraint::Fill,
+                crate::smelt_edit::LayoutTree::leaf(crate::app::TRANSCRIPT_WIN),
+            ),
+        ]));
+        let vp = crate::smelt_edit::WindowViewport::new(
+            crate::smelt_edit::Rect::new(0, 0, 20, 1),
+            20,
+            1,
+            0,
+            None,
+        );
+        let buf_id = app.ui.win(top).expect("top bar win").buf;
+        {
+            let buf = app.ui.buf_mut(buf_id).expect("top bar buf");
+            buf.set_all_lines(vec!["abc----xyz".into()]);
+            buf.add_highlight_group_with_meta(
+                0,
+                3,
+                7,
+                smelt_core::theme::intern("Normal"),
+                smelt_core::buffer::SpanMeta {
+                    selectable: false,
+                    copy_as: None,
+                },
+            );
+        }
+        {
+            let win = app.ui.win_mut(top).expect("top bar win");
+            win.viewport = Some(vp);
+            win.selectable = true;
+            win.focusable = false;
+        }
+        app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        let down = left_down(0, 4);
+
+        app.handle_mouse(down);
+
+        assert_eq!(app.app_focus, AppFocus::Content);
+        assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
+        assert_eq!(app.ui.capture(), None);
+        assert!(app.core.clipboard.kill_ring.current().is_empty());
+    }
+
+    #[test]
+    fn prompt_bottom_bar_click_is_inert() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        app.push_block(smelt_core::Block::Text {
+            content: "content focus target".into(),
+        });
+        app.app_focus = AppFocus::Content;
+        app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        app.render_normal_to(false, &mut std::io::sink());
+
+        let bottom = app
+            .ui
+            .named_win("smelt.prompt_bar.bottom")
+            .expect("prompt bottom bar window");
+        let vp = app
+            .ui
+            .win(bottom)
+            .and_then(|w| w.viewport)
+            .expect("bottom bar viewport");
+        let down = left_down(vp.rect.top, vp.rect.left);
+
+        app.handle_mouse(down);
+
+        assert_eq!(app.app_focus, AppFocus::Content);
+        assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
+        assert_eq!(app.ui.capture(), None);
+        assert!(app.core.clipboard.kill_ring.current().is_empty());
     }
 
     #[test]

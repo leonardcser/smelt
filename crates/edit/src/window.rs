@@ -933,14 +933,6 @@ impl Window {
                 },
             };
         }
-        if !buf.decoration_at(logical_row).cell_selectable {
-            return TextHit {
-                row,
-                cell_col: cell,
-                kind: TextHitKind::AllChrome,
-            };
-        }
-
         let spans = buf.highlights_at(logical_row);
         if cell_range_contains_selectable(&spans, cell, cell.saturating_add(1)) {
             return TextHit {
@@ -2747,13 +2739,6 @@ mod tests {
     fn text_hit_at_mouse_distinguishes_selectable_text_from_chrome() {
         let w = make_win();
         let mut buf = make_buf(vec!["abc----xyz".into()]);
-        buf.set_decoration(
-            0,
-            smelt_buffer::buffer::LineDecoration {
-                cell_selectable: true,
-                ..Default::default()
-            },
-        );
         buf.add_highlight_group_with_meta(
             0,
             3,
