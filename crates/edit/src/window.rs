@@ -2327,8 +2327,8 @@ impl Window {
                 selection_owned = self.auto_selection_ranges(buf, ctx.vim_mode);
                 &selection_owned[..]
             };
-        let yank_flash_ranges = buf.yank_flash();
-        let search_ranges = buf.search_highlights();
+        let yank_flash_ranges = buf.range_layer(crate::RangeLayer::YankFlash);
+        let search_ranges = buf.range_layer(crate::RangeLayer::Search);
         // Reused per-row scratch - avoids `height` allocations of each Vec.
         let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
         let mut line_chars: Vec<char> = Vec::with_capacity(content_width as usize);

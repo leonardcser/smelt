@@ -18,7 +18,7 @@ Primary plan and staged work:
 
 - `selection-architecture-rewrite-plan.md` — this architecture plan.
 - `crates/buffer/src/coords.rs` — byte/display row-range projection and selectable-row helpers.
-- `crates/edit/src/lib.rs` — `UiHost` trait, `rows_for_range`, `copy_virtual_range`, and future search/range seams.
+- `crates/edit/src/lib.rs` — `UiHost` trait, `display_rows_for_range`, `copy_virtual_range`, and future search/range seams.
 - `crates/edit/src/window.rs` — common `Window` shell, viewport math, cursor hit-testing, selection projection, `snap_col_past_chrome`.
 - `crates/edit/src/window/virtual_rows.rs` — rows-mode cursor, visual selection, virtual commands, and mouse hit-testing.
 - `crates/edit/src/vim.rs` — Vim command handling for `gg`, `G`, visual mode, `/`, `?`, `n`, and `N` integration.
@@ -187,12 +187,12 @@ Virtual transcript copy cannot be a normal local byte copy because the buffer is
 
 Do not remove this seam. The rewrite should instead guarantee that the `DocRange` passed to it is the same range that render/yank flash use.
 
-### 7. `UiHost::rows_for_range` is the right seam for off-viewport text
+### 7. `UiHost::display_rows_for_range` is the right seam for off-viewport text
 
 Virtual word motions already need rows outside the materialized slice and use host callbacks:
 
 - `resolve_virtual_viewer_command`: `crates/tui/src/app/events.rs:1159`
-- `UiHost::rows_for_range`: `crates/edit/src/lib.rs:2103`
+- `UiHost::display_rows_for_range`: `crates/edit/src/lib.rs:2131`
 
 Do not force edit/window to own full transcript data. Edit should own visible hit-testing and selection state; host/projection should still provide off-viewport rows and virtual copy.
 
@@ -245,7 +245,7 @@ Viewer key dispatch is already generic across transcript and overlay leaves:
 - content pane delegates to `dispatch_window_viewer_key`: `crates/tui/src/app/content_keys.rs:24`
 - overlay key cascade routes read-only viewer keys before catch-all fallbacks: `crates/tui/src/app/events.rs:985`
 - `dispatch_window_viewer_key` handles transcript, overlay leaves, and future scrollable windows: `crates/tui/src/app/events.rs:1066`
-- `UiHost::rows_for_range` is already the generic bounded row-access seam: `crates/edit/src/lib.rs:2101`
+- `UiHost::display_rows_for_range` is already the generic bounded row-access seam: `crates/edit/src/lib.rs:2131`
 
 Search should target the currently focused non-editable window: transcript, overlay viewer, dialog viewer, or any future readonly row window. If focus is inside an editable buffer, `/` remains text input or normal Vim behavior; it must not steal focus into search.
 
@@ -336,7 +336,7 @@ The code now has the right visible-buffer direction, and the Phase 1 work has re
 
 - render path plans visible projection in `render_loop.rs`, then applies `MaterializedRows`: `crates/tui/src/app/render_loop.rs:151`
 - exact total rows are provided by `TranscriptProjection::exact_total_rows` and `TuiApp::transcript_total_rows`; `UiHost::virtual_total_rows` no longer calls `full_transcript_display_text`.
-- `rows_for_range` prepares exact heights, then materializes only the intersecting block range.
+- `display_rows_for_range` prepares exact heights, then materializes only the intersecting block range.
 - transcript `copy_range` prepares exact heights, then materializes only the selected/intersecting block range.
 - `materialize_block_layout` is an exact metadata query backed by `BlockRowIndex`, not a full row concatenation path.
 - `line_breaks` remains the explicit full break-vector path; `line_breaks_range` is used by ranged callers.
@@ -424,13 +424,13 @@ Cost model:
 - `copy_range(range)` may materialize the selected block range and scan selected rows; huge selections are explicitly huge operations.
 - line-break APIs should have a range form for virtual word motion; full break vectors are explicit full-text/export/debug operations only.
 
-Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `ExactRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
+Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `ExactRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `display_rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
 
-Implementation note: `UiHost::display_rows_for_range` now returns the bounded row text and row-local break metadata together as `DisplayRows`. Legacy `rows_for_range` and `breaks_for_range` are derived accessors. TUI transcript materialization returns `DisplayRows` directly, so rows and soft/hard breaks come from one bounded materialization pass with no transcript-local duplicate row container.
+Implementation note: `UiHost::display_rows_for_range` now returns the bounded row text and row-local break metadata together as `DisplayRows`. TUI transcript materialization returns `DisplayRows` directly, so rows and soft/hard breaks come from one bounded materialization pass with no transcript-local duplicate row container.
 
-Design note: do not add an empty `DisplayRow` metadata shell until a consumer can delete existing logic. The next expansion should happen with search/copy/hit-test work and should add real selectable spans, decorations, and copy/source mapping to the displayed-row seam in the same slice.
+Design note: do not add another display-row metadata side channel. Search/copy/hit-test work should add real selectable spans, decorations, and copy/source mapping to the displayed-row seam in the same slice.
 
-Implementation note: `UiHost::rows_for_range` and `UiHost::breaks_for_range` remain compatibility vocabulary. The full-document operations are explicitly named `full_rows_for` and `full_breaks_for`; their default implementations go through the ranged seam and exist for export/debug/full-scan callers. This keeps accidental full materialization visible at call sites while avoiding a premature full `DisplayDocument` trait split before search consumes richer row metadata.
+Implementation note: the full-document operations are explicitly named `full_rows_for` and `full_breaks_for`; their default implementations go through `display_rows_for_range` and exist for export/debug/full-scan callers. This keeps accidental full materialization visible at call sites while avoiding a premature full `DisplayDocument` trait split before search consumes richer row metadata.
 
 ### 7. Operations allowed to scan the full transcript
 
@@ -788,7 +788,7 @@ Completion criteria:
 - make `virtual_total_rows` use exact height/index metadata rather than full row concatenation.
 - make ranged transcript rows/copy materialize only intersecting block ranges after exact-height prep.
 - move displayed-buffer byte-range copy and selectable-cell snapping into `smelt_buffer::coords`; transcript owns virtual range materialization, not generic copy rendering.
-- make full-row/full-break host APIs explicitly named `full_rows_for` / `full_breaks_for`; correctness-sensitive paths use `rows_for_range` / `breaks_for_range`.
+- make full-row/full-break host APIs explicitly named `full_rows_for` / `full_breaks_for`; correctness-sensitive paths use `display_rows_for_range`.
 
 This phase eliminates the prompt-bar `────` bug, the code-block padding cursor bug, all-chrome selection bugs, and duplicate transcript snapping offsets while establishing exact transcript row coordinates without concatenating full display rows. The old byte/row state fields still exist as implementation storage; deleting that remaining dual state moves to the display-document/state-cleanup phases once the final `DisplayDocument`/`TextRange` consumers are in place.
 
@@ -849,9 +849,9 @@ Search rules:
 - no disk index; no full row concatenation.
 - the first implementation may scan synchronously on Enter, but keep the scan isolated enough to chunk/cancel later without placeholder async machinery.
 
-Implementation note: `/` and `?` now open the existing bottom status input in search mode for the focused searchable readonly surface. Submit scans the target through bounded `UiHost::display_rows_for_range` chunks, stores document-coordinate matches in a `SearchSession`, paints visible matches through buffer search-highlight ranges, and `n`/`N` jump through the stored match vector without rescanning. Editable prompt focus does not open viewer search, and readonly overlay leaves use the same target capture path as the transcript.
+Implementation note: `/` and `?` now open the existing bottom status input in search mode for the focused searchable readonly surface. Submit scans the target through bounded `UiHost::display_rows_for_range` chunks, stores document-coordinate matches in a `SearchSession`, paints viewport-filtered visible matches through the buffer search range layer, and `n`/`N` jump through the stored match vector without rescanning. Editable prompt focus does not open viewer search, and readonly overlay leaves use the same target capture path as the transcript.
 
-Implementation note: `DisplayRows` now carries optional row-local selectable byte ranges. Buffer-backed and transcript-backed search scans use those ranges so non-selectable chrome/padding is not searched, while older callers that only need text/breaks can ignore the metadata. The first search implementation is line-local; multi-line queries remain out of scope for this phase.
+Implementation note: `DisplayRows` now contains row-local `DisplayRow` objects with text plus selectable byte ranges, rather than parallel text/metadata vectors. Buffer-backed and transcript-backed search scans use those ranges so non-selectable chrome/padding is not searched. The first search implementation is display-row-local; multi-line queries remain out of scope for this phase.
 
 ### Phase 4: deletion and simplification pass
 
@@ -863,8 +863,11 @@ Scope:
 - delete explicit full-row/full-break APIs if display documents replace them; keep only full-text/export APIs that are intentionally expensive.
 - delete old `focusable`/`selectable`/`mouse_scroll` authority if not already removed.
 - delete old byte/doc projection duplication after `TextRange` projection is authoritative.
+- replace bespoke buffer visual range fields (`selection`, `search_highlights`, `yank_flash`) with a single typed range-overlay/layer model if they remain after the display-document pass.
 - delete or update Lua APIs freely; no Lua compatibility is required.
 - simplify tests around `WindowSurface`, `DisplayDocument`, `TextHit`, and `TextRange`.
+
+Implementation note: Phase 4 removed the `UiHost::rows_for_range` / `breaks_for_range` compatibility accessors; bounded text access now goes through `display_rows_for_range`, and transcript ranged materialization is named the same way. `DisplayRows` remains the single bounded text+metadata return shape. Buffer visual ranges now live behind a typed `RangeLayer` store (`Search`, `Selection`, `YankFlash`) instead of separate fields, and search clear/paint paths target the search layer directly. The remaining `full_rows_for` / `full_breaks_for` methods are intentionally full-document seams for legacy mouse selection/export-style callers until `TextRange` projection replaces those paths.
 
 ## Design decisions after code review
 

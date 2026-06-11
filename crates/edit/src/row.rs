@@ -18,13 +18,26 @@ pub struct DocRange {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DisplayRow {
+    pub text: String,
+    /// Byte ranges in `text` that are selectable/searchable display text.
+    pub selectable_ranges: Vec<Range<usize>>,
+}
+
+impl DisplayRow {
+    pub fn new(text: String, selectable_ranges: Vec<Range<usize>>) -> Self {
+        Self {
+            text,
+            selectable_ranges,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayRows {
-    pub rows: Vec<String>,
+    pub rows: Vec<DisplayRow>,
     pub soft_breaks: Vec<usize>,
     pub hard_breaks: Vec<usize>,
-    /// Byte ranges in each row that are selectable/searchable display text.
-    /// `None` means callers should treat every row's text as selectable.
-    pub selectable_ranges: Option<Vec<Vec<Range<usize>>>>,
 }
 
 impl DisplayRows {

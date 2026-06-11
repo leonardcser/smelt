@@ -1264,9 +1264,11 @@ impl TuiApp {
         win_id: crate::smelt_edit::WinId,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<String> {
-        crate::smelt_edit::UiHost::rows_for_range(self, win_id, row, 1)?
+        crate::smelt_edit::UiHost::display_rows_for_range(self, win_id, row, 1)?
+            .rows
             .into_iter()
             .next()
+            .map(|row| row.text)
     }
 
     /// Keymap-driven dispatcher: looks up the binding under the window's

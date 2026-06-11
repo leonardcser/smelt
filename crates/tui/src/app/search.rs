@@ -2,6 +2,8 @@ use crate::app::TuiApp;
 use crate::smelt_edit::{DocPosition, DocRange, RowIndex, UiHost, WinId};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+// Search scans bounded display-row windows so large virtual documents do not
+// need to concatenate or materialize the whole transcript at once.
 const SEARCH_SCAN_ROWS: RowIndex = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +30,21 @@ pub(crate) struct SearchSession {
     pub(crate) current: Option<usize>,
 }
 
+impl SearchSession {
+    pub(crate) fn visible_matches(
+        &self,
+        visible_start: RowIndex,
+        visible_rows: u16,
+    ) -> &[DocRange] {
+        let visible_end = visible_start.saturating_add(visible_rows.max(1) as RowIndex);
+        let first = self
+            .matches
+            .partition_point(|range| range.start.row < visible_start);
+        let len = self.matches[first..].partition_point(|range| range.start.row < visible_end);
+        &self.matches[first..first + len]
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SearchState {
     pub(crate) session: Option<SearchSession>,
@@ -43,9 +60,14 @@ impl TuiApp {
     }
 
     pub(crate) fn clear_search(&mut self) {
-        self.search.session = None;
-        for buf in self.ui.buffers_mut() {
-            buf.clear_search_highlights();
+        let Some(session) = self.search.session.take() else {
+            return;
+        };
+        let Some(buf_id) = self.ui.win(session.target).map(|win| win.buf) else {
+            return;
+        };
+        if let Some(buf) = self.ui.buf_mut(buf_id) {
+            buf.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
         }
     }
 
@@ -141,6 +163,9 @@ impl TuiApp {
         Some(self.ui.buf(buf_id)?.line_count() as RowIndex)
     }
 
+    /// Finds literal, display-row-local matches. Queries containing `\n` are
+    /// rejected by `submit_search`; multi-line display search would need
+    /// row-break-aware scanning and match storage.
     fn scan_search_matches(&mut self, win: WinId, query: &str) -> Vec<DocRange> {
         let Some(total_rows) = self.display_total_rows(win) else {
             return Vec::new();
@@ -154,17 +179,13 @@ impl TuiApp {
             };
             for (offset, row) in display.rows.iter().enumerate() {
                 let row_index = start.saturating_add(offset as RowIndex);
-                let selectable = display
-                    .selectable_ranges
-                    .as_ref()
-                    .and_then(|ranges| ranges.get(offset));
-                for (byte_col, _) in row.match_indices(query) {
+                for (byte_col, _) in row.text.match_indices(query) {
                     let end_col = byte_col + query.len();
-                    if selectable.is_some_and(|ranges| {
-                        !ranges
-                            .iter()
-                            .any(|range| range.start <= byte_col && end_col <= range.end)
-                    }) {
+                    if !row
+                        .selectable_ranges
+                        .iter()
+                        .any(|range| range.start <= byte_col && end_col <= range.end)
+                    {
                         continue;
                     }
                     matches.push(DocRange {

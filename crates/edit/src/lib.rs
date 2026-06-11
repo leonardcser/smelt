@@ -20,7 +20,7 @@ pub use named::NamedSlots;
 pub use smelt_buffer::attachment::AttachmentId;
 pub use smelt_buffer::buffer::{
     BufCreateOpts, BufId, Buffer, BufferCopy, BufferParser, CopyOutput, ExtmarkOpts,
-    ExtmarkPayload, SelectionRange, SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
+    ExtmarkPayload, RangeLayer, SelectionRange, SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
 };
 pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};
@@ -65,8 +65,8 @@ pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use row::{
-    row_to_usize, DisplayRows, DocPosition, DocRange, MaterializeRequest, MaterializedRows,
-    RowIndex,
+    row_to_usize, DisplayRow, DisplayRows, DocPosition, DocRange, MaterializeRequest,
+    MaterializedRows, RowIndex,
 };
 pub use vim::VimMode;
 pub use window::{
@@ -2140,48 +2140,25 @@ pub trait UiHost {
         let rows = buf.lines();
         let start_idx = row_to_usize(start).min(rows.len());
         let end = row_to_usize(start.saturating_add(count)).min(rows.len());
-        let rows = rows[start_idx..end].to_vec();
-        let selectable_ranges = rows
+        let text_rows = rows[start_idx..end].to_vec();
+        let display_rows: Vec<DisplayRow> = text_rows
             .iter()
             .enumerate()
             .map(|(offset, row)| {
                 let spans = buf.highlights_at(start_idx + offset);
-                selectable_byte_ranges_for_line(row, &spans)
+                DisplayRow::new(row.clone(), selectable_byte_ranges_for_line(row, &spans))
             })
             .collect();
-        let hard_breaks = hard_breaks_for_lines(&rows);
+        let hard_breaks = hard_breaks_for_lines(&text_rows);
         Some(DisplayRows {
-            rows,
+            rows: display_rows,
             soft_breaks: Vec::new(),
             hard_breaks,
-            selectable_ranges: Some(selectable_ranges),
         })
     }
 
-    /// Display rows for a bounded range in `win`. Prefer `display_rows_for_range`
-    /// when break metadata is needed too.
-    fn rows_for_range(
-        &mut self,
-        win: WinId,
-        start: RowIndex,
-        count: RowIndex,
-    ) -> Option<Vec<String>> {
-        Some(self.display_rows_for_range(win, start, count)?.rows)
-    }
-
-    /// Soft and hard breaks for `display_rows_for_range`.
-    fn breaks_for_range(
-        &mut self,
-        win: WinId,
-        start: RowIndex,
-        count: RowIndex,
-    ) -> Option<(Vec<usize>, Vec<usize>)> {
-        let rows = self.display_rows_for_range(win, start, count)?;
-        Some((rows.soft_breaks, rows.hard_breaks))
-    }
-
     /// Full display rows for `win`. This is intentionally named as a full-document
-    /// operation; correctness-sensitive viewer paths should prefer `rows_for_range`.
+    /// operation; correctness-sensitive viewer paths should prefer `display_rows_for_range`.
     fn full_rows_for(&mut self, win: WinId) -> Option<Vec<String>> {
         let count = if let Some(total) = self.virtual_total_rows(win) {
             total
@@ -2190,7 +2167,13 @@ pub trait UiHost {
             let buf_id = ui.win(win)?.buf;
             ui.buf(buf_id)?.lines().len() as RowIndex
         };
-        self.rows_for_range(win, 0, count)
+        Some(
+            self.display_rows_for_range(win, 0, count)?
+                .rows
+                .into_iter()
+                .map(|row| row.text)
+                .collect(),
+        )
     }
 
     /// Full soft/hard break vectors for `full_rows_for(win)?.join("\n")`.
@@ -4236,11 +4219,14 @@ mod tests {
             let vp = host.viewport_for(win).unwrap();
             assert_eq!(vp.rect.width, 20);
             let display_rows = host.display_rows_for_range(win, 1, 2).unwrap();
-            assert_eq!(display_rows.rows, vec!["world!", "ok"]);
+            let display_text: Vec<_> = display_rows
+                .rows
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect();
+            assert_eq!(display_text, vec!["world!", "ok"]);
             assert!(display_rows.soft_breaks.is_empty());
             assert_eq!(display_rows.hard_breaks, vec![6]);
-            let range_rows = host.rows_for_range(win, 1, 2).unwrap();
-            assert_eq!(range_rows, vec!["world!", "ok"]);
             let rows = host.full_rows_for(win).unwrap();
             assert_eq!(rows, vec!["hello", "world!", "ok"]);
             // "hello\nworld!\nok" - `\n` after "hello" lives at byte 5,

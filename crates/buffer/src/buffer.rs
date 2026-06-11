@@ -546,6 +546,25 @@ fn overlaps_lines(m: &Extmark, line_start: usize, line_end: usize) -> bool {
     m.start_row < line_end && m_end >= line_start
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeLayer {
+    Search,
+    Selection,
+    YankFlash,
+}
+
+impl RangeLayer {
+    const COUNT: usize = 3;
+
+    fn index(self) -> usize {
+        match self {
+            Self::Search => 0,
+            Self::Selection => 1,
+            Self::YankFlash => 2,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Buffer {
     pub(crate) id: BufId,
@@ -568,9 +587,7 @@ pub struct Buffer {
     pub history: UndoHistory,
     pub attachment_ids: Vec<AttachmentId>,
     pub readonly: bool,
-    selection: Vec<SelectionRange>,
-    yank_flash: Vec<SelectionRange>,
-    search_highlights: Vec<SelectionRange>,
+    range_layers: [Vec<SelectionRange>; RangeLayer::COUNT],
     /// Source↔display coord maps. Written by parsers in `parse()` when source
     /// bytes don't map 1:1 to display chars. `None` falls back to identity.
     projection_maps: Option<crate::coords::ProjectionMaps>,
@@ -605,63 +622,70 @@ impl Buffer {
             history: UndoHistory::default(),
             attachment_ids: Vec::new(),
             readonly: false,
-            selection: Vec::new(),
-            yank_flash: Vec::new(),
-            search_highlights: Vec::new(),
+            range_layers: std::array::from_fn(|_| Vec::new()),
             projection_maps: None,
         }
+    }
+
+    /// Override a per-row visual range layer. Empty `ranges` clears the layer.
+    pub fn set_range_layer(&mut self, layer: RangeLayer, ranges: Vec<SelectionRange>) {
+        let slot = &mut self.range_layers[layer.index()];
+        if *slot == ranges {
+            return;
+        }
+        *slot = ranges;
+    }
+
+    /// Returns the ranges set for `layer`. Empty when inactive.
+    pub fn range_layer(&self, layer: RangeLayer) -> &[SelectionRange] {
+        &self.range_layers[layer.index()]
+    }
+
+    pub fn clear_range_layer(&mut self, layer: RangeLayer) {
+        self.range_layers[layer.index()].clear();
     }
 
     /// Override the per-row visual-mode selection. Empty `ranges` clears
     /// the override; `Window::render` then derives selection from its own state.
     pub fn set_selection(&mut self, ranges: Vec<SelectionRange>) {
-        if self.selection == ranges {
-            return;
-        }
-        self.selection = ranges;
+        self.set_range_layer(RangeLayer::Selection, ranges);
     }
 
     /// Returns the selection override set by [`Self::set_selection`]. Empty when inactive.
     pub fn selection(&self) -> &[SelectionRange] {
-        &self.selection
+        self.range_layer(RangeLayer::Selection)
     }
 
     pub fn clear_selection(&mut self) {
-        self.selection.clear();
+        self.clear_range_layer(RangeLayer::Selection);
     }
 
     /// Override the per-row yank-flash highlight. Empty `ranges` clears.
     pub fn set_yank_flash(&mut self, ranges: Vec<SelectionRange>) {
-        if self.yank_flash == ranges {
-            return;
-        }
-        self.yank_flash = ranges;
+        self.set_range_layer(RangeLayer::YankFlash, ranges);
     }
 
     /// Returns the yank-flash ranges set by [`Self::set_yank_flash`].
     pub fn yank_flash(&self) -> &[SelectionRange] {
-        &self.yank_flash
+        self.range_layer(RangeLayer::YankFlash)
     }
 
     pub fn clear_yank_flash(&mut self) {
-        self.yank_flash.clear();
+        self.clear_range_layer(RangeLayer::YankFlash);
     }
 
     /// Override the per-row search highlights. Empty `ranges` clears.
     pub fn set_search_highlights(&mut self, ranges: Vec<SelectionRange>) {
-        if self.search_highlights == ranges {
-            return;
-        }
-        self.search_highlights = ranges;
+        self.set_range_layer(RangeLayer::Search, ranges);
     }
 
     /// Returns the search highlight ranges set by [`Self::set_search_highlights`].
     pub fn search_highlights(&self) -> &[SelectionRange] {
-        &self.search_highlights
+        self.range_layer(RangeLayer::Search)
     }
 
     pub fn clear_search_highlights(&mut self) {
-        self.search_highlights.clear();
+        self.clear_range_layer(RangeLayer::Search);
     }
 
     /// Attach a parser, firing `on_attach` once and invalidating the render cache.
@@ -853,10 +877,9 @@ impl Buffer {
         for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, start, end);
         }
-        self.selection.retain(|r| r.line < start || r.line >= end);
-        self.yank_flash.retain(|r| r.line < start || r.line >= end);
-        self.search_highlights
-            .retain(|r| r.line < start || r.line >= end);
+        for layer in &mut self.range_layers {
+            layer.retain(|r| r.line < start || r.line >= end);
+        }
         self.changedtick += 1;
         self.last_line_edit = Some(LineEdit {
             before_tick,
@@ -879,9 +902,9 @@ impl Buffer {
         for ns in [self.ns_highlights, self.ns_decorations, self.ns_virt_text] {
             self.extmarks.clear_namespace(ns, 0, usize::MAX);
         }
-        self.selection.clear();
-        self.yank_flash.clear();
-        self.search_highlights.clear();
+        for layer in &mut self.range_layers {
+            layer.clear();
+        }
         self.changedtick += 1;
         self.last_line_edit = None;
     }

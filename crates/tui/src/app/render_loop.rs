@@ -196,11 +196,14 @@ impl TuiApp {
                         let ranges = win.doc_ranges_to_row_ranges(
                             buf,
                             viewport_rows,
-                            search.matches.iter().copied(),
+                            search
+                                .visible_matches(win.scroll_top(), viewport_rows)
+                                .iter()
+                                .copied(),
                         );
-                        buf.set_search_highlights(ranges);
+                        buf.set_range_layer(crate::smelt_edit::RangeLayer::Search, ranges);
                     } else {
-                        buf.clear_search_highlights();
+                        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
                     }
                 }
             },

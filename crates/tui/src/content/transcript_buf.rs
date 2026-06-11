@@ -1,8 +1,8 @@
 use super::block_buffers::RenderedBlockCache;
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
-    clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRows, DocRange,
-    MaterializedRows, RowIndex,
+    clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
+    DocRange, MaterializedRows, RowIndex,
 };
 use smelt_buffer::coords::copy_byte_range;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
@@ -944,7 +944,7 @@ impl TranscriptProjection {
         rows
     }
 
-    pub(crate) fn rows_for_range(
+    pub(crate) fn display_rows_for_range(
         &mut self,
         history: &mut BlockHistory,
         width: u16,
@@ -999,15 +999,19 @@ impl TranscriptProjection {
                 *slot = crate::smelt_edit::selectable_byte_ranges_for_line(row, &p.highlights);
             }
         }
-        let rows = materialized.texts[local_start..local_end].to_vec();
+        let rows = materialized.texts[local_start..local_end]
+            .iter()
+            .cloned()
+            .zip(selectable_ranges[local_start..local_end].iter().cloned())
+            .map(|(text, selectable_ranges)| DisplayRow::new(text, selectable_ranges))
+            .collect();
         let soft_wrapped = soft_wrapped[local_start..local_end].to_vec();
-        let selectable_ranges = selectable_ranges[local_start..local_end].to_vec();
-        let (soft_breaks, hard_breaks) = breaks_for_materialized_rows(&rows, &soft_wrapped);
+        let text_rows = materialized.texts[local_start..local_end].to_vec();
+        let (soft_breaks, hard_breaks) = breaks_for_materialized_rows(&text_rows, &soft_wrapped);
         DisplayRows {
             rows,
             soft_breaks,
             hard_breaks,
-            selectable_ranges: Some(selectable_ranges),
         }
     }
 
@@ -1470,9 +1474,11 @@ mod tests {
         );
 
         projection.reset_counters();
-        let rows = projection.rows_for_range(&mut transcript.history, 80, false, &theme, 150, 3);
+        let rows =
+            projection.display_rows_for_range(&mut transcript.history, 80, false, &theme, 150, 3);
 
-        assert_eq!(rows.rows, vec!["line 75", "", "line 76"]);
+        let text: Vec<_> = rows.rows.iter().map(|row| row.text.as_str()).collect();
+        assert_eq!(text, vec!["line 75", "", "line 76"]);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
         assert_eq!(counters.rendered_blocks, 0);
@@ -1585,10 +1591,17 @@ mod tests {
         let expected = full_buf.lines()[5..12].to_vec();
 
         let mut range_projection = TranscriptProjection::new();
-        let range =
-            range_projection.rows_for_range(&mut transcript.history, 80, false, &theme, 5, 7);
+        let range = range_projection.display_rows_for_range(
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            5,
+            7,
+        );
 
-        assert_eq!(range.rows, expected);
+        let text: Vec<_> = range.rows.iter().map(|row| row.text.clone()).collect();
+        assert_eq!(text, expected);
     }
 
     #[test]
@@ -1616,7 +1629,7 @@ mod tests {
         assert!(!soft.is_empty(), "fixture should produce soft wraps");
 
         let mut range_projection = TranscriptProjection::new();
-        let range = range_projection.rows_for_range(
+        let range = range_projection.display_rows_for_range(
             &mut transcript.history,
             18,
             false,
@@ -1625,7 +1638,8 @@ mod tests {
             full_buf.line_count() as RowIndex,
         );
 
-        assert_eq!(range.rows, full_buf.lines().to_vec());
+        let text: Vec<_> = range.rows.iter().map(|row| row.text.clone()).collect();
+        assert_eq!(text, full_buf.lines().to_vec());
         assert_eq!(range.soft_breaks, soft);
         assert_eq!(range.hard_breaks, hard);
     }

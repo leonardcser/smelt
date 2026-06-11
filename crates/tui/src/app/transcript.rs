@@ -127,7 +127,7 @@ impl TranscriptView {
             .project_planned(buf, &mut self.transcript.history, theme, plan)
     }
 
-    pub(crate) fn rows_for_range(
+    pub(crate) fn display_rows_for_range(
         &mut self,
         width: u16,
         show_thinking: bool,
@@ -135,7 +135,7 @@ impl TranscriptView {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
-        self.projection.rows_for_range(
+        self.projection.display_rows_for_range(
             &mut self.transcript.history,
             width,
             show_thinking,
@@ -452,17 +452,19 @@ impl TuiApp {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         self.transcript
-            .rows_for_range(tw, show_thinking, &theme, start, count)
+            .display_rows_for_range(tw, show_thinking, &theme, start, count)
     }
 
-    pub(crate) fn transcript_display_rows_range(
+    pub(crate) fn transcript_visible_rows(
         &mut self,
-        show_thinking: bool,
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> Vec<String> {
-        self.transcript_rows_and_breaks_range(show_thinking, start, count)
+        self.transcript_rows_and_breaks_range(self.core.config.settings.show_thinking, start, count)
             .rows
+            .into_iter()
+            .map(|row| row.text)
+            .collect()
     }
 
     /// `\n` byte positions in `full_transcript_display_text(..).join("\n")`,
@@ -566,14 +568,6 @@ impl TuiApp {
                 let end = first_row.saturating_add(*rows);
                 row >= *first_row && row < end
             })
-    }
-
-    pub(crate) fn transcript_visible_rows(
-        &mut self,
-        start: crate::smelt_edit::RowIndex,
-        count: crate::smelt_edit::RowIndex,
-    ) -> Vec<String> {
-        self.transcript_display_rows_range(self.core.config.settings.show_thinking, start, count)
     }
 
     pub(crate) fn finish_transcript_turn(&mut self) {
