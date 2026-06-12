@@ -98,7 +98,7 @@ fn replay_smelt(text: &str, path: &Path, trace: bool) {
                 let slen = buf.map(|b| b.source().len()).unwrap_or(0);
                 eprintln!(
                     "  {:?} cpos={} src.len={} vim_mode={:?} sel_anchor={:?}",
-                    wid, win.cpos, slen, win.vim_mode, win.selection_anchor
+                    wid, win.cpos(), slen, win.vim_mode(), win.selection_anchor()
                 );
             }
             if app.quit_requested() {
