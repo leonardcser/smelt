@@ -31,7 +31,7 @@ Primary plan and staged work:
 - `crates/tui/src/app/cmdline_edit.rs` — reusable editing primitives for the status input.
 - `crates/tui/src/app/content_keys.rs` — content-pane wrapper around generic viewer key dispatch.
 - `crates/tui/src/app/test_harness.rs` — TUI regression tests for Vim/selection/search behavior.
-- `runtime/lua/smelt/prompt_bar.lua` — prompt top/bottom bar windows, focus/selectability config, and current press handlers.
+- `runtime/lua/smelt/prompt_bar.lua` — prompt top/bottom bar windows, explicit surface roles, and current press handlers.
 - `runtime/lua/smelt/_bar.lua` — prompt/status bar composition and per-span `selectable = false` metadata for dash/fill chrome.
 - `crates/tui/tests/**` — integration/storybook coverage if a behavior is better asserted by rendered frames.
 - `crates/tui/src/content/transcript_buf.rs` — `TranscriptProjection`, `BlockRowIndex`, full-materialization hotspots, copy/range/search row extraction.
@@ -271,8 +271,8 @@ The search scan is an explicitly full-document operation, but it must not concat
 
 Prompt top/bottom bars are visually part of the prompt block, but they are not editable prompt input. They may contain selectable text, and the top bar currently opts into selection:
 
-- top bar window is `focusable = false, selectable = true`: `runtime/lua/smelt/prompt_bar.lua:284`
-- bottom bar window is `focusable = false, selectable = false`: `runtime/lua/smelt/prompt_bar.lua:291`
+- top bar window uses `surface = "selectable_text"`: `runtime/lua/smelt/prompt_bar.lua:284`
+- bottom bar window uses `surface = "inert"`: `runtime/lua/smelt/prompt_bar.lua:291`
 - bar dash/fill spans are emitted as `selectable = false`: `runtime/lua/smelt/_bar.lua:112`
 - current prompt-bar press handlers focus the prompt on every press: `runtime/lua/smelt/prompt_bar.lua:301` and `runtime/lua/smelt/prompt_bar.lua:305`
 - generic selectable leaves route clicks through `handle_selectable_leaf_mouse`: `crates/tui/src/app/mouse.rs:365`
@@ -430,7 +430,7 @@ Implementation note: `UiHost::display_rows_for_range` now returns the bounded ro
 
 Design note: do not add another display-row metadata side channel. Search/copy/hit-test work should add real selectable spans, decorations, and copy/source mapping to the displayed-row seam in the same slice.
 
-Implementation note: the full-document operations are explicitly named `full_rows_for` and `full_breaks_for`; their default implementations go through `display_rows_for_range` and exist for export/debug/full-scan callers. This keeps accidental full materialization visible at call sites while avoiding a premature full `DisplayDocument` trait split before search consumes richer row metadata.
+Implementation note: the temporary `full_rows_for` and `full_breaks_for` host compatibility accessors were deleted once `DisplayDocument` became the full-scan seam. Callers that truly need whole-document data now use explicit transcript export/full-text APIs or `DisplayDocument::materialize(0..snapshot.total_rows)`, making expensive scans visible at the call site without preserving a second row/break API.
 
 ### 7. Operations allowed to scan the full transcript
 
@@ -788,7 +788,7 @@ Completion criteria:
 - make `virtual_total_rows` use exact height/index metadata rather than full row concatenation.
 - make ranged transcript rows/copy materialize only intersecting block ranges after exact-height prep.
 - move displayed-buffer byte-range copy and selectable-cell snapping into `smelt_buffer::coords`; transcript owns virtual range materialization, not generic copy rendering.
-- make full-row/full-break host APIs explicitly named `full_rows_for` / `full_breaks_for`; correctness-sensitive paths use `display_rows_for_range`.
+- delete full-row/full-break host APIs; correctness-sensitive paths use `display_rows_for_range`, and explicit full scans use `DisplayDocument` snapshots/materialization or named export/full-text APIs.
 
 This phase eliminates the prompt-bar `────` bug, the code-block padding cursor bug, all-chrome selection bugs, and duplicate transcript snapping offsets while establishing exact transcript row coordinates without concatenating full display rows. The old byte/row state fields still exist as implementation storage; deleting that remaining dual state moves to the display-document/state-cleanup phases once the final `DisplayDocument`/`TextRange` consumers are in place.
 
@@ -867,7 +867,7 @@ Scope:
 - delete or update Lua APIs freely; no Lua compatibility is required.
 - simplify tests around `WindowSurface`, `DisplayDocument`, `TextHit`, and `TextRange`.
 
-Implementation note: Phase 4 removed the `UiHost::rows_for_range` / `breaks_for_range` compatibility accessors; bounded text access now goes through `display_rows_for_range`, and transcript ranged materialization is named the same way. `DisplayRows` now contains row-local text, selectable ranges, and soft/hard break metadata, with explicit text extraction helpers for legacy text-only callers. Buffer visual ranges now live behind a typed `RangeLayer` store (`Search`, `Selection`, `YankFlash`); render iterates layer order/style metadata instead of hard-coding each feature, and search clear/paint paths target the search layer directly. Boolean focus/selectable mutators were removed from `Window`; Lua opts are translated at the API boundary into explicit `WindowSurface` roles. The remaining `full_rows_for` / `full_breaks_for` methods are intentionally full-document seams for legacy mouse selection/export-style callers until `TextRange` projection replaces those paths.
+Implementation note: Phase 4 removed the `UiHost::rows_for_range` / `breaks_for_range` and later `full_rows_for` / `full_breaks_for` compatibility accessors; bounded text access now goes through `display_rows_for_range`, while explicit whole-document consumers use `DisplayDocument` snapshots/materialization or transcript export/full-text APIs. `DisplayRows` now contains row-local text, selectable ranges, and soft/hard break metadata, with explicit text extraction helpers for text-only callers. Buffer visual ranges now live behind a typed `RangeLayer` store (`Search`, `Selection`, `YankFlash`); render iterates layer order/style metadata instead of hard-coding each feature, and search clear/paint paths target the search layer directly. `WindowSurface` now carries the text interaction state that used to sit directly on `Window`, so changing a surface role preserves state while removing the old boolean authority. Lua window creation no longer accepts `focusable` / `selectable`; runtime Lua uses explicit `surface = ...` roles at the boundary.
 
 ## Design decisions after code review
 

@@ -300,8 +300,7 @@ local function ensure_label_window(lines, width)
 	end
 	local win = smelt.win.new(buf, {
 		name = "smelt.banner.label.win",
-		focusable = false,
-		selectable = true,
+		surface = "selectable_text",
 	})
 	state.version_buf = buf
 	state.version_win = win

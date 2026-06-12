@@ -42,14 +42,15 @@ impl PromptState {
         let yank_tick_before = clipboard.kill_ring.yank_tick();
         let result = {
             let (text, hist) = ctx.buf.edit_refs();
+            let text_state = ctx.win.text_state_mut();
             let mut vctx = VimContext {
                 buf: text,
-                cpos: &mut ctx.win.cpos,
+                cpos: &mut text_state.cpos,
                 history: hist,
                 clipboard,
-                mode: &mut ctx.win.vim_mode,
-                curswant: &mut ctx.win.curswant,
-                vim_state: &mut ctx.win.vim_state,
+                mode: &mut text_state.vim_mode,
+                curswant: &mut text_state.curswant,
+                vim_state: &mut text_state.vim_state,
                 now,
             };
             vim::handle_key(key_ev, &mut vctx)

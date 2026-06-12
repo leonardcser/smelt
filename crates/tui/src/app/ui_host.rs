@@ -42,36 +42,6 @@ impl crate::smelt_edit::UiHost for TuiApp {
     ) -> Option<crate::smelt_edit::WindowViewport> {
         self.ui.win(win).and_then(|w| w.viewport)
     }
-    fn full_rows_for(&mut self, win: crate::smelt_edit::WinId) -> Option<Vec<String>> {
-        if win == crate::app::PROMPT_WIN {
-            let buf_id = self.ui.win(self.well_known.prompt)?.buf;
-            let buf = self.ui.buf(buf_id)?;
-            Some(buf.lines().to_vec())
-        } else if win == crate::app::TRANSCRIPT_WIN {
-            let rows = self.full_transcript_display_text(self.core.config.settings.show_thinking);
-            Some((*rows).clone())
-        } else {
-            crate::smelt_edit::UiHost::full_rows_for(&mut self.ui, win)
-        }
-    }
-    fn full_breaks_for(
-        &mut self,
-        win: crate::smelt_edit::WinId,
-    ) -> Option<(Vec<usize>, Vec<usize>)> {
-        if win == crate::app::PROMPT_WIN {
-            let buf_id = self.ui.win(self.well_known.prompt)?.buf;
-            let buf = self.ui.buf(buf_id)?;
-            Some((
-                Vec::new(),
-                crate::smelt_edit::hard_breaks_for_text(buf.source()),
-            ))
-        } else if win == crate::app::TRANSCRIPT_WIN {
-            Some(self.transcript_line_breaks(self.core.config.settings.show_thinking))
-        } else {
-            crate::smelt_edit::UiHost::full_breaks_for(&mut self.ui, win)
-        }
-    }
-
     fn display_rows_for_range(
         &mut self,
         win: crate::smelt_edit::WinId,

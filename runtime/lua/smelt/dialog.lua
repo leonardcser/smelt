@@ -148,7 +148,7 @@ function smelt.dialog.input(placeholder, opts)
   -- `opts.pad_left` / `opts.pad_right` override the dialog gutter for callers
   -- that want extra indent (e.g. nested inputs visually grouped under a list).
   local leaf = smelt.win.new(buf, {
-    region = REGION, focusable = true, selectable = true,
+    region = REGION, surface = "editable_text",
     pad_left = opts.pad_left or GUTTER,
     pad_right = opts.pad_right or GUTTER,
     scrollbar = false, wrap = false,
@@ -309,8 +309,7 @@ function smelt.dialog.menu(items, opts)
 
   local leaf = smelt.win.new(buf, {
     region         = REGION,
-    focusable      = true,
-    selectable     = true,
+    surface       = "list",
     pad_left       = GUTTER,
     pad_right      = GUTTER,
     scrollbar      = false,
@@ -421,15 +420,14 @@ end
 
 -- Wrap an existing `buf` as a selectable list leaf. Use when the buffer
 -- contents need to be mutated live (vs. the snapshot supplied to
--- `smelt.dialog.menu`). `opts.focusable` defaults true; `opts.selected`
+-- `smelt.dialog.menu`). `opts.surface` defaults to `"list"`; `opts.selected`
 -- (0-based) sets the initial cursor row.
 ---@type fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win
 function smelt.dialog.list(buf, opts)
   opts = opts or {}
-  local focusable = opts.focusable
-  if focusable == nil then focusable = true end
+  local surface = opts.surface or "list"
   local leaf = smelt.win.new(buf, {
-    region = REGION, focusable = focusable, selectable = true,
+    region = REGION, surface = surface,
     pad_left = GUTTER, pad_right = GUTTER, scrollbar = false,
     kind = "list",
     initial_cursor = opts.selected or 0,
@@ -456,7 +454,7 @@ function smelt.dialog.markdown(text)
   local buf = smelt.buf.new({ mode = "markdown" })
   buf:source(text or "")
   local leaf = smelt.win.new(buf, {
-    region = REGION, focusable = false, selectable = true,
+    region = REGION, surface = "selectable_text",
     pad_left = GUTTER, pad_right = GUTTER,
   })
   return leaf, buf
@@ -480,15 +478,14 @@ function smelt.dialog.content(opts)
   if opts.readonly ~= nil then
     buf:readonly(opts.readonly and true or false)
   end
-  local focusable = opts.focusable
-  if focusable == nil then focusable = opts.interactive or false end
+  local surface = opts.surface
+  if surface == nil then surface = opts.interactive and "readonly_text" or "selectable_text" end
   -- `wrap` defaults to true (matches `smelt.win.new`); pass `wrap = false` to
   -- show pre-styled content (e.g. via `buf:styled(...)`) at its
   -- intrinsic width without soft-wrapping the row.
   local leaf = smelt.win.new(buf, {
     region      = REGION,
-    focusable   = focusable,
-    selectable  = true,
+    surface     = surface,
     vim_enabled = (opts.interactive and smelt.settings.vim) and true or false,
     pad_left    = GUTTER,
     pad_right   = GUTTER,
@@ -525,7 +522,7 @@ function smelt.dialog.viewer(opts)
     buf         = buf,
     interactive = opts.interactive ~= false,
     wrap        = opts.wrap,
-    focusable   = opts.focusable,
+    surface     = opts.surface,
   })
 
   local panel = { leaf = leaf, height = opts.panel_height }
@@ -887,7 +884,7 @@ function smelt.dialog.picker(opts)
 
   local input_leaf, input_buf = smelt.dialog.input(opts.placeholder or "")
   local list_buf  = smelt.buf.new()
-  local list_leaf = smelt.dialog.list(list_buf, { focusable = false })
+  local list_leaf = smelt.dialog.list(list_buf, { surface = "list_inert" })
 
   local list = smelt.list.new({
     leaf       = list_leaf,

@@ -1064,60 +1064,6 @@ impl TranscriptProjection {
             clipboard,
         }
     }
-
-    pub(crate) fn line_breaks(
-        &mut self,
-        history: &mut BlockHistory,
-        width: u16,
-        show_thinking: bool,
-        theme: &Theme,
-    ) -> (Vec<usize>, Vec<usize>) {
-        self.measure_all_heights(history, width, show_thinking, theme);
-        if self.exact_rows.nodes.is_empty() {
-            return (Vec::new(), Vec::new());
-        }
-        let materialized =
-            self.collect_blocks_range(history, theme, 0..self.exact_rows.nodes.len());
-        let mut soft_wrapped = vec![false; materialized.texts.len()];
-        for p in materialized.pending {
-            if let Some(slot) = soft_wrapped.get_mut(p.row) {
-                *slot = p.decoration.soft_wrapped;
-            }
-        }
-        breaks_for_materialized_rows(&materialized.texts, &soft_wrapped)
-    }
-}
-
-fn breaks_for_materialized_rows(
-    rows: &[String],
-    soft_wrapped: &[bool],
-) -> (Vec<usize>, Vec<usize>) {
-    breaks_for_row_lengths(rows.iter().map(|row| row.len()), soft_wrapped)
-}
-
-fn breaks_for_row_lengths(
-    row_lengths: impl IntoIterator<Item = usize>,
-    soft_wrapped: &[bool],
-) -> (Vec<usize>, Vec<usize>) {
-    let mut soft = Vec::new();
-    let mut hard = Vec::new();
-    let mut pos = 0usize;
-    let mut rows = row_lengths.into_iter().peekable();
-    let mut i = 0usize;
-    while let Some(row_len) = rows.next() {
-        if rows.peek().is_none() {
-            break;
-        }
-        pos += row_len;
-        if soft_wrapped.get(i + 1).copied().unwrap_or(false) {
-            soft.push(pos);
-        } else {
-            hard.push(pos);
-        }
-        pos += 1;
-        i += 1;
-    }
-    (soft, hard)
 }
 
 fn debug_assert_materialized_viewport(rows: MaterializedRows, viewport_rows: u16) {
@@ -1628,9 +1574,6 @@ mod tests {
             ScrollTarget::visible_row(0),
             20,
         );
-        let (soft, hard) = full_projection.line_breaks(&mut transcript.history, 18, false, &theme);
-        assert!(!soft.is_empty(), "fixture should produce soft wraps");
-
         let mut range_projection = TranscriptProjection::new();
         let range = range_projection.display_rows_for_range(
             &mut transcript.history,
@@ -1640,11 +1583,13 @@ mod tests {
             0,
             full_buf.line_count() as RowIndex,
         );
+        assert!(
+            !range.soft_breaks().is_empty(),
+            "fixture should produce soft wraps"
+        );
 
         let text: Vec<_> = range.rows.iter().map(|row| row.text.clone()).collect();
         assert_eq!(text, full_buf.lines().to_vec());
-        assert_eq!(range.soft_breaks(), soft);
-        assert_eq!(range.hard_breaks(), hard);
     }
 
     #[test]
@@ -2216,7 +2161,15 @@ mod tests {
             80,
         );
 
-        let (soft, _hard) = projection.line_breaks(&mut transcript.history, 40, false, &theme);
+        let display = projection.display_rows_for_range(
+            &mut transcript.history,
+            40,
+            false,
+            &theme,
+            0,
+            buf.line_count() as RowIndex,
+        );
+        let soft = display.soft_breaks();
         // For a transcript with only a table, every row boundary should be a
         // hard break (no soft breaks) so triple-click selects one display row.
         // The table is at rows 2-6; verify no soft break falls inside it.
@@ -2262,12 +2215,22 @@ mod tests {
         let mut projection = TranscriptProjection::new();
         let rows = projection.build_rows(&mut transcript.history, 80, false, &theme);
 
-        let (soft, hard) = projection.line_breaks(&mut transcript.history, 80, false, &theme);
+        let display = projection.display_rows_for_range(
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            0,
+            rows.len() as RowIndex,
+        );
         assert!(
-            soft.is_empty(),
+            display.soft_breaks().is_empty(),
             "unwrapped source lines must be hard breaks"
         );
-        assert_eq!(hard, crate::smelt_edit::hard_breaks_for_lines(&rows));
+        assert_eq!(
+            display.hard_breaks(),
+            crate::smelt_edit::hard_breaks_for_lines(&rows)
+        );
     }
 
     #[test]

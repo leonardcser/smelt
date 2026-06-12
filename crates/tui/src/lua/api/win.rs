@@ -805,7 +805,7 @@ fn apply_window_opts(
     if let Ok(wrap) = opts.get::<bool>("wrap") {
         w.wrap = wrap;
     }
-    if let Some(surface) = surface_from_opts(w.surface(), opts) {
+    if let Some(surface) = surface_from_opts(opts) {
         w.set_surface(surface);
     }
     if let Ok(cursor_line) = opts.get::<bool>("cursor_line") {
@@ -828,40 +828,17 @@ fn apply_window_opts(
     }
 }
 
-fn surface_from_opts(
-    current: crate::smelt_edit::WindowSurface,
-    opts: &mlua::Table,
-) -> Option<crate::smelt_edit::WindowSurface> {
+fn surface_from_opts(opts: &mlua::Table) -> Option<crate::smelt_edit::WindowSurface> {
     if let Ok(Some(surface)) = opts.get::<Option<String>>("surface") {
         return match surface.as_str() {
-            "editable_text" | "editable" => Some(crate::smelt_edit::WindowSurface::EditableText),
-            "readonly_text" | "readonly" => Some(crate::smelt_edit::WindowSurface::ReadonlyText),
-            "selectable_text" | "selectable" => {
-                Some(crate::smelt_edit::WindowSurface::SelectableText)
-            }
-            "inert" => Some(crate::smelt_edit::WindowSurface::Inert),
-            "list" => Some(crate::smelt_edit::WindowSurface::List { focusable: true }),
-            "list_inert" => Some(crate::smelt_edit::WindowSurface::List { focusable: false }),
+            "editable_text" => Some(crate::smelt_edit::WindowSurface::editable_text()),
+            "readonly_text" => Some(crate::smelt_edit::WindowSurface::readonly_text()),
+            "selectable_text" => Some(crate::smelt_edit::WindowSurface::selectable_text()),
+            "inert" => Some(crate::smelt_edit::WindowSurface::inert()),
+            "list" => Some(crate::smelt_edit::WindowSurface::list(true)),
+            "list_inert" => Some(crate::smelt_edit::WindowSurface::list(false)),
             _ => None,
         };
     }
-
-    let focusable = opts.get::<Option<bool>>("focusable").ok().flatten();
-    let selectable = opts.get::<Option<bool>>("selectable").ok().flatten();
-    if focusable.is_none() && selectable.is_none() {
-        return None;
-    }
-    if matches!(current, crate::smelt_edit::WindowSurface::List { .. }) {
-        return Some(crate::smelt_edit::WindowSurface::List {
-            focusable: focusable.unwrap_or_else(|| current.accepts_focus()),
-        });
-    }
-    let focusable = focusable.unwrap_or_else(|| current.accepts_focus());
-    let selectable = selectable.unwrap_or_else(|| current.supports_text_selection());
-    Some(match (focusable, selectable) {
-        (true, true) => crate::smelt_edit::WindowSurface::ReadonlyText,
-        (true, false) => crate::smelt_edit::WindowSurface::EditableText,
-        (false, true) => crate::smelt_edit::WindowSurface::SelectableText,
-        (false, false) => crate::smelt_edit::WindowSurface::Inert,
-    })
+    None
 }

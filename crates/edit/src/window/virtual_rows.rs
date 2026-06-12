@@ -342,6 +342,11 @@ impl Window {
         }
     }
 
+    pub fn handle_virtual_viewer_key(&mut self, key: KeyEvent) -> Option<ViewerCommand> {
+        let text = self.text_state_mut();
+        vim::handle_virtual_viewer_key(key, &mut text.vim_mode, &mut text.vim_state)
+    }
+
     pub fn handle_virtual_mouse(
         &mut self,
         buf: &Buffer,
@@ -417,7 +422,7 @@ impl Window {
                 if self.vim_enabled
                     && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
                 {
-                    self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+                    self.set_vim_mode(VimMode::Normal);
                 }
                 (Status::Capture, None)
             }
@@ -456,7 +461,7 @@ impl Window {
                 if self.vim_enabled
                     && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
                 {
-                    self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+                    self.set_vim_mode(VimMode::Normal);
                 }
                 (Status::Consumed, copy)
             }

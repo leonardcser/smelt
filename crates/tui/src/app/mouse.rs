@@ -315,8 +315,16 @@ impl TuiApp {
             return;
         };
         let usable = vp.content_width as usize;
-        let (soft, hard) = crate::smelt_edit::UiHost::full_breaks_for(self, crate::app::PROMPT_WIN)
-            .unwrap_or_default();
+        let hard = {
+            let Some(buf_id) = self.ui.win(crate::app::PROMPT_WIN).map(|win| win.buf) else {
+                return;
+            };
+            let Some(buf) = self.ui.buf(buf_id) else {
+                return;
+            };
+            crate::smelt_edit::hard_breaks_for_text(buf.source())
+        };
+        let soft = Vec::new();
         let yank = {
             let (win, buf) = self
                 .ui
@@ -358,8 +366,18 @@ impl TuiApp {
         let Some(buf_id) = self.ui.win(win).map(|w| w.buf) else {
             return (crate::smelt_edit::Status::Ignored, None);
         };
-        let (soft, hard) =
-            crate::smelt_edit::UiHost::full_breaks_for(self, win).unwrap_or_default();
+        let total_rows =
+            crate::smelt_edit::UiHost::virtual_total_rows(self, win).unwrap_or_else(|| {
+                self.ui
+                    .buf(buf_id)
+                    .map(|buf| buf.line_count() as crate::smelt_edit::RowIndex)
+                    .unwrap_or(0)
+            });
+        let display_rows =
+            crate::smelt_edit::UiHost::display_rows_for_range(self, win, 0, total_rows)
+                .unwrap_or_default();
+        let soft = display_rows.soft_breaks();
+        let hard = display_rows.hard_breaks();
         let (status, range) = {
             let mouse_ctx = crate::smelt_edit::MouseCtx {
                 soft_breaks: &soft,
@@ -680,7 +698,7 @@ mod tests {
         {
             let win = app.ui.win_mut(top).expect("top bar win");
             win.viewport = Some(vp);
-            win.set_surface(crate::smelt_edit::WindowSurface::SelectableText);
+            win.set_surface(crate::smelt_edit::WindowSurface::selectable_text());
         }
         app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
         app

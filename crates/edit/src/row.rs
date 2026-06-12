@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use crate::{BufId, WinId};
+use smelt_buffer::buffer::CopyOutput;
 use smelt_term::Rect;
 
 pub type RowIndex = u64;
@@ -15,6 +16,31 @@ pub struct DocPosition {
 pub struct DocRange {
     pub start: DocPosition,
     pub end: DocPosition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TextRange {
+    Bytes(Range<usize>),
+    Rows(DocRange),
+}
+
+impl TextRange {
+    pub fn rows(&self) -> Option<DocRange> {
+        match self {
+            Self::Rows(range) => Some(*range),
+            Self::Bytes(_) => None,
+        }
+    }
+
+    pub fn start_position(&self) -> Option<DocPosition> {
+        self.rows().map(|range| range.start)
+    }
+}
+
+impl From<DocRange> for TextRange {
+    fn from(range: DocRange) -> Self {
+        Self::Rows(range)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +72,18 @@ impl DisplayRow {
         self.break_before = Some(break_before);
         self
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplaySnapshot {
+    pub generation: u64,
+    pub total_rows: RowIndex,
+}
+
+pub trait DisplayDocument {
+    fn snapshot(&mut self) -> DisplaySnapshot;
+    fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows;
+    fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput>;
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

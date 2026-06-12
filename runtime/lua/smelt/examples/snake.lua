@@ -259,7 +259,7 @@ local function open()
 	STATE.buf:lines({
 		" hjkl / arrows: move    space: reset    esc / ctrl-c: close ",
 	})
-	STATE.win = smelt.win.new(STATE.buf, { focusable = true })
+	STATE.win = smelt.win.new(STATE.buf, { surface = "editable_text" })
 
 	STATE.paint = smelt.paint.register(paint, { name = "smelt.snake.paint" })
 

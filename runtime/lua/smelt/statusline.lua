@@ -174,8 +174,7 @@ end
 M.win = smelt.win.new(smelt.buf.new({ name = "smelt.statusline" }), {
   name = "smelt.statusline",
   scrollbar = false,
-  focusable = false,
-  selectable = true,
+  surface = "selectable_text",
   region = "status",
 })
 

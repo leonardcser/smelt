@@ -87,10 +87,9 @@ local function open(filepath)
 
 	local vim = smelt.settings.vim and true or false
 	local win_opts = {
-		focusable = true,
+		surface = "readonly_text",
 		vim_enabled = vim,
 		cursor_line = true,
-		selectable = true,
 	}
 	local left_win = smelt.win.new(left_buf, win_opts)
 	local right_win = smelt.win.new(right_buf, win_opts)

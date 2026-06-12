@@ -3056,13 +3056,22 @@ mod tests {
         app.press(KeyCode::Enter);
 
         let matches = app.app.search.session.as_ref().unwrap().matches.clone();
-        assert_eq!(transcript_virtual_cursor_row(&app), matches[0].start.row);
+        assert_eq!(
+            transcript_virtual_cursor_row(&app),
+            matches[0].rows().unwrap().start.row
+        );
         assert_eq!(matches.len(), 20);
 
         app.type_char('n');
-        assert_eq!(transcript_virtual_cursor_row(&app), matches[1].start.row);
+        assert_eq!(
+            transcript_virtual_cursor_row(&app),
+            matches[1].rows().unwrap().start.row
+        );
         app.type_char('N');
-        assert_eq!(transcript_virtual_cursor_row(&app), matches[0].start.row);
+        assert_eq!(
+            transcript_virtual_cursor_row(&app),
+            matches[0].rows().unwrap().start.row
+        );
     }
 
     #[test]
@@ -3108,18 +3117,18 @@ mod tests {
         let current = app.app.search.session.as_ref().unwrap().current.unwrap();
         assert_eq!(
             transcript_virtual_cursor_row(&app),
-            matches[current].start.row
+            matches[current].rows().unwrap().start.row
         );
 
         app.type_char('n');
         assert_eq!(
             transcript_virtual_cursor_row(&app),
-            matches[current - 1].start.row
+            matches[current - 1].rows().unwrap().start.row
         );
         app.type_char('N');
         assert_eq!(
             transcript_virtual_cursor_row(&app),
-            matches[current].start.row
+            matches[current].rows().unwrap().start.row
         );
     }
 
@@ -3180,7 +3189,7 @@ mod tests {
             )
             .expect("overlay leaf");
         if let Some(win) = app.app.ui.win_mut(leaf) {
-            win.set_surface(crate::smelt_edit::WindowSurface::ReadonlyText);
+            win.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
             win.set_vim_enabled(true);
         }
         app.app.ui.overlay_open(
@@ -3229,7 +3238,7 @@ mod tests {
             )
             .expect("overlay leaf");
         if let Some(win) = app.app.ui.win_mut(leaf) {
-            win.set_surface(crate::smelt_edit::WindowSurface::ReadonlyText);
+            win.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
             win.set_vim_enabled(true);
         }
         app.app.ui.overlay_open(
@@ -3288,7 +3297,7 @@ mod tests {
             )
             .expect("overlay leaf");
         if let Some(win) = app.app.ui.win_mut(leaf) {
-            win.set_surface(crate::smelt_edit::WindowSurface::ReadonlyText);
+            win.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
             win.set_vim_enabled(true);
         }
         app.app.ui.overlay_open(
@@ -3311,7 +3320,10 @@ mod tests {
         app.press(KeyCode::Enter);
         let session = app.app.search.session.as_ref().unwrap();
         assert_eq!(session.matches.len(), 1);
-        assert_eq!(session.matches[0].start.byte_col, "chrome ".len());
+        assert_eq!(
+            session.matches[0].rows().unwrap().start.byte_col,
+            "chrome ".len()
+        );
     }
 
     #[test]
@@ -4209,7 +4221,7 @@ mod tests {
         lua.load(
             r#"
             local buf = smelt.buf.new({ name = "perf_panel.buf" })
-            local win = smelt.win.new(buf, { name = "perf_panel.win", focusable = false })
+            local win = smelt.win.new(buf, { name = "perf_panel.win", surface = "inert" })
             smelt.overlay.new({
                 name = "perf_panel",
                 title = "old title",
@@ -4242,7 +4254,7 @@ mod tests {
         lua.load(
             r#"
             local buf = smelt.buf.new({ name = "perf_panel.buf" })
-            local win = smelt.win.new(buf, { name = "perf_panel.win", focusable = false })
+            local win = smelt.win.new(buf, { name = "perf_panel.win", surface = "inert" })
             smelt.overlay.new({
                 name = "perf_panel",
                 title = "new title",

@@ -65,8 +65,8 @@ pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use row::{
-    row_to_usize, DisplayRow, DisplayRows, DocPosition, DocRange, MaterializeRequest,
-    MaterializedRows, RowBreak, RowIndex,
+    row_to_usize, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition, DocRange,
+    MaterializeRequest, MaterializedRows, RowBreak, RowIndex, TextRange,
 };
 pub use vim::VimMode;
 pub use window::{
@@ -2158,34 +2158,6 @@ pub trait UiHost {
         Some(DisplayRows { rows: display_rows })
     }
 
-    /// Full display rows for `win`. This is intentionally named as a full-document
-    /// operation; correctness-sensitive viewer paths should prefer `display_rows_for_range`.
-    fn full_rows_for(&mut self, win: WinId) -> Option<Vec<String>> {
-        let count = if let Some(total) = self.virtual_total_rows(win) {
-            total
-        } else {
-            let ui = self.ui();
-            let buf_id = ui.win(win)?.buf;
-            ui.buf(buf_id)?.lines().len() as RowIndex
-        };
-        Some(self.display_rows_for_range(win, 0, count)?.into_text_rows())
-    }
-
-    /// Full soft/hard break vectors for `full_rows_for(win)?.join("\n")`.
-    /// Prefer `display_rows_for_range` unless the caller is explicitly scanning the
-    /// whole displayed document.
-    fn full_breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)> {
-        let count = if let Some(total) = self.virtual_total_rows(win) {
-            total
-        } else {
-            let ui = self.ui();
-            let buf_id = ui.win(win)?.buf;
-            ui.buf(buf_id)?.lines().len() as RowIndex
-        };
-        let rows = self.display_rows_for_range(win, 0, count)?;
-        Some((rows.soft_breaks(), rows.hard_breaks()))
-    }
-
     /// Total rows for a virtual document. `None` means `win` is backed by its
     /// materialized buffer and `Window::scroll_row_total` is authoritative.
     fn virtual_total_rows(&mut self, _win: WinId) -> Option<RowIndex> {
@@ -2207,6 +2179,49 @@ pub trait UiHost {
                     .scroll_top
                     .saturating_add(viewport.rect.height as RowIndex),
         )
+    }
+}
+
+pub struct HostDisplayDocument<'a, H: UiHost + ?Sized> {
+    host: &'a mut H,
+    win: WinId,
+}
+
+impl<'a, H: UiHost + ?Sized> HostDisplayDocument<'a, H> {
+    pub fn new(host: &'a mut H, win: WinId) -> Self {
+        Self { host, win }
+    }
+}
+
+impl<H: UiHost + ?Sized> DisplayDocument for HostDisplayDocument<'_, H> {
+    fn snapshot(&mut self) -> DisplaySnapshot {
+        let total_rows = if let Some(total) = self.host.virtual_total_rows(self.win) {
+            total
+        } else {
+            let ui = self.host.ui();
+            ui.win(self.win)
+                .and_then(|win| ui.buf(win.buf))
+                .map(|buf| buf.line_count() as RowIndex)
+                .unwrap_or(0)
+        };
+        DisplaySnapshot {
+            generation: 0,
+            total_rows,
+        }
+    }
+
+    fn materialize(&mut self, range: std::ops::Range<RowIndex>) -> DisplayRows {
+        let count = range.end.saturating_sub(range.start);
+        self.host
+            .display_rows_for_range(self.win, range.start, count)
+            .unwrap_or_else(DisplayRows::empty)
+    }
+
+    fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
+        match range {
+            TextRange::Rows(range) => self.host.copy_virtual_range(self.win, range),
+            TextRange::Bytes(_) => None,
+        }
     }
 }
 
@@ -2874,7 +2889,9 @@ mod tests {
                 gutters: Default::default(),
             }
         ));
-        ui.win_mut(leaf).unwrap().set_surface(WindowSurface::Inert);
+        ui.win_mut(leaf)
+            .unwrap()
+            .set_surface(WindowSurface::inert());
 
         let perf_layout = LayoutTree::hbox(vec![(
             Constraint::Length(10),
@@ -2904,15 +2921,15 @@ mod tests {
         assert_eq!(status, Status::Consumed);
         assert!(
             ui.chrome_drag.is_some(),
-            "body click on non-focusable leaf of a draggable overlay should latch drag (no modal)"
+            "body click on inert leaf of a draggable overlay should latch drag (no modal)"
         );
         assert_eq!(ui.chrome_drag.unwrap().overlay, perf);
     }
 
     #[test]
     fn body_click_drags_non_focusable_draggable_overlay_through_modal() {
-        // Regression: a non-focusable leaf inside a draggable overlay
-        // (perf panel - pure HUD with `focusable = false`) treats body
+        // Regression: an inert leaf inside a draggable overlay
+        // (perf panel - pure HUD) treats body
         // clicks the same as chrome Title/Body for drag purposes,
         // *and* this works while a modal dialog is open below.
         let mut ui = make_ui();
@@ -2926,9 +2943,10 @@ mod tests {
                 gutters: Default::default(),
             }
         ));
-        // Mark the leaf non-focusable (matches `perf_panel.lua`'s
-        // `smelt.win.new(buf, { focusable = false })`).
-        ui.win_mut(leaf).unwrap().set_surface(WindowSurface::Inert);
+        // Mark the leaf inert (matches HUD-style Lua surfaces).
+        ui.win_mut(leaf)
+            .unwrap()
+            .set_surface(WindowSurface::inert());
 
         let perf_layout = LayoutTree::hbox(vec![(
             Constraint::Length(10),
@@ -3240,7 +3258,7 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.win_mut(win).unwrap().set_surface(WindowSurface::Inert);
+        ui.win_mut(win).unwrap().set_surface(WindowSurface::inert());
         ui.set_layout(LayoutTree::vbox(vec![(
             Constraint::Fill,
             LayoutTree::leaf(win),
@@ -3927,7 +3945,7 @@ mod tests {
             )
             .unwrap();
         if let Some(w) = ui.win_mut(win) {
-            w.set_surface(WindowSurface::EditableText);
+            w.set_surface(WindowSurface::editable_text());
         }
         let layout = LayoutTree::vbox(vec![(
             Constraint::Length(10),
@@ -4229,23 +4247,15 @@ mod tests {
             assert_eq!(display_text, vec!["world!", "ok"]);
             assert!(display_rows.soft_breaks().is_empty());
             assert_eq!(display_rows.hard_breaks(), vec![6]);
-            let rows = host.full_rows_for(win).unwrap();
-            assert_eq!(rows, vec!["hello", "world!", "ok"]);
-            // "hello\nworld!\nok" - `\n` after "hello" lives at byte 5,
-            // `\n` after "world!" at byte 12. Both are hard breaks; soft
-            // breaks are empty for an unwrapped buffer.
-            let (soft, hard) = host.full_breaks_for(win).unwrap();
-            assert!(soft.is_empty(), "default impl emits no soft breaks");
-            assert_eq!(hard, vec![5, 12]);
+            // "world!\nok" - the join between the two ranged rows lives at
+            // byte 6 and is a hard break for an unwrapped buffer.
         }
         assert_default_shape(&mut ui, win);
 
-        // Unknown window → `None` for every accessor.
+        // Unknown window → `None` for bounded display access.
         let stranger = WinId(9999);
         assert!(UiHost::viewport_for(&ui, stranger).is_none());
         assert!(UiHost::display_rows_for_range(&mut ui, stranger, 0, 1).is_none());
-        assert!(UiHost::full_rows_for(&mut ui, stranger).is_none());
-        assert!(UiHost::full_breaks_for(&mut ui, stranger).is_none());
     }
 
     #[test]

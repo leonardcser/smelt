@@ -162,8 +162,7 @@ local function attach()
 	state.buf = smelt.buf.new({ name = "perf_panel.buf", readonly = true })
 	state.win = smelt.win.new(state.buf, {
 		name = "perf_panel.win",
-		focusable = true,
-		selectable = true,
+		surface = "readonly_text",
 		vim_enabled = smelt.settings.vim and true or false,
 	})
 	state.win:key("esc", close)

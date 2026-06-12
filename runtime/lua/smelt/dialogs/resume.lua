@@ -170,14 +170,14 @@ smelt.cmd.register("resume", function()
     local input_buf = smelt.buf.new()
     input_buf:lines({ "" })
     local input_leaf = smelt.win.new(input_buf, {
-      region = "resume_overlay", focusable = true, selectable = true,
+      region = "resume_overlay", surface = "editable_text",
       pad_left = 1, pad_right = 1, scrollbar = false, wrap = false,
       kind = "input", placeholder = "filter sessions…",
     })
 
     local list_buf = smelt.buf.new()
     local list_leaf = smelt.win.new(list_buf, {
-      region = "resume_overlay", focusable = false, selectable = true,
+      region = "resume_overlay", surface = "list_inert",
       pad_left = 1, pad_right = 1, scrollbar = false,
       kind = "list", initial_cursor = 0,
     })
@@ -189,7 +189,7 @@ smelt.cmd.register("resume", function()
       preview_buf = smelt.buf.new({ readonly = true })
       preview_buf:lines({ "" })
       preview_leaf = smelt.win.new(preview_buf, {
-        region = "resume_overlay", focusable = false, selectable = true,
+        region = "resume_overlay", surface = "selectable_text",
         pad_left = 0, pad_right = 0, wrap = false, scrollbar = true,
       })
     end

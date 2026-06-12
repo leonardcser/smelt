@@ -59,16 +59,6 @@ impl TranscriptView {
             .exact_total_rows(&mut self.transcript.history, width, show_thinking, theme)
     }
 
-    pub(crate) fn line_breaks(
-        &mut self,
-        width: u16,
-        show_thinking: bool,
-        theme: &Theme,
-    ) -> (Vec<usize>, Vec<usize>) {
-        self.projection
-            .line_breaks(&mut self.transcript.history, width, show_thinking, theme)
-    }
-
     pub(crate) fn materialize_block_layout(
         &mut self,
         width: u16,
@@ -462,22 +452,6 @@ impl TuiApp {
     ) -> Vec<String> {
         self.transcript_rows_and_breaks_range(self.core.config.settings.show_thinking, start, count)
             .into_text_rows()
-    }
-
-    /// `\n` byte positions in `full_transcript_display_text(..).join("\n")`,
-    /// partitioned into soft-wrap and hard-break sets. Soft positions are
-    /// transparent to word-select; hard positions bound line-select.
-    pub(crate) fn transcript_line_breaks(
-        &mut self,
-        show_thinking: bool,
-    ) -> (Vec<usize>, Vec<usize>) {
-        let _perf = smelt_perf::perf::begin("transcript:materialize_breaks_full");
-        let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        let (mut soft, mut hard) = self.transcript.line_breaks(tw, show_thinking, &theme);
-        soft.sort_unstable();
-        hard.sort_unstable();
-        (soft, hard)
     }
 
     pub(crate) fn snap_cpos_to_selectable(

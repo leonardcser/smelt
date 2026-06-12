@@ -72,8 +72,7 @@ local function open_bottom()
   })
   local win = smelt.win.new(buf, {
     name = "smelt.scroll_pills.bottom.win",
-    focusable = false,
-    selectable = false,
+    surface = "inert",
     scrollbar = false,
   })
   win:on("press", function()
@@ -119,8 +118,7 @@ local function open_top(width)
   buf:lines({ "" })
   local win = smelt.win.new(buf, {
     name = "smelt.scroll_pills.top.win",
-    focusable = false,
-    selectable = false,
+    surface = "inert",
     scrollbar = false,
   })
   win:on("press", function()

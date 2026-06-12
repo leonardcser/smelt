@@ -45,13 +45,12 @@ smelt.cmd.register("help", function()
     -- `wrap = false` so the leaf reports its actual longest-line width as its
     -- natural width - without this the overlay's `width = "fit"` would resolve
     -- to the full terminal.
-    -- `selectable = true` so mouse click-and-drag highlights text the same way
+    -- `surface = "readonly_text"` so mouse click-and-drag highlights text the same way
     -- it does in the transcript; vim_enabled tracks the user's global setting so
     -- non-vim users don't get dropped into normal mode here.
     local leaf = smelt.win.new(buf, {
       region      = "dialog_overlay",
-      focusable   = true,
-      selectable  = true,
+      surface     = "readonly_text",
       wrap        = false,
       vim_enabled = smelt.settings.vim and true or false,
     })

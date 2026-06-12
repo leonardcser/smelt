@@ -43,8 +43,7 @@ smelt.cmd.register("skills", function()
 
     local leaf = smelt.win.new(buf, {
       region      = "skills_overlay",
-      focusable   = true,
-      selectable  = true,
+      surface     = "readonly_text",
       wrap        = true,
       vim_enabled = smelt.settings.vim and true or false,
     })

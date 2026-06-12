@@ -1,5 +1,7 @@
 use crate::app::TuiApp;
-use crate::smelt_edit::{BufId, DocPosition, DocRange, RowIndex, UiHost, WinId};
+use crate::smelt_edit::{
+    BufId, DisplayDocument, DocPosition, DocRange, HostDisplayDocument, RowIndex, TextRange, WinId,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // Search scans bounded display-row windows so large virtual documents do not
@@ -27,7 +29,7 @@ pub(crate) struct SearchSession {
     pub(crate) target_buf: BufId,
     pub(crate) query: String,
     pub(crate) direction: SearchDirection,
-    pub(crate) matches: Vec<DocRange>,
+    pub(crate) matches: Vec<TextRange>,
     pub(crate) current: Option<usize>,
 }
 
@@ -36,13 +38,13 @@ impl SearchSession {
         &self,
         visible_start: RowIndex,
         visible_rows: u16,
-    ) -> &[DocRange] {
+    ) -> Vec<DocRange> {
         let visible_end = visible_start.saturating_add(visible_rows.max(1) as RowIndex);
-        let first = self
-            .matches
-            .partition_point(|range| range.start.row < visible_start);
-        let len = self.matches[first..].partition_point(|range| range.start.row < visible_end);
-        &self.matches[first..first + len]
+        self.matches
+            .iter()
+            .filter_map(TextRange::rows)
+            .filter(|range| range.start.row >= visible_start && range.start.row < visible_end)
+            .collect()
     }
 }
 
@@ -159,28 +161,17 @@ impl TuiApp {
             .find(|&win| self.ui.win(win).is_some_and(|w| w.supports_search()))
     }
 
-    fn display_total_rows(&mut self, win: WinId) -> Option<RowIndex> {
-        if let Some(total) = UiHost::virtual_total_rows(self, win) {
-            return Some(total);
-        }
-        let buf_id = self.ui.win(win)?.buf;
-        Some(self.ui.buf(buf_id)?.line_count() as RowIndex)
-    }
-
     /// Finds literal, display-row-local matches. Queries containing `\n` are
     /// rejected by `submit_search`; multi-line display search would need
     /// row-break-aware scanning and match storage.
-    fn scan_search_matches(&mut self, win: WinId, query: &str) -> Vec<DocRange> {
-        let Some(total_rows) = self.display_total_rows(win) else {
-            return Vec::new();
-        };
+    fn scan_search_matches(&mut self, win: WinId, query: &str) -> Vec<TextRange> {
+        let mut doc = HostDisplayDocument::new(self, win);
+        let total_rows = doc.snapshot().total_rows;
         let mut matches = Vec::new();
         let mut start = 0;
         while start < total_rows {
             let count = SEARCH_SCAN_ROWS.min(total_rows - start);
-            let Some(display) = UiHost::display_rows_for_range(self, win, start, count) else {
-                break;
-            };
+            let display = doc.materialize(start..start.saturating_add(count));
             for (offset, row) in display.rows.iter().enumerate() {
                 let row_index = start.saturating_add(offset as RowIndex);
                 for (byte_col, _) in row.text.match_indices(query) {
@@ -192,7 +183,7 @@ impl TuiApp {
                     {
                         continue;
                     }
-                    matches.push(DocRange {
+                    matches.push(TextRange::Rows(DocRange {
                         start: DocPosition {
                             row: row_index,
                             byte_col,
@@ -201,7 +192,7 @@ impl TuiApp {
                             row: row_index,
                             byte_col: byte_col + query.len(),
                         },
-                    });
+                    }));
                 }
             }
             start = start.saturating_add(count);
@@ -226,7 +217,7 @@ impl TuiApp {
         let Some(session) = self.search.session.as_mut() else {
             return;
         };
-        let Some(range) = session.matches.get(index).copied() else {
+        let Some(range) = session.matches.get(index).and_then(TextRange::rows) else {
             return;
         };
         session.current = Some(index);
@@ -262,18 +253,26 @@ impl TuiApp {
 }
 
 fn initial_match(
-    matches: &[DocRange],
+    matches: &[TextRange],
     origin: DocPosition,
     direction: SearchDirection,
 ) -> Option<usize> {
+    let starts_at_or_after = |m: &TextRange| {
+        m.start_position()
+            .is_some_and(|pos| (pos.row, pos.byte_col) >= (origin.row, origin.byte_col))
+    };
+    let starts_at_or_before = |m: &TextRange| {
+        m.start_position()
+            .is_some_and(|pos| (pos.row, pos.byte_col) <= (origin.row, origin.byte_col))
+    };
     match direction {
         SearchDirection::Forward => matches
             .iter()
-            .position(|m| (m.start.row, m.start.byte_col) >= (origin.row, origin.byte_col))
+            .position(starts_at_or_after)
             .or_else(|| (!matches.is_empty()).then_some(0)),
         SearchDirection::Backward => matches
             .iter()
-            .rposition(|m| (m.start.row, m.start.byte_col) <= (origin.row, origin.byte_col))
+            .rposition(starts_at_or_before)
             .or_else(|| (!matches.is_empty()).then_some(matches.len() - 1)),
     }
 }

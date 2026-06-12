@@ -284,42 +284,142 @@ pub enum VerticalScroll {
     Tail,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowTextState {
+    pub cpos: usize,
+    pub vim_enabled: bool,
+    pub vim_mode: VimMode,
+    pub vim_state: VimWindowState,
+    /// Shift-selection / vim Visual anchor. `None` means no active selection.
+    pub selection_anchor: Option<usize>,
+    /// Preferred display column for vertical motion; measured in terminal cells.
+    pub curswant: Option<usize>,
+    /// Local visual-row index of the cursor (0-based in the backing buffer's
+    /// materialized row space). Add `row_base` to compare with `scroll_top`.
+    pub cursor_row: RowIndex,
+    /// Virtual row/document state for readonly viewers whose backing buffer is a
+    /// materialized slice of a larger row space. `None` means the backing buffer
+    /// is the full scrollable extent.
+    pub virtual_rows: Option<VirtualRowsState>,
+    /// Cell-column of the cursor within its visual row. Derived from `cpos`
+    /// via `sync_from_cpos`.
+    pub cursor_col: u16,
+    /// Last cpos seen by the renderer; distinguishes cursor-move from scroll-pan.
+    pub last_render_cpos: Option<usize>,
+    pub cursor_positioned: bool,
+    /// Double-click word-select anchor; drag extends in word units while set.
+    pub drag_anchor_word: Option<(usize, usize)>,
+    /// Triple-click line-select anchor; drag extends in line units while set.
+    pub drag_anchor_line: Option<(usize, usize)>,
+    /// Cpos of a single-click press awaiting drag; promoted to a selection on the
+    /// first `Drag` event. A bare press-release with no motion leaves no selection.
+    pub pending_press: Option<usize>,
+    /// Moving end of an active mouse drag-select, in editable-byte space. `None`
+    /// outside a drag. The renderer paints the cursor/CursorLine at this byte's
+    /// projected row when set, and the selection range is `(selection_anchor,
+    /// drag_endpoint)`. `mouse_up` commits this into `cpos` only for caret
+    /// leaves (`is_caret_leaf`); otherwise the value is discarded and `cpos`
+    /// returns to its pre-drag position.
+    pub drag_endpoint: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub enum WindowSurface {
     /// Editable text such as the prompt input. Keyboard-focusable, with a caret.
-    #[default]
-    EditableText,
+    EditableText(WindowTextState),
     /// Readonly/viewer text such as transcript or dialog bodies. Keyboard-focusable,
     /// with caret/search/text-selection state but no edits.
-    ReadonlyText,
+    ReadonlyText(WindowTextState),
     /// Non-focusable text that supports drag-copy when the press lands on text.
-    SelectableText,
+    SelectableText(WindowTextState),
     /// Row/list widget. May be keyboard-focusable, scrollable, and highlighted by row;
     /// it does not expose a text caret.
-    List { focusable: bool },
+    List {
+        focusable: bool,
+        text: WindowTextState,
+    },
     /// Pure chrome/fill. No focus, caret, text selection, or wheel scroll.
-    Inert,
+    Inert(WindowTextState),
+}
+
+impl Default for WindowSurface {
+    fn default() -> Self {
+        Self::editable_text()
+    }
 }
 
 impl WindowSurface {
+    pub fn editable_text() -> Self {
+        Self::EditableText(WindowTextState::default())
+    }
+
+    pub fn readonly_text() -> Self {
+        Self::ReadonlyText(WindowTextState::default())
+    }
+
+    pub fn selectable_text() -> Self {
+        Self::SelectableText(WindowTextState::default())
+    }
+
+    pub fn inert() -> Self {
+        Self::Inert(WindowTextState::default())
+    }
+
+    pub fn list(focusable: bool) -> Self {
+        Self::List {
+            focusable,
+            text: WindowTextState::default(),
+        }
+    }
+
+    fn text(&self) -> &WindowTextState {
+        match self {
+            Self::EditableText(text)
+            | Self::ReadonlyText(text)
+            | Self::SelectableText(text)
+            | Self::Inert(text) => text,
+            Self::List { text, .. } => text,
+        }
+    }
+
+    fn text_mut(&mut self) -> &mut WindowTextState {
+        match self {
+            Self::EditableText(text)
+            | Self::ReadonlyText(text)
+            | Self::SelectableText(text)
+            | Self::Inert(text) => text,
+            Self::List { text, .. } => text,
+        }
+    }
+
+    fn with_text(self, text: WindowTextState) -> Self {
+        match self {
+            Self::EditableText(_) => Self::EditableText(text),
+            Self::ReadonlyText(_) => Self::ReadonlyText(text),
+            Self::SelectableText(_) => Self::SelectableText(text),
+            Self::Inert(_) => Self::Inert(text),
+            Self::List { focusable, .. } => Self::List { focusable, text },
+        }
+    }
+
     pub fn accepts_focus(self) -> bool {
         match self {
-            Self::EditableText | Self::ReadonlyText => true,
-            Self::List { focusable } => focusable,
-            Self::SelectableText | Self::Inert => false,
+            Self::EditableText(_) | Self::ReadonlyText(_) => true,
+            Self::List { focusable, .. } => focusable,
+            Self::SelectableText(_) | Self::Inert(_) => false,
         }
     }
 
     pub fn has_caret(self) -> bool {
-        matches!(self, Self::EditableText | Self::ReadonlyText)
+        matches!(self, Self::EditableText(_) | Self::ReadonlyText(_))
     }
 
     pub fn supports_text_selection(self) -> bool {
-        matches!(self, Self::ReadonlyText | Self::SelectableText)
+        matches!(self, Self::ReadonlyText(_) | Self::SelectableText(_))
     }
 
     pub fn supports_search(self) -> bool {
-        matches!(self, Self::ReadonlyText)
+        matches!(self, Self::ReadonlyText(_))
     }
 
     pub fn accepts_wheel_scroll(self) -> bool {
@@ -365,14 +465,6 @@ pub struct Window {
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
 
-    pub cpos: usize,
-    pub vim_enabled: bool,
-    pub vim_mode: VimMode,
-    pub vim_state: VimWindowState,
-    /// Shift-selection / vim Visual anchor. `None` means no active selection.
-    pub selection_anchor: Option<usize>,
-    /// Preferred display column for vertical motion; measured in terminal cells.
-    pub curswant: Option<usize>,
     scroll_top: RowIndex,
     /// Logical anchor for `scroll_top` - `(changedtick, logical_row, byte_offset)`
     /// of the chunk that was at the top of the viewport when scroll was last
@@ -383,19 +475,6 @@ pub struct Window {
     /// transcript projection rebuilds its buffer on every frame), since the
     /// `(lrow, byte)` would no longer reference the same content.
     pub(crate) scroll_anchor: Option<(u64, usize, usize)>,
-    /// Local visual-row index of the cursor (0-based in the backing buffer's
-    /// materialized row space). Add `row_base` to compare with `scroll_top`.
-    /// Derived from `cpos` via `sync_from_cpos`, projected through `self.layout`
-    /// so it tracks visual rows when wrap splits a logical row into multiple
-    /// visual rows.
-    pub(crate) cursor_row: RowIndex,
-    /// Virtual row/document state for readonly viewers whose backing buffer is a
-    /// materialized slice of a larger row space. `None` means the backing buffer
-    /// is the full scrollable extent.
-    pub(crate) virtual_rows: Option<VirtualRowsState>,
-    /// Cell-column of the cursor within its visual row. Derived from `cpos`
-    /// via `sync_from_cpos`.
-    pub(crate) cursor_col: u16,
     /// Vertical scroll policy. `scroll_top` is the resolved viewport row used for paint;
     /// this records whether the next frame should preserve that row or resolve to tail.
     scroll_state: VerticalScroll,
@@ -410,29 +489,26 @@ pub struct Window {
     /// Used when callers set a cursor position before the viewport height is known
     /// (e.g. opening a list dialog with an initial selection partway down the list).
     pub pending_scroll_to_cursor: bool,
-    /// Last cpos seen by the renderer; distinguishes cursor-move from scroll-pan.
-    pub last_render_cpos: Option<usize>,
-    pub cursor_positioned: bool,
-    /// Double-click word-select anchor; drag extends in word units while set.
-    pub drag_anchor_word: Option<(usize, usize)>,
-    /// Triple-click line-select anchor; drag extends in line units while set.
-    pub drag_anchor_line: Option<(usize, usize)>,
-    /// Cpos of a single-click press awaiting drag; promoted to a selection on the
-    /// first `Drag` event. A bare press-release with no motion leaves no selection.
-    pub pending_press: Option<usize>,
     /// `(scroll_top, tail-follow)` last emitted via `WinEvent::Scrolled`.
     pub(crate) last_emitted_scroll: Option<(RowIndex, bool)>,
     /// `(rect, content_width)` last emitted via `WinEvent::Resized`. Tracked
     /// here so the dispatcher can fire only when the leaf's geometry
     /// actually changed since the last frame.
     pub(crate) last_emitted_resize: Option<(Rect, u16)>,
-    /// Moving end of an active mouse drag-select, in editable-byte space. `None`
-    /// outside a drag. The renderer paints the cursor/CursorLine at this byte's
-    /// projected row when set, and the selection range is `(selection_anchor,
-    /// drag_endpoint)`. `mouse_up` commits this into `cpos` only for caret
-    /// leaves (`is_caret_leaf`); otherwise the value is discarded and `cpos`
-    /// returns to its pre-drag position.
-    pub(crate) drag_endpoint: Option<usize>,
+}
+
+impl std::ops::Deref for Window {
+    type Target = WindowTextState;
+
+    fn deref(&self) -> &Self::Target {
+        self.surface.text()
+    }
+}
+
+impl std::ops::DerefMut for Window {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.surface.text_mut()
+    }
 }
 
 impl Window {
@@ -452,27 +528,12 @@ impl Window {
             cursor_line: false,
             selection_highlight: false,
             viewport: None,
-            cpos: 0,
-            vim_enabled: false,
-            vim_mode: VimMode::default(),
-            vim_state: VimWindowState::default(),
-            selection_anchor: None,
-            curswant: None,
             scroll_top: 0,
             scroll_anchor: None,
             scroll_state: VerticalScroll::Pinned,
             scroll_left: 0,
-            cursor_row: 0,
-            virtual_rows: None,
-            cursor_col: 0,
             pending_recenter: false,
             pending_scroll_to_cursor: false,
-            last_render_cpos: None,
-            cursor_positioned: false,
-            drag_anchor_word: None,
-            drag_anchor_line: None,
-            pending_press: None,
-            drag_endpoint: None,
             last_emitted_scroll: None,
             last_emitted_resize: None,
         }
@@ -486,8 +547,13 @@ impl Window {
         self.surface
     }
 
+    pub fn text_state_mut(&mut self) -> &mut WindowTextState {
+        self.surface.text_mut()
+    }
+
     pub fn set_surface(&mut self, surface: WindowSurface) {
-        self.surface = surface;
+        let text = *self.surface.text();
+        self.surface = surface.with_text(text);
     }
 
     pub fn accepts_focus(&self) -> bool {
@@ -504,10 +570,6 @@ impl Window {
 
     pub fn supports_wheel_scroll(&self) -> bool {
         self.surface.accepts_wheel_scroll() || self.config.gutters.scrollbar
-    }
-
-    pub fn set_list_surface(&mut self, focusable: bool) {
-        self.surface = WindowSurface::List { focusable };
     }
 
     pub fn scroll_top(&self) -> RowIndex {
@@ -1097,14 +1159,16 @@ impl Window {
 
     /// Set this window's vim mode and clear any pending key sequence.
     pub fn set_vim_mode(&mut self, mode: VimMode) {
-        self.vim_state.set_mode(&mut self.vim_mode, mode);
+        let text = self.surface.text_mut();
+        text.vim_state.set_mode(&mut text.vim_mode, mode);
     }
 
     /// Anchor a visual selection at `cpos` and enter the given visual mode.
     /// Clears any shift-selection anchor.
     pub fn begin_visual(&mut self, mode: VimMode, cpos: usize) {
-        self.selection_anchor = None;
-        self.vim_state.begin_visual(&mut self.vim_mode, mode, cpos);
+        let text = self.surface.text_mut();
+        text.selection_anchor = None;
+        text.vim_state.begin_visual(&mut text.vim_mode, mode, cpos);
     }
 
     // ── Cursor ─────────────────────────────────────────────────────────
@@ -1446,8 +1510,7 @@ impl Window {
         };
         self.drag_endpoint = Some(endpoint);
         if self.vim_enabled {
-            self.vim_state
-                .begin_visual(&mut self.vim_mode, VimMode::Visual, start);
+            self.begin_visual(VimMode::Visual, start);
         } else {
             self.selection_anchor = Some(start);
         }
@@ -1472,7 +1535,7 @@ impl Window {
             return;
         }
         if self.vim_enabled && self.vim_mode != VimMode::Normal {
-            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+            self.set_vim_mode(VimMode::Normal);
         }
         if !self.cursor_positioned {
             let rows = buf.lines();
@@ -1614,10 +1677,11 @@ impl Window {
         let (row, col) = self.cursor_visual(buf, self.cpos);
         self.cursor_row = row;
         self.cursor_col = col;
+        let byte_col = buf.display_byte_pos(self.cpos).1;
         if let Some(state) = self.virtual_rows.as_mut() {
             state.cursor = DocPosition {
                 row: state.materialized.absolute_row(row),
-                byte_col: buf.display_byte_pos(self.cpos).1,
+                byte_col,
             };
             state.preferred_cell_col = Some(col as usize);
         }
@@ -1703,13 +1767,13 @@ impl Window {
             .saturating_sub(ctx.viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left);
         if buf.lines().is_empty() {
-            return if matches!(self.surface, WindowSurface::SelectableText) {
+            return if matches!(self.surface, WindowSurface::SelectableText(_)) {
                 Status::Ignored
             } else {
                 Status::Consumed
             };
         }
-        if matches!(self.surface, WindowSurface::SelectableText)
+        if matches!(self.surface, WindowSurface::SelectableText(_))
             && !self
                 .text_hit_at_mouse(buf, event, ctx.viewport)
                 .is_selectable()
@@ -1762,7 +1826,7 @@ impl Window {
                 if self.vim_enabled
                     && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
                 {
-                    self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+                    self.set_vim_mode(VimMode::Normal);
                 }
                 self.pending_press = Some(click_byte);
                 Status::Capture
@@ -1785,7 +1849,7 @@ impl Window {
         // visual/visual-line mode so the old anchor doesn't pollute the new
         // drag selection.
         if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
-            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+            self.set_vim_mode(VimMode::Normal);
         }
         let rel_row = event
             .row
@@ -1809,8 +1873,7 @@ impl Window {
                 self.pin_current_scroll();
                 let press = text::snap(text, press.min(text.len()));
                 if self.vim_enabled {
-                    self.vim_state
-                        .begin_visual(&mut self.vim_mode, VimMode::Visual, press);
+                    self.begin_visual(VimMode::Visual, press);
                 } else {
                     self.selection_anchor = Some(press);
                 }
@@ -1837,7 +1900,7 @@ impl Window {
 
     fn mouse_up(&mut self, buf: &Buffer, viewport_rows: u16) -> Status {
         if self.vim_enabled && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine) {
-            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+            self.set_vim_mode(VimMode::Normal);
         }
         // Commit-or-discard the drag endpoint. Caret leaves keep a visible
         // text cursor, so a click should park that cursor at the release byte.
@@ -1895,8 +1958,7 @@ impl Window {
         };
         self.drag_endpoint = Some(new_endpoint);
         if self.vim_enabled {
-            self.vim_state
-                .begin_visual(&mut self.vim_mode, VimMode::Visual, new_anchor);
+            self.begin_visual(VimMode::Visual, new_anchor);
         } else {
             self.selection_anchor = Some(new_anchor);
         }
@@ -1923,8 +1985,7 @@ impl Window {
         };
         self.drag_endpoint = Some(new_endpoint);
         if self.vim_enabled {
-            self.vim_state
-                .begin_visual(&mut self.vim_mode, VimMode::Visual, new_anchor);
+            self.begin_visual(VimMode::Visual, new_anchor);
         } else {
             self.selection_anchor = Some(new_anchor);
         }
@@ -1947,6 +2008,7 @@ impl Window {
                 let mut scratch = buf.text();
                 let mut scratch_history = UndoHistory::default();
                 let mut scratch_attachments = Vec::new();
+                let text_state = self.surface.text_mut();
                 let mut ctx = VimContext {
                     buf: smelt_buffer::attached::AttachedTextMut::new(
                         &mut scratch,
@@ -1955,22 +2017,23 @@ impl Window {
                     cpos: &mut cpos,
                     history: &mut scratch_history,
                     clipboard,
-                    mode: &mut self.vim_mode,
-                    curswant: &mut self.curswant,
-                    vim_state: &mut self.vim_state,
+                    mode: &mut text_state.vim_mode,
+                    curswant: &mut text_state.curswant,
+                    vim_state: &mut text_state.vim_state,
                     now,
                 };
                 vim::handle_key(k, &mut ctx)
             } else {
                 let (text, history) = buf.edit_refs();
+                let text_state = self.surface.text_mut();
                 let mut ctx = VimContext {
                     buf: text,
                     cpos: &mut cpos,
                     history,
                     clipboard,
-                    mode: &mut self.vim_mode,
-                    curswant: &mut self.curswant,
-                    vim_state: &mut self.vim_state,
+                    mode: &mut text_state.vim_mode,
+                    curswant: &mut text_state.curswant,
+                    vim_state: &mut text_state.vim_state,
                     now,
                 };
                 vim::handle_key(k, &mut ctx)
@@ -1982,7 +2045,7 @@ impl Window {
             action
         };
         if self.vim_enabled && self.vim_mode == VimMode::Insert {
-            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+            self.set_vim_mode(VimMode::Normal);
         }
         if buf.readonly {
             // Insertion-mode-entering keys (o, O, i, a, ...) run against a
@@ -2046,7 +2109,7 @@ impl Window {
         self.curswant = Some(new_want);
         self.cpos = new_cpos;
         if self.vim_enabled && self.vim_mode == VimMode::Insert {
-            self.vim_state.set_mode(&mut self.vim_mode, VimMode::Normal);
+            self.set_vim_mode(VimMode::Normal);
         }
         self.sync_from_cpos(buf, viewport_rows);
         self.update_tail_state(buf, viewport_rows);
@@ -2861,7 +2924,7 @@ mod tests {
     #[test]
     fn selectable_text_mouse_down_ignores_empty_buffer() {
         let mut w = make_win();
-        w.set_surface(WindowSurface::SelectableText);
+        w.set_surface(WindowSurface::selectable_text());
         let buf = make_buf(Vec::new());
         let soft = Vec::new();
         let hard = Vec::new();
@@ -2889,7 +2952,7 @@ mod tests {
     #[test]
     fn selectable_text_mouse_down_ignores_chrome_in_edit_policy() {
         let mut w = make_win();
-        w.set_surface(WindowSurface::SelectableText);
+        w.set_surface(WindowSurface::selectable_text());
         let mut buf = make_buf(vec!["abc----xyz".into()]);
         buf.add_highlight_group_with_meta(
             0,
@@ -4453,30 +4516,22 @@ mod tests {
 
         // Enter visual mode.
         let now = std::time::Instant::now();
-        let cmd = crate::vim::handle_virtual_viewer_key(
-            crossterm::event::KeyEvent {
-                code: crossterm::event::KeyCode::Char('v'),
-                modifiers: crossterm::event::KeyModifiers::empty(),
-                kind: crossterm::event::KeyEventKind::Press,
-                state: crossterm::event::KeyEventState::NONE,
-            },
-            &mut w.vim_mode,
-            &mut w.vim_state,
-        );
+        let cmd = w.handle_virtual_viewer_key(crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Char('v'),
+            modifiers: crossterm::event::KeyModifiers::empty(),
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
         assert_eq!(cmd, Some(crate::ViewerCommand::StartVisual));
         w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
 
         // Move down to the short row 2; byte_col should clamp to line width.
-        let cmd = crate::vim::handle_virtual_viewer_key(
-            crossterm::event::KeyEvent {
-                code: crossterm::event::KeyCode::Char('j'),
-                modifiers: crossterm::event::KeyModifiers::empty(),
-                kind: crossterm::event::KeyEventKind::Press,
-                state: crossterm::event::KeyEventState::NONE,
-            },
-            &mut w.vim_mode,
-            &mut w.vim_state,
-        );
+        let cmd = w.handle_virtual_viewer_key(crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Char('j'),
+            modifiers: crossterm::event::KeyModifiers::empty(),
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
         assert_eq!(cmd, Some(crate::ViewerCommand::MoveRows(1)));
         w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
         assert_eq!(w.virtual_rows.unwrap().cursor.row, 2);
@@ -4488,16 +4543,12 @@ mod tests {
 
         // Move down to the longer row 3; byte_col should recover toward the
         // original column, not get stuck at the clamped short-line width.
-        let cmd = crate::vim::handle_virtual_viewer_key(
-            crossterm::event::KeyEvent {
-                code: crossterm::event::KeyCode::Char('j'),
-                modifiers: crossterm::event::KeyModifiers::empty(),
-                kind: crossterm::event::KeyEventKind::Press,
-                state: crossterm::event::KeyEventState::NONE,
-            },
-            &mut w.vim_mode,
-            &mut w.vim_state,
-        );
+        let cmd = w.handle_virtual_viewer_key(crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Char('j'),
+            modifiers: crossterm::event::KeyModifiers::empty(),
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
         assert_eq!(cmd, Some(crate::ViewerCommand::MoveRows(1)));
         w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
         assert_eq!(w.virtual_rows.unwrap().cursor.row, 3);
@@ -4510,16 +4561,12 @@ mod tests {
         // Move right to the end of the long line with 'l'.
         let line3_len = rows[3].len();
         for _ in 0..(line3_len - 5) {
-            let cmd = crate::vim::handle_virtual_viewer_key(
-                crossterm::event::KeyEvent {
-                    code: crossterm::event::KeyCode::Char('l'),
-                    modifiers: crossterm::event::KeyModifiers::empty(),
-                    kind: crossterm::event::KeyEventKind::Press,
-                    state: crossterm::event::KeyEventState::NONE,
-                },
-                &mut w.vim_mode,
-                &mut w.vim_state,
-            );
+            let cmd = w.handle_virtual_viewer_key(crossterm::event::KeyEvent {
+                code: crossterm::event::KeyCode::Char('l'),
+                modifiers: crossterm::event::KeyModifiers::empty(),
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            });
             assert_eq!(cmd, Some(crate::ViewerCommand::MoveCursorCol(1)));
             w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
         }
@@ -4530,16 +4577,12 @@ mod tests {
         );
 
         // Pressing 'l' again at the end should be a no-op.
-        let cmd = crate::vim::handle_virtual_viewer_key(
-            crossterm::event::KeyEvent {
-                code: crossterm::event::KeyCode::Char('l'),
-                modifiers: crossterm::event::KeyModifiers::empty(),
-                kind: crossterm::event::KeyEventKind::Press,
-                state: crossterm::event::KeyEventState::NONE,
-            },
-            &mut w.vim_mode,
-            &mut w.vim_state,
-        );
+        let cmd = w.handle_virtual_viewer_key(crossterm::event::KeyEvent {
+            code: crossterm::event::KeyCode::Char('l'),
+            modifiers: crossterm::event::KeyModifiers::empty(),
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        });
         assert_eq!(cmd, Some(crate::ViewerCommand::MoveCursorCol(1)));
         w.execute_virtual_viewer_command(&buf, cmd.unwrap(), 10, now);
         assert_eq!(

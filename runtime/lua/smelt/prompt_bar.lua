@@ -284,15 +284,13 @@ end
 M.top_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.top" }), {
   name = "smelt.prompt_bar.top",
   scrollbar = false,
-  focusable = false,
-  selectable = true,
+  surface = "selectable_text",
   region = "prompt_above",
 })
 M.bottom_win = smelt.win.new(smelt.buf.new({ name = "smelt.prompt_bar.bottom" }), {
   name = "smelt.prompt_bar.bottom",
   scrollbar = false,
-  focusable = false,
-  selectable = false,
+  surface = "inert",
   region = "prompt_below",
 })
 

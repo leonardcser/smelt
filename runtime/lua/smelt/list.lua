@@ -7,7 +7,7 @@
 -- to raw `dialog.list` whenever you need finer control.
 --
 -- Usage:
---   local leaf = smelt.dialog.list(buf, { focusable = false })
+--   local leaf = smelt.dialog.list(buf, { surface = "list_inert" })
 --   local list = smelt.list.new({
 --     leaf = leaf, buf = buf, items = entries,
 --     render = function(it)

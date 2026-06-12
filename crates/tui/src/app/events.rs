@@ -1144,11 +1144,7 @@ impl TuiApp {
             if is_virtual {
                 let command = {
                     let win = self.ui.win_mut(win_id).expect("window");
-                    crate::smelt_edit::vim::handle_virtual_viewer_key(
-                        k,
-                        &mut win.vim_mode,
-                        &mut win.vim_state,
-                    )
+                    win.handle_virtual_viewer_key(k)
                 };
                 if let Some(command) = command {
                     let command = self
