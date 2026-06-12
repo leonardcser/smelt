@@ -324,22 +324,18 @@ pub struct WindowTextState {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum WindowSurface {
-    /// Editable text such as the prompt input. Keyboard-focusable, with a caret.
-    EditableText(WindowTextState),
-    /// Readonly/viewer text such as transcript or dialog bodies. Keyboard-focusable,
-    /// with caret/search/text-selection state but no edits.
-    ReadonlyText(WindowTextState),
-    /// Non-focusable text that supports drag-copy when the press lands on text.
-    SelectableText(WindowTextState),
-    /// Row/list widget. May be keyboard-focusable, scrollable, and highlighted by row;
-    /// it does not expose a text caret.
-    List {
-        focusable: bool,
-        text: WindowTextState,
-    },
-    /// Pure chrome/fill. No focus, caret, text selection, or wheel scroll.
-    Inert(WindowTextState),
+pub struct WindowSurface {
+    kind: WindowSurfaceKind,
+    text: WindowTextState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowSurfaceKind {
+    EditableText,
+    ReadonlyText,
+    SelectableText,
+    List { focusable: bool },
+    Inert,
 }
 
 impl Default for WindowSurface {
@@ -350,80 +346,77 @@ impl Default for WindowSurface {
 
 impl WindowSurface {
     pub fn editable_text() -> Self {
-        Self::EditableText(WindowTextState::default())
+        Self::new(WindowSurfaceKind::EditableText)
     }
 
     pub fn readonly_text() -> Self {
-        Self::ReadonlyText(WindowTextState::default())
+        Self::new(WindowSurfaceKind::ReadonlyText)
     }
 
     pub fn selectable_text() -> Self {
-        Self::SelectableText(WindowTextState::default())
+        Self::new(WindowSurfaceKind::SelectableText)
     }
 
     pub fn inert() -> Self {
-        Self::Inert(WindowTextState::default())
+        Self::new(WindowSurfaceKind::Inert)
     }
 
     pub fn list(focusable: bool) -> Self {
-        Self::List {
-            focusable,
+        Self::new(WindowSurfaceKind::List { focusable })
+    }
+
+    fn new(kind: WindowSurfaceKind) -> Self {
+        Self {
+            kind,
             text: WindowTextState::default(),
         }
     }
 
     fn text(&self) -> &WindowTextState {
-        match self {
-            Self::EditableText(text)
-            | Self::ReadonlyText(text)
-            | Self::SelectableText(text)
-            | Self::Inert(text) => text,
-            Self::List { text, .. } => text,
-        }
+        &self.text
     }
 
     fn text_mut(&mut self) -> &mut WindowTextState {
-        match self {
-            Self::EditableText(text)
-            | Self::ReadonlyText(text)
-            | Self::SelectableText(text)
-            | Self::Inert(text) => text,
-            Self::List { text, .. } => text,
-        }
+        &mut self.text
     }
 
-    fn with_text(self, text: WindowTextState) -> Self {
-        match self {
-            Self::EditableText(_) => Self::EditableText(text),
-            Self::ReadonlyText(_) => Self::ReadonlyText(text),
-            Self::SelectableText(_) => Self::SelectableText(text),
-            Self::Inert(_) => Self::Inert(text),
-            Self::List { focusable, .. } => Self::List { focusable, text },
-        }
+    fn with_text(mut self, text: WindowTextState) -> Self {
+        self.text = text;
+        self
     }
 
     pub fn accepts_focus(self) -> bool {
-        match self {
-            Self::EditableText(_) | Self::ReadonlyText(_) => true,
-            Self::List { focusable, .. } => focusable,
-            Self::SelectableText(_) | Self::Inert(_) => false,
+        match self.kind {
+            WindowSurfaceKind::EditableText | WindowSurfaceKind::ReadonlyText => true,
+            WindowSurfaceKind::List { focusable } => focusable,
+            WindowSurfaceKind::SelectableText | WindowSurfaceKind::Inert => false,
         }
     }
 
     pub fn has_caret(self) -> bool {
-        matches!(self, Self::EditableText(_) | Self::ReadonlyText(_))
+        matches!(
+            self.kind,
+            WindowSurfaceKind::EditableText | WindowSurfaceKind::ReadonlyText
+        )
     }
 
     pub fn supports_text_selection(self) -> bool {
-        matches!(self, Self::ReadonlyText(_) | Self::SelectableText(_))
+        matches!(
+            self.kind,
+            WindowSurfaceKind::ReadonlyText | WindowSurfaceKind::SelectableText
+        )
     }
 
     pub fn supports_search(self) -> bool {
-        matches!(self, Self::ReadonlyText(_))
+        matches!(self.kind, WindowSurfaceKind::ReadonlyText)
     }
 
     pub fn accepts_wheel_scroll(self) -> bool {
-        matches!(self, Self::List { .. })
+        matches!(self.kind, WindowSurfaceKind::List { .. })
+    }
+
+    fn is_selectable_text(self) -> bool {
+        matches!(self.kind, WindowSurfaceKind::SelectableText)
     }
 }
 
@@ -608,14 +601,14 @@ impl Window {
         self.surface.text().vim_mode
     }
 
-    pub fn handle_vim_key_with_text(
+    pub fn handle_vim_key(
         &mut self,
-        text: smelt_buffer::attached::AttachedTextMut<'_>,
-        history: &mut UndoHistory,
+        buf: &mut Buffer,
         clipboard: &mut Clipboard,
         key: KeyEvent,
         now: std::time::Instant,
     ) -> Action {
+        let (text, history) = buf.edit_refs();
         let text_state = self.surface.text_mut();
         let mut ctx = VimContext {
             buf: text,
@@ -1851,13 +1844,13 @@ impl Window {
             .saturating_sub(ctx.viewport.gutter_width)
             .saturating_sub(self.config.gutters.pad_left);
         if buf.lines().is_empty() {
-            return if matches!(self.surface, WindowSurface::SelectableText(_)) {
+            return if self.surface.is_selectable_text() {
                 Status::Ignored
             } else {
                 Status::Consumed
             };
         }
-        if matches!(self.surface, WindowSurface::SelectableText(_))
+        if self.surface.is_selectable_text()
             && !self
                 .text_hit_at_mouse(buf, event, ctx.viewport)
                 .is_selectable()

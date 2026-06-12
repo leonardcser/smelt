@@ -40,11 +40,7 @@ impl PromptState {
         let key_ev: KeyEvent = *key_ev;
 
         let yank_tick_before = clipboard.kill_ring.yank_tick();
-        let result = {
-            let (text, hist) = ctx.buf.edit_refs();
-            ctx.win
-                .handle_vim_key_with_text(text, hist, clipboard, key_ev, now)
-        };
+        let result = ctx.win.handle_vim_key(ctx.buf, clipboard, key_ev, now);
         if clipboard.kill_ring.yank_tick() != yank_tick_before {
             ctx.buf.sync_clipboard_from_kill_ring(clipboard);
         }
