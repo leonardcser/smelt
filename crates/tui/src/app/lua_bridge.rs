@@ -16,13 +16,13 @@ impl TuiApp {
 
     pub(crate) fn focused_vim_mode(&self) -> Option<crate::smelt_edit::VimMode> {
         if let Some(win) = self.ui.focused_window() {
-            if win.vim_enabled {
-                return Some(win.vim_mode);
+            if win.vim_enabled() {
+                return Some(win.vim_mode());
             }
         }
         match self.app_focus {
-            crate::app::AppFocus::Content if self.transcript_win().vim_enabled => {
-                Some(self.transcript_win().vim_mode)
+            crate::app::AppFocus::Content if self.transcript_win().vim_enabled() => {
+                Some(self.transcript_win().vim_mode())
             }
             crate::app::AppFocus::Prompt if self.input.vim_enabled(self.prompt_win()) => {
                 Some(self.input.vim_mode(self.prompt_win()))
@@ -35,14 +35,14 @@ impl TuiApp {
     pub(crate) fn set_focused_vim_mode(&mut self, mode: crate::smelt_edit::VimMode) {
         if let Some(win_id) = self.ui.focus() {
             if let Some(w) = self.ui.win_mut(win_id) {
-                if w.vim_enabled {
+                if w.vim_enabled() {
                     w.set_vim_mode(mode);
                     return;
                 }
             }
         }
         match self.app_focus {
-            crate::app::AppFocus::Content if self.transcript_win().vim_enabled => {
+            crate::app::AppFocus::Content if self.transcript_win().vim_enabled() => {
                 self.transcript_win_mut().set_vim_mode(mode);
             }
             crate::app::AppFocus::Prompt => {
@@ -62,7 +62,7 @@ impl TuiApp {
         if self.last_prompt_text == current_text {
             return;
         }
-        let cursor_before = self.prompt_win().cpos;
+        let cursor_before = self.prompt_win().cpos();
         if self.prompt_trace_enabled() {
             self.trace_prompt_event(
                 "text_changed_before",
@@ -104,12 +104,13 @@ impl TuiApp {
         // `text_changed` is observational: filter/completer callbacks can edit
         // the prompt explicitly, but a callback that only moves the cursor must
         // not repark the insertion point after every typed character.
-        if self.prompt_buf().source() == current_text && self.prompt_win().cpos != cursor_before {
-            let cursor_after_callbacks = self.prompt_win().cpos;
+        if self.prompt_buf().source() == current_text && self.prompt_win().cpos() != cursor_before {
+            let cursor_after_callbacks = self.prompt_win().cpos();
             {
                 let pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                pctx.win.cpos = smelt_buffer::text::snap(pctx.buf.source(), cursor_before);
-                pctx.win.selection_anchor = None;
+                pctx.win
+                    .set_cpos(smelt_buffer::text::snap(pctx.buf.source(), cursor_before));
+                pctx.win.clear_selection_anchor();
                 pctx.win.clamp_anchors_to_source(pctx.buf.source());
             }
             if self.prompt_trace_enabled() {
@@ -118,7 +119,7 @@ impl TuiApp {
                     serde_json::json!({
                         "cursor_before": cursor_before,
                         "cursor_after_callbacks": cursor_after_callbacks,
-                        "cursor_after_restore": self.prompt_win().cpos,
+                        "cursor_after_restore": self.prompt_win().cpos(),
                     }),
                 );
             }

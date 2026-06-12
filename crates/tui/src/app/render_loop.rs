@@ -255,7 +255,7 @@ impl TuiApp {
                 .sync_display_coords(&mut pctx, prompt_rect.height);
             pctx.win.scroll_left = 0;
             pctx.win.pending_recenter = false;
-            pctx.win.last_render_cpos = Some(pctx.win.cpos);
+            pctx.win.set_last_render_cpos(Some(pctx.win.cpos()));
         }
 
         {

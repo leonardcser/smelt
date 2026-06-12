@@ -419,7 +419,7 @@ impl TuiApp {
             MouseEventKind::Down(_) => click_count >= 2,
             MouseEventKind::Drag(_) => {
                 let w = self.transcript_win();
-                w.drag_anchor_word.is_some() || w.drag_anchor_line.is_some()
+                w.has_drag_anchor()
             }
             _ => false,
         };

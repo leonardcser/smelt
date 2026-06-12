@@ -18,12 +18,12 @@ impl PromptState {
 
     /// Save undo state. Skips during vim Insert - the session entry saved on insert-entry covers it.
     pub(crate) fn save_undo(&mut self, ctx: &mut PromptCtx<'_>) {
-        if ctx.win.vim_enabled && ctx.win.vim_mode == VimMode::Insert {
+        if ctx.win.vim_enabled() && ctx.win.vim_mode() == VimMode::Insert {
             return; // insert session groups all edits into one undo step
         }
         ctx.buf.history.save(crate::smelt_edit::UndoEntry::snapshot(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             &ctx.buf.attachment_ids,
         ));
     }
@@ -45,8 +45,8 @@ impl PromptState {
             self.save_undo(ctx);
             self.delete_selection(ctx);
         }
-        let p = ctx.buf.text_mut().insert(ctx.win.cpos, c);
-        ctx.win.cpos = p + c.len_utf8();
+        let p = ctx.buf.text_mut().insert(ctx.win.cpos(), c);
+        ctx.win.set_cpos(p + c.len_utf8());
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
@@ -59,8 +59,8 @@ impl PromptState {
         // A degenerate `selection_anchor` (set by a shift-key whose motion
         // resolved to no movement, e.g. Shift+End at EOL) lingers as a
         // byte position that the source mutation below would orphan.
-        ctx.win.selection_anchor = None;
-        if ctx.win.cpos == 0 {
+        ctx.win.clear_selection_anchor();
+        if ctx.win.cpos() == 0 {
             return;
         }
         // Deleting the closing `"` of a `"@path"` token removes the whole token.
@@ -68,24 +68,24 @@ impl PromptState {
             if start == 0 {
                 self.from_paste = false;
             }
-            let cpos = ctx.win.cpos;
+            let cpos = ctx.win.cpos();
             self.safe_shrink(ctx, start..cpos);
-            ctx.win.cpos = start;
+            ctx.win.set_cpos(start);
             return;
         }
-        let prev = prev_char_boundary(ctx.buf.source(), ctx.win.cpos);
+        let prev = prev_char_boundary(ctx.buf.source(), ctx.win.cpos());
         if prev == 0 {
             self.from_paste = false;
         }
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         self.safe_shrink(ctx, prev..cpos);
-        ctx.win.cpos = prev;
+        ctx.win.set_cpos(prev);
     }
 
     /// Byte offset of the opening `"` when the cursor is just after the closing `"` of a `"@path"` token.
     pub(super) fn quoted_at_ref_start(&self, ctx: PromptCtxRef<'_>) -> Option<usize> {
         let src = ctx.buf.source();
-        let before = slice(src, 0..ctx.win.cpos);
+        let before = slice(src, 0..ctx.win.cpos());
         if !before.ends_with('"') {
             return None;
         }
@@ -101,41 +101,41 @@ impl PromptState {
     }
 
     pub(super) fn delete_word_backward(&mut self, ctx: &mut PromptCtx<'_>) {
-        if ctx.win.cpos == 0 {
+        if ctx.win.cpos() == 0 {
             return;
         }
         let target = crate::smelt_edit::text::word_backward_pos(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             crate::smelt_edit::text::CharClass::Word,
         );
         if target == 0 {
             self.from_paste = false;
         }
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         self.safe_shrink(ctx, target..cpos);
-        ctx.win.cpos = target;
+        ctx.win.set_cpos(target);
     }
 
     pub(super) fn delete_char_forward(&mut self, ctx: &mut PromptCtx<'_>) {
-        if ctx.win.cpos >= ctx.buf.source().len() {
+        if ctx.win.cpos() >= ctx.buf.source().len() {
             return;
         }
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         let next = next_char_boundary(ctx.buf.source(), cpos);
         self.safe_shrink(ctx, cpos..next);
     }
 
     pub(super) fn delete_word_forward(&mut self, ctx: &mut PromptCtx<'_>) {
-        if ctx.win.cpos >= ctx.buf.source().len() {
+        if ctx.win.cpos() >= ctx.buf.source().len() {
             return;
         }
         let target = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             crate::smelt_edit::text::CharClass::Word,
         );
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         self.safe_shrink(ctx, cpos..target);
     }
 
@@ -144,7 +144,7 @@ impl PromptState {
         ctx: &mut PromptCtx<'_>,
         clipboard: &mut crate::smelt_edit::Clipboard,
     ) {
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         let end = slice(ctx.buf.source(), cpos..ctx.buf.source().len())
             .find('\n')
             .map(|i| cpos + i)
@@ -159,37 +159,37 @@ impl PromptState {
         ctx: &mut PromptCtx<'_>,
         clipboard: &mut crate::smelt_edit::Clipboard,
     ) {
-        let start = slice(ctx.buf.source(), 0..ctx.win.cpos)
+        let start = slice(ctx.buf.source(), 0..ctx.win.cpos())
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         let killed = ctx.buf.copy_range(start..cpos);
         self.safe_shrink(ctx, start..cpos);
-        ctx.win.cpos = start;
+        ctx.win.set_cpos(start);
         self.kill_and_copy(killed, clipboard);
     }
 
     pub(super) fn delete_to_start_of_line(&mut self, ctx: &mut PromptCtx<'_>) {
-        let start = slice(ctx.buf.source(), 0..ctx.win.cpos)
+        let start = slice(ctx.buf.source(), 0..ctx.win.cpos())
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         self.safe_shrink(ctx, start..cpos);
-        ctx.win.cpos = start;
+        ctx.win.set_cpos(start);
     }
 
     pub(super) fn uppercase_word(&mut self, ctx: &mut PromptCtx<'_>) {
         let end = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             crate::smelt_edit::text::CharClass::Word,
         );
-        if end == ctx.win.cpos {
+        if end == ctx.win.cpos() {
             return;
         }
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         let upper: String = slice(ctx.buf.source(), cpos..end).to_uppercase();
         let new_len = upper.len();
         // Case mapping leaves ATTACHMENT_MARKER unchanged; `AttachedTextMut`'s
@@ -197,37 +197,37 @@ impl PromptState {
         // still need a clamp because case mapping can change byte length
         // (e.g. ß → SS).
         ctx.buf.text_mut().replace_range(cpos..end, &upper);
-        ctx.win.cpos = cpos + new_len;
+        ctx.win.set_cpos(cpos + new_len);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn lowercase_word(&mut self, ctx: &mut PromptCtx<'_>) {
         let end = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             crate::smelt_edit::text::CharClass::Word,
         );
-        if end == ctx.win.cpos {
+        if end == ctx.win.cpos() {
             return;
         }
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         let lower: String = slice(ctx.buf.source(), cpos..end).to_lowercase();
         let new_len = lower.len();
         ctx.buf.text_mut().replace_range(cpos..end, &lower);
-        ctx.win.cpos = cpos + new_len;
+        ctx.win.set_cpos(cpos + new_len);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn capitalize_word(&mut self, ctx: &mut PromptCtx<'_>) {
         let end = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             crate::smelt_edit::text::CharClass::Word,
         );
-        if end == ctx.win.cpos {
+        if end == ctx.win.cpos() {
             return;
         }
-        let word = slice(ctx.buf.source(), ctx.win.cpos..end);
+        let word = slice(ctx.buf.source(), ctx.win.cpos()..end);
         let mut cap = String::with_capacity(word.len());
         let mut first = true;
         for c in word.chars() {
@@ -238,17 +238,17 @@ impl PromptState {
                 cap.push(c);
             }
         }
-        let cpos = ctx.win.cpos;
+        let cpos = ctx.win.cpos();
         let cap_len = cap.len();
         ctx.buf.text_mut().replace_range(cpos..end, &cap);
-        ctx.win.cpos = cpos + cap_len;
+        ctx.win.set_cpos(cpos + cap_len);
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn undo(&mut self, ctx: &mut PromptCtx<'_>) {
         let current = crate::smelt_edit::UndoEntry::snapshot(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             &ctx.buf.attachment_ids,
         );
         if let Some(entry) = ctx.buf.history.undo(current) {
@@ -257,16 +257,16 @@ impl PromptState {
     }
 
     pub(super) fn move_word_forward(&mut self, ctx: &mut PromptCtx<'_>) -> bool {
-        if ctx.win.cpos >= ctx.buf.source().len() {
+        if ctx.win.cpos() >= ctx.buf.source().len() {
             return false;
         }
         let target = crate::smelt_edit::text::word_forward_pos(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             crate::smelt_edit::text::CharClass::Word,
         );
-        if target != ctx.win.cpos {
-            ctx.win.cpos = target;
+        if target != ctx.win.cpos() {
+            ctx.win.set_cpos(target);
             true
         } else {
             false
@@ -274,16 +274,16 @@ impl PromptState {
     }
 
     pub(super) fn move_word_backward(&mut self, ctx: &mut PromptCtx<'_>) -> bool {
-        if ctx.win.cpos == 0 {
+        if ctx.win.cpos() == 0 {
             return false;
         }
         let target = crate::smelt_edit::text::word_backward_pos(
             ctx.buf.source(),
-            ctx.win.cpos,
+            ctx.win.cpos(),
             crate::smelt_edit::text::CharClass::Word,
         );
-        if target != ctx.win.cpos {
-            ctx.win.cpos = target;
+        if target != ctx.win.cpos() {
+            ctx.win.set_cpos(target);
             true
         } else {
             false
@@ -306,28 +306,28 @@ impl PromptState {
 
         // Mark from_paste when inserting at the beginning of the current line
         // so pasted content starting with `!` isn't treated as a shell escape.
-        let line_start = slice(ctx.buf.source(), 0..ctx.win.cpos)
+        let line_start = slice(ctx.buf.source(), 0..ctx.win.cpos())
             .rfind('\n')
             .map(|i| i + 1)
             .unwrap_or(0);
-        if ctx.win.cpos == line_start {
+        if ctx.win.cpos() == line_start {
             self.from_paste = true;
         }
-        let p = ctx.buf.text_mut().insert_str(ctx.win.cpos, &data);
-        ctx.win.cpos = p + data.len();
+        let p = ctx.buf.text_mut().insert_str(ctx.win.cpos(), &data);
+        ctx.win.set_cpos(p + data.len());
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     pub(super) fn insert_attachment_id(&mut self, ctx: &mut PromptCtx<'_>, id: AttachmentId) {
-        let p = ctx.buf.text_mut().insert_marker(ctx.win.cpos, id);
-        ctx.win.cpos = p + ATTACHMENT_MARKER.len_utf8();
+        let p = ctx.buf.text_mut().insert_marker(ctx.win.cpos(), id);
+        ctx.win.set_cpos(p + ATTACHMENT_MARKER.len_utf8());
         ctx.win.clamp_anchors_to_source(ctx.buf.source());
     }
 
     /// Move the cursor by `delta` source lines, clamped to the buffer bounds.
     pub(super) fn scroll_lines(&mut self, ctx: &mut PromptCtx<'_>, delta: isize) {
         let source = ctx.buf.source();
-        let line = super::current_line(source, ctx.win.cpos);
+        let line = super::current_line(source, ctx.win.cpos());
         let total_lines = source.chars().filter(|&c| c == '\n').count() + 1;
         let target = if delta < 0 {
             line.saturating_sub((-delta) as usize)
@@ -357,7 +357,7 @@ impl PromptState {
             // target beyond end, go to last line start
             pos = ctx.buf.source().rfind('\n').map(|i| i + 1).unwrap_or(0);
         }
-        ctx.win.cpos = pos;
+        ctx.win.set_cpos(pos);
     }
 
     /// Kill text into the kill ring and copy to clipboard. `out.kill_ring`

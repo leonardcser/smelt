@@ -62,7 +62,7 @@ impl TuiApp {
             return None;
         }
         let ctx = crate::input::prompt_ctx_ref(&self.ui);
-        if ctx.win.vim_enabled && ctx.win.vim_mode != crate::smelt_edit::VimMode::Insert {
+        if ctx.win.vim_enabled() && ctx.win.vim_mode() != crate::smelt_edit::VimMode::Insert {
             return None;
         }
         if self.input.selection_range(ctx).is_some() {
@@ -71,7 +71,7 @@ impl TuiApp {
         Some(PromptInsertCheck {
             ch: *ch,
             before_text: ctx.buf.source().to_string(),
-            before_cpos: ctx.win.cpos,
+            before_cpos: ctx.win.cpos(),
         })
     }
 
@@ -84,7 +84,7 @@ impl TuiApp {
         expected.insert(insert_at, check.ch);
         let expected_cpos = insert_at + check.ch.len_utf8();
         let actual = self.prompt_buf().source();
-        let actual_cpos = self.prompt_win().cpos;
+        let actual_cpos = self.prompt_win().cpos();
         let text_matches = actual == expected;
         let cursor_matches = actual_cpos == expected_cpos;
         let label = if text_matches && !cursor_matches {
@@ -114,7 +114,7 @@ impl TuiApp {
 
     fn prompt_trace_snapshot(&self) -> Value {
         let source = self.prompt_buf().source();
-        let cpos = self.prompt_win().cpos;
+        let cpos = self.prompt_win().cpos();
         serde_json::json!({
             "len": source.len(),
             "hash": Self::prompt_text_hash(source),
@@ -122,7 +122,7 @@ impl TuiApp {
             "preview": prompt_preview(source),
             "cursor_context": prompt_cursor_context(source, cpos),
             "app_focus": format!("{:?}", self.app_focus),
-            "vim_mode": format!("{:?}", self.prompt_win().vim_mode),
+            "vim_mode": format!("{:?}", self.prompt_win().vim_mode()),
             "focused_overlay": self.ui.focused_overlay().is_some(),
             "active_modal": self.ui.active_modal().is_some(),
             "cmdline_open": self.well_known.cmdline.is_some(),

@@ -8,7 +8,7 @@
 //! cross-call state - it's a pure function of the borrowed context.
 
 use super::{Action, History, PromptCtx, PromptState};
-use crate::smelt_edit::vim::{self, VimContext};
+use crate::smelt_edit::vim;
 use crate::smelt_edit::Clipboard;
 use crossterm::event::{Event, KeyEvent};
 
@@ -31,7 +31,7 @@ impl PromptState {
         clipboard: &mut Clipboard,
         now: std::time::Instant,
     ) -> VimBridgeResult {
-        if !ctx.win.vim_enabled {
+        if !ctx.win.vim_enabled() {
             return VimBridgeResult::NotAKey;
         }
         let Event::Key(key_ev) = ev else {
@@ -42,18 +42,8 @@ impl PromptState {
         let yank_tick_before = clipboard.kill_ring.yank_tick();
         let result = {
             let (text, hist) = ctx.buf.edit_refs();
-            let text_state = ctx.win.text_state_mut();
-            let mut vctx = VimContext {
-                buf: text,
-                cpos: &mut text_state.cpos,
-                history: hist,
-                clipboard,
-                mode: &mut text_state.vim_mode,
-                curswant: &mut text_state.curswant,
-                vim_state: &mut text_state.vim_state,
-                now,
-            };
-            vim::handle_key(key_ev, &mut vctx)
+            ctx.win
+                .handle_vim_key_with_text(text, hist, clipboard, key_ev, now)
         };
         if clipboard.kill_ring.yank_tick() != yank_tick_before {
             ctx.buf.sync_clipboard_from_kill_ring(clipboard);

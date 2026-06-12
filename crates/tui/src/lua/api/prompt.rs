@@ -71,12 +71,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(crate::lua::with_app(|app| match pos {
                 Some(p) => {
                     let requested = p.max(0) as usize;
-                    let before_cpos = app.prompt_win().cpos;
+                    let before_cpos = app.prompt_win().cpos();
                     let snapped = {
                         let pctx = crate::input::prompt_ctx_mut(&mut app.ui);
                         let snapped = smelt_buffer::text::snap(pctx.buf.source(), requested);
-                        pctx.win.cpos = snapped;
-                        pctx.win.selection_anchor = None;
+                        pctx.win.set_cpos(snapped);
+                        pctx.win.clear_selection_anchor();
                         pctx.win.clamp_anchors_to_source(pctx.buf.source());
                         snapped
                     };
@@ -92,7 +92,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     }
                     snapped as i64
                 }
-                None => app.prompt_win().cpos as i64,
+                None => app.prompt_win().cpos() as i64,
             }))
         },
     )?;
@@ -102,7 +102,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &["start", "end", "text"],
         |_, (start, end, text): (i64, i64, String)| -> LuaResult<i64> {
             Ok(crate::lua::with_app(|app| {
-                let before_cpos = app.prompt_win().cpos;
+                let before_cpos = app.prompt_win().cpos();
                 let (start, end, new_cpos) = {
                     let pctx = crate::input::prompt_ctx_mut(&mut app.ui);
                     let src = pctx.buf.source();
@@ -110,8 +110,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     let end = smelt_buffer::text::snap(src, end.max(0) as usize).max(start);
                     pctx.buf.text_mut().replace_range(start..end, &text);
                     let new_cpos = start + text.len();
-                    pctx.win.cpos = new_cpos;
-                    pctx.win.selection_anchor = None;
+                    pctx.win.set_cpos(new_cpos);
+                    pctx.win.clear_selection_anchor();
                     pctx.win.clamp_anchors_to_source(pctx.buf.source());
                     (start, end, new_cpos)
                 };

@@ -798,19 +798,19 @@ impl TestApp {
         let Some(win) = self.app.ui.win(crate::app::PROMPT_WIN) else {
             return;
         };
-        if win.effective_endpoint() != win.cpos {
+        if win.effective_endpoint() != win.cpos() {
             return;
         }
         let Some(buf) = self.app.ui.buf(crate::app::PROMPT_EDIT_BUF) else {
             return;
         };
         let source = buf.source();
-        let cpos = smelt_buffer::text::snap(source, win.cpos.min(source.len()));
+        let cpos = smelt_buffer::text::snap(source, win.cpos().min(source.len()));
         assert_eq!(
-            win.cpos,
+            win.cpos(),
             cpos,
             "prompt cpos is not on a UTF-8 boundary after render: cpos {}, source len {}",
-            win.cpos,
+            win.cpos(),
             source.len()
         );
         let projected = win.compute_cpos(buf);
@@ -988,7 +988,7 @@ impl TestApp {
         self.app
             .ui
             .win(crate::app::PROMPT_WIN)
-            .map(|w| w.cpos)
+            .map(|w| w.cpos())
             .unwrap_or(0)
     }
 
@@ -1007,11 +1007,11 @@ impl TestApp {
         let Some(win) = self.app.ui.win(crate::app::PROMPT_WIN) else {
             return false;
         };
-        if win.vim_enabled && !matches!(win.vim_mode, VimMode::Insert) {
+        if win.vim_enabled() && !matches!(win.vim_mode(), VimMode::Insert) {
             return false;
         }
-        if win.selection_anchor.is_some()
-            || win.effective_endpoint() != win.cpos
+        if win.selection_anchor().is_some()
+            || win.effective_endpoint() != win.cpos()
             || (!allow_pending_chord && self.app.timers.pending_chord.is_some())
             || self.app.timers.pending_pane_chord.is_some()
         {
@@ -1158,11 +1158,11 @@ impl TestApp {
         self.app.clear_prompt_prediction();
         let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
         if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
-            if win.vim_enabled {
+            if win.vim_enabled() {
                 win.set_vim_mode(VimMode::Insert);
             }
             win.clear_mouse_state();
-            win.selection_anchor = None;
+            win.clear_selection_anchor();
         }
     }
 
@@ -1253,7 +1253,7 @@ impl TestApp {
         self.app.term_focused = true;
         let _ = self.app.ui.set_focus(crate::app::PROMPT_WIN);
         if let Some(win) = self.app.ui.win_mut(crate::app::PROMPT_WIN) {
-            if win.vim_enabled {
+            if win.vim_enabled() {
                 win.set_vim_mode(VimMode::Insert);
             }
         }
@@ -1547,19 +1547,22 @@ impl TestApp {
                 continue;
             }
             assert!(
-                win.cpos <= src.len(),
+                win.cpos() <= src.len(),
                 "window {:?} cpos {} > source len {}",
                 wid,
-                win.cpos,
+                win.cpos(),
                 src.len()
             );
-            let snapped = smelt_buffer::text::snap(src, win.cpos);
+            let snapped = smelt_buffer::text::snap(src, win.cpos());
             assert_eq!(
-                snapped, win.cpos,
+                snapped,
+                win.cpos(),
                 "window {:?} cpos {} not on UTF-8 char boundary (snapped {})",
-                wid, win.cpos, snapped
+                wid,
+                win.cpos(),
+                snapped
             );
-            if let Some(anchor) = win.selection_anchor {
+            if let Some(anchor) = win.selection_anchor() {
                 assert!(
                     anchor <= src.len(),
                     "window {:?} selection_anchor {} > source len {}",
@@ -1645,7 +1648,7 @@ impl TestApp {
         // `text().len()` if the buffer shrinks under the anchor without
         // the window noticing - that's the trap fuzzing should catch.
         for (wid, win) in self.app.ui.iter_wins() {
-            if !win.vim_enabled {
+            if !win.vim_enabled() {
                 continue;
             }
             let Some(buf) = self.app.ui.buf(win.buf) else {
@@ -1656,7 +1659,7 @@ impl TestApp {
             } else {
                 buf.source().to_string()
             };
-            let anchor = win.vim_state.visual_anchor_raw();
+            let anchor = win.vim_state().visual_anchor_raw();
             assert!(
                 anchor <= text.len(),
                 "window {:?} vim visual_anchor {} > text len {}",
@@ -2130,7 +2133,7 @@ impl TestApp {
             .app
             .ui
             .win(self.app.well_known.prompt)
-            .map(|w| w.vim_mode)
+            .map(|w| w.vim_mode())
             .unwrap_or(VimMode::Insert);
         AppSnapshot {
             app_focus: self.app.app_focus,
@@ -3258,7 +3261,7 @@ mod tests {
 
         let win = app.app.ui.win(leaf).expect("overlay window");
         let buf = app.app.ui.buf(win.buf).expect("overlay buffer");
-        assert_eq!(buf.display_byte_pos(win.cpos), (1, 0));
+        assert_eq!(buf.display_byte_pos(win.cpos()), (1, 0));
         assert_eq!(app.app.search.session.as_ref().unwrap().target, leaf);
     }
 
@@ -3365,10 +3368,10 @@ mod tests {
     fn picker_set_selected_moves_cursor() {
         let mut app = TestApp::builder().build();
         let leaf = open_test_picker(&mut app, &["a", "b", "c", "d"], 0);
-        let initial_cpos = app.app.ui.win(leaf).map(|w| w.cpos).unwrap_or(0);
+        let initial_cpos = app.app.ui.win(leaf).map(|w| w.cpos()).unwrap_or(0);
 
         crate::picker::set_selected(&mut app.app, leaf, 2);
-        let new_cpos = app.app.ui.win(leaf).map(|w| w.cpos).unwrap_or(0);
+        let new_cpos = app.app.ui.win(leaf).map(|w| w.cpos()).unwrap_or(0);
         assert_ne!(initial_cpos, new_cpos, "cursor moved with selection");
     }
 
@@ -3661,7 +3664,7 @@ mod tests {
         app.app.app_focus = AppFocus::Content;
         app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
         let win = app.app.transcript_win_mut();
-        win.vim_enabled = vim;
+        win.set_vim_enabled(vim);
         win.set_vim_mode(VimMode::Normal);
         app
     }
@@ -3832,7 +3835,7 @@ mod tests {
         // Enter visual-line mode.
         app.type_char('V');
         assert!(
-            matches!(app.app.transcript_win().vim_mode, VimMode::VisualLine),
+            matches!(app.app.transcript_win().vim_mode(), VimMode::VisualLine),
             "should start in visual-line mode"
         );
 
@@ -3853,9 +3856,9 @@ mod tests {
 
         // Visual-line mode should have been exited by the drag.
         assert!(
-            matches!(app.app.transcript_win().vim_mode, VimMode::Normal),
+            matches!(app.app.transcript_win().vim_mode(), VimMode::Normal),
             "mouse drag should exit visual-line mode, got {:?}",
-            app.app.transcript_win().vim_mode
+            app.app.transcript_win().vim_mode()
         );
     }
 
@@ -3999,14 +4002,14 @@ mod tests {
 
         for (idx, ch) in "Hello".chars().enumerate() {
             app.type_char(ch);
-            assert_eq!(app.app.prompt_win().cpos, idx + 1);
+            assert_eq!(app.app.prompt_win().cpos(), idx + 1);
         }
 
         app.press(KeyCode::Left);
         app.type_char('!');
 
         assert_eq!(app.state().prompt_text, "Hell!o");
-        assert_eq!(app.app.prompt_win().cpos, 5);
+        assert_eq!(app.app.prompt_win().cpos(), 5);
     }
 
     #[test]
@@ -4023,7 +4026,7 @@ mod tests {
         app.type_text("Hello");
 
         assert_eq!(app.state().prompt_text, "Hello");
-        assert_eq!(app.app.prompt_win().cpos, 5);
+        assert_eq!(app.app.prompt_win().cpos(), 5);
     }
 
     #[test]
@@ -4041,7 +4044,7 @@ mod tests {
         app.type_char('X');
 
         assert_eq!(app.state().prompt_text, "aXb");
-        assert_eq!(app.app.prompt_win().cpos, 2);
+        assert_eq!(app.app.prompt_win().cpos(), 2);
     }
 
     #[test]
@@ -4064,7 +4067,7 @@ mod tests {
 
         let prompt = app.app.prompt_win();
         assert_eq!(app.state().prompt_text, "aXbcd");
-        assert_eq!(prompt.cpos, 2);
+        assert_eq!(prompt.cpos(), 2);
         assert_eq!(prompt.effective_endpoint(), 2);
         assert_eq!(app.app.ui.capture(), None);
         assert!(!app.app.ui.any_drag_active());

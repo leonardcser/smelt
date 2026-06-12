@@ -206,7 +206,7 @@ impl TuiApp {
             return Some(pos);
         }
         let buf = self.ui.buf(window.buf)?;
-        let (row, byte_col) = buf.display_byte_pos(window.cpos);
+        let (row, byte_col) = buf.display_byte_pos(window.cpos());
         Some(DocPosition {
             row: row as RowIndex,
             byte_col,
@@ -245,7 +245,7 @@ impl TuiApp {
             );
         } else {
             if let Some(cpos) = byte_offset_for_doc_position(buf, range.start) {
-                win.cpos = cpos;
+                win.set_cpos(cpos);
                 win.resync(buf, viewport_rows);
             }
         }

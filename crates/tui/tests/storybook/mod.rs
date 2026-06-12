@@ -110,10 +110,10 @@ impl StoryCtx {
         let (win, buf) = self.ui.win_and_buf_mut(focus, buf_id);
         if let (Some(win), Some(buf)) = (win, buf) {
             win.set_vim_enabled(true);
-            // Direct field write so we don't clobber any pending vim sub-sequence
+            // Restore without clobbering any pending vim sub-sequence
             // (e.g. mid-`dd`, `df<x>`). `set_vim_mode` resets pending state, which would
             // turn every `press_vim` call into a sequence break.
-            win.vim_mode = self.vim_mode;
+            win.restore_vim_mode(self.vim_mode);
             win.viewport = Some(viewport);
             let ctx = EventCtx {
                 soft_breaks: &[],
@@ -124,7 +124,7 @@ impl StoryCtx {
                 now: std::time::Instant::now(),
             };
             win.handle(buf, ev, ctx);
-            self.vim_mode = win.vim_mode;
+            self.vim_mode = win.vim_mode();
         }
         self.repaint_visual_selection(focus);
     }

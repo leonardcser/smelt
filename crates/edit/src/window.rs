@@ -286,41 +286,41 @@ pub enum VerticalScroll {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WindowTextState {
-    pub cpos: usize,
-    pub vim_enabled: bool,
-    pub vim_mode: VimMode,
-    pub vim_state: VimWindowState,
+    pub(crate) cpos: usize,
+    pub(crate) vim_enabled: bool,
+    pub(crate) vim_mode: VimMode,
+    pub(crate) vim_state: VimWindowState,
     /// Shift-selection / vim Visual anchor. `None` means no active selection.
-    pub selection_anchor: Option<usize>,
+    pub(crate) selection_anchor: Option<usize>,
     /// Preferred display column for vertical motion; measured in terminal cells.
-    pub curswant: Option<usize>,
+    pub(crate) curswant: Option<usize>,
     /// Local visual-row index of the cursor (0-based in the backing buffer's
     /// materialized row space). Add `row_base` to compare with `scroll_top`.
-    pub cursor_row: RowIndex,
+    pub(crate) cursor_row: RowIndex,
     /// Virtual row/document state for readonly viewers whose backing buffer is a
     /// materialized slice of a larger row space. `None` means the backing buffer
     /// is the full scrollable extent.
-    pub virtual_rows: Option<VirtualRowsState>,
+    pub(crate) virtual_rows: Option<VirtualRowsState>,
     /// Cell-column of the cursor within its visual row. Derived from `cpos`
     /// via `sync_from_cpos`.
-    pub cursor_col: u16,
+    pub(crate) cursor_col: u16,
     /// Last cpos seen by the renderer; distinguishes cursor-move from scroll-pan.
-    pub last_render_cpos: Option<usize>,
-    pub cursor_positioned: bool,
+    pub(crate) last_render_cpos: Option<usize>,
+    pub(crate) cursor_positioned: bool,
     /// Double-click word-select anchor; drag extends in word units while set.
-    pub drag_anchor_word: Option<(usize, usize)>,
+    pub(crate) drag_anchor_word: Option<(usize, usize)>,
     /// Triple-click line-select anchor; drag extends in line units while set.
-    pub drag_anchor_line: Option<(usize, usize)>,
+    pub(crate) drag_anchor_line: Option<(usize, usize)>,
     /// Cpos of a single-click press awaiting drag; promoted to a selection on the
     /// first `Drag` event. A bare press-release with no motion leaves no selection.
-    pub pending_press: Option<usize>,
+    pub(crate) pending_press: Option<usize>,
     /// Moving end of an active mouse drag-select, in editable-byte space. `None`
     /// outside a drag. The renderer paints the cursor/CursorLine at this byte's
     /// projected row when set, and the selection range is `(selection_anchor,
     /// drag_endpoint)`. `mouse_up` commits this into `cpos` only for caret
     /// leaves (`is_caret_leaf`); otherwise the value is discarded and `cpos`
     /// returns to its pre-drag position.
-    pub drag_endpoint: Option<usize>,
+    pub(crate) drag_endpoint: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -547,8 +547,87 @@ impl Window {
         self.surface
     }
 
-    pub fn text_state_mut(&mut self) -> &mut WindowTextState {
+    pub(crate) fn text_state_mut(&mut self) -> &mut WindowTextState {
         self.surface.text_mut()
+    }
+
+    pub fn cpos(&self) -> usize {
+        self.surface.text().cpos
+    }
+
+    pub fn set_cpos(&mut self, cpos: usize) {
+        self.surface.text_mut().cpos = cpos;
+    }
+
+    pub fn selection_anchor(&self) -> Option<usize> {
+        self.surface.text().selection_anchor
+    }
+
+    pub fn set_selection_anchor(&mut self, anchor: Option<usize>) {
+        self.surface.text_mut().selection_anchor = anchor;
+    }
+
+    pub fn clear_selection_anchor(&mut self) {
+        self.set_selection_anchor(None);
+    }
+
+    pub fn curswant(&self) -> Option<usize> {
+        self.surface.text().curswant
+    }
+
+    pub fn set_curswant(&mut self, curswant: Option<usize>) {
+        self.surface.text_mut().curswant = curswant;
+    }
+
+    pub fn vim_state(&self) -> &VimWindowState {
+        &self.surface.text().vim_state
+    }
+
+    pub fn shift_vim_visual_anchor(&mut self, delta: usize) {
+        self.surface.text_mut().vim_state.shift_visual_anchor(delta);
+    }
+
+    pub fn clear_vim_visual_anchor(&mut self) {
+        self.surface.text_mut().vim_state.clear_visual_anchor();
+    }
+
+    pub fn has_drag_anchor(&self) -> bool {
+        let text = self.surface.text();
+        text.drag_anchor_word.is_some() || text.drag_anchor_line.is_some()
+    }
+
+    pub fn set_last_render_cpos(&mut self, cpos: Option<usize>) {
+        self.surface.text_mut().last_render_cpos = cpos;
+    }
+
+    pub fn vim_enabled(&self) -> bool {
+        self.surface.text().vim_enabled
+    }
+
+    pub fn vim_mode(&self) -> VimMode {
+        self.surface.text().vim_mode
+    }
+
+    pub fn handle_vim_key_with_text(
+        &mut self,
+        text: smelt_buffer::attached::AttachedTextMut<'_>,
+        history: &mut UndoHistory,
+        clipboard: &mut Clipboard,
+        key: KeyEvent,
+        now: std::time::Instant,
+    ) -> Action {
+        let text_state = self.surface.text_mut();
+        let mut ctx = VimContext {
+            buf: text,
+            cpos: &mut text_state.cpos,
+            history,
+            clipboard,
+            mode: &mut text_state.vim_mode,
+            curswant: &mut text_state.curswant,
+            vim_state: &mut text_state.vim_state,
+            now,
+        };
+        vim::handle_key(key, &mut ctx)
     }
 
     pub fn set_surface(&mut self, surface: WindowSurface) {
@@ -1161,6 +1240,11 @@ impl Window {
     pub fn set_vim_mode(&mut self, mode: VimMode) {
         let text = self.surface.text_mut();
         text.vim_state.set_mode(&mut text.vim_mode, mode);
+    }
+
+    /// Restore a previously observed vim mode without touching pending vim sub-state.
+    pub fn restore_vim_mode(&mut self, mode: VimMode) {
+        self.surface.text_mut().vim_mode = mode;
     }
 
     /// Anchor a visual selection at `cpos` and enter the given visual mode.

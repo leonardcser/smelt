@@ -750,12 +750,12 @@ impl TuiApp {
                 .map(|r| (r.line, r.col_start, r.col_end))
                 .collect();
         }
-        let vim_visual = win.vim_enabled
+        let vim_visual = win.vim_enabled()
             && matches!(
-                win.vim_mode,
+                win.vim_mode(),
                 crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine
             );
-        let anchor_set = win.selection_anchor.is_some();
+        let anchor_set = win.selection_anchor().is_some();
         if !vim_visual && !anchor_set {
             return Vec::new();
         }
@@ -772,14 +772,14 @@ impl TuiApp {
         let text = buf.text();
         let win = self.transcript_win();
         let endpoint = win.effective_endpoint();
-        let active_selection = if win.vim_enabled {
-            match win.vim_mode {
+        let active_selection = if win.vim_enabled() {
+            match win.vim_mode() {
                 crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine => {
                     crate::smelt_edit::vim::visual_range(
-                        &win.vim_state,
+                        win.vim_state(),
                         &text,
                         endpoint,
-                        win.vim_mode,
+                        win.vim_mode(),
                     )
                 }
                 _ => win.selection_range_at(endpoint, &text),
@@ -905,8 +905,8 @@ mod tests {
         };
         {
             let win = harness.app.transcript_win_mut();
-            win.selection_anchor = Some(start);
-            win.cpos = end;
+            win.set_selection_anchor(Some(start));
+            win.set_cpos(end);
         }
 
         let ranges = harness.app.transcript_selection_highlights(39, 30, 5);

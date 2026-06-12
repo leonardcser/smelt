@@ -379,7 +379,7 @@ impl TuiApp {
                         tokens: Vec::new(),
                         started: now,
                         vim_mode_at_start: if self.input.vim_enabled(self.prompt_win()) {
-                            Some(self.prompt_win().vim_mode)
+                            Some(self.prompt_win().vim_mode())
                         } else {
                             None
                         },
@@ -429,7 +429,7 @@ impl TuiApp {
             let in_insert = match self.app_focus {
                 crate::app::AppFocus::Prompt => {
                     !self.input.vim_enabled(self.prompt_win())
-                        || self.prompt_win().vim_mode == crate::smelt_edit::VimMode::Insert
+                        || self.prompt_win().vim_mode() == crate::smelt_edit::VimMode::Insert
                 }
                 crate::app::AppFocus::Content => false,
             };
@@ -638,7 +638,7 @@ impl TuiApp {
     fn handle_idle_prompt_esc(&mut self, ev: Event, modifiers: KeyModifiers) -> EventOutcome {
         if self.input.vim_enabled(self.prompt_win())
             && matches!(
-                self.prompt_win().vim_mode,
+                self.prompt_win().vim_mode(),
                 crate::smelt_edit::VimMode::Insert
                     | crate::smelt_edit::VimMode::Visual
                     | crate::smelt_edit::VimMode::VisualLine
@@ -673,7 +673,7 @@ impl TuiApp {
 
     fn handle_running_prompt_esc(&mut self, ev: Event) -> EventOutcome {
         let cur_mode = if self.input.vim_enabled(self.prompt_win()) {
-            Some(self.prompt_win().vim_mode)
+            Some(self.prompt_win().vim_mode())
         } else {
             None
         };
@@ -925,7 +925,7 @@ impl TuiApp {
         if self.ui.win(win_id).is_some_and(|w| w.is_virtual_rows()) {
             return;
         }
-        let cpos = self.transcript_win().cpos;
+        let cpos = self.transcript_win().cpos();
         let show_thinking = self.core.config.settings.show_thinking;
         let rows: Vec<String> = self
             .ui
@@ -934,7 +934,7 @@ impl TuiApp {
             .unwrap_or_default();
         let snapped = self.snap_cpos_to_selectable(&rows, cpos, show_thinking);
         if snapped != cpos {
-            self.transcript_win_mut().cpos = snapped;
+            self.transcript_win_mut().set_cpos(snapped);
             let viewport = self.viewport_rows_estimate();
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             win.expect("transcript window")
@@ -1062,7 +1062,7 @@ impl TuiApp {
             None => return false,
         };
         let (vim_enabled, vim_mode, vim_idle) = match self.ui.win(win) {
-            Some(w) => (w.vim_enabled, w.vim_mode, w.vim_state.is_idle()),
+            Some(w) => (w.vim_enabled(), w.vim_mode(), w.vim_state().is_idle()),
             None => return false,
         };
         let in_insert = vim_enabled && vim_mode == crate::smelt_edit::VimMode::Insert;
@@ -1121,7 +1121,7 @@ impl TuiApp {
         }
         let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win_id) {
             Some(w) => (
-                w.vim_enabled,
+                w.vim_enabled(),
                 w.buf,
                 w.viewport.map(|v| v.rect.height).unwrap_or(0),
             ),
@@ -1285,7 +1285,12 @@ impl TuiApp {
 
         let (vim_enabled, vim_mode, readonly, buf_empty) =
             match (self.ui.win(win_id), self.ui.buf(buf_id)) {
-                (Some(w), Some(b)) => (w.vim_enabled, w.vim_mode, b.readonly, b.text().is_empty()),
+                (Some(w), Some(b)) => (
+                    w.vim_enabled(),
+                    w.vim_mode(),
+                    b.readonly,
+                    b.text().is_empty(),
+                ),
                 _ => return Status::Ignored,
             };
         let ctx = KeyContext {
@@ -1416,10 +1421,10 @@ impl TuiApp {
                 | KeyAction::ScrollLineDown
         );
 
-        let cpos_before = self.ui.win(win_id).expect("window").cpos;
+        let cpos_before = self.ui.win(win_id).expect("window").cpos();
         let win = self.ui.win_mut(win_id).expect("window");
         if is_motion {
-            win.selection_anchor = None;
+            win.clear_selection_anchor();
         } else if extending {
             win.extend_selection(cpos_before);
         }
@@ -1451,7 +1456,7 @@ impl TuiApp {
             None => return Status::Ignored,
         };
         let text = buf.text().to_string();
-        let cpos = self.ui.win(win_id).expect("window").cpos;
+        let cpos = self.ui.win(win_id).expect("window").cpos();
         let mv: Option<usize> = match action {
             KeyAction::MoveLeft | KeyAction::SelectLeft => {
                 Some(crate::smelt_edit::text::prev_char_boundary(&text, cpos))
@@ -1505,14 +1510,14 @@ impl TuiApp {
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             let win = win.expect("window");
             let buf = buf.expect("buffer");
-            win.cpos = new_cpos;
+            win.set_cpos(new_cpos);
             // A shift-motion that resolved to no movement (e.g. Shift+End at
             // EOL) leaves `selection_anchor == cpos` - a degenerate, empty
             // selection that downstream code treats as "no selection" but
             // whose anchor still points into the buffer. Clear it so a
             // follow-up source-shrinking edit can't orphan it.
-            if win.selection_anchor == Some(win.cpos) {
-                win.selection_anchor = None;
+            if win.selection_anchor() == Some(win.cpos()) {
+                win.clear_selection_anchor();
             }
             win.resync(buf, viewport_rows);
             return Status::Consumed;
