@@ -971,7 +971,7 @@ impl PromptState {
                 self.delete_selection(ctx);
             }
             if let Some(path) = engine::image::normalize_pasted_path(&data) {
-                if engine::image::is_image_file(&path) {
+                if engine::image::is_image_file(&path) && std::path::Path::new(&path).exists() {
                     match engine::image::read_image_as_data_url(&path) {
                         Ok(url) => {
                             let label = engine::image::image_label_from_path(&path);

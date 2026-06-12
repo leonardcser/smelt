@@ -3767,6 +3767,37 @@ mod tests {
     }
 
     #[test]
+    fn pasted_missing_image_path_stays_text() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().join("missing.png").to_string_lossy().to_string();
+
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
+            text.clone(),
+        )));
+        app.render_silent();
+
+        assert_eq!(app.state().prompt_text, text);
+        let prompt = app.app.ui.buf(crate::app::PROMPT_EDIT_BUF).unwrap();
+        assert!(prompt.attachment_ids.is_empty());
+    }
+
+    #[test]
+    fn pasted_http_image_url_stays_text() {
+        let mut app = TestApp::builder().with_vim(false).build();
+        let url = "https://example.com/image.png".to_string();
+
+        app.feed_one(SourceEvent::Term(crossterm::event::Event::Paste(
+            url.clone(),
+        )));
+        app.render_silent();
+
+        assert_eq!(app.state().prompt_text, url);
+        let prompt = app.app.ui.buf(crate::app::PROMPT_EDIT_BUF).unwrap();
+        assert!(prompt.attachment_ids.is_empty());
+    }
+
+    #[test]
     fn custom_command_turn_includes_registered_lua_tools() {
         let mut app = TestApp::builder().with_vim(false).build();
         let payload = app
