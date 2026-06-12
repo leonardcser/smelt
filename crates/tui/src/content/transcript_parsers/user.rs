@@ -186,9 +186,9 @@ mod tests {
             r as usize
         };
         let lines = read_buffer(&buf, &theme, rows);
-        assert_eq!(lines[0].text, "");
-        assert_eq!(lines[2].text, "");
-        assert_eq!(lines[rows - 1].text, "");
+        assert_eq!(lines[0].text, " ");
+        assert_eq!(lines[2].text, " ");
+        assert_eq!(lines[rows - 1].text, " ");
         assert!(buf.decoration_at(0).fill_bg.is_some());
         assert!(buf.decoration_at(2).fill_bg.is_some());
         assert!(buf.decoration_at(rows - 1).fill_bg.is_some());

@@ -68,6 +68,10 @@ pub(crate) fn focus_for_region_click(
     }
 }
 
+fn is_prompt_top_bar_window(win: &crate::smelt_edit::Window) -> bool {
+    win.config.region == "prompt_above"
+}
+
 fn projected_buf_breaks(buf: &crate::smelt_edit::Buffer) -> (Vec<usize>, Vec<usize>) {
     let lines = buf.lines();
     let mut soft = Vec::new();
@@ -143,20 +147,28 @@ impl TuiApp {
         // app_focus to the underlying pane even when the overlay leaf is not
         // focusable or selectable.
         if is_left_down(me.kind) && self.ui.active_modal().is_none() {
-            let hits_overlay =
-                self.ui
-                    .hit_test(me.row, me.column, None)
-                    .is_some_and(|ht| match ht {
-                        HitTarget::Window(w) => self.ui.overlay_for_leaf(w).is_some(),
-                        HitTarget::Chrome { .. } => true,
-                        _ => false,
-                    });
+            let hit_target = self.ui.hit_test(me.row, me.column, None);
+            let hits_overlay = hit_target.is_some_and(|ht| match ht {
+                HitTarget::Window(w) => self.ui.overlay_for_leaf(w).is_some(),
+                HitTarget::Chrome { .. } => true,
+                _ => false,
+            });
             if !hits_overlay {
                 let region = self.layout.hit_test(me.row, me.column);
                 let has_content =
                     self.has_transcript_content(self.core.config.settings.show_thinking);
                 if let Some(focus) = focus_for_region_click(region, has_content) {
                     self.app_focus = focus;
+                    if matches!(focus, AppFocus::Prompt)
+                        && hit_target.is_some_and(|ht| match ht {
+                            HitTarget::Window(w) => {
+                                self.ui.win(w).is_some_and(is_prompt_top_bar_window)
+                            }
+                            _ => false,
+                        })
+                    {
+                        self.ui.set_focus(crate::app::PROMPT_WIN);
+                    }
                 }
             }
         }
@@ -208,6 +220,13 @@ impl TuiApp {
                 .win(win)
                 .is_some_and(|w| w.supports_text_selection())
             {
+                if is_down
+                    && self.ui.active_modal().is_none()
+                    && self.ui.win(win).is_some_and(is_prompt_top_bar_window)
+                {
+                    self.app_focus = AppFocus::Prompt;
+                    self.ui.set_focus(crate::app::PROMPT_WIN);
+                }
                 // Generic selectable leaf: notifications, dialog bodies, future popups.
                 // On Down, promote keyboard focus to this leaf if it's focusable -
                 // overlays with multiple leaves (e.g. side-by-side panes) need click
@@ -218,9 +237,18 @@ impl TuiApp {
                     if is_down {
                         self.ui.cancel_pointer_interaction();
                     }
-                    return EventOutcome::Noop;
+                    return if self.ui.win(win).is_some_and(is_prompt_top_bar_window) {
+                        EventOutcome::Redraw
+                    } else {
+                        EventOutcome::Noop
+                    };
                 }
-                if is_down && self.ui.win(win).is_some_and(|w| w.accepts_focus()) {
+                if is_down
+                    && self
+                        .ui
+                        .win(win)
+                        .is_some_and(|w| w.accepts_focus() && !is_prompt_top_bar_window(w))
+                {
                     self.ui.set_focus(win);
                 }
                 if is_up {
@@ -229,6 +257,14 @@ impl TuiApp {
                     }
                 }
             } else if is_down {
+                if self.ui.win(win).is_some_and(is_prompt_top_bar_window)
+                    && self.ui.active_modal().is_none()
+                {
+                    self.app_focus = AppFocus::Prompt;
+                    self.ui.set_focus(crate::app::PROMPT_WIN);
+                    self.ui.cancel_pointer_interaction();
+                    return EventOutcome::Redraw;
+                }
                 self.ui.cancel_pointer_interaction();
                 return EventOutcome::Noop;
             }
@@ -705,27 +741,27 @@ mod tests {
     }
 
     #[test]
-    fn prompt_top_bar_chrome_click_does_not_focus_prompt() {
+    fn prompt_top_bar_chrome_click_focuses_prompt_without_selecting() {
         let mut app = app_with_seeded_prompt_top_bar();
         let down = left_down(0, 4);
 
         app.handle_mouse(down);
 
-        assert_eq!(app.app_focus, AppFocus::Content);
+        assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
         assert_eq!(app.ui.capture(), None);
         assert!(app.core.clipboard.kill_ring.current().is_empty());
     }
 
     #[test]
-    fn prompt_top_bar_selectable_text_drag_copies_without_focus() {
+    fn prompt_top_bar_selectable_text_drag_copies_and_focuses_prompt() {
         let mut app = app_with_seeded_prompt_top_bar();
 
         app.handle_mouse(left_down(0, 0));
         app.handle_mouse(left_drag(0, 3));
         app.handle_mouse(left_up(0, 3));
 
-        assert_eq!(app.app_focus, AppFocus::Content);
+        assert_eq!(app.app_focus, AppFocus::Prompt);
         assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
         assert_eq!(app.core.clipboard.kill_ring.current(), "abc");
     }

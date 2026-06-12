@@ -231,6 +231,7 @@ impl TuiApp {
         }) else {
             return;
         };
+        let top_padding = search_top_padding(target);
         let now = self.core.clock.instant_now();
         let (win, buf) = self.ui.win_and_buf_mut(target, buf_id);
         let (Some(win), Some(buf)) = (win, buf) else {
@@ -243,10 +244,12 @@ impl TuiApp {
                 viewport_rows,
                 now,
             );
+            apply_search_top_padding(win, buf, range.start.row, viewport_rows, top_padding);
         } else {
             if let Some(cpos) = byte_offset_for_doc_position(buf, range.start) {
                 win.set_cpos(cpos);
                 win.resync(buf, viewport_rows);
+                apply_search_top_padding(win, buf, range.start.row, viewport_rows, top_padding);
             }
         }
     }
@@ -275,6 +278,29 @@ fn initial_match(
             .rposition(starts_at_or_before)
             .or_else(|| (!matches.is_empty()).then_some(matches.len() - 1)),
     }
+}
+
+fn search_top_padding(win: WinId) -> RowIndex {
+    (win == crate::app::TRANSCRIPT_WIN) as RowIndex
+}
+
+fn apply_search_top_padding(
+    win: &mut crate::smelt_edit::Window,
+    buf: &crate::smelt_edit::Buffer,
+    row: RowIndex,
+    viewport_rows: u16,
+    padding: RowIndex,
+) {
+    if padding == 0 || row == 0 {
+        return;
+    }
+    let screen_row = row.saturating_sub(win.scroll_top());
+    if screen_row >= padding {
+        return;
+    }
+    let total_rows = win.scroll_row_total(buf);
+    let max_scroll = total_rows.saturating_sub(viewport_rows.max(1) as RowIndex);
+    win.pin_scroll(row.saturating_sub(padding).min(max_scroll));
 }
 
 fn byte_offset_for_doc_position(

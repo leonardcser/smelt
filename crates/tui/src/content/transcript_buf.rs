@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn user_chrome_uses_background_fill_not_fake_blank_text() {
+    fn user_chrome_uses_indented_background_fill_not_fake_full_width_text() {
         let mut transcript = Transcript::new();
         transcript.push(Block::User {
             text: "hello".into(),
@@ -1212,16 +1212,24 @@ mod tests {
 
         let rows = project_fresh(&mut transcript.history);
 
-        assert_eq!(rows.first().map(|row| row.line.as_str()), Some(""));
-        assert_eq!(rows.last().map(|row| row.line.as_str()), Some(""));
+        assert_eq!(rows.first().map(|row| row.line.as_str()), Some(" "));
+        assert_eq!(rows.last().map(|row| row.line.as_str()), Some(" "));
         assert!(rows
             .first()
             .is_some_and(|row| row.decoration.fill_bg.is_some()));
         assert!(rows
             .last()
             .is_some_and(|row| row.decoration.fill_bg.is_some()));
-        assert!(rows.first().is_some_and(|row| row.highlights.is_empty()));
-        assert!(rows.last().is_some_and(|row| row.highlights.is_empty()));
+        assert!(rows.first().is_some_and(|row| {
+            row.highlights
+                .iter()
+                .any(|span| span.col_start == 0 && span.col_end == 1 && !span.meta.selectable)
+        }));
+        assert!(rows.last().is_some_and(|row| {
+            row.highlights
+                .iter()
+                .any(|span| span.col_start == 0 && span.col_end == 1 && !span.meta.selectable)
+        }));
         assert!(rows.iter().any(|row| row.line == " hello"));
         assert!(!rows.iter().any(|row| row.line.len() >= 80));
     }

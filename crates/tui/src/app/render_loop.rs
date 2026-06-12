@@ -71,10 +71,9 @@ impl TuiApp {
         // Suppress unused-variable warning when queued is only forwarded into Lua state.
         let _ = queued;
         // Transcript projection is materialized by the render-prep hook below,
-        // after split geometry is resolved. Drag capture freezes only
-        // materialization; cursor and selection render state still syncs so
-        // drag feedback stays live while the backing slice remains stable.
-        let transcript_frozen = self.ui.drag_capture_window() == Some(crate::app::TRANSCRIPT_WIN);
+        // after split geometry is resolved. Row-backed drag state uses absolute
+        // document rows, so the backing slice can keep following scroll during
+        // edge autoscroll without moving the selection anchor.
         {
             let _p = smelt_perf::perf::begin("compositor:input");
             self.sync_input_layer(prompt_rect, has_prompt_cursor);
@@ -139,7 +138,7 @@ impl TuiApp {
                     return;
                 }
                 let viewport_rows = request.rect.height;
-                if !transcript_frozen {
+                {
                     let _p = smelt_perf::perf::begin("compositor:project_transcript");
                     let scroll_target = if transcript_should_follow_tail {
                         crate::content::transcript_buf::ScrollTarget::visible_tail()

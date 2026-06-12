@@ -3078,6 +3078,24 @@ mod tests {
     }
 
     #[test]
+    fn transcript_search_jump_keeps_match_below_top_overlay() {
+        let mut app = row_document_transcript_app(100, true);
+        app.type_char('G');
+
+        app.type_char('/');
+        app.type_text("row 010");
+        app.press(KeyCode::Enter);
+
+        let match_row = app.app.search.session.as_ref().unwrap().matches[0]
+            .rows()
+            .unwrap()
+            .start
+            .row;
+        assert_eq!(transcript_row_cursor_row(&app), match_row);
+        assert_eq!(app.app.transcript_win().scroll_top(), match_row - 1);
+    }
+
+    #[test]
     fn transcript_search_paints_visible_matches_and_esc_clears() {
         let mut app = row_document_transcript_app(20, true);
         app.type_char('g');
@@ -3649,6 +3667,42 @@ mod tests {
                 .saturating_add(vp.gutter_width)
                 .saturating_add(pad_left),
         )
+    }
+
+    #[test]
+    fn prompt_top_bar_chrome_click_focuses_prompt_without_selecting() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().build();
+        app.app.push_block(smelt_core::Block::Text {
+            content: "transcript".into(),
+        });
+        app.render_silent();
+        app.app.app_focus = AppFocus::Content;
+        app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+
+        let top_bar = app
+            .app
+            .ui
+            .named_win("smelt.prompt_bar.top")
+            .expect("prompt top bar window");
+        let vp = app
+            .app
+            .ui
+            .win(top_bar)
+            .and_then(|w| w.viewport)
+            .expect("prompt top bar viewport");
+        let bar_row = vp.rect.top.saturating_add(vp.rect.height.saturating_sub(1));
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: bar_row,
+            column: vp.rect.left,
+            modifiers: KeyModifiers::empty(),
+        })));
+
+        assert_eq!(app.state().app_focus, AppFocus::Prompt);
+        assert_eq!(app.app.ui.focus(), Some(crate::app::PROMPT_WIN));
+        assert!(!app.app.ui.any_drag_active());
     }
 
     fn row_document_transcript_app(rows: usize, vim: bool) -> TestApp {

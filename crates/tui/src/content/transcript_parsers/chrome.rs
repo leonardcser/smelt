@@ -35,7 +35,10 @@ pub(super) fn render(
     };
     let pad: String = " ".repeat(CHROME_INNER_PAD);
     let blank_row = |out: &mut LineBuilder| {
+        out.set_hl(user_bg);
+        out.print_with_meta(&pad, pad_meta.clone());
         out.fill_line_bg(bg);
+        out.reset_style();
         out.newline();
     };
 
