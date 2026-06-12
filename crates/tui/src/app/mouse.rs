@@ -928,7 +928,11 @@ mod tests {
 
         let win = app.transcript_win();
         assert_eq!(win.cursor_screen_row(vp.rect.height), Some(end_rel));
-        let selection = app.ui.buf(win.buf).expect("transcript buffer").selection();
+        let selection = app
+            .ui
+            .buf(win.buf)
+            .expect("transcript buffer")
+            .range_layer(crate::smelt_edit::RangeLayer::Selection);
         assert!(
             !selection.is_empty(),
             "virtual drag selection should be projected while capture freezes transcript materialization"

@@ -2,7 +2,7 @@ use super::block_buffers::RenderedBlockCache;
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
-    DocRange, MaterializedRows, RowIndex,
+    DocRange, MaterializedRows, RowBreak, RowIndex,
 };
 use smelt_buffer::coords::copy_byte_range;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
@@ -1003,16 +1003,19 @@ impl TranscriptProjection {
             .iter()
             .cloned()
             .zip(selectable_ranges[local_start..local_end].iter().cloned())
-            .map(|(text, selectable_ranges)| DisplayRow::new(text, selectable_ranges))
+            .enumerate()
+            .map(|(offset, (text, selectable_ranges))| {
+                let row = DisplayRow::new(text, selectable_ranges);
+                if offset == 0 {
+                    row
+                } else if soft_wrapped[local_start + offset] {
+                    row.with_break_before(RowBreak::Soft)
+                } else {
+                    row.with_break_before(RowBreak::Hard)
+                }
+            })
             .collect();
-        let soft_wrapped = soft_wrapped[local_start..local_end].to_vec();
-        let text_rows = materialized.texts[local_start..local_end].to_vec();
-        let (soft_breaks, hard_breaks) = breaks_for_materialized_rows(&text_rows, &soft_wrapped);
-        DisplayRows {
-            rows,
-            soft_breaks,
-            hard_breaks,
-        }
+        DisplayRows { rows }
     }
 
     pub(crate) fn copy_range(
@@ -1640,8 +1643,8 @@ mod tests {
 
         let text: Vec<_> = range.rows.iter().map(|row| row.text.clone()).collect();
         assert_eq!(text, full_buf.lines().to_vec());
-        assert_eq!(range.soft_breaks, soft);
-        assert_eq!(range.hard_breaks, hard);
+        assert_eq!(range.soft_breaks(), soft);
+        assert_eq!(range.hard_breaks(), hard);
     }
 
     #[test]

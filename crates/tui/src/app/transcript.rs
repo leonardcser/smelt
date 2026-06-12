@@ -461,10 +461,7 @@ impl TuiApp {
         count: crate::smelt_edit::RowIndex,
     ) -> Vec<String> {
         self.transcript_rows_and_breaks_range(self.core.config.settings.show_thinking, start, count)
-            .rows
-            .into_iter()
-            .map(|row| row.text)
-            .collect()
+            .into_text_rows()
     }
 
     /// `\n` byte positions in `full_transcript_display_text(..).join("\n")`,

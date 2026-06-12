@@ -1,5 +1,5 @@
 use crate::app::TuiApp;
-use crate::smelt_edit::{DocPosition, DocRange, RowIndex, UiHost, WinId};
+use crate::smelt_edit::{BufId, DocPosition, DocRange, RowIndex, UiHost, WinId};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 // Search scans bounded display-row windows so large virtual documents do not
@@ -24,6 +24,7 @@ impl SearchDirection {
 #[derive(Clone, Debug)]
 pub(crate) struct SearchSession {
     pub(crate) target: WinId,
+    pub(crate) target_buf: BufId,
     pub(crate) query: String,
     pub(crate) direction: SearchDirection,
     pub(crate) matches: Vec<DocRange>,
@@ -31,7 +32,7 @@ pub(crate) struct SearchSession {
 }
 
 impl SearchSession {
-    pub(crate) fn visible_matches(
+    pub(crate) fn visible_line_matches(
         &self,
         visible_start: RowIndex,
         visible_rows: u16,
@@ -63,12 +64,10 @@ impl TuiApp {
         let Some(session) = self.search.session.take() else {
             return;
         };
-        let Some(buf_id) = self.ui.win(session.target).map(|win| win.buf) else {
+        let Some(buf) = self.ui.buf_mut(session.target_buf) else {
             return;
         };
-        if let Some(buf) = self.ui.buf_mut(buf_id) {
-            buf.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
-        }
+        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
     }
 
     pub(crate) fn handle_search_key_for_target(&mut self, target: WinId, k: KeyEvent) -> bool {
@@ -101,11 +100,16 @@ impl TuiApp {
             self.clear_search();
             return;
         }
+        let Some(target_buf) = self.ui.win(target).map(|win| win.buf) else {
+            self.clear_search();
+            return;
+        };
         let matches = self.scan_search_matches(target, &query);
         let origin = self.search_origin(target).unwrap_or_default();
         let current = initial_match(&matches, origin, direction);
         self.search.session = Some(SearchSession {
             target,
+            target_buf,
             query,
             direction,
             matches,

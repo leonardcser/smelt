@@ -108,7 +108,7 @@ story!(table_selection_masks_chrome_and_padding, |ctx| {
             render_markdown_table(out, &rows, &[], 18, false, None, "");
         });
         let selection = smelt_buffer::coords::byte_range_to_row_ranges(buf, 0, buf.text().len());
-        buf.set_selection(selection);
+        buf.set_range_layer(tui::smelt_edit::RangeLayer::Selection, selection);
     }
     let win = ctx.open_split(buf_id, pane("only"));
     ctx.set_layout(LayoutTree::vbox(vec![(

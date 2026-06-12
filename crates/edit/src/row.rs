@@ -17,9 +17,18 @@ pub struct DocRange {
     pub end: DocPosition,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowBreak {
+    Soft,
+    Hard,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayRow {
     pub text: String,
+    /// Separator between the previous row and this row in joined display text.
+    /// `None` means this is the first row in the returned slice.
+    pub break_before: Option<RowBreak>,
     /// Byte ranges in `text` that are selectable/searchable display text.
     pub selectable_ranges: Vec<Range<usize>>,
 }
@@ -28,21 +37,56 @@ impl DisplayRow {
     pub fn new(text: String, selectable_ranges: Vec<Range<usize>>) -> Self {
         Self {
             text,
+            break_before: None,
             selectable_ranges,
         }
+    }
+
+    pub fn with_break_before(mut self, break_before: RowBreak) -> Self {
+        self.break_before = Some(break_before);
+        self
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayRows {
     pub rows: Vec<DisplayRow>,
-    pub soft_breaks: Vec<usize>,
-    pub hard_breaks: Vec<usize>,
 }
 
 impl DisplayRows {
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    pub fn into_text_rows(self) -> Vec<String> {
+        self.rows.into_iter().map(|row| row.text).collect()
+    }
+
+    pub fn text_rows(&self) -> Vec<String> {
+        self.rows.iter().map(|row| row.text.clone()).collect()
+    }
+
+    pub fn soft_breaks(&self) -> Vec<usize> {
+        self.breaks(RowBreak::Soft)
+    }
+
+    pub fn hard_breaks(&self) -> Vec<usize> {
+        self.breaks(RowBreak::Hard)
+    }
+
+    fn breaks(&self, kind: RowBreak) -> Vec<usize> {
+        let mut breaks = Vec::new();
+        let mut pos = 0usize;
+        for (i, row) in self.rows.iter().enumerate() {
+            if i > 0 {
+                if row.break_before == Some(kind) {
+                    breaks.push(pos);
+                }
+                pos = pos.saturating_add(1);
+            }
+            pos = pos.saturating_add(row.text.len());
+        }
+        breaks
     }
 }
 

@@ -176,17 +176,20 @@ impl TuiApp {
                         win.sync_virtual_render_state(buf, viewport_rows, render_now);
                         win.scroll_left = 0;
                     } else {
-                        buf.set_selection(Vec::new());
+                        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
                         if !focused_overlay {
                             if let Some((s, e)) = clipboard.kill_ring.yank_flash_range(render_now) {
                                 let ranges =
                                     smelt_buffer::coords::byte_range_to_row_ranges(buf, s, e);
-                                buf.set_yank_flash(ranges);
+                                buf.set_range_layer(
+                                    crate::smelt_edit::RangeLayer::YankFlash,
+                                    ranges,
+                                );
                             } else {
-                                buf.clear_yank_flash();
+                                buf.clear_range_layer(crate::smelt_edit::RangeLayer::YankFlash);
                             }
                         } else {
-                            buf.clear_yank_flash();
+                            buf.clear_range_layer(crate::smelt_edit::RangeLayer::YankFlash);
                         }
                         win.scroll_left = 0;
                     }
@@ -197,7 +200,7 @@ impl TuiApp {
                             buf,
                             viewport_rows,
                             search
-                                .visible_matches(win.scroll_top(), viewport_rows)
+                                .visible_line_matches(win.scroll_top(), viewport_rows)
                                 .iter()
                                 .copied(),
                         );

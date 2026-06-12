@@ -3078,7 +3078,8 @@ mod tests {
         let win = app.app.transcript_win();
         let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
         assert!(
-            !buf.search_highlights().is_empty(),
+            !buf.range_layer(crate::smelt_edit::RangeLayer::Search)
+                .is_empty(),
             "submitted search should paint visible matches"
         );
 
@@ -3086,7 +3087,9 @@ mod tests {
         app.render_silent();
         let win = app.app.transcript_win();
         let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
-        assert!(buf.search_highlights().is_empty());
+        assert!(buf
+            .range_layer(crate::smelt_edit::RangeLayer::Search)
+            .is_empty());
         assert!(app.app.search.session.is_none());
     }
 

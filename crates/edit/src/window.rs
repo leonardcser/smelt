@@ -506,28 +506,6 @@ impl Window {
         self.surface.accepts_wheel_scroll() || self.config.gutters.scrollbar
     }
 
-    pub fn set_focusable(&mut self, focusable: bool) {
-        if matches!(self.surface, WindowSurface::List { .. }) {
-            self.surface = WindowSurface::List { focusable };
-            return;
-        }
-        self.surface = match (focusable, self.supports_text_selection()) {
-            (true, true) => WindowSurface::ReadonlyText,
-            (true, false) => WindowSurface::EditableText,
-            (false, true) => WindowSurface::SelectableText,
-            (false, false) => WindowSurface::Inert,
-        };
-    }
-
-    pub fn set_text_selectable(&mut self, selectable: bool) {
-        self.surface = match (self.accepts_focus(), selectable) {
-            (true, true) => WindowSurface::ReadonlyText,
-            (true, false) => WindowSurface::EditableText,
-            (false, true) => WindowSurface::SelectableText,
-            (false, false) => WindowSurface::Inert,
-        };
-    }
-
     pub fn set_list_surface(&mut self, focusable: bool) {
         self.surface = WindowSurface::List { focusable };
     }
@@ -1305,8 +1283,8 @@ impl Window {
         buf: &Buffer,
         vim_mode: VimMode,
     ) -> Vec<smelt_buffer::buffer::SelectionRange> {
-        // Virtual rows manage selection via sync_virtual_render_state (which
-        // writes buf.selection()); falling back to non-virtual vim::visual_range
+        // Virtual rows manage selection via sync_virtual_render_state (which writes
+        // the buffer's Selection range layer); falling back to non-virtual vim::visual_range
         // uses vim_state.visual_anchor which is never set for virtual rows and
         // would spuriously select from byte 0.
         if self.is_virtual_rows() {
@@ -2315,20 +2293,16 @@ impl Window {
         let fill_cursor_row = self.selection_highlight || (self.cursor_line && ctx.focused);
         let normal_style = ctx.theme.get("Normal");
         let cursor_style = ctx.theme.get("CursorLine");
-        let visual_style = ctx.theme.get("Visual");
-        let search_style = ctx.theme.get("Search");
-        let yank_flash_style = ctx.theme.get("YankFlash");
         // Buffer override wins; fall back to window anchors.
         let selection_owned: Vec<smelt_buffer::buffer::SelectionRange>;
+        let selection_layer = buf.range_layer(crate::RangeLayer::Selection);
         let selection_ranges: &[smelt_buffer::buffer::SelectionRange] =
-            if !buf.selection().is_empty() {
-                buf.selection()
+            if !selection_layer.is_empty() {
+                selection_layer
             } else {
                 selection_owned = self.auto_selection_ranges(buf, ctx.vim_mode);
                 &selection_owned[..]
             };
-        let yank_flash_ranges = buf.range_layer(crate::RangeLayer::YankFlash);
-        let search_ranges = buf.range_layer(crate::RangeLayer::Search);
         // Reused per-row scratch - avoids `height` allocations of each Vec.
         let mut col_to_char: Vec<usize> = Vec::with_capacity(content_width as usize);
         let mut line_chars: Vec<char> = Vec::with_capacity(content_width as usize);
@@ -2497,9 +2471,13 @@ impl Window {
             // selection span placed after the chrome by `byte_range_to_row_ranges` will
             // paint there, keeping multi-line selections visually continuous without
             // highlighting the chrome itself.
-            let line_has_highlight = selection_ranges.iter().any(|r| r.line == logical_row)
-                || yank_flash_ranges.iter().any(|r| r.line == logical_row)
-                || search_ranges.iter().any(|r| r.line == logical_row);
+            let line_has_highlight = crate::RangeLayer::paint_order().into_iter().any(|layer| {
+                let ranges = match layer {
+                    crate::RangeLayer::Selection => selection_ranges,
+                    _ => buf.range_layer(layer),
+                };
+                ranges.iter().any(|r| r.line == logical_row)
+            });
             let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
             let any_selectable =
                 cell_range_contains_selectable(&spans_buf, 0, text::byte_to_cell(line, line.len()));
@@ -2539,12 +2517,15 @@ impl Window {
                             }
                         }
                     };
-                paint_ranges(search_ranges, merge_span_style(row_style, &search_style));
-                paint_ranges(selection_ranges, merge_span_style(row_style, &visual_style));
-                paint_ranges(
-                    yank_flash_ranges,
-                    merge_span_style(row_style, &yank_flash_style),
-                );
+                for layer in crate::RangeLayer::paint_order() {
+                    let ranges = match layer {
+                        crate::RangeLayer::Selection => selection_ranges,
+                        _ => buf.range_layer(layer),
+                    };
+                    let style =
+                        merge_span_style(row_style, &ctx.theme.get(layer.highlight_group()));
+                    paint_ranges(ranges, style);
+                }
             }
             vt_buf.clear();
             // Virtual text attaches to the logical row's first chunk only; we
@@ -5556,23 +5537,26 @@ mod tests {
             ..Default::default()
         };
         buf.add_highlight_with_meta(1, 0, 10, crate::SpanStyle::new(), chrome);
-        buf.set_selection(vec![
-            smelt_buffer::buffer::SelectionRange {
-                line: 0,
-                col_start: 0,
-                col_end: 5,
-            },
-            smelt_buffer::buffer::SelectionRange {
-                line: 1,
-                col_start: 0,
-                col_end: 1,
-            },
-            smelt_buffer::buffer::SelectionRange {
-                line: 2,
-                col_start: 0,
-                col_end: 5,
-            },
-        ]);
+        buf.set_range_layer(
+            crate::RangeLayer::Selection,
+            vec![
+                smelt_buffer::buffer::SelectionRange {
+                    line: 0,
+                    col_start: 0,
+                    col_end: 5,
+                },
+                smelt_buffer::buffer::SelectionRange {
+                    line: 1,
+                    col_start: 0,
+                    col_end: 1,
+                },
+                smelt_buffer::buffer::SelectionRange {
+                    line: 2,
+                    col_start: 0,
+                    col_end: 5,
+                },
+            ],
+        );
 
         let w = make_win();
         let mut theme = Theme::default();
@@ -5636,11 +5620,14 @@ mod tests {
         buf.add_highlight_with_meta(0, 0, 2, crate::SpanStyle::new(), chrome.clone());
         buf.add_highlight_with_meta(0, 3, 6, crate::SpanStyle::new(), chrome.clone());
         buf.add_highlight_with_meta(0, 7, 11, crate::SpanStyle::new(), chrome);
-        buf.set_selection(vec![smelt_buffer::buffer::SelectionRange {
-            line: 0,
-            col_start: 0,
-            col_end: unicode_width::UnicodeWidthStr::width(line) as u16,
-        }]);
+        buf.set_range_layer(
+            crate::RangeLayer::Selection,
+            vec![smelt_buffer::buffer::SelectionRange {
+                line: 0,
+                col_start: 0,
+                col_end: unicode_width::UnicodeWidthStr::width(line) as u16,
+            }],
+        );
 
         let w = make_win();
         let mut theme = Theme::default();

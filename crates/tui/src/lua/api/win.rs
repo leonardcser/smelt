@@ -639,7 +639,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     // lockstep with the Rust source (`Gutters::default()`) - no hand-kept
     // duplication that could drift on a default change.
     let new_doc: &'static str = Box::leak(format!(
-        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
+        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
         crate::smelt_edit::layout::Gutters::default().scrollbar
     ).into_boxed_str());
     m.fn_(
@@ -805,8 +805,8 @@ fn apply_window_opts(
     if let Ok(wrap) = opts.get::<bool>("wrap") {
         w.wrap = wrap;
     }
-    if let Ok(focusable) = opts.get::<bool>("focusable") {
-        w.set_focusable(focusable);
+    if let Some(surface) = surface_from_opts(w.surface(), opts) {
+        w.set_surface(surface);
     }
     if let Ok(cursor_line) = opts.get::<bool>("cursor_line") {
         w.cursor_line = cursor_line;
@@ -817,9 +817,6 @@ fn apply_window_opts(
     if let Ok(vim_enabled) = opts.get::<bool>("vim_enabled") {
         w.set_vim_enabled(vim_enabled);
     }
-    if let Ok(selectable) = opts.get::<bool>("selectable") {
-        w.set_text_selectable(selectable);
-    }
     if let Ok(Some(gutter)) = opts.get::<Option<String>>("gutter") {
         w.gutter = match gutter.as_str() {
             "line_numbers" => Some(std::sync::Arc::new(
@@ -829,4 +826,42 @@ fn apply_window_opts(
             _ => None,
         };
     }
+}
+
+fn surface_from_opts(
+    current: crate::smelt_edit::WindowSurface,
+    opts: &mlua::Table,
+) -> Option<crate::smelt_edit::WindowSurface> {
+    if let Ok(Some(surface)) = opts.get::<Option<String>>("surface") {
+        return match surface.as_str() {
+            "editable_text" | "editable" => Some(crate::smelt_edit::WindowSurface::EditableText),
+            "readonly_text" | "readonly" => Some(crate::smelt_edit::WindowSurface::ReadonlyText),
+            "selectable_text" | "selectable" => {
+                Some(crate::smelt_edit::WindowSurface::SelectableText)
+            }
+            "inert" => Some(crate::smelt_edit::WindowSurface::Inert),
+            "list" => Some(crate::smelt_edit::WindowSurface::List { focusable: true }),
+            "list_inert" => Some(crate::smelt_edit::WindowSurface::List { focusable: false }),
+            _ => None,
+        };
+    }
+
+    let focusable = opts.get::<Option<bool>>("focusable").ok().flatten();
+    let selectable = opts.get::<Option<bool>>("selectable").ok().flatten();
+    if focusable.is_none() && selectable.is_none() {
+        return None;
+    }
+    if matches!(current, crate::smelt_edit::WindowSurface::List { .. }) {
+        return Some(crate::smelt_edit::WindowSurface::List {
+            focusable: focusable.unwrap_or_else(|| current.accepts_focus()),
+        });
+    }
+    let focusable = focusable.unwrap_or_else(|| current.accepts_focus());
+    let selectable = selectable.unwrap_or_else(|| current.supports_text_selection());
+    Some(match (focusable, selectable) {
+        (true, true) => crate::smelt_edit::WindowSurface::ReadonlyText,
+        (true, false) => crate::smelt_edit::WindowSurface::EditableText,
+        (false, true) => crate::smelt_edit::WindowSurface::SelectableText,
+        (false, false) => crate::smelt_edit::WindowSurface::Inert,
+    })
 }

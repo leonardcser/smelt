@@ -66,7 +66,7 @@ use overlay::OverlayHitTarget;
 pub use overlay::{HitTarget, Overlay, OverlayId};
 pub use row::{
     row_to_usize, DisplayRow, DisplayRows, DocPosition, DocRange, MaterializeRequest,
-    MaterializedRows, RowIndex,
+    MaterializedRows, RowBreak, RowIndex,
 };
 pub use vim::VimMode;
 pub use window::{
@@ -2146,15 +2146,16 @@ pub trait UiHost {
             .enumerate()
             .map(|(offset, row)| {
                 let spans = buf.highlights_at(start_idx + offset);
-                DisplayRow::new(row.clone(), selectable_byte_ranges_for_line(row, &spans))
+                let display_row =
+                    DisplayRow::new(row.clone(), selectable_byte_ranges_for_line(row, &spans));
+                if offset == 0 {
+                    display_row
+                } else {
+                    display_row.with_break_before(RowBreak::Hard)
+                }
             })
             .collect();
-        let hard_breaks = hard_breaks_for_lines(&text_rows);
-        Some(DisplayRows {
-            rows: display_rows,
-            soft_breaks: Vec::new(),
-            hard_breaks,
-        })
+        Some(DisplayRows { rows: display_rows })
     }
 
     /// Full display rows for `win`. This is intentionally named as a full-document
@@ -2167,21 +2168,22 @@ pub trait UiHost {
             let buf_id = ui.win(win)?.buf;
             ui.buf(buf_id)?.lines().len() as RowIndex
         };
-        Some(
-            self.display_rows_for_range(win, 0, count)?
-                .rows
-                .into_iter()
-                .map(|row| row.text)
-                .collect(),
-        )
+        Some(self.display_rows_for_range(win, 0, count)?.into_text_rows())
     }
 
     /// Full soft/hard break vectors for `full_rows_for(win)?.join("\n")`.
-    /// Prefer `breaks_for_range` unless the caller is explicitly scanning the
+    /// Prefer `display_rows_for_range` unless the caller is explicitly scanning the
     /// whole displayed document.
     fn full_breaks_for(&mut self, win: WinId) -> Option<(Vec<usize>, Vec<usize>)> {
-        let rows = self.full_rows_for(win)?;
-        Some((Vec::new(), hard_breaks_for_lines(&rows)))
+        let count = if let Some(total) = self.virtual_total_rows(win) {
+            total
+        } else {
+            let ui = self.ui();
+            let buf_id = ui.win(win)?.buf;
+            ui.buf(buf_id)?.lines().len() as RowIndex
+        };
+        let rows = self.display_rows_for_range(win, 0, count)?;
+        Some((rows.soft_breaks(), rows.hard_breaks()))
     }
 
     /// Total rows for a virtual document. `None` means `win` is backed by its
@@ -2872,7 +2874,7 @@ mod tests {
                 gutters: Default::default(),
             }
         ));
-        ui.win_mut(leaf).unwrap().set_focusable(false);
+        ui.win_mut(leaf).unwrap().set_surface(WindowSurface::Inert);
 
         let perf_layout = LayoutTree::hbox(vec![(
             Constraint::Length(10),
@@ -2926,7 +2928,7 @@ mod tests {
         ));
         // Mark the leaf non-focusable (matches `perf_panel.lua`'s
         // `smelt.win.new(buf, { focusable = false })`).
-        ui.win_mut(leaf).unwrap().set_focusable(false);
+        ui.win_mut(leaf).unwrap().set_surface(WindowSurface::Inert);
 
         let perf_layout = LayoutTree::hbox(vec![(
             Constraint::Length(10),
@@ -3238,7 +3240,7 @@ mod tests {
                 },
             )
             .unwrap();
-        ui.win_mut(win).unwrap().set_focusable(false);
+        ui.win_mut(win).unwrap().set_surface(WindowSurface::Inert);
         ui.set_layout(LayoutTree::vbox(vec![(
             Constraint::Fill,
             LayoutTree::leaf(win),
@@ -3925,7 +3927,7 @@ mod tests {
             )
             .unwrap();
         if let Some(w) = ui.win_mut(win) {
-            w.set_focusable(true);
+            w.set_surface(WindowSurface::EditableText);
         }
         let layout = LayoutTree::vbox(vec![(
             Constraint::Length(10),
@@ -4225,8 +4227,8 @@ mod tests {
                 .map(|row| row.text.as_str())
                 .collect();
             assert_eq!(display_text, vec!["world!", "ok"]);
-            assert!(display_rows.soft_breaks.is_empty());
-            assert_eq!(display_rows.hard_breaks, vec![6]);
+            assert!(display_rows.soft_breaks().is_empty());
+            assert_eq!(display_rows.hard_breaks(), vec![6]);
             let rows = host.full_rows_for(win).unwrap();
             assert_eq!(rows, vec!["hello", "world!", "ok"]);
             // "hello\nworld!\nok" - `\n` after "hello" lives at byte 5,

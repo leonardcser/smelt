@@ -59,9 +59,9 @@ pub(crate) fn sync_prompt_overlays(inp: &InputLeafInput<'_>, buf: &mut Buffer) {
         .selection_range(crate::input::PromptCtxRef { buf, win: inp.win })
     {
         let ranges = smelt_buffer::coords::byte_range_to_row_ranges(buf, start, end);
-        buf.set_selection(ranges);
+        buf.set_range_layer(crate::smelt_edit::RangeLayer::Selection, ranges);
     } else {
-        buf.set_selection(Vec::new());
+        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
     }
     if let Some((start, end)) = inp.input.yank_flash_range(
         crate::input::PromptCtxRef { buf, win: inp.win },
@@ -69,9 +69,9 @@ pub(crate) fn sync_prompt_overlays(inp: &InputLeafInput<'_>, buf: &mut Buffer) {
         inp.now,
     ) {
         let ranges = smelt_buffer::coords::byte_range_to_row_ranges(buf, start, end);
-        buf.set_yank_flash(ranges);
+        buf.set_range_layer(crate::smelt_edit::RangeLayer::YankFlash, ranges);
     } else {
-        buf.clear_yank_flash();
+        buf.clear_range_layer(crate::smelt_edit::RangeLayer::YankFlash);
     }
 
     buf.clear_namespace(placeholder_ns, 0, usize::MAX);

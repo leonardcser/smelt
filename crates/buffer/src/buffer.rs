@@ -556,6 +556,18 @@ pub enum RangeLayer {
 impl RangeLayer {
     const COUNT: usize = 3;
 
+    pub fn paint_order() -> [Self; Self::COUNT] {
+        [Self::Search, Self::Selection, Self::YankFlash]
+    }
+
+    pub fn highlight_group(self) -> &'static str {
+        match self {
+            Self::Search => "Search",
+            Self::Selection => "Visual",
+            Self::YankFlash => "YankFlash",
+        }
+    }
+
     fn index(self) -> usize {
         match self {
             Self::Search => 0,
@@ -643,49 +655,6 @@ impl Buffer {
 
     pub fn clear_range_layer(&mut self, layer: RangeLayer) {
         self.range_layers[layer.index()].clear();
-    }
-
-    /// Override the per-row visual-mode selection. Empty `ranges` clears
-    /// the override; `Window::render` then derives selection from its own state.
-    pub fn set_selection(&mut self, ranges: Vec<SelectionRange>) {
-        self.set_range_layer(RangeLayer::Selection, ranges);
-    }
-
-    /// Returns the selection override set by [`Self::set_selection`]. Empty when inactive.
-    pub fn selection(&self) -> &[SelectionRange] {
-        self.range_layer(RangeLayer::Selection)
-    }
-
-    pub fn clear_selection(&mut self) {
-        self.clear_range_layer(RangeLayer::Selection);
-    }
-
-    /// Override the per-row yank-flash highlight. Empty `ranges` clears.
-    pub fn set_yank_flash(&mut self, ranges: Vec<SelectionRange>) {
-        self.set_range_layer(RangeLayer::YankFlash, ranges);
-    }
-
-    /// Returns the yank-flash ranges set by [`Self::set_yank_flash`].
-    pub fn yank_flash(&self) -> &[SelectionRange] {
-        self.range_layer(RangeLayer::YankFlash)
-    }
-
-    pub fn clear_yank_flash(&mut self) {
-        self.clear_range_layer(RangeLayer::YankFlash);
-    }
-
-    /// Override the per-row search highlights. Empty `ranges` clears.
-    pub fn set_search_highlights(&mut self, ranges: Vec<SelectionRange>) {
-        self.set_range_layer(RangeLayer::Search, ranges);
-    }
-
-    /// Returns the search highlight ranges set by [`Self::set_search_highlights`].
-    pub fn search_highlights(&self) -> &[SelectionRange] {
-        self.range_layer(RangeLayer::Search)
-    }
-
-    pub fn clear_search_highlights(&mut self) {
-        self.clear_range_layer(RangeLayer::Search);
     }
 
     /// Attach a parser, firing `on_attach` once and invalidating the render cache.

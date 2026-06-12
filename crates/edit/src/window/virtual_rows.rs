@@ -295,12 +295,12 @@ impl Window {
         let selection_ranges = anchor_range
             .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
             .unwrap_or_default();
-        buf.set_selection(selection_ranges);
+        buf.set_range_layer(crate::RangeLayer::Selection, selection_ranges);
         let flash_ranges = self
             .virtual_yank_flash_range(now)
             .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
             .unwrap_or_default();
-        buf.set_yank_flash(flash_ranges);
+        buf.set_range_layer(crate::RangeLayer::YankFlash, flash_ranges);
     }
 
     pub fn virtual_yank_flash_until(&self) -> Option<Instant> {
