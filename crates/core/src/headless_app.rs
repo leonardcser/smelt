@@ -85,11 +85,14 @@ impl HeadlessApp {
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
 
+        let cwd = self.core.env.cwd().to_string_lossy().into_owned();
+        let content = crate::file_ref::expand_at_file_refs(&message, &cwd, &self.core.files);
+
         self.core
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
-                content: Content::text(message),
+                content: Content::text(content),
                 mode: self.core.config.mode.clone(),
                 model: self.core.config.model.clone(),
                 reasoning_effort: self.core.config.reasoning_effort,

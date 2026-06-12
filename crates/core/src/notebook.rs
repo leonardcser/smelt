@@ -633,6 +633,8 @@ fn render_data_metadata(data: &NotebookRenderData) -> serde_json::Value {
         "cell_id": data.cell_id,
         "old_source": data.old_source,
         "new_source": data.new_source,
+        "syntax_ext": data.syntax_ext(),
+        "title": data.title(),
     })
 }
 

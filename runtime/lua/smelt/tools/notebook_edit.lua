@@ -33,6 +33,7 @@ smelt.tools.register({
   name = "edit_notebook",
   description = "Edit a Jupyter notebook (.ipynb) cell. Supports replacing, inserting, and deleting cells. Identify cells by cell_id or cell_number (0-indexed).",
   override = true,
+  execution_mode = "sequential",
   effect = "write",
   parameters = {
     type = "object",
@@ -74,7 +75,7 @@ smelt.tools.register({
     if path == "" or smelt.fs.file_state.has(path) then
       return nil
     end
-    return "You must use read_file before editing. Read the notebook first."
+    return "Use read_file on this notebook before editing it."
   end,
   render = function(_, output, ctx)
     if output.is_error then

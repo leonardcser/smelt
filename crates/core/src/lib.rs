@@ -11,6 +11,7 @@ pub mod confirms;
 pub mod content;
 pub mod custom_commands;
 pub mod engine_client;
+pub mod file_ref;
 pub mod fs;
 pub mod fuzzy;
 pub mod grep;

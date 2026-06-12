@@ -4,6 +4,34 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+pub const TEXT_WINDOW_LINE_LIMIT: usize = 2000;
+
+pub fn render_text_window(content: &str, offset: usize, limit: usize) -> Option<String> {
+    let mut lines: Vec<&str> = content.lines().collect();
+    if content.ends_with('\n') {
+        lines.push("");
+    }
+    if lines.is_empty() {
+        return (offset <= 1).then(String::new);
+    }
+    let start = offset.max(1) - 1;
+    if start >= lines.len() {
+        return None;
+    }
+    let end = start.saturating_add(limit).min(lines.len());
+    Some(
+        lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let line = smelt_buffer::text::slice(line, 0..TEXT_WINDOW_LINE_LIMIT);
+                format!("{:4}\t{}", start + i + 1, line)
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     std::fs::read_to_string(path)
 }
@@ -250,6 +278,16 @@ fn literal_prefix_before_meta(pattern: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn render_text_window_truncates_long_lines_on_char_boundary() {
+        let long = format!("{}é", "a".repeat(TEXT_WINDOW_LINE_LIMIT));
+        let rendered = render_text_window(&long, 1, 1).unwrap();
+        assert_eq!(
+            rendered,
+            format!("   1\t{}", "a".repeat(TEXT_WINDOW_LINE_LIMIT))
+        );
+    }
 
     #[test]
     fn literal_prefix_uses_existing_subtree() {

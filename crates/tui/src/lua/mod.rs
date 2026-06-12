@@ -865,6 +865,29 @@ mod tests {
     }
 
     #[test]
+    fn autoload_registers_conflicting_file_tools_as_sequential() {
+        let mut rt = LuaRuntime::new();
+        rt.load_autoload();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let defs = rt.tool_defs(protocol::AgentMode::normal());
+        for name in ["edit_file", "edit_notebook"] {
+            let tool = defs
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} should be auto-registered"));
+            assert_eq!(tool.execution_mode, protocol::ToolExecutionMode::Sequential);
+        }
+        let write = defs
+            .iter()
+            .find(|d| d.name == "write_file")
+            .expect("write_file should be auto-registered");
+        assert_eq!(
+            write.execution_mode,
+            protocol::ToolExecutionMode::Concurrent
+        );
+    }
+
+    #[test]
     fn tool_summary_comes_from_lua() {
         let rt = LuaRuntime::new();
         rt.lua

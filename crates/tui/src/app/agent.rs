@@ -1,7 +1,7 @@
 use crate::app::{
     DeferredDialog, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
 };
-use protocol::{Content, Decision, HistoryItem, UiCommand};
+use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
 use smelt_core::*;
 use std::collections::HashMap;
@@ -67,8 +67,30 @@ impl TuiApp {
         }
     }
 
+    fn expand_at_file_refs_in_text(&mut self, text: &str) -> String {
+        smelt_core::file_ref::expand_at_file_refs(text, &self.cwd, &self.core.files)
+    }
+
+    fn expand_at_file_refs(&mut self, content: Content) -> Content {
+        match content {
+            Content::Text(text) => Content::Text(self.expand_at_file_refs_in_text(&text)),
+            Content::Parts(parts) => Content::Parts(
+                parts
+                    .into_iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } => ContentPart::Text {
+                            text: self.expand_at_file_refs_in_text(&text),
+                        },
+                        other => other,
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
     pub(crate) fn begin_agent_turn(&mut self, display: &str, content: Content) -> TurnState {
         let _perf = smelt_perf::perf::begin("agent:begin_turn");
+        let content = self.expand_at_file_refs(content);
         let text = content.text_content();
         let submitted = match text.trim() {
             "" => None,
@@ -860,6 +882,42 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn expanding_at_file_records_absolute_path_as_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("note.txt");
+        std::fs::write(&file, "hello\nworld").unwrap();
+
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.cwd = tmp.path().to_string_lossy().into_owned();
+        let expanded = app.app.expand_at_file_refs_in_text("summarize @note.txt");
+
+        let path = file.to_string_lossy();
+        assert!(expanded.contains(&format!("<attached_file path=\"{path}\">")));
+        assert!(expanded.contains("   1\thello"));
+        assert!(app.app.core.files.has(&path));
+    }
+
+    #[test]
+    fn expanding_at_notebook_uses_notebook_renderer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("nb.ipynb");
+        std::fs::write(
+            &file,
+            r##"{"cells":[{"cell_type":"markdown","id":"intro","source":["# Title\n"]}]}"##,
+        )
+        .unwrap();
+
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.cwd = tmp.path().to_string_lossy().into_owned();
+        let expanded = app.app.expand_at_file_refs_in_text("summarize @nb.ipynb");
+
+        let path = file.to_string_lossy();
+        assert!(expanded.contains(&format!("<attached_file path=\"{path}\">")));
+        assert!(expanded.contains("--- Cell 0 [markdown] id=intro ---"));
+        assert!(app.app.core.files.has(&path));
     }
 
     #[test]
