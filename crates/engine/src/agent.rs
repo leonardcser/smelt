@@ -1539,6 +1539,7 @@ impl<'a> Turn<'a> {
                                         pending.args,
                                         pending.tool_start,
                                     ));
+                                    outstanding -= 1;
                                 } else {
                                     let rid = next_request_id();
                                     let _ = self.event_tx.send(EngineEvent::ToolDispatch {
@@ -1595,6 +1596,7 @@ impl<'a> Turn<'a> {
                                             pending.args,
                                             pending.tool_start,
                                         ));
+                                        outstanding -= 1;
                                     } else {
                                         let rid = next_request_id();
                                         let _ = self
