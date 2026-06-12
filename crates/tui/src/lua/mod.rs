@@ -157,24 +157,63 @@ pub(crate) fn canonicalize_chord(chord: &str) -> Option<String> {
     chord_string(KeyEvent::new(kb.code, kb.mods))
 }
 
-/// Canonicalize a chord sequence (one or more tokens: `<...>` or single printable chars).
-/// Returns the canonical joined form (e.g. `"<Esc><Esc>"`, `"gd"`) or `None` if any
-/// token is unknown. Single-token shorthand is tried first before sequence tokenization.
-pub(crate) fn canonicalize_chord_sequence(input: &str) -> Option<String> {
-    if let Some(single) = canonicalize_chord(input) {
-        return Some(single);
+/// Canonicalize a chord sequence (one or more tokens: `<...>` or single printable chars)
+/// and expand `<leader>` tokens to `leader` when provided.
+pub(crate) fn canonicalize_chord_sequence_with_leader(
+    input: &str,
+    leader: Option<&str>,
+) -> Option<String> {
+    if !input.contains('<') {
+        if let Some(single) = canonicalize_chord(input) {
+            return Some(single);
+        }
     }
     let tokens = tokenize_chord_spec(input)?;
     let mut out = String::new();
     for tok in tokens {
-        let canonical = canonicalize_chord(&tok)?;
-        out.push_str(&canonical);
+        if tok.eq_ignore_ascii_case("<leader>") {
+            out.push_str(leader?);
+        } else {
+            let canonical = canonicalize_chord(&tok)?;
+            out.push_str(&canonical);
+        }
     }
     if out.is_empty() {
         None
     } else {
         Some(out)
     }
+}
+
+/// Format an internal canonical chord sequence for user-facing introspection.
+pub(crate) fn display_chord_sequence(chord: &str) -> String {
+    let mut out = String::new();
+    let mut chars = chord.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ' ' {
+            out.push_str("<space>");
+        } else if c == '<' {
+            out.push('<');
+            for cc in chars.by_ref() {
+                out.push(cc);
+                if cc == '>' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Canonicalize a single leader key. `<leader>` is not accepted here because
+/// leader expansion is only meaningful in registered keymap sequences.
+pub(crate) fn canonicalize_leader(input: &str) -> Option<String> {
+    if input.trim().eq_ignore_ascii_case("<leader>") {
+        return None;
+    }
+    canonicalize_chord(input)
 }
 
 /// Split a chord-spec into individual tokens (`<...>` or single printable chars).
@@ -1387,6 +1426,74 @@ mod tests {
         assert_eq!(canonicalize_chord("s-tab").as_deref(), Some("<Tab>"));
         assert_eq!(canonicalize_chord("j").as_deref(), Some("j"));
         assert_eq!(canonicalize_chord("bogus"), None);
+    }
+
+    #[test]
+    fn canonicalize_chord_sequence_expands_leader() {
+        assert_eq!(
+            canonicalize_chord_sequence_with_leader("<leader>r", Some(" ")).as_deref(),
+            Some(" r")
+        );
+        assert_eq!(
+            canonicalize_chord_sequence_with_leader("<Leader><C-r>", Some("\\")).as_deref(),
+            Some("\\<C-r>")
+        );
+        assert_eq!(
+            canonicalize_chord_sequence_with_leader("<leader>r", None),
+            None
+        );
+        assert_eq!(canonicalize_leader("<space>").as_deref(), Some(" "));
+        assert_eq!(display_chord_sequence(" r"), "<space>r");
+        assert_eq!(canonicalize_leader("<leader>"), None);
+    }
+
+    #[test]
+    fn keymap_leader_applies_to_subsequent_registrations() {
+        let rt = LuaRuntime::new();
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap.set_leader("<space>")
+                    smelt.keymap.set("n", "<leader>r", function() smelt.notify("resume") end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+        use smelt_core::lua::runtime::KeymapResult;
+        assert_eq!(
+            rt.run_keymap(" r", Some("Normal"), None),
+            KeymapResult::Consumed
+        );
+        let rows: mlua::Table = rt.lua.load("return smelt.keymap.list()").eval().unwrap();
+        let first: mlua::Table = rows.get(1).unwrap();
+        let chord: String = first.get("chord").unwrap();
+        assert_eq!(chord, "<space>r");
+        let leader: String = rt.lua.load("return smelt.keymap.leader()").eval().unwrap();
+        assert_eq!(leader, "<space>");
+        assert_eq!(
+            rt.run_keymap("\\r", Some("Normal"), None),
+            KeymapResult::NoBinding
+        );
+    }
+
+    #[test]
+    fn keymap_leader_resets_on_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let init = tmp.path().join("init.lua");
+        std::fs::write(&init, r#"smelt.keymap.set_leader("<space>")"#).unwrap();
+
+        let mut rt = LuaRuntime::new();
+        rt.set_init_lua_path(init.clone());
+        rt.load_user_config();
+        let leader: String = rt.lua.load("return smelt.keymap.leader()").eval().unwrap();
+        assert_eq!(leader, "<space>");
+
+        std::fs::write(&init, "").unwrap();
+        let err = rt.reload(None);
+        assert!(err.is_none(), "reload: {err:?}");
+        let leader: String = rt.lua.load("return smelt.keymap.leader()").eval().unwrap();
+        assert_eq!(leader, "\\");
     }
 
     #[test]

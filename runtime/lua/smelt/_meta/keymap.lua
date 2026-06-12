@@ -11,6 +11,10 @@ local keymap = {}
 ---@type fun(): table
 keymap.help_sections = nil
 
+--- Return the current `<leader>` expansion used when registering keymaps. Defaults to a single backslash (`\`).
+---@type fun(): string
+keymap.leader = nil
+
 --- Return the set of currently-bound `{ mode, chord }` rows. `mode` is the canonical short form (`"n"`/`"i"`/`"v"`/`""`).
 ---@type fun(): table
 keymap.list = nil
@@ -18,6 +22,10 @@ keymap.list = nil
 --- Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
 ---@type fun(mode: string, chord: string, handler: fun()): smelt.Reg
 keymap.set = nil
+
+--- Set the `<leader>` expansion for subsequent keymap registrations. `leader` must be one canonicalizable key token, e.g. `<space>` or a single backslash (`\`). Existing keymaps keep the expansion they were registered with.
+---@type fun(leader: string): nil
+keymap.set_leader = nil
 
 --- Drop the binding for `chord` in `mode`. `mode` accepts the same forms as `set`. Returns `true` if a binding was removed.
 ---@type fun(mode: string, chord: string): boolean

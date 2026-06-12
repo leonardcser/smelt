@@ -77,6 +77,9 @@ pub struct LuaShared {
     /// to ask "is `/foo` a known command?" - this is the answer.
     pub command_names: Arc<Mutex<HashSet<String>>>,
     pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
+    /// Canonical single-token expansion for `<leader>` in keymap registrations.
+    /// Matches nvim's default leader (`\\`) unless user config sets another token.
+    pub keymap_leader: Mutex<String>,
     /// Lua-registered composer for the main TUI layout. When `Some`, the
     /// host invokes it once per frame to produce a `LuaUiLayout` tree
     /// describing the split between transcript, prompt, and any
@@ -236,6 +239,7 @@ impl Default for LuaShared {
             commands: Mutex::new(HashMap::new()),
             command_names: Arc::new(Mutex::new(HashSet::new())),
             keymaps: Mutex::new(HashMap::new()),
+            keymap_leader: Mutex::new("\\".to_string()),
             main_layout_composer: Mutex::new(None),
             win_renderers: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
@@ -341,6 +345,9 @@ impl LuaShared {
         }
         if let Ok(mut shell) = self.default_shell.lock() {
             *shell = None;
+        }
+        if let Ok(mut leader) = self.keymap_leader.lock() {
+            *leader = "\\".to_string();
         }
     }
 

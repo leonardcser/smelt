@@ -14,6 +14,14 @@ fun(): table
 
 Return layered keybinding help as `{ title, entries = { { label, detail } } }` rows. Filters vim-only chords when vim mode is disabled.
 
+## `smelt.keymap.leader`
+
+```lua
+fun(): string
+```
+
+Return the current `<leader>` expansion used when registering keymaps. Defaults to a single backslash (`\`).
+
 ## `smelt.keymap.list`
 
 ```lua
@@ -31,6 +39,14 @@ fun(mode: string, chord: string, handler: fun()): smelt.Reg
 Types: [`smelt.Reg`](types.md#smeltreg)
 
 Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
+
+## `smelt.keymap.set_leader`
+
+```lua
+fun(leader: string): nil
+```
+
+Set the `<leader>` expansion for subsequent keymap registrations. `leader` must be one canonicalizable key token, e.g. `<space>` or a single backslash (`\`). Existing keymaps keep the expansion they were registered with.
 
 ## `smelt.keymap.unset`
 

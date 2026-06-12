@@ -182,6 +182,17 @@ For reference (don't recommend these unless the user asks):
 
 ```lua
 -- In ~/.config/smelt/init.lua
+smelt.keymap.set_leader("<space>")
+smelt.keymap.set("n", "<leader>r", function()
+  smelt.cmd.run("resume")
+end)
+```
+
+`<leader>` expands when the binding is registered; existing bindings keep the
+leader value they were created with. The default leader is a single backslash (`\\`).
+
+```lua
+-- In ~/.config/smelt/init.lua
 smelt.keymap.set("n", "<C-y>", function()
   local text = smelt.transcript.text()
   smelt.clipboard.write(text)
@@ -1193,10 +1204,14 @@ Register chord→callback bindings and inspect the layered help index.
 
 - `smelt.keymap.help_sections` :: `fun(): table`
   Return layered keybinding help as `{ title, entries = { { label, detail } } }` rows.
+- `smelt.keymap.leader` :: `fun(): string`
+  Return the current `<leader>` expansion used when registering keymaps.
 - `smelt.keymap.list` :: `fun(): table`
   Return the set of currently-bound `{ mode, chord }` rows.
 - `smelt.keymap.set` :: `fun(mode: string, chord: string, handler: fun()): smelt.Reg`
   Bind `chord` in `mode` to a Lua callback.
+- `smelt.keymap.set_leader` :: `fun(leader: string): nil`
+  Set the `<leader>` expansion for subsequent keymap registrations.
 - `smelt.keymap.unset` :: `fun(mode: string, chord: string): boolean`
   Drop the binding for `chord` in `mode`.
 

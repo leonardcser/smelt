@@ -9,6 +9,28 @@ use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
 use std::sync::Arc;
 
+fn default_leader() -> String {
+    "\\".to_string()
+}
+
+fn current_leader(shared: &Arc<LuaShared>) -> String {
+    shared
+        .keymap_leader
+        .lock()
+        .map(|leader| leader.clone())
+        .unwrap_or_else(|_| default_leader())
+}
+
+fn canonicalize_registered_chord(
+    shared: &Arc<LuaShared>,
+    api_name: &str,
+    chord: &str,
+) -> LuaResult<String> {
+    let leader = current_leader(shared);
+    crate::lua::canonicalize_chord_sequence_with_leader(chord, Some(&leader))
+        .ok_or_else(|| LuaError::RuntimeError(format!("{api_name}: unknown chord `{chord}`")))
+}
+
 pub(super) fn register(
     lua: &Lua,
     smelt_keymap: &mlua::Table,
@@ -52,6 +74,37 @@ pub(super) fn register(
     {
         let s = shared.clone();
         m.fn_(
+            "leader",
+            "Return the current `<leader>` expansion used when registering keymaps. Defaults to a single backslash (`\\`).",
+            &[],
+            move |_, ()| -> LuaResult<String> {
+                Ok(crate::lua::display_chord_sequence(&current_leader(&s)))
+            },
+        )?;
+    }
+    {
+        let s = shared.clone();
+        m.fn_(
+            "set_leader",
+            "Set the `<leader>` expansion for subsequent keymap registrations. `leader` must be one canonicalizable key token, e.g. `<space>` or a single backslash (`\\`). Existing keymaps keep the expansion they were registered with.",
+            &["leader"],
+            move |_, leader: String| -> LuaResult<()> {
+                let canonical = crate::lua::canonicalize_leader(&leader).ok_or_else(|| {
+                    LuaError::RuntimeError(format!(
+                        "keymap.set_leader: unknown leader `{leader}`"
+                    ))
+                })?;
+                if let Ok(mut current) = s.keymap_leader.lock() {
+                    *current = canonical;
+                }
+                Ok(())
+            },
+        )?;
+    }
+
+    {
+        let s = shared.clone();
+        m.fn_(
             "set",
             "Bind `chord` in `mode` to a Lua callback. `mode` is `\"n\"|\"i\"|\"v\"|\"\"` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.",
             &["mode", "chord", "handler"],
@@ -65,12 +118,7 @@ pub(super) fn register(
                         ))
                     },
                 )?;
-                let canonical_chord = crate::lua::canonicalize_chord_sequence(&chord)
-                    .ok_or_else(|| {
-                        LuaError::RuntimeError(format!(
-                            "keymap.set: unknown chord `{chord}`"
-                        ))
-                    })?;
+                let canonical_chord = canonicalize_registered_chord(&s, "keymap.set", &chord)?;
                 let handle = LuaHandle::from_func(lua, handler.into_inner())?;
                 if let Ok(mut map) = s.keymaps.lock() {
                     map.insert((canonical_mode.clone(), canonical_chord.clone()), handle);
@@ -98,10 +146,7 @@ pub(super) fn register(
                         "keymap.unset: unknown mode `{mode}` (expected \"n\"|\"i\"|\"v\"|\"\" or \"normal\"|\"insert\"|\"visual\")"
                     ))
                 })?;
-                let canonical_chord = crate::lua::canonicalize_chord_sequence(&chord)
-                    .ok_or_else(|| {
-                        LuaError::RuntimeError(format!("keymap.unset: unknown chord `{chord}`"))
-                    })?;
+                let canonical_chord = canonicalize_registered_chord(&s, "keymap.unset", &chord)?;
                 Ok(s.keymaps
                     .lock()
                     .map(|mut m| m.remove(&(canonical_mode, canonical_chord)).is_some())
@@ -126,7 +171,7 @@ pub(super) fn register(
                 for (i, (mode, chord)) in rows.into_iter().enumerate() {
                     let row = lua.create_table()?;
                     row.set("mode", mode)?;
-                    row.set("chord", chord)?;
+                    row.set("chord", crate::lua::display_chord_sequence(&chord))?;
                     out.set(i + 1, row)?;
                 }
                 Ok(out)
