@@ -628,7 +628,7 @@ impl TranscriptProjection {
         }
     }
 
-    /// Render a bounded virtual window into `buf`.
+    /// Render a bounded row window into `buf`.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn project(

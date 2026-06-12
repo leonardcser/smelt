@@ -737,7 +737,7 @@ impl TuiApp {
         viewport_rows: u16,
     ) -> Vec<(usize, u16, u16)> {
         let win = self.transcript_win();
-        if win.is_virtual_rows() {
+        if win.has_materialized_rows() {
             let buf_id = win.buf;
             let buf = match self.ui.buf(buf_id) {
                 Some(b) => b,
@@ -745,7 +745,7 @@ impl TuiApp {
             };
             let now = self.core.clock.instant_now();
             return win
-                .virtual_selection_ranges(buf, viewport_rows, now)
+                .row_selection_ranges(buf, viewport_rows, now)
                 .into_iter()
                 .map(|r| (r.line, r.col_start, r.col_end))
                 .collect();
@@ -796,7 +796,7 @@ impl TuiApp {
         }
         // Route through the shared coord helper so the prompt's per-row
         // selection painting and the transcript's stay one implementation -
-        // including the "1-cell virtual span on empty middle rows" rule.
+        // including the "1-cell fallback span on empty middle rows" rule.
         let first = scroll_top
             .saturating_sub(row_base)
             .min(usize::MAX as crate::smelt_edit::RowIndex) as usize;
@@ -884,7 +884,7 @@ mod tests {
     use crate::app::test_harness::TestApp;
 
     #[test]
-    fn selection_highlights_subtract_virtual_row_base() {
+    fn selection_highlights_subtract_materialized_row_base() {
         let mut harness = TestApp::builder().build();
         let buf_id = harness.app.transcript_win().buf;
         {

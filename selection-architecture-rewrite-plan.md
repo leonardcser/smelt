@@ -18,15 +18,15 @@ Primary plan and staged work:
 
 - `selection-architecture-rewrite-plan.md` — this architecture plan.
 - `crates/buffer/src/coords.rs` — byte/display row-range projection and selectable-row helpers.
-- `crates/edit/src/lib.rs` — `UiHost` trait, `display_rows_for_range`, `copy_virtual_range`, and future search/range seams.
+- `crates/edit/src/lib.rs` — `UiHost` trait, `display_rows_for_range`, `copy_document_range`, and future search/range seams.
 - `crates/edit/src/window.rs` — common `Window` shell, viewport math, cursor hit-testing, selection projection, `snap_col_past_chrome`.
-- `crates/edit/src/window/virtual_rows.rs` — rows-mode cursor, visual selection, virtual commands, and mouse hit-testing.
+- `crates/edit/src/window/row_text.rs` — row-backed cursor, visual selection, viewer commands, and mouse hit-testing.
 - `crates/edit/src/vim.rs` — Vim command handling for `gg`, `G`, visual mode, `/`, `?`, `n`, and `N` integration.
 - `crates/tui/src/app/events.rs` — focus-aware key routing, overlay/dialog dispatch, and generic viewer command dispatch.
 - `crates/tui/src/app/mouse.rs` — transcript/content mouse dispatch and the transcript-specific snapping to remove.
 - `crates/tui/src/app/render_loop.rs` — normal render path; should materialize only visible rows plus bounded overscan.
 - `crates/tui/src/app/transcript.rs` — transcript view wrappers, block snapshots, visible rows, and selection highlight helpers.
-- `crates/tui/src/app/ui_host.rs` — TUI-side `UiHost`; currently contains full-materialization hotspots such as `virtual_total_rows`.
+- `crates/tui/src/app/ui_host.rs` — TUI-side `UiHost`; owns exact document-row counts without full materialization.
 - `crates/tui/src/app/cmdline.rs` — existing `:` bottom status input to generalize into command/search modes.
 - `crates/tui/src/app/cmdline_edit.rs` — reusable editing primitives for the status input.
 - `crates/tui/src/app/content_keys.rs` — content-pane wrapper around generic viewer key dispatch.
@@ -53,7 +53,7 @@ Reference implementation for comparison, not a template to copy wholesale:
 
 - common/layout/viewport/scroll fields: `crates/edit/src/window.rs:264`
 - local byte cursor/selection fields: `cpos`, `selection_anchor`, `vim_state`, `drag_endpoint`
-- virtual row state: `virtual_rows: Option<VirtualRowsState>`
+- row-backed text state: `row_text: RowTextState` with `active` materialized-document state
 
 A top-level `enum WindowModel { Buffer, Viewer }` is too blunt: common layout/viewport/render plumbing is genuinely shared. The better split is a stable `Window` shell plus `surface: WindowSurface`, where the surface owns both interaction role and document state.
 
@@ -79,26 +79,25 @@ enum WindowSurface {
 }
 ```
 
-`WindowSurface` should replace the old boolean authority and the bolted-on `virtual_rows` mode, not sit beside them as a compatibility label.
+`WindowSurface` should replace the old boolean authority and the bolted-on row-materialization mode, not sit beside them as a compatibility label.
 
-Implementation note: the first Phase 1 surface step replaced the direct
-`focusable`, `selectable`, and `mouse_scroll` booleans with a `WindowSurface`
-interaction role (`EditableText`, `ReadonlyText`, `SelectableText`, `List`,
-`Inert`). This is intentionally not the full end state yet: text/list document
-state still lives in the existing `Window` fields, and `virtual_rows` is still
-separate. The important line is that focus, generic text selection, caret commit,
-and wheel-scroll policy now ask the surface instead of reinterpreting three
-booleans at each call site.
+Implementation note: Phase 4 sealed the text/surface state behind explicit
+`Window` accessors, made `WindowSurface` opaque to callers, and removed
+`Window`'s internal `Deref`/`DerefMut` to `WindowTextState`. The old optional
+row-materialization mode is now a private `RowTextState` owned by text state; callers
+configure materialized document rows through `set_materialized_rows` /
+`apply_materialized_rows` and query document totals/copy through row/document
+APIs rather than compatibility virtual-row names.
 
 ### 2. Materialized row space and interaction mode should be separate concepts
 
-Virtual rows are not only transcript. They are also used by:
+Materialized row documents are not only transcript. They are also used by:
 
 - transcript render projection: `crates/tui/src/app/render_loop.rs:168`
 - resume preview/session projection: `crates/tui/src/lua/api/session.rs:600`
 - picker virtualization: `crates/tui/src/picker.rs:289`
 
-Picker rows are virtualized, but its selected item is primarily list state in `picker_state`, not a text selection. So the plan should not make “viewer text selection” synonymous with “materialized rows.”
+Picker rows are range-materialized, but its selected item is primarily list state in `picker_state`, not a text selection. So the plan should not make “viewer text selection” synonymous with “materialized rows.”
 
 Use explicit state per surface/document type:
 
@@ -139,7 +138,7 @@ Transcript mouse handling snaps in TUI before calling edit:
 
 - `transcript_mouse_cell`: `crates/tui/src/app/mouse.rs:78`
 - `snap_event_for_selection`: `crates/tui/src/app/mouse.rs:488`
-- virtual edit hit-test then recomputes the position: `crates/edit/src/window/virtual_rows.rs:463`
+- row-text edit hit-test then recomputes the position: `crates/edit/src/window/row_text.rs:463`
 
 These two paths can disagree about viewport-edge row clamping, materialized row base, horizontal scroll, and stale viewport scroll. This is likely the source of “sometimes offset.”
 
@@ -148,7 +147,7 @@ Plan change: remove transcript-specific pre-snapping from TUI. TUI should pass r
 Implementation note: the TUI pre-snap path (`transcript_mouse_cell` and
 `snap_event_for_selection`) has been removed. Transcript mouse handling now
 passes the raw `MouseEvent` into `Window::handle_mouse` /
-`Window::handle_virtual_mouse`; edit-side hit-testing owns row clamping,
+`Window::handle_row_mouse`; edit-side hit-testing owns row clamping,
 horizontal scroll, gutter/padding subtraction, and selectable-span snapping.
 
 ### 4. Existing buffer metadata is enough for generic selectable snapping
@@ -180,21 +179,21 @@ Implementation note: user/exec chrome blank rows now commit semantic empty rows 
 
 ### 6. Copy semantics are already rightly transcript-owned
 
-Virtual transcript copy cannot be a normal local byte copy because the buffer is only a materialized slice. The existing seam is good:
+Row-backed transcript copy cannot be a normal local byte copy because the buffer is only a materialized slice. The existing seam is good:
 
-- trait method: `UiHost::copy_virtual_range` in `crates/edit/src/lib.rs:2135`
+- trait method: `UiHost::copy_document_range` in `crates/edit/src/lib.rs:2135`
 - transcript implementation: `crates/tui/src/content/transcript_buf.rs:892`
 
 Do not remove this seam. The rewrite should instead guarantee that the `DocRange` passed to it is the same range that render/yank flash use.
 
 ### 7. `UiHost::display_rows_for_range` is the right seam for off-viewport text
 
-Virtual word motions already need rows outside the materialized slice and use host callbacks:
+Row-document word motions already need rows outside the materialized slice and use host callbacks:
 
-- `resolve_virtual_viewer_command`: `crates/tui/src/app/events.rs:1159`
+- `resolve_row_viewer_command`: `crates/tui/src/app/events.rs:1159`
 - `UiHost::display_rows_for_range`: `crates/edit/src/lib.rs:2131`
 
-Do not force edit/window to own full transcript data. Edit should own visible hit-testing and selection state; host/projection should still provide off-viewport rows and virtual copy.
+Do not force edit/window to own full transcript data. Edit should own visible hit-testing and selection state; host/projection should still provide off-viewport rows and ranged document copy.
 
 ### 8. Soft-wrap/copy-continuation is mostly copy, not selection painting
 
@@ -202,7 +201,7 @@ Do not force edit/window to own full transcript data. Edit should own visible hi
 
 Selection painting mostly needs rows, cells, empty-row behavior, and selectable masks. The shared projector should not overfit copy semantics. Copy/render share the same normalized range, but they may consume different row metadata.
 
-Implementation note: the displayed-buffer byte-range renderer now lives in `smelt_buffer::coords::copy_byte_range`, alongside selectable coordinate helpers. Transcript still owns virtual `DocRange` materialization/copy because it must map absolute rows through the projection, but once a bounded scratch/visible buffer exists, generic selectable leaves and transcript use the same copy primitive.
+Implementation note: the displayed-buffer byte-range renderer now lives in `smelt_buffer::coords::copy_byte_range`, alongside selectable coordinate helpers. Transcript still owns `DocRange` materialization/copy because it must map absolute rows through the projection, but once a bounded scratch/visible buffer exists, generic selectable leaves and transcript use the same copy primitive.
 
 ### 9. Code-block padding is currently real selectable text
 
@@ -335,7 +334,7 @@ Recommended direction: Smelt should use a hybrid model.
 The code now has the right visible-buffer direction, and the Phase 1 work has removed the accidental full-row paths from correctness-sensitive transcript operations:
 
 - render path plans visible projection in `render_loop.rs`, then applies `MaterializedRows`: `crates/tui/src/app/render_loop.rs:151`
-- exact total rows are provided by `TranscriptProjection::exact_total_rows` and `TuiApp::transcript_total_rows`; `UiHost::virtual_total_rows` no longer calls `full_transcript_display_text`.
+- exact total rows are provided by `TranscriptProjection::exact_total_rows` and `TuiApp::transcript_total_rows`; `UiHost::document_total_rows` no longer calls `full_transcript_display_text`.
 - `display_rows_for_range` prepares exact heights, then materializes only the intersecting block range.
 - transcript `copy_range` prepares exact heights, then materializes only the selected/intersecting block range.
 - `materialize_block_layout` is an exact metadata query backed by `BlockRowIndex`, not a full row concatenation path.
@@ -396,19 +395,19 @@ scroll target -> render every block -> concatenate every row -> slice viewport
 
 ### 5. Height exactness policy
 
-User-visible row coordinates must be exact. Estimates may exist only as internal cache warmup hints; they must not drive `virtual_total_rows`, scrollbar thumb math, `gg`, `G`, search origins, search match ranges, selection ranges, or copy ranges.
+User-visible row coordinates must be exact. Estimates may exist only as internal cache warmup hints; they must not drive `document_total_rows`, scrollbar thumb math, `gg`, `G`, search origins, search match ranges, selection ranges, or copy ranges.
 
 Required behavior:
 
 - `gg` jumps to absolute row `0`.
 - `G` jumps to the exact bottom clamp, based on exact total rows.
-- `virtual_total_rows` returns exact rows from an explicit height index, not `build_rows`/`full_transcript_display_text`.
+- `document_total_rows` returns exact rows from an explicit height index, not `build_rows`/`full_transcript_display_text`.
 - If width/show-thinking/content changes invalidate heights, rebuild exact heights before exposing global row coordinates.
 - The first implementation may rebuild exact heights synchronously; if that is too slow, switch to chunked exact rebuilds that do not expose approximate coordinates while incomplete.
 
 The key architectural rule is: exact height measurement is allowed to scan blocks, but full row concatenation is not required for exact row counts.
 
-Implementation note: `TranscriptProjection::exact_total_rows` now measures exact block heights and returns `ExactRowIndex`'s total directly. `UiHost::virtual_total_rows` uses that path instead of `full_transcript_display_text`, so exact scrollbar/`G` coordinates no longer require concatenating all rows. The current eager policy may still render blocks to measure missing heights; it just does not build the full row vector, and repeated exact-count queries reuse the exact row index.
+Implementation note: `TranscriptProjection::exact_total_rows` now measures exact block heights and returns `ExactRowIndex`'s total directly. `UiHost::document_total_rows` uses that path instead of `full_transcript_display_text`, so exact scrollbar/`G` coordinates no longer require concatenating all rows. The current eager policy may still render blocks to measure missing heights; it just does not build the full row vector, and repeated exact-count queries reuse the exact row index.
 
 ### 6. Off-viewport display access
 
@@ -422,7 +421,7 @@ Cost model:
 
 - `materialize(start..end)` may render blocks intersecting that range plus minimal context; it must not call full layout unless the requested range itself spans the full transcript.
 - `copy_range(range)` may materialize the selected block range and scan selected rows; huge selections are explicitly huge operations.
-- line-break APIs should have a range form for virtual word motion; full break vectors are explicit full-text/export/debug operations only.
+- line-break APIs should have a range form for row-document word motion; full break vectors are explicit full-text/export/debug operations only.
 
 Implementation note: `materialize_block_layout` is now an exact block-layout metadata query backed by `ExactRowIndex`; when heights are already exact it does not render blocks or concatenate rows. `display_rows_for_range` and transcript `copy_range` prepare exact heights, find the intersecting block range from the index, then materialize only that block range into a scratch row buffer.
 
@@ -447,7 +446,7 @@ These should not scan/concatenate all rows:
 - normal render
 - wheel scroll
 - line/page cursor motions inside already-known row space
-- `virtual_total_rows`
+- `document_total_rows`
 - selection paint/yank flash for visible rows
 - visible block layout APIs
 
@@ -465,7 +464,7 @@ The recommended end-state abstractions are:
 
 ### A. Replace boolean interaction state with `WindowSurface`
 
-Current window behavior is encoded by combinations of `focusable`, `selectable`, `mouse_scroll`, `cursor_line`, `selection_highlight`, `virtual_rows`, `cpos`, and selection/drag fields. That allows invalid combinations: inert chrome can focus the prompt, row viewers can carry stale byte cursors, and list rows can pretend to be text caret state.
+Current window behavior is encoded by combinations of `focusable`, `selectable`, `mouse_scroll`, `cursor_line`, `selection_highlight`, row materialization state, `cpos`, and selection/drag fields. That allows invalid combinations: inert chrome can focus the prompt, row viewers can carry stale byte cursors, and list rows can pretend to be text caret state.
 
 Make the surface/document model explicit:
 
@@ -542,7 +541,7 @@ struct ListDocState {
 }
 ```
 
-This should delete the dual authority of local byte `cpos` plus `virtual_rows.cursor`, byte `selection_anchor` plus row selection anchor, byte drag endpoint plus row drag endpoint, and byte yank flash plus row yank flash.
+This should delete the dual authority of local byte `cpos` plus `RowTextState::cursor`, byte `selection_anchor` plus row selection anchor, byte drag endpoint plus row drag endpoint, and byte yank flash plus row yank flash.
 
 ### C. Add one chrome-aware `TextHit`
 
@@ -618,7 +617,7 @@ struct DisplayRow {
 
 Implement this model for buffer-backed text, transcript projection, readonly overlay/dialog text, and selectable bars where applicable. Search, hit-testing, selection projection, and copy should consume `DisplayRow` metadata instead of reconstructing selectable masks from plain strings.
 
-`MaterializedRows` remains useful as the local/absolute row-space primitive inside `RowTextState`, but it should be owned by the row text state rather than exposed as an optional virtual mode bolted onto byte cursor fields.
+`MaterializedRows` remains useful as the local/absolute row-space primitive inside `RowTextState`, but it should be owned by the row text state rather than exposed as an optional row-materialization mode bolted onto byte cursor fields.
 
 ### E. Split exact row coordinates from rendered transcript buffers
 
@@ -637,7 +636,7 @@ struct RenderedBlockCache {
 
 Rules:
 
-- exact heights are stored by block id/key and prefix-summed for `virtual_total_rows`, scrollbar math, `gg`, `G`, search origins/results, selection, and copy.
+- exact heights are stored by block id/key and prefix-summed for `document_total_rows`, scrollbar math, `gg`, `G`, search origins/results, selection, and copy.
 - a height measurement may render a block, but after recording height the rendered buffer may be evicted unless visible/recent/search-copy needs it.
 - normal render materializes only visible rows plus bounded overscan.
 - full row concatenation is allowed only for explicit export/debug/full-text operations.
@@ -716,18 +715,18 @@ Regression coverage should be TUI-level whenever the bug was visible through rea
 
 Existing TUI coverage to preserve:
 
-- `crates/tui/src/app/test_harness.rs:3475` — `transcript_vim_gg_g_and_count_g_use_virtual_rows` covers exact virtual-row `gg`, `G`, and count-`G` navigation.
-- `crates/tui/src/app/test_harness.rs:3494` — `transcript_vim_visual_yank_copies_virtual_range` covers Vim visual yank through `copy_virtual_range` and virtual yank flash expiry.
+- `crates/tui/src/app/test_harness.rs` — `transcript_vim_gg_g_and_count_g_use_row_document` covers exact row-document `gg`, `G`, and count-`G` navigation.
+- `crates/tui/src/app/test_harness.rs` — `transcript_vim_visual_yank_copies_document_range` covers Vim visual yank through `copy_document_range` and row yank flash expiry.
 - `crates/tui/src/app/test_harness.rs:3524` — `transcript_vim_visual_char_starts_at_cursor` covers visual selection starting at the cursor instead of the top of the transcript, plus mouse-down clearing stale visual state.
 - `crates/tui/src/app/test_harness.rs:3588` — `wheel_scroll_in_visual_mode_preserves_cursor_screen_row` covers visual-mode wheel scrolling preserving screen-row intent.
 - `crates/tui/src/app/test_harness.rs:3620` — `mouse_drag_clears_visual_line_mode` covers mouse drag exiting Vim visual-line mode.
-- `crates/tui/src/app/test_harness.rs:3654` — `transcript_shift_selection_copy_copies_virtual_range` covers shift-selection copy from a virtual transcript.
+- `crates/tui/src/app/test_harness.rs` — `transcript_shift_selection_copy_copies_document_range` covers shift-selection copy from a row-backed transcript.
 - `crates/tui/src/app/test_harness.rs:3669` — `transcript_triple_click_event_pipeline_yanks_clicked_display_line` covers the real event pipeline for transcript line yanking.
-- `crates/tui/src/app/mouse.rs:645` — `transcript_click_after_tail_render_lands_on_clicked_screen_row` covers clicks in a tail-projected virtual transcript.
-- `crates/tui/src/app/mouse.rs:733` — `transcript_drag_after_tail_render_starts_from_clicked_row` covers drag anchors in a tail-projected virtual transcript.
-- `crates/tui/src/app/mouse.rs:796` — `virtual_transcript_drag_renders_cursor_and_selection_while_captured` covers rendering selection while mouse capture freezes materialization.
+- `crates/tui/src/app/mouse.rs` — `transcript_click_after_tail_render_lands_on_clicked_screen_row` covers clicks in a tail-projected row-backed transcript.
+- `crates/tui/src/app/mouse.rs` — `transcript_drag_after_tail_render_starts_from_clicked_row` covers drag anchors in a tail-projected row-backed transcript.
+- `crates/tui/src/app/mouse.rs` — `row_document_transcript_drag_renders_cursor_and_selection_while_captured` covers rendering selection while mouse capture freezes materialization.
 - `crates/tui/src/app/mouse.rs:839` — `transcript_drag_while_streaming_keeps_clicked_anchor` covers streaming appends during drag.
-- `crates/tui/src/app/mouse.rs:904` — `transcript_click_uses_local_row_in_tail_projection` covers local-row hit-testing after virtual row-base projection.
+- `crates/tui/src/app/mouse.rs` — `transcript_click_uses_local_row_in_tail_projection` covers local-row hit-testing after row-base projection.
 
 Missing or still-required TUI regressions from the bug table:
 
@@ -738,7 +737,7 @@ Selection/cursor semantics:
 3. Thinking block empty row paints after `│ `, not over the chrome prefix.
 4. Code-block click past EOL snaps to the end of the actual code text.
 5. Code-block drag/select through right padding does not copy padding spaces.
-6. Virtual mouse drag from col 0 to char col 3 copies/highlights four chars, with render highlight, copied text, and yank flash agreeing.
+6. Mouse drag from col 0 to char col 3 copies/highlights four chars, with render highlight, copied text, and yank flash agreeing.
 7. Double-click word: highlighted range, copied range, and yank flash range are identical.
 8. TUI transcript drag near viewport edge uses the same row as edit hit-test; no duplicate TUI snapping offset.
 9. Prompt top-bar click on non-selectable `────` chrome does not focus the prompt, does not move prompt/bar cursor state, and does not snap to the right-side selectable group.
@@ -748,7 +747,7 @@ Selection/cursor semantics:
 
 Virtualization shape:
 
-1. `virtual_total_rows` or equivalent exact total-row query does not call `build_rows`/`full_transcript_display_text`.
+1. `document_total_rows` or equivalent exact total-row query does not call `build_rows`/`full_transcript_display_text`.
 2. `gg` and `G` use exact row counts without full row concatenation.
 3. Wheel scroll on a large transcript materializes only viewport plus overscan block ranges.
 4. ranged display materialization touches only requested/intersecting blocks.
@@ -785,9 +784,9 @@ Completion criteria:
 - if real pad cells are required for a right border, emit them as non-selectable chrome.
 - replace transcript-specific TUI snapping with edit/window hit-testing over display row spans/decorations.
 - keep TUI responsible for dispatch/capture/focus/clipboard, not cell snapping.
-- make `virtual_total_rows` use exact height/index metadata rather than full row concatenation.
+- make `document_total_rows` use exact height/index metadata rather than full row concatenation.
 - make ranged transcript rows/copy materialize only intersecting block ranges after exact-height prep.
-- move displayed-buffer byte-range copy and selectable-cell snapping into `smelt_buffer::coords`; transcript owns virtual range materialization, not generic copy rendering.
+- move displayed-buffer byte-range copy and selectable-cell snapping into `smelt_buffer::coords`; transcript owns document-range materialization, not generic copy rendering.
 - delete full-row/full-break host APIs; correctness-sensitive paths use `display_rows_for_range`, and explicit full scans use `DisplayDocument` snapshots/materialization or named export/full-text APIs.
 
 This phase eliminates the prompt-bar `────` bug, the code-block padding cursor bug, all-chrome selection bugs, and duplicate transcript snapping offsets while establishing exact transcript row coordinates without concatenating full display rows. The old byte/row state fields still exist as implementation storage; deleting that remaining dual state moves to the display-document/state-cleanup phases once the final `DisplayDocument`/`TextRange` consumers are in place.
@@ -844,7 +843,7 @@ Scope:
 Search rules:
 
 - normal readonly buffers search their display document directly.
-- virtual/transcript windows use exact row index plus bounded display materialization.
+- row-backed/transcript windows use exact row index plus bounded display materialization.
 - searchable text excludes non-selectable chrome, borders, gutters, and visual padding.
 - no disk index; no full row concatenation.
 - the first implementation may scan synchronously on Enter, but keep the scan isolated enough to chunk/cancel later without placeholder async machinery.
@@ -859,7 +858,7 @@ After the new model is green, delete the old model rather than preserving shims.
 
 Scope:
 
-- delete old `virtual_rows` APIs and compatibility wrappers that are no longer used.
+- delete old row-materialization APIs and compatibility wrappers that are no longer used.
 - delete explicit full-row/full-break APIs if display documents replace them; keep only full-text/export APIs that are intentionally expensive.
 - delete old `focusable`/`selectable`/`mouse_scroll` authority if not already removed.
 - delete old byte/doc projection duplication after `TextRange` projection is authoritative.
@@ -867,7 +866,7 @@ Scope:
 - delete or update Lua APIs freely; no Lua compatibility is required.
 - simplify tests around `WindowSurface`, `DisplayDocument`, `TextHit`, and `TextRange`.
 
-Implementation note: Phase 4 removed the `UiHost::rows_for_range` / `breaks_for_range` and later `full_rows_for` / `full_breaks_for` compatibility accessors; bounded text access now goes through `display_rows_for_range`, while explicit whole-document consumers use `DisplayDocument` snapshots/materialization or transcript export/full-text APIs. `DisplayRows` now contains row-local text, selectable ranges, and soft/hard break metadata, with explicit text extraction helpers for text-only callers. Buffer visual ranges now live behind a typed `RangeLayer` store (`Search`, `Selection`, `YankFlash`); render iterates layer order/style metadata instead of hard-coding each feature, and search clear/paint paths target the search layer directly. `WindowSurface` now carries the text interaction state that used to sit directly on `Window`, so changing a surface role preserves state while removing the old boolean authority. The carried text state is no longer a public mutation surface for TUI/runtime callers: `WindowSurface` is opaque, `WindowTextState` fields are crate-private, prompt/viewer code goes through explicit `Window` methods, and Vim dispatch borrows both buffer edit state and window text state inside `smelt-edit` instead of reassembling field refs in TUI. Lua window creation no longer accepts `focusable` / `selectable`; runtime Lua uses explicit `surface = ...` roles at the boundary.
+Implementation note: Phase 4 removed the `UiHost::rows_for_range` / `breaks_for_range` and later `full_rows_for` / `full_breaks_for` compatibility accessors; bounded text access now goes through `display_rows_for_range`, while explicit whole-document consumers use `DisplayDocument` snapshots/materialization or transcript export/full-text APIs. `DisplayRows` now contains row-local text, selectable ranges, and soft/hard break metadata, with explicit text extraction helpers for text-only callers. Buffer visual ranges now live behind a typed `RangeLayer` store (`Search`, `Selection`, `YankFlash`); render iterates layer order/style metadata instead of hard-coding each feature, and search clear/paint paths target the search layer directly. `WindowSurface` now carries the text interaction state that used to sit directly on `Window`, so changing a surface role preserves state while removing the old boolean authority. The carried text state is no longer a public mutation surface for TUI/runtime callers: `WindowSurface` is opaque, `WindowTextState` fields are crate-private, prompt/viewer code goes through explicit `Window` methods, and Vim dispatch borrows both buffer edit state and window text state inside `smelt-edit` instead of reassembling field refs in TUI. The old optional row-materialization API shape is gone: row-backed viewers use `RowTextState` and materialized document rows directly, `UiHost` exposes `document_total_rows` / `copy_document_range`, and `Window` no longer derefs to its internal text state. Lua window creation no longer accepts `focusable` / `selectable`; runtime Lua uses explicit `surface = ...` roles at the boundary.
 
 ## Design decisions after code review
 
@@ -877,7 +876,7 @@ Implementation note: Phase 4 removed the `UiHost::rows_for_range` / `breaks_for_
 - Add `TextHit` / `TextHitKind`; do not collapse hit-testing into a byte offset before surface policy is applied.
 - Use `DisplayDocument`, `DisplayRows`, and `DisplayRow` because search/selection/copy operate over displayed selectable text.
 - Use `TextRange` and `SelectionState<P>` in both byte-backed and row-backed text states.
-- Keep `MaterializedRows` as the local/absolute row-space primitive inside `RowTextState`, not as an optional virtual mode on `Window`.
+- Keep `MaterializedRows` as the local/absolute row-space primitive inside `RowTextState`, not as an optional row-materialization mode on `Window`.
 - Keep transcript copy projection-owned, but route it through display-document/ranged copy semantics.
 - Split exact row-height/index state from rendered block buffer retention.
 - User-visible row counts and coordinates must be exact; no approximate `gg`, `G`, scrollbar, search, selection, or copy coordinates.

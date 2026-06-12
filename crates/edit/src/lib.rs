@@ -71,8 +71,8 @@ pub use row::{
 pub use vim::VimMode;
 pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, CursorShape, DrawContext, EventCtx,
-    MouseCtx, ScrollbarState, SplitConfig, VerticalScroll, ViewerCommand, VirtualRowsState,
-    VirtualYankFlash, Window, WindowSurface, WindowViewport,
+    MouseCtx, RowTextState, RowYankFlash, ScrollbarState, SplitConfig, VerticalScroll,
+    ViewerCommand, Window, WindowSurface, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.
@@ -1441,10 +1441,10 @@ impl Ui {
         self.render_with_paints_prepared(w, |_, _| {}, paint)
     }
 
-    /// Render one frame with a host preparation hook for virtualized windows.
+    /// Render one frame with a host preparation hook for row-backed windows.
     ///
     /// `prepare` runs after split/overlay geometry is known and before the backing
-    /// buffer is rendered/layouted for paint. Virtualized sources can materialize a
+    /// buffer is rendered/layouted for paint. Row-backed sources can materialize a
     /// bounded row slice into `request.buf`, apply row metadata to `request.win`,
     /// and then let the normal `Window::render` path handle painting.
     pub fn render_with_paints_prepared<W, P, F>(
@@ -1517,7 +1517,7 @@ impl Ui {
                                     CursorShape::Hidden
                                 },
                                 theme: std::sync::Arc::clone(theme),
-                                vim_mode: win.vim_mode,
+                                vim_mode: win.vim_mode(),
                             };
                             win.render(buf, &mut slice, &ctx);
                             return;
@@ -2126,7 +2126,7 @@ pub trait UiHost {
     fn viewport_for(&self, win: WinId) -> Option<WindowViewport>;
 
     /// Display rows and row-local break metadata for a bounded range in `win`.
-    /// This is the primary host seam for off-viewport text access; virtual
+    /// This is the primary host seam for off-viewport text access; row-backed
     /// documents must override it with a range-aware implementation.
     fn display_rows_for_range(
         &mut self,
@@ -2158,15 +2158,15 @@ pub trait UiHost {
         Some(DisplayRows { rows: display_rows })
     }
 
-    /// Total rows for a virtual document. `None` means `win` is backed by its
+    /// Total rows for a row-backed document. `None` means `win` is backed by its
     /// materialized buffer and `Window::scroll_row_total` is authoritative.
-    fn virtual_total_rows(&mut self, _win: WinId) -> Option<RowIndex> {
+    fn document_total_rows(&mut self, _win: WinId) -> Option<RowIndex> {
         None
     }
 
-    /// Copy an absolute document range for a virtual window. `None` falls back to
+    /// Copy an absolute document range for a row-backed window. `None` falls back to
     /// local buffer byte-range copy at the call site.
-    fn copy_virtual_range(&mut self, _win: WinId, _range: DocRange) -> Option<CopyOutput> {
+    fn copy_document_range(&mut self, _win: WinId, _range: DocRange) -> Option<CopyOutput> {
         None
     }
 
@@ -2195,7 +2195,7 @@ impl<'a, H: UiHost + ?Sized> HostDisplayDocument<'a, H> {
 
 impl<H: UiHost + ?Sized> DisplayDocument for HostDisplayDocument<'_, H> {
     fn snapshot(&mut self) -> DisplaySnapshot {
-        let total_rows = if let Some(total) = self.host.virtual_total_rows(self.win) {
+        let total_rows = if let Some(total) = self.host.document_total_rows(self.win) {
             total
         } else {
             let ui = self.host.ui();
@@ -2219,7 +2219,7 @@ impl<H: UiHost + ?Sized> DisplayDocument for HostDisplayDocument<'_, H> {
 
     fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
         match range {
-            TextRange::Rows(range) => self.host.copy_virtual_range(self.win, range),
+            TextRange::Rows(range) => self.host.copy_document_range(self.win, range),
             TextRange::Bytes(_) => None,
         }
     }
@@ -4149,8 +4149,8 @@ mod tests {
                 .unwrap();
             {
                 let w = host.win_mut(win).unwrap();
-                w.cursor_row = 0;
-                w.cursor_col = 3;
+                w.text_state_mut().cursor_row = 0;
+                w.text_state_mut().cursor_col = 3;
             }
             // Hosting `win` in a modal overlay both makes it focusable
             // (overlay leaf) and exercises `overlay_open`. The modal
@@ -4517,7 +4517,7 @@ mod tests {
         let buf_id = ui.win(win).unwrap().buf;
         let buf = ui.buf(buf_id).unwrap();
         let byte = buf.byte_at_display_pos(vrow, 0);
-        ui.win_mut(win).unwrap().drag_endpoint = Some(byte);
+        ui.win_mut(win).unwrap().text_state_mut().drag_endpoint = Some(byte);
     }
 
     #[test]
@@ -4589,7 +4589,7 @@ mod tests {
     }
 
     #[test]
-    fn drag_autoscroll_virtual_rows_fires_at_bottom_edge() {
+    fn drag_autoscroll_row_document_fires_at_bottom_edge() {
         let mut ui = make_ui();
         let buf = ui.buf_create(BufCreateOpts::default());
         if let Some(b) = ui.buf_mut(buf) {
@@ -4612,42 +4612,36 @@ mod tests {
         ui.wins.get_mut(&win).unwrap().viewport = Some(WindowViewport {
             rect,
             content_width: 20,
-            total_rows: 20,
+            total_rows: 21,
             scroll_top: 0,
             scrollbar: None,
             gutter_width: 0,
         });
-        ui.wins.get_mut(&win).unwrap().set_virtual_rows(0, 20);
+        ui.wins
+            .get_mut(&win)
+            .unwrap()
+            .set_materialized_rows(0, 20, 21);
 
         ui.set_capture(HitTarget::Window(win));
-        // Park virtual drag endpoint at bottom edge (row 9).
-        ui.wins
-            .get_mut(&win)
-            .unwrap()
-            .virtual_rows
-            .as_mut()
-            .unwrap()
-            .cursor = DocPosition {
-            row: 9,
-            byte_col: 0,
-        };
-        ui.wins
-            .get_mut(&win)
-            .unwrap()
-            .virtual_rows
-            .as_mut()
-            .unwrap()
-            .drag_endpoint = Some(DocPosition {
-            row: 9,
-            byte_col: 0,
-        });
-        // Sync local cursor to match the virtual state (row 9 is local 9 when row_base=0).
-        ui.wins.get_mut(&win).unwrap().cursor_row = 9;
+        // Park row-document drag endpoint at bottom edge (row 9).
+        {
+            let state = ui.wins.get_mut(&win).unwrap().row_text_state_mut();
+            state.cursor = DocPosition {
+                row: 9,
+                byte_col: 0,
+            };
+            state.drag_endpoint = Some(DocPosition {
+                row: 9,
+                byte_col: 0,
+            });
+        }
+        // Sync local cursor to match the row state (row 9 is local 9 when row_base=0).
+        ui.wins.get_mut(&win).unwrap().text_state_mut().cursor_row = 9;
 
         assert!(ui.drag_autoscroll_interval().is_some());
         assert!(ui.tick_drag_autoscroll());
         assert_eq!(ui.win(win).unwrap().scroll_top(), 1);
-        let state = ui.win(win).unwrap().virtual_rows.unwrap();
+        let state = *ui.win(win).unwrap().row_text_state();
         assert_eq!(state.cursor.row, 10);
         assert_eq!(
             state.drag_endpoint,
@@ -4755,7 +4749,7 @@ mod tests {
         {
             let w = ui.win_mut(win).unwrap();
             w.pin_scroll(0);
-            w.selection_anchor = Some(5);
+            w.text_state_mut().selection_anchor = Some(5);
         }
         ui.resolve_tail_scrolls();
         assert_eq!(
@@ -4765,7 +4759,7 @@ mod tests {
         );
 
         // Clearing the selection leaves the window pinned until tail is requested again.
-        ui.win_mut(win).unwrap().selection_anchor = None;
+        ui.win_mut(win).unwrap().text_state_mut().selection_anchor = None;
         ui.resolve_tail_scrolls();
         assert_eq!(
             ui.win(win).unwrap().scroll_top(),

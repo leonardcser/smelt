@@ -367,7 +367,7 @@ impl TuiApp {
             return (crate::smelt_edit::Status::Ignored, None);
         };
         let total_rows =
-            crate::smelt_edit::UiHost::virtual_total_rows(self, win).unwrap_or_else(|| {
+            crate::smelt_edit::UiHost::document_total_rows(self, win).unwrap_or_else(|| {
                 self.ui
                     .buf(buf_id)
                     .map(|buf| buf.line_count() as crate::smelt_edit::RowIndex)
@@ -437,7 +437,7 @@ impl TuiApp {
             return None;
         }
 
-        if self.transcript_win().is_virtual_rows() {
+        if self.transcript_win().has_materialized_rows() {
             let now = self.core.clock.instant_now();
             let range = {
                 let mouse_ctx = crate::smelt_edit::MouseCtx {
@@ -449,10 +449,10 @@ impl TuiApp {
                 let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
                 let (_, range) = win
                     .expect("transcript window")
-                    .handle_virtual_mouse(buf?, me, mouse_ctx, now);
+                    .handle_row_mouse(buf?, me, mouse_ctx, now);
                 range?
             };
-            let out = crate::smelt_edit::UiHost::copy_virtual_range(self, win_id, range)?;
+            let out = crate::smelt_edit::UiHost::copy_document_range(self, win_id, range)?;
             return if out.clipboard.is_empty() && out.kill_ring.is_empty() {
                 None
             } else {
@@ -911,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_transcript_drag_renders_cursor_and_selection_while_captured() {
+    fn row_document_transcript_drag_renders_cursor_and_selection_while_captured() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {
             app.push_block(smelt_core::Block::Text {
@@ -953,7 +953,7 @@ mod tests {
             .range_layer(crate::smelt_edit::RangeLayer::Selection);
         assert!(
             !selection.is_empty(),
-            "virtual drag selection should be projected while capture freezes transcript materialization"
+            "row-backed drag selection should be projected while capture freezes transcript materialization"
         );
     }
 
@@ -1053,7 +1053,7 @@ mod tests {
                 .ui
                 .win_mut(crate::app::TRANSCRIPT_WIN)
                 .expect("transcript window");
-            win.set_virtual_rows(20, 22);
+            win.set_materialized_rows(20, 2, 22);
             win.pin_scroll(20);
             win.scroll_left = 0;
             win.viewport = Some(viewport);

@@ -4,7 +4,7 @@ use crate::smelt_edit::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-// Search scans bounded display-row windows so large virtual documents do not
+// Search scans bounded display-row windows so large row-backed documents do not
 // need to concatenate or materialize the whole transcript at once.
 const SEARCH_SCAN_ROWS: RowIndex = 512;
 
@@ -202,7 +202,7 @@ impl TuiApp {
 
     fn search_origin(&self, win: WinId) -> Option<DocPosition> {
         let window = self.ui.win(win)?;
-        if let Some(pos) = window.virtual_cursor() {
+        if let Some(pos) = window.row_cursor() {
             return Some(pos);
         }
         let buf = self.ui.buf(window.buf)?;
@@ -222,11 +222,11 @@ impl TuiApp {
         };
         session.current = Some(index);
         let target = session.target;
-        let Some((buf_id, viewport_rows, is_virtual)) = self.ui.win(target).map(|w| {
+        let Some((buf_id, viewport_rows, is_row_backed)) = self.ui.win(target).map(|w| {
             (
                 w.buf,
                 w.viewport.map(|v| v.rect.height).unwrap_or(1).max(1),
-                w.is_virtual_rows(),
+                w.has_materialized_rows(),
             )
         }) else {
             return;
@@ -236,8 +236,8 @@ impl TuiApp {
         let (Some(win), Some(buf)) = (win, buf) else {
             return;
         };
-        if is_virtual {
-            win.execute_virtual_viewer_command(
+        if is_row_backed {
+            win.execute_row_viewer_command(
                 buf,
                 crate::smelt_edit::ViewerCommand::GotoPosition(range.start),
                 viewport_rows,

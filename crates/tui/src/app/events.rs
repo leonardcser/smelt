@@ -920,9 +920,13 @@ impl TuiApp {
     pub(crate) fn snap_transcript_cursor(&mut self) {
         let win_id = self.well_known.transcript;
         let buf_id = self.transcript_win().buf;
-        // Virtual rows manage their own cursor; snapping the local cpos would
-        // overwrite the virtual cursor via sync_from_cpos in resync.
-        if self.ui.win(win_id).is_some_and(|w| w.is_virtual_rows()) {
+        // Row-backed windows manage their own cursor; snapping the local cpos would
+        // overwrite the document cursor via sync_from_cpos in resync.
+        if self
+            .ui
+            .win(win_id)
+            .is_some_and(|w| w.has_materialized_rows())
+        {
             return;
         }
         let cpos = self.transcript_win().cpos();
@@ -1140,26 +1144,29 @@ impl TuiApp {
         }
 
         if vim_enabled {
-            let is_virtual = self.ui.win(win_id).is_some_and(|win| win.is_virtual_rows());
-            if is_virtual {
+            let has_materialized_rows = self
+                .ui
+                .win(win_id)
+                .is_some_and(|win| win.has_materialized_rows());
+            if has_materialized_rows {
                 let command = {
                     let win = self.ui.win_mut(win_id).expect("window");
-                    win.handle_virtual_viewer_key(k)
+                    win.handle_row_viewer_key(k)
                 };
                 if let Some(command) = command {
                     let command = self
-                        .resolve_virtual_viewer_command(win_id, command)
+                        .resolve_row_viewer_command(win_id, command)
                         .unwrap_or(command);
                     let now = self.core.clock.instant_now();
                     let copied = {
                         let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
                         let win = win.expect("window");
                         let buf = buf.expect("buffer");
-                        win.execute_virtual_viewer_command(buf, command, viewport_rows, now)
+                        win.execute_row_viewer_command(buf, command, viewport_rows, now)
                     };
                     if let Some(range) = copied {
                         if let Some(out) =
-                            crate::smelt_edit::UiHost::copy_virtual_range(self, win_id, range)
+                            crate::smelt_edit::UiHost::copy_document_range(self, win_id, range)
                         {
                             self.yank_to_clipboard(out);
                         }
@@ -1187,7 +1194,7 @@ impl TuiApp {
         self.dispatch_buffer_action(win_id, buf_id, k, viewport_rows)
     }
 
-    fn resolve_virtual_viewer_command(
+    fn resolve_row_viewer_command(
         &mut self,
         win_id: crate::smelt_edit::WinId,
         command: crate::smelt_edit::ViewerCommand,
@@ -1207,17 +1214,17 @@ impl TuiApp {
             ViewerCommand::WordEnd(count) => (WordKind::End, count.max(1)),
             _ => return Some(command),
         };
-        let total_rows = UiHost::virtual_total_rows(self, win_id)?;
+        let total_rows = UiHost::document_total_rows(self, win_id)?;
         if total_rows == 0 {
             return None;
         }
-        let mut pos = self.ui.win(win_id)?.virtual_cursor()?;
+        let mut pos = self.ui.win(win_id)?.row_cursor()?;
         pos.row = pos.row.min(total_rows.saturating_sub(1));
 
         for _ in 0..count {
             match kind {
                 WordKind::Forward => {
-                    let line = self.virtual_line(win_id, pos.row)?;
+                    let line = self.row_line(win_id, pos.row)?;
                     let col = text::word_forward_pos(&line, pos.byte_col, text::CharClass::Word);
                     if col < line.len() || pos.row + 1 >= total_rows {
                         pos.byte_col = col;
@@ -1227,17 +1234,17 @@ impl TuiApp {
                     }
                 }
                 WordKind::Backward => {
-                    let line = self.virtual_line(win_id, pos.row)?;
+                    let line = self.row_line(win_id, pos.row)?;
                     let col = text::word_backward_pos(&line, pos.byte_col, text::CharClass::Word);
                     if col > 0 || pos.row == 0 {
                         pos.byte_col = col;
                     } else {
                         pos.row = pos.row.saturating_sub(1);
-                        pos.byte_col = self.virtual_line(win_id, pos.row)?.len();
+                        pos.byte_col = self.row_line(win_id, pos.row)?.len();
                     }
                 }
                 WordKind::End => {
-                    let line = self.virtual_line(win_id, pos.row)?;
+                    let line = self.row_line(win_id, pos.row)?;
                     let col = text::word_end_pos(&line, pos.byte_col, text::CharClass::Word);
                     if col > pos.byte_col || pos.row + 1 >= total_rows {
                         pos.byte_col = col;
@@ -1255,7 +1262,7 @@ impl TuiApp {
         }))
     }
 
-    fn virtual_line(
+    fn row_line(
         &mut self,
         win_id: crate::smelt_edit::WinId,
         row: crate::smelt_edit::RowIndex,
@@ -1307,7 +1314,11 @@ impl TuiApp {
             return Status::Ignored;
         };
 
-        if self.ui.win(win_id).is_some_and(|win| win.is_virtual_rows()) {
+        if self
+            .ui
+            .win(win_id)
+            .is_some_and(|win| win.has_materialized_rows())
+        {
             let extending = matches!(
                 action,
                 KeyAction::SelectUp
@@ -1353,15 +1364,15 @@ impl TuiApp {
             };
             if let Some(command) = command {
                 let command = self
-                    .resolve_virtual_viewer_command(win_id, command)
+                    .resolve_row_viewer_command(win_id, command)
                     .unwrap_or(command);
                 let now = self.core.clock.instant_now();
                 let copied = {
                     let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
                     let win = win.expect("window");
                     let buf = buf.expect("buffer");
-                    if extending && !win.virtual_selection_anchor_active() {
-                        win.execute_virtual_viewer_command(
+                    if extending && !win.row_selection_anchor_active() {
+                        win.execute_row_viewer_command(
                             buf,
                             crate::smelt_edit::ViewerCommand::StartVisual,
                             viewport_rows,
@@ -1370,18 +1381,18 @@ impl TuiApp {
                     } else if !extending
                         && !matches!(command, crate::smelt_edit::ViewerCommand::YankSelection)
                     {
-                        win.execute_virtual_viewer_command(
+                        win.execute_row_viewer_command(
                             buf,
                             crate::smelt_edit::ViewerCommand::ClearSelection,
                             viewport_rows,
                             now,
                         );
                     }
-                    win.execute_virtual_viewer_command(buf, command, viewport_rows, now)
+                    win.execute_row_viewer_command(buf, command, viewport_rows, now)
                 };
                 if let Some(range) = copied {
                     if let Some(out) =
-                        crate::smelt_edit::UiHost::copy_virtual_range(self, win_id, range)
+                        crate::smelt_edit::UiHost::copy_document_range(self, win_id, range)
                     {
                         self.yank_to_clipboard(out);
                     }

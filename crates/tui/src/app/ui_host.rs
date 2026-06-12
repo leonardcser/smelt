@@ -59,18 +59,18 @@ impl crate::smelt_edit::UiHost for TuiApp {
         }
     }
 
-    fn virtual_total_rows(
+    fn document_total_rows(
         &mut self,
         win: crate::smelt_edit::WinId,
     ) -> Option<crate::smelt_edit::RowIndex> {
         if win == crate::app::TRANSCRIPT_WIN {
             Some(self.transcript_total_rows(self.core.config.settings.show_thinking))
         } else {
-            crate::smelt_edit::UiHost::virtual_total_rows(&mut self.ui, win)
+            crate::smelt_edit::UiHost::document_total_rows(&mut self.ui, win)
         }
     }
 
-    fn copy_virtual_range(
+    fn copy_document_range(
         &mut self,
         win: crate::smelt_edit::WinId,
         range: crate::smelt_edit::DocRange,
@@ -85,7 +85,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
                 range,
             ))
         } else {
-            crate::smelt_edit::UiHost::copy_virtual_range(&mut self.ui, win, range)
+            crate::smelt_edit::UiHost::copy_document_range(&mut self.ui, win, range)
         }
     }
 }

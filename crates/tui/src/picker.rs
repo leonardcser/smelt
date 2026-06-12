@@ -201,7 +201,7 @@ pub(crate) fn move_selected(app: &mut TuiApp, leaf: WinId, delta: isize) {
     sync_selected(app, leaf, selected);
 }
 
-/// Refresh virtualized picker buffers after viewport-led scrolling.
+/// Refresh materialized picker buffers after viewport-led scrolling.
 pub(crate) fn sync_scrolled(app: &mut TuiApp) {
     let leaves: Vec<WinId> = app.picker_state.keys().copied().collect();
     for leaf in leaves {

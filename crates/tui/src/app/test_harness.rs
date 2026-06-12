@@ -3049,7 +3049,7 @@ mod tests {
 
     #[test]
     fn transcript_search_opens_status_input_and_repeats_matches() {
-        let mut app = virtual_transcript_app(20, true);
+        let mut app = row_document_transcript_app(20, true);
         app.type_char('g');
         app.type_char('g');
 
@@ -3060,26 +3060,26 @@ mod tests {
 
         let matches = app.app.search.session.as_ref().unwrap().matches.clone();
         assert_eq!(
-            transcript_virtual_cursor_row(&app),
+            transcript_row_cursor_row(&app),
             matches[0].rows().unwrap().start.row
         );
         assert_eq!(matches.len(), 20);
 
         app.type_char('n');
         assert_eq!(
-            transcript_virtual_cursor_row(&app),
+            transcript_row_cursor_row(&app),
             matches[1].rows().unwrap().start.row
         );
         app.type_char('N');
         assert_eq!(
-            transcript_virtual_cursor_row(&app),
+            transcript_row_cursor_row(&app),
             matches[0].rows().unwrap().start.row
         );
     }
 
     #[test]
     fn transcript_search_paints_visible_matches_and_esc_clears() {
-        let mut app = virtual_transcript_app(20, true);
+        let mut app = row_document_transcript_app(20, true);
         app.type_char('g');
         app.type_char('g');
         app.type_char('/');
@@ -3107,10 +3107,10 @@ mod tests {
 
     #[test]
     fn backward_search_starts_from_previous_match() {
-        let mut app = virtual_transcript_app(20, true);
+        let mut app = row_document_transcript_app(20, true);
         app.type_char('5');
         app.type_char('G');
-        assert_eq!(transcript_virtual_cursor_row(&app), 4);
+        assert_eq!(transcript_row_cursor_row(&app), 4);
 
         app.press_mod(KeyCode::Char('?'), KeyModifiers::SHIFT);
         assert!(app.state().cmdline_open);
@@ -3119,18 +3119,18 @@ mod tests {
         let matches = app.app.search.session.as_ref().unwrap().matches.clone();
         let current = app.app.search.session.as_ref().unwrap().current.unwrap();
         assert_eq!(
-            transcript_virtual_cursor_row(&app),
+            transcript_row_cursor_row(&app),
             matches[current].rows().unwrap().start.row
         );
 
         app.type_char('n');
         assert_eq!(
-            transcript_virtual_cursor_row(&app),
+            transcript_row_cursor_row(&app),
             matches[current - 1].rows().unwrap().start.row
         );
         app.type_char('N');
         assert_eq!(
-            transcript_virtual_cursor_row(&app),
+            transcript_row_cursor_row(&app),
             matches[current].rows().unwrap().start.row
         );
     }
@@ -3651,7 +3651,7 @@ mod tests {
         )
     }
 
-    fn virtual_transcript_app(rows: usize, vim: bool) -> TestApp {
+    fn row_document_transcript_app(rows: usize, vim: bool) -> TestApp {
         let mut app = TestApp::builder().with_vim(vim).build();
         app.app.handle_resize(80, 16);
         for i in 0..rows {
@@ -3669,11 +3669,11 @@ mod tests {
         app
     }
 
-    fn transcript_virtual_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
+    fn transcript_row_cursor_row(app: &TestApp) -> crate::smelt_edit::RowIndex {
         app.app
             .transcript_win()
-            .virtual_cursor()
-            .expect("virtual transcript cursor")
+            .row_cursor()
+            .expect("row-document transcript cursor")
             .row
     }
 
@@ -3684,27 +3684,27 @@ mod tests {
     }
 
     #[test]
-    fn transcript_vim_gg_g_and_count_g_use_virtual_rows() {
-        let mut app = virtual_transcript_app(100, true);
+    fn transcript_vim_gg_g_and_count_g_use_row_document() {
+        let mut app = row_document_transcript_app(100, true);
         let total_rows = transcript_total_rows(&app);
-        assert!(total_rows > 40, "test transcript should be virtualized");
+        assert!(total_rows > 40, "test transcript should be row-backed");
 
         app.type_char('g');
         app.type_char('g');
-        assert_eq!(transcript_virtual_cursor_row(&app), 0);
+        assert_eq!(transcript_row_cursor_row(&app), 0);
 
         app.type_char('G');
-        assert_eq!(transcript_virtual_cursor_row(&app), total_rows - 1);
+        assert_eq!(transcript_row_cursor_row(&app), total_rows - 1);
 
         app.type_char('2');
         app.type_char('5');
         app.type_char('G');
-        assert_eq!(transcript_virtual_cursor_row(&app), 24);
+        assert_eq!(transcript_row_cursor_row(&app), 24);
     }
 
     #[test]
-    fn transcript_vim_visual_yank_copies_virtual_range() {
-        let mut app = virtual_transcript_app(100, true);
+    fn transcript_vim_visual_yank_copies_document_range() {
+        let mut app = row_document_transcript_app(100, true);
 
         app.type_char('g');
         app.type_char('g');
@@ -3718,28 +3718,20 @@ mod tests {
         assert!(yank.contains("row 000 alpha beta"), "yank was {yank:?}");
         assert!(yank.contains("row 029 alpha beta"), "yank was {yank:?}");
         let now = app.app.core.clock.instant_now();
-        assert!(app
-            .app
-            .transcript_win()
-            .virtual_selection_range(now)
-            .is_some());
+        assert!(app.app.transcript_win().row_selection_range(now).is_some());
         app.feed_one(SourceEvent::Tick(300));
         let now = app.app.core.clock.instant_now();
-        assert!(app
-            .app
-            .transcript_win()
-            .virtual_selection_range(now)
-            .is_none());
+        assert!(app.app.transcript_win().row_selection_range(now).is_none());
     }
 
     #[test]
     fn transcript_vim_visual_char_starts_at_cursor() {
-        let mut app = virtual_transcript_app(100, true);
+        let mut app = row_document_transcript_app(100, true);
 
         // Move to row 003 (1-indexed in vim, so 0-indexed row 2)
         app.type_char('3');
         app.type_char('G');
-        assert_eq!(transcript_virtual_cursor_row(&app), 2);
+        assert_eq!(transcript_row_cursor_row(&app), 2);
 
         // Enter visual mode
         app.type_char('v');
@@ -3798,12 +3790,12 @@ mod tests {
 
     #[test]
     fn wheel_scroll_in_visual_mode_preserves_cursor_screen_row() {
-        let mut app = virtual_transcript_app(100, true);
+        let mut app = row_document_transcript_app(100, true);
 
         // Move cursor to row 5.
         app.type_char('5');
         app.type_char('G');
-        let row_before = transcript_virtual_cursor_row(&app);
+        let row_before = transcript_row_cursor_row(&app);
         assert_eq!(row_before, 4);
 
         // Enter visual mode.
@@ -3818,7 +3810,7 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         })));
 
-        let row_after = transcript_virtual_cursor_row(&app);
+        let row_after = transcript_row_cursor_row(&app);
         // With the fix the cursor follows the viewport, so it should have
         // moved down by 3 rows (screen row preserved).
         assert_eq!(
@@ -3830,7 +3822,7 @@ mod tests {
 
     #[test]
     fn mouse_drag_clears_visual_line_mode() {
-        let mut app = virtual_transcript_app(100, true);
+        let mut app = row_document_transcript_app(100, true);
 
         // Enter visual-line mode.
         app.type_char('V');
@@ -3863,8 +3855,8 @@ mod tests {
     }
 
     #[test]
-    fn transcript_shift_selection_copy_copies_virtual_range() {
-        let mut app = virtual_transcript_app(80, false);
+    fn transcript_shift_selection_copy_copies_document_range() {
+        let mut app = row_document_transcript_app(80, false);
 
         app.press_mod(KeyCode::Up, KeyModifiers::SUPER);
         for _ in 0..30 {

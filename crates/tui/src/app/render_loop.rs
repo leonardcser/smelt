@@ -172,8 +172,8 @@ impl TuiApp {
                 }
                 let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
                 if let (Some(win), Some(buf)) = (win, buf) {
-                    if win.is_virtual_rows() {
-                        win.sync_virtual_render_state(buf, viewport_rows, render_now);
+                    if win.has_materialized_rows() {
+                        win.sync_row_render_state(buf, viewport_rows, render_now);
                         win.scroll_left = 0;
                     } else {
                         buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);

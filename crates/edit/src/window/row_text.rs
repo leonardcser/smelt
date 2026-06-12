@@ -29,46 +29,30 @@ pub enum ViewerCommand {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VirtualYankFlash {
+pub struct RowYankFlash {
     pub range: DocRange,
     pub until: Instant,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct VirtualRowsState {
+pub struct RowTextState {
+    pub active: bool,
     pub materialized: MaterializedRows,
-    /// Authoritative virtual cursor position. `byte_col` is a byte column in
-    /// the materialized/virtual row text, not a terminal cell column.
+    /// Authoritative row-document cursor position. `byte_col` is a byte column in
+    /// the materialized/document row text, not a terminal cell column.
     pub cursor: DocPosition,
-    /// Preferred display column for virtual vertical motion, measured in
+    /// Preferred display column for document-row vertical motion, measured in
     /// terminal cells so multibyte chrome/text does not drift.
     pub preferred_cell_col: Option<usize>,
     pub selection_anchor: Option<DocPosition>,
     pub drag_endpoint: Option<DocPosition>,
-    pub yank_flash: Option<VirtualYankFlash>,
+    pub yank_flash: Option<RowYankFlash>,
 }
 
 impl Window {
-    pub fn set_virtual_rows(&mut self, row_base: RowIndex, total_rows: RowIndex) {
-        debug_assert!(
-            total_rows >= row_base,
-            "virtual row total {total_rows} must cover row_base {row_base}"
-        );
-        let materialized = MaterializedRows {
-            clamped_scroll: self.scroll_top,
-            row_base,
-            total_rows,
-            materialized_rows: self
-                .virtual_rows
-                .map(|state| state.materialized.materialized_rows)
-                .unwrap_or(0),
-        };
-        self.set_virtual_materialized_rows(materialized);
-    }
-
-    /// Configure the backing buffer as a materialized slice of a larger virtual
-    /// row space. Clears virtual mode only when the slice covers the whole row
-    /// space; a top slice with more rows below must still keep `total_rows`.
+    /// Configure the backing buffer as a materialized slice of a larger row
+    /// document. Clears row-document mode only when the slice covers the whole
+    /// row space; a top slice with more rows below must still keep `total_rows`.
     pub fn set_materialized_rows(
         &mut self,
         row_base: RowIndex,
@@ -85,69 +69,74 @@ impl Window {
 
     pub fn apply_materialized_rows(&mut self, rows: MaterializedRows) {
         if rows.row_base == 0 && rows.materialized_rows >= rows.total_rows {
-            self.clear_virtual_rows();
+            self.clear_materialized_rows();
         } else {
-            self.set_virtual_materialized_rows(rows);
+            self.set_row_materialization(rows);
         }
     }
 
-    fn set_virtual_materialized_rows(&mut self, rows: MaterializedRows) {
-        let cursor = self
-            .virtual_rows
-            .map(|state| state.cursor)
-            .unwrap_or_else(|| DocPosition {
-                row: rows.absolute_row(self.cursor_row),
-                byte_col: self.cursor_col as usize,
-            });
-        let mut state = self.virtual_rows.unwrap_or_default();
+    fn set_row_materialization(&mut self, rows: MaterializedRows) {
+        let cursor = if self.row_text_state().active {
+            self.row_text_state().cursor
+        } else {
+            DocPosition {
+                row: rows.absolute_row(self.cursor_row()),
+                byte_col: self.cursor_col() as usize,
+            }
+        };
+        let state = self.row_text_state_mut();
+        state.active = true;
         state.materialized = rows;
         state.cursor = DocPosition {
             row: cursor.row.min(rows.total_rows.saturating_sub(1)),
             byte_col: cursor.byte_col,
         };
-        self.virtual_rows = Some(state);
     }
 
-    pub fn clear_virtual_rows(&mut self) {
-        self.virtual_rows = None;
+    pub fn clear_materialized_rows(&mut self) {
+        *self.row_text_state_mut() = RowTextState::default();
     }
 
     pub fn scroll_row_total(&self, buf: &Buffer) -> RowIndex {
-        self.virtual_rows
-            .map(|state| state.materialized.total_rows)
-            .unwrap_or_else(|| self.visual_row_total(buf))
+        let state = self.row_text_state();
+        if state.active {
+            state.materialized.total_rows
+        } else {
+            self.visual_row_total(buf)
+        }
     }
 
-    pub fn is_virtual_rows(&self) -> bool {
-        self.virtual_rows.is_some()
+    pub fn has_materialized_rows(&self) -> bool {
+        self.row_text_state().active
     }
 
-    pub fn virtual_cursor(&self) -> Option<DocPosition> {
-        self.virtual_rows.map(|state| state.cursor)
+    pub fn row_cursor(&self) -> Option<DocPosition> {
+        self.row_text_state()
+            .active
+            .then_some(self.row_text_state().cursor)
     }
 
     pub fn drag_active(&self) -> bool {
-        self.drag_endpoint.is_some()
-            || self
-                .virtual_rows
-                .is_some_and(|state| state.drag_endpoint.is_some())
+        self.text_state().drag_endpoint.is_some()
+            || (self.row_text_state().active && self.row_text_state().drag_endpoint.is_some())
     }
 
-    pub fn virtual_selection_anchor_active(&self) -> bool {
-        self.virtual_rows
-            .map(|state| state.selection_anchor.is_some())
-            .unwrap_or(false)
+    pub fn row_selection_anchor_active(&self) -> bool {
+        self.row_text_state().active && self.row_text_state().selection_anchor.is_some()
     }
 
-    pub fn virtual_selection_range(&self, now: Instant) -> Option<DocRange> {
-        self.virtual_yank_flash_range(now)
-            .or_else(|| self.virtual_selection_anchor_range())
+    pub fn row_selection_range(&self, now: Instant) -> Option<DocRange> {
+        self.row_yank_flash_range(now)
+            .or_else(|| self.row_selection_anchor_range())
     }
 
-    pub fn virtual_selection_anchor_range(&self) -> Option<DocRange> {
-        let state = self.virtual_rows?;
+    pub fn row_selection_anchor_range(&self) -> Option<DocRange> {
+        if !self.row_text_state().active {
+            return None;
+        }
+        let state = *self.row_text_state();
         state.selection_anchor.map(|anchor| {
-            if matches!(self.vim_mode, VimMode::VisualLine) {
+            if matches!(self.vim_mode(), VimMode::VisualLine) {
                 let start = anchor.row.min(state.cursor.row);
                 let end = anchor.row.max(state.cursor.row).saturating_add(1);
                 DocRange {
@@ -166,21 +155,23 @@ impl Window {
         })
     }
 
-    pub fn virtual_yank_flash_range(&self, now: Instant) -> Option<DocRange> {
-        let state = self.virtual_rows?;
-        state
+    pub fn row_yank_flash_range(&self, now: Instant) -> Option<DocRange> {
+        if !self.row_text_state().active {
+            return None;
+        }
+        self.row_text_state()
             .yank_flash
             .filter(|flash| now < flash.until)
             .map(|flash| flash.range)
     }
 
-    pub fn virtual_selection_ranges(
+    pub fn row_selection_ranges(
         &self,
         buf: &Buffer,
         viewport_rows: u16,
         now: Instant,
     ) -> Vec<smelt_buffer::buffer::SelectionRange> {
-        let Some(range) = self.virtual_selection_range(now) else {
+        let Some(range) = self.row_selection_range(now) else {
             return Vec::new();
         };
         self.doc_range_to_row_ranges(buf, viewport_rows, range)
@@ -210,10 +201,12 @@ impl Window {
         {
             return Vec::new();
         }
-        let total_rows = self
-            .virtual_rows
-            .map(|state| state.materialized.total_rows)
-            .unwrap_or_else(|| self.visual_row_total(buf));
+        let state = self.row_text_state();
+        let total_rows = if state.active {
+            state.materialized.total_rows
+        } else {
+            self.visual_row_total(buf)
+        };
         if total_rows == 0 {
             return Vec::new();
         }
@@ -253,7 +246,7 @@ impl Window {
                 line_width
             };
             // A row that's part of the selection but has no selectable text gets a
-            // one-cell virtual span placed after any leading non-selectable chrome
+            // one-cell fallback span placed after any leading non-selectable chrome
             // (gutter, padding) so the highlight doesn't paint over chrome cells.
             // This mirrors the rule in `smelt_buffer::coords::byte_range_to_row_ranges`.
             if line_width > 0
@@ -281,52 +274,49 @@ impl Window {
         out
     }
 
-    pub fn sync_virtual_render_state(
-        &mut self,
-        buf: &mut Buffer,
-        viewport_rows: u16,
-        now: Instant,
-    ) {
-        self.sync_virtual_cursor_to_local(buf, viewport_rows);
+    pub fn sync_row_render_state(&mut self, buf: &mut Buffer, viewport_rows: u16, now: Instant) {
+        self.sync_row_cursor_to_local(buf, viewport_rows);
         let text = buf.text();
         self.clamp_anchors_to_source(&text);
-        self.clear_expired_virtual_yank_flash(now);
-        let anchor_range = self.virtual_selection_anchor_range();
+        self.clear_expired_row_yank_flash(now);
+        let anchor_range = self.row_selection_anchor_range();
         let selection_ranges = anchor_range
             .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
             .unwrap_or_default();
         buf.set_range_layer(crate::RangeLayer::Selection, selection_ranges);
         let flash_ranges = self
-            .virtual_yank_flash_range(now)
+            .row_yank_flash_range(now)
             .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
             .unwrap_or_default();
         buf.set_range_layer(crate::RangeLayer::YankFlash, flash_ranges);
     }
 
-    pub fn virtual_yank_flash_until(&self) -> Option<Instant> {
-        self.virtual_rows
-            .and_then(|state| state.yank_flash.map(|flash| flash.until))
+    pub fn row_yank_flash_until(&self) -> Option<Instant> {
+        self.row_text_state().active.then_some(())?;
+        self.row_text_state().yank_flash.map(|flash| flash.until)
     }
 
-    pub fn clear_expired_virtual_yank_flash(&mut self, now: Instant) {
-        let Some(mut state) = self.virtual_rows else {
-            return;
-        };
-        if state.yank_flash.is_some_and(|flash| now >= flash.until) {
-            state.yank_flash = None;
-            self.virtual_rows = Some(state);
+    pub fn clear_expired_row_yank_flash(&mut self, now: Instant) {
+        if self.row_text_state().active
+            && self
+                .row_text_state()
+                .yank_flash
+                .is_some_and(|flash| now >= flash.until)
+        {
+            self.row_text_state_mut().yank_flash = None;
         }
     }
 
-    pub fn sync_virtual_cursor_to_local(&mut self, buf: &Buffer, viewport_rows: u16) {
-        let Some(state) = self.virtual_rows else {
+    pub fn sync_row_cursor_to_local(&mut self, buf: &Buffer, viewport_rows: u16) {
+        if !self.row_text_state().active {
             return;
-        };
+        }
+        let state = *self.row_text_state();
         if buf.lines().is_empty() {
             self.reset_cursor();
             return;
         }
-        let local_cursor_synced = self.project_virtual_cursor_to_local(state, buf);
+        let local_cursor_synced = self.project_row_cursor_to_local(state, buf);
         if viewport_rows > 0 {
             let viewport_cols = if local_cursor_synced {
                 self.viewport.map(|v| v.content_width).unwrap_or(0)
@@ -342,29 +332,30 @@ impl Window {
         }
     }
 
-    pub fn handle_virtual_viewer_key(&mut self, key: KeyEvent) -> Option<ViewerCommand> {
+    pub fn handle_row_viewer_key(&mut self, key: KeyEvent) -> Option<ViewerCommand> {
         let text = self.text_state_mut();
-        vim::handle_virtual_viewer_key(key, &mut text.vim_mode, &mut text.vim_state)
+        vim::handle_row_viewer_key(key, &mut text.vim_mode, &mut text.vim_state)
     }
 
-    pub fn handle_virtual_mouse(
+    pub fn handle_row_mouse(
         &mut self,
         buf: &Buffer,
         event: MouseEvent,
         ctx: MouseCtx,
         now: Instant,
     ) -> (Status, Option<DocRange>) {
-        let Some(mut state) = self.virtual_rows else {
+        if !self.row_text_state().active {
             return (Status::Ignored, None);
-        };
+        }
+        let mut state = *self.row_text_state();
         if ctx.viewport.rect.height == 0
             || state.materialized.total_rows == 0
             || buf.lines().is_empty()
         {
             return (Status::Consumed, None);
         }
-        let pos = self.virtual_doc_pos_at_mouse(buf, event, ctx.viewport);
-        if let Some(cell) = self.virtual_position_cell(state, buf, pos) {
+        let pos = self.row_doc_pos_at_mouse(buf, event, ctx.viewport);
+        if let Some(cell) = self.row_position_cell(state, buf, pos) {
             state.preferred_cell_col = Some(cell);
         }
         match event.kind {
@@ -413,14 +404,14 @@ impl Window {
                     }
                     _ => {}
                 }
-                if let Some(cell) = self.virtual_position_cell(state, buf, state.cursor) {
+                if let Some(cell) = self.row_position_cell(state, buf, state.cursor) {
                     state.preferred_cell_col = Some(cell);
                 }
-                self.virtual_rows = Some(state);
+                *self.row_text_state_mut() = state;
                 // A new mouse gesture starts fresh: exit any existing visual
                 // mode so the old anchor doesn't pollute the new selection.
-                if self.vim_enabled
-                    && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
+                if self.vim_enabled()
+                    && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine)
                 {
                     self.set_vim_mode(VimMode::Normal);
                 }
@@ -433,7 +424,7 @@ impl Window {
                 state.cursor = pos;
                 state.drag_endpoint = Some(pos);
                 state.yank_flash = None;
-                self.virtual_rows = Some(state);
+                *self.row_text_state_mut() = state;
                 (Status::Consumed, None)
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -451,15 +442,15 @@ impl Window {
                 state.cursor = pos;
                 state.drag_endpoint = None;
                 state.selection_anchor = None;
-                state.yank_flash = copy.map(|range| VirtualYankFlash {
+                state.yank_flash = copy.map(|range| RowYankFlash {
                     range,
                     until: now + YANK_FLASH_DURATION,
                 });
-                self.virtual_rows = Some(state);
+                *self.row_text_state_mut() = state;
                 // Mouse-up concludes the gesture: exit visual mode so the
                 // selection is not left dangling.
-                if self.vim_enabled
-                    && matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
+                if self.vim_enabled()
+                    && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine)
                 {
                     self.set_vim_mode(VimMode::Normal);
                 }
@@ -469,15 +460,16 @@ impl Window {
         }
     }
 
-    fn virtual_doc_pos_at_mouse(
+    fn row_doc_pos_at_mouse(
         &mut self,
         buf: &Buffer,
         event: MouseEvent,
         viewport: WindowViewport,
     ) -> DocPosition {
-        let Some(state) = self.virtual_rows else {
+        if !self.row_text_state().active {
             return DocPosition::default();
-        };
+        }
+        let state = *self.row_text_state();
         let height = viewport.rect.height.max(1);
         // Use the authoritative scroll_top on self, not the stale viewport copy
         // (viewport is set during render prep; autoscroll may have changed
@@ -509,14 +501,17 @@ impl Window {
         DocPosition { row, byte_col }
     }
 
-    pub fn execute_virtual_viewer_command(
+    pub fn execute_row_viewer_command(
         &mut self,
         buf: &Buffer,
         command: ViewerCommand,
         viewport_rows: u16,
         now: Instant,
     ) -> Option<DocRange> {
-        let mut state = self.virtual_rows?;
+        if !self.row_text_state().active {
+            return None;
+        }
+        let mut state = *self.row_text_state();
         let total_rows = state.materialized.total_rows;
         if total_rows == 0 || viewport_rows == 0 {
             return None;
@@ -527,17 +522,17 @@ impl Window {
         match command {
             ViewerCommand::MoveRows(delta) => {
                 let row = add_signed_row(current.row, delta).min(total_rows.saturating_sub(1));
-                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::PageRows(delta) => {
                 let rows = (viewport_rows as isize).saturating_mul(delta);
                 let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
-                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::HalfPageRows(delta) => {
                 let rows = (viewport_rows as isize / 2).max(1).saturating_mul(delta);
                 let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
-                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::ScrollRows(delta) => {
                 let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
@@ -554,7 +549,7 @@ impl Window {
                 let row = new_scroll
                     .saturating_add(screen_row)
                     .min(total_rows.saturating_sub(1));
-                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::BufferStart => {
                 next.row = 0;
@@ -565,7 +560,7 @@ impl Window {
                 next.row = total_rows.saturating_sub(1);
             }
             ViewerCommand::GotoRow(row) => {
-                self.move_virtual_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
             ViewerCommand::GotoPosition(pos) => {
                 next.row = pos.row.min(total_rows.saturating_sub(1));
@@ -596,7 +591,7 @@ impl Window {
             ViewerCommand::YankSelection => {
                 if let Some(anchor) = state.selection_anchor {
                     copy = Some(order_doc_range(anchor, current));
-                    state.yank_flash = copy.map(|range| VirtualYankFlash {
+                    state.yank_flash = copy.map(|range| RowYankFlash {
                         range,
                         until: now + YANK_FLASH_DURATION,
                     });
@@ -621,7 +616,7 @@ impl Window {
                             byte_col: 0,
                         },
                     });
-                    state.yank_flash = copy.map(|range| VirtualYankFlash {
+                    state.yank_flash = copy.map(|range| RowYankFlash {
                         range,
                         until: now + YANK_FLASH_DURATION,
                     });
@@ -640,7 +635,7 @@ impl Window {
                         byte_col: 0,
                     },
                 });
-                state.yank_flash = copy.map(|range| VirtualYankFlash {
+                state.yank_flash = copy.map(|range| RowYankFlash {
                     range,
                     until: now + YANK_FLASH_DURATION,
                 });
@@ -671,7 +666,7 @@ impl Window {
                     // line, not move past it. Visual/VisualLine allow the
                     // cursor to sit past the last char so the selection is
                     // inclusive.
-                    if !matches!(self.vim_mode, VimMode::Visual | VimMode::VisualLine)
+                    if !matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine)
                         && delta > 0
                         && next.byte_col > 0
                         && next.byte_col >= line.len()
@@ -682,7 +677,7 @@ impl Window {
                     // vertical motion preserves the intended column, but only
                     // when the cursor actually moved (vim curswant semantics).
                     if next.byte_col != old {
-                        if let Some(cell) = self.virtual_position_cell(state, buf, next) {
+                        if let Some(cell) = self.row_position_cell(state, buf, next) {
                             state.preferred_cell_col = Some(cell);
                         }
                     }
@@ -753,12 +748,12 @@ impl Window {
                 | ViewerCommand::WordBackward(_)
                 | ViewerCommand::WordEnd(_)
         ) {
-            if let Some(cell) = self.virtual_position_cell(state, buf, next) {
+            if let Some(cell) = self.row_position_cell(state, buf, next) {
                 state.preferred_cell_col = Some(cell);
             }
         }
         state.cursor = next;
-        self.virtual_rows = Some(state);
+        *self.row_text_state_mut() = state;
         if !matches!(
             command,
             ViewerCommand::ScrollRows(_)

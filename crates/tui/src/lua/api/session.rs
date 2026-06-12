@@ -534,7 +534,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "render_preview_into",
-        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching virtual scroll state when provided; `opts.show_thinking` defaults to the current UI setting. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.",
+        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided; `opts.show_thinking` defaults to the current UI setting. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.",
         &["id", "opts"],
         |lua, (id, opts): (String, mlua::Table)| -> LuaResult<Option<mlua::Table>> {
             let buf: super::buf::LuaBuf = opts.get("buf")?;

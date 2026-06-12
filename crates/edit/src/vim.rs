@@ -350,7 +350,7 @@ pub fn visual_anchor(state: &VimWindowState, buf: &str, mode: VimMode) -> Option
     }
 }
 
-pub fn handle_virtual_viewer_key(
+pub fn handle_row_viewer_key(
     key: KeyEvent,
     mode: &mut VimMode,
     state: &mut VimWindowState,

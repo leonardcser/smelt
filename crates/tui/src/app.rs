@@ -1578,10 +1578,10 @@ impl TuiApp {
                 .kill_ring
                 .yank_flash_until()
                 .is_some_and(|t| t > now);
-            let virtual_yank_flash_active = self
+            let row_yank_flash_active = self
                 .ui
                 .win(TRANSCRIPT_WIN)
-                .and_then(|w| w.virtual_yank_flash_until())
+                .and_then(|w| w.row_yank_flash_until())
                 .is_some_and(|t| t > now);
             let drag_active = self.ui.drag_capture_window().is_some();
             let has_animation = self.ui.focused_overlay().is_some()
@@ -1589,7 +1589,7 @@ impl TuiApp {
                 || self.working.is_animating()
                 || self.busy_stack.is_busy()
                 || yank_flash_active
-                || virtual_yank_flash_active
+                || row_yank_flash_active
                 || drag_active;
             let next_timer_delay = self
                 .core
