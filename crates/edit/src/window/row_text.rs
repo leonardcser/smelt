@@ -47,6 +47,10 @@ pub struct RowTextState {
     pub selection_anchor: Option<DocPosition>,
     pub drag_endpoint: Option<DocPosition>,
     pub yank_flash: Option<RowYankFlash>,
+    /// Whether the active character-wise selection should include the cursor
+    /// cell under the block (true for mouse drags and Visual mode, false for
+    /// VisualLine and bare single clicks that never became a drag).
+    pub selection_includes_cursor_cell: bool,
 }
 
 impl Window {
@@ -125,12 +129,12 @@ impl Window {
         self.row_text_state().active && self.row_text_state().selection_anchor.is_some()
     }
 
-    pub fn row_selection_range(&self, now: Instant) -> Option<DocRange> {
+    pub fn row_selection_range(&self, buf: &Buffer, now: Instant) -> Option<DocRange> {
         self.row_yank_flash_range(now)
-            .or_else(|| self.row_selection_anchor_range())
+            .or_else(|| self.row_selection_anchor_range(buf))
     }
 
-    pub fn row_selection_anchor_range(&self) -> Option<DocRange> {
+    pub fn row_selection_anchor_range(&self, buf: &Buffer) -> Option<DocRange> {
         if !self.row_text_state().active {
             return None;
         }
@@ -150,7 +154,13 @@ impl Window {
                     },
                 }
             } else {
-                order_doc_range(anchor, state.cursor)
+                order_doc_range_including_cursor_cell(
+                    buf,
+                    state.materialized,
+                    anchor,
+                    state.cursor,
+                    state.selection_includes_cursor_cell,
+                )
             }
         })
     }
@@ -171,7 +181,7 @@ impl Window {
         viewport_rows: u16,
         now: Instant,
     ) -> Vec<smelt_buffer::buffer::SelectionRange> {
-        let Some(range) = self.row_selection_range(now) else {
+        let Some(range) = self.row_selection_range(buf, now) else {
             return Vec::new();
         };
         self.doc_range_to_row_ranges(buf, viewport_rows, range)
@@ -279,7 +289,7 @@ impl Window {
         let text = buf.text();
         self.clamp_anchors_to_source(&text);
         self.clear_expired_row_yank_flash(now);
-        let anchor_range = self.row_selection_anchor_range();
+        let anchor_range = self.row_selection_anchor_range(buf);
         let selection_ranges = anchor_range
             .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
             .unwrap_or_default();
@@ -364,6 +374,7 @@ impl Window {
                 state.drag_endpoint = Some(pos);
                 state.selection_anchor = None;
                 state.yank_flash = None;
+                state.selection_includes_cursor_cell = false;
                 match ctx.click_count {
                     2 => {
                         let local = state
@@ -420,6 +431,7 @@ impl Window {
             MouseEventKind::Drag(MouseButton::Left) => {
                 if state.selection_anchor.is_none() {
                     state.selection_anchor = state.drag_endpoint.or(Some(state.cursor));
+                    state.selection_includes_cursor_cell = true;
                 }
                 state.cursor = pos;
                 state.drag_endpoint = Some(pos);
@@ -434,7 +446,15 @@ impl Window {
                 // the release coordinates, which may truncate the selection.
                 let copy = state
                     .selection_anchor
-                    .map(|anchor| order_doc_range(anchor, state.cursor))
+                    .map(|anchor| {
+                        order_doc_range_including_cursor_cell(
+                            buf,
+                            state.materialized,
+                            anchor,
+                            state.cursor,
+                            state.selection_includes_cursor_cell,
+                        )
+                    })
                     .filter(|range| {
                         (range.start.row, range.start.byte_col)
                             < (range.end.row, range.end.byte_col)
@@ -442,6 +462,7 @@ impl Window {
                 state.cursor = pos;
                 state.drag_endpoint = None;
                 state.selection_anchor = None;
+                state.selection_includes_cursor_cell = false;
                 state.yank_flash = copy.map(|range| RowYankFlash {
                     range,
                     until: now + YANK_FLASH_DURATION,
@@ -575,22 +596,37 @@ impl Window {
                 let local = state.materialized.local_row(current.row);
                 next.byte_col = buf
                     .get_line(row_to_usize(local))
-                    .map(|line| line.len())
+                    .map(|line| {
+                        if matches!(self.vim_mode(), VimMode::Normal) && !line.is_empty() {
+                            text::prev_char_boundary(line, line.len())
+                        } else {
+                            line.len()
+                        }
+                    })
                     .unwrap_or(0);
                 state.preferred_cell_col = None;
             }
             ViewerCommand::StartVisual => {
                 state.selection_anchor = Some(current);
+                state.selection_includes_cursor_cell = true;
             }
             ViewerCommand::StartVisualLine => {
                 state.selection_anchor = Some(DocPosition {
                     row: current.row,
                     byte_col: 0,
                 });
+                state.selection_includes_cursor_cell = false;
             }
             ViewerCommand::YankSelection => {
                 if let Some(anchor) = state.selection_anchor {
-                    copy = Some(order_doc_range(anchor, current));
+                    let range = order_doc_range_including_cursor_cell(
+                        buf,
+                        state.materialized,
+                        anchor,
+                        current,
+                        state.selection_includes_cursor_cell,
+                    );
+                    copy = Some(range);
                     state.yank_flash = copy.map(|range| RowYankFlash {
                         range,
                         until: now + YANK_FLASH_DURATION,
@@ -767,10 +803,43 @@ impl Window {
     }
 }
 
-fn order_doc_range(a: DocPosition, b: DocPosition) -> DocRange {
+fn order_doc_range_including_cursor_cell(
+    buf: &Buffer,
+    materialized: MaterializedRows,
+    a: DocPosition,
+    b: DocPosition,
+    include_cursor_cell: bool,
+) -> DocRange {
     if (a.row, a.byte_col) <= (b.row, b.byte_col) {
-        DocRange { start: a, end: b }
+        DocRange {
+            start: a,
+            end: advance_doc_position_if_on_char(buf, materialized, b, include_cursor_cell),
+        }
     } else {
-        DocRange { start: b, end: a }
+        DocRange {
+            start: b,
+            end: advance_doc_position_if_on_char(buf, materialized, a, include_cursor_cell),
+        }
     }
+}
+
+fn advance_doc_position_if_on_char(
+    buf: &Buffer,
+    materialized: MaterializedRows,
+    mut pos: DocPosition,
+    advance: bool,
+) -> DocPosition {
+    if !advance {
+        return pos;
+    }
+    let local = materialized
+        .local_row(pos.row)
+        .min(buf.lines().len().saturating_sub(1) as RowIndex);
+    let Some(line) = buf.get_line(row_to_usize(local)) else {
+        return pos;
+    };
+    if pos.byte_col < line.len() && line.as_bytes()[pos.byte_col] != b'\n' {
+        pos.byte_col = text::next_char_boundary(line, pos.byte_col);
+    }
+    pos
 }

@@ -3772,10 +3772,14 @@ mod tests {
         assert!(yank.contains("row 000 alpha beta"), "yank was {yank:?}");
         assert!(yank.contains("row 029 alpha beta"), "yank was {yank:?}");
         let now = app.app.core.clock.instant_now();
-        assert!(app.app.transcript_win().row_selection_range(now).is_some());
+        let win = app.app.transcript_win();
+        let buf = app.app.ui.buf(win.buf).unwrap();
+        assert!(win.row_selection_range(buf, now).is_some());
         app.feed_one(SourceEvent::Tick(300));
         let now = app.app.core.clock.instant_now();
-        assert!(app.app.transcript_win().row_selection_range(now).is_none());
+        let win = app.app.transcript_win();
+        let buf = app.app.ui.buf(win.buf).unwrap();
+        assert!(win.row_selection_range(buf, now).is_none());
     }
 
     #[test]
@@ -3798,11 +3802,11 @@ mod tests {
         let highlights = app
             .app
             .transcript_selection_highlights(scroll_top, row_base, 16);
-        // In visual mode with no movement, the anchor equals the cursor, so
-        // there should be no selection painted.
+        // Visual mode includes the character under the cursor, matching nvim.
+        let rows: Vec<usize> = highlights.iter().map(|(line, _, _)| *line).collect();
         assert!(
-            highlights.is_empty(),
-            "empty visual selection should paint nothing, got {highlights:?}"
+            rows.contains(&2),
+            "visual selection should include cursor row 2, got {highlights:?}"
         );
 
         // Move down one row

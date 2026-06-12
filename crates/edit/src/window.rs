@@ -314,6 +314,9 @@ pub struct WindowTextState {
     /// Cpos of a single-click press awaiting drag; promoted to a selection on the
     /// first `Drag` event. A bare press-release with no motion leaves no selection.
     pub(crate) pending_press: Option<usize>,
+    pub(crate) pending_press_includes_cell: bool,
+    pub(crate) selection_anchor_includes_cell: bool,
+    pub(crate) drag_endpoint_includes_cell: bool,
     /// Moving end of an active mouse drag-select, in editable-byte space. `None`
     /// outside a drag. The renderer paints the cursor/CursorLine at this byte's
     /// projected row when set, and the selection range is `(selection_anchor,
@@ -1236,6 +1239,7 @@ impl Window {
         text.vim_enabled = enabled;
         if !enabled {
             text.selection_anchor = None;
+            text.selection_anchor_includes_cell = false;
         }
     }
 
@@ -1255,6 +1259,7 @@ impl Window {
     pub fn begin_visual(&mut self, mode: VimMode, cpos: usize) {
         let text = self.surface.text_mut();
         text.selection_anchor = None;
+        text.selection_anchor_includes_cell = false;
         text.vim_state.begin_visual(&mut text.vim_mode, mode, cpos);
     }
 
@@ -1321,9 +1326,12 @@ impl Window {
     pub fn clear_mouse_state(&mut self) {
         let text = self.text_state_mut();
         text.drag_endpoint = None;
+        text.drag_endpoint_includes_cell = false;
         text.drag_anchor_word = None;
         text.drag_anchor_line = None;
         text.pending_press = None;
+        text.pending_press_includes_cell = false;
+        text.selection_anchor_includes_cell = false;
         if text.row_text.active {
             text.row_text.drag_endpoint = None;
         }
@@ -1345,6 +1353,7 @@ impl Window {
             let text = self.text_state_mut();
             text.cpos = cpos;
             text.selection_anchor = None;
+            text.selection_anchor_includes_cell = false;
         }
         self.clear_mouse_state();
     }
@@ -1378,6 +1387,7 @@ impl Window {
         let text = self.text_state_mut();
         if text.selection_anchor.is_none() {
             text.selection_anchor = Some(cpos);
+            text.selection_anchor_includes_cell = false;
         }
     }
 
@@ -1425,6 +1435,29 @@ impl Window {
         (lo != hi).then_some((lo, hi))
     }
 
+    fn mouse_selection_range_at(
+        &self,
+        cpos: usize,
+        src: &str,
+        buf: &Buffer,
+        cursor_includes_cell: bool,
+    ) -> Option<(usize, usize)> {
+        let anchor_includes_cell = self.text_state().selection_anchor_includes_cell;
+        let a = text::snap(src, self.selection_anchor()?);
+        let c = text::snap(src, cpos);
+        let (lo, hi, include_hi) = if a <= c {
+            (a, c, cursor_includes_cell)
+        } else {
+            (c, a, anchor_includes_cell)
+        };
+        let end = if include_hi {
+            include_cursor_cell(buf, src, hi)
+        } else {
+            hi
+        };
+        (lo < end).then_some((lo, end))
+    }
+
     pub fn selection_range(&self, buf: &Buffer) -> Option<(usize, usize)> {
         let endpoint = self
             .text_state()
@@ -1438,7 +1471,16 @@ impl Window {
                 return Some(range);
             }
         }
-        self.selection_range_at(endpoint, &text)
+        if self.is_plain_mouse_drag() {
+            self.mouse_selection_range_at(
+                endpoint,
+                &text,
+                buf,
+                self.text_state().drag_endpoint_includes_cell,
+            )
+        } else {
+            self.selection_range_at(endpoint, &text)
+        }
     }
 
     /// Derive selection ranges from this window's own anchors; used when the buffer
@@ -1464,6 +1506,13 @@ impl Window {
         let endpoint = self.effective_endpoint();
         let range = if in_vim_visual {
             vim::visual_range(self.vim_state(), &buf_text, endpoint, vim_mode)
+        } else if self.is_plain_mouse_drag() {
+            self.mouse_selection_range_at(
+                endpoint,
+                &buf_text,
+                buf,
+                self.text_state().drag_endpoint_includes_cell,
+            )
         } else {
             self.selection_range_at(endpoint, &buf_text)
         };
@@ -1610,10 +1659,12 @@ impl Window {
             end
         };
         self.text_state_mut().drag_endpoint = Some(endpoint);
+        self.text_state_mut().drag_endpoint_includes_cell = false;
         if self.vim_enabled() {
             self.begin_visual(VimMode::Visual, start);
         } else {
             self.text_state_mut().selection_anchor = Some(start);
+            self.text_state_mut().selection_anchor_includes_cell = false;
         }
     }
 
@@ -1852,7 +1903,7 @@ impl Window {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 let text = Self::coordinate_text(buf);
-                let range = self.mouse_yank_range(&ctx, text.as_ref());
+                let range = self.mouse_yank_range(&ctx, buf, text.as_ref());
                 let status = self.mouse_up(buf, ctx.viewport.rect.height);
                 (status, range)
             }
@@ -1884,11 +1935,10 @@ impl Window {
                 Status::Consumed
             };
         }
-        if self.surface.is_selectable_text()
-            && !self
-                .text_hit_at_mouse(buf, event, ctx.viewport)
-                .is_selectable()
-        {
+        let hit_includes_cell = self
+            .text_hit_at_mouse(buf, event, ctx.viewport)
+            .is_selectable();
+        if self.surface.is_selectable_text() && !hit_includes_cell {
             return Status::Ignored;
         }
 
@@ -1899,6 +1949,7 @@ impl Window {
         // `effective_endpoint` so the cursor and selection track the drag without
         // perturbing the persistent `cpos` mid-gesture.
         self.text_state_mut().drag_endpoint = Some(click_byte);
+        self.text_state_mut().drag_endpoint_includes_cell = hit_includes_cell;
 
         match ctx.click_count {
             2 => {
@@ -1934,12 +1985,14 @@ impl Window {
                 self.text_state_mut().drag_anchor_word = None;
                 self.text_state_mut().drag_anchor_line = None;
                 self.text_state_mut().selection_anchor = None;
+                self.text_state_mut().selection_anchor_includes_cell = false;
                 if self.vim_enabled()
                     && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine)
                 {
                     self.set_vim_mode(VimMode::Normal);
                 }
                 self.text_state_mut().pending_press = Some(click_byte);
+                self.text_state_mut().pending_press_includes_cell = hit_includes_cell;
                 Status::Capture
             }
         }
@@ -1973,7 +2026,11 @@ impl Window {
             .saturating_sub(self.config.gutters.pad_left)
             .min(ctx.viewport.content_width.saturating_sub(1));
         let drag_byte = self.cpos_at_mouse(buf, rel_row, rel_col);
+        let drag_includes_cell = self
+            .text_hit_at_mouse(buf, event, ctx.viewport)
+            .is_selectable();
         self.text_state_mut().drag_endpoint = Some(drag_byte);
+        self.text_state_mut().drag_endpoint_includes_cell = drag_includes_cell;
 
         if self.text_state_mut().drag_anchor_word.is_some() {
             self.extend_word_anchored_drag(buf, ctx, text);
@@ -1982,11 +2039,13 @@ impl Window {
         } else {
             if let Some(press) = self.text_state_mut().pending_press.take() {
                 self.pin_current_scroll();
+                let press_includes_cell = self.text_state().pending_press_includes_cell;
                 let press = text::snap(text, press.min(text.len()));
                 if self.vim_enabled() {
                     self.begin_visual(VimMode::Visual, press);
                 } else {
                     self.text_state_mut().selection_anchor = Some(press);
+                    self.text_state_mut().selection_anchor_includes_cell = press_includes_cell;
                 }
             } else if !self.vim_enabled() {
                 self.extend_selection(self.effective_endpoint());
@@ -1996,10 +2055,22 @@ impl Window {
     }
 
     /// Selection byte range before `mouse_up` clears anchors; `None` if empty or absent.
-    fn mouse_yank_range(&self, _ctx: &MouseCtx, text: &str) -> Option<(usize, usize)> {
+    fn mouse_yank_range(
+        &self,
+        _ctx: &MouseCtx,
+        buf: &Buffer,
+        text: &str,
+    ) -> Option<(usize, usize)> {
         let endpoint = self.effective_endpoint();
         let (start, end) = if self.vim_enabled() {
             vim::visual_range(self.vim_state(), text, endpoint, self.vim_mode())?
+        } else if self.is_plain_mouse_drag() {
+            self.mouse_selection_range_at(
+                endpoint,
+                text,
+                buf,
+                self.text_state().drag_endpoint_includes_cell,
+            )?
         } else {
             self.selection_range_at(endpoint, text)?
         };
@@ -2026,7 +2097,11 @@ impl Window {
                 // that produced the endpoint so the committed cpos never lands
                 // past EOF or mid-codepoint.
                 let text = Self::coordinate_text(buf);
-                self.set_cpos(text::snap(text.as_ref(), end.min(text.len())));
+                let mut cpos = text::snap(text.as_ref(), end.min(text.len()));
+                if self.vim_enabled() && matches!(self.vim_mode(), VimMode::Normal) {
+                    super::motions::clamp_normal(text.as_ref(), &mut cpos);
+                }
+                self.set_cpos(cpos);
                 self.sync_from_cpos(buf, viewport_rows);
                 // Mirror vim: a click or drag-release stamps curswant at the
                 // landing column so a subsequent j/k keeps that column.
@@ -2034,15 +2109,26 @@ impl Window {
             }
         }
         self.text_state_mut().selection_anchor = None;
+        self.text_state_mut().selection_anchor_includes_cell = false;
         self.text_state_mut().drag_anchor_word = None;
         self.text_state_mut().drag_anchor_line = None;
         self.text_state_mut().pending_press = None;
+        self.text_state_mut().pending_press_includes_cell = false;
+        self.text_state_mut().drag_endpoint_includes_cell = false;
         Status::Consumed
     }
 
     /// Caret-leaf predicate. Mouse-up writes `cpos` only for these.
     fn is_caret_leaf(&self) -> bool {
         self.surface.has_caret()
+    }
+
+    /// True when the user is performing a plain (cell-granularity) mouse drag,
+    /// as opposed to word- or line-anchored double/triple-click selections.
+    fn is_plain_mouse_drag(&self) -> bool {
+        self.text_state().drag_endpoint.is_some()
+            && self.text_state().drag_anchor_word.is_none()
+            && self.text_state().drag_anchor_line.is_none()
     }
 
     /// Extend drag by WORD units, keeping the original double-clicked word inside the selection.
@@ -2794,6 +2880,28 @@ fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
     } else {
         row.saturating_sub(delta.unsigned_abs() as RowIndex)
     }
+}
+
+fn include_cursor_cell(buf: &Buffer, src: &str, pos: usize) -> usize {
+    let pos = text::snap(src, pos.min(src.len()));
+    if cursor_cell_selectable(buf, pos) && pos < src.len() && src.as_bytes()[pos] != b'\n' {
+        text::next_char_boundary(src, pos)
+    } else {
+        pos
+    }
+}
+
+fn cursor_cell_selectable(buf: &Buffer, cpos: usize) -> bool {
+    let (row, col) = buf.display_cursor_pos(cpos);
+    let Some(line) = buf.get_line(row) else {
+        return false;
+    };
+    let line_width = text::byte_to_cell(line, line.len());
+    if col >= line_width {
+        return false;
+    }
+    let spans = buf.highlights_at(row);
+    cell_range_contains_selectable(&spans, col, col.saturating_add(1))
 }
 
 /// Advance `col` past any leading non-selectable (chrome) spans on `logical_row`.
@@ -3587,9 +3695,10 @@ mod tests {
 
         assert_eq!(range.start.row, 45);
         assert_eq!(range.end.row, 55);
-        assert_eq!(w.row_selection_range(now).unwrap(), range);
+        assert_eq!(range.end.byte_col, 1);
+        assert_eq!(w.row_selection_range(&buf, now).unwrap(), range);
         assert!(w
-            .row_selection_range(now + Duration::from_millis(250))
+            .row_selection_range(&buf, now + Duration::from_millis(250))
             .is_none());
     }
 
@@ -3625,6 +3734,24 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn row_text_line_end_lands_on_last_character() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["abc".into()]);
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 20,
+            materialized_rows: 1,
+        });
+        let now = Instant::now();
+
+        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(10), 5, now);
+        w.execute_row_viewer_command(&buf, ViewerCommand::LineEnd, 5, now);
+
+        assert_eq!(w.row_cursor().unwrap().byte_col, 2);
     }
 
     #[test]
@@ -3698,7 +3825,7 @@ mod tests {
                 },
                 end: DocPosition {
                     row: 49,
-                    byte_col: 3,
+                    byte_col: 4,
                 },
             }
         );
@@ -3794,6 +3921,98 @@ mod tests {
         assert_eq!(w.text_state().pending_press, Some(click_byte));
         assert_eq!(w.text_state().drag_endpoint, Some(click_byte));
         assert!(w.selection_anchor().is_none());
+    }
+
+    #[test]
+    fn mouse_drag_copy_includes_cursor_cell() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["abc".into()]);
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport: viewport_for(buf.lines(), Rect::new(0, 0, 10, 1)),
+            click_count: 1,
+        };
+
+        w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 0),
+            ctx,
+        );
+        w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 2),
+            ctx,
+        );
+
+        let ranges = w.auto_selection_ranges(&buf, VimMode::Normal);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!((ranges[0].col_start, ranges[0].col_end), (0, 3));
+
+        let (_, range) = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 2),
+            ctx,
+        );
+        assert_eq!(range, Some((0, 3)));
+    }
+
+    #[test]
+    fn reverse_mouse_drag_copy_includes_cursor_cell() {
+        let mut w = make_win();
+        let buf = make_buf(vec!["abc".into()]);
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport: viewport_for(buf.lines(), Rect::new(0, 0, 10, 1)),
+            click_count: 1,
+        };
+
+        w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 2),
+            ctx,
+        );
+        w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Drag(MouseButton::Left), 0, 0),
+            ctx,
+        );
+        let (_, range) = w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 0),
+            ctx,
+        );
+
+        assert_eq!(range, Some((0, 3)));
+    }
+
+    #[test]
+    fn vim_mouse_click_past_eol_clamps_to_last_char_in_normal_mode() {
+        let mut w = make_win();
+        w.set_vim_enabled(true);
+        w.set_vim_mode(VimMode::Normal);
+        let buf = make_buf(vec!["abc".into()]);
+        let ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport: viewport_for(buf.lines(), Rect::new(0, 0, 10, 1)),
+            click_count: 1,
+        };
+
+        w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Down(MouseButton::Left), 0, 9),
+            ctx,
+        );
+        w.handle_mouse(
+            &buf,
+            click_event(MouseEventKind::Up(MouseButton::Left), 0, 9),
+            ctx,
+        );
+
+        assert_eq!(w.cpos(), 2);
+        assert_eq!(w.cursor_col(), 2);
     }
 
     #[test]
@@ -5385,7 +5604,7 @@ mod tests {
             ctx,
         );
         assert_eq!(r, Status::Consumed);
-        assert_eq!(yank, Some((0, 7)));
+        assert_eq!(yank, Some((0, 8)));
     }
 
     #[test]

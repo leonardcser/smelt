@@ -2128,6 +2128,31 @@ mod tests {
     }
 
     #[test]
+    fn dollar_lands_on_last_character_in_normal_mode() {
+        let mut h = TestHarness::new("abc");
+        h.handle(key('$'));
+        assert_eq!(h.cpos, 2);
+        assert_eq!(h.mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn capital_a_enters_insert_after_last_character_then_esc_returns_to_last_character() {
+        let mut h = TestHarness::new("abc");
+        h.handle(key('A'));
+        assert_eq!(h.cpos, 3);
+        assert_eq!(h.mode, VimMode::Insert);
+
+        h.handle(KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::empty(),
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        });
+        assert_eq!(h.cpos, 2);
+        assert_eq!(h.mode, VimMode::Normal);
+    }
+
+    #[test]
     fn test_word_backward() {
         let mut h = TestHarness::new("hello world");
         h.cpos = 6;
