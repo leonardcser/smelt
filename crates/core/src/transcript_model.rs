@@ -297,7 +297,7 @@ pub struct BlockHistory {
     /// Cached per-block content hashes; avoids re-hashing on layout-key construction.
     pub(crate) content_hashes: HashMap<BlockId, u64>,
     pub(crate) next_id: u64,
-    pub tool_states: HashMap<String, ToolState>,
+    tool_states: HashMap<String, ToolState>,
     tool_display_hashes: HashMap<String, u64>,
     /// Absent entries default to `ViewState::Expanded`.
     pub(crate) view_states: HashMap<BlockId, ViewState>,
@@ -350,6 +350,16 @@ impl BlockHistory {
             return *h;
         }
         self.blocks.get(&id).map(|b| b.content_hash()).unwrap_or(0)
+    }
+
+    pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
+        self.tool_states.get(call_id)
+    }
+
+    pub fn tool_states(&self) -> impl Iterator<Item = (&str, &ToolState)> {
+        self.tool_states
+            .iter()
+            .map(|(call_id, state)| (call_id.as_str(), state))
     }
 
     pub fn len(&self) -> usize {

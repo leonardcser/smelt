@@ -169,7 +169,7 @@ impl DisplayModel {
                 );
                 return false;
             };
-            let Some(current_state) = history.tool_states.get(call_id) else {
+            let Some(current_state) = history.tool_state(call_id) else {
                 smelt_perf::perf::record_value(
                     "transcript:display_model:hydrate_reject:missing_tool_state",
                     1,
@@ -241,7 +241,8 @@ impl DisplayModel {
         ids: &[BlockId],
         keys: &[LayoutKey],
     ) -> usize {
-        let jobs = self.collect_compile_jobs(history, ids, keys);
+        let jobs =
+            self.collect_compile_jobs(history, ids.iter().copied().zip(keys.iter().copied()));
         let compiled = jobs.len();
         let blocks = jobs.into_iter().map(CompileJob::compile).collect();
         self.insert_compiled_blocks(blocks);
@@ -254,15 +255,14 @@ impl DisplayModel {
     pub(crate) fn collect_compile_jobs(
         &mut self,
         history: &BlockHistory,
-        ids: &[BlockId],
-        keys: &[LayoutKey],
+        blocks: impl IntoIterator<Item = (BlockId, LayoutKey)>,
     ) -> Vec<CompileJob> {
         let _perf = smelt_perf::perf::begin("transcript:display_model:ensure_many");
-        smelt_perf::perf::record_value("transcript:display_model:requested", ids.len() as u64);
-        debug_assert_eq!(ids.len(), keys.len());
 
         let mut jobs = Vec::new();
-        for (&id, &key) in ids.iter().zip(keys.iter()) {
+        let mut requested = 0;
+        for (id, key) in blocks {
+            requested += 1;
             let display_key = DisplayCacheKey::from_layout_key(key);
             if self
                 .blocks
@@ -276,7 +276,7 @@ impl DisplayModel {
                 continue;
             };
             let state = match &block {
-                Block::ToolCall { call_id, .. } => history.tool_states.get(call_id).cloned(),
+                Block::ToolCall { call_id, .. } => history.tool_state(call_id).cloned(),
                 _ => None,
             };
             jobs.push(CompileJob {
@@ -286,6 +286,7 @@ impl DisplayModel {
                 state,
             });
         }
+        smelt_perf::perf::record_value("transcript:display_model:requested", requested);
         smelt_perf::perf::record_value("transcript:display_model:compiled", jobs.len() as u64);
         jobs
     }
@@ -490,7 +491,7 @@ mod tests {
         );
         let mut hydrated = DisplayModel::new();
         assert_eq!(hydrated.hydrate_many(&mut cold.history, entries), 1);
-        assert!(cold.history.tool_states["call-1"].body.is_some());
+        assert!(cold.history.tool_state("call-1").unwrap().body.is_some());
         let cold_key = base_key(&cold.history, id);
         assert_eq!(hydrated.ensure_many(&cold.history, &[id], &[cold_key]), 0);
     }

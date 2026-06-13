@@ -578,8 +578,7 @@ impl TranscriptProjection {
         self.counters = TranscriptProjectionCounters::default();
     }
 
-    fn ensure_blocks(&mut self, history: &BlockHistory, ids: &[BlockId], keys: &[LayoutKey]) {
-        let jobs = self.display_model.collect_compile_jobs(history, ids, keys);
+    fn finish_compile_jobs(&mut self, jobs: Vec<CompileJob>) {
         let compiled = jobs.len();
         let blocks = jobs.into_iter().map(CompileJob::compile).collect();
         self.display_model.insert_compiled_blocks(blocks);
@@ -598,16 +597,14 @@ impl TranscriptProjection {
         history: &BlockHistory,
         indices: impl IntoIterator<Item = usize>,
     ) {
-        let mut ids = Vec::new();
-        let mut keys = Vec::new();
-        for index in indices {
-            let Some(node) = self.exact_rows.nodes.get(index) else {
-                continue;
-            };
-            ids.push(node.id);
-            keys.push(node.key);
-        }
-        self.ensure_blocks(history, &ids, &keys);
+        let jobs = {
+            let nodes = &self.exact_rows.nodes;
+            let blocks = indices
+                .into_iter()
+                .filter_map(|index| nodes.get(index).map(|node| (node.id, node.key)));
+            self.display_model.collect_compile_jobs(history, blocks)
+        };
+        self.finish_compile_jobs(jobs);
     }
 
     fn clear_materialized_state(&mut self) {
@@ -2715,7 +2712,7 @@ mod tests {
             if let Some(block) = history.blocks.get(id) {
                 bytes += block.raw_text().map_or(0, |text| text.len());
                 if let Block::ToolCall { call_id, .. } = block {
-                    if let Some(state) = history.tool_states.get(call_id) {
+                    if let Some(state) = history.tool_state(call_id) {
                         bytes += state
                             .output
                             .as_ref()

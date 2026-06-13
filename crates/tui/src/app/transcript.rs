@@ -286,7 +286,7 @@ fn collect_tool_render_jobs(
         else {
             continue;
         };
-        let Some(state) = history.tool_states.get(call_id) else {
+        let Some(state) = history.tool_state(call_id) else {
             continue;
         };
         if matches!(state.status, ToolStatus::Denied) {

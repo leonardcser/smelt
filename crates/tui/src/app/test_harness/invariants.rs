@@ -369,7 +369,7 @@ impl TestApp {
                 // state; a terminal status means the pending bookkeeping
                 // wasn't cleared when the tool finished - both corrupt
                 // the tool widget.
-                let state = self.app.transcript.history().tool_states.get(&pt.call_id);
+                let state = self.app.transcript.history().tool_state(&pt.call_id);
                 assert!(
                     state.is_some(),
                     "pending tool {:?} has no ToolState entry in transcript history",
@@ -391,7 +391,7 @@ impl TestApp {
         // that no longer has a live block, or `set_history` left state
         // behind.
         let history = self.app.transcript.history();
-        for call_id in history.tool_states.keys() {
+        for (call_id, _) in history.tool_states() {
             let exists = history.blocks.values().any(|b| {
                 matches!(
                     b,

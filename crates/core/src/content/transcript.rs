@@ -241,7 +241,7 @@ mod tests {
             tool_state(),
         );
         assert_eq!(t.history.len(), 1);
-        assert!(t.history.tool_states.contains_key("id-1"));
+        assert!(t.history.tool_state("id-1").is_some());
     }
 
     #[test]

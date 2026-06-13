@@ -38,7 +38,7 @@ impl StreamParser {
 
     pub fn sync_active_tool_elapsed_at(&self, history: &mut BlockHistory, now: Instant) {
         for tool in &self.active_tools {
-            let Some(state) = history.tool_states.get(&tool.call_id) else {
+            let Some(state) = history.tool_state(&tool.call_id) else {
                 continue;
             };
             if state.status != ToolStatus::Pending {
@@ -59,7 +59,7 @@ impl StreamParser {
     pub fn set_active_tools_paused(&mut self, history: &BlockHistory, paused: bool, now: Instant) {
         for tool in &mut self.active_tools {
             if !matches!(
-                history.tool_states.get(&tool.call_id).map(|s| s.status),
+                history.tool_state(&tool.call_id).map(|s| s.status),
                 Some(ToolStatus::Pending)
             ) {
                 continue;
@@ -452,7 +452,7 @@ impl StreamParser {
             return;
         };
         if let Some(active) = self.active_tools.iter_mut().find(|t| t.call_id == cid) {
-            let previous = history.tool_states.get(&cid).map(|s| s.status);
+            let previous = history.tool_state(&cid).map(|s| s.status);
             match (previous, status) {
                 (_, ToolStatus::Confirm) => active.pause(now),
                 (Some(ToolStatus::Confirm), ToolStatus::Pending) => active.resume(now),
@@ -915,7 +915,7 @@ mod tests {
 
         parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(2));
         assert_eq!(
-            history.tool_states["c1"].elapsed,
+            history.tool_state("c1").unwrap().elapsed,
             Some(Duration::from_secs(2))
         );
 
@@ -927,7 +927,7 @@ mod tests {
         );
         parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(12));
         assert_eq!(
-            history.tool_states["c1"].elapsed,
+            history.tool_state("c1").unwrap().elapsed,
             Some(Duration::from_secs(2))
         );
 
@@ -939,7 +939,7 @@ mod tests {
         );
         parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(15));
         assert_eq!(
-            history.tool_states["c1"].elapsed,
+            history.tool_state("c1").unwrap().elapsed,
             Some(Duration::from_secs(5))
         );
     }
@@ -961,14 +961,14 @@ mod tests {
         parser.set_active_tools_paused(&history, true, start + Duration::from_secs(1));
         parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(8));
         assert_eq!(
-            history.tool_states["c1"].elapsed,
+            history.tool_state("c1").unwrap().elapsed,
             Some(Duration::from_secs(1))
         );
 
         parser.set_active_tools_paused(&history, false, start + Duration::from_secs(8));
         parser.sync_active_tool_elapsed_at(&mut history, start + Duration::from_secs(10));
         assert_eq!(
-            history.tool_states["c1"].elapsed,
+            history.tool_state("c1").unwrap().elapsed,
             Some(Duration::from_secs(3))
         );
     }
