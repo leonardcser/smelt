@@ -1,4 +1,5 @@
 use smelt_core::content::builder::LineBuilder;
+use smelt_core::content::code_block::parse_code_block;
 use smelt_core::content::highlight::{render_code_block, render_markdown_table};
 use smelt_core::content::markdown_ir::{parse_markdown, MarkdownBlock, MarkdownNode};
 use smelt_core::theme::intern;
@@ -45,7 +46,8 @@ fn render_markdown_block(
                         smelt_buffer::text::slice(block.source, range.clone()).lines()
                     })
                     .collect();
-                state.rows += render_code_block(out, &code_lines, lang, width, dim, bctx, true);
+                let code_block = parse_code_block(&code_lines, lang);
+                state.rows += render_code_block(out, &code_block, width, dim, bctx, true);
                 state.last_content_line = None;
                 state.prev_was_block = true;
             }

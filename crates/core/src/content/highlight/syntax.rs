@@ -9,6 +9,7 @@ use syntect::parsing::SyntaxReference;
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::buffer::SpanMeta;
 use crate::content::builder::LineBuilder;
+use crate::content::code_block::CodeBlock;
 use crate::content::default_width;
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Color;
@@ -44,26 +45,25 @@ pub fn syntax_for_lang(lang: &str) -> &'static SyntaxReference {
 /// markdown form so partial selections can round-trip back to raw markdown.
 pub fn render_code_block(
     out: &mut LineBuilder,
-    lines: &[&str],
-    lang: &str,
+    block: &CodeBlock,
     width: usize,
     dim: bool,
     bctx: Option<&super::super::BoxContext>,
     fence: bool,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:code_block");
-    let syntax = syntax_for_lang(lang);
+    let syntax = syntax_for_lang(block.lang());
     let theme = syntax_theme();
     let content_width = if let Some(b) = bctx { b.inner_w } else { width };
     let text_w = content_width.max(1);
-    let expanded: Vec<String> = lines.iter().map(|l| l.replace('\t', "    ")).collect();
     let mut rows = 0u16;
     let mut h = HighlightLines::new(syntax, theme);
 
     let bg_group = intern("SmeltCodeBlockBg");
     let bg = out.theme().resolve(bg_group).bg.unwrap_or(Color::Reset);
-    let last_idx = expanded.len().saturating_sub(1);
-    for (line_idx, line) in expanded.iter().enumerate() {
+    let last_idx = block.len().saturating_sub(1);
+    for line_idx in 0..block.len() {
+        let line = block.line_text(line_idx).unwrap_or("");
         let line_with_nl = format!("{}\n", line);
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)
@@ -77,7 +77,7 @@ pub fn render_code_block(
                 let mut src = String::new();
                 if fence && line_idx == 0 {
                     src.push_str("```");
-                    src.push_str(lang);
+                    src.push_str(block.lang());
                     src.push('\n');
                 }
                 src.push_str(line);
@@ -416,6 +416,19 @@ mod tests {
             group: HlGroup::default(),
             inner_w,
         }
+    }
+
+    fn render_code_block(
+        out: &mut crate::content::builder::LineBuilder,
+        lines: &[&str],
+        lang: &str,
+        width: usize,
+        dim: bool,
+        bctx: Option<&BoxContext>,
+        fence: bool,
+    ) -> u16 {
+        let block = crate::content::code_block::parse_code_block(lines, lang);
+        super::render_code_block(out, &block, width, dim, bctx, fence)
     }
 
     // ── render_code_block ─────────────────────────────────────────────

@@ -6,7 +6,8 @@ use crate::smelt_edit::{
 };
 use smelt_buffer::coords::copy_byte_range;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
-use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::content::code_block::{measure_code_block, parse_code_block};
+use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
 const HEAD_OVERSCAN_ROWS: RowIndex = 20;
@@ -317,6 +318,27 @@ fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
     }
 }
 
+fn apply_view_state_height(rows: RowIndex, state: ViewState) -> RowIndex {
+    match state {
+        ViewState::Expanded => rows,
+        ViewState::Collapsed => {
+            if rows > 1 {
+                2
+            } else {
+                rows
+            }
+        }
+        ViewState::TrimmedHead { keep } | ViewState::TrimmedTail { keep } => {
+            let keep = keep as RowIndex;
+            if rows > keep {
+                keep.saturating_add(1)
+            } else {
+                rows
+            }
+        }
+    }
+}
+
 impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
@@ -475,7 +497,14 @@ impl TranscriptProjection {
             "transcript:measure_all_heights:missing",
             missing.len() as u64,
         );
-        for chunk in missing.chunks(RenderedBlockCache::MAX_BLOCKS) {
+        let mut render_missing = Vec::with_capacity(missing.len());
+        for i in missing {
+            if self.measure_code_line_height(history, i) {
+                continue;
+            }
+            render_missing.push(i);
+        }
+        for chunk in render_missing.chunks(RenderedBlockCache::MAX_BLOCKS) {
             let _perf = smelt_perf::perf::begin("transcript:measure_all_heights:measure_chunk");
             self.ensure_block_indices(history, theme, chunk);
             for &i in chunk {
@@ -502,6 +531,31 @@ impl TranscriptProjection {
             }
         }
         self.exact_rows.refresh_prefix_rows();
+    }
+
+    fn measure_code_line_height(&mut self, history: &BlockHistory, index: usize) -> bool {
+        let Some(node) = self.exact_rows.nodes.get(index) else {
+            return false;
+        };
+        if node.exact_height.is_some() {
+            return true;
+        }
+        let Block::CodeLine { content, lang } = history.block_at(index) else {
+            return false;
+        };
+        let line = content.as_str();
+        let block = parse_code_block(&[line], lang);
+        let rows = measure_code_block(&block, node.key.width as usize) as RowIndex;
+        let rows = apply_view_state_height(rows, node.key.view_state);
+        let gap = history.rendered_block_gap(index, rows as usize) as RowIndex;
+        let _measured = self
+            .exact_rows
+            .set_exact_height(index, gap.saturating_add(rows));
+        #[cfg(test)]
+        if _measured {
+            self.counters.exact_height_measured_blocks += 1;
+        }
+        true
     }
 
     fn exact_block_layout(&self, history: &BlockHistory) -> Vec<LayoutEntry> {
@@ -1421,6 +1475,28 @@ mod tests {
             TranscriptProjectionCounters::default(),
             "repeated exact row-count queries should use the exact height index"
         );
+    }
+
+    #[test]
+    fn code_line_heights_measure_without_rendering_syntax() {
+        let mut transcript = Transcript::new();
+        for _ in 0..3 {
+            transcript.push(Block::CodeLine {
+                content: "x".repeat(40),
+                lang: "rust".into(),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let total = projection.exact_total_rows(&mut transcript.history, 10, false, &theme);
+
+        assert_eq!(total, 12);
+        assert_eq!(projection.rendered_block_cache_len(), 0);
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.rendered_blocks, 0);
+        assert_eq!(counters.exact_height_measured_blocks, 3);
     }
 
     #[test]

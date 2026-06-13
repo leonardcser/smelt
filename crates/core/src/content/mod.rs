@@ -1,6 +1,7 @@
 pub mod ansi;
 pub mod block_layout;
 pub mod builder;
+pub mod code_block;
 pub(crate) mod context;
 pub mod highlight;
 pub mod selection;

@@ -775,6 +775,51 @@ Conclusion: this slice moves markdown structural parsing into a reusable core IR
 
 **Deliverable:** code block measurement is syntect-free; DisplayIR contains no theme-dependent or render-cache state.
 
+**Completed slice:** code blocks now have a pure width-independent IR, and streamed code-line height measurement no longer renders buffers or runs syntect.
+
+- Added `smelt_core::content::code_block::{CodeBlock, parse_code_block, measure_code_block}` in `crates/core/src/content/code_block.rs`. `CodeBlock` stores language plus tab-expanded `InlineLine<()>` rows using preserved-space wrapping; measurement sums `InlineLine::wrap_rows(width.max(1))` and does not touch syntax highlighting.
+- Updated `crates/core/src/content/highlight/syntax.rs` so `render_code_block` consumes `CodeBlock` instead of raw lines. Rendering still computes syntect spans as a visible-render concern, but parsing/tab expansion and line wrapping now share the same IR as measurement.
+- Updated markdown fenced-code and streamed code-line renderers to parse `CodeBlock` before rendering (`crates/tui/src/content/transcript_parsers/markdown.rs`, `crates/tui/src/content/transcript_parsers/code_line.rs`).
+- Added a direct `Block::CodeLine` height path in `crates/tui/src/content/transcript_buf.rs`, including view-state and block-gap accounting, before falling back to `RenderedBlockCache` for other block variants. Code-line exact heights now leave `rendered_block_cache_len()` at zero and increment only the exact-height measurement counter in coverage.
+- The separate syntax render cache and row-range code-block renderer are still future work. This slice removes syntect/rendered-buffer measurement for `Block::CodeLine` while keeping the existing full-render path for markdown blocks and visible rendering.
+
+Validation:
+
+```bash
+cargo test -p smelt-core code_block
+cargo test -p smelt-tui markdown
+cargo test -p smelt-tui code_line_heights_measure_without_rendering_syntax
+cargo test -p smelt-tui transcript_buf
+cargo test -p smelt-tui
+cargo test -p smelt-core -- --test-threads=1
+cargo fmt
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p smelt-tui mixed_large_transcript_projection_baseline -- --ignored --nocapture
+```
+
+Baseline result after the code block IR slice:
+
+```text
+TRANSCRIPT_LAYOUT_BASELINE input_bytes=10497943 generated_bytes=10499021 blocks=3404 total_rows=120137 diff_caches=128 diff_cache_ms=1685 resize_diff_caches=128 resize_diff_cache_ms=1725 first_ms=912 resize_ms=1014 visible_ms=3 allocs=3393237 bytes_allocated=640539440 visible_rows=80
+```
+
+Top duration totals from the same run:
+
+| label | count | total |
+|---|---:|---:|
+| `render:text` | 1024 | 4.055 s |
+| `render:markdown` | 1024 | 4.039 s |
+| `render:build_diff_cache` | 256 | 3.399 s |
+| `transcript:plan_projection_measured` | 2 | 1.925 s |
+| `transcript:measure_all_heights` | 3 | 1.924 s |
+| `render:tool_call` | 256 | 1.691 s |
+| `render:inline_diff_cached` | 256 | 1.681 s |
+| `render:code_block` | 1024 | 972 ms |
+| `render:exec` | 400 | 398 ms |
+| `render:wrapped_output` | 400 | 383 ms |
+
+Conclusion: the large mixed baseline is still dominated by full markdown/tool/diff measurement and remains broadly comparable to the previous slices because the synthetic code fences live inside markdown blocks. The meaningful change is architectural and covered directly: standalone `Block::CodeLine` heights are now measured from IR without populating rendered block caches or running syntax highlighting.
+
 ### Phase 4: Diff / file view IR
 
 **Goal:** diffs are measured without building full styled caches.

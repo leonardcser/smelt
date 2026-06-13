@@ -608,8 +608,8 @@ pub fn inline_spans_width(spans: &[InlineSpan]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::super::super::builder::test_util::render_test;
-    use super::super::syntax::render_code_block;
     use super::*;
+    use crate::content::BoxContext;
 
     /// Parse `text` into styled inline spans and return a compact
     /// `Vec<(tag, text)>` representation.
@@ -985,6 +985,19 @@ mod tests {
         // giving width=4 after stripping. The new parser keeps the run
         // literal, so stripping should return the whole thing.
         assert_eq!(strip_markdown_markers("**text*"), "**text*");
+    }
+
+    fn render_code_block(
+        out: &mut crate::content::builder::LineBuilder,
+        lines: &[&str],
+        lang: &str,
+        width: usize,
+        dim: bool,
+        bctx: Option<&BoxContext>,
+        fence: bool,
+    ) -> u16 {
+        let block = crate::content::code_block::parse_code_block(lines, lang);
+        super::super::syntax::render_code_block(out, &block, width, dim, bctx, fence)
     }
 
     /// Source-text round-trip for fenced code blocks: opening fence on
