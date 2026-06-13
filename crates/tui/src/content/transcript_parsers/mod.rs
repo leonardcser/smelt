@@ -1061,8 +1061,55 @@ mod tests {
         assert_eq!(pending_col, finished_col);
     }
 
-    /// When the cached width doesn't match the layout width, the cache is ignored and
-    /// the rendered body falls back to `output.content`. This guards the resize path.
+    /// Width-independent IR caches are safe to replay after resize; they rewrap at render time.
+    #[test]
+    fn tool_render_ir_cache_reused_on_width_mismatch() {
+        use smelt_core::content::block_layout::{BlockLayout, RenderedLeaf};
+        use smelt_core::transcript_model::ToolOutput;
+
+        let ir = smelt_core::content::highlight::build_file_view_ir("IR_LAYOUT\n", Some("txt"));
+        let stale_cache = ((W as u16) + 10, BlockLayout::Leaf(RenderedLeaf::DiffIr(ir)));
+
+        let block = Block::ToolCall {
+            call_id: "c-ir".into(),
+            name: "write_file".into(),
+            summary: protocol::StyledLines::from_plain("x.rs"),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            output: Some(Box::new(ToolOutput {
+                content: "FALLBACK".into(),
+                is_error: false,
+                metadata: None,
+            })),
+            user_message: None,
+            render_cache: Some(stale_cache),
+            layout_revision: 0,
+        };
+        let ctx = LayoutContext {
+            width: W as u16,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+        let display = layout_block_test(&block, Some(&state), &ctx);
+        let joined: String = display
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            joined.contains("IR_LAYOUT"),
+            "width-independent IR cache should be reused, got: {joined:?}"
+        );
+        assert!(
+            !joined.contains("FALLBACK"),
+            "IR cache should replace output fallback, got: {joined:?}"
+        );
+    }
+
+    /// Width-dependent buffer caches are ignored after resize and the body falls back to output.content.
     #[test]
     fn tool_render_cache_ignored_on_width_mismatch() {
         use smelt_core::content::block_layout::BlockLayout;

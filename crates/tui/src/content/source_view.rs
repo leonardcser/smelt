@@ -1,15 +1,14 @@
 use smelt_core::content::block_layout::{DiffSpec, FileViewSpec};
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::{
-    build_file_view_cache, lang_to_ext, print_cached_inline_diff, print_inline_diff_ext,
-    CachedInlineDiff, GutterStyle,
+    build_file_view_ir, lang_to_ext, print_diff_ir, print_inline_diff_ext, DiffIr, GutterStyle,
 };
 
 /// Semantic source-view content returned by Lua block-layout leaves.
 pub(crate) enum SourceView<'a> {
     Diff(&'a DiffSpec),
     FileView(&'a FileViewSpec),
-    DiffCache(&'a CachedInlineDiff),
+    DiffIr(&'a DiffIr),
 }
 
 /// Paint target for nested source views. The renderer owns source-view chrome
@@ -38,7 +37,7 @@ pub(crate) fn render_source_view(
     match view {
         SourceView::Diff(spec) => render_diff(out, spec, target),
         SourceView::FileView(spec) => render_file_view(out, spec, target),
-        SourceView::DiffCache(cache) => print_cached_inline_diff(
+        SourceView::DiffIr(cache) => print_diff_ir(
             out,
             cache,
             GutterStyle::InlineLineNumbers,
@@ -71,8 +70,8 @@ fn render_file_view(out: &mut LineBuilder, spec: &FileViewSpec, target: SourceVi
             .extension()
             .and_then(|e| e.to_str())
     });
-    let cache = build_file_view_cache(&spec.content, ext);
-    print_cached_inline_diff(
+    let cache = build_file_view_ir(&spec.content, ext);
+    print_diff_ir(
         out,
         &cache,
         GutterStyle::InlineLineNumbers,

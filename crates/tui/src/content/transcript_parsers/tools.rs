@@ -400,8 +400,8 @@ fn render_leaf(
         RenderedLeaf::Diff(spec) => {
             render_source_view(out, SourceView::Diff(spec), source_view_target)
         }
-        RenderedLeaf::DiffCache(cache) => {
-            render_source_view(out, SourceView::DiffCache(cache), source_view_target)
+        RenderedLeaf::DiffIr(cache) => {
+            render_source_view(out, SourceView::DiffIr(cache), source_view_target)
         }
         RenderedLeaf::FileView(spec) => {
             render_source_view(out, SourceView::FileView(spec), source_view_target)

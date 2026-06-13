@@ -7,7 +7,9 @@ use crate::content::prompt_parser::{
 use crate::smelt_edit::{BufCreateOpts, Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 
-use smelt_core::content::block_layout::{BlockLayout, HboxItem, RenderedLayout};
+use smelt_core::content::block_layout::{
+    rendered_layout_width_independent, BlockLayout, HboxItem, RenderedLayout,
+};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::transcript_model::{
     Block, BlockHistory, BlockId, ToolOutput, ToolOutputRef, ToolStatus,
@@ -279,7 +281,11 @@ fn collect_tool_render_jobs(
         if matches!(state.status, ToolStatus::Denied) {
             continue;
         }
-        if matches!(&state.render_cache, Some((w, _)) if *w == width) {
+        if state
+            .render_cache
+            .as_ref()
+            .is_some_and(|(w, layout)| *w == width || rendered_layout_width_independent(layout))
+        {
             continue;
         }
         jobs.push(ToolRenderJob {
@@ -916,25 +922,35 @@ pub(crate) fn extract_rendered_layout(
             BlockLayout::Leaf(RenderedLeaf::Buf(Box::new(buf)))
         }
         BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
-            let _perf = smelt_perf::perf::begin("render:diff_cache");
+            let _perf = smelt_perf::perf::begin("render:diff_ir");
             let ext = spec
                 .lang
                 .as_deref()
                 .map(smelt_core::content::highlight::lang_to_ext);
-            let cache = smelt_core::content::highlight::build_inline_diff_cache_ext(
+            let cache = smelt_core::content::highlight::build_diff_ir_ext(
                 &spec.old,
                 &spec.new,
                 &spec.path,
                 &spec.anchor,
                 ext,
             );
-            BlockLayout::Leaf(RenderedLeaf::DiffCache(cache))
+            BlockLayout::Leaf(RenderedLeaf::DiffIr(cache))
         }
         BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
-            BlockLayout::Leaf(RenderedLeaf::FileView(spec.clone()))
+            let ext = spec
+                .lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext)
+                .or_else(|| {
+                    std::path::Path::new(&spec.path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                });
+            let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
+            BlockLayout::Leaf(RenderedLeaf::DiffIr(ir))
         }
-        BlockLayout::Leaf(LuaLeaf::DiffCache(_)) => {
-            panic!("DiffCache should not be produced by Lua render hooks")
+        BlockLayout::Leaf(LuaLeaf::DiffIr(_)) => {
+            panic!("DiffIr should not be produced by Lua render hooks")
         }
         BlockLayout::Vbox(items) => BlockLayout::Vbox(
             items

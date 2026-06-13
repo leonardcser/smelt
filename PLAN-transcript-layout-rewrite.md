@@ -836,6 +836,8 @@ Conclusion: the large mixed baseline is still dominated by full markdown/tool/di
 
 **Deliverable:** diff measurement does not build styled caches; resize does not rebuild diff caches.
 
+**Completed slice:** `CachedInlineDiff` became `DiffIr` in `crates/core/src/content/highlight/diff.rs`; it stores diff structure, expanded text, line numbers, syntax extension, and `InlineLine<()>` layout only. Syntax style spans are computed in `print_diff_ir` during rendering. `measure_diff_ir` measures wrapped rows from the IR without syntect. File-view leaves compile to the same IR via `build_file_view_ir`, and rendered layouts made only of IR/spec leaves are marked width-independent so resize can reuse them instead of rerunning tool extraction. Validation: `cargo nextest run --workspace` (3041 passed, 1 skipped) and `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ### Phase 5: Tool body IR and global tool prerender removal
 
 **Goal:** historical tool blocks are cheap to measure; tool render hooks run only on content changes or DisplayIR cache misses, never because width changed.

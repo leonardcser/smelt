@@ -2398,14 +2398,14 @@ mod tests {
                 continue;
             };
             let (old, new) = large_mixed_diff_pair(i);
-            let cache = smelt_core::content::highlight::build_inline_diff_cache_ext(
+            let cache = smelt_core::content::highlight::build_diff_ir_ext(
                 &old,
                 &new,
                 &format!("mixed_{i}.rs"),
                 "",
                 Some("rs"),
             );
-            state.render_cache = Some((width, BlockLayout::Leaf(RenderedLeaf::DiffCache(cache))));
+            state.render_cache = Some((width, BlockLayout::Leaf(RenderedLeaf::DiffIr(cache))));
             installed += 1;
         }
         installed

@@ -20,8 +20,8 @@ pub mod util;
 ///   (`BufFormat::Code`) where the gutter belongs to the window chrome.
 ///
 /// `print_syntax_file*` understands `None | Stamped` (inline-gutter callers
-/// route through `build_file_view_cache` + `print_cached_inline_diff` instead).
-/// `print_cached_inline_diff` understands `None | InlineLineNumbers | Stamped`.
+/// route through `build_file_view_ir` + `print_diff_ir` instead).
+/// `print_diff_ir` understands `None | InlineLineNumbers | Stamped`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GutterStyle {
     None,
@@ -54,9 +54,9 @@ pub(super) fn syntax_theme() -> &'static syntect::highlighting::Theme {
 }
 
 pub use diff::{
-    build_file_view_cache, build_inline_diff_cache_ext, compute_split_diff,
-    print_cached_inline_diff, print_inline_diff, print_inline_diff_ext, print_split_diff,
-    print_split_diff_side, CachedInlineDiff, SplitDiffPlan, SplitSide,
+    build_diff_ir_ext, build_file_view_ir, compute_split_diff, measure_diff_ir, print_diff_ir,
+    print_inline_diff, print_inline_diff_ext, print_split_diff, print_split_diff_side, DiffIr,
+    SplitDiffPlan, SplitSide,
 };
 pub use inline::{
     emit_inline_spans, inline_spans_width, parse_inline_spans, render_markdown_table,

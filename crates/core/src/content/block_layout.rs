@@ -11,7 +11,7 @@
 //!   to the parallel layout workers, which cannot touch `app.ui`.
 
 use crate::buffer::{BufId, Buffer};
-use crate::content::highlight::CachedInlineDiff;
+use crate::content::highlight::DiffIr;
 
 /// Inline-diff render directive. The worker calls `print_inline_diff` directly,
 /// so width / indent / bg-fill / wrap math all live in one render path with no
@@ -42,7 +42,7 @@ pub enum Leaf<B> {
     Buf(B),
     Diff(DiffSpec),
     FileView(FileViewSpec),
-    DiffCache(CachedInlineDiff),
+    DiffIr(DiffIr),
 }
 
 pub type LuaLeaf = Leaf<BufId>;
@@ -114,6 +114,20 @@ impl<L> BlockLayout<L> {
 /// Owned-leaf alias used by the prerender → parallel-layout handoff.
 pub type RenderedLayout = BlockLayout<RenderedLeaf>;
 pub type RenderedHboxItem = HboxItem<RenderedLeaf>;
+
+/// Whether a rendered layout can be reused across width changes.
+pub fn rendered_layout_width_independent(layout: &RenderedLayout) -> bool {
+    match layout {
+        BlockLayout::Leaf(RenderedLeaf::Buf(_)) => false,
+        BlockLayout::Leaf(
+            RenderedLeaf::Diff(_) | RenderedLeaf::FileView(_) | RenderedLeaf::DiffIr(_),
+        ) => true,
+        BlockLayout::Vbox(items) => items.iter().all(rendered_layout_width_independent),
+        BlockLayout::Hbox(items) => items
+            .iter()
+            .all(|item| rendered_layout_width_independent(&item.layout)),
+    }
+}
 
 /// Allocate column widths from raw constraints (the leaf type is irrelevant). Returns
 /// one width per constraint, summing to at most `total`. `Length` is consumed first,

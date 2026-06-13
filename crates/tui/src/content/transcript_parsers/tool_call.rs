@@ -19,12 +19,13 @@ pub(super) fn render(
     state: &ToolState,
     width: usize,
 ) -> u16 {
-    // Cache hit only when the cached width matches the current layout width - a resize
-    // invalidates without us having to track it explicitly.
     let rendered = state
         .render_cache
         .as_ref()
-        .filter(|(w, _)| *w as usize == width)
+        .filter(|(w, layout)| {
+            *w as usize == width
+                || smelt_core::content::block_layout::rendered_layout_width_independent(layout)
+        })
         .map(|(_, layout)| layout);
     render_tool(
         out,

@@ -145,7 +145,7 @@ pub(super) fn render_highlighted(
     let lineno_digits = lines.len().max(1).to_string().len();
     // `Stamped` reserves gutter cells for the host window's `LineNumberGutter`.
     // `None` reserves nothing. Inline-gutter callers go through
-    // `build_file_view_cache` + `print_cached_inline_diff` instead.
+    // `build_file_view_ir` + `print_diff_ir` instead.
     let gutter_cells = match gutter {
         GutterStyle::Stamped => lineno_digits + 2,
         GutterStyle::None | GutterStyle::InlineLineNumbers => 0,
