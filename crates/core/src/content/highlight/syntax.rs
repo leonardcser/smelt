@@ -62,8 +62,8 @@ pub fn render_code_block(
     let bg_group = intern("SmeltCodeBlockBg");
     let bg = out.theme().resolve(bg_group).bg.unwrap_or(Color::Reset);
     let last_idx = block.len().saturating_sub(1);
-    for line_idx in 0..block.len() {
-        let line = block.line_text(line_idx).unwrap_or("");
+    for (line_idx, code_line) in block.lines().iter().enumerate() {
+        let line = code_line.text();
         let line_with_nl = format!("{}\n", line);
         let regions = h
             .highlight_line(&line_with_nl, &SYNTAX_SET)

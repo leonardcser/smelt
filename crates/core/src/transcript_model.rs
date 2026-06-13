@@ -252,6 +252,37 @@ pub enum ViewState {
     TrimmedTail { keep: u16 },
 }
 
+impl ViewState {
+    pub fn measured_height(self, total_rows: u64) -> u64 {
+        match self {
+            Self::Expanded => total_rows,
+            Self::Collapsed => {
+                if total_rows > 1 {
+                    2
+                } else {
+                    total_rows
+                }
+            }
+            Self::TrimmedHead { keep } | Self::TrimmedTail { keep } => {
+                let keep = keep as u64;
+                if total_rows > keep {
+                    keep.saturating_add(1)
+                } else {
+                    total_rows
+                }
+            }
+        }
+    }
+
+    pub fn elides_rows(self, total_rows: u64) -> bool {
+        match self {
+            Self::Expanded => false,
+            Self::Collapsed => total_rows > 1,
+            Self::TrimmedHead { keep } | Self::TrimmedTail { keep } => total_rows > keep as u64,
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]

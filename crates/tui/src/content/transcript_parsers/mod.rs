@@ -57,11 +57,12 @@ fn apply_view_state(
     outcome: Outcome,
 ) -> Outcome {
     let total = outcome.line_count;
+    let target_total = state.measured_height(total as u64) as usize;
     let start = buf.line_count().saturating_sub(total);
     match state {
         ViewState::Expanded => outcome,
         ViewState::Collapsed => {
-            if total > 1 {
+            if state.elides_rows(total as u64) {
                 let hidden = total - 1;
                 // Keep first line, drop the rest.
                 buf.set_lines(start + 1, start + total, vec![]);
@@ -69,40 +70,48 @@ fn apply_view_state(
                     line_count: 1,
                     ..outcome
                 };
-                append_ellipsis(
+                let with_ellipsis = append_ellipsis(
                     buf,
                     theme,
                     width,
                     &format!("… {hidden} more lines"),
                     after_truncate_outcome,
-                )
+                );
+                Outcome {
+                    line_count: target_total,
+                    ..with_ellipsis
+                }
             } else {
                 outcome
             }
         }
         ViewState::TrimmedHead { keep } => {
             let keep = keep as usize;
-            if total > keep {
+            if state.elides_rows(total as u64) {
                 let hidden = total - keep;
                 buf.set_lines(start + keep, start + total, vec![]);
                 let after_truncate_outcome = Outcome {
                     line_count: keep,
                     ..outcome
                 };
-                append_ellipsis(
+                let with_ellipsis = append_ellipsis(
                     buf,
                     theme,
                     width,
                     &format!("… {hidden} more lines"),
                     after_truncate_outcome,
-                )
+                );
+                Outcome {
+                    line_count: target_total,
+                    ..with_ellipsis
+                }
             } else {
                 outcome
             }
         }
         ViewState::TrimmedTail { keep } => {
             let keep = keep as usize;
-            if total > keep {
+            if state.elides_rows(total as u64) {
                 let hidden = total - keep;
                 buf.set_lines(start, start + (total - keep), vec![]);
                 let mut kept_lines: Vec<String> = (0..keep)
@@ -114,7 +123,7 @@ fn apply_view_state(
                 let kept_highlights: Vec<_> =
                     (0..keep).map(|i| buf.highlights_at(start + i)).collect();
                 buf.set_lines(start, start + keep, vec![]);
-                let after_ellipsis_outcome = append_ellipsis(
+                append_ellipsis(
                     buf,
                     theme,
                     width,
@@ -144,7 +153,7 @@ fn apply_view_state(
                     }
                 }
                 Outcome {
-                    line_count: after_ellipsis_outcome.line_count + keep,
+                    line_count: target_total,
                     ..outcome
                 }
             } else {

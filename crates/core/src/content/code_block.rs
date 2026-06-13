@@ -3,7 +3,23 @@ use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeBlock {
     lang: String,
-    lines: Vec<InlineLine<()>>,
+    lines: Vec<CodeBlockLine>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeBlockLine {
+    text: String,
+    layout: InlineLine<()>,
+}
+
+impl CodeBlockLine {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn layout(&self) -> &InlineLine<()> {
+        &self.layout
+    }
 }
 
 impl CodeBlock {
@@ -11,15 +27,12 @@ impl CodeBlock {
         &self.lang
     }
 
-    pub fn lines(&self) -> &[InlineLine<()>] {
+    pub fn lines(&self) -> &[CodeBlockLine] {
         &self.lines
     }
 
     pub fn line_text(&self, index: usize) -> Option<&str> {
-        self.lines
-            .get(index)
-            .and_then(|line| line.runs.first())
-            .map(|run| run.text.as_str())
+        self.lines.get(index).map(CodeBlockLine::text)
     }
 
     pub fn len(&self) -> usize {
@@ -37,22 +50,26 @@ pub fn parse_code_block(lines: &[&str], lang: &str) -> CodeBlock {
         lines: lines
             .iter()
             .map(|line| {
-                InlineLine::new(vec![InlineRun::new(
-                    line.replace('\t', "    "),
-                    (),
-                    BreakPolicy::PreserveSpaces,
-                )])
+                let text = line.replace('\t', "    ");
+                CodeBlockLine {
+                    layout: InlineLine::new(vec![InlineRun::new(
+                        text.clone(),
+                        (),
+                        BreakPolicy::PreserveSpaces,
+                    )]),
+                    text,
+                }
             })
             .collect(),
     }
 }
 
-pub fn measure_code_block(block: &CodeBlock, width: usize) -> u16 {
+pub fn measure_code_block(block: &CodeBlock, width: usize) -> usize {
     let text_w = width.max(1);
     block
         .lines()
         .iter()
-        .map(|line| line.wrap_rows(text_w) as u16)
+        .map(|line| line.layout().wrap_rows(text_w))
         .sum()
 }
 

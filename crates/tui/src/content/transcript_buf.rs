@@ -318,24 +318,13 @@ fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
     }
 }
 
-fn apply_view_state_height(rows: RowIndex, state: ViewState) -> RowIndex {
-    match state {
-        ViewState::Expanded => rows,
-        ViewState::Collapsed => {
-            if rows > 1 {
-                2
-            } else {
-                rows
-            }
+fn measure_block_content_height(block: &Block, width: u16) -> Option<RowIndex> {
+    match block {
+        Block::CodeLine { content, lang } => {
+            let block = parse_code_block(&[content.as_str()], lang);
+            Some(measure_code_block(&block, width as usize) as RowIndex)
         }
-        ViewState::TrimmedHead { keep } | ViewState::TrimmedTail { keep } => {
-            let keep = keep as RowIndex;
-            if rows > keep {
-                keep.saturating_add(1)
-            } else {
-                rows
-            }
-        }
+        _ => None,
     }
 }
 
@@ -499,7 +488,7 @@ impl TranscriptProjection {
         );
         let mut render_missing = Vec::with_capacity(missing.len());
         for i in missing {
-            if self.measure_code_line_height(history, i) {
+            if self.try_measure_block_height(history, i) {
                 continue;
             }
             render_missing.push(i);
@@ -521,41 +510,35 @@ impl TranscriptProjection {
                 };
                 let block_rows = block_buf.line_count();
                 let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
-                let _measured = self
-                    .exact_rows
-                    .set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
-                #[cfg(test)]
-                if _measured {
-                    self.counters.exact_height_measured_blocks += 1;
-                }
+                self.set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
             }
         }
         self.exact_rows.refresh_prefix_rows();
     }
 
-    fn measure_code_line_height(&mut self, history: &BlockHistory, index: usize) -> bool {
+    fn try_measure_block_height(&mut self, history: &BlockHistory, index: usize) -> bool {
         let Some(node) = self.exact_rows.nodes.get(index) else {
             return false;
         };
         if node.exact_height.is_some() {
             return true;
         }
-        let Block::CodeLine { content, lang } = history.block_at(index) else {
+        let Some(rows) = measure_block_content_height(history.block_at(index), node.key.width)
+        else {
             return false;
         };
-        let line = content.as_str();
-        let block = parse_code_block(&[line], lang);
-        let rows = measure_code_block(&block, node.key.width as usize) as RowIndex;
-        let rows = apply_view_state_height(rows, node.key.view_state);
+        let rows = node.key.view_state.measured_height(rows);
         let gap = history.rendered_block_gap(index, rows as usize) as RowIndex;
-        let _measured = self
-            .exact_rows
-            .set_exact_height(index, gap.saturating_add(rows));
+        self.set_exact_height(index, gap.saturating_add(rows));
+        true
+    }
+
+    fn set_exact_height(&mut self, index: usize, rows: RowIndex) {
+        let _measured = self.exact_rows.set_exact_height(index, rows);
         #[cfg(test)]
         if _measured {
             self.counters.exact_height_measured_blocks += 1;
         }
-        true
     }
 
     fn exact_block_layout(&self, history: &BlockHistory) -> Vec<LayoutEntry> {
