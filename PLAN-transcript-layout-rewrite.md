@@ -1,0 +1,931 @@
+# Transcript Layout Rewrite — Architectural Plan
+
+**Goal:** make transcript projection (resume, preview, resize, first render) scale from 10 MB to 100 MB sessions while keeping exact scrollbar, exact vim navigation, and real rendering semantics. End state: simpler, more composable, more robust code with the right abstractions and no leftover scaffolding.
+
+**Planning principles:**
+
+1. This plan is a direction, not a contract. If a better approach emerges during implementation, we take it.
+2. We do not defer work just because it is large. If something is worth doing for the end-state quality of the code, we do it now.
+3. Better/simpler code is the goal. The final code must be simpler, less complex, more composable, more robust, and more testable than what we have today. Whatever structural changes are required to achieve that are acceptable.
+4. APIs can break and evolve. We do not keep old APIs, internal shims, backward compatibility layers, or Lua surface compatibility for their own sake.
+5. Remove before adding. If an abstraction no longer pulls its weight, delete it rather than wrap it.
+6. Refactor/consolidate along the way. If cleanup is worth doing for the final architecture, do it as part of the migration instead of deferring it because it is large.
+7. Exactness is non-negotiable. Speed must come from avoiding wasted work, not from faking data.
+
+---
+
+## 1. What we found
+
+### 1.1 The concrete symptom
+
+An 11 MB session causes ~2 s stalls on:
+
+- `/resume` picker open (initial preview)
+- selecting/resuming the session
+- terminal resize
+
+Benchmark highlights:
+
+- `render:build_diff_cache` ×1024 → 1.27 s
+- `render:inline_diff_cached` ×1024 → 331 ms
+- `render:tool_call` ×1024 → 277 ms
+- `render:markdown` / `render:text` ×670 → ~170 ms each
+- `compositor:render_flush` max → 1.57 s
+- `cmd:dispatch` / `lua:cmd` / `lua:event_cb` max → 1.81 s
+
+The 1024 counts are suspicious: for a large transcript, almost every block is being rendered even though only a viewport-full is visible.
+
+### 1.2 Root cause
+
+The system already virtualizes *viewport materialization*, but it pays for a full *rendered measurement pass* first.
+
+Current pipeline:
+
+```
+history
+  → TranscriptProjection
+    → ExactRowIndex wants heights
+      → RenderedBlockCache renders every block into a Buffer
+        → count Buffer lines
+      → prefix rows
+    → plan visible block range
+    → render/materialize visible blocks
+```
+
+`measure_all_heights` (`crates/tui/src/content/transcript_buf.rs:439`) is the seam where the problem lives. To know how tall a block is, the code currently lays it out into a real `Buffer` with spans, highlights, syntect, diff caches, and tool-render callbacks — then counts the lines.
+
+Consequences:
+
+1. **Resize is catastrophic** — width change invalidates `RenderedBlockCache` and `ExactRowIndex`, so every block must be re-rendered.
+2. **Resume preview is synchronous and full** — the resume dialog calls `render_preview_into` which builds a full `TranscriptView`, then prerenders *all* tool blocks, then measures all heights.
+3. **Tool prerender is global** — every compositor frame calls `prerender_transcript_tool_blocks_for_ids(tw, &block_ids)` for the *entire* transcript order (`crates/tui/src/app/render_loop.rs:117-119`). On resize every historical tool misses its width-keyed cache and reruns its Lua render hook.
+4. **Markdown has no AST/IR** — it parses and emits in one pass; measuring height has no cheaper path.
+5. **Diffs are re-cached eagerly** — `extract_rendered_layout` builds `CachedInlineDiff` during tool extraction, under a width-keyed cache, so resize rebuilds them all.
+
+### 1.3 What already exists that is good
+
+- `BlockHistory` — stable transcript block model.
+- `LayoutKey` — clean cache key: width + show_thinking + view_state + content_hash + sidecar_hash.
+- `ExactRowIndex` — prefix-sum row index; keep it, just feed it from cheaper measurement.
+- `BlockLayout` / `RenderedLayout` — declarative layout tree for tool output. Keep the idea, evolve the leaves.
+- `CachedInlineDiff` — a real width-independent-ish IR for diffs: diff lines + syntax style ranges; wrap/render from the IR.
+- Visible-row materialization in `project_visible_range` / `collect_blocks_range`.
+
+### 1.4 What should go away or change
+
+- `RenderedBlockCache` as the source of truth for heights. It stores fully rendered `Buffer`s and is cleared on every width change. It can remain as a *visible-row rendering cache* but should not be required for measurement.
+- The global tool-prerender pass every frame.
+- The assumption that tool render hooks must run for every historical tool on resize.
+- Markdown rendering doing parse+emit in one pass with no reusable IR. Replace the parser with `pulldown-cmark`-powered AST; keep Smelt's custom rendering decisions (heading spacing, table layout, etc.).
+- Diff cache being built inside width-keyed tool render cache.
+- `build_rows` / `display_rows_for_range` / `copy_range` all forcing full `measure_all_heights` through rendered buffers.
+- `ToolState.layout_revision` as the sidecar cache key. It is in-memory and volatile; replace it with a stable content hash of the mutable tool state (status, output, user_message, elapsed).
+- `layout.leaf(buf_id)` from the tool renderer API. It forces width-dependent rendered buffers and blocks width-independent IR. Remove it; the API becomes declarative primitives (`layout.text`, `layout.diff`, `layout.file_view`, compositional `vbox`/`hbox`).
+
+---
+
+## 2. Goal architecture
+
+### 2.1 Core idea
+
+Separate **layout** (width-dependent height) from **rendering** (painting visible rows).
+
+```
+Session history
+  → BlockHistory
+    → hydrate DisplayIR from persistent cache
+    → compile cache misses to width-independent DisplayIR
+      → DisplayIR is cheap to measure at any width
+      → DisplayIR can render an arbitrary row range at any width
+  → ExactRowIndex
+    → heights from DisplayIR.measure(width)
+    → prefix rows
+  → ProjectionPlan
+    → visible block range
+  → Viewport materialization
+    → render only visible row ranges from DisplayIR
+```
+
+Measurement must not:
+
+- allocate terminal buffers,
+- run syntect,
+- build diff caches,
+- call Lua tool render hooks,
+- emit styled spans.
+
+Rendering must:
+
+- reuse the same DisplayIR so semantics match measurement exactly,
+- only touch visible rows,
+- still support copy/yank/selection/search by being able to render any row range on demand.
+
+### 2.2 Desired properties
+
+| Property | Today | Goal |
+|----------|-------|------|
+| Exact scrollbar total | yes, via full render | yes, via IR measurement |
+| Exact `gg`/`G`/scroll | yes, via full render | yes, via prefix index |
+| Resize latency | O(all blocks × full render) | O(all blocks × cheap measure) |
+| Resume latency | full render + tool rerender | hydrate persistent IR cache, cheap measure, render visible |
+| Preview latency | synchronous full render | same as live transcript |
+| 100 MB feasibility | no | yes, if IR stays proportional to source |
+| Code complexity | several overlapping caches | one IR, one row index, one visible renderer |
+
+### 2.3 Design principles
+
+1. **Plan is direction, not contract.** We adapt as we learn.
+2. **No deferred big work.** If something is worth doing for end-state quality, we do it now.
+3. **Better code is the goal.** Simpler, less complex, more composable, more robust, more testable.
+4. **APIs can break and evolve.** We do not keep old APIs, backward compatibility layers, internal shims, or Lua surface compatibility for their own sake. If a cleaner design requires changing tool renderer contracts, session serialization, or module boundaries, we change them.
+5. **One canonical source state.** `Session` / `BlockHistory` remain the canonical transcript state. DisplayIR is the canonical display form derived from that state, not a replacement for it.
+6. **DisplayIR is serializable from day one.** `session.ir.bin` can land after the first useful vertical slice, but every DisplayIR type must be designed as cache-safe: width-independent, theme-independent, deterministic, and free of Lua handles, `Buffer`s, render caches, and non-serializable state.
+7. **Width only affects wrapping, not parsing.** Compile the IR once per block content, not per width.
+8. **Rendering is a function `IR × width × row_range → rows`.** No hidden global state needed to paint a row.
+9. **Keep `ExactRowIndex` but change how it is fed.** It is a good abstraction; the bad part is rendered measurement.
+10. **Tool render hooks run only for content changes/cache misses.** Width changes and hidden historical blocks with valid DisplayIR do not call Lua.
+11. **Remove before adding.** If an abstraction no longer pulls its weight, delete it rather than wrap it.
+12. **Refactor/consolidate during the migration.** No deferred big cleanup just because it is large. If finishing a refactor is worth it for the end state, finish it in this migration.
+13. **No approximate previews.** Exactness is non-negotiable; the speed must come from avoiding wasted work, not from faking data.
+
+---
+
+## 3. Proposed data model
+
+### 3.1 Canonical state vs display cache
+
+`Session` / `BlockHistory` remain the canonical source state. Blocks keep their source strings and structured domain data:
+
+```rust
+Block::Text { content: String }
+Block::Thinking { content: String }
+Block::ToolCall { call_id, name, summary, args }
+```
+
+DisplayIR does **not** live inside `Block`. It lives in `DisplayModel` and in the disposable `sessions/<id>/session.ir.bin` sidecar. This keeps conversation/session state clean and makes the display cache safe to delete and rebuild.
+
+Every DisplayIR type must be serializable/cache-safe from the beginning, even before the persistent cache implementation lands. Do not put theme-dependent syntax data, Lua userdata, `Buffer`s, `OnceCell` render caches, or width-dependent wraps inside DisplayIR.
+
+### 3.2 `DisplayBlock` / `DisplayIr` (new, central)
+
+Owned by `Transcript` or a parallel `DisplayModel` keyed by display-cache identity, not by bare `BlockId` alone. `BlockId`s are stable across rewrites, so reuse must validate the current content and sidecar hashes.
+
+```rust
+pub(crate) struct DisplayCacheKey {
+    block_id: BlockId,
+    content_hash: u64,
+    sidecar_hash: u64,
+    renderer_version: u32,
+}
+```
+
+```rust
+/// Width-independent display representation of one transcript block.
+pub(crate) enum DisplayBlock {
+    Markdown(MarkdownBlock),
+    Code(CodeBlock),
+    Tool(ToolBlock),
+    User(UserBlock),
+    Thinking(MarkdownBlock),
+    Compacted(MarkdownBlock),
+    Mode(ModeBlock),
+    ProcessStatus(ProcessStatusBlock),
+    Exec(ExecBlock),
+}
+```
+
+Each variant holds only semantic data and precomputed cheap-to-store metrics:
+
+- For text: run-aware `InlineLine`s with style/source/copy metadata; widths are computed on demand.
+- For code: lines + tab expansion state; syntax tokens are computed only by ephemeral render caches.
+- For tools: the tool header + a `ToolBodyIr` (see below).
+- For diffs: a `DiffIr` similar to `CachedInlineDiff` but without render state.
+
+Persistent DisplayIR is stored separately from the canonical session file. The session JSON remains the source of truth; the display cache is disposable and keyed by content/sidecar/renderer versions. Theme-dependent syntax, visible rows, and width-dependent wraps never go into the persistent cache.
+
+### 3.3 `MarkdownBlock`
+
+Use `pulldown-cmark` **only as the parser** and translate its event stream into a small, purpose-built AST. Smelt keeps its own rendering logic: heading spacing, list bullets, blockquote bars, code block chrome, and especially table layout (dynamic column fitting, stacked fallback, borders, alignment, and soft-wrapping inside cells) all remain unchanged. The only thing that changes is where the structural tree comes from.
+
+Build the AST from `pulldown-cmark::Parser::into_offset_iter()` so block nodes and inline spans can carry source byte ranges into the original markdown. The semantic AST is not enough on its own: copy/yank fidelity depends on attaching original markdown source to rendered rows.
+
+This replaces the custom line-oriented markdown parser in `transcript_parsers/markdown.rs` and fixes bugs that are fundamentally parsing bugs: malformed/nested code blocks, tables whose inline code spans were not recognized as a single cell token, escaped characters, and other cases where the hand-rolled parser lost nesting information. Rendering was not the problem; the AST was.
+
+Dependency:
+
+```toml
+pulldown-cmark = { version = "0.13", default-features = false }
+```
+
+With default features disabled the transitive deps are only `bitflags`, `memchr`, `unicase`, and `unicode-width`.
+
+```rust
+pub(crate) struct MarkdownBlock {
+    source: String,
+    nodes: Vec<MarkdownNode>,
+}
+
+pub(crate) struct SourceRange {
+    start: usize,
+    end: usize,
+}
+
+pub(crate) enum MarkdownNode {
+    Paragraph { spans: Vec<InlineSpan>, source: SourceRange },
+    Heading { level: u8, spans: Vec<InlineSpan>, source: SourceRange },
+    BlockQuote { children: Vec<MarkdownNode>, source: SourceRange },
+    List { ordered: bool, items: Vec<Vec<MarkdownNode>>, source: SourceRange },
+    /// A fenced or indented code block. The AST stores raw source lines;
+    /// rendering applies chrome, tab expansion, and optional syntax highlighting.
+    Code { lang: String, lines: Vec<String>, source: SourceRange },
+    Table(TableIr),
+    Rule { source: SourceRange },
+    Blank,
+}
+
+pub(crate) enum InlineSpan {
+    Text { text: String, source: SourceRange },
+    Bold { children: Vec<InlineSpan>, source: SourceRange },
+    Italic { children: Vec<InlineSpan>, source: SourceRange },
+    Code { text: String, source: SourceRange },
+    Strikethrough { children: Vec<InlineSpan>, source: SourceRange },
+    Link { text: Vec<InlineSpan>, url: String, source: SourceRange },
+    Image { alt: String, url: String, source: SourceRange },
+    TaskListMarker { checked: bool, source: SourceRange },
+}
+```
+
+`InlineSpan` is a tree, not a flat run list, because `pulldown-cmark` naturally produces nested emphasis/links. Measurement flattens spans to compute display width and wrap count; rendering flattens spans into styled text. We do not store cumulative widths in the IR; wrapping is computed on demand during measure/render.
+
+Parser options enabled:
+
+- `ENABLE_TABLES`
+- `ENABLE_STRIKETHROUGH`
+- `ENABLE_TASKLISTS`
+- optionally `ENABLE_HEADING_ATTRIBUTES` and `ENABLE_SMART_PUNCTUATION`
+
+Rendering choices we deliberately keep:
+
+- No blank line between a heading and the following content.
+- Custom table measurement/rendering: `pulldown-cmark` only gives rows; column widths, wrapping, fallback, and borders stay in Smelt.
+- `source_text` / copy-yank semantics must continue to return the original markdown, even for rendered tables and chrome-delimited blocks.
+- Table and chrome rows preserve non-selectable spans, `cell_selectable`, `block_selectable`, `copy_continuation`, and `pre_formatted` metadata.
+
+Unsupported markdown policy:
+
+- Support table alignment, escaped characters, links, images, task lists, hard/soft breaks, emphasis/strong/strikethrough, inline code, fenced/indented code, blockquotes, lists, headings, horizontal rules, and tables.
+- Inline HTML, block HTML, footnotes, metadata/frontmatter, and unusual extensions initially render as plain text where possible.
+- Never silently drop user-visible text. Unsupported structure degrades to plain text plus source ranges.
+
+### 3.4 `CodeBlock`
+
+```rust
+pub(crate) struct CodeBlock {
+    lang: String,
+    lines: Vec<InlineLine>,
+}
+```
+
+Height does not need syntax. `CodeBlock` IR is pure semantic/layout data: source lines, language, and cheap text metrics. Syntax highlighting is not stored in the IR and is not serialized with it; it lives in a separate render cache owned by the projection/renderer and is computed only for visible rows.
+
+### 3.5 `ToolBlock`
+
+```rust
+pub(crate) struct ToolBlock {
+    name: String,
+    summary: StyledLines,
+    status: ToolStatus,
+    elapsed: Option<Duration>,
+    user_message: Option<String>,
+    body: ToolBody,
+}
+
+pub(crate) enum ToolBody {
+    /// Default wrapped/plain output.
+    Text(Vec<InlineLine>),
+    /// Rich layout produced by a tool renderer.
+    Layout(LayoutIr),
+    /// Denied / no output.
+    Empty,
+}
+```
+
+### 3.6 `LayoutIr` (evolution of `BlockLayout`/`RenderedLayout`)
+
+Replace the current `BlockLayout<BufId>` / `BlockLayout<Box<Buffer>>` pair with a single renderable/measurable IR.
+
+```rust
+pub(crate) enum LayoutIr {
+    /// Plain text runs, cheap to measure and render.
+    Text(Vec<InlineRun>),
+    /// Precomputed diff, width-independent.
+    Diff(DiffIr),
+    /// File view, width-independent.
+    FileView(FileViewIr),
+    /// Horizontal stack of children with width constraints.
+    Hbox(Vec<HboxItem>),
+    /// Vertical stack of children.
+    Vbox(Vec<LayoutIr>),
+    /// Solid separator line.
+    Separator { glyph: char },
+}
+
+pub(crate) struct HboxItem {
+    constraint: Constraint,
+    child: LayoutIr,
+}
+```
+
+Leaves no longer carry rendered `Buffer`s. `measure(width)` recursively computes heights. `render(width, row_range, sink)` recursively paints visible rows.
+
+The primary API has no buffer-leaf compatibility path. `layout.leaf(buf_id)` is removed. If preformatted content becomes necessary for a concrete built-in use case, add it as a new declarative primitive with explicit semantics; do not keep the old buffer-leaf model alive.
+
+### 3.7 `DiffIr` / `FileViewIr`
+
+Evolve `CachedInlineDiff` into `DiffIr`.
+
+```rust
+pub(crate) struct DiffIr {
+    lines: Vec<DiffLine>,
+    max_lineno: u32,
+}
+
+pub(crate) enum DiffLine {
+    Context { lineno: u32, text: InlineLine },
+    Insert { lineno: u32, text: InlineLine },
+    Delete { lineno: u32, text: InlineLine },
+    Ellipsis,
+}
+```
+
+The IR stores the diff structure and line metrics. Syntax highlighting is a render concern and is cached outside the IR. Wrapping is computed at measure/render time from `InlineLine`.
+
+### 3.8 `InlineLine` (shared wrapping primitive)
+
+Wrapping must understand styled runs, source ranges, copy substitutions, and unbreakable inline spans. A plain string metric is not enough for markdown paragraphs, table cells, links, and inline code.
+
+```rust
+pub(crate) struct InlineLine {
+    runs: Vec<InlineRun>,
+}
+
+pub(crate) struct InlineRun {
+    text: String,
+    style: InlineStyle,
+    source: Option<SourceRange>,
+    break_policy: BreakPolicy,
+    copy_as: Option<String>,
+}
+
+pub(crate) enum BreakPolicy {
+    Normal,
+    Unbreakable,
+    PreserveSpaces,
+}
+
+impl InlineLine {
+    fn plain(s: String) -> Self;
+    fn measure_unwrapped(&self) -> CellWidth;
+    fn wrap_rows(&self, max_cells: u16) -> RowIndex;
+    fn wrap_ranges(&self, max_cells: u16) -> Vec<WrappedInlineLine>;
+}
+```
+
+Plain text, code, diff lines, tool output, ANSI output, and markdown inline content all lower to `InlineLine`; plain text is a single run. Do not precompute cumulative char widths initially. Width walking is computed on demand; add a lazy width cache only if profiling shows it matters.
+
+---
+
+## 4. Proposed API surfaces
+
+### 4.1 `TranscriptProjection` becomes the layout engine
+
+```rust
+pub(crate) struct TranscriptProjection {
+    /// Width-independent IR per block/cache key.
+    display_blocks: HashMap<DisplayCacheKey, DisplayBlock>,
+    /// Exact row index: prefix rows for current (width, show_thinking, view_state).
+    exact_rows: ExactRowIndex,
+    /// Last materialized visible range.
+    visible_layout: Vec<LayoutEntry>,
+    /// Ephemeral render-only caches: syntax highlighting, recently rendered visible rows, etc.
+    render_caches: RenderCaches,
+}
+```
+
+Key operations:
+
+```rust
+impl TranscriptProjection {
+    /// Compile or reuse DisplayBlock for each block. Cheap, does not depend on width.
+    fn ensure_display_blocks(&mut self, history: &BlockHistory);
+
+    /// Recompute exact row index for a width. O(blocks × cheap measure).
+    fn measure_all_heights(&mut self, history: &BlockHistory, width: u16, show_thinking: bool);
+
+    /// Plan visible range.
+    fn plan_projection_measured(...);
+
+    /// Materialize only planned visible rows.
+    fn project_planned(&mut self, buf: &mut Buffer, theme: &Theme, plan: ProjectionPlan);
+}
+```
+
+### 4.2 `DisplayBlock` trait/object
+
+```rust
+impl DisplayBlock {
+    fn measure(&self, ctx: MeasureCtx) -> BlockMeasurement;
+    fn render_range(&self, ctx: RenderCtx, rows: Range<RowIndex>, out: &mut RowSink);
+}
+```
+
+`MeasureCtx` carries width, show_thinking, view_state, and theme-independent layout constants.
+
+`RenderCtx` carries width, theme, row budget, and render-cache access.
+
+View-state handling is a wrapper around block IR measurement/rendering. `DisplayBlock.measure(ctx)` returns post-view-state height, and `render_range` receives row ranges in post-view-state coordinates. Collapsed/trimmed head/trimmed tail behavior is implemented once, not duplicated in every block renderer.
+
+Rendering emits full rows, not just strings:
+
+```rust
+pub(crate) struct RenderedRow {
+    text: String,
+    highlights: Vec<Span>,
+    decoration: LineDecoration,
+}
+
+pub(crate) trait RowSink {
+    fn push_row(&mut self, row: RenderedRow);
+}
+```
+
+This preserves the current `LineBuilder` semantics without requiring a `Buffer` for measurement. Row decorations include `source_text`, `soft_wrapped`, `copy_continuation`, `cell_selectable`, `block_selectable`, `source_line`, `fill_bg`, and `pre_formatted`.
+
+### 4.3 Keep `ExactRowIndex`
+
+The prefix-sum index is a good abstraction. Only its feeding mechanism changes. Nodes still store:
+
+- `BlockId`
+- `LayoutKey`
+- `exact_height`
+- `estimated_height` (fallback)
+
+Rebuild rules stay the same except measurement becomes cheap.
+
+### 4.4 Rendered row cache
+
+A small optional cache of recently materialized visible block rows. Unlike today's `RenderedBlockCache`, it stores `RenderedRow`s keyed by `(DisplayCacheKey, width, view_state, row_range)`. This is an optimization, not required for correctness.
+
+Persistent DisplayIR and ephemeral render caches are separate. Syntax highlighting, theme-dependent spans, and visible rows are render caches; they are not part of the serialized DisplayIR.
+
+### 4.5 Chrome metrics
+
+Measurement is theme-independent, but it still needs every fixed cell-width layout decision used by rendering: transcript indentation, code/table chrome, diff gutters, box inner width, hbox constraints, tool header chrome, and block gaps.
+
+```rust
+pub(crate) struct MeasureCtx {
+    width: u16,
+    show_thinking: bool,
+    view_state: ViewState,
+    chrome: ChromeMetrics,
+}
+
+pub(crate) struct ChromeMetrics {
+    transcript_indent: u16,
+    code_border_width: u16,
+    table_border_width: u16,
+    diff_gutter_width: u16,
+    tool_header_width: u16,
+}
+```
+
+The exact fields should match the implementation, but the rule is fixed: measurement and rendering share one source for chrome widths.
+
+---
+
+## 5. Tool renderer API changes
+
+### 5.1 Current situation
+
+Tool renderers return width-dependent `BlockLayout<BufId>`, which contains buffer ids, diff specs, and file-view specs:
+
+```lua
+-- plugin returns a layout tree with Buf/Diff/FileView leaves
+```
+
+`extract_rendered_layout` converts `BufId` to `Box<Buffer>` and eagerly builds `DiffCache` from `DiffSpec`.
+
+### 5.2 Goal
+
+Tool renderers return `LayoutIr` directly. Lua describes what the tool output is; Rust owns measurement, wrapping, diff rendering, syntax highlighting, copy metadata, and visible-row rendering.
+
+The primary tool render context has no width:
+
+```rust
+pub struct ToolIrCtx<'a> {
+    pub summary: &'a str,
+    pub status: &'a str,
+    pub elapsed_secs: Option<u64>,
+    pub call_id: Option<&'a str>,
+}
+```
+
+`ToolRenderCtx.width` is removed from the primary API. Width may only appear if we add a new explicitly preformatted declarative primitive with fixed semantics; it is not part of normal tool layouts.
+
+Chosen design:
+
+- Tool renderers return a declarative tree of `{ kind = "text"|"diff"|"file"|"vbox"|"hbox"|"separator", ... }`.
+- Built-in tools and bundled plugins are migrated to declarative output.
+- `ctx.width` is removed from the primary tool-renderer API. Tool renderers choose structure; Rust owns width-dependent measurement and rendering.
+- `layout.leaf(buf_id)` is removed from the Lua API entirely; the old buffer-leaf contract is gone.
+- No compatibility shim is planned. If an explicit preformatted primitive becomes necessary for a concrete built-in use case, it must be justified as a new declarative primitive, not as preservation of the old buffer API.
+
+### 5.3 Tool render cache changes
+
+Remove `ToolState.render_cache` as a width-keyed rendered buffer cache. Instead, cache the `LayoutIr` (or the full `ToolBody`) inside `ToolBlock` IR.
+
+`ToolBlock` IR should be invalidated only when:
+
+- tool output changes,
+- tool args/status change,
+- tool renderer implementation/version changes.
+
+Width changes do **not** invalidate it.
+
+---
+
+## 6. Migration phases
+
+Phases are big and well-scoped, but implementation should prefer thin vertical slices over long waterfall work. After the primitives exist, convert one simple block path end-to-end through `DisplayBlock.measure` / `render_range` / `ExactRowIndex` / `copy_range` before converting every block type. This exposes hidden rendered-buffer assumptions early.
+
+Each phase should leave the codebase in a working, testable state. `session.ir.bin` implementation lands once enough DisplayIR exists to be useful, but serializability/cache-safety is a constraint from Phase 1 onward.
+
+Do not carry compatibility scaffolding across phases. When a new path is proven, delete the old path and consolidate call sites before moving on. If a refactor is worth doing for the final architecture, finish it in this migration rather than leaving a shim or duplicate abstraction for later.
+
+### Phase 0: Instrumentation and validation harness
+
+**Goal:** know exactly where time goes and have tests that prevent regressions.
+
+- Add perf scopes around:
+  - `session:load` sub-parts (read, parse, history conversion, blob internalize, DisplayIR cache read/hydrate)
+  - `transcript:build_from_session`
+  - `transcript:measure_all_heights` and its substeps
+  - tool prerender count/time
+  - diff cache build count/time
+  - markdown render count/time
+- Add a benchmark or test that builds a large synthetic transcript and measures:
+  - first projection time,
+  - resize time,
+  - visible-row materialization time,
+  - memory allocated during projection.
+- Add property tests: for random blocks and widths, `measure(width)` must equal the number of rows produced by `render_range(width, all_rows)`.
+
+**Deliverable:** benchmark + baselines.
+
+### Phase 1: Introduce `InlineLine` and share wrapping
+
+**Goal:** centralize run-aware text wrapping so it can be reused by every block type.
+
+- Move wrapping logic from markdown inline spans, code block rendering, diff printing, and tool output into one `InlineLine` / `InlineRun` primitive in `smelt_core::content::measure` or equivalent.
+- `InlineLine` stores runs with:
+  - display text,
+  - style/copy metadata,
+  - optional source ranges,
+  - break policy (`Normal`, `Unbreakable`, `PreserveSpaces`).
+- Do **not** precompute cumulative char widths initially. Compute width on demand and add a lazy width cache only if profiling shows it matters.
+- Provide:
+  - `measure_unwrapped() -> CellWidth`
+  - `wrap_rows(max_cells) -> RowIndex`
+  - `wrap_ranges(max_cells) -> Vec<WrappedInlineLine>`
+  - `plain(s: String) -> InlineLine`
+- Update markdown inline wrapping, table cell wrapping, code block wrapping, diff wrapping, ANSI/plain tool output, and file-view output to use `InlineLine`.
+
+**Why first:** wrapping is the common primitive. Getting it right and fast unlocks everything else.
+
+**Deliverable:** all wrapped text goes through `InlineLine`; no behavior change except where existing tests intentionally capture known bugs for later correction.
+
+### Phase 2: Markdown IR with `pulldown-cmark`
+
+**Goal:** replace the custom markdown parser with `pulldown-cmark` and build a Smelt AST from its events; keep all Smelt rendering decisions.
+
+- Add dependency to `smelt_core`:
+  ```toml
+  pulldown-cmark = { version = "0.13", default-features = false }
+  ```
+- Define `MarkdownBlock` / `MarkdownNode` / `InlineSpan` AST as described in §3.3.
+- Build a translator from `pulldown-cmark::Parser::into_offset_iter()` to `MarkdownBlock`:
+  - paragraph, heading, blockquote, list, code block, table, rule
+  - emphasis, strong, strikethrough, inline code, link, image, task list marker
+  - source byte ranges for nodes, inline spans, table rows/cells, and code blocks
+- Implement `measure_markdown(ast: &MarkdownBlock, width: u16) -> RowIndex`.
+- Implement `render_markdown(ast: &MarkdownBlock, width: u16, rows: Range<RowIndex>, out: &mut RowSink)`.
+- Preserve existing Smelt rendering behavior: no blank line after headings, custom table layout (dynamic column widths, fallback, borders, cell alignment, wrapping inside cells), block/inline code chrome, list indentation, blockquote bars.
+- Preserve `source_text` / copy-yank semantics so copying a rendered table or chrome-delimited block returns the original markdown.
+- Move heading adjacency/block-gap behavior to AST semantics instead of the old raw `trim_start().starts_with('#')` heuristic. This intentionally fixes escaped headings and invalid heading markers.
+- **Before replacing the old parser, add regression tests** that capture current rendering for:
+  - tables with inline code, emphasis, and wrapped cell content
+  - nested code blocks and fenced blocks inside lists/blockquotes
+  - headings immediately followed by paragraphs/lists
+  - lists, blockquotes, links, images, task lists, strikethrough
+  - copy/yank returning original markdown for the above
+- Run the new AST renderer against those tests. Where the old renderer was buggy, update the expected output to the correct behavior and document the fix.
+- Replace `crates/tui/src/content/transcript_parsers/markdown.rs` with the new AST renderer.
+
+**Deliverable:** markdown blocks are parsed once to AST and measured/rendered from it; table layout and custom formatting remain Smelt code; the old line-oriented parser is deleted.
+
+### Phase 3: Code block IR and separate syntax render cache
+
+**Goal:** code block height does not run syntect, and DisplayIR stays pure/serializable.
+
+- Introduce `CodeBlock` IR with `lines: Vec<InlineLine>` and `lang: Option<String>`.
+- Do not embed `OnceCell<Vec<SyntaxLine>>` inside the IR. Syntax highlighting is an ephemeral render cache owned by `TranscriptProjection` / renderer.
+- Add `RenderCaches::syntax`, keyed by block content hash, language, and theme/syntax version.
+- Split `render_code_block` into:
+  - `parse_code_block(lines, lang) -> CodeBlock`
+  - `measure_code_block(block: &CodeBlock, width: u16) -> RowIndex`
+  - `render_code_block(block: &CodeBlock, width: u16, rows: Range<RowIndex>, theme, caches, out)`
+- Syntax tokens are computed only when visible rows require them. If a highlighter needs prior-line state, computing from the start of the visible code block is acceptable initially; add incremental checkpoints only if profiling shows huge code blocks are a problem.
+
+**Deliverable:** code block measurement is syntect-free; DisplayIR contains no theme-dependent or render-cache state.
+
+### Phase 4: Diff / file view IR
+
+**Goal:** diffs are measured without building full styled caches.
+
+- Evolve `CachedInlineDiff` into `DiffIr`:
+  - store diff structure + `InlineLine` per line,
+  - keep syntax style ranges out of the IR; use the same ephemeral syntax render cache as code/file views.
+- Provide:
+  - `build_diff_ir(old, new, path, anchor, lang) -> DiffIr`
+  - `measure_diff(ir: &DiffIr, width: u16, gutter: GutterStyle) -> RowIndex`
+  - `render_diff(ir: &DiffIr, width: u16, rows: Range<RowIndex>, gutter, theme, out)`
+- Update `source_view.rs` and `diff.rs` to use the IR.
+- Ensure `DiffIr` is cached per diff content, not per width.
+
+**Deliverable:** diff measurement does not build styled caches; resize does not rebuild diff caches.
+
+### Phase 5: Tool body IR and global tool prerender removal
+
+**Goal:** historical tool blocks are cheap to measure; tool render hooks run only on content changes or DisplayIR cache misses, never because width changed.
+
+- Introduce `ToolBody` IR.
+- Convert built-in tool outputs (bash, grep, etc.) to produce `ToolBody::Text` or `ToolBody::Layout(LayoutIr)`.
+- Replace `ToolState.render_cache` with width-independent `ToolBody` in the `DisplayModel`, keyed by content hash + stable sidecar hash + tool renderer version.
+- `ToolBody` is computed once per content change, not per width.
+- Remove `prerender_transcript_tool_blocks_for_ids(tw, &all_block_ids)` from the render loop.
+- In `measure_all_heights`, tool blocks measure from `ToolBody` IR.
+- In `project_visible_range`, visible tool blocks render from `ToolBody` IR.
+- Update the Lua tool-renderer API to return declarative `LayoutIr` primitives; remove `layout.leaf(buf_id)` and `ctx.width`.
+- Built-in/bundled tools are migrated first. No buffer-leaf compatibility shim is kept; add only declarative primitives that are justified by real built-in needs.
+
+**Deliverable:** resize does not rerun Lua tool render hooks for hidden tools.
+
+### Phase 6: Unified `DisplayBlock` and `TranscriptProjection` rewrite
+
+**Goal:** one IR per block, one measurement path, one render path.
+
+- Introduce `DisplayBlock` enum covering all block variants.
+- Add `DisplayModel` keyed by `DisplayCacheKey { block_id, content_hash, sidecar_hash, renderer_version }` inside `Transcript` or `TranscriptProjection`.
+- Replace per-variant renderers (`transcript_parsers/*`) with:
+  - `compile_block(block: &Block, state: Option<&ToolState>, lua: &LuaRuntime) -> DisplayBlock`
+  - `measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> RowIndex`
+  - `render_block(block: &DisplayBlock, ctx: RenderCtx, rows: Range<RowIndex>, out: &mut RowSink)`
+- Rewrite `TranscriptProjection`:
+  - `ensure_display_blocks` compiles missing IRs.
+  - `measure_all_heights` calls `measure_block` for each block.
+  - `project_planned` / `collect_blocks_range` calls `render_block` for visible row ranges.
+- Delete `RenderedBlockCache` and `layout_block_into` if no longer used.
+- Keep `ExactRowIndex` but feed it from `measure_block`.
+
+**Deliverable:** transcript projection is IR-based end to end.
+
+### Phase 7: Cleanup dead abstractions
+
+**Goal:** remove leftover scaffolding and simplify.
+
+- Remove `RenderedBlockCache` if replaced.
+- Remove old `transcript_parsers/*` files once their block variants move to DisplayIR.
+  - In particular delete the custom markdown parser once `pulldown-cmark` AST rendering is proven.
+  - Do not leave old/new renderer shims side by side after a variant migrates.
+- Remove `BlockLayout<BufId>` / `BlockLayout<Box<Buffer>>` if replaced by `LayoutIr`.
+- Remove `ToolState.render_cache` and related width-keyed cache logic.
+- Consolidate `CachedInlineDiff` into `DiffIr`.
+- Rename `measure_all_heights` to `rebuild_row_index` if that better reflects its new role.
+- Update Lua API docs/stubs for any changed tool renderer return types.
+
+**Deliverable:** codebase has fewer files and concepts; all tests pass.
+
+### Phase 8: Implement `session.ir.bin`
+
+**Goal:** resume large sessions without reparsing/recompiling every block.
+
+Disk persistence is required for the target UX and has been a DisplayIR design constraint from the start. This phase wires the already-serializable DisplayIR into the on-disk sidecar. The canonical session JSON remains the source of truth; DisplayIR is stored in a separate disposable cache file next to the session, for example:
+
+```text
+sessions/<id>/session.json
+sessions/<id>/session.ir.bin
+```
+
+- Add a binary persistent display cache at `sessions/<id>/session.ir.bin` (`bincode`, `postcard`, or equivalent internal Rust-only format).
+- Start the file with a small fixed header before the encoded payload:
+  - magic bytes (for example `SMELTIR\0`),
+  - IR cache format version,
+  - renderer version,
+  - Smelt/build version,
+  - checksum or payload length if useful for partial-write detection.
+- Cache compiled `DisplayBlock`s keyed by:
+  - block content hash,
+  - stable sidecar hash,
+  - renderer version,
+  - Smelt/IR cache schema version,
+  - tool renderer version for tool layouts.
+- On load:
+  - read `session.json`,
+  - read `session.ir.bin` if present,
+  - hydrate matching `DisplayBlock`s,
+  - compile missing/stale entries,
+  - write back the updated cache asynchronously or at a safe save point.
+- Treat cache corruption, missing files, version mismatch, and partial writes as cache misses.
+- Do not store theme-dependent syntax highlighting, visible rows, or width-dependent wraps in the persistent cache.
+- Keep session cache handling simple: missing/stale cache rebuilds from canonical `session.json`; no cross-version cache migration layer.
+
+**Deliverable:** resume/preview avoids markdown/diff/tool IR recompilation for unchanged historical blocks.
+
+### Phase 9: Performance polish and future-proofing
+
+**Goal:** make 100 MB sessions feasible.
+
+- Add incremental row index updates: when appending a block, only measure the new block and extend prefix sums.
+- Parallel IR compilation for cache misses during session load (markdown/diff parsing is independent per block).
+- Add a cap/trim mode for very long plain-text blocks so measurement stays bounded.
+- Optimize `InlineLine` memory layout if profiling shows it.
+- Add syntax-cache checkpoints for enormous code/file-view blocks only if visible rendering proves slow.
+
+**Deliverable:** benchmark shows order-of-magnitude improvement; 100 MB synthetic session is usable.
+
+---
+
+## 7. How each user-facing path changes
+
+### Resume picker preview
+
+Today:
+
+```
+load session → build transcript → prerender all tools → measure all heights by rendering → render visible tail
+```
+
+Goal:
+
+```
+load session → hydrate DisplayIR cache → compile cache misses → measure all heights cheaply → render visible tail
+```
+
+Expected: ~10-50 ms for an 11 MB session instead of ~2 s.
+
+### Session resume
+
+Today: same as preview plus full first-frame render flush.
+
+Goal: hydrate DisplayIR cache during `load_session`, compile misses, then cheap measure + visible render.
+
+### Resize
+
+Today:
+
+```
+width change → clear rendered cache → prerender all tools → render all blocks to measure → render visible
+```
+
+Goal:
+
+```
+width change → recompute heights from IR → render visible
+```
+
+No Lua hooks, no syntect, no diff cache rebuilds for hidden blocks.
+
+### Streaming a new block
+
+Today: block is appended; next frame measures by rendering.
+
+Goal: compile IR for the new block once, append height to row index, render visible tail.
+
+### Copy / yank / search
+
+Today: `copy_range` and `display_rows_for_range` force full measurement via rendered buffers.
+
+Goal: they use `measure_all_heights` (now cheap) and render only the requested row range from IR.
+
+---
+
+## 8. Testing strategy
+
+### Invariants to test
+
+1. **Exactness:** for every block type, sample of widths, and sample of view states:
+   ```
+   measure(width) == render(block, width, 0..measure(width)).len()
+   ```
+2. **Row index correctness:** for random transcripts and widths, prefix rows match sequential measurement.
+3. **Visible materialization coverage:** for random scroll positions, `project_planned` materializes rows covering `[scroll_top, scroll_top + viewport_rows)`.
+4. **Resize equivalence:** rendering at width W1 then W2 produces the same rows as rendering directly at W2.
+5. **Copy/yank correctness:** `copy_range` returns the same text as the full rendered transcript for the same range.
+6. **Persistent cache correctness:** loading DisplayIR from disk renders/measures identically to compiling it fresh.
+7. **AST gap semantics:** heading adjacency uses parsed markdown headings, not raw `#` prefix heuristics.
+
+### Regression tests
+
+- Add regression tests **before** replacing the markdown parser. Capture current rendering of tables, nested code blocks, headings, lists, blockquotes, links, inline emphasis, task lists, and `source_text` / copy-yank behavior.
+- When the AST renderer produces different output, investigate whether the old behavior was a bug. Fix the expected output and document the change rather than preserving bugs for compatibility.
+- Existing storybook tests for transcript rendering must still pass.
+- Existing tests for diff rendering, markdown tables, code blocks, tool output must pass.
+- Add large synthetic session benchmark.
+
+### Fuzz/property tests
+
+- Random markdown strings → parse → measure → render → compare line count.
+- Random terminal widths → ensure no panic and monotonic total rows.
+
+---
+
+## 9. Risks and mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| Breaking plugin tool renderers | Accepted. Option A is a breaking declarative width-independent API; migrate built-in tools and update docs/stubs. No compatibility shim. |
+| Table rendering fidelity lost | `pulldown-cmark` only parses rows; all layout logic stays in Smelt; regression tests for tables before migration |
+| `source_text` / copy-yank drift | Build markdown AST with source ranges via `into_offset_iter`; reproduce `LineBuilder::set_source_text`, `arm_source_text`, `stamp_copy_group`, `stamp_chrome_delimited_block`; regression tests |
+| Unicode/ANSI wrapping drift | Centralize in `InlineLine`; exhaustive tests |
+| Syntax highlighting cache complexity | Keep syntax cache separate from DisplayIR; key by content/language/theme; compute only for visible rows |
+| Persistent cache corruption/staleness | Cache is disposable; version/hash mismatch and read errors are cache misses |
+| Memory blow from IR for 100 MB | IR is proportional to source; add caps/trim modes if needed |
+| Long migration | Each phase is independent and testable; ship after each phase |
+| Theme changes | IR is width-independent; theme changes clear render caches but not measurement or persistent IR |
+| Selection/copy over wrapped rows | Render the requested range from IR; use same wrapping and row-decoration logic |
+
+---
+
+## 10. What to delete / rename
+
+### Likely deletions
+
+- `crates/tui/src/content/block_buffers.rs` — `RenderedBlockCache`
+- `crates/tui/src/content/transcript_parsers/mod.rs` — old `layout_block_into` path
+- `crates/tui/src/content/transcript_parsers/text.rs`, `markdown.rs`, `thinking.rs`, `user.rs`, `code_line.rs`, `compacted.rs`, `exec.rs`, `mode.rs`, `process_status.rs`, `tool_call.rs`, `tools.rs` — merged into `DisplayBlock` impls
+- `crates/core/src/content/block_layout.rs` — old `BlockLayout` if fully replaced by `LayoutIr`
+- `ToolState.render_cache`
+- `extract_rendered_layout` and width-keyed diff cache build
+
+### Likely renames
+
+- `transcript_parsers` module → `display` or `layout`
+- `BlockLayout` → `LayoutIr`
+- `CachedInlineDiff` → `DiffIr`
+- `measure_all_heights` → `rebuild_row_index`
+- `RenderedBlockCache` → `RenderedRowCache` (if kept as optional optimization)
+
+### Keep
+
+- `BlockHistory`
+- `LayoutKey`
+- `ExactRowIndex`
+- `TranscriptProjection` (rewritten)
+- `TranscriptView` facade
+- `SourceViewTarget` idea
+
+---
+
+## 11. Success criteria
+
+1. Resume picker opens in < 100 ms for an 11 MB session.
+2. Resuming an 11 MB session with a warm DisplayIR cache shows the transcript in < 100 ms.
+3. Terminal resize of an 11 MB session is < 50 ms.
+4. A 100 MB synthetic session is usable (resume/resize < 500 ms, scrolling smooth).
+5. All existing rendering tests pass.
+6. Codebase has fewer concepts/files than before (net deletion).
+7. New architecture is documented and obvious to future maintainers.
+8. Warm resume uses the persistent DisplayIR cache; missing/stale/corrupt cache falls back to correct recompilation.
+
+---
+
+## 12. Summary of architectural shift
+
+| Aspect | Before | After |
+|--------|--------|-------|
+| Block model | `Block` enum | `Block` + compiled `DisplayBlock` IR |
+| Height measurement | render into Buffer, count lines | `DisplayBlock.measure(width)` |
+| Width handling | everything invalidated | only wrapping recomputed |
+| Tool rendering | Lua hook per width | Lua returns width-independent declarative IR per content change |
+| Diff rendering | build styled cache per width | `DiffIr` once; syntax cache separate/render-only |
+| Markdown | parse+emit every time | parse once to source-ranged AST; persist DisplayIR cache |
+| Global prerender | all tools every frame | only visible rows rendered |
+| Caches | several overlapping caches (rendered blocks, tool cache, diff cache) | persistent DisplayIR cache + ephemeral render caches |
+
+The end state is a single pipeline:
+
+```
+session → hydrate persistent IR cache → compile misses → measure cheaply per width → index rows → render only visible rows
+```
+
+This is the architecture that can scale.
