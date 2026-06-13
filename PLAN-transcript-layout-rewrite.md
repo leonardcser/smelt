@@ -718,6 +718,48 @@ Conclusion: this slice intentionally centralizes behavior without changing the r
 
 **Deliverable:** markdown blocks are parsed once to AST and measured/rendered from it; table layout and custom formatting remain Smelt code; the old line-oriented parser is deleted.
 
+**Completed slice:** markdown parsing now produces a width-independent structural IR for the blocks that previously forced custom parsing decisions.
+
+- Added `pulldown-cmark` to `smelt_core` with default features disabled.
+- Added `smelt_core::content::markdown_ir::{MarkdownBlock, MarkdownNode, parse_markdown}` in `crates/core/src/content/markdown_ir.rs`. This first IR slice borrows the source and keeps source ranges for plain source, fenced/indented code blocks, tables, and horizontal rules; code nodes also store language and body ranges.
+- Updated `crates/tui/src/content/transcript_parsers/markdown.rs` to render from `MarkdownBlock` while preserving the existing Smelt line renderer for source ranges and the existing table/code/rule renderers for specialized nodes.
+- Kept current copy/source behavior for rendered markdown tables and current spacing behavior for headings, lists, code blocks, tables, and horizontal rules. The bridge intentionally still renders ordinary source lines with the existing inline renderer until full paragraph/list/inline AST lowering lands.
+- The old backtick-fence helpers remain in `smelt_core::content` for now because they are tested parsing primitives, but the transcript markdown renderer no longer uses them.
+
+Validation:
+
+```bash
+cargo test -p smelt-core markdown_ir
+cargo test -p smelt-tui markdown
+cargo test -p smelt-tui transcript_buf
+cargo test -p smelt-core -- --test-threads=1
+cargo test -p smelt-tui
+cargo test -p smelt-tui mixed_large_transcript_projection_baseline -- --ignored --nocapture
+```
+
+Baseline result after the markdown IR parser slice:
+
+```text
+TRANSCRIPT_LAYOUT_BASELINE input_bytes=10497943 generated_bytes=10499021 blocks=3404 total_rows=120137 diff_caches=128 diff_cache_ms=1698 resize_diff_caches=128 resize_diff_cache_ms=1682 first_ms=843 resize_ms=931 visible_ms=3 allocs=3387644 bytes_allocated=644856584 visible_rows=80
+```
+
+Top duration totals from the same run:
+
+| label | count | total |
+|---|---:|---:|
+| `render:text` | 1024 | 3.703 s |
+| `render:markdown` | 1024 | 3.695 s |
+| `render:build_diff_cache` | 256 | 3.369 s |
+| `transcript:plan_projection_measured` | 2 | 1.773 s |
+| `transcript:measure_all_heights` | 3 | 1.773 s |
+| `render:tool_call` | 256 | 1.606 s |
+| `render:inline_diff_cached` | 256 | 1.597 s |
+| `render:code_block` | 1024 | 919 ms |
+| `render:exec` | 400 | 376 ms |
+| `render:wrapped_output` | 400 | 361 ms |
+
+Conclusion: this slice moves markdown structural parsing into a reusable core IR and keeps rendering compatibility, but it still renders full blocks for measurement. The measured hot path is therefore intentionally unchanged until markdown/code/table measurement can read the IR directly.
+
 ### Phase 3: Code block IR and separate syntax render cache
 
 **Goal:** code block height does not run syntect, and DisplayIR stays pure/serializable.

@@ -1,6 +1,6 @@
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::{render_code_block, render_markdown_table};
-use smelt_core::content::{markdown_closes_fence, markdown_opening_fence};
+use smelt_core::content::markdown_ir::{parse_markdown, MarkdownBlock, MarkdownNode};
 use smelt_core::theme::intern;
 
 pub fn render_markdown_inner(
@@ -12,181 +12,224 @@ pub fn render_markdown_inner(
     bctx: Option<&smelt_core::content::BoxContext>,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:markdown");
+    let block = parse_markdown(content);
+    render_markdown_block(out, &block, width, indent, dim, bctx)
+}
+
+fn render_markdown_block(
+    out: &mut LineBuilder,
+    block: &MarkdownBlock<'_>,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+) -> u16 {
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {
         width.saturating_sub(indent.len() + 1)
     };
-    let lines: Vec<&str> = content.lines().collect();
+    let mut state = RenderState::default();
+
+    for node in &block.nodes {
+        match node {
+            MarkdownNode::Source { range } => {
+                let source = smelt_buffer::text::slice(block.source, range.clone());
+                render_source_lines(out, source, max_cols, indent, dim, bctx, &mut state);
+            }
+            MarkdownNode::Code { lang, body, .. } => {
+                render_block_gap(out, &mut state);
+                let code_lines: Vec<&str> = body
+                    .iter()
+                    .flat_map(|range| {
+                        smelt_buffer::text::slice(block.source, range.clone()).lines()
+                    })
+                    .collect();
+                state.rows += render_code_block(out, &code_lines, lang, width, dim, bctx, true);
+                state.last_content_line = None;
+                state.prev_was_block = true;
+            }
+            MarkdownNode::Table { range } => {
+                render_block_gap(out, &mut state);
+                let source = smelt_buffer::text::slice(block.source, range.clone());
+                let lines: Vec<&str> = source.lines().collect();
+                state.rows +=
+                    render_markdown_table_from_lines(out, &lines, width, dim, bctx, indent);
+                state.last_content_line = None;
+                state.prev_was_block = true;
+            }
+            MarkdownNode::Rule { .. } => {
+                render_block_gap(out, &mut state);
+                state.rows += render_horizontal_rule(out, bctx, indent);
+                state.last_content_line = None;
+                state.prev_was_block = true;
+            }
+        }
+    }
+
+    state.rows
+}
+
+#[derive(Default)]
+struct RenderState {
+    rows: u16,
+    last_content_line: Option<String>,
+    pending_blank: bool,
+    prev_was_block: bool,
+}
+
+fn render_block_gap(out: &mut LineBuilder, state: &mut RenderState) {
+    let mut gap_emitted = false;
+    if state.pending_blank {
+        out.newline();
+        state.rows += 1;
+        state.pending_blank = false;
+        gap_emitted = true;
+    }
+    if state.rows > 0 && !gap_emitted {
+        let after_heading = state
+            .last_content_line
+            .as_deref()
+            .is_some_and(|l| l.trim_start().starts_with('#'));
+        if !after_heading {
+            out.newline();
+            state.rows += 1;
+        }
+    }
+}
+
+fn render_source_lines(
+    out: &mut LineBuilder,
+    source: &str,
+    max_cols: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    state: &mut RenderState,
+) {
+    let lines: Vec<&str> = source.lines().collect();
     let mut i = 0;
-    let mut rows = 0u16;
-    let mut last_content_line: Option<&str> = None;
-    let mut pending_blank = false;
-    let mut prev_was_block = false;
     while i < lines.len() {
-        if lines[i].trim().is_empty() {
-            let after_heading = last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
+        let line = lines[i];
+        if line.trim().is_empty() {
+            let after_heading = state
+                .last_content_line
+                .as_deref()
+                .is_some_and(|l| l.trim_start().starts_with('#'));
             let mut next_i = i + 1;
             while next_i < lines.len() && lines[next_i].trim().is_empty() {
                 next_i += 1;
             }
-            if rows > 0 && !after_heading && next_i < lines.len() && !is_list_item(lines[next_i]) {
-                pending_blank = true;
+            if state.rows > 0
+                && !after_heading
+                && next_i < lines.len()
+                && !is_list_item(lines[next_i])
+            {
+                state.pending_blank = true;
             }
             i = next_i;
             continue;
         }
+
         let mut gap_emitted = false;
-        if pending_blank {
+        if state.pending_blank {
             out.newline();
-            rows += 1;
-            pending_blank = false;
+            state.rows += 1;
+            state.pending_blank = false;
             gap_emitted = true;
         }
-        if let Some((fence_len, lang)) = markdown_opening_fence(lines[i]) {
-            if rows > 0 && !gap_emitted {
-                let after_heading =
-                    last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
-                if !after_heading {
-                    out.newline();
-                    rows += 1;
-                }
-            }
-            i += 1;
-            let code_start = i;
-            while i < lines.len() {
-                if markdown_closes_fence(fence_len, lines[i]) {
-                    break;
-                }
-                i += 1;
-            }
-            let code_lines = &lines[code_start..i];
-            if i < lines.len() {
-                i += 1;
-            }
-            rows += render_code_block(out, code_lines, lang, width, dim, bctx, true);
-            last_content_line = None;
-            prev_was_block = true;
-        } else if lines[i].trim_start().starts_with('|') {
-            if rows > 0 && !gap_emitted {
-                let after_heading =
-                    last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
-                if !after_heading {
-                    out.newline();
-                    rows += 1;
-                }
-            }
-            let table_start = i;
-            while i < lines.len() && lines[i].trim_start().starts_with('|') {
-                i += 1;
-            }
-            rows += render_markdown_table_from_lines(
-                out,
-                &lines[table_start..i],
-                width,
-                dim,
-                bctx,
-                indent,
-            );
-            last_content_line = None;
-            prev_was_block = true;
-        } else if is_horizontal_rule(lines[i]) {
-            if rows > 0 && !gap_emitted {
-                let after_heading =
-                    last_content_line.is_some_and(|l| l.trim_start().starts_with('#'));
-                if !after_heading {
-                    out.newline();
-                    rows += 1;
-                }
-            }
-            rows += render_horizontal_rule(out, bctx, indent);
-            last_content_line = None;
-            prev_was_block = true;
-            i += 1;
-        } else {
-            if prev_was_block && !gap_emitted {
-                out.newline();
-                rows += 1;
-            }
-            let trimmed = lines[i].trim_start();
-            {
-                use smelt_core::content::highlight::{
-                    emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans,
-                    InlineSpan, InlineStyle,
-                };
-                let leading_ws = &lines[i][..lines[i].len() - trimmed.len()];
-                let mut line_spans: Vec<InlineSpan> = Vec::new();
-
-                if trimmed.starts_with('#') {
-                    line_spans.push(InlineSpan {
-                        text: trimmed.to_string(),
-                        style: InlineStyle {
-                            bold: true,
-                            dim,
-                            group: Some(intern("SmeltHeading")),
-                            ..Default::default()
-                        },
-                    });
-                } else if trimmed.starts_with('>') {
-                    line_spans.push(InlineSpan {
-                        text: trimmed.to_string(),
-                        style: InlineStyle {
-                            dim: true,
-                            italic: true,
-                            ..Default::default()
-                        },
-                    });
-                } else {
-                    let (prefix, body) = split_list_prefix(trimmed);
-                    if !leading_ws.is_empty() {
-                        line_spans.push(InlineSpan {
-                            text: leading_ws.to_string(),
-                            style: InlineStyle {
-                                dim,
-                                ..Default::default()
-                            },
-                        });
-                    }
-                    if !prefix.is_empty() {
-                        line_spans.push(InlineSpan {
-                            text: prefix.to_string(),
-                            style: InlineStyle {
-                                dim: true,
-                                ..Default::default()
-                            },
-                        });
-                    }
-                    line_spans.extend(parse_inline_spans(body, dim));
-                }
-
-                let wrapped = wrap_inline_spans(&line_spans, max_cols);
-                if wrapped.len() > 1 {
-                    out.mark_wrapped();
-                }
-                for (si, row_spans) in wrapped.iter().enumerate() {
-                    if si == 0 {
-                        out.set_source_text(lines[i]);
-                    } else {
-                        out.mark_soft_wrap_continuation();
-                    }
-                    if let Some(b) = bctx {
-                        b.print_left(out);
-                        emit_inline_spans(out, row_spans);
-                        b.print_right(out, inline_spans_width(row_spans));
-                    } else {
-                        out.print(indent);
-                        emit_inline_spans(out, row_spans);
-                    }
-                    out.newline();
-                }
-                rows += wrapped.len() as u16;
-            }
-            last_content_line = Some(lines[i]);
-            prev_was_block = false;
-            i += 1;
+        if state.prev_was_block && !gap_emitted {
+            out.newline();
+            state.rows += 1;
         }
+        render_markdown_line(out, line, max_cols, indent, dim, bctx, state);
+        state.last_content_line = Some(line.to_string());
+        state.prev_was_block = false;
+        i += 1;
     }
-    rows
+}
+
+fn render_markdown_line(
+    out: &mut LineBuilder,
+    line: &str,
+    max_cols: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    state: &mut RenderState,
+) {
+    use smelt_core::content::highlight::{
+        emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans, InlineSpan,
+        InlineStyle,
+    };
+
+    let trimmed = line.trim_start();
+    let leading_ws = &line[..line.len() - trimmed.len()];
+    let mut line_spans: Vec<InlineSpan> = Vec::new();
+
+    if trimmed.starts_with('#') {
+        line_spans.push(InlineSpan {
+            text: trimmed.to_string(),
+            style: InlineStyle {
+                bold: true,
+                dim,
+                group: Some(intern("SmeltHeading")),
+                ..Default::default()
+            },
+        });
+    } else if trimmed.starts_with('>') {
+        line_spans.push(InlineSpan {
+            text: trimmed.to_string(),
+            style: InlineStyle {
+                dim: true,
+                italic: true,
+                ..Default::default()
+            },
+        });
+    } else {
+        let (prefix, body) = split_list_prefix(trimmed);
+        if !leading_ws.is_empty() {
+            line_spans.push(InlineSpan {
+                text: leading_ws.to_string(),
+                style: InlineStyle {
+                    dim,
+                    ..Default::default()
+                },
+            });
+        }
+        if !prefix.is_empty() {
+            line_spans.push(InlineSpan {
+                text: prefix.to_string(),
+                style: InlineStyle {
+                    dim: true,
+                    ..Default::default()
+                },
+            });
+        }
+        line_spans.extend(parse_inline_spans(body, dim));
+    }
+
+    let wrapped = wrap_inline_spans(&line_spans, max_cols);
+    if wrapped.len() > 1 {
+        out.mark_wrapped();
+    }
+    for (si, row_spans) in wrapped.iter().enumerate() {
+        if si == 0 {
+            out.set_source_text(line);
+        } else {
+            out.mark_soft_wrap_continuation();
+        }
+        if let Some(b) = bctx {
+            b.print_left(out);
+            emit_inline_spans(out, row_spans);
+            b.print_right(out, inline_spans_width(row_spans));
+        } else {
+            out.print(indent);
+            emit_inline_spans(out, row_spans);
+        }
+        out.newline();
+    }
+    state.rows += wrapped.len() as u16;
 }
 
 fn split_list_prefix(line: &str) -> (&str, &str) {
@@ -224,6 +267,7 @@ fn is_list_item(line: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 pub(super) fn is_horizontal_rule(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
