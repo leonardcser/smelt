@@ -454,22 +454,22 @@ impl TranscriptProjection {
         });
     }
 
-    pub(crate) fn measure_all_heights(
+    pub(crate) fn rebuild_row_index(
         &mut self,
         history: &mut BlockHistory,
         width: u16,
         show_thinking: bool,
         _theme: &Theme,
     ) {
-        let _perf = smelt_perf::perf::begin("transcript:measure_all_heights");
+        let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index");
         smelt_perf::perf::record_value(
-            "transcript:measure_all_heights:blocks",
+            "transcript:rebuild_row_index:blocks",
             history.order.len() as u64,
         );
         self.gc_if_stale(history, width);
         let base_key = base_layout_key(width, show_thinking);
         {
-            let _perf = smelt_perf::perf::begin("transcript:measure_all_heights:rebuild_index");
+            let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
             self.exact_rows
                 .rebuild_if_stale(history, width, show_thinking, base_key);
         }
@@ -478,7 +478,7 @@ impl TranscriptProjection {
         }
 
         let missing: Vec<usize> = {
-            let _perf = smelt_perf::perf::begin("transcript:measure_all_heights:collect_missing");
+            let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:collect_missing");
             (0..self.exact_rows.nodes.len())
                 .filter(|&i| {
                     self.exact_rows
@@ -489,7 +489,7 @@ impl TranscriptProjection {
                 .collect()
         };
         smelt_perf::perf::record_value(
-            "transcript:measure_all_heights:missing",
+            "transcript:rebuild_row_index:missing",
             missing.len() as u64,
         );
         self.ensure_block_indices(history, &missing);
@@ -563,7 +563,7 @@ impl TranscriptProjection {
         show_thinking: bool,
         theme: &Theme,
     ) -> RowIndex {
-        self.measure_all_heights(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking, theme);
         self.exact_rows.total_rows()
     }
 
@@ -591,7 +591,7 @@ impl TranscriptProjection {
     ) -> ProjectionPlan {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
-        self.measure_all_heights(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking, theme);
         self.plan_projection_from_prepared(
             history,
             width,
@@ -928,7 +928,7 @@ impl TranscriptProjection {
         show_thinking: bool,
         theme: &Theme,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
-        self.measure_all_heights(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking, theme);
         self.exact_block_layout(history)
             .into_iter()
             .map(|e| (e.id, e.start, e.rows))
@@ -1016,7 +1016,7 @@ impl TranscriptProjection {
             return DisplayRows::empty();
         }
 
-        self.measure_all_heights(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking, theme);
         let total_rows = self.exact_rows.total_rows();
         if total_rows == 0 || start >= total_rows {
             return DisplayRows::empty();
@@ -1088,7 +1088,7 @@ impl TranscriptProjection {
         if (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col) {
             return CopyOutput::default();
         }
-        self.measure_all_heights(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking, theme);
         let total_rows = self.exact_rows.total_rows();
         if total_rows == 0 || range.start.row >= total_rows {
             return CopyOutput::default();

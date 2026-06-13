@@ -423,7 +423,7 @@ impl TranscriptProjection {
     fn ensure_display_blocks(&mut self, history: &BlockHistory);
 
     /// Recompute exact row index for a width. O(blocks × cheap measure).
-    fn measure_all_heights(&mut self, history: &BlockHistory, width: u16, show_thinking: bool);
+    fn rebuild_row_index(&mut self, history: &BlockHistory, width: u16, show_thinking: bool);
 
     /// Plan visible range.
     fn plan_projection_measured(...);
@@ -886,18 +886,24 @@ Validation:
 
 **Deliverable:** transcript projection is display-model based end to end.
 
-### Phase 7: Cleanup dead abstractions
+### Phase 7: Cleanup dead abstractions — complete
 
 **Goal:** remove leftover scaffolding and simplify.
 
-- Remove old `transcript_parsers/*` files once their block variants move to DisplayIR.
-  - In particular delete the custom markdown parser once `pulldown-cmark` AST rendering is proven.
-  - Do not leave old/new renderer shims side by side after a variant migrates.
-- Remove `BlockLayout<BufId>` / `BlockLayout<Box<Buffer>>` if replaced by `LayoutIr`.
-- Remove `ToolState.render_cache` and related width-keyed cache logic.
-- Consolidate `CachedInlineDiff` into `DiffIr`.
-- Rename `measure_all_heights` to `rebuild_row_index` if that better reflects its new role.
-- Update Lua API docs/stubs for any changed tool renderer return types.
+Completed slice:
+
+- Removed the rendered-block cache abstraction in Phase 6; no `RenderedBlockCache` code remains.
+- Collapsed transitional fake `DisplayBlock` variants into an explicit `Legacy` variant plus real `CodeLine` / `ToolCall` IR-backed variants.
+- Removed leftover fixed-size rendered-cache batching from transcript measurement/materialization.
+- Renamed `measure_all_heights` to `rebuild_row_index`; the method now describes the row-index side effect instead of the old render-to-measure implementation.
+- Kept `BlockLayout<BufId>` intentionally as the raw Lua-returned tool preview/render shape. `BlockLayout<Box<Buffer>>`, `RenderedLayout`, `ToolState.render_cache`, and `CachedInlineDiff` are gone.
+- No Lua API docs/stubs changed in this phase.
+
+Validation:
+
+- `cargo test -p smelt-tui transcript_buf`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace` → `3046 passed, 1 skipped`
 
 **Deliverable:** codebase has fewer files and concepts; all tests pass.
 
@@ -1001,7 +1007,7 @@ Goal: compile IR for the new block once, append height to row index, render visi
 
 Today: `copy_range` and `display_rows_for_range` force full measurement via rendered buffers.
 
-Goal: they use `measure_all_heights` (now cheap) and render only the requested row range from IR.
+Goal: they use `rebuild_row_index` (now cheap) and render only the requested row range from IR.
 
 ---
 
@@ -1064,8 +1070,6 @@ Goal: they use `measure_all_heights` (now cheap) and render only the requested r
 
 - `transcript_parsers` module → `display` or `layout`
 - `BlockLayout` → `LayoutIr`
-- `CachedInlineDiff` → `DiffIr`
-- `measure_all_heights` → `rebuild_row_index`
 - `RenderedRowCache` (if optional visible-row cache is reintroduced)
 
 ### Keep
