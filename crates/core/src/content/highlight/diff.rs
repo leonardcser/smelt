@@ -2,6 +2,7 @@
 //! produce a fresh diff per render, plus the persisted `DiffIr`
 //! IR that `edit_file` / `edit_notebook` produce once and replay.
 
+use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 use syntect::easy::HighlightLines;
@@ -29,30 +30,18 @@ struct DiffViewData {
     is_full_file: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffIr {
     pub(crate) max_display_lineno: usize,
     pub(crate) syntax_ext: String,
     pub(crate) lines: Vec<DiffLine>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum DiffLine {
-    Context {
-        lineno: usize,
-        text: String,
-        layout: InlineLine<()>,
-    },
-    Delete {
-        lineno: usize,
-        text: String,
-        layout: InlineLine<()>,
-    },
-    Insert {
-        lineno: usize,
-        text: String,
-        layout: InlineLine<()>,
-    },
+    Context { lineno: usize, text: String },
+    Delete { lineno: usize, text: String },
+    Insert { lineno: usize, text: String },
     Ellipsis,
 }
 
@@ -65,30 +54,15 @@ fn diff_line_layout(text: &str) -> InlineLine<()> {
 }
 
 fn context_line(lineno: usize, text: String) -> DiffLine {
-    let layout = diff_line_layout(&text);
-    DiffLine::Context {
-        lineno,
-        text,
-        layout,
-    }
+    DiffLine::Context { lineno, text }
 }
 
 fn delete_line(lineno: usize, text: String) -> DiffLine {
-    let layout = diff_line_layout(&text);
-    DiffLine::Delete {
-        lineno,
-        text,
-        layout,
-    }
+    DiffLine::Delete { lineno, text }
 }
 
 fn insert_line(lineno: usize, text: String) -> DiffLine {
-    let layout = diff_line_layout(&text);
-    DiffLine::Insert {
-        lineno,
-        text,
-        layout,
-    }
+    DiffLine::Insert { lineno, text }
 }
 
 fn push_expanded_tabs(out: &mut String, s: &str) {
@@ -555,9 +529,9 @@ pub fn measure_diff_ir(cache: &DiffIr, width: u16, gutter: GutterStyle, indent_c
         .lines
         .iter()
         .map(|line| match line {
-            DiffLine::Context { layout, .. }
-            | DiffLine::Delete { layout, .. }
-            | DiffLine::Insert { layout, .. } => diff_line_rows(layout, max_content),
+            DiffLine::Context { text, .. }
+            | DiffLine::Delete { text, .. }
+            | DiffLine::Insert { text, .. } => diff_line_rows(&diff_line_layout(text), max_content),
             DiffLine::Ellipsis => 1,
         })
         .sum::<usize>()
@@ -612,15 +586,17 @@ pub fn print_diff_ir(
     let syntax_theme = syntax_theme();
     let mut h = HighlightLines::new(syntax, syntax_theme);
 
+    let mut seen_rows = 0u16;
     let mut emitted = 0u16;
-    for (row_idx, line) in cache.lines.iter().enumerate() {
+    'lines: for line in &cache.lines {
         if emitted >= emit_limit {
             break;
         }
         match line {
             DiffLine::Ellipsis => {
                 h = HighlightLines::new(syntax, syntax_theme);
-                if row_idx < skip as usize {
+                if seen_rows < skip {
+                    seen_rows = seen_rows.saturating_add(1);
                     continue;
                 }
                 if indent > 0 {
@@ -635,10 +611,12 @@ pub fn print_diff_ir(
                 out.print("...");
                 out.reset_style();
                 out.newline();
+                emitted = emitted.saturating_add(1);
+                seen_rows = seen_rows.saturating_add(1);
             }
             _ => {
                 let (source_line, sign, bg, text) = match line {
-                    DiffLine::Context { lineno, text, .. } => (
+                    DiffLine::Context { lineno, text } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
@@ -646,7 +624,7 @@ pub fn print_diff_ir(
                         None,
                         text.as_str(),
                     ),
-                    DiffLine::Delete { lineno, text, .. } => (
+                    DiffLine::Delete { lineno, text } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
@@ -654,7 +632,7 @@ pub fn print_diff_ir(
                         bg_del,
                         text.as_str(),
                     ),
-                    DiffLine::Insert { lineno, text, .. } => (
+                    DiffLine::Insert { lineno, text } => (
                         smelt_buffer::buffer::SourceLine::Linear {
                             lineno: *lineno as u32,
                         },
@@ -665,14 +643,18 @@ pub fn print_diff_ir(
                     DiffLine::Ellipsis => unreachable!(),
                 };
                 let visual_rows = split_syntax_spans_into_rows(&mut h, text, max_content);
-                if row_idx < skip as usize {
-                    continue;
-                }
                 let pad_meta = SpanMeta {
                     selectable: false,
                     copy_as: None,
                 };
                 for (vi, vrow) in visual_rows.iter().enumerate() {
+                    if seen_rows < skip {
+                        seen_rows = seen_rows.saturating_add(1);
+                        continue;
+                    }
+                    if emitted >= emit_limit {
+                        break 'lines;
+                    }
                     // For delete/insert rows the bg extends under the indent
                     // (the leftmost cells of the row) and across the trailing
                     // pad, so the strip reads as a single change-band. Indent
@@ -709,11 +691,10 @@ pub fn print_diff_ir(
                         print_syntax_spans(out, vrow, None);
                     }
                     out.newline();
+                    emitted = emitted.saturating_add(1);
+                    seen_rows = seen_rows.saturating_add(1);
                 }
             }
-        }
-        if row_idx >= skip as usize {
-            emitted += 1;
         }
     }
     emitted
@@ -1036,30 +1017,30 @@ mod tests {
         (ctx, del, ins, ell)
     }
 
-    fn assert_line_layouts_match_text(cache: &DiffIr) {
+    fn assert_text_layouts_measure(cache: &DiffIr) {
         for line in &cache.lines {
-            let (text, layout) = match line {
-                DiffLine::Context { text, layout, .. }
-                | DiffLine::Delete { text, layout, .. }
-                | DiffLine::Insert { text, layout, .. } => (text, layout),
+            let text = match line {
+                DiffLine::Context { text, .. }
+                | DiffLine::Delete { text, .. }
+                | DiffLine::Insert { text, .. } => text,
                 DiffLine::Ellipsis => continue,
             };
             assert_eq!(
-                layout.measure_unwrapped(),
+                diff_line_layout(text).measure_unwrapped(),
                 unicode_width::UnicodeWidthStr::width(text.as_str())
             );
         }
     }
 
     #[test]
-    fn diff_ir_layouts_are_valid_for_tabs_and_unicode() {
+    fn diff_ir_text_measures_for_tabs_and_unicode() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("unicode.rs");
         let old = "fn main() {\n\tlet s = \"é😀\";\n}\n";
         let new = "fn main() {\n\tlet s = \"é😀!\";\n}\n";
         std::fs::write(&path, new).unwrap();
         let cache = build_diff_ir(old, new, path.to_str().unwrap(), "");
-        assert_line_layouts_match_text(&cache);
+        assert_text_layouts_measure(&cache);
     }
 
     #[test]
@@ -1412,6 +1393,16 @@ mod tests {
     }
 
     #[test]
+    fn diff_ir_round_trips_through_json() {
+        let cache = build_file_view_ir("alpha\nbeta\n", Some("txt"));
+        let encoded = serde_json::to_string(&cache).unwrap();
+        let decoded: DiffIr = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.syntax_ext, "txt");
+        assert_eq!(count_lines(&decoded), (2, 0, 0, 0));
+        assert_eq!(measure_diff_ir(&decoded, 80, GutterStyle::None, 0), 2);
+    }
+
+    #[test]
     fn print_diff_ir_zero_max_rows_emits_no_limit() {
         let cache = DiffIr {
             max_display_lineno: 1,
@@ -1463,6 +1454,27 @@ mod tests {
         assert!(joined.contains("line3"));
         assert!(!joined.contains("line1"));
         assert!(!joined.contains("line2"));
+    }
+
+    #[test]
+    fn print_diff_ir_skips_visual_rows_inside_wrapped_line() {
+        let cache = DiffIr {
+            max_display_lineno: 1,
+            syntax_ext: "txt".to_string(),
+            lines: vec![context_line(1, "abcdefghij".to_string())],
+        };
+        let block = render_test(6, |out| {
+            let emitted = print_diff_ir(out, &cache, GutterStyle::None, 0, 1, 1);
+            assert_eq!(emitted, 1);
+        });
+        let joined: String = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("efgh"), "got: {joined:?}");
+        assert!(!joined.contains("abcd"), "got: {joined:?}");
     }
 
     #[test]

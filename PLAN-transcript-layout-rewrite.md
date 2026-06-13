@@ -825,8 +825,8 @@ Conclusion: the large mixed baseline is still dominated by full markdown/tool/di
 **Goal:** diffs are measured without building full styled caches.
 
 - Evolve `CachedInlineDiff` into `DiffIr`:
-  - store diff structure + `InlineLine` per line,
-  - keep syntax style ranges out of the IR; use the same ephemeral syntax render cache as code/file views.
+  - store diff structure, line numbers, expanded text, and syntax extension,
+  - keep syntax style ranges and width-derived layout caches out of the IR; wrap from text for measurement and use ephemeral syntax state for rendering.
 - Provide:
   - `build_diff_ir(old, new, path, anchor, lang) -> DiffIr`
   - `measure_diff(ir: &DiffIr, width: u16, gutter: GutterStyle) -> RowIndex`
@@ -836,7 +836,7 @@ Conclusion: the large mixed baseline is still dominated by full markdown/tool/di
 
 **Deliverable:** diff measurement does not build styled caches; resize does not rebuild diff caches.
 
-**Completed slice:** `CachedInlineDiff` became `DiffIr` in `crates/core/src/content/highlight/diff.rs`; it stores diff structure, expanded text, line numbers, syntax extension, and `InlineLine<()>` layout only. Syntax style spans are computed in `print_diff_ir` during rendering. `measure_diff_ir` measures wrapped rows from the IR without syntect. File-view leaves compile to the same IR via `build_file_view_ir`, and rendered layouts made only of IR/spec leaves are marked width-independent so resize can reuse them instead of rerunning tool extraction. Validation: `cargo nextest run --workspace` (3041 passed, 1 skipped) and `cargo clippy --workspace --all-targets -- -D warnings`.
+**Completed slice:** `CachedInlineDiff` became serializable `DiffIr` in `crates/core/src/content/highlight/diff.rs`; it stores diff structure, expanded text, line numbers, and syntax extension without persistent syntax style ranges or duplicated layout text. Syntax style spans are computed in `print_diff_ir` during rendering. `measure_diff_ir` measures wrapped rows from the IR without syntect, and `print_diff_ir` now applies `skip`/`max_rows` to visual rows so measurement and rendering use the same row model. File-view leaves compile to the same IR via `build_file_view_ir`, and rendered layouts made only of IR/spec leaves are marked width-independent so resize can reuse them instead of rerunning tool extraction. Validation: `cargo nextest run --workspace` (3043 passed, 1 skipped) and `cargo clippy --workspace --all-targets -- -D warnings`.
 
 ### Phase 5: Tool body IR and global tool prerender removal
 
