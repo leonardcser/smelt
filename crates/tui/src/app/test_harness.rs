@@ -4076,6 +4076,180 @@ mod tests {
     }
 
     #[test]
+    fn user_message_padding_click_snaps_cursor_after_left_pad() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.app
+            .push_block(smelt_core::transcript_model::Block::User {
+                text: "hello".into(),
+                image_labels: vec![],
+            });
+        app.render_silent();
+
+        let transcript_win = app.app.transcript_win();
+        assert!(
+            !transcript_win.has_materialized_rows(),
+            "single user message should exercise the byte-backed path"
+        );
+        let vp = transcript_win
+            .viewport
+            .expect("transcript viewport after render");
+        let column = vp
+            .rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(transcript_win.config.gutters.pad_left);
+
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: vp.rect.top,
+            column,
+            modifiers: KeyModifiers::empty(),
+        })));
+
+        let win = app.app.transcript_win();
+        let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+        assert_eq!(
+            buf.display_cursor_pos(win.effective_endpoint()),
+            (0, 1),
+            "cursor should snap after the user-message left padding cell"
+        );
+    }
+
+    #[test]
+    fn user_message_drag_to_line_end_does_not_select_bottom_padding_row() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.app
+            .push_block(smelt_core::transcript_model::Block::User {
+                text: "hello".into(),
+                image_labels: vec![],
+            });
+        app.render_silent();
+
+        let transcript_win = app.app.transcript_win();
+        assert!(
+            !transcript_win.has_materialized_rows(),
+            "single user message should exercise the byte-backed path"
+        );
+        let vp = transcript_win
+            .viewport
+            .expect("transcript viewport after render");
+        let pad_left = transcript_win.config.gutters.pad_left;
+        let buf = app
+            .app
+            .ui
+            .buf(transcript_win.buf)
+            .expect("transcript buffer");
+        let text_row = buf
+            .lines()
+            .iter()
+            .position(|line| line.contains("hello"))
+            .expect("rendered user text row");
+        let text_col = smelt_buffer::text::byte_to_cell(
+            &buf.lines()[text_row],
+            buf.lines()[text_row].find("hello").unwrap(),
+        ) as u16;
+        let row = vp.rect.top + text_row as u16;
+        let column = vp
+            .rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(pad_left)
+            .saturating_add(text_col);
+
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row,
+            column,
+            modifiers: KeyModifiers::empty(),
+        })));
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row,
+            column: column + "hello".len() as u16,
+            modifiers: KeyModifiers::empty(),
+        })));
+        app.render_silent();
+
+        let scroll_top = app.app.transcript_win().scroll_top();
+        let highlights = app
+            .app
+            .transcript_selection_highlights(scroll_top, 0, vp.rect.height);
+        assert!(
+            highlights.iter().any(|(line, start, end)| {
+                *line == text_row && *start == text_col && *end == text_col + "hello".len() as u16
+            }),
+            "text row should be highlighted, got {highlights:?}"
+        );
+        assert!(
+            !highlights.iter().any(|(line, _, _)| *line > text_row),
+            "selection ending after the last character must not include bottom padding, got {highlights:?}"
+        );
+    }
+
+    #[test]
+    fn transcript_click_drag_in_vim_survives_multiple_drag_events() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut app = TestApp::builder().with_vim(true).build();
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: "hello world".into(),
+            });
+        app.render_silent();
+
+        let transcript_win = app.app.transcript_win();
+        assert!(
+            !transcript_win.has_materialized_rows(),
+            "fresh/small transcript should exercise the byte-backed path"
+        );
+        let vp = transcript_win
+            .viewport
+            .expect("transcript viewport after render");
+        let pad_left = transcript_win.config.gutters.pad_left;
+        let row = vp.rect.top;
+        let column = vp
+            .rect
+            .left
+            .saturating_add(vp.gutter_width)
+            .saturating_add(pad_left);
+
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row,
+            column,
+            modifiers: KeyModifiers::empty(),
+        })));
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row,
+            column: column + 2,
+            modifiers: KeyModifiers::empty(),
+        })));
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            row,
+            column: column + 4,
+            modifiers: KeyModifiers::empty(),
+        })));
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            row,
+            column: column + 4,
+            modifiers: KeyModifiers::empty(),
+        })));
+
+        assert_eq!(
+            app.app.core.clipboard.kill_ring.current(),
+            "hello",
+            "vim drag selection should stay active across every Drag event"
+        );
+    }
+
+    #[test]
     fn keyboard_input_cancels_stale_prompt_mouse_endpoint() {
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 

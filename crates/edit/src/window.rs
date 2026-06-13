@@ -47,6 +47,7 @@ pub(crate) enum ViewportHit {
 pub struct TextHit<P> {
     pub row: RowIndex,
     pub cell_col: usize,
+    pub cpos: P,
     pub kind: TextHitKind<P>,
 }
 
@@ -64,6 +65,18 @@ impl<P> TextHit<P> {
     pub fn is_selectable(&self) -> bool {
         matches!(self.kind, TextHitKind::Selectable { .. })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MouseTextEndpoint {
+    cpos: usize,
+    includes_cell: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MouseEndpointMode {
+    RequireContentHit,
+    ClampToContent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1063,15 +1076,92 @@ impl Window {
         (vrow as RowIndex, cell_col as u16)
     }
 
-    /// Convert viewport-relative mouse coordinates to a buffer cpos,
-    /// accounting for both vertical and horizontal scroll.
-    fn cpos_at_mouse(&self, buf: &Buffer, rel_row: u16, rel_col: u16) -> usize {
+    fn adjust_vim_mouse_endpoint_for_hit(
+        &self,
+        text: &str,
+        endpoint: usize,
+        hit: TextHit<usize>,
+    ) -> usize {
+        if !self.vim_enabled() {
+            return endpoint;
+        }
+        match hit.kind {
+            TextHitKind::TrailingChrome {
+                nearest: Some(nearest),
+            } => {
+                let nearest = text::snap(text, nearest.min(text.len()));
+                text::prev_char_boundary(text, nearest).min(endpoint)
+            }
+            _ => endpoint,
+        }
+    }
+
+    fn mouse_text_endpoint(
+        &self,
+        buf: &Buffer,
+        event: MouseEvent,
+        viewport: WindowViewport,
+        text: &str,
+        mode: MouseEndpointMode,
+    ) -> Option<MouseTextEndpoint> {
+        let viewport_hit = viewport.hit(event.row, event.column);
+        let (rel_row, rel_col, hit_is_content) = match mode {
+            MouseEndpointMode::RequireContentHit => {
+                let ViewportHit::Content {
+                    row,
+                    col: viewport_rel_col,
+                } = viewport_hit?
+                else {
+                    return None;
+                };
+                let col = viewport_rel_col
+                    .saturating_sub(viewport.gutter_width)
+                    .saturating_sub(self.config.gutters.pad_left);
+                (row, col, true)
+            }
+            MouseEndpointMode::ClampToContent => {
+                if viewport.rect.height == 0 {
+                    return None;
+                }
+                let row = event
+                    .row
+                    .saturating_sub(viewport.rect.top)
+                    .min(viewport.rect.height.saturating_sub(1));
+                let col = event
+                    .column
+                    .saturating_sub(viewport.rect.left)
+                    .saturating_sub(viewport.gutter_width)
+                    .saturating_sub(self.config.gutters.pad_left)
+                    .min(viewport.content_width.saturating_sub(1));
+                (
+                    row,
+                    col,
+                    matches!(viewport_hit, Some(ViewportHit::Content { .. })),
+                )
+            }
+        };
+
         let visual_total = self.visual_row_total(buf);
         let vrow = self
             .local_row(self.scroll_top.saturating_add(rel_row as RowIndex))
             .min(visual_total.max(1).saturating_sub(1));
         let vcell = rel_col as usize + self.scroll_left as usize;
-        self.cpos_at_visual(buf, row_to_usize(vrow), vcell)
+        let clamped_hit = self.text_hit_at_visual(buf, row_to_usize(vrow), vcell);
+        let hit = if hit_is_content {
+            clamped_hit
+        } else {
+            TextHit {
+                row: self.absolute_row(vrow),
+                cell_col: vcell,
+                cpos: clamped_hit.cpos,
+                kind: TextHitKind::Outside,
+            }
+        };
+        let cpos = self.adjust_vim_mouse_endpoint_for_hit(text, hit.cpos, hit);
+        Some(MouseTextEndpoint {
+            cpos,
+            includes_cell: hit.is_selectable(),
+        })
     }
 
     pub fn text_hit_at_mouse(
@@ -1084,6 +1174,7 @@ impl Window {
             return TextHit {
                 row: 0,
                 cell_col: 0,
+                cpos: 0,
                 kind: TextHitKind::Outside,
             };
         };
@@ -1095,6 +1186,7 @@ impl Window {
             return TextHit {
                 row: 0,
                 cell_col: 0,
+                cpos: 0,
                 kind: TextHitKind::Outside,
             };
         };
@@ -1112,9 +1204,16 @@ impl Window {
     pub fn text_hit_at_visual(&self, buf: &Buffer, vrow: usize, vcell: usize) -> TextHit<usize> {
         let row = self.absolute_row(vrow as RowIndex);
         let Some((logical_row, cell)) = self.logical_cell_at_visual(buf, vrow, vcell) else {
+            let cpos = buf
+                .lines()
+                .len()
+                .checked_sub(1)
+                .map(|last_logical| buf.byte_at_display_pos(last_logical, 0))
+                .unwrap_or(0);
             return TextHit {
                 row,
                 cell_col: vcell,
+                cpos,
                 kind: TextHitKind::Outside,
             };
         };
@@ -1122,13 +1221,19 @@ impl Window {
             return TextHit {
                 row,
                 cell_col: cell,
+                cpos: 0,
                 kind: TextHitKind::Outside,
             };
+        };
+        let cpos = |cell: usize| {
+            let cell = snap_col_past_chrome(buf, logical_row, cell as u16) as usize;
+            buf.byte_at_display_pos(logical_row, cell)
         };
         if line.is_empty() {
             return TextHit {
                 row,
                 cell_col: cell,
+                cpos: cpos(cell),
                 kind: TextHitKind::EmptyRow,
             };
         }
@@ -1140,6 +1245,7 @@ impl Window {
             return TextHit {
                 row,
                 cell_col: cell,
+                cpos: cpos(cell),
                 kind: TextHitKind::TrailingChrome {
                     nearest: Some(line_end),
                 },
@@ -1147,11 +1253,13 @@ impl Window {
         }
         let spans = buf.highlights_at(logical_row);
         if cell_range_contains_selectable(&spans, cell, cell.saturating_add(1)) {
+            let before = buf.byte_at_display_pos(logical_row, cell);
             return TextHit {
                 row,
                 cell_col: cell,
+                cpos: before,
                 kind: TextHitKind::Selectable {
-                    before: buf.byte_at_display_pos(logical_row, cell),
+                    before,
                     after: buf.byte_at_display_pos(logical_row, cell.saturating_add(1)),
                 },
             };
@@ -1176,6 +1284,7 @@ impl Window {
         TextHit {
             row,
             cell_col: cell,
+            cpos: cpos(cell),
             kind,
         }
     }
@@ -1912,22 +2021,15 @@ impl Window {
     }
 
     fn mouse_down(&mut self, buf: &Buffer, event: MouseEvent, ctx: &MouseCtx) -> Status {
-        let Some(hit) = ctx.viewport.hit(event.row, event.column) else {
+        let Some(endpoint) = self.mouse_text_endpoint(
+            buf,
+            event,
+            ctx.viewport,
+            Self::coordinate_text(buf).as_ref(),
+            MouseEndpointMode::RequireContentHit,
+        ) else {
             return Status::Ignored;
         };
-        let ViewportHit::Content {
-            row: rel_row,
-            col: viewport_rel_col,
-        } = hit
-        else {
-            return Status::Ignored;
-        };
-        // `ViewportHit::Content` reports a column relative to `viewport.rect.left`,
-        // which includes the data gutter and the window's left pad. Selection / cursor
-        // positioning operates on source-cell columns, so subtract both.
-        let rel_col = viewport_rel_col
-            .saturating_sub(ctx.viewport.gutter_width)
-            .saturating_sub(self.config.gutters.pad_left);
         if buf.lines().is_empty() {
             return if self.surface.is_selectable_text() {
                 Status::Ignored
@@ -1935,21 +2037,22 @@ impl Window {
                 Status::Consumed
             };
         }
-        let hit_includes_cell = self
-            .text_hit_at_mouse(buf, event, ctx.viewport)
-            .is_selectable();
+        let hit_includes_cell = endpoint.includes_cell;
         if self.surface.is_selectable_text() && !hit_includes_cell {
             return Status::Ignored;
         }
 
         let viewport_rows = ctx.viewport.rect.height;
-        let click_byte = self.cpos_at_mouse(buf, rel_row, rel_col);
+        let click_byte = endpoint.cpos;
         // All leaves stage the click into `drag_endpoint`; `cpos` is committed on Up
         // only for caret-bearing leaves (see `is_caret_leaf`). Readers route through
         // `effective_endpoint` so the cursor and selection track the drag without
         // perturbing the persistent `cpos` mid-gesture.
         self.text_state_mut().drag_endpoint = Some(click_byte);
         self.text_state_mut().drag_endpoint_includes_cell = hit_includes_cell;
+        if self.vim_enabled() && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine) {
+            self.set_vim_mode(VimMode::Normal);
+        }
 
         match ctx.click_count {
             2 => {
@@ -1986,11 +2089,6 @@ impl Window {
                 self.text_state_mut().drag_anchor_line = None;
                 self.text_state_mut().selection_anchor = None;
                 self.text_state_mut().selection_anchor_includes_cell = false;
-                if self.vim_enabled()
-                    && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine)
-                {
-                    self.set_vim_mode(VimMode::Normal);
-                }
                 self.text_state_mut().pending_press = Some(click_byte);
                 self.text_state_mut().pending_press_includes_cell = hit_includes_cell;
                 Status::Capture
@@ -2009,26 +2107,17 @@ impl Window {
         if viewport_rows == 0 || buf.lines().is_empty() {
             return Status::Consumed;
         }
-        // A new mouse drag gesture should start fresh: exit any existing
-        // visual/visual-line mode so the old anchor doesn't pollute the new
-        // drag selection.
-        if self.vim_enabled() && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine) {
-            self.set_vim_mode(VimMode::Normal);
-        }
-        let rel_row = event
-            .row
-            .saturating_sub(ctx.viewport.rect.top)
-            .min(viewport_rows.saturating_sub(1));
-        let rel_col = event
-            .column
-            .saturating_sub(ctx.viewport.rect.left)
-            .saturating_sub(ctx.viewport.gutter_width)
-            .saturating_sub(self.config.gutters.pad_left)
-            .min(ctx.viewport.content_width.saturating_sub(1));
-        let drag_byte = self.cpos_at_mouse(buf, rel_row, rel_col);
-        let drag_includes_cell = self
-            .text_hit_at_mouse(buf, event, ctx.viewport)
-            .is_selectable();
+        let endpoint = self
+            .mouse_text_endpoint(
+                buf,
+                event,
+                ctx.viewport,
+                text,
+                MouseEndpointMode::ClampToContent,
+            )
+            .expect("non-empty viewport produces a mouse endpoint");
+        let drag_byte = endpoint.cpos;
+        let drag_includes_cell = endpoint.includes_cell;
         self.text_state_mut().drag_endpoint = Some(drag_byte);
         self.text_state_mut().drag_endpoint_includes_cell = drag_includes_cell;
 
@@ -2959,7 +3048,7 @@ fn snap_col_past_chrome(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
         .next_back();
     match last_selectable_edge {
         Some(edge) if col > edge => edge,
-        None => 0,
+        None => u16::from(line_width == 1),
         _ => col.min(line_width),
     }
 }
@@ -4431,15 +4520,25 @@ mod tests {
 
     #[test]
     fn row_text_mouse_hit_testing_subtracts_row_base() {
-        let mut w = make_win();
+        let w = {
+            let mut w = make_win();
+            w.set_materialized_rows(80, 20, 100);
+            w.scroll_top = 90;
+            w
+        };
         let rows = sample_rows(20);
         let buf = make_buf(rows.clone());
-        w.set_materialized_rows(80, 20, 100);
-        w.scroll_top = 90;
-
-        let cpos = w.cpos_at_mouse(&buf, 3, 2);
+        let endpoint = w
+            .mouse_text_endpoint(
+                &buf,
+                click_event(MouseEventKind::Down(MouseButton::Left), 3, 2),
+                viewport(20, 5),
+                buf.text().as_str(),
+                MouseEndpointMode::RequireContentHit,
+            )
+            .expect("content mouse endpoint");
         let offsets = smelt_buffer::text::line_start_offsets(&rows);
-        assert_eq!(cpos, offsets[13] + 2);
+        assert_eq!(endpoint.cpos, offsets[13] + 2);
     }
 
     #[test]
@@ -5690,9 +5789,9 @@ mod tests {
     #[test]
     fn mouse_click_respects_horizontal_scroll() {
         // With scroll_left = 5, a click at viewport column 2 must land on
-        // source column 7, not column 2. Before `cpos_at_mouse` centralised
-        // the coordinate transform, `scroll_left` was ignored and clicks
-        // drifted left by exactly the horizontal scroll offset.
+        // source column 7, not column 2. Mouse endpoint resolution must apply
+        // the horizontal scroll offset or clicks drift left by exactly that
+        // amount.
         let mut w = make_win();
         let row = "abcdefghijklmnopqrstuvwxyz".to_string();
         let buf = make_buf(vec![row.clone()]);
@@ -5885,20 +5984,24 @@ mod tests {
     }
 
     #[test]
-    fn snap_col_past_chrome_all_chrome_row_returns_zero() {
-        // Blank user-block padding rows are entirely chrome (1 span covering
-        // 0..layout_width). A click anywhere on the row must not escape past
-        // the row's content edge.
-        let mut buf = make_buf(vec![" ".repeat(40)]);
+    fn snap_col_past_chrome_all_chrome_row_stays_put_except_single_pad() {
+        // A one-cell user-block padding row should put the cursor just after the
+        // pad. Wider all-chrome rows still stay at the left edge so a generic
+        // non-selectable separator can't push the cursor to layout_width.
+        let mut one_pad = make_buf(vec![" ".into()]);
         let chrome = smelt_buffer::buffer::SpanMeta {
             selectable: false,
             ..Default::default()
         };
-        buf.add_highlight_with_meta(0, 0, 40, crate::SpanStyle::new(), chrome);
+        one_pad.add_highlight_with_meta(0, 0, 1, crate::SpanStyle::new(), chrome.clone());
+        assert_eq!(snap_col_past_chrome(&one_pad, 0, 0), 1);
 
-        assert_eq!(snap_col_past_chrome(&buf, 0, 0), 0);
-        assert_eq!(snap_col_past_chrome(&buf, 0, 20), 0);
-        assert_eq!(snap_col_past_chrome(&buf, 0, 39), 0);
+        let mut wide = make_buf(vec![" ".repeat(40)]);
+        wide.add_highlight_with_meta(0, 0, 40, crate::SpanStyle::new(), chrome);
+
+        assert_eq!(snap_col_past_chrome(&wide, 0, 0), 0);
+        assert_eq!(snap_col_past_chrome(&wide, 0, 20), 0);
+        assert_eq!(snap_col_past_chrome(&wide, 0, 39), 0);
     }
 
     #[test]
