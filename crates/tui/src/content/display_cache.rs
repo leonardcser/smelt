@@ -23,12 +23,21 @@ pub(crate) fn write_for_session(session: &Session, entries: &[DisplayCacheEntry]
 fn read_at_path(path: &Path) -> Vec<DisplayCacheEntry> {
     let _perf = smelt_perf::perf::begin("session_ir:read");
     let Ok(bytes) = std::fs::read(path) else {
+        smelt_perf::perf::record_value("session_ir:read:missing", 1);
         return Vec::new();
     };
     smelt_perf::perf::record_value("session_ir:read:bytes", bytes.len() as u64);
-    let entries = decode(&bytes).unwrap_or_default();
-    smelt_perf::perf::record_value("session_ir:read:entries", entries.len() as u64);
-    entries
+    match decode(&bytes) {
+        Ok(entries) => {
+            smelt_perf::perf::record_value("session_ir:read:entries", entries.len() as u64);
+            entries
+        }
+        Err(reason) => {
+            reason.record();
+            smelt_perf::perf::record_value("session_ir:read:entries", 0);
+            Vec::new()
+        }
+    }
 }
 
 fn write_at_path(path: &Path, entries: &[DisplayCacheEntry]) {
@@ -45,6 +54,7 @@ fn write_at_path(path: &Path, entries: &[DisplayCacheEntry]) {
 }
 
 fn encode(entries: &[DisplayCacheEntry]) -> Option<Vec<u8>> {
+    let _perf = smelt_perf::perf::begin("session_ir:encode");
     let payload = bincode::serialize(entries).ok()?;
     let build = BUILD_VERSION.as_bytes();
     let build_len = u16::try_from(build.len()).ok()?;
@@ -61,39 +71,84 @@ fn encode(entries: &[DisplayCacheEntry]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn decode(bytes: &[u8]) -> Option<Vec<DisplayCacheEntry>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodeError {
+    HeaderTooShort,
+    BadMagic,
+    BadFormatVersion,
+    BadRendererVersion,
+    BadBuildLength,
+    BadBuildVersion,
+    BadPayloadLength,
+    TrailingBytes,
+    Bincode,
+}
+
+impl DecodeError {
+    fn record(self) {
+        let label = match self {
+            Self::HeaderTooShort => "session_ir:decode_fail:header_too_short",
+            Self::BadMagic => "session_ir:decode_fail:bad_magic",
+            Self::BadFormatVersion => "session_ir:decode_fail:bad_format_version",
+            Self::BadRendererVersion => "session_ir:decode_fail:bad_renderer_version",
+            Self::BadBuildLength => "session_ir:decode_fail:bad_build_length",
+            Self::BadBuildVersion => "session_ir:decode_fail:bad_build_version",
+            Self::BadPayloadLength => "session_ir:decode_fail:bad_payload_length",
+            Self::TrailingBytes => "session_ir:decode_fail:trailing_bytes",
+            Self::Bincode => "session_ir:decode_fail:bincode",
+        };
+        smelt_perf::perf::record_value(label, 1);
+    }
+}
+
+fn decode(bytes: &[u8]) -> Result<Vec<DisplayCacheEntry>, DecodeError> {
+    let _perf = smelt_perf::perf::begin("session_ir:decode");
     if bytes.len() < FIXED_HEADER_LEN {
-        return None;
+        return Err(DecodeError::HeaderTooShort);
     }
     let mut pos = 0;
-    if bytes.get(pos..pos + MAGIC.len())? != MAGIC {
-        return None;
+    if bytes
+        .get(pos..pos + MAGIC.len())
+        .ok_or(DecodeError::BadMagic)?
+        != MAGIC
+    {
+        return Err(DecodeError::BadMagic);
     }
     pos += MAGIC.len();
 
-    let format_version = read_u32(bytes, &mut pos)?;
+    let format_version = read_u32(bytes, &mut pos).ok_or(DecodeError::BadFormatVersion)?;
     if format_version != FORMAT_VERSION {
-        return None;
+        return Err(DecodeError::BadFormatVersion);
     }
-    let renderer_version = read_u64(bytes, &mut pos)?;
+    let renderer_version = read_u64(bytes, &mut pos).ok_or(DecodeError::BadRendererVersion)?;
     if renderer_version != DISPLAY_RENDERER_VERSION {
-        return None;
+        return Err(DecodeError::BadRendererVersion);
     }
-    let build_len = read_u16(bytes, &mut pos)? as usize;
-    let payload_len = read_u64(bytes, &mut pos)? as usize;
+    let build_len = read_u16(bytes, &mut pos).ok_or(DecodeError::BadBuildLength)? as usize;
+    let payload_len = read_u64(bytes, &mut pos).ok_or(DecodeError::BadPayloadLength)? as usize;
 
-    let build = bytes.get(pos..pos.checked_add(build_len)?)?;
-    pos += build_len;
+    let build_end = pos
+        .checked_add(build_len)
+        .ok_or(DecodeError::BadBuildLength)?;
+    let build = bytes
+        .get(pos..build_end)
+        .ok_or(DecodeError::BadBuildLength)?;
+    pos = build_end;
     if build != BUILD_VERSION.as_bytes() {
-        return None;
+        return Err(DecodeError::BadBuildVersion);
     }
 
-    let payload_end = pos.checked_add(payload_len)?;
-    let payload = bytes.get(pos..payload_end)?;
+    let payload_end = pos
+        .checked_add(payload_len)
+        .ok_or(DecodeError::BadPayloadLength)?;
+    let payload = bytes
+        .get(pos..payload_end)
+        .ok_or(DecodeError::BadPayloadLength)?;
     if payload_end != bytes.len() {
-        return None;
+        return Err(DecodeError::TrailingBytes);
     }
-    bincode::deserialize(payload).ok()
+    let _perf = smelt_perf::perf::begin("session_ir:decode:bincode");
+    bincode::deserialize(payload).map_err(|_| DecodeError::Bincode)
 }
 
 fn read_u16(bytes: &[u8], pos: &mut usize) -> Option<u16> {
@@ -148,8 +203,11 @@ mod tests {
     fn corrupt_cache_is_a_miss() {
         let mut encoded = encode(&[entry()]).expect("encode cache");
         encoded[0] = b'X';
-        assert!(decode(&encoded).is_none());
-        assert!(decode(&encoded[..8]).is_none());
+        assert!(matches!(decode(&encoded), Err(DecodeError::BadMagic)));
+        assert!(matches!(
+            decode(&encoded[..8]),
+            Err(DecodeError::HeaderTooShort)
+        ));
     }
 
     #[test]

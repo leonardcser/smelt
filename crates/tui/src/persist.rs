@@ -107,6 +107,16 @@ fn worker_loop(rx: Receiver<Cmd>) {
 }
 
 fn write(req: &PersistRequest) {
+    let _perf = smelt_perf::perf::begin("persist:write");
+    smelt_perf::perf::record_value(
+        "persist:write:history_items",
+        req.session.history.len() as u64,
+    );
+    smelt_perf::perf::record_value(
+        "persist:write:display_cache_entries",
+        req.display_cache.len() as u64,
+    );
+    smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
     let session_dir = session::dir_for(&req.session);
     let _ = std::fs::create_dir_all(&session_dir);
     let blob_dir = session_dir.join("blobs");

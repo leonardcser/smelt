@@ -117,6 +117,10 @@ impl DisplayModel {
         history: &mut BlockHistory,
         entries: Vec<DisplayCacheEntry>,
     ) -> usize {
+        smelt_perf::perf::record_value(
+            "transcript:display_model:hydrate_requested",
+            entries.len() as u64,
+        );
         let mut hydrated = 0;
         for entry in entries {
             if self.hydrate_one(history, entry) {
@@ -127,23 +131,44 @@ impl DisplayModel {
     }
 
     fn hydrate_one(&mut self, history: &mut BlockHistory, entry: DisplayCacheEntry) -> bool {
+        smelt_perf::perf::record_value("transcript:display_model:hydrate_attempt", 1);
         let Some(current_block) = history.blocks.get(&entry.id).cloned() else {
+            smelt_perf::perf::record_value(
+                "transcript:display_model:hydrate_reject:missing_block",
+                1,
+            );
             return false;
         };
         if entry.block.block() != &current_block {
+            smelt_perf::perf::record_value(
+                "transcript:display_model:hydrate_reject:block_mismatch",
+                1,
+            );
             return false;
         }
 
         if let DisplayBlock::ToolCall { state, .. } = &entry.block {
             let Block::ToolCall { call_id, .. } = &current_block else {
+                smelt_perf::perf::record_value(
+                    "transcript:display_model:hydrate_reject:tool_block_mismatch",
+                    1,
+                );
                 return false;
             };
             let Some(current_state) = history.tool_states.get_mut(call_id) else {
+                smelt_perf::perf::record_value(
+                    "transcript:display_model:hydrate_reject:missing_tool_state",
+                    1,
+                );
                 return false;
             };
             let mut candidate = current_state.clone();
             candidate.body = state.body.clone();
             if candidate.display_hash() != entry.key.sidecar_hash {
+                smelt_perf::perf::record_value(
+                    "transcript:display_model:hydrate_reject:tool_sidecar_hash",
+                    1,
+                );
                 return false;
             }
             current_state.body = candidate.body;
@@ -161,6 +186,10 @@ impl DisplayModel {
         );
         let display_key = DisplayCacheKey::from_layout_key(key);
         if display_key != entry.key {
+            smelt_perf::perf::record_value(
+                "transcript:display_model:hydrate_reject:key_mismatch",
+                1,
+            );
             return false;
         }
 
@@ -171,6 +200,7 @@ impl DisplayModel {
                 block: entry.block,
             },
         );
+        smelt_perf::perf::record_value("transcript:display_model:hydrate_ok", 1);
         true
     }
 
@@ -285,6 +315,7 @@ pub(crate) fn compile_block(block: &Block, state: Option<&ToolState>) -> Display
 }
 
 pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
+    let _perf = smelt_perf::perf::begin(measure_block_label(block));
     let expanded_rows = match block {
         DisplayBlock::CodeLine { code, .. } => measure_code_block(code, ctx.width as usize) as u64,
         DisplayBlock::ToolCall { block, state } => match block {
@@ -305,6 +336,24 @@ pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
         DisplayBlock::Legacy { .. } => measure_legacy_by_rendering(block, ctx),
     };
     ctx.view_state.measured_height(expanded_rows)
+}
+
+fn measure_block_label(block: &DisplayBlock) -> &'static str {
+    match block {
+        DisplayBlock::CodeLine { .. } => "transcript:measure_block:code_line",
+        DisplayBlock::ToolCall { .. } => "transcript:measure_block:tool_call",
+        DisplayBlock::Legacy { block } => match block {
+            Block::User { .. } => "transcript:measure_block:legacy:user",
+            Block::Mode { .. } => "transcript:measure_block:legacy:mode",
+            Block::ProcessStatus { .. } => "transcript:measure_block:legacy:process_status",
+            Block::Thinking { .. } => "transcript:measure_block:legacy:thinking",
+            Block::Text { .. } => "transcript:measure_block:legacy:text",
+            Block::CodeLine { .. } => "transcript:measure_block:legacy:code_line",
+            Block::ToolCall { .. } => "transcript:measure_block:legacy:tool_call",
+            Block::Exec { .. } => "transcript:measure_block:legacy:exec",
+            Block::Compacted { .. } => "transcript:measure_block:legacy:compacted",
+        },
+    }
 }
 
 fn measure_legacy_by_rendering(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
