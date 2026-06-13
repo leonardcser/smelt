@@ -184,6 +184,8 @@ impl TuiApp {
                         win.sync_row_render_state(buf, viewport_rows, render_now);
                         win.scroll_left = 0;
                     } else {
+                        let text = buf.text();
+                        win.clamp_anchors_to_source(&text);
                         buf.clear_range_layer(crate::smelt_edit::RangeLayer::Selection);
                         if !focused_overlay {
                             if let Some((s, e)) = clipboard.kill_ring.yank_flash_range(render_now) {

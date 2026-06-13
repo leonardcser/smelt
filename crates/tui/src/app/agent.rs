@@ -912,6 +912,31 @@ mod tests {
     }
 
     #[test]
+    fn process_status_resize_keeps_transcript_cursor_in_bounds() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+
+        app.feed_one(crate::app::test_harness::SourceEvent::Engine(
+            protocol::EngineEvent::ProcessCompleted {
+                id: String::new(),
+                exit_code: None,
+            },
+        ));
+        app.render_silent();
+        app.feed_one(crate::app::test_harness::SourceEvent::Resize {
+            width: 1,
+            height: 12,
+        });
+        app.render_silent();
+        app.feed_one(crate::app::test_harness::SourceEvent::Resize {
+            width: 50,
+            height: 1,
+        });
+        app.render_silent();
+
+        app.assert_invariants();
+    }
+
+    #[test]
     fn running_agent_process_completion_queues_process_status_append() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(7);
