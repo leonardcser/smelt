@@ -459,7 +459,6 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
         show_thinking: bool,
-        _theme: &Theme,
     ) {
         let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index");
         smelt_perf::perf::record_value(
@@ -561,9 +560,8 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
         show_thinking: bool,
-        theme: &Theme,
     ) -> RowIndex {
-        self.rebuild_row_index(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking);
         self.exact_rows.total_rows()
     }
 
@@ -587,11 +585,10 @@ impl TranscriptProjection {
         show_thinking: bool,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
-        theme: &Theme,
     ) -> ProjectionPlan {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
-        self.rebuild_row_index(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking);
         self.plan_projection_from_prepared(
             history,
             width,
@@ -691,7 +688,6 @@ impl TranscriptProjection {
             show_thinking,
             scroll_target,
             viewport_rows,
-            theme,
         );
         self.project_planned(buf, history, theme, plan)
     }
@@ -926,9 +922,8 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
         show_thinking: bool,
-        theme: &Theme,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
-        self.rebuild_row_index(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking);
         self.exact_block_layout(history)
             .into_iter()
             .map(|e| (e.id, e.start, e.rows))
@@ -1016,7 +1011,7 @@ impl TranscriptProjection {
             return DisplayRows::empty();
         }
 
-        self.rebuild_row_index(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking);
         let total_rows = self.exact_rows.total_rows();
         if total_rows == 0 || start >= total_rows {
             return DisplayRows::empty();
@@ -1088,7 +1083,7 @@ impl TranscriptProjection {
         if (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col) {
             return CopyOutput::default();
         }
-        self.rebuild_row_index(history, width, show_thinking, theme);
+        self.rebuild_row_index(history, width, show_thinking);
         let total_rows = self.exact_rows.total_rows();
         if total_rows == 0 || range.start.row >= total_rows {
             return CopyOutput::default();
@@ -1426,10 +1421,9 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let total = projection.exact_total_rows(&mut transcript.history, 80, false, &theme);
+        let total = projection.exact_total_rows(&mut transcript.history, 80, false);
 
         assert_eq!(total, 199);
         let counters = projection.counters();
@@ -1439,7 +1433,7 @@ mod tests {
 
         projection.reset_counters();
         assert_eq!(
-            projection.exact_total_rows(&mut transcript.history, 80, false, &theme),
+            projection.exact_total_rows(&mut transcript.history, 80, false),
             total
         );
         assert_eq!(
@@ -1458,10 +1452,9 @@ mod tests {
                 lang: "rust".into(),
             });
         }
-        let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let total = projection.exact_total_rows(&mut transcript.history, 10, false, &theme);
+        let total = projection.exact_total_rows(&mut transcript.history, 10, false);
 
         assert_eq!(total, 12);
         assert_eq!(projection.display_model_len(), 3);
@@ -1473,7 +1466,6 @@ mod tests {
 
     #[test]
     fn exact_total_rows_keeps_display_blocks_width_independent() {
-        let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
         let block_count = 537;
         let mut transcript = Transcript::new();
@@ -1483,7 +1475,7 @@ mod tests {
             });
         }
 
-        let total = projection.exact_total_rows(&mut transcript.history, 80, false, &theme);
+        let total = projection.exact_total_rows(&mut transcript.history, 80, false);
 
         assert_eq!(total, (block_count as RowIndex).saturating_mul(2) - 1);
         assert_eq!(projection.display_model_len(), block_count);
@@ -1504,7 +1496,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
         assert_eq!(
-            projection.exact_total_rows(&mut transcript.history, 80, false, &theme),
+            projection.exact_total_rows(&mut transcript.history, 80, false),
             199
         );
 
@@ -1535,7 +1527,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
         assert_eq!(
-            projection.exact_total_rows(&mut transcript.history, 80, false, &theme),
+            projection.exact_total_rows(&mut transcript.history, 80, false),
             199
         );
 
@@ -1818,7 +1810,7 @@ mod tests {
         let mut projection = TranscriptProjection::new();
         let mut buf = Buffer::new(crate::smelt_edit::BufId(16), Default::default());
         let after_start = projection
-            .materialize_block_layout(&mut transcript.history, 80, false, &theme)
+            .materialize_block_layout(&mut transcript.history, 80, false)
             .into_iter()
             .find(|(id, _, _)| *id == after_id)
             .map(|(_, start, _)| start)
@@ -1863,7 +1855,7 @@ mod tests {
         let mut buf = Buffer::new(crate::smelt_edit::BufId(13), Default::default());
         let anchor_id = transcript.history.order[10];
         let anchor_row = projection
-            .materialize_block_layout(&mut transcript.history, 80, false, &theme)
+            .materialize_block_layout(&mut transcript.history, 80, false)
             .into_iter()
             .find(|(id, _, _)| *id == anchor_id)
             .map(|(_, start, _)| start)
@@ -2057,8 +2049,7 @@ mod tests {
         let visible_count = projection.visible_block_layout().count();
         assert!(visible_count < transcript.history.order.len());
 
-        let layout =
-            projection.materialize_block_layout(&mut transcript.history, 80, false, &theme);
+        let layout = projection.materialize_block_layout(&mut transcript.history, 80, false);
         assert_eq!(layout.len(), transcript.history.order.len());
         assert_eq!(layout.first().map(|(_, start, _)| *start), Some(0));
         assert_eq!(layout.last().map(|(_, _, rows)| *rows), Some(1));
@@ -2127,7 +2118,7 @@ mod tests {
 
         let anchor_id = transcript.history.order[10];
         let anchor_row = projection
-            .materialize_block_layout(&mut transcript.history, 80, false, &theme)
+            .materialize_block_layout(&mut transcript.history, 80, false)
             .into_iter()
             .find(|(id, _, _)| *id == anchor_id)
             .map(|(_, start, _)| start)
@@ -2225,8 +2216,7 @@ mod tests {
 
             let theme = Theme::default();
             let mut projection = TranscriptProjection::new();
-            let measured =
-                projection.exact_total_rows(&mut transcript.history, width, true, &theme);
+            let measured = projection.exact_total_rows(&mut transcript.history, width, true);
             let full_rows = projection.build_rows(&mut transcript.history, width, true, &theme);
             assert_eq!(measured as usize, full_rows.len(), "width {width}");
 

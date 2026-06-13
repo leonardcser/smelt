@@ -169,7 +169,6 @@ impl TuiApp {
                         show_thinking,
                         scroll_target,
                         viewport_rows,
-                        &theme,
                     );
                     let tool_bodies_changed = crate::app::transcript::prerender_tool_bodies_for_ids(
                         lua,
@@ -182,7 +181,6 @@ impl TuiApp {
                             show_thinking,
                             scroll_target,
                             viewport_rows,
-                            &theme,
                         );
                     }
                     let Some(buf) = ui.buf_mut(request.buf) else {

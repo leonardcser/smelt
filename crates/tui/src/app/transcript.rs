@@ -53,28 +53,22 @@ impl TranscriptView {
         &mut self,
         width: u16,
         show_thinking: bool,
-        theme: &Theme,
     ) -> crate::smelt_edit::RowIndex {
         self.projection
-            .exact_total_rows(&mut self.transcript.history, width, show_thinking, theme)
+            .exact_total_rows(&mut self.transcript.history, width, show_thinking)
     }
 
     pub(crate) fn materialize_block_layout(
         &mut self,
         width: u16,
         show_thinking: bool,
-        theme: &Theme,
     ) -> Vec<(
         BlockId,
         crate::smelt_edit::RowIndex,
         crate::smelt_edit::RowIndex,
     )> {
-        self.projection.materialize_block_layout(
-            &mut self.transcript.history,
-            width,
-            show_thinking,
-            theme,
-        )
+        self.projection
+            .materialize_block_layout(&mut self.transcript.history, width, show_thinking)
     }
 
     pub(crate) fn visible_block_layout(
@@ -95,7 +89,6 @@ impl TranscriptView {
         show_thinking: bool,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
-        theme: &Theme,
     ) -> crate::content::transcript_buf::ProjectionPlan {
         self.projection.plan_projection_measured(
             &mut self.transcript.history,
@@ -103,7 +96,6 @@ impl TranscriptView {
             show_thinking,
             scroll_target,
             viewport_rows,
-            theme,
         )
     }
 
@@ -443,8 +435,7 @@ impl TuiApp {
     ) -> crate::smelt_edit::RowIndex {
         let _perf = smelt_perf::perf::begin("transcript:measure_rows_exact");
         let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        self.transcript.exact_total_rows(tw, show_thinking, &theme)
+        self.transcript.exact_total_rows(tw, show_thinking)
     }
 
     pub(crate) fn transcript_rows_and_breaks_range(
@@ -509,12 +500,9 @@ impl TuiApp {
 
     pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
         let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        let layout = self.transcript.materialize_block_layout(
-            tw,
-            self.core.config.settings.show_thinking,
-            &theme,
-        );
+        let layout = self
+            .transcript
+            .materialize_block_layout(tw, self.core.config.settings.show_thinking);
         self.transcript_block_snapshots_from_layout(layout.into_iter())
     }
 

@@ -895,7 +895,7 @@ Completed slice:
 - Removed the rendered-block cache abstraction in Phase 6; no `RenderedBlockCache` code remains.
 - Collapsed transitional fake `DisplayBlock` variants into an explicit `Legacy` variant plus real `CodeLine` / `ToolCall` IR-backed variants.
 - Removed leftover fixed-size rendered-cache batching from transcript measurement/materialization.
-- Renamed `measure_all_heights` to `rebuild_row_index`; the method now describes the row-index side effect instead of the old render-to-measure implementation.
+- Renamed `measure_all_heights` to `rebuild_row_index`; the method now describes the row-index side effect and no longer accepts theme state.
 - Kept `BlockLayout<BufId>` intentionally as the raw Lua-returned tool preview/render shape. `BlockLayout<Box<Buffer>>`, `RenderedLayout`, `ToolState.render_cache`, and `CachedInlineDiff` are gone.
 - No Lua API docs/stubs changed in this phase.
 
