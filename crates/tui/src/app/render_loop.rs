@@ -138,6 +138,12 @@ impl TuiApp {
                     return;
                 }
                 let viewport_rows = request.rect.height;
+                let cursor_screen_row = if transcript_should_follow_tail {
+                    ui.win(request.win)
+                        .and_then(|win| win.cursor_screen_row(viewport_rows))
+                } else {
+                    None
+                };
                 {
                     let _p = smelt_perf::perf::begin("compositor:project_transcript");
                     let scroll_target = if transcript_should_follow_tail {
@@ -171,6 +177,9 @@ impl TuiApp {
                 }
                 let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
                 if let (Some(win), Some(buf)) = (win, buf) {
+                    if let Some(screen_row) = cursor_screen_row {
+                        win.restore_cursor_screen_row(buf, screen_row);
+                    }
                     if win.has_materialized_rows() {
                         win.sync_row_render_state(buf, viewport_rows, render_now);
                         win.scroll_left = 0;

@@ -3757,6 +3757,69 @@ mod tests {
     }
 
     #[test]
+    fn transcript_tail_follow_keeps_cursor_fixed_relative_to_viewport() {
+        let mut app = row_document_transcript_app(100, true);
+
+        app.type_char('G');
+        app.render_silent();
+
+        let win = app.app.transcript_win();
+        let viewport_rows = win
+            .viewport
+            .map(|v| v.rect.height)
+            .expect("transcript viewport after render");
+        let total_rows = transcript_total_rows(&app);
+        assert_eq!(transcript_row_cursor_row(&app), total_rows - 1);
+
+        // Put the transcript cursor on a visible row above the bottom, then
+        // re-enable sticky-bottom scrolling. New transcript rows should move
+        // the cursor to the row now under the same screen cell.
+        for _ in 0..3 {
+            app.type_char('k');
+        }
+        app.render_silent();
+        let screen_row_before = app
+            .app
+            .transcript_win()
+            .cursor_screen_row(viewport_rows)
+            .expect("cursor should be visible before append");
+        let cursor_before = transcript_row_cursor_row(&app);
+        assert!(cursor_before < total_rows - 1);
+        assert!(!app.app.transcript_win().is_following_tail());
+
+        app.app.transcript_win_mut().scroll_to_bottom();
+        app.render_silent();
+        assert!(app.app.transcript_win().is_following_tail());
+        assert_eq!(
+            app.app.transcript_win().cursor_screen_row(viewport_rows),
+            Some(screen_row_before)
+        );
+
+        for i in 0..10 {
+            app.app
+                .push_block(smelt_core::transcript_model::Block::Text {
+                    content: format!("new row {i:03} alpha beta"),
+                });
+        }
+        app.render_silent();
+
+        let win = app.app.transcript_win();
+        assert!(
+            transcript_total_rows(&app) > total_rows,
+            "content was appended"
+        );
+        assert!(
+            win.is_following_tail(),
+            "should still be following tail after append"
+        );
+        assert_eq!(
+            win.cursor_screen_row(viewport_rows),
+            Some(screen_row_before),
+            "cursor should stay fixed relative to the viewport"
+        );
+    }
+
+    #[test]
     fn transcript_vim_visual_yank_copies_document_range() {
         let mut app = row_document_transcript_app(100, true);
 
