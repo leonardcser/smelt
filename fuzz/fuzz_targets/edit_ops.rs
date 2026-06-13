@@ -72,17 +72,8 @@ fn run(input: Input) {
     let take = input.ops.len().min(96);
     for op in input.ops.into_iter().take(take) {
         match op {
-            Op::Insert { pos, text } => {
-                let b = ui.buf_mut(buf).unwrap();
-                let p = smelt_buffer::text::snap(b.source(), pos as usize);
-                b.text_mut().insert_str(p, &text);
-                b.sync_after_edit(80);
-            }
-            Op::Replace { start, end, text } => {
-                let b = ui.buf_mut(buf).unwrap();
-                b.text_mut().replace_range(start as usize..end as usize, &text);
-                b.sync_after_edit(80);
-            }
+            Op::Insert { pos, text } => insert_direct(&mut ui, buf, win, pos as usize, &text),
+            Op::Replace { start, end, text } => replace_direct(&mut ui, buf, win, start as usize, end as usize, &text),
             Op::SetCursor { pos } => {
                 let source = ui.buf_mut(buf).unwrap().source().to_string();
                 let p = smelt_buffer::text::snap(&source, (pos as usize).min(source.len()));
@@ -125,6 +116,76 @@ fn run(input: Input) {
         let _ = ui.snapshot();
         assert_window_invariants(&mut ui, buf, win);
     }
+}
+
+fn insert_direct(ui: &mut Ui, buf: smelt_edit::BufId, win: smelt_edit::WinId, pos: usize, text: &str) {
+    let old_source = ui.buf(buf).unwrap().source().to_string();
+    let start = smelt_buffer::text::snap(&old_source, pos);
+    let offsets = window_offsets(ui, win);
+    {
+        let b = ui.buf_mut(buf).unwrap();
+        b.text_mut().insert_str(start, text);
+        b.sync_after_edit(80);
+    }
+    repair_window_offsets(ui, buf, win, start, start, text.len(), offsets);
+}
+
+fn replace_direct(
+    ui: &mut Ui,
+    buf: smelt_edit::BufId,
+    win: smelt_edit::WinId,
+    start: usize,
+    end: usize,
+    text: &str,
+) {
+    let old_source = ui.buf(buf).unwrap().source().to_string();
+    let start = smelt_buffer::text::snap(&old_source, start);
+    let end = smelt_buffer::text::snap(&old_source, end).max(start);
+    let offsets = window_offsets(ui, win);
+    {
+        let b = ui.buf_mut(buf).unwrap();
+        b.text_mut().replace_range(start..end, text);
+        b.sync_after_edit(80);
+    }
+    repair_window_offsets(ui, buf, win, start, end, text.len(), offsets);
+}
+
+fn window_offsets(ui: &Ui, win: smelt_edit::WinId) -> (usize, Option<usize>) {
+    let w = ui.win(win).unwrap();
+    (w.cpos(), w.selection_anchor())
+}
+
+fn repair_window_offsets(
+    ui: &mut Ui,
+    buf: smelt_edit::BufId,
+    win: smelt_edit::WinId,
+    start: usize,
+    end: usize,
+    inserted_len: usize,
+    offsets: (usize, Option<usize>),
+) {
+    let (cpos, anchor) = offsets;
+    let source = ui.buf(buf).unwrap().source().to_string();
+    let w = ui.win_mut(win).unwrap();
+    w.set_cpos(transform_offset(&source, start, end, inserted_len, cpos));
+    w.set_selection_anchor(anchor.map(|offset| transform_offset(&source, start, end, inserted_len, offset)));
+    w.set_curswant(None);
+}
+
+fn transform_offset(source: &str, start: usize, end: usize, inserted_len: usize, offset: usize) -> usize {
+    let removed_len = end.saturating_sub(start);
+    let shifted = if offset <= start {
+        offset
+    } else if offset >= end {
+        if inserted_len >= removed_len {
+            offset.saturating_add(inserted_len - removed_len)
+        } else {
+            offset.saturating_sub(removed_len - inserted_len)
+        }
+    } else {
+        start.saturating_add(inserted_len)
+    };
+    smelt_buffer::text::snap(source, shifted.min(source.len()))
 }
 
 fn dispatch(ui: &mut Ui, ev: Event) {
