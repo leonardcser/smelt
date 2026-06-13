@@ -381,6 +381,7 @@ pub(crate) struct InlineRun {
 
 pub(crate) enum BreakPolicy {
     Normal,
+    BreakOnSpaces,
     Unbreakable,
     PreserveSpaces,
 }
@@ -631,7 +632,7 @@ Current conclusion: visible materialization after measurement is cheap (~3 ms fo
   - display text,
   - style/copy metadata,
   - optional source ranges,
-  - break policy (`Normal`, `Unbreakable`, `PreserveSpaces`).
+  - break policy (`Normal`, `BreakOnSpaces`, `Unbreakable`, `PreserveSpaces`).
 - Do **not** precompute cumulative char widths initially. Compute width on demand and add a lazy width cache only if profiling shows it matters.
 - Provide:
   - `measure_unwrapped() -> CellWidth`
@@ -643,6 +644,50 @@ Current conclusion: visible materialization after measurement is cheap (~3 ms fo
 **Why first:** wrapping is the common primitive. Getting it right and fast unlocks everything else.
 
 **Deliverable:** all wrapped text goes through `InlineLine`; no behavior change except where existing tests intentionally capture known bugs for later correction.
+
+**Completed slice:** shared inline wrapping is now the wrapping primitive for transcript/content renderers.
+
+- Added `smelt_buffer::inline_line::{InlineLine, InlineRun, WrappedRun, BreakPolicy}` in `crates/buffer/src/inline_line.rs`, re-exported as `smelt_core::content::inline_line`. It includes width measurement, run-preserving visual row wrapping, run-index/byte-range fragments for styled callers, and explicit `Normal` versus `BreakOnSpaces` policies.
+- Markdown inline/table wrapping now lowers `InlineSpan`s to `InlineLine<InlineStyle>` in `crates/core/src/content/highlight/inline.rs`.
+- Code block and file-view syntax wrapping now lower syntect regions to `InlineLine<Style>` with preserved-space wrapping in `crates/core/src/content/highlight/syntax.rs`.
+- Inline diff rendering now lowers cached render spans to `InlineLine<(u8, u8, u8)>` with preserved-space wrapping in `crates/core/src/content/highlight/diff.rs`.
+- ANSI/tool output wrapping now uses `InlineLine` break-on-space semantics in `crates/core/src/content/ansi.rs` and run-index fragments in `crates/tui/src/content/transcript_parsers/tools.rs`, removing the tool-title offset side table.
+- User/exec chrome, process-status rows, and collapsed thinking summaries now use `InlineLine` plain byte ranges in `crates/tui/src/content/transcript_parsers/chrome.rs`, `process_status.rs`, and `thinking.rs`.
+- Remaining direct uses of `smelt_buffer::wrap` are outside transcript/content rendering: low-level buffer visual layout (`crates/buffer/src/wrap.rs`, `crates/buffer/src/wrap_layout.rs`), the edit re-export (`crates/edit/src/text.rs`), and standalone formatting (`crates/tui/src/format.rs`). `InlineLine::wrap_plain_ranges` delegates to the low-level wrapper for plain single-run compatibility rather than duplicating that algorithm.
+
+Validation:
+
+```bash
+cargo test -p smelt-buffer
+cargo test -p smelt-core
+cargo test -p smelt-tui
+cargo fmt
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p smelt-tui mixed_large_transcript_projection_baseline -- --ignored --nocapture
+```
+
+Baseline result after the shared wrapping slice:
+
+```text
+TRANSCRIPT_LAYOUT_BASELINE input_bytes=10497943 generated_bytes=10499021 blocks=3404 total_rows=120137 diff_caches=128 diff_cache_ms=1652 resize_diff_caches=128 resize_diff_cache_ms=1632 first_ms=852 resize_ms=940 visible_ms=3 allocs=3359698 bytes_allocated=603078742 visible_rows=80
+```
+
+Top duration totals from the same run:
+
+| label | count | total |
+|---|---:|---:|
+| `render:text` | 1024 | 3.580 s |
+| `render:markdown` | 1024 | 3.576 s |
+| `render:build_diff_cache` | 256 | 3.273 s |
+| `transcript:plan_projection_measured` | 2 | 1.791 s |
+| `transcript:measure_all_heights` | 3 | 1.788 s |
+| `render:tool_call` | 256 | 1.658 s |
+| `render:inline_diff_cached` | 256 | 1.648 s |
+| `render:code_block` | 1024 | 876 ms |
+| `render:exec` | 400 | 382 ms |
+| `render:wrapped_output` | 400 | 367 ms |
+
+Conclusion: this slice intentionally centralizes behavior without changing the rendered-measurement architecture, so the same hotspots remain. The small allocation/time movement is within this path's current full-render cost profile; the next slices still need width-independent IR measurement to remove the expensive work.
 
 ### Phase 2: Markdown IR with `pulldown-cmark`
 

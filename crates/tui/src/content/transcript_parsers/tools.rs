@@ -7,7 +7,7 @@ use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{RenderedLayout, RenderedLeaf};
 use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
 use smelt_core::content::highlight::InlineSyntax;
-use smelt_core::content::wrap::wrap_line_ranges;
+use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
 use smelt_core::theme::{intern, HlGroup};
 use smelt_core::transcript_model::{ToolOutput, ToolStatus};
 use std::collections::HashMap;
@@ -122,39 +122,35 @@ fn print_tool_line(
     let max_seg = ly.max_summary.max(1);
 
     struct Wrapped {
-        // Cumulative byte offsets: span i covers the concatenated plain at offs[i]..offs[i+1].
-        offs: Vec<usize>,
-        // Wrap segments as byte ranges into the concatenated plain text.
-        ranges: Vec<(usize, usize)>,
+        rows: Vec<Vec<WrappedRun<()>>>,
     }
 
     let mut wlines: Vec<Wrapped> = summary
         .0
         .iter()
         .map(|spans| {
-            let mut plain = String::new();
-            let mut offs = Vec::with_capacity(spans.len() + 1);
-            offs.push(0);
-            for s in spans {
-                plain.push_str(&s.text);
-                offs.push(plain.len());
+            let line = InlineLine::new(
+                spans
+                    .iter()
+                    .map(|s| InlineRun::new(s.text.clone(), (), BreakPolicy::BreakOnSpaces))
+                    .collect(),
+            );
+            Wrapped {
+                rows: line.wrap_fragments(max_seg),
             }
-            let ranges = wrap_line_ranges(&plain, max_seg);
-            Wrapped { offs, ranges }
         })
         .collect();
     if wlines.is_empty() {
         wlines.push(Wrapped {
-            offs: vec![0],
-            ranges: vec![(0, 0)],
+            rows: vec![Vec::new()],
         });
     }
 
-    if wlines.iter().any(|w| w.ranges.len() > 1) {
+    if wlines.iter().any(|w| w.rows.len() > 1) {
         out.mark_wrapped();
     }
 
-    let total: usize = wlines.iter().map(|w| w.ranges.len()).sum();
+    let total: usize = wlines.iter().map(|w| w.rows.len()).sum();
     let show = total.min(MAX_TOOL_BLOCK_ROWS);
     let mut rows = 0u16;
     let mut emitted = 0usize;
@@ -166,7 +162,7 @@ fn print_tool_line(
             .map(Vec::as_slice)
             .unwrap_or(&[] as &[StyledSpan]);
         let line_source = selectable_line_text(spans);
-        for (seg_idx, &(rs, re)) in w.ranges.iter().enumerate() {
+        for (seg_idx, row_fragments) in w.rows.iter().enumerate() {
             if emitted >= show {
                 break 'outer;
             }
@@ -181,16 +177,12 @@ fn print_tool_line(
                 out.set_source_text(&tool_title_source_text(name, &line_source, is_first));
             }
 
-            for (sp_idx, span) in spans.iter().enumerate() {
-                let sp_start = w.offs[sp_idx];
-                let sp_end = w.offs[sp_idx + 1];
-                let lo = sp_start.max(rs);
-                let hi = sp_end.min(re);
-                if lo >= hi {
+            for fragment in row_fragments {
+                let Some(span) = spans.get(fragment.run_index) else {
                     continue;
-                }
-                let start = lo - sp_start;
-                let end = hi - sp_start;
+                };
+                let start = fragment.range.start;
+                let end = fragment.range.end;
                 let piece = smelt_buffer::text::slice(&span.text, start..end);
 
                 let fg_color = span.fg.as_deref().and_then(|name| out.theme().get(name).fg);

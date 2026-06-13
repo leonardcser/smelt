@@ -10,9 +10,10 @@ use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::buffer::SpanMeta;
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
+use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Color;
 use crate::theme::intern;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 /// Map a language token (`"bash"`, `"rust"`, `"ts"`, …) to a syntect-friendly file extension.
 /// Unknown tokens fall through unchanged so syntect can attempt a direct extension lookup.
@@ -225,39 +226,21 @@ fn split_regions_into_rows(
     regions: &[(Style, &str)],
     max_width: usize,
 ) -> Vec<Vec<(Style, String)>> {
-    let max_width = max_width.max(1);
-    let mut rows: Vec<Vec<(Style, String)>> = Vec::new();
-    let mut current_row: Vec<(Style, String)> = Vec::new();
-    let mut col = 0usize;
-
-    for (style, text) in regions {
-        let text = text.trim_end_matches('\n').trim_end_matches('\r');
-        if text.is_empty() {
-            continue;
-        }
-        let mut chunk = String::new();
-        for ch in text.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if col > 0 && col.saturating_add(ch_width) > max_width {
-                if !chunk.is_empty() {
-                    current_row.push((*style, std::mem::take(&mut chunk)));
-                }
-                rows.push(std::mem::take(&mut current_row));
-                col = 0;
-            }
-            chunk.push(ch);
-            col = col.saturating_add(ch_width);
-        }
-        if !chunk.is_empty() {
-            current_row.push((*style, chunk));
-        }
-    }
-    if !current_row.is_empty() {
-        rows.push(current_row);
-    }
-    if rows.is_empty() {
-        rows.push(Vec::new());
-    }
+    let line = InlineLine::new(
+        regions
+            .iter()
+            .filter_map(|(style, text)| {
+                let text = text.trim_end_matches('\n').trim_end_matches('\r');
+                (!text.is_empty())
+                    .then(|| InlineRun::new(text.to_string(), *style, BreakPolicy::PreserveSpaces))
+            })
+            .collect(),
+    );
+    let rows: Vec<Vec<(Style, String)>> = line
+        .wrap_ranges(max_width.max(1))
+        .into_iter()
+        .map(|row| row.into_iter().map(|run| (run.meta, run.text)).collect())
+        .collect();
     if rows.len() > 1 {
         out.mark_wrapped();
     }

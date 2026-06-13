@@ -10,6 +10,7 @@ use syntect::easy::HighlightLines;
 use super::{syntax_theme, GutterStyle, SYNTAX_SET};
 use crate::content::builder::LineBuilder;
 use crate::content::default_width;
+use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Color;
 use smelt_buffer::buffer::SpanMeta;
 
@@ -576,58 +577,25 @@ fn split_cached_spans_into_rows(
     spans: &[CachedStyleRange],
     max_width: usize,
 ) -> Vec<Vec<RenderSpan>> {
-    let spans = render_spans_for_line(line, spans);
     let _ = out;
-    let max_width = max_width.max(1);
-    let mut rows: Vec<Vec<RenderSpan>> = Vec::new();
-    let mut current_row: Vec<RenderSpan> = Vec::new();
-    let mut col = 0;
-
-    for span in spans {
-        if span.text.is_empty() {
-            continue;
-        }
-        let mut chars = span.text.chars().peekable();
-        while chars.peek().is_some() {
-            let remaining = max_width.saturating_sub(col);
-            if remaining == 0 {
-                rows.push(std::mem::take(&mut current_row));
-                col = 0;
-                continue;
-            }
-            let mut chunk = String::new();
-            let mut chunk_w = 0;
-            while let Some(ch) = chars.peek().copied() {
-                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                if chunk_w + cw > remaining && chunk_w > 0 {
-                    break;
-                }
-                if chunk_w + cw > remaining {
-                    break;
-                }
-                chars.next();
-                chunk.push(ch);
-                chunk_w += cw;
-            }
-            if chunk.is_empty() {
-                rows.push(std::mem::take(&mut current_row));
-                col = 0;
-                continue;
-            }
-            col += chunk_w;
-            current_row.push(RenderSpan {
-                text: chunk,
-                fg: span.fg,
-            });
-        }
-    }
-    if !current_row.is_empty() {
-        rows.push(current_row);
-    }
-    if rows.is_empty() {
-        rows.push(Vec::new());
-    }
-    rows
+    let spans = render_spans_for_line(line, spans);
+    let line = InlineLine::new(
+        spans
+            .into_iter()
+            .map(|span| InlineRun::new(span.text, span.fg, BreakPolicy::PreserveSpaces))
+            .collect(),
+    );
+    line.wrap_ranges(max_width.max(1))
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|run| RenderSpan {
+                    text: run.text,
+                    fg: run.meta,
+                })
+                .collect()
+        })
+        .collect()
 }
 
 pub fn print_cached_inline_diff(

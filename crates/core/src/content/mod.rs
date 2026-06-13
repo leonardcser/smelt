@@ -8,6 +8,7 @@ pub mod stream_parser;
 pub mod transcript;
 pub mod width;
 
+pub use smelt_buffer::inline_line;
 pub use smelt_buffer::wrap;
 
 pub use crate::buffer::SpanMeta;

@@ -5,9 +5,9 @@
 //! other. This module keeps the buffer-specific wrapping and `LineBuilder`
 //! emission helpers used by transcript rendering.
 
+use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::style::Style;
 pub use smelt_ansi::{parse_ansi, AnsiSpan};
-use smelt_buffer::wrap::wrap_line_ranges;
 
 /// Cumulative byte boundaries for a list of spans.
 fn span_boundaries(spans: &[AnsiSpan]) -> Vec<usize> {
@@ -28,8 +28,13 @@ fn span_boundaries(spans: &[AnsiSpan]) -> Vec<usize> {
 /// indices to their cumulative byte offsets.
 pub fn wrap_ansi(text: &str, width: usize) -> (Vec<AnsiSpan>, Vec<(usize, usize)>, Vec<usize>) {
     let spans = parse_ansi(text);
-    let plain: String = spans.iter().map(|s| s.text.as_str()).collect();
-    let ranges = wrap_line_ranges(&plain, width);
+    let line = InlineLine::new(
+        spans
+            .iter()
+            .map(|span| InlineRun::new(span.text.clone(), (), BreakPolicy::BreakOnSpaces))
+            .collect(),
+    );
+    let ranges = line.wrap_plain_ranges(width);
     let boundaries = span_boundaries(&spans);
     (spans, ranges, boundaries)
 }

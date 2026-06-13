@@ -3,7 +3,7 @@
 
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::{emit_inline_spans, parse_inline_spans, wrap_inline_spans};
-use smelt_core::content::wrap::wrap_line;
+use smelt_core::content::inline_line::InlineLine;
 
 use super::metrics::{block_inner_width, THINKING_GUTTER};
 use super::tools::pluralize;
@@ -72,12 +72,14 @@ fn render_thinking_summary(
 ) -> u16 {
     let summary = format!("{label} ({})", pluralize(line_count, "line", "lines"));
     let max_cols = block_inner_width(width);
-    let segs = wrap_line(&summary, max_cols);
+    let line = InlineLine::plain(summary.as_str(), ());
+    let segs = line.wrap_plain_ranges(max_cols);
     if segs.len() > 1 {
         out.mark_wrapped();
     }
     let mut rows = 0u16;
-    for seg in &segs {
+    for (start, end) in segs {
+        let seg = smelt_buffer::text::slice(&summary, start..end);
         out.set_dim_italic();
         out.print_gutter(THINKING_GUTTER);
         out.print(seg);

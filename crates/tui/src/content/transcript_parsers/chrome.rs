@@ -6,7 +6,7 @@
 
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::builder::LineBuilder;
-use smelt_core::content::wrap::wrap_line;
+use smelt_core::content::inline_line::InlineLine;
 use smelt_core::theme::intern;
 
 use super::metrics::CHROME_INNER_PAD;
@@ -53,12 +53,14 @@ pub(super) fn render(
             rows += 1;
             continue;
         }
-        let chunks = wrap_line(logical, text_w);
+        let line = InlineLine::plain(logical.as_str(), ());
+        let chunks = line.wrap_plain_ranges(text_w);
         if chunks.len() > 1 {
             out.mark_wrapped();
         }
         let mut char_start = 0usize;
-        for chunk in &chunks {
+        for (start, end) in chunks {
+            let chunk = smelt_buffer::text::slice(logical, start..end);
             out.set_hl(user_bg);
             out.print_with_meta(&pad, pad_meta.clone());
             out.set_bold();

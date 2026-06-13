@@ -3,6 +3,7 @@
 //! renderer that uses both.
 
 use crate::content::builder::{display_width, LineBuilder};
+use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::content::ColumnAlignment;
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
@@ -559,81 +560,23 @@ fn flatten_nodes_into(nodes: &[InlineNode], style: &InlineStyle, out: &mut Vec<I
 }
 
 pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<InlineSpan>> {
-    use unicode_width::UnicodeWidthChar;
-
-    if max_cols == 0 || spans.is_empty() {
-        return vec![spans.to_vec()];
-    }
-
-    let mut rows: Vec<Vec<InlineSpan>> = Vec::new();
-    let mut cur_row: Vec<InlineSpan> = Vec::new();
-    let mut col = 0usize;
-
-    for span in spans {
-        let mut remaining = span.text.as_str();
-        while !remaining.is_empty() {
-            let word_end = remaining
-                .find(' ')
-                .map(|i| i + 1)
-                .unwrap_or(remaining.len());
-            let word = &remaining[..word_end];
-            remaining = &remaining[word_end..];
-
-            let word_width: usize = word.chars().map(|c| c.width().unwrap_or(0)).sum();
-
-            if col + word_width > max_cols && col > 0 {
-                rows.push(std::mem::take(&mut cur_row));
-                col = 0;
-            }
-
-            if word_width > max_cols {
-                for ch in word.chars() {
-                    let cw = ch.width().unwrap_or(0);
-                    if col + cw > max_cols && col > 0 {
-                        rows.push(std::mem::take(&mut cur_row));
-                        col = 0;
-                    }
-                    append_char_to_row(&mut cur_row, ch, &span.style);
-                    col += cw;
-                }
-            } else {
-                append_text_to_row(&mut cur_row, word, &span.style);
-                col += word_width;
-            }
-        }
-    }
-
-    if !cur_row.is_empty() || rows.is_empty() {
-        rows.push(cur_row);
-    }
-
-    rows
-}
-
-fn append_text_to_row(row: &mut Vec<InlineSpan>, text: &str, style: &InlineStyle) {
-    if let Some(last) = row.last_mut() {
-        if last.style == *style {
-            last.text.push_str(text);
-            return;
-        }
-    }
-    row.push(InlineSpan {
-        text: text.to_string(),
-        style: *style,
-    });
-}
-
-fn append_char_to_row(row: &mut Vec<InlineSpan>, ch: char, style: &InlineStyle) {
-    if let Some(last) = row.last_mut() {
-        if last.style == *style {
-            last.text.push(ch);
-            return;
-        }
-    }
-    row.push(InlineSpan {
-        text: ch.to_string(),
-        style: *style,
-    });
+    let line = InlineLine::new(
+        spans
+            .iter()
+            .map(|span| InlineRun::new(span.text.clone(), span.style, BreakPolicy::Normal))
+            .collect(),
+    );
+    line.wrap_ranges(max_cols)
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|run| InlineSpan {
+                    text: run.text,
+                    style: run.meta,
+                })
+                .collect()
+        })
+        .collect()
 }
 
 pub fn emit_inline_spans(out: &mut LineBuilder, spans: &[InlineSpan]) {
