@@ -50,7 +50,7 @@ fn run(input: Input) {
     let mut ui = Ui::new();
     ui.set_terminal_size(40, 10);
     let buf = ui.buf_create(BufCreateOpts::default());
-    ui.buf_mut(buf).unwrap().set_source(input.initial);
+    ui.buf_mut(buf).unwrap().set_source(plain_text(&input.initial));
     ui.buf_mut(buf).unwrap().sync_after_edit(40);
     let win = ui
         .win_open_split(
@@ -72,22 +72,22 @@ fn run(input: Input) {
     let take = input.ops.len().min(96);
     for op in input.ops.into_iter().take(take) {
         match op {
-            Op::Insert { pos, text } => insert_direct(&mut ui, buf, win, pos as usize, &text),
-            Op::Replace { start, end, text } => replace_direct(&mut ui, buf, win, start as usize, end as usize, &text),
+            Op::Insert { pos, text } => insert_direct(&mut ui, buf, win, pos as usize, &plain_text(&text)),
+            Op::Replace { start, end, text } => replace_direct(&mut ui, buf, win, start as usize, end as usize, &plain_text(&text)),
             Op::SetCursor { pos } => {
                 let source = ui.buf_mut(buf).unwrap().source().to_string();
                 let p = smelt_buffer::text::snap(&source, (pos as usize).min(source.len()));
                 ui.win_mut(win).unwrap().set_cpos(p);
             }
             Op::KeyChar { ch, ctrl, shift, alt } => {
-                let c = char::from_u32(ch).unwrap_or('?');
+                let c = char::from_u32(ch).filter(|c| *c != smelt_buffer::ATTACHMENT_MARKER).unwrap_or('?');
                 dispatch(&mut ui, Event::Key(key(KeyCode::Char(c), mods(ctrl, shift, alt))));
             }
             Op::Special { idx, shift } => {
                 let code = SPECIALS[(idx as usize) % SPECIALS.len()];
                 dispatch(&mut ui, Event::Key(key(code, mods(false, shift, false))));
             }
-            Op::Paste(s) => dispatch(&mut ui, Event::Paste(s)),
+            Op::Paste(s) => dispatch(&mut ui, Event::Paste(plain_text(&s))),
             Op::Mouse { kind, button, row, col } => {
                 dispatch(
                     &mut ui,
@@ -116,6 +116,10 @@ fn run(input: Input) {
         let _ = ui.snapshot();
         assert_window_invariants(&mut ui, buf, win);
     }
+}
+
+fn plain_text(s: &str) -> String {
+    s.replace(smelt_buffer::ATTACHMENT_MARKER, "")
 }
 
 fn insert_direct(ui: &mut Ui, buf: smelt_edit::BufId, win: smelt_edit::WinId, pos: usize, text: &str) {
