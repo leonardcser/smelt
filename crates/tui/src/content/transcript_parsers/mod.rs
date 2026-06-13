@@ -27,7 +27,7 @@ mod user;
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
 pub(crate) use tools::measure_tool_height;
-pub use tools::render_layout_into;
+pub use tools::render_tool_body_into;
 
 /// Per-tool row cap (applied to command header and output body separately).
 const MAX_TOOL_BLOCK_ROWS: usize = 20;
@@ -1053,6 +1053,61 @@ mod tests {
         let pending_col = render_insert_column(pending_layout, ToolStatus::Pending);
         let finished_col = render_insert_column(finished_layout, ToolStatus::Ok);
         assert_eq!(pending_col, finished_col);
+    }
+
+    #[test]
+    fn tool_body_compile_rejects_buffer_leaf_layouts() {
+        use smelt_core::buffer::BufId;
+        use smelt_core::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
+
+        let layout = BlockLayout::Vbox(vec![
+            BlockLayout::Leaf(LuaLeaf::Text(TextSpec {
+                content: "kept".into(),
+                hl_group: None,
+            })),
+            BlockLayout::Leaf(LuaLeaf::Buf(BufId(99))),
+        ]);
+
+        let err = crate::app::transcript::compile_tool_body(&layout)
+            .expect_err("buffer leaves should reject the whole body");
+        assert!(err.contains("layout.leaf"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn tool_body_diff_ir_respects_tool_row_cap() {
+        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, ToolBody};
+        use smelt_core::transcript_model::ToolOutput;
+
+        let content = (0..80)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ir = smelt_core::content::highlight::build_file_view_ir(&content, Some("txt"));
+        let block = Block::ToolCall {
+            call_id: "c-cap".into(),
+            name: "write_file".into(),
+            summary: protocol::StyledLines::from_plain("x.txt"),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            output: Some(Box::new(ToolOutput {
+                content: "FALLBACK".into(),
+                is_error: false,
+                metadata: None,
+            })),
+            user_message: None,
+            body: Some(ToolBody::Layout(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))),
+            layout_revision: 0,
+        };
+        let ctx = LayoutContext {
+            width: W as u16,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+        let display = layout_block_test(&block, Some(&state), &ctx);
+        assert_eq!(display.len(), 1 + MAX_TOOL_BLOCK_ROWS);
     }
 
     #[test]

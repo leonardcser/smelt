@@ -5,10 +5,9 @@ use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{
-    solve_hbox_widths, BlockLayout, IrLeaf, LayoutIr, RenderedLayout, RenderedLeaf, TextSpec,
-    ToolBody,
+    solve_hbox_widths, BlockLayout, IrLeaf, LayoutIr, TextSpec, ToolBody,
 };
-use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
+use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::InlineSyntax;
 use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
 use smelt_core::theme::{intern, HlGroup};
@@ -505,7 +504,7 @@ fn render_ir_leaf(
                 } else {
                     0
                 },
-                u16::MAX,
+                rows_cap,
             );
             render_source_view(out, SourceView::DiffIr(cache), target)
         }
@@ -520,7 +519,8 @@ fn measure_ir_leaf(leaf: &IrLeaf, rows_cap: u16, width: u16) -> u16 {
             width,
             smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
             BLOCK_GUTTER_W as u16,
-        ),
+        )
+        .min(rows_cap),
     }
 }
 
@@ -613,210 +613,6 @@ fn render_ir_hbox(
         out.newline();
     }
     row_total
-}
-
-/// Render a `RenderedLayout` directly into `out` without a tool-block gutter
-/// or row cap. Used by the confirm dialog's preview pipeline, which renders
-/// into a fresh dialog-owned buffer instead of stamping into a transcript row.
-pub fn render_layout_into(out: &mut LineBuilder, layout: &RenderedLayout, width: u16) -> u16 {
-    replay_node(out, layout, u16::MAX, width, false)
-}
-
-fn replay_node(
-    out: &mut LineBuilder,
-    layout: &RenderedLayout,
-    rows_cap: u16,
-    width: u16,
-    with_gutter: bool,
-) -> u16 {
-    if rows_cap == 0 {
-        return 0;
-    }
-    match layout {
-        RenderedLayout::Leaf(leaf) => render_leaf(out, leaf, rows_cap, width, with_gutter),
-        RenderedLayout::Vbox(items) => {
-            let mut written = 0u16;
-            for child in items {
-                let remaining = rows_cap.saturating_sub(written);
-                if remaining == 0 {
-                    break;
-                }
-                written =
-                    written.saturating_add(replay_node(out, child, remaining, width, with_gutter));
-            }
-            written
-        }
-        RenderedLayout::Hbox(items) => replay_hbox(out, items, rows_cap, width, with_gutter),
-    }
-}
-
-fn render_leaf(
-    out: &mut LineBuilder,
-    leaf: &RenderedLeaf,
-    rows_cap: u16,
-    width: u16,
-    with_gutter: bool,
-) -> u16 {
-    let source_view_target = SourceViewTarget::new(
-        if with_gutter {
-            BLOCK_GUTTER_W as u16
-        } else {
-            0
-        },
-        u16::MAX,
-    );
-    match leaf {
-        RenderedLeaf::Buf(buf) => replay_leaf(out, buf, rows_cap, width, with_gutter),
-        RenderedLeaf::Text(spec) => render_text_spec(out, spec, rows_cap, width, with_gutter),
-        RenderedLeaf::Diff(spec) => {
-            render_source_view(out, SourceView::Diff(spec), source_view_target)
-        }
-        RenderedLeaf::DiffIr(cache) => {
-            render_source_view(out, SourceView::DiffIr(cache), source_view_target)
-        }
-        RenderedLeaf::FileView(spec) => {
-            render_source_view(out, SourceView::FileView(spec), source_view_target)
-        }
-    }
-}
-
-fn replay_leaf(
-    out: &mut LineBuilder,
-    buf: &smelt_core::buffer::Buffer,
-    rows_cap: u16,
-    width: u16,
-    with_gutter: bool,
-) -> u16 {
-    let n = buf.line_count();
-    if n == 0 || rows_cap == 0 {
-        return 0;
-    }
-    if is_unit_leaf(buf) && width > 0 {
-        let glyph = buf.get_line(0).unwrap_or("");
-        if with_gutter {
-            out.print_gutter(BLOCK_GUTTER_SPACE);
-        }
-        out.print(&glyph.repeat(width as usize));
-        out.newline();
-        return 1;
-    }
-    let limit = (n as u16).min(rows_cap);
-    for i in 0..limit {
-        if with_gutter {
-            out.print_gutter(BLOCK_GUTTER_SPACE);
-        }
-        replay_buffer_row_into(buf, i, out);
-        out.newline();
-    }
-    limit
-}
-
-fn replay_hbox(
-    out: &mut LineBuilder,
-    items: &[smelt_core::content::block_layout::RenderedHboxItem],
-    rows_cap: u16,
-    total_width: u16,
-    with_gutter: bool,
-) -> u16 {
-    use smelt_core::content::block_layout::solve_hbox_widths;
-    let widths = solve_hbox_widths(items, total_width);
-
-    let mut columns: Vec<Vec<&smelt_core::buffer::Buffer>> = Vec::with_capacity(items.len());
-    let mut col_height: u16 = 0;
-    let mut any_unit_only = true;
-    for item in items {
-        // Hbox columns can only contain buffer leaves; spec leaves (diff/file_view)
-        // would need width-dependent height computation that hbox layout can't do
-        // ahead of time. The built-in tools that use specs (edit_file, write_file)
-        // wrap them in a top-level `Leaf`, not an `Hbox`, so this restriction is
-        // invisible to them.
-        let bufs: Vec<&smelt_core::buffer::Buffer> = item
-            .layout
-            .leaves()
-            .into_iter()
-            .filter_map(|l| match l {
-                RenderedLeaf::Buf(b) => Some(&**b),
-                _ => None,
-            })
-            .collect();
-        let height: u16 = bufs
-            .iter()
-            .map(|b| {
-                if is_unit_leaf(b) {
-                    0
-                } else {
-                    b.line_count() as u16
-                }
-            })
-            .sum();
-        if height > 0 {
-            any_unit_only = false;
-        }
-        if height > col_height {
-            col_height = height;
-        }
-        columns.push(bufs);
-    }
-    if any_unit_only {
-        col_height = 1; // pure separator row
-    }
-    let row_total = col_height.min(rows_cap);
-    if row_total == 0 {
-        return 0;
-    }
-
-    for r in 0..row_total {
-        if with_gutter {
-            out.print_gutter(BLOCK_GUTTER_SPACE);
-        }
-        for (col_idx, bufs) in columns.iter().enumerate() {
-            let col_w = widths.get(col_idx).copied().unwrap_or(0);
-            if col_w == 0 {
-                continue;
-            }
-            let emitted = emit_column_row(out, bufs, r, col_w);
-            if emitted < col_w {
-                out.print(&" ".repeat((col_w - emitted) as usize));
-            }
-        }
-        out.newline();
-    }
-    row_total
-}
-
-fn emit_column_row(
-    out: &mut LineBuilder,
-    bufs: &[&smelt_core::buffer::Buffer],
-    r: u16,
-    col_w: u16,
-) -> u16 {
-    // Unit leaves (1×1) repeat horizontally to fill the column.
-    for buf in bufs {
-        if is_unit_leaf(buf) {
-            let glyph = buf.get_line(0).unwrap_or("");
-            let repeat = col_w as usize;
-            let s = glyph.repeat(repeat);
-            out.print(&s);
-            return col_w;
-        }
-    }
-    let mut consumed: u16 = 0;
-    for buf in bufs {
-        let h = buf.line_count() as u16;
-        if r < consumed + h {
-            return emit_buffer_row_clipped(buf, r - consumed, col_w, out);
-        }
-        consumed = consumed.saturating_add(h);
-    }
-    0
-}
-
-fn is_unit_leaf(buf: &smelt_core::buffer::Buffer) -> bool {
-    if buf.line_count() != 1 {
-        return false;
-    }
-    let line = buf.get_line(0).unwrap_or("");
-    smelt_core::content::builder::display_width(line) == 1
 }
 
 fn emit_buffer_row_clipped(
@@ -968,6 +764,12 @@ fn measure_tool_output(content: &str, width: usize) -> u16 {
         })
         .sum();
     (total_rows.min(MAX_TOOL_BLOCK_ROWS) + usize::from(total_rows > MAX_TOOL_BLOCK_ROWS)) as u16
+}
+
+pub fn render_tool_body_into(out: &mut LineBuilder, body: &ToolBody, width: u16) -> u16 {
+    match body {
+        ToolBody::Layout(layout) => render_layout_ir_node(out, layout, u16::MAX, width, false),
+    }
 }
 
 pub fn render_wrapped_output(

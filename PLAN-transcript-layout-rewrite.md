@@ -848,9 +848,11 @@ Completed slice:
 - Replaced `ToolState.render_cache` with width-independent `ToolState.body`.
 - Added native declarative Lua `smelt.layout.text` and `smelt.layout.tool_output`; bundled text/diff/file-view tool renderers now compile to `ToolBody` without persistent buffers.
 - Removed the render-loop call that prerendered every transcript tool block at the current width.
-- Projection now computes tool bodies only for the planned visible block window, stores them as width-independent sidecar display state, then replans against the updated row index.
-- Tool block measurement reads `ToolBody` directly, including text wrapping and diff/file-view IR measurement, before falling back to raw output for tools without a compiled body.
+- Projection now computes tool bodies only for the planned visible block window, stores them as width-independent sidecar display state, then replans against the updated row index when new bodies were stored.
+- Tool body compilation is all-or-nothing; unsupported buffer leaves reject the body instead of silently dropping children.
+- Tool block measurement reads `ToolBody` directly, including text wrapping and capped diff/file-view IR measurement, before falling back to raw output for tools without a compiled body.
 - Visible materialization renders `ToolBody` directly; width changes rewrap the body and do not rerun Lua render hooks for hidden tools with cached bodies.
+- Permission previews render through the same tool-body IR path; the old `RenderedLayout` / `extract_rendered_layout` pipeline was removed.
 - Removed `ctx.width` from `ToolRenderCtx`; regenerated Lua API docs/stubs.
 
 Validation:
@@ -1057,8 +1059,6 @@ Goal: they use `measure_all_heights` (now cheap) and render only the requested r
 - `crates/tui/src/content/transcript_parsers/mod.rs` — old `layout_block_into` path
 - `crates/tui/src/content/transcript_parsers/text.rs`, `markdown.rs`, `thinking.rs`, `user.rs`, `code_line.rs`, `compacted.rs`, `exec.rs`, `mode.rs`, `process_status.rs`, `tool_call.rs`, `tools.rs` — merged into `DisplayBlock` impls
 - `crates/core/src/content/block_layout.rs` — old `BlockLayout` if fully replaced by `LayoutIr`
-- `ToolState.render_cache`
-- `extract_rendered_layout` and width-keyed diff cache build
 
 ### Likely renames
 

@@ -5,7 +5,7 @@
 //! leaves (`Text` and `DiffIr`). Buffer leaves are transient Lua values and are
 //! not preserved in tool bodies.
 
-use crate::buffer::{BufId, Buffer};
+use crate::buffer::BufId;
 use crate::content::highlight::DiffIr;
 use serde::{Deserialize, Serialize};
 
@@ -45,8 +45,7 @@ pub enum IrLeaf {
 }
 
 /// A leaf parameterised on the buffer payload `B`. With `B = BufId` this is the
-/// Lua-returned shape; with `B = Box<Buffer>` it's the main-thread-extracted
-/// shape. Diff/FileView arms are identical in both.
+/// raw Lua-returned shape; compiled tool bodies use `IrLeaf` instead.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Leaf<B> {
     Buf(B),
@@ -57,7 +56,6 @@ pub enum Leaf<B> {
 }
 
 pub type LuaLeaf = Leaf<BufId>;
-pub type RenderedLeaf = Leaf<Box<Buffer>>;
 pub type LayoutIr = BlockLayout<IrLeaf>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,27 +106,6 @@ impl<L> BlockLayout<L> {
                 }
             }
         }
-    }
-}
-
-/// Owned-leaf alias used by the prerender → parallel-layout handoff.
-pub type RenderedLayout = BlockLayout<RenderedLeaf>;
-pub type RenderedHboxItem = HboxItem<RenderedLeaf>;
-
-/// Whether a rendered layout can be reused across width changes.
-pub fn rendered_layout_width_independent(layout: &RenderedLayout) -> bool {
-    match layout {
-        BlockLayout::Leaf(RenderedLeaf::Buf(_)) => false,
-        BlockLayout::Leaf(
-            RenderedLeaf::Text(_)
-            | RenderedLeaf::Diff(_)
-            | RenderedLeaf::FileView(_)
-            | RenderedLeaf::DiffIr(_),
-        ) => true,
-        BlockLayout::Vbox(items) => items.iter().all(rendered_layout_width_independent),
-        BlockLayout::Hbox(items) => items
-            .iter()
-            .all(|item| rendered_layout_width_independent(&item.layout)),
     }
 }
 

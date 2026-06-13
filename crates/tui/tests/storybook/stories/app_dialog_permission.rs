@@ -4,8 +4,7 @@
 //! `dispatch_engine_event`. The app registers the confirm, fires
 //! `smelt.confirm.open`, and renders the tool's `preview(args)`
 //! layout (diff, file_view, notebook preview, …) through the live
-//! `extract_rendered_layout` + `render_layout_into` pipeline - the
-//! same one production transcript blocks use.
+//! tool-body IR preview pipeline.
 
 use serde_json::json;
 

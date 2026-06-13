@@ -184,11 +184,8 @@ fn parse_decision(decision: &str, req: &ConfirmRequest) -> ConfirmChoice {
     }
 }
 
-/// Call the tool's `preview` hook, move any returned buffer ids out of `app.ui`,
-/// then render the resulting layout directly into the dialog's preview buffer at
-/// `term_width` cells. Mirrors the transcript path (`prerender_tool_blocks` +
-/// `extract_rendered_layout` + `replay_rendered`) but with no row cap and no
-/// 2-cell tool-block gutter, since the dialog's preview pane owns its own chrome.
+/// Call the tool's `preview` hook, compile the returned declarative layout, then
+/// render it directly into the dialog's preview buffer at `term_width` cells.
 fn render_preview_into(
     app: &mut crate::app::TuiApp,
     buf_id: crate::smelt_edit::BufId,
@@ -198,14 +195,21 @@ fn render_preview_into(
     let Some(layout) = app.lua.render_tool_preview(tool_name, args) else {
         return false;
     };
-    let rendered = crate::app::transcript::extract_rendered_layout(&layout, &mut app.ui);
+    let body = match crate::app::transcript::compile_tool_body(&layout) {
+        Ok(body) => body,
+        Err(err) => {
+            app.lua
+                .record_error(format!("tool preview `{tool_name}`: {err}"));
+            return false;
+        }
+    };
     let theme = app.ui.theme().clone();
     let width = crate::content::term_width() as u16;
     let Some(buf) = app.ui.buf_mut(buf_id) else {
         return false;
     };
     crate::content::to_buffer::render_into_buffer(buf, width, &theme, |sink| {
-        crate::content::transcript_parsers::render_layout_into(sink, &rendered, width);
+        crate::content::transcript_parsers::render_tool_body_into(sink, &body, width);
     });
     true
 }

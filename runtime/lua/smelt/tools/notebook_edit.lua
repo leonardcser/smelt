@@ -24,9 +24,7 @@ local function preview_layout(meta)
   if title == "" then
     return body
   end
-  local title_buf = smelt.buf.new({ readonly = true })
-  title_buf:styled({ { { text = title, style = { dim = true } } } })
-  return smelt.layout.vbox({ smelt.layout.leaf(title_buf), body })
+  return smelt.layout.vbox({ smelt.layout.text(title), body })
 end
 
 smelt.tools.register({

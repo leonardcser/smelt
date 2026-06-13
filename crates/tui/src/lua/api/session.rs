@@ -578,13 +578,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let theme = app.ui.theme().clone();
                 let mut plan =
                     view.plan_projection_measured(width, show_thinking, scroll_target, height, &theme);
-                crate::app::transcript::prerender_tool_bodies_for_ids(
+                let tool_bodies_changed = crate::app::transcript::prerender_tool_bodies_for_ids(
                     &app.lua,
                     view.history_mut(),
                     plan.block_ids(),
                 );
-                plan =
-                    view.plan_projection_measured(width, show_thinking, scroll_target, height, &theme);
+                if tool_bodies_changed {
+                    plan = view.plan_projection_measured(
+                        width,
+                        show_thinking,
+                        scroll_target,
+                        height,
+                        &theme,
+                    );
+                }
                 let out = {
                     let target = app.ui.buf_mut(buf.id)?;
                     view.project_planned(target, &theme, plan)

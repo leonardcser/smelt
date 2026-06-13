@@ -1,15 +1,11 @@
 //! Transcript block history, streaming state, projection, and cursor glyph cache.
 
 use crate::app::TuiApp;
-use crate::content::prompt_parser::{
-    build_prompt_display_lines, prompt_display_uses_cursor_padding,
-};
-use crate::smelt_edit::{BufCreateOpts, Buffer, Theme};
+use crate::content::prompt_parser::{build_prompt_display_lines, prompt_display_uses_cursor_padding};
+use crate::smelt_edit::{Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 
-use smelt_core::content::block_layout::{
-    BlockLayout, HboxItem, IrLeaf, LayoutIr, RenderedLayout, ToolBody,
-};
+use smelt_core::content::block_layout::{BlockLayout, HboxItem, IrLeaf, LayoutIr, ToolBody};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::transcript_model::{
     Block, BlockHistory, BlockId, ToolOutput, ToolOutputRef, ToolStatus,
@@ -827,14 +823,14 @@ pub(crate) fn prerender_tool_bodies_for_ids(
     lua: &smelt_core::lua::runtime::LuaRuntime,
     history: &mut BlockHistory,
     ids: &[BlockId],
-) {
+) -> bool {
     let _perf = smelt_perf::perf::begin("tool:prerender_bodies");
     smelt_perf::perf::record_value("tool:prerender_bodies:requested", ids.len() as u64);
     let jobs = collect_tool_render_jobs(history, ids.iter().copied());
     smelt_perf::perf::record_value("tool:prerender_bodies:jobs", jobs.len() as u64);
     let bodies = render_tool_body_jobs(lua, jobs);
     smelt_perf::perf::record_value("tool:prerender_bodies:rendered", bodies.len() as u64);
-    store_tool_body_results(history, bodies);
+    store_tool_body_results(history, bodies)
 }
 
 fn render_tool_body_jobs(
@@ -864,14 +860,15 @@ fn render_tool_body_jobs(
         }) else {
             continue;
         };
-        if let Some(body) = compile_tool_body(&layout) {
-            rendered_jobs.push((job.call_id, body));
+        match compile_tool_body(&layout) {
+            Ok(body) => rendered_jobs.push((job.call_id, body)),
+            Err(err) => lua.record_error(format!("tool render `{}`: {err}", job.name)),
         }
     }
     rendered_jobs
 }
 
-fn store_tool_body_results(history: &mut BlockHistory, bodies: Vec<(String, ToolBody)>) {
+fn store_tool_body_results(history: &mut BlockHistory, bodies: Vec<(String, ToolBody)>) -> bool {
     let mut changed = false;
     for (call_id, body) in bodies {
         if let Some(state) = history.tool_states.get_mut(&call_id) {
@@ -883,17 +880,20 @@ fn store_tool_body_results(history: &mut BlockHistory, bodies: Vec<(String, Tool
     if changed {
         history.invalidate_display_cache();
     }
+    changed
 }
 
-pub(crate) fn compile_tool_body(layout: &BlockLayout) -> Option<ToolBody> {
+pub(crate) fn compile_tool_body(layout: &BlockLayout) -> Result<ToolBody, String> {
     compile_layout_ir(layout).map(ToolBody::Layout)
 }
 
-fn compile_layout_ir(layout: &BlockLayout) -> Option<LayoutIr> {
+fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
     use smelt_core::content::block_layout::{LuaLeaf, TextSpec};
     match layout {
-        BlockLayout::Leaf(LuaLeaf::Buf(_)) => None,
-        BlockLayout::Leaf(LuaLeaf::Text(spec)) => Some(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+        BlockLayout::Leaf(LuaLeaf::Buf(_)) => {
+            Err("layout.leaf buffer leaves are not supported in tool bodies".into())
+        }
+        BlockLayout::Leaf(LuaLeaf::Text(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
             content: spec.content.clone(),
             hl_group: spec.hl_group.clone(),
         }))),
@@ -909,7 +909,7 @@ fn compile_layout_ir(layout: &BlockLayout) -> Option<LayoutIr> {
                 &spec.anchor,
                 ext,
             );
-            Some(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))
+            Ok(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))
         }
         BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
             let ext = spec
@@ -922,91 +922,24 @@ fn compile_layout_ir(layout: &BlockLayout) -> Option<LayoutIr> {
                         .and_then(|e| e.to_str())
                 });
             let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
-            Some(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))
+            Ok(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))
         }
-        BlockLayout::Leaf(LuaLeaf::DiffIr(ir)) => {
-            Some(BlockLayout::Leaf(IrLeaf::DiffIr(ir.clone())))
-        }
-        BlockLayout::Vbox(items) => Some(BlockLayout::Vbox(
-            items.iter().filter_map(compile_layout_ir).collect(),
-        )),
-        BlockLayout::Hbox(items) => Some(BlockLayout::Hbox(
-            items
-                .iter()
-                .filter_map(|item| {
-                    Some(HboxItem {
-                        constraint: item.constraint,
-                        layout: compile_layout_ir(&item.layout)?,
-                    })
-                })
-                .collect(),
-        )),
-    }
-}
-
-/// Move every leaf buffer out of `ui` into a `RenderedLayout`. Missing buf ids fall back
-/// to an empty placeholder so a registration race doesn't take down the frame.
-pub(crate) fn extract_rendered_layout(
-    layout: &BlockLayout,
-    ui: &mut crate::smelt_edit::Ui,
-) -> RenderedLayout {
-    use smelt_core::content::block_layout::{LuaLeaf, RenderedLeaf};
-    match layout {
-        BlockLayout::Leaf(LuaLeaf::Buf(id)) => {
-            let buf = ui
-                .buf_destroy(*id)
-                .unwrap_or_else(|| Buffer::new(*id, BufCreateOpts::default()));
-            BlockLayout::Leaf(RenderedLeaf::Buf(Box::new(buf)))
-        }
-        BlockLayout::Leaf(LuaLeaf::Text(spec)) => {
-            BlockLayout::Leaf(RenderedLeaf::Text(spec.clone()))
-        }
-        BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
-            let _perf = smelt_perf::perf::begin("render:diff_ir");
-            let ext = spec
-                .lang
-                .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext);
-            let cache = smelt_core::content::highlight::build_diff_ir_ext(
-                &spec.old,
-                &spec.new,
-                &spec.path,
-                &spec.anchor,
-                ext,
-            );
-            BlockLayout::Leaf(RenderedLeaf::DiffIr(cache))
-        }
-        BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
-            let ext = spec
-                .lang
-                .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext)
-                .or_else(|| {
-                    std::path::Path::new(&spec.path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                });
-            let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
-            BlockLayout::Leaf(RenderedLeaf::DiffIr(ir))
-        }
-        BlockLayout::Leaf(LuaLeaf::DiffIr(_)) => {
-            panic!("DiffIr should not be produced by Lua render hooks")
-        }
-        BlockLayout::Vbox(items) => BlockLayout::Vbox(
-            items
-                .iter()
-                .map(|c| extract_rendered_layout(c, ui))
-                .collect(),
-        ),
-        BlockLayout::Hbox(items) => BlockLayout::Hbox(
-            items
-                .iter()
-                .map(|item| HboxItem {
+        BlockLayout::Leaf(LuaLeaf::DiffIr(ir)) => Ok(BlockLayout::Leaf(IrLeaf::DiffIr(ir.clone()))),
+        BlockLayout::Vbox(items) => items
+            .iter()
+            .map(compile_layout_ir)
+            .collect::<Result<Vec<_>, _>>()
+            .map(BlockLayout::Vbox),
+        BlockLayout::Hbox(items) => items
+            .iter()
+            .map(|item| {
+                Ok(HboxItem {
                     constraint: item.constraint,
-                    layout: extract_rendered_layout(&item.layout, ui),
+                    layout: compile_layout_ir(&item.layout)?,
                 })
-                .collect(),
-        ),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(BlockLayout::Hbox),
     }
 }
 
