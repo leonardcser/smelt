@@ -1,4 +1,4 @@
-use super::block_buffers::RenderedBlockCache;
+use super::display_block::{measure_block, render_block_into, DisplayModel, MeasureCtx, RenderCtx};
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
@@ -6,17 +6,15 @@ use crate::smelt_edit::{
 };
 use smelt_buffer::coords::copy_byte_range;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
-use smelt_core::content::code_block::{measure_code_block, parse_code_block};
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
 const HEAD_OVERSCAN_ROWS: RowIndex = 20;
 const TAIL_OVERSCAN_ROWS: RowIndex = 20;
 
 pub(crate) struct TranscriptProjection {
-    rendered_blocks: RenderedBlockCache,
-    rendered_blocks_generation: u64,
-    rendered_blocks_width: u16,
+    display_model: DisplayModel,
+    layout_width: u16,
     materialized: Option<MaterializedProjection>,
     /// Block layout from the last visible `project()`. Surfaced to Lua via `visible_blocks`.
     visible_layout: Vec<LayoutEntry>,
@@ -35,7 +33,7 @@ pub(crate) struct TranscriptProjection {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TranscriptProjectionCounters {
     pub full_row_builds: usize,
-    pub rendered_blocks: usize,
+    pub display_blocks: usize,
     pub exact_height_measured_blocks: usize,
     pub range_materialized_blocks: usize,
 }
@@ -324,44 +322,11 @@ fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
     }
 }
 
-fn measure_block_content_height(
-    block: &Block,
-    state: Option<&smelt_core::transcript_model::ToolState>,
-    width: u16,
-) -> Option<RowIndex> {
-    match block {
-        Block::CodeLine { content, lang } => {
-            let block = parse_code_block(&[content.as_str()], lang);
-            Some(measure_code_block(&block, width as usize) as RowIndex)
-        }
-        Block::ToolCall {
-            name,
-            summary,
-            args: _,
-            ..
-        } => {
-            let state = state?;
-            Some(crate::content::transcript_parsers::measure_tool_height(
-                name,
-                summary,
-                state.status,
-                state.elapsed,
-                state.output.as_deref(),
-                state.user_message.as_deref(),
-                state.body.as_ref(),
-                width as usize,
-            ) as RowIndex)
-        }
-        _ => None,
-    }
-}
-
 impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
-            rendered_blocks: RenderedBlockCache::new(),
-            rendered_blocks_generation: u64::MAX,
-            rendered_blocks_width: 0,
+            display_model: DisplayModel::new(),
+            layout_width: 0,
             materialized: None,
             visible_layout: Vec::new(),
             visible_row_base: 0,
@@ -383,13 +348,8 @@ impl TranscriptProjection {
     }
 
     #[cfg(test)]
-    pub(crate) fn rendered_block_cache_len(&self) -> usize {
-        self.rendered_blocks.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn rendered_block_cache_capacity(&self) -> usize {
-        RenderedBlockCache::MAX_BLOCKS
+    pub(crate) fn display_model_len(&self) -> usize {
+        self.display_model.len()
     }
 
     #[cfg(test)]
@@ -402,22 +362,16 @@ impl TranscriptProjection {
         self.counters = TranscriptProjectionCounters::default();
     }
 
-    fn ensure_blocks(
-        &mut self,
-        history: &BlockHistory,
-        ids: &[BlockId],
-        keys: &[LayoutKey],
-        theme: &Theme,
-    ) {
-        let rendered = self.rendered_blocks.ensure_many(history, ids, keys, theme);
+    fn ensure_blocks(&mut self, history: &BlockHistory, ids: &[BlockId], keys: &[LayoutKey]) {
+        let compiled = self.display_model.ensure_many(history, ids, keys);
         #[cfg(test)]
         {
-            self.counters.rendered_blocks += rendered;
+            self.counters.display_blocks += compiled;
         }
-        let _ = rendered;
+        let _ = compiled;
     }
 
-    fn ensure_block_indices(&mut self, history: &BlockHistory, theme: &Theme, indices: &[usize]) {
+    fn ensure_block_indices(&mut self, history: &BlockHistory, indices: &[usize]) {
         let mut ids = Vec::with_capacity(indices.len());
         let mut keys = Vec::with_capacity(indices.len());
         for &index in indices {
@@ -427,7 +381,7 @@ impl TranscriptProjection {
             ids.push(node.id);
             keys.push(node.key);
         }
-        self.ensure_blocks(history, &ids, &keys, theme);
+        self.ensure_blocks(history, &ids, &keys);
     }
 
     fn clear_materialized_state(&mut self) {
@@ -439,21 +393,19 @@ impl TranscriptProjection {
         self.exact_rows = ExactRowIndex::default();
     }
 
-    fn gc_if_stale(&mut self, gen: u64, width: u16) {
-        if width != self.rendered_blocks_width {
-            // Width change invalidates all layouts (wrapping changes).
-            self.rendered_blocks.clear();
-            self.rendered_blocks_width = width;
+    fn gc_if_stale(&mut self, history: &BlockHistory, width: u16) {
+        self.display_model.retain_order(&history.order);
+        if width != self.layout_width {
+            // Width changes invalidate row indexes and materialized rows, but
+            // display blocks are width-independent and stay reusable.
+            self.layout_width = width;
             self.clear_materialized_state();
         }
-        self.rendered_blocks_generation = gen;
     }
 
-    /// Clear every cached layout so the next `project()` rebuilds from scratch.
-    /// Called when the theme changes - colors that were baked into anonymous
-    /// highlight groups need to be re-resolved against the new palette.
+    /// Clear cached visible/layout state so the next projection rebuilds from scratch.
+    /// Display blocks are theme-independent; only rendered buffers/rows carry colors.
     pub(crate) fn invalidate_theme(&mut self) {
-        self.rendered_blocks.clear();
         self.clear_materialized_state();
     }
 
@@ -480,15 +432,14 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
         show_thinking: bool,
-        theme: &Theme,
+        _theme: &Theme,
     ) {
         let _perf = smelt_perf::perf::begin("transcript:measure_all_heights");
         smelt_perf::perf::record_value(
             "transcript:measure_all_heights:blocks",
             history.order.len() as u64,
         );
-        let gen = history.generation();
-        self.gc_if_stale(gen, width);
+        self.gc_if_stale(history, width);
         let base_key = base_layout_key(width, show_thinking);
         {
             let _perf = smelt_perf::perf::begin("transcript:measure_all_heights:rebuild_index");
@@ -514,52 +465,36 @@ impl TranscriptProjection {
             "transcript:measure_all_heights:missing",
             missing.len() as u64,
         );
-        let mut render_missing = Vec::with_capacity(missing.len());
-        for i in missing {
-            if self.try_measure_block_height(history, i) {
-                continue;
-            }
-            render_missing.push(i);
-        }
-        for chunk in render_missing.chunks(RenderedBlockCache::MAX_BLOCKS) {
+        for chunk in missing.chunks(512) {
             let _perf = smelt_perf::perf::begin("transcript:measure_all_heights:measure_chunk");
-            self.ensure_block_indices(history, theme, chunk);
+            self.ensure_block_indices(history, chunk);
             for &i in chunk {
-                let Some(node) = self.exact_rows.nodes.get(i) else {
-                    continue;
-                };
-                if node.exact_height.is_some() {
-                    continue;
-                }
-                let id = node.id;
-                let key = node.key;
-                let Some(block_buf) = self.rendered_blocks.get(id, key) else {
-                    continue;
-                };
-                let block_rows = block_buf.line_count();
-                let gap = history.rendered_block_gap(i, block_rows) as RowIndex;
-                self.set_exact_height(i, gap.saturating_add(block_rows as RowIndex));
+                self.measure_display_block_height(history, i);
             }
         }
         self.exact_rows.refresh_prefix_rows();
     }
 
-    fn try_measure_block_height(&mut self, history: &BlockHistory, index: usize) -> bool {
+    fn measure_display_block_height(&mut self, history: &BlockHistory, index: usize) -> bool {
         let Some(node) = self.exact_rows.nodes.get(index) else {
             return false;
         };
         if node.exact_height.is_some() {
             return true;
         }
-        let block = history.block_at(index);
-        let state = match block {
-            Block::ToolCall { call_id, .. } => history.tool_states.get(call_id),
-            _ => None,
-        };
-        let Some(rows) = measure_block_content_height(block, state, node.key.width) else {
+        let id = node.id;
+        let key = node.key;
+        let Some(block) = self.display_model.get(id, key) else {
             return false;
         };
-        let rows = node.key.view_state.measured_height(rows);
+        let rows = measure_block(
+            block,
+            MeasureCtx {
+                width: key.width,
+                show_thinking: key.show_thinking,
+                view_state: key.view_state,
+            },
+        ) as RowIndex;
         let gap = history.rendered_block_gap(index, rows as usize) as RowIndex;
         self.set_exact_height(index, gap.saturating_add(rows));
         true
@@ -650,9 +585,8 @@ impl TranscriptProjection {
     ) -> Option<RowIndex> {
         let (id, offset) = anchor?;
         let index = self.exact_rows.block_index(id)?;
-        let key = self.exact_rows.nodes.get(index)?.key;
-        let block_rows = self.rendered_blocks.get(id, key)?.line_count();
-        let gap = history.rendered_block_gap(index, block_rows) as RowIndex;
+        let exact_height = self.exact_rows.nodes.get(index)?.exact_height?;
+        let gap = (history.block_gap(index) as RowIndex).min(exact_height);
         Some(
             self.exact_rows
                 .prefix_row(index)
@@ -870,12 +804,12 @@ impl TranscriptProjection {
         };
 
         let indices: Vec<usize> = (start..end).collect();
-        for chunk in indices.chunks(RenderedBlockCache::MAX_BLOCKS) {
-            self.ensure_block_indices(history, theme, chunk);
+        for chunk in indices.chunks(512) {
+            self.ensure_block_indices(history, chunk);
             for &block_index in chunk {
                 let id = self.exact_rows.nodes[block_index].id;
                 let key = self.exact_rows.nodes[block_index].key;
-                self.append_projected_block(history, block_index, id, key, &mut rows);
+                self.append_projected_block(history, theme, block_index, id, key, &mut rows);
             }
         }
 
@@ -892,15 +826,27 @@ impl TranscriptProjection {
     fn append_projected_block(
         &mut self,
         history: &BlockHistory,
+        theme: &Theme,
         block_index: usize,
         id: BlockId,
         key: LayoutKey,
         rows: &mut ProjectRows<'_>,
     ) {
-        let Some(block_buf) = self.rendered_blocks.get(id, key) else {
+        let Some(display_block) = self.display_model.get(id, key) else {
             return;
         };
-        let block_rows = block_buf.line_count();
+        let mut block_buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let outcome = render_block_into(
+            &mut block_buf,
+            display_block,
+            RenderCtx {
+                width: key.width,
+                show_thinking: key.show_thinking,
+                view_state: key.view_state,
+                theme,
+            },
+        );
+        let block_rows = outcome.line_count;
         let gap = history.rendered_block_gap(block_index, block_rows);
         let _measured = self.exact_rows.set_exact_height(
             block_index,
@@ -988,7 +934,7 @@ impl TranscriptProjection {
     ) -> Arc<Vec<String>> {
         let _perf = smelt_perf::perf::begin("transcript:build_rows");
         let gen = history.generation();
-        self.gc_if_stale(gen, width);
+        self.gc_if_stale(history, width);
         if let Some(c) = &self.cached_rows {
             if c.generation == gen && c.width == width && c.show_thinking == show_thinking {
                 return Arc::clone(&c.rows);
@@ -1004,18 +950,29 @@ impl TranscriptProjection {
             .rebuild_if_stale(history, width, show_thinking, base_key);
         let mut rows: Vec<String> = Vec::new();
         let indices: Vec<usize> = (0..self.exact_rows.nodes.len()).collect();
-        for chunk in indices.chunks(RenderedBlockCache::MAX_BLOCKS) {
-            self.ensure_block_indices(history, theme, chunk);
+        for chunk in indices.chunks(512) {
+            self.ensure_block_indices(history, chunk);
             for &i in chunk {
                 let Some(node) = self.exact_rows.nodes.get(i) else {
                     continue;
                 };
                 let id = node.id;
                 let bkey = node.key;
-                let Some(block_buf) = self.rendered_blocks.get(id, bkey) else {
+                let Some(display_block) = self.display_model.get(id, bkey) else {
                     continue;
                 };
-                let block_rows = block_buf.line_count();
+                let mut block_buf = Buffer::new(BufId(0), BufCreateOpts::default());
+                let outcome = render_block_into(
+                    &mut block_buf,
+                    display_block,
+                    RenderCtx {
+                        width: bkey.width,
+                        show_thinking: bkey.show_thinking,
+                        view_state: bkey.view_state,
+                        theme,
+                    },
+                );
+                let block_rows = outcome.line_count;
                 let gap = history.rendered_block_gap(i, block_rows);
                 let _measured = self
                     .exact_rows
@@ -1449,7 +1406,7 @@ mod tests {
         assert!(rows.iter().any(|line| line == "line 0"));
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 1);
-        assert_eq!(counters.rendered_blocks, 100);
+        assert_eq!(counters.display_blocks, 100);
         assert_eq!(counters.exact_height_measured_blocks, 100);
 
         projection.reset_counters();
@@ -1477,7 +1434,7 @@ mod tests {
         assert_eq!(total, 199);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.rendered_blocks, 100);
+        assert_eq!(counters.display_blocks, 100);
         assert_eq!(counters.exact_height_measured_blocks, 100);
 
         projection.reset_counters();
@@ -1507,18 +1464,18 @@ mod tests {
         let total = projection.exact_total_rows(&mut transcript.history, 10, false, &theme);
 
         assert_eq!(total, 12);
-        assert_eq!(projection.rendered_block_cache_len(), 0);
+        assert_eq!(projection.display_model_len(), 3);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.rendered_blocks, 0);
+        assert_eq!(counters.display_blocks, 3);
         assert_eq!(counters.exact_height_measured_blocks, 3);
     }
 
     #[test]
-    fn exact_total_rows_keeps_rendered_block_cache_bounded() {
+    fn exact_total_rows_keeps_display_blocks_width_independent() {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let block_count = projection.rendered_block_cache_capacity() + 25;
+        let block_count = 537;
         let mut transcript = Transcript::new();
         for i in 0..block_count {
             transcript.push(Block::Text {
@@ -1529,13 +1486,10 @@ mod tests {
         let total = projection.exact_total_rows(&mut transcript.history, 80, false, &theme);
 
         assert_eq!(total, (block_count as RowIndex).saturating_mul(2) - 1);
-        assert!(
-            projection.rendered_block_cache_len() <= projection.rendered_block_cache_capacity(),
-            "rendered block cache should stay bounded after scanning {block_count} blocks"
-        );
+        assert_eq!(projection.display_model_len(), block_count);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.rendered_blocks, block_count);
+        assert_eq!(counters.display_blocks, block_count);
         assert_eq!(counters.exact_height_measured_blocks, block_count);
     }
 
@@ -1562,7 +1516,7 @@ mod tests {
         assert_eq!(text, vec!["line 75", "", "line 76"]);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.rendered_blocks, 0);
+        assert_eq!(counters.display_blocks, 0);
         assert_eq!(counters.exact_height_measured_blocks, 0);
         assert!(
             counters.range_materialized_blocks < transcript.history.order.len(),
@@ -1607,7 +1561,7 @@ mod tests {
         assert_eq!(copied.kill_ring, "line 75");
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.rendered_blocks, 0);
+        assert_eq!(counters.display_blocks, 0);
         assert_eq!(counters.exact_height_measured_blocks, 0);
         assert!(
             counters.range_materialized_blocks < transcript.history.order.len(),

@@ -865,30 +865,31 @@ Validation:
 
 **Deliverable:** resize does not rerun Lua tool render hooks for hidden tools.
 
-### Phase 6: Unified `DisplayBlock` and `TranscriptProjection` rewrite
+### Phase 6: Unified `DisplayBlock` and `TranscriptProjection` rewrite — complete
 
 **Goal:** one IR per block, one measurement path, one render path.
 
-- Introduce `DisplayBlock` enum covering all block variants.
-- Add `DisplayModel` keyed by `DisplayCacheKey { block_id, content_hash, sidecar_hash, renderer_version }` inside `Transcript` or `TranscriptProjection`.
-- Replace per-variant renderers (`transcript_parsers/*`) with:
-  - `compile_block(block: &Block, state: Option<&ToolState>, lua: &LuaRuntime) -> DisplayBlock`
-  - `measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> RowIndex`
-  - `render_block(block: &DisplayBlock, ctx: RenderCtx, rows: Range<RowIndex>, out: &mut RowSink)`
-- Rewrite `TranscriptProjection`:
-  - `ensure_display_blocks` compiles missing IRs.
-  - `measure_all_heights` calls `measure_block` for each block.
-  - `project_planned` / `collect_blocks_range` calls `render_block` for visible row ranges.
-- Delete `RenderedBlockCache` and `layout_block_into` if no longer used.
-- Keep `ExactRowIndex` but feed it from `measure_block`.
+Completed slice:
 
-**Deliverable:** transcript projection is IR-based end to end.
+- Added `DisplayBlock`, `DisplayModel`, `DisplayCacheKey`, `MeasureCtx`, and `RenderCtx` in `crates/tui/src/content/display_block.rs`.
+- `TranscriptProjection` now compiles blocks into the width-independent display model, measures through `measure_block`, and materializes visible/full/range rows through `render_block_into`.
+- Removed `RenderedBlockCache` and `crates/tui/src/content/block_buffers.rs`; width changes invalidate row indexes/materialized rows but keep compiled display blocks.
+- Standalone code-line and tool-call measurement use their existing pure IR/body paths from `DisplayBlock`; remaining legacy block renderers are reached only through the unified display-block facade while they are migrated to pure row-range renderers.
+- Updated projection tests to assert display-block compilation and width-independent reuse instead of rendered-buffer cache behavior.
+
+Validation:
+
+- `cargo test -p smelt-tui transcript_buf`
+- `cargo test -p smelt-tui transcript_parsers`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace` → `3046 passed, 1 skipped`
+
+**Deliverable:** transcript projection is display-model based end to end.
 
 ### Phase 7: Cleanup dead abstractions
 
 **Goal:** remove leftover scaffolding and simplify.
 
-- Remove `RenderedBlockCache` if replaced.
 - Remove old `transcript_parsers/*` files once their block variants move to DisplayIR.
   - In particular delete the custom markdown parser once `pulldown-cmark` AST rendering is proven.
   - Do not leave old/new renderer shims side by side after a variant migrates.
@@ -1055,7 +1056,6 @@ Goal: they use `measure_all_heights` (now cheap) and render only the requested r
 
 ### Likely deletions
 
-- `crates/tui/src/content/block_buffers.rs` — `RenderedBlockCache`
 - `crates/tui/src/content/transcript_parsers/mod.rs` — old `layout_block_into` path
 - `crates/tui/src/content/transcript_parsers/text.rs`, `markdown.rs`, `thinking.rs`, `user.rs`, `code_line.rs`, `compacted.rs`, `exec.rs`, `mode.rs`, `process_status.rs`, `tool_call.rs`, `tools.rs` — merged into `DisplayBlock` impls
 - `crates/core/src/content/block_layout.rs` — old `BlockLayout` if fully replaced by `LayoutIr`
@@ -1066,7 +1066,7 @@ Goal: they use `measure_all_heights` (now cheap) and render only the requested r
 - `BlockLayout` → `LayoutIr`
 - `CachedInlineDiff` → `DiffIr`
 - `measure_all_heights` → `rebuild_row_index`
-- `RenderedBlockCache` → `RenderedRowCache` (if kept as optional optimization)
+- `RenderedRowCache` (if optional visible-row cache is reintroduced)
 
 ### Keep
 

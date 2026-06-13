@@ -1604,12 +1604,11 @@ impl TuiApp {
         let is_light = self.ui.theme().is_light();
         let baked = crate::theme::default_baked_with_background(is_light);
         self.install_theme(baked);
-        // Capture the thread-safe Lua command-name set directly. Going through
-        // `try_with_app` would only work on the main thread (APP is a thread-
-        // local), and `layout_block_into` runs in worker threads via
-        // `std::thread::scope`, so the resolver must reach the registry
-        // without consulting APP. `commands` itself can't cross threads (the
-        // handler holds a `LuaHandle`), so this uses the name-only mirror.
+        // Capture the thread-safe Lua command-name set directly. Rendering and
+        // measurement can run outside Lua's main-thread APP context, so slash
+        // command detection must reach the registry without consulting APP.
+        // `commands` itself can't cross those boundaries (the handler holds a
+        // `LuaHandle`), so this uses the name-only mirror.
         let command_names = self.lua.command_names_handle();
         smelt_core::commands::set_command_resolver(move |name| {
             command_names
