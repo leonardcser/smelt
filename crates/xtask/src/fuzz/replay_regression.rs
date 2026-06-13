@@ -3,9 +3,8 @@
 //! CI calls this on every PR; devs call it before sending changes.
 //!
 //! JSON-scenario targets (`smelt_loop`, `lua_loop`) replay via the in-tree
-//! `replay_scenario` binary. Byte-form targets (`text_ops`, `attached_ops`,
-//! `cache_invariance`, `openai_cache_invariance`) replay via
-//! `cargo fuzz run --runs=0` which executes every file in the corpus dir
+//! `replay_scenario` binary. Byte-form targets replay via
+//! `cargo fuzz run --runs=0` which executes every file in the seed dir
 //! exactly once and exits.
 
 use super::{die, repo_root, step, targets_of, TargetKind};

@@ -6,6 +6,7 @@
 
 pub mod cache_common;
 pub mod lua_loop;
+pub mod runtime;
 pub mod shrink;
 pub use lua_loop::{run_lua_scenario, LuaScenario};
 
@@ -466,6 +467,36 @@ pub enum FuzzOp {
     ProbeCompactionPrepareRequest {
         variant: u8,
     },
+    /// Macro workload: paste a bounded text chunk repeatedly, move the cursor,
+    /// and optionally submit. Random single-key streams rarely build large
+    /// prompt buffers or hit multi-step edit/submit interactions.
+    MacroPromptEdit {
+        text: String,
+        repetitions: u8,
+        movement: u8,
+        submit: bool,
+    },
+    /// Macro workload: create/target an active turn and run a matched
+    /// ToolStarted -> ToolOutput -> ToolFinished sequence using one call id.
+    /// This reaches paired lifecycle paths far more reliably than unrelated
+    /// random engine events.
+    MacroToolRoundTrip {
+        call_id: u8,
+        tool_name: String,
+        args: ArgsBag,
+        output: String,
+        is_error: bool,
+    },
+    /// Macro workload: stream several text/thinking chunks, then finish or
+    /// error the turn. Exercises transcript parser/render with realistic
+    /// clustered provider output instead of isolated deltas.
+    MacroStreamTurn {
+        turn_id: u8,
+        text: String,
+        thinking: String,
+        chunks: u8,
+        error: bool,
+    },
 }
 
 impl FuzzOp {
@@ -544,6 +575,15 @@ impl FuzzOp {
             ScheduleReload => "schedule reload".into(),
             ProbePromptCursorAfterTurn { variant } => format!("prompt cursor probe v={variant}"),
             ProbeCompactionPrepareRequest { variant } => format!("compaction probe v={variant}"),
+            MacroPromptEdit {
+                repetitions,
+                submit,
+                ..
+            } => format!("macro prompt reps={repetitions} submit={submit}"),
+            MacroToolRoundTrip { tool_name, .. } => format!("macro tool round-trip {tool_name}"),
+            MacroStreamTurn { chunks, error, .. } => {
+                format!("macro stream chunks={chunks} error={error}")
+            }
         }
     }
 }
@@ -895,6 +935,32 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
     |u| {
         Ok(FuzzOp::ProbeCompactionPrepareRequest {
             variant: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::MacroPromptEdit {
+            text: u.arbitrary()?,
+            repetitions: u.arbitrary()?,
+            movement: u.arbitrary()?,
+            submit: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::MacroToolRoundTrip {
+            call_id: u.arbitrary()?,
+            tool_name: u.arbitrary()?,
+            args: u.arbitrary()?,
+            output: u.arbitrary()?,
+            is_error: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(FuzzOp::MacroStreamTurn {
+            turn_id: u.arbitrary()?,
+            text: u.arbitrary()?,
+            thinking: u.arbitrary()?,
+            chunks: u.arbitrary()?,
+            error: u.arbitrary()?,
         })
     },
 ];
@@ -1973,6 +2039,114 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
             });
             (Some(ev), PostCheck::None)
         }
+        FuzzOp::MacroPromptEdit { .. }
+        | FuzzOp::MacroToolRoundTrip { .. }
+        | FuzzOp::MacroStreamTurn { .. } => {
+            unreachable!("macro ops handled inline in apply()")
+        }
+    }
+}
+
+fn apply_macro_prompt_edit(
+    app: &mut TestApp,
+    text: String,
+    repetitions: u8,
+    movement: u8,
+    submit: bool,
+) {
+    let bounded = smelt_buffer::text::slice(&text, 0..128).to_string();
+    let reps = usize::from(repetitions % 8) + 1;
+    for _ in 0..reps {
+        apply(app, FuzzOp::Paste(bounded.clone()));
+        if app.quit_requested() {
+            return;
+        }
+    }
+    let moves = usize::from(movement % 16);
+    let key = if movement & 0x80 == 0 { 7 } else { 6 }; // right / left in SPECIALS
+    for _ in 0..moves {
+        apply(app, FuzzOp::KeySpecial(key));
+        if app.quit_requested() {
+            return;
+        }
+    }
+    if submit {
+        apply(app, FuzzOp::KeySpecial(0));
+    }
+}
+
+fn apply_macro_tool_round_trip(
+    app: &mut TestApp,
+    call_id: u8,
+    tool_name: String,
+    args: ArgsBag,
+    output: String,
+    is_error: bool,
+) {
+    if !app.agent_running() {
+        app.start_turn(u64::from(call_id));
+    }
+    apply(
+        app,
+        FuzzOp::EngineToolStart {
+            call_id,
+            tool_name,
+            args,
+        },
+    );
+    if app.quit_requested() {
+        return;
+    }
+    let output = smelt_buffer::text::slice(&output, 0..256).to_string();
+    apply(
+        app,
+        FuzzOp::EngineToolOutput {
+            call_id,
+            chunk: output.clone(),
+        },
+    );
+    if app.quit_requested() {
+        return;
+    }
+    apply(
+        app,
+        FuzzOp::EngineToolFinish {
+            call_id,
+            is_error,
+            content: output,
+        },
+    );
+}
+
+fn apply_macro_stream_turn(
+    app: &mut TestApp,
+    turn_id: u8,
+    text: String,
+    thinking: String,
+    chunks: u8,
+    error: bool,
+) {
+    if !app.agent_running() {
+        app.start_turn(u64::from(turn_id));
+    }
+    let text = smelt_buffer::text::slice(&text, 0..256).to_string();
+    let thinking = smelt_buffer::text::slice(&thinking, 0..256).to_string();
+    let chunks = usize::from(chunks % 8) + 1;
+    for i in 0..chunks {
+        if !text.is_empty() {
+            apply(app, FuzzOp::EngineTextDelta(format!("{i}:{text}")));
+        }
+        if !thinking.is_empty() {
+            apply(app, FuzzOp::EngineThinkingDelta(format!("{i}:{thinking}")));
+        }
+        if app.quit_requested() {
+            return;
+        }
+    }
+    if error {
+        apply(app, FuzzOp::EngineTurnError("macro stream error".into()));
+    } else {
+        apply(app, FuzzOp::EngineTurnComplete { msg_count: 1 });
     }
 }
 
@@ -2124,6 +2298,26 @@ fn try_dispatch_side_channel(app: &mut TestApp, op: FuzzOp) -> Result<(), FuzzOp
                 app.assert_lua_handles_alive();
             }
         }
+        FuzzOp::MacroPromptEdit {
+            text,
+            repetitions,
+            movement,
+            submit,
+        } => apply_macro_prompt_edit(app, text, repetitions, movement, submit),
+        FuzzOp::MacroToolRoundTrip {
+            call_id,
+            tool_name,
+            args,
+            output,
+            is_error,
+        } => apply_macro_tool_round_trip(app, call_id, tool_name, args, output, is_error),
+        FuzzOp::MacroStreamTurn {
+            turn_id,
+            text,
+            thinking,
+            chunks,
+            error,
+        } => apply_macro_stream_turn(app, turn_id, text, thinking, chunks, error),
         FuzzOp::ProbePromptCursorAfterTurn { variant } => {
             app.probe_prompt_cursor_after_turn(variant);
         }
@@ -2237,54 +2431,45 @@ pub fn apply_n(app: &mut TestApp, scenario: &Scenario, n: usize) {
 /// Used by the fuzz target itself and by any external replay code that
 /// just wants to re-run a scenario to confirm a crash.
 pub fn run_scenario(scenario: Scenario) {
-    // Vim bang escape (`!cmd<CR>`) spawns a shell via `tokio::spawn`. With
-    // no runtime entered, that panics. We use a current-thread runtime
-    // that never drives the task queue, so spawn succeeds and the queued
-    // shell command never actually runs - keeping fuzz iterations free
-    // of real process / fs side effects.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime for fuzz harness");
-    let _guard = runtime.enter();
+    runtime::with_current_thread_runtime("fuzz harness", || {
+        let mut app = TestApp::builder()
+            .with_vim(scenario.vim)
+            .with_mode(scenario.mode.into())
+            .build();
+        let theme_baseline = smelt_style::theme::registry_len();
+        let ns_baseline = smelt_buffer::buffer::namespace_count();
 
-    let mut app = TestApp::builder()
-        .with_vim(scenario.vim)
-        .with_mode(scenario.mode.into())
-        .build();
-    let theme_baseline = smelt_style::theme::registry_len();
-    let ns_baseline = smelt_buffer::buffer::namespace_count();
-
-    let take = scenario.ops.len().min(MAX_OPS);
-    for op in scenario.ops.into_iter().take(take) {
-        let render_after = render_trigger(&op);
-        apply(&mut app, op);
-        if app.quit_requested() {
-            break;
+        let take = scenario.ops.len().min(MAX_OPS);
+        for op in scenario.ops.into_iter().take(take) {
+            let render_after = render_trigger(&op);
+            apply(&mut app, op);
+            if app.quit_requested() {
+                break;
+            }
+            if render_after {
+                app.render_silent();
+            }
         }
-        if render_after {
-            app.render_silent();
-        }
-    }
-    // Always render once at the end so the final state passes through the
-    // projection - covers scenarios that end on a `Tick` and would
-    // otherwise skip the renderer entirely.
-    app.render_silent();
+        // Always render once at the end so the final state passes through the
+        // projection - covers scenarios that end on a `Tick` and would
+        // otherwise skip the renderer entirely.
+        app.render_silent();
 
-    let theme_end = smelt_style::theme::registry_len();
-    let ns_end = smelt_buffer::buffer::namespace_count();
-    assert!(
-        theme_end <= theme_baseline + INTERN_SLACK,
-        "theme registry leaked: {} -> {} (slack {})",
-        theme_baseline,
-        theme_end,
-        INTERN_SLACK
-    );
-    assert!(
-        ns_end <= ns_baseline + INTERN_SLACK,
-        "namespace registry leaked: {} -> {} (slack {})",
-        ns_baseline,
-        ns_end,
-        INTERN_SLACK
-    );
+        let theme_end = smelt_style::theme::registry_len();
+        let ns_end = smelt_buffer::buffer::namespace_count();
+        assert!(
+            theme_end <= theme_baseline + INTERN_SLACK,
+            "theme registry leaked: {} -> {} (slack {})",
+            theme_baseline,
+            theme_end,
+            INTERN_SLACK
+        );
+        assert!(
+            ns_end <= ns_baseline + INTERN_SLACK,
+            "namespace registry leaked: {} -> {} (slack {})",
+            ns_baseline,
+            ns_end,
+            INTERN_SLACK
+        );
+    });
 }

@@ -199,6 +199,27 @@ impl StreamState {
     }
 }
 
+pub(super) fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, ProviderError> {
+    if !state.saw_finish_reason {
+        return Err(ProviderError::InvalidResponse(
+            "stream ended without finish_reason".into(),
+        ));
+    }
+    Ok(state.finalize())
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub(super) fn parse_stream_events<'a>(
+    events: impl IntoIterator<Item = &'a serde_json::Value>,
+    on_delta: &mut dyn FnMut(StreamDelta),
+) -> Result<ParsedResponse, ProviderError> {
+    let mut state = StreamState::default();
+    for ev in events {
+        apply_sse_event(&mut state, ev, on_delta);
+    }
+    finish_stream_state(state)
+}
+
 /// Apply one SSE event to the accumulator. Pure (modulo `on_delta`).
 pub(super) fn apply_sse_event(
     state: &mut StreamState,
@@ -287,13 +308,7 @@ pub(super) async fn read_stream(
     })
     .await?;
 
-    if !state.saw_finish_reason {
-        return Err(ProviderError::InvalidResponse(
-            "stream ended without finish_reason".into(),
-        ));
-    }
-
-    Ok(state.finalize())
+    finish_stream_state(state)
 }
 
 #[cfg(test)]

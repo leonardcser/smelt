@@ -183,10 +183,10 @@ pub enum LuaOp {
     /// added via `LuaMod::fn_` flows into this op automatically with
     /// no hand-written entry, so coverage of the Lua API surface keeps
     /// up with the surface itself instead of silently rotting.
-    /// `arg_kind % 5` picks an arg shape (`nil`, `""`, `0`, `true`, `{}`)
-    /// - most calls will fail with type errors (wrapped in `pcall`)
-    /// but the host-side type-checking + arg-conversion paths still
-    /// execute.
+    ///
+    /// `arg_kind % 5` picks an arg shape (`nil`, `""`, `0`, `true`, `{}`).
+    /// Most calls will fail with type errors (wrapped in `pcall`), but the
+    /// host-side type-checking + arg-conversion paths still execute.
     ApiProbe { fn_idx: u16, arg_kind: u8 },
 
     /// Execute an arbitrary Lua snippet verbatim. **Not produced by the
@@ -217,6 +217,12 @@ pub enum LuaOp {
     /// inside a Lua chunk. The runner drains it only after the chunk returns,
     /// matching the production safe-point behavior.
     ScheduleReload,
+
+    /// High-validity API recipes. Unlike `ApiProbe`, these are curated
+    /// multi-call snippets with well-typed arguments, so the target spends
+    /// more time in success paths (resource creation, rule compilation,
+    /// command callbacks) instead of only type-error conversion.
+    ApiRecipe { kind: u8 },
 }
 
 impl LuaOp {
@@ -278,77 +284,116 @@ impl LuaOp {
             }
             WorkBusyRelease { slot } => format!("work.release slot={slot}"),
             ScheduleReload => "schedule reload".into(),
+            ApiRecipe { kind } => format!("api recipe {}", kind % 5),
         }
     }
 }
 
-/// Total `LuaOp` variant count. Keep in lockstep with `build_lua_op`.
-pub const N_LUAOP_VARIANTS: usize = 16;
+/// Per-variant LuaOp builder. Keep additions local: append one closure and
+/// `N_LUAOP_VARIANTS` follows automatically.
+type LuaOpBuilder = fn(&mut Unstructured<'_>) -> arbitrary::Result<LuaOp>;
+
+const LUAOP_BUILDERS: &[LuaOpBuilder] = &[
+    |u| {
+        Ok(LuaOp::BufNew {
+            name_slot: opt_slot(u)?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::WinNew {
+            buf_idx: u.arbitrary()?,
+            name_slot: opt_slot(u)?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::OverlayNew {
+            layout: u.arbitrary()?,
+            name_slot: opt_slot(u)?,
+            keymap_count: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::Remove {
+            kind: u.arbitrary()?,
+            idx: u.arbitrary()?,
+        })
+    },
+    |_| Ok(LuaOp::Reload),
+    |u| {
+        Ok(LuaOp::PaintRegister {
+            name_slot: opt_slot(u)?,
+            body_kind: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::StateSet {
+            slot: u.arbitrary()?,
+            key: arb_short_string(u, 16)?,
+            value: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::StateGet {
+            slot: u.arbitrary()?,
+            key: arb_short_string(u, 16)?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::CmdRegister {
+            name_slot: u.arbitrary()?,
+            handler_kind: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::CmdInvoke {
+            name_slot: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::KeymapSet {
+            scope_kind: u.arbitrary()?,
+            chord_slot: u.arbitrary()?,
+            handler_kind: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::ProbeRead {
+            kind: u.arbitrary()?,
+            target_idx: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::ApiProbe {
+            fn_idx: u.arbitrary()?,
+            arg_kind: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::WorkBusyAcquire {
+            slot: u.arbitrary()?,
+            label_slot: u.arbitrary()?,
+        })
+    },
+    |u| {
+        Ok(LuaOp::WorkBusyRelease {
+            slot: u.arbitrary()?,
+        })
+    },
+    |_| Ok(LuaOp::ScheduleReload),
+    |u| {
+        Ok(LuaOp::ApiRecipe {
+            kind: u.arbitrary()?,
+        })
+    },
+];
+
+/// Total `LuaOp` variant count, derived from the dispatch table so it cannot drift.
+pub const N_LUAOP_VARIANTS: usize = LUAOP_BUILDERS.len();
 
 /// Build one `LuaOp` by variant index. Payloads still come from
 /// `u.arbitrary()` so the value space stays unrestricted.
 fn build_lua_op(idx: usize, u: &mut Unstructured<'_>) -> arbitrary::Result<LuaOp> {
-    Ok(match idx {
-        0 => LuaOp::BufNew {
-            name_slot: opt_slot(u)?,
-        },
-        1 => LuaOp::WinNew {
-            buf_idx: u.arbitrary()?,
-            name_slot: opt_slot(u)?,
-        },
-        2 => LuaOp::OverlayNew {
-            layout: u.arbitrary()?,
-            name_slot: opt_slot(u)?,
-            keymap_count: u.arbitrary()?,
-        },
-        3 => LuaOp::Remove {
-            kind: u.arbitrary()?,
-            idx: u.arbitrary()?,
-        },
-        4 => LuaOp::Reload,
-        5 => LuaOp::PaintRegister {
-            name_slot: opt_slot(u)?,
-            body_kind: u.arbitrary()?,
-        },
-        6 => LuaOp::StateSet {
-            slot: u.arbitrary()?,
-            key: arb_short_string(u, 16)?,
-            value: u.arbitrary()?,
-        },
-        7 => LuaOp::StateGet {
-            slot: u.arbitrary()?,
-            key: arb_short_string(u, 16)?,
-        },
-        8 => LuaOp::CmdRegister {
-            name_slot: u.arbitrary()?,
-            handler_kind: u.arbitrary()?,
-        },
-        9 => LuaOp::CmdInvoke {
-            name_slot: u.arbitrary()?,
-        },
-        10 => LuaOp::KeymapSet {
-            scope_kind: u.arbitrary()?,
-            chord_slot: u.arbitrary()?,
-            handler_kind: u.arbitrary()?,
-        },
-        11 => LuaOp::ProbeRead {
-            kind: u.arbitrary()?,
-            target_idx: u.arbitrary()?,
-        },
-        12 => LuaOp::ApiProbe {
-            fn_idx: u.arbitrary()?,
-            arg_kind: u.arbitrary()?,
-        },
-        13 => LuaOp::WorkBusyAcquire {
-            slot: u.arbitrary()?,
-            label_slot: u.arbitrary()?,
-        },
-        14 => LuaOp::WorkBusyRelease {
-            slot: u.arbitrary()?,
-        },
-        15 => LuaOp::ScheduleReload,
-        n => unreachable!("lua_op idx {n} out of range; bump N_LUAOP_VARIANTS or extend dispatch"),
-    })
+    LUAOP_BUILDERS[idx](u)
 }
 
 impl<'a> Arbitrary<'a> for LuaOp {
@@ -725,9 +770,89 @@ pub fn build_snippet(ops: &[LuaOp], api_metas: &[(&str, &str)]) -> String {
             LuaOp::ScheduleReload => {
                 out.push_str("pcall(function() smelt.engine.reload_when_idle() end)\n");
             }
+            LuaOp::ApiRecipe { kind } => emit_api_recipe(&mut out, *kind),
         }
     }
     out
+}
+
+/// Emit curated, well-typed Lua API sequences. These complement `ApiProbe`:
+/// probes keep breadth over the generated API registry, recipes keep depth in
+/// success paths where resources are created, callbacks run, and permissions
+/// rules are compiled/evaluated.
+fn emit_api_recipe(out: &mut String, kind: u8) {
+    match kind % 5 {
+        0 => out.push_str(
+            r#"pcall(function()
+  local b = smelt.buf.new({ name = "fuzz.recipe.buf" })
+  local w = smelt.win.new(b, { name = "fuzz.recipe.win" })
+  local p = smelt.paint.register(function(slice, _ctx)
+    if slice and slice.put then slice:put(0, 0, "r", nil) end
+  end, { name = "fuzz.recipe.paint" })
+  local ov = smelt.overlay.new({
+    name = "fuzz.recipe.overlay",
+    anchor = "screen_at", corner = "nw", row = 1, col = 1, width = 12, height = 3,
+    layout = smelt.ui.layout.leaf(w),
+    keymaps = { { key = "<C-r>", on_press = function() smelt.state("fuzz.recipe").hit = true end } },
+  })
+  if p and p.rect then p:rect() end
+  if w and w.content_width then w:content_width() end
+  if ov and ov.remove then ov:remove() end
+end)
+"#,
+        ),
+        1 => out.push_str(
+            r#"pcall(function()
+  smelt.permissions.set_rules({
+    default = {
+      tools = { allow = { "bash", "web_fetch" }, ask = { "edit" }, deny = { "danger" } },
+      bash = { allow = { "git status*", "ls*" }, ask = { "cat *" }, deny = { "rm*", "sudo*" } },
+      web_fetch = { allow = { "https://example.com/*" }, deny = { "http://*" } },
+    },
+    plan = { tools = { ask = { "bash" } }, bash = { allow = { "pwd" } } },
+  })
+  smelt.permissions.check_tool("normal", "bash")
+  smelt.permissions.check("normal", "bash", "git status --short")
+  smelt.permissions.check("normal", "bash", "rm -rf target")
+  smelt.permissions.list()
+end)
+"#,
+        ),
+        2 => out.push_str(
+            r#"pcall(function()
+  smelt.cmd.register("fuzz.recipe.cmd", function()
+    local s = smelt.state("fuzz.recipe.cmd")
+    s.count = (s.count or 0) + 1
+    smelt.text.fit("recipe", 4)
+  end)
+  smelt.cmd.run("fuzz.recipe.cmd")
+  smelt.keymap.set("prompt", "<C-r>", function() smelt.cmd.run("fuzz.recipe.cmd") end)
+end)
+"#,
+        ),
+        3 => out.push_str(
+            r#"pcall(function()
+  local reg = smelt.work.busy("fuzz.recipe.busy")
+  smelt.engine.reload_when_idle()
+  if reg then reg:remove() end
+end)
+"#,
+        ),
+        _ => out.push_str(
+            r#"pcall(function()
+  smelt.permissions.set_rules({
+    default = {
+      tools = { allow = { "bash" }, ask = { "web_fetch" }, deny = { "danger" } },
+      bash = { allow = { "pwd", "echo *" }, ask = { "cat *" }, deny = { "rm*" } },
+    },
+  })
+  smelt.permissions.list()
+  smelt.permissions.check_tool("normal", "bash")
+  smelt.permissions.check("normal", "bash", "echo hello")
+end)
+"#,
+        ),
+    }
 }
 
 /// `__fuzz.regs[slot] = smelt.work.busy("fuzz.label.<n>")`. The slot
@@ -837,63 +962,59 @@ fn emit_probe_read(out: &mut String, kind: u8, target_idx: u8) {
 /// Invariants assert after every segment AND after every reload -
 /// failures stay attached to whichever op caused them.
 pub fn run_lua_scenario(scenario: LuaScenario) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime for lua_loop");
-    let _guard = runtime.enter();
+    crate::runtime::with_current_thread_runtime("lua_loop", || {
+        let mut app = TestApp::builder().build();
+        // Capture the live Lua doc-registry enumeration *after* the TUI
+        // LuaRuntime has finished registering every `LuaMod::fn_`. The
+        // snapshot drives `LuaOp::ApiProbe` emit so the fuzz surface
+        // tracks the API surface automatically.
+        let api_metas = app.lua_doc_snapshot();
+        let take = scenario.ops.len().min(LUA_MAX_OPS);
+        let ops = &scenario.ops[..take];
+        let snippet = build_snippet(ops, &api_metas);
 
-    let mut app = TestApp::builder().build();
-    // Capture the live Lua doc-registry enumeration *after* the TUI
-    // LuaRuntime has finished registering every `LuaMod::fn_`. The
-    // snapshot drives `LuaOp::ApiProbe` emit so the fuzz surface
-    // tracks the API surface automatically.
-    let api_metas = app.lua_doc_snapshot();
-    let take = scenario.ops.len().min(LUA_MAX_OPS);
-    let ops = &scenario.ops[..take];
-    let snippet = build_snippet(ops, &api_metas);
-
-    let segments: Vec<&str> = snippet.split("-- @reload@\n").collect();
-    for (i, segment) in segments.iter().enumerate() {
-        if !segment.trim().is_empty() {
-            // Lua-level errors aren't fuzz failures - the snippet
-            // intentionally tolerates type errors via `pcall`. Real
-            // bugs surface through `assert_invariants`, Rust panics
-            // inside binding code, or the FFI ledger detecting a
-            // dangling `RegistryKey`.
-            let _ = app.run_lua(segment);
-            app.assert_invariants();
-            // FFI ledger: force a full Lua GC and verify every Rust-
-            // side `LuaHandle` still resolves in the mlua registry.
-            // Without this, a path that drops a `RegistryKey` without
-            // calling `remove` survives latently - only manifesting
-            // when something else tries to invoke the dead handle,
-            // potentially much later or never. Running it between
-            // segments pins the failure to the op batch responsible.
-            app.assert_lua_handles_alive();
-            if app.drain_idle_work() {
+        let segments: Vec<&str> = snippet.split("-- @reload@\n").collect();
+        for (i, segment) in segments.iter().enumerate() {
+            if !segment.trim().is_empty() {
+                // Lua-level errors aren't fuzz failures - the snippet
+                // intentionally tolerates type errors via `pcall`. Real
+                // bugs surface through `assert_invariants`, Rust panics
+                // inside binding code, or the FFI ledger detecting a
+                // dangling `RegistryKey`.
+                let _ = app.run_lua(segment);
+                app.assert_invariants();
+                // FFI ledger: force a full Lua GC and verify every Rust-
+                // side `LuaHandle` still resolves in the mlua registry.
+                // Without this, a path that drops a `RegistryKey` without
+                // calling `remove` survives latently - only manifesting
+                // when something else tries to invoke the dead handle,
+                // potentially much later or never. Running it between
+                // segments pins the failure to the op batch responsible.
+                app.assert_lua_handles_alive();
+                if app.drain_idle_work() {
+                    app.assert_lua_handles_alive();
+                }
+                app.assert_invariants();
+            }
+            // Reload BETWEEN segments (matches the sentinel position).
+            // Skipped after the last segment so the final invariant check
+            // observes terminal state, not post-reload state.
+            if i + 1 < segments.len() {
+                app.reload_lua();
+                app.assert_invariants();
+                // `/reload` is the heaviest GC-and-rebuild surface in the
+                // Lua API - re-check per-field liveness afterward so a
+                // reload that forgot to re-register a named handle surfaces
+                // here.
                 app.assert_lua_handles_alive();
             }
-            app.assert_invariants();
         }
-        // Reload BETWEEN segments (matches the sentinel position).
-        // Skipped after the last segment so the final invariant check
-        // observes terminal state, not post-reload state.
-        if i + 1 < segments.len() {
-            app.reload_lua();
-            app.assert_invariants();
-            // `/reload` is the heaviest GC-and-rebuild surface in the
-            // Lua API - re-check per-field liveness afterward so a
-            // reload that forgot to re-register a named handle surfaces
-            // here.
-            app.assert_lua_handles_alive();
-        }
-    }
-    // Post-scenario steady-state leak check: do two more reloads from
-    // current state and assert the live-handle count is stable between
-    // them. Catches reload-path leaks (handles created during reload
-    // but never dropped) that the per-field walk above can't see - it
-    // only checks tracked fields, not the global counter.
-    drop(segments);
-    app.assert_no_handle_leak_across_reload();
+        // Post-scenario steady-state leak check: do two more reloads from
+        // current state and assert the live-handle count is stable between
+        // them. Catches reload-path leaks (handles created during reload
+        // but never dropped) that the per-field walk above can't see - it
+        // only checks tracked fields, not the global counter.
+        drop(segments);
+        app.assert_no_handle_leak_across_reload();
+    });
 }

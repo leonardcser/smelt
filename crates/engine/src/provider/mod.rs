@@ -1396,6 +1396,84 @@ pub fn slugify(title: &str) -> String {
         .join("-")
 }
 
+#[cfg(any(test, feature = "fuzz"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FuzzProviderSummary {
+    pub ok: bool,
+    pub content_len: usize,
+    pub reasoning_len: usize,
+    pub reasoning_blocks: usize,
+    pub tool_calls: usize,
+    pub text_deltas: usize,
+    pub thinking_deltas: usize,
+    pub tool_arg_deltas: usize,
+    pub usage_fields: usize,
+    pub error: Option<String>,
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+fn fuzz_summary(
+    result: Result<ParsedResponse, ProviderError>,
+    deltas: FuzzProviderSummary,
+) -> FuzzProviderSummary {
+    match result {
+        Ok(parsed) => FuzzProviderSummary {
+            ok: true,
+            content_len: parsed.content.as_deref().map(str::len).unwrap_or(0),
+            reasoning_len: parsed.reasoning.as_deref().map(str::len).unwrap_or(0),
+            reasoning_blocks: parsed.reasoning_blocks.as_ref().map(Vec::len).unwrap_or(0),
+            tool_calls: parsed.tool_calls.len(),
+            usage_fields: usize::from(parsed.usage.context_tokens.is_some())
+                + usize::from(parsed.usage.prompt_tokens.is_some())
+                + usize::from(parsed.usage.completion_tokens.is_some())
+                + usize::from(parsed.usage.cache_read_tokens.is_some())
+                + usize::from(parsed.usage.cache_write_tokens.is_some())
+                + usize::from(parsed.usage.reasoning_tokens.is_some()),
+            ..deltas
+        },
+        Err(err) => FuzzProviderSummary {
+            ok: false,
+            error: Some(err.to_string()),
+            ..deltas
+        },
+    }
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+fn count_delta(summary: &mut FuzzProviderSummary, delta: StreamDelta<'_>) {
+    match delta {
+        StreamDelta::Text(_) => summary.text_deltas += 1,
+        StreamDelta::Thinking(_) => summary.thinking_deltas += 1,
+        StreamDelta::ToolArgs { .. } => summary.tool_arg_deltas += 1,
+    }
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_drain_sse_events(buf: &mut String) -> Vec<serde_json::Value> {
+    sse::drain_sse_events(buf)
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_parse_provider_response(wire: u8, data: &serde_json::Value) -> FuzzProviderSummary {
+    let result = match wire % 3 {
+        0 => chat_completions::parse_response(data),
+        1 => openai::parse_response(data),
+        _ => anthropic::parse_response(data),
+    };
+    fuzz_summary(result, FuzzProviderSummary::default())
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_parse_provider_stream(wire: u8, events: &[serde_json::Value]) -> FuzzProviderSummary {
+    let mut deltas = FuzzProviderSummary::default();
+    let result = match wire % 3 {
+        0 => chat_completions::parse_stream_events(events, &mut |d| count_delta(&mut deltas, d)),
+        1 => openai::parse_stream_events(events, &mut |d| count_delta(&mut deltas, d)),
+        _ => anthropic::parse_stream_events(events, &mut |d| count_delta(&mut deltas, d)),
+    };
+    fuzz_summary(result, deltas)
+}
+
 /// Fuzz-only entry points: build the provider-shaped request bodies the
 /// same way the production code does, so `cache_invariance` can
 /// byte-compare cached prefixes across randomly-generated histories

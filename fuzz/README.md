@@ -1,10 +1,10 @@
 # smelt fuzz
 
-Nine targets covering distinct surfaces:
+Fifteen targets covering distinct surfaces:
 
 | target | what it fuzzes | how |
 |---|---|---|
-| `smelt_loop` | TUI event loop (terminal + engine events) | structured `Scenario` ops |
+| `smelt_loop` | TUI event loop (terminal + engine events) | structured `Scenario` ops, swarm weighting, and macro workloads |
 | `lua_loop` | Lua FFI bindings (`smelt.*` API) | structured `LuaScenario` ops + FFI ledger oracle |
 | `text_ops` | `smelt_buffer::text` UTF-8 helpers | direct calls + reference-model differential |
 | `attached_ops` | `smelt_buffer::attached::AttachedTextMut` | segment-based reference model + invariant check |
@@ -13,6 +13,11 @@ Nine targets covering distinct surfaces:
 | `snapshot_roundtrip` | `SnapshotFrame::parse` round-trip | random grid + style palette + assert `from_grid → text+styles → parse` is identity |
 | `grid_invariants` | terminal grid mutation/diff invariants | random cell writes/fills + wide-char and diff-replay oracles |
 | `ansi_parser` | ANSI SGR parser + wrapped emission | random bytes → lossy UTF-8 + `wrap_ansi` / `emit_ansi_row` UTF-8 boundary checks |
+| `edit_ops` | editor/window core (`smelt_edit::Ui`, buffer edits, vim keys, mouse, resize) | focused shell around edit primitives + cursor/selection UTF-8 invariants |
+| `transcript_render` | transcript-producing engine events and renderer projection | focused `TestApp` shell: tool/text/thinking/process events + resize/render invariant checks |
+| `provider_body` | provider request-body construction | low-dependency Anthropic/OpenAI body builders + serialization/schema/cache-key smoke invariants |
+| `provider_stream` | provider SSE/response parsers | pure SSE draining + Chat Completions/OpenAI/Anthropic stream and JSON parser summaries |
+| `permissions_rules` | permission rule compilation/evaluation | random rule sets, shell-aware subpatterns, mode behavior, workspace downgrade oracle |
 
 ## Setup once
 
@@ -98,11 +103,13 @@ See `fuzz/seeds/README.md` for the convention and how to add one.
 ## Coverage scoreboard
 
 ```sh
+cargo xtask fuzz status
+
 # Snapshot per-target source-code coverage to fuzz/coverage-history/.
 # Use to A/B your own generator changes: snapshot before, change, snapshot
 # after, diff the .txt files.
 cargo xtask fuzz coverage-snapshot
-cargo xtask fuzz coverage-snapshot smelt_loop      # one target only
+cargo xtask fuzz coverage-snapshot --timeout 120 smelt_loop      # one target only
 ```
 
 ## Lower-level

@@ -3,6 +3,7 @@
 mod coverage;
 mod replay_regression;
 mod run;
+mod status;
 mod triage;
 
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ pub fn run(args: Vec<String>) {
             std::process::exit(2);
         }
         Some("run") => run::run(rest),
+        Some("status") => status::run(rest),
         Some("build") => build(rest),
         Some("triage") => triage::run(rest),
         Some("replay-regression") => replay_regression::run(rest),
@@ -35,12 +37,13 @@ pub fn print_usage() {
     eprintln!();
     eprintln!("subcommands:");
     eprintln!("  run <target> [--fork N] [--cmin]   fuzz a target until crash or Ctrl-C");
+    eprintln!(
+        "  status                              summarize corpora, seeds, artifacts, coverage"
+    );
     eprintln!("  build [target...]                    build real fuzz targets one-by-one");
     eprintln!("  triage <target> <crash-artifact>   crash → JSON → shrink → print");
     eprintln!("  replay-regression                  replay every seed under fuzz/seeds/<target>/regression/");
-    eprintln!(
-        "  coverage-snapshot [target...]      per-target line/function/region coverage snapshot"
-    );
+    eprintln!("  coverage-snapshot [--timeout SECONDS] [target...]  per-target coverage snapshot");
 }
 
 fn build(args: Vec<String>) {
@@ -129,6 +132,11 @@ pub(super) const TARGETS: &[(&str, TargetKind)] = &[
     ("snapshot_roundtrip", TargetKind::Bytes),
     ("grid_invariants", TargetKind::Bytes),
     ("ansi_parser", TargetKind::Bytes),
+    ("edit_ops", TargetKind::Bytes),
+    ("provider_body", TargetKind::Bytes),
+    ("transcript_render", TargetKind::Bytes),
+    ("provider_stream", TargetKind::Bytes),
+    ("permissions_rules", TargetKind::Bytes),
 ];
 
 #[derive(Copy, Clone, PartialEq, Eq)]

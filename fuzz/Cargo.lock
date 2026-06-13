@@ -2360,6 +2360,7 @@ dependencies = [
  "serde_json",
  "smelt-buffer",
  "smelt-core",
+ "smelt-edit",
  "smelt-engine",
  "smelt-protocol",
  "smelt-style",

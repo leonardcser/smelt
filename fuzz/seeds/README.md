@@ -4,7 +4,7 @@ JSON scenarios committed under `<target>/regression/<bug-slug>.json` -
 one file per fixed bug, exercised by:
 
 ```sh
-fuzz/scripts/replay-regression.sh
+cargo xtask fuzz replay-regression
 ```
 
 and by CI on every PR. **Add a file here when you fix a fuzz-found bug.**
@@ -27,7 +27,7 @@ target replays the same code path either way (`run_lua_scenario` /
 3. Commit under `fuzz/seeds/<target>/regression/<commit-shortsha>-<slug>.json`
    with `_about` and `_fix` fields naming the bug and the commit that
    fixed it.
-4. Re-run `fuzz/scripts/replay-regression.sh` to confirm green.
+4. Re-run `cargo xtask fuzz replay-regression` to confirm green.
 
 ## Per-target conventions
 

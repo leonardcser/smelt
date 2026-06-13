@@ -338,6 +338,18 @@ impl StreamState {
     }
 }
 
+#[cfg(any(test, feature = "fuzz"))]
+pub(super) fn parse_stream_events<'a>(
+    events: impl IntoIterator<Item = &'a serde_json::Value>,
+    on_delta: &mut dyn FnMut(StreamDelta),
+) -> Result<ParsedResponse, ProviderError> {
+    let mut state = StreamState::default();
+    for ev in events {
+        apply_sse_event(&mut state, ev, on_delta);
+    }
+    state.finalize()
+}
+
 /// Apply one SSE event to the accumulator. Pure (modulo the on_delta callback).
 pub(super) fn apply_sse_event(
     state: &mut StreamState,
