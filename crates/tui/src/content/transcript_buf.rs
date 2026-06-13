@@ -1,5 +1,6 @@
 use super::display_block::{
-    measure_block, render_block_into, DisplayCacheEntry, DisplayModel, MeasureCtx, RenderCtx,
+    measure_block, render_block_into, CompileJob, DisplayCacheEntry, DisplayModel, MeasureCtx,
+    RenderCtx,
 };
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
@@ -71,6 +72,13 @@ impl ExactBlockRow {
 }
 
 impl ExactRowIndex {
+    fn is_current(&self, history: &BlockHistory, width: u16, show_thinking: bool) -> bool {
+        self.generation == history.generation()
+            && self.width == width
+            && self.show_thinking == show_thinking
+            && self.nodes.len() == history.order.len()
+    }
+
     fn rebuild_if_stale(
         &mut self,
         history: &BlockHistory,
@@ -135,11 +143,55 @@ impl ExactRowIndex {
         true
     }
 
+    /// Sync the index when the current history keeps the old order as a prefix.
+    /// Returns `false` when a deletion or reorder means the index must be rebuilt.
+    fn sync_stable_order_prefix(&mut self, history: &BlockHistory, base_key: LayoutKey) -> bool {
+        let old_len = self.nodes.len();
+        if old_len > history.order.len() {
+            return false;
+        }
+        if old_len == history.order.len()
+            && self.generation == history.generation()
+            && self.width == base_key.width
+            && self.show_thinking == base_key.show_thinking
+        {
+            return true;
+        }
+        let mut prev_key_changed = false;
+        for index in 0..old_len {
+            let id = history.order[index];
+            let key = history.resolve_key(id, base_key);
+            let node = &mut self.nodes[index];
+            if node.id != id {
+                return false;
+            }
+            if node.key != key {
+                node.key = key;
+                node.exact_height = None;
+                prev_key_changed = true;
+            } else if prev_key_changed {
+                node.exact_height = None;
+                prev_key_changed = false;
+            }
+        }
+        for index in old_len..history.order.len() {
+            let id = history.order[index];
+            let key = history.resolve_key(id, base_key);
+            self.nodes.push(ExactBlockRow {
+                id,
+                key,
+                estimated_height: 1,
+                exact_height: None,
+            });
+        }
+        self.generation = history.generation();
+        self.width = base_key.width;
+        self.show_thinking = base_key.show_thinking;
+        true
+    }
+
     fn is_exact_for(&self, history: &BlockHistory, width: u16, show_thinking: bool) -> bool {
-        self.generation == history.generation()
-            && self.width == width
-            && self.show_thinking == show_thinking
-            && self.nodes.len() == history.order.len()
+        self.is_current(history, width, show_thinking)
             && self.nodes.iter().all(|node| node.exact_height.is_some())
     }
 
@@ -405,7 +457,10 @@ impl TranscriptProjection {
     }
 
     fn ensure_blocks(&mut self, history: &BlockHistory, ids: &[BlockId], keys: &[LayoutKey]) {
-        let compiled = self.display_model.ensure_many(history, ids, keys);
+        let jobs = self.display_model.collect_compile_jobs(history, ids, keys);
+        let compiled = jobs.len();
+        let blocks = jobs.into_iter().map(CompileJob::compile).collect();
+        self.display_model.insert_compiled_blocks(blocks);
         #[cfg(test)]
         {
             self.counters.display_blocks += compiled;
@@ -486,12 +541,16 @@ impl TranscriptProjection {
         );
         self.gc_if_stale(history, width);
         let base_key = base_layout_key(width, show_thinking);
-        {
+        let reused_index = self.exact_rows.sync_stable_order_prefix(history, base_key);
+        if !reused_index {
             let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
             self.exact_rows
                 .rebuild_if_stale(history, width, show_thinking, base_key);
         }
         if self.exact_rows.is_exact_for(history, width, show_thinking) {
+            if reused_index {
+                self.exact_rows.refresh_prefix_rows();
+            }
             return;
         }
 
@@ -552,6 +611,7 @@ impl TranscriptProjection {
 
     fn exact_block_layout(&self, history: &BlockHistory) -> Vec<LayoutEntry> {
         let mut layout = Vec::with_capacity(self.exact_rows.nodes.len());
+        let mut running_total: RowIndex = 0;
         for (i, node) in self.exact_rows.nodes.iter().enumerate() {
             debug_assert!(
                 node.exact_height.is_some(),
@@ -565,11 +625,13 @@ impl TranscriptProjection {
             } else {
                 (history.block_gap(i) as RowIndex).min(exact_height)
             };
+            running_total = running_total.saturating_add(gap);
             layout.push(LayoutEntry {
                 id: node.id,
-                start: self.exact_rows.prefix_row(i).saturating_add(gap),
+                start: running_total,
                 rows: exact_height.saturating_sub(gap),
             });
+            running_total = running_total.saturating_add(exact_height.saturating_sub(gap));
         }
         layout
     }
@@ -1502,6 +1564,105 @@ mod tests {
         assert_eq!(counters.full_row_builds, 0);
         assert_eq!(counters.display_blocks, block_count);
         assert_eq!(counters.exact_height_measured_blocks, block_count);
+
+        projection.reset_counters();
+        let total_narrow = projection.exact_total_rows(&mut transcript.history, 40, false);
+        assert!(total_narrow >= total);
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(
+            counters.display_blocks, 0,
+            "display blocks are width-independent and should not be recompiled"
+        );
+        assert_eq!(
+            counters.exact_height_measured_blocks, block_count,
+            "width change must remeasure all block heights"
+        );
+    }
+
+    #[test]
+    fn incremental_row_index_only_measures_appended_blocks() {
+        let mut projection = TranscriptProjection::new();
+        let mut transcript = Transcript::new();
+        for i in 0..50 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+
+        let total = projection.exact_total_rows(&mut transcript.history, 80, false);
+        assert_eq!(total, 99);
+        let first_counters = projection.counters();
+        assert_eq!(first_counters.exact_height_measured_blocks, 50);
+
+        projection.reset_counters();
+        for i in 50..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let total_after = projection.exact_total_rows(&mut transcript.history, 80, false);
+        assert_eq!(total_after, 199);
+        let second_counters = projection.counters();
+        assert_eq!(
+            second_counters.exact_height_measured_blocks, 50,
+            "only appended blocks should be measured"
+        );
+        assert_eq!(
+            second_counters.display_blocks, 50,
+            "only appended blocks should be compiled"
+        );
+    }
+
+    #[test]
+    fn incremental_row_index_remeasures_rewritten_block_and_successor() {
+        let mut projection = TranscriptProjection::new();
+        let mut transcript = Transcript::new();
+        for i in 0..50 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        projection.exact_total_rows(&mut transcript.history, 80, false);
+        projection.reset_counters();
+
+        transcript.history.rewrite(
+            transcript.history.order[10],
+            Block::Text {
+                content: "rewritten block with different height".into(),
+            },
+        );
+        projection.exact_total_rows(&mut transcript.history, 80, false);
+
+        let counters = projection.counters();
+        assert_eq!(
+            counters.exact_height_measured_blocks, 2,
+            "same-order rewrite should remeasure the changed block and following gap: {counters:?}"
+        );
+        assert_eq!(counters.display_blocks, 1);
+    }
+
+    #[test]
+    fn incremental_row_index_rebuilds_when_order_prefix_changes() {
+        let mut projection = TranscriptProjection::new();
+        let mut transcript = Transcript::new();
+        for i in 0..50 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        projection.exact_total_rows(&mut transcript.history, 80, false);
+        projection.reset_counters();
+
+        transcript.history.order.remove(10);
+        transcript.history.invalidate_display_cache();
+        projection.exact_total_rows(&mut transcript.history, 80, false);
+
+        let counters = projection.counters();
+        assert!(
+            counters.exact_height_measured_blocks >= 39,
+            "order-prefix change should force a rebuild from the changed point: {counters:?}"
+        );
     }
 
     #[test]

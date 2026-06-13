@@ -41,6 +41,25 @@ pub(crate) struct DisplayCacheEntry {
     pub(crate) block: DisplayBlock,
 }
 
+pub(crate) struct CompileJob {
+    id: BlockId,
+    key: DisplayCacheKey,
+    block: Block,
+    state: Option<ToolState>,
+}
+
+impl CompileJob {
+    pub(crate) fn compile(self) -> (BlockId, DisplayCacheKey, DisplayBlock) {
+        let Self {
+            id,
+            key,
+            block,
+            state,
+        } = self;
+        (id, key, compile_block(&block, state.as_ref()))
+    }
+}
+
 impl DisplayBlock {
     fn block(&self) -> &Block {
         match self {
@@ -168,17 +187,34 @@ impl DisplayModel {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn ensure_many(
         &mut self,
         history: &BlockHistory,
         ids: &[BlockId],
         keys: &[LayoutKey],
     ) -> usize {
+        let jobs = self.collect_compile_jobs(history, ids, keys);
+        let compiled = jobs.len();
+        let blocks = jobs.into_iter().map(CompileJob::compile).collect();
+        self.insert_compiled_blocks(blocks);
+        compiled
+    }
+
+    /// Returns compile jobs for cache misses. The caller can run these jobs on
+    /// the current thread or schedule them onto a worker pool, then insert the
+    /// results with `insert_compiled_blocks`.
+    pub(crate) fn collect_compile_jobs(
+        &mut self,
+        history: &BlockHistory,
+        ids: &[BlockId],
+        keys: &[LayoutKey],
+    ) -> Vec<CompileJob> {
         let _perf = smelt_perf::perf::begin("transcript:display_model:ensure_many");
         smelt_perf::perf::record_value("transcript:display_model:requested", ids.len() as u64);
         debug_assert_eq!(ids.len(), keys.len());
 
-        let mut compiled = 0;
+        let mut jobs = Vec::new();
         for (&id, &key) in ids.iter().zip(keys.iter()) {
             let display_key = DisplayCacheKey::from_layout_key(key);
             if self
@@ -188,25 +224,32 @@ impl DisplayModel {
             {
                 continue;
             }
-            let Some(block) = history.blocks.get(&id) else {
+            let Some(block) = history.blocks.get(&id).cloned() else {
                 self.blocks.remove(&id);
                 continue;
             };
-            let state = match block {
-                Block::ToolCall { call_id, .. } => history.tool_states.get(call_id),
+            let state = match &block {
+                Block::ToolCall { call_id, .. } => history.tool_states.get(call_id).cloned(),
                 _ => None,
             };
-            self.blocks.insert(
+            jobs.push(CompileJob {
                 id,
-                CachedDisplayBlock {
-                    key: display_key,
-                    block: compile_block(block, state),
-                },
-            );
-            compiled += 1;
+                key: display_key,
+                block,
+                state,
+            });
         }
-        smelt_perf::perf::record_value("transcript:display_model:compiled", compiled as u64);
-        compiled
+        smelt_perf::perf::record_value("transcript:display_model:compiled", jobs.len() as u64);
+        jobs
+    }
+
+    pub(crate) fn insert_compiled_blocks(
+        &mut self,
+        blocks: Vec<(BlockId, DisplayCacheKey, DisplayBlock)>,
+    ) {
+        for (id, key, block) in blocks {
+            self.blocks.insert(id, CachedDisplayBlock { key, block });
+        }
     }
 
     pub(crate) fn retain_order(&mut self, order: &[BlockId]) {

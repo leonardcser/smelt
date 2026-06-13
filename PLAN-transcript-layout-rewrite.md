@@ -937,17 +937,35 @@ Validation:
 
 **Deliverable:** resume/preview can hydrate unchanged historical `DisplayBlock`s and cached tool bodies from `session.ir.bin`; cache misses rebuild from canonical `session.json`.
 
-### Phase 9: Performance polish and future-proofing
+### Phase 9: Performance measurement and fixes
 
-**Goal:** make 100 MB sessions feasible.
+**Goal:** use measurements on 10 MB and 100 MB transcripts to find the remaining bottlenecks, then fix the ones that are worth the added code. This phase is for evidence-driven performance work, not speculative caps, trims, or representation tweaks that lose transcript content.
 
-- Add incremental row index updates: when appending a block, only measure the new block and extend prefix sums.
-- Parallel IR compilation for cache misses during session load (markdown/diff parsing is independent per block).
-- Add a cap/trim mode for very long plain-text blocks so measurement stays bounded.
-- Optimize `InlineLine` memory layout if profiling shows it.
-- Add syntax-cache checkpoints for enormous code/file-view blocks only if visible rendering proves slow.
+Completed in this slice:
 
-**Deliverable:** benchmark shows order-of-magnitude improvement; 100 MB synthetic session is usable.
+- `ExactRowIndex` syncs itself when the existing order remains a stable prefix, so appended blocks do not force historical row remeasurement; order-prefix changes still fall back to a full index rebuild.
+- Cache-miss compilation now flows through independent `CompileJob`s from `collect_compile_jobs`; those jobs can be scheduled in parallel once profiling identifies the right threshold and executor. The current caller keeps sequential execution to avoid adding scheduler complexity before it is needed.
+- Synthetic 10 MB baseline improved from `first_ms=4394 resize_ms=4849` to `first_ms=2415 resize_ms=2785`, with visible projection at `visible_ms=3`.
+
+Next measurements:
+
+- Run the synthetic baseline at 100 MB and compare resume, resize, visible projection, allocation count, and bytes allocated.
+- If display compilation is a material bottleneck, schedule `CompileJob`s in parallel with a measured block-count/byte threshold.
+- If `InlineLine` allocation or width walking is a material bottleneck, optimize the representation based on allocation/profiling data.
+- If visible rendering of enormous code/file-view blocks is a material bottleneck, add syntax-cache checkpoints.
+
+**Deliverable:** 100 MB performance bottlenecks are measured, high-value fixes are implemented, and any rejected optimization is rejected because measurements show it is not worth the complexity or because it would lose transcript content.
+
+### Phase 10: Eliminate legacy display paths
+
+**Goal:** finish the structural migration so transcript layout is a single IR-driven pipeline instead of a mix of `DisplayBlock` IR and legacy parser/render fallbacks.
+
+- Replace `DisplayBlock::Legacy` with explicit width-independent variants for text, markdown, user, thinking, compacted, mode, process-status, and exec blocks.
+- Move the remaining `transcript_parsers` responsibilities into `DisplayBlock`/display modules, then delete or rename `transcript_parsers` once it is no longer the shared legacy renderer.
+- Make measurement, row-range rendering, and copy/yank consume the same IR. `display_rows_for_range` and `copy_range` are already range-limited through `collect_blocks_range`; remove their scratch-buffer dependence only when equivalent source/copy metadata lives in IR.
+- Revisit `build_rows`: either keep it as an explicit full-transcript compatibility API or replace callers with row-range APIs if no caller truly needs all rows at once.
+
+**Deliverable:** `DisplayBlock::Legacy` is gone, `transcript_parsers` no longer owns transcript layout, and the remaining full-row paths are intentional API choices rather than hidden measurement dependencies.
 
 ---
 
@@ -999,9 +1017,9 @@ Goal: compile IR for the new block once, append height to row index, render visi
 
 ### Copy / yank / search
 
-Today: `copy_range` and `display_rows_for_range` force full measurement via rendered buffers.
+Current status: `display_rows_for_range` and `copy_range` now rebuild the exact row index and materialize only the intersecting block range. `build_rows` remains a full-materialization compatibility path for consumers that need the entire transcript as strings.
 
-Goal: they use `rebuild_row_index` (now cheap) and render only the requested row range from IR.
+Long-term goal: all three paths render/copy directly from IR row ranges, with `build_rows` kept only if a full-transcript API remains necessary.
 
 ---
 
@@ -1045,7 +1063,7 @@ Goal: they use `rebuild_row_index` (now cheap) and render only the requested row
 | Unicode/ANSI wrapping drift | Centralize in `InlineLine`; exhaustive tests |
 | Syntax highlighting cache complexity | Keep syntax cache separate from DisplayIR; key by content/language/theme; compute only for visible rows |
 | Persistent cache corruption/staleness | Cache is disposable; version/hash mismatch and read errors are cache misses |
-| Memory blow from IR for 100 MB | IR is proportional to source; add caps/trim modes if needed |
+| Memory blow from IR for 100 MB | Keep IR proportional to source; profile allocations and optimize representation or chunk/checkpoint without dropping transcript content |
 | Long migration | Each phase is independent and testable; ship after each phase |
 | Theme changes | IR is width-independent; theme changes clear render caches but not measurement or persistent IR |
 | Selection/copy over wrapped rows | Render the requested range from IR; use same wrapping and row-decoration logic |
@@ -1054,7 +1072,9 @@ Goal: they use `rebuild_row_index` (now cheap) and render only the requested row
 
 ## 10. What to delete / rename
 
-### Likely deletions
+### Deferred deletions
+
+These stay until `DisplayBlock::Legacy` has been migrated into explicit IR variants:
 
 - `crates/tui/src/content/transcript_parsers/mod.rs` — old `layout_block_into` path
 - `crates/tui/src/content/transcript_parsers/text.rs`, `markdown.rs`, `thinking.rs`, `user.rs`, `code_line.rs`, `compacted.rs`, `exec.rs`, `mode.rs`, `process_status.rs`, `tool_call.rs`, `tools.rs` — merged into `DisplayBlock` impls
