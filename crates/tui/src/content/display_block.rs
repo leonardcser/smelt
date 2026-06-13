@@ -29,29 +29,17 @@ impl DisplayCacheKey {
 
 #[derive(Clone)]
 pub(crate) enum DisplayBlock {
-    User { block: Block },
-    Mode { block: Block },
-    ProcessStatus { block: Block },
-    Thinking { block: Block },
-    Text { block: Block },
+    Legacy { block: Block },
     CodeLine { block: Block, code: CodeBlock },
     ToolCall { block: Block, state: ToolState },
-    Exec { block: Block },
-    Compacted { block: Block },
 }
 
 impl DisplayBlock {
     fn block(&self) -> &Block {
         match self {
-            Self::User { block }
-            | Self::Mode { block }
-            | Self::ProcessStatus { block }
-            | Self::Thinking { block }
-            | Self::Text { block }
+            Self::Legacy { block }
             | Self::CodeLine { block, .. }
-            | Self::ToolCall { block, .. }
-            | Self::Exec { block }
-            | Self::Compacted { block } => block,
+            | Self::ToolCall { block, .. } => block,
         }
     }
 
@@ -155,21 +143,6 @@ impl DisplayModel {
 
 pub(crate) fn compile_block(block: &Block, state: Option<&ToolState>) -> DisplayBlock {
     match block {
-        Block::User { .. } => DisplayBlock::User {
-            block: block.clone(),
-        },
-        Block::Mode { .. } => DisplayBlock::Mode {
-            block: block.clone(),
-        },
-        Block::ProcessStatus { .. } => DisplayBlock::ProcessStatus {
-            block: block.clone(),
-        },
-        Block::Thinking { .. } => DisplayBlock::Thinking {
-            block: block.clone(),
-        },
-        Block::Text { .. } => DisplayBlock::Text {
-            block: block.clone(),
-        },
         Block::CodeLine { content, lang } => DisplayBlock::CodeLine {
             block: block.clone(),
             code: parse_code_block(&[content.as_str()], lang),
@@ -180,10 +153,7 @@ pub(crate) fn compile_block(block: &Block, state: Option<&ToolState>) -> Display
                 .cloned()
                 .unwrap_or_else(|| panic!("missing ToolState for tool call `{call_id}`")),
         },
-        Block::Exec { .. } => DisplayBlock::Exec {
-            block: block.clone(),
-        },
-        Block::Compacted { .. } => DisplayBlock::Compacted {
+        _ => DisplayBlock::Legacy {
             block: block.clone(),
         },
     }
@@ -207,12 +177,12 @@ pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
             }
             _ => unreachable!("tool display block must wrap a tool call block"),
         },
-        _ => measure_by_rendering(block, ctx),
+        DisplayBlock::Legacy { .. } => measure_legacy_by_rendering(block, ctx),
     };
     ctx.view_state.measured_height(expanded_rows)
 }
 
-fn measure_by_rendering(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
+fn measure_legacy_by_rendering(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
     let theme = Theme::default();
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let render_ctx = RenderCtx {
