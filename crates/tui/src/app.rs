@@ -84,6 +84,7 @@ pub struct TuiApp {
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     pub(crate) persister: crate::persist::Persister,
     pub(crate) session_save_pending: bool,
+    pub(crate) persisted_fingerprints: Option<PersistFingerprints>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
@@ -189,6 +190,13 @@ pub struct PlaceholderOpts {
 #[cfg(any(test, feature = "harness"))]
 pub(crate) use queue::MAX_QUEUED_MESSAGES;
 pub(crate) use queue::{InputQueues, QueueStage, QueuedInput, QueuedTurnOptions};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PersistFingerprints {
+    pub(crate) session: Vec<u8>,
+    pub(crate) display_cache: Vec<u8>,
+}
+
 pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
 
 /// Stack of live `smelt.work.busy` tokens. Each `push` returns a
@@ -860,6 +868,7 @@ impl TuiApp {
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
             session_save_pending: false,
+            persisted_fingerprints: None,
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,

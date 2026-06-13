@@ -1,61 +1,120 @@
-use crate::content::display_block::{DisplayCacheEntry, DISPLAY_RENDERER_VERSION};
+use crate::content::display_block::{
+    DisplayCacheEntry, DisplayRowIndexEntry, DISPLAY_RENDERER_VERSION,
+};
 use smelt_core::session::Session;
 use std::path::{Path, PathBuf};
 
 const CACHE_FILE: &str = "session.ir.bin";
 const MAGIC: &[u8; 8] = b"SMELTIR\0";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIXED_HEADER_LEN: usize = MAGIC.len() + 4 + 8 + 2 + 8;
+
+#[derive(Clone, Default)]
+pub(crate) struct DisplayCacheData {
+    pub(crate) entries: Vec<DisplayCacheEntry>,
+    pub(crate) row_indexes: Vec<DisplayRowIndexEntry>,
+}
+
+impl DisplayCacheData {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.row_indexes.is_empty()
+    }
+
+    pub(crate) fn fingerprint(&self) -> Option<Vec<u8>> {
+        bincode::serialize(&DisplayCachePayload {
+            entries: self.entries.clone(),
+            row_indexes: self.row_indexes.clone(),
+        })
+        .ok()
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DisplayCachePayload {
+    entries: Vec<DisplayCacheEntry>,
+    row_indexes: Vec<DisplayRowIndexEntry>,
+}
+
+impl From<DisplayCacheData> for DisplayCachePayload {
+    fn from(data: DisplayCacheData) -> Self {
+        Self {
+            entries: data.entries,
+            row_indexes: data.row_indexes,
+        }
+    }
+}
+
+impl From<DisplayCachePayload> for DisplayCacheData {
+    fn from(payload: DisplayCachePayload) -> Self {
+        Self {
+            entries: payload.entries,
+            row_indexes: payload.row_indexes,
+        }
+    }
+}
 
 pub(crate) fn path_for_session(session: &Session) -> PathBuf {
     smelt_core::session::dir_for(session).join(CACHE_FILE)
 }
 
-pub(crate) fn read_for_session(session: &Session) -> Vec<DisplayCacheEntry> {
+pub(crate) fn read_for_session(session: &Session) -> DisplayCacheData {
     read_at_path(&path_for_session(session))
 }
 
-pub(crate) fn write_for_session(session: &Session, entries: &[DisplayCacheEntry]) {
-    write_at_path(&path_for_session(session), entries);
+pub(crate) fn write_for_session(session: &Session, data: &DisplayCacheData) {
+    write_at_path(&path_for_session(session), data);
 }
 
-fn read_at_path(path: &Path) -> Vec<DisplayCacheEntry> {
+fn read_at_path(path: &Path) -> DisplayCacheData {
     let _perf = smelt_perf::perf::begin("session_ir:read");
     let Ok(bytes) = std::fs::read(path) else {
         smelt_perf::perf::record_value("session_ir:read:missing", 1);
-        return Vec::new();
+        return DisplayCacheData::default();
     };
     smelt_perf::perf::record_value("session_ir:read:bytes", bytes.len() as u64);
     match decode(&bytes) {
-        Ok(entries) => {
-            smelt_perf::perf::record_value("session_ir:read:entries", entries.len() as u64);
-            entries
+        Ok(data) => {
+            smelt_perf::perf::record_value("session_ir:read:entries", data.entries.len() as u64);
+            smelt_perf::perf::record_value(
+                "session_ir:read:row_indexes",
+                data.row_indexes.len() as u64,
+            );
+            data
         }
         Err(reason) => {
             reason.record();
             smelt_perf::perf::record_value("session_ir:read:entries", 0);
-            Vec::new()
+            smelt_perf::perf::record_value("session_ir:read:row_indexes", 0);
+            DisplayCacheData::default()
         }
     }
 }
 
-fn write_at_path(path: &Path, entries: &[DisplayCacheEntry]) {
+fn write_at_path(path: &Path, data: &DisplayCacheData) {
     let _perf = smelt_perf::perf::begin("session_ir:write");
-    if entries.is_empty() {
+    if data.is_empty() {
         return;
     }
-    let Some(bytes) = encode(entries) else {
+    let Some(bytes) = encode(data) else {
         return;
     };
-    smelt_perf::perf::record_value("session_ir:write:entries", entries.len() as u64);
+    smelt_perf::perf::record_value("session_ir:write:entries", data.entries.len() as u64);
+    smelt_perf::perf::record_value(
+        "session_ir:write:row_indexes",
+        data.row_indexes.len() as u64,
+    );
     smelt_perf::perf::record_value("session_ir:write:bytes", bytes.len() as u64);
     smelt_core::session::atomic_write(path, &bytes, smelt_core::session::now_ms());
 }
 
-fn encode(entries: &[DisplayCacheEntry]) -> Option<Vec<u8>> {
+fn encode(data: &DisplayCacheData) -> Option<Vec<u8>> {
     let _perf = smelt_perf::perf::begin("session_ir:encode");
-    let payload = bincode::serialize(entries).ok()?;
+    let payload = bincode::serialize(&DisplayCachePayload {
+        entries: data.entries.clone(),
+        row_indexes: data.row_indexes.clone(),
+    })
+    .ok()?;
     let build = BUILD_VERSION.as_bytes();
     let build_len = u16::try_from(build.len()).ok()?;
     let payload_len = u64::try_from(payload.len()).ok()?;
@@ -101,7 +160,7 @@ impl DecodeError {
     }
 }
 
-fn decode(bytes: &[u8]) -> Result<Vec<DisplayCacheEntry>, DecodeError> {
+fn decode(bytes: &[u8]) -> Result<DisplayCacheData, DecodeError> {
     let _perf = smelt_perf::perf::begin("session_ir:decode");
     if bytes.len() < FIXED_HEADER_LEN {
         return Err(DecodeError::HeaderTooShort);
@@ -148,7 +207,9 @@ fn decode(bytes: &[u8]) -> Result<Vec<DisplayCacheEntry>, DecodeError> {
         return Err(DecodeError::TrailingBytes);
     }
     let _perf = smelt_perf::perf::begin("session_ir:decode:bincode");
-    bincode::deserialize(payload).map_err(|_| DecodeError::Bincode)
+    bincode::deserialize::<DisplayCachePayload>(payload)
+        .map(DisplayCacheData::from)
+        .map_err(|_| DecodeError::Bincode)
 }
 
 fn read_u16(bytes: &[u8], pos: &mut usize) -> Option<u16> {
@@ -175,8 +236,10 @@ fn read_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::display_block::{DisplayBlock, DisplayCacheKey};
-    use smelt_core::transcript_model::Block;
+    use crate::content::display_block::{
+        DisplayBlock, DisplayCacheKey, DisplayRowIndexEntry, DisplayRowIndexNode,
+    };
+    use smelt_core::transcript_model::{Block, LayoutKey, ViewState};
 
     fn entry() -> DisplayCacheEntry {
         let block = Block::Text {
@@ -189,19 +252,46 @@ mod tests {
         }
     }
 
+    fn row_index() -> DisplayRowIndexEntry {
+        DisplayRowIndexEntry {
+            width: 80,
+            show_thinking: false,
+            nodes: vec![DisplayRowIndexNode {
+                id: smelt_core::transcript_model::BlockId::new(7),
+                key: LayoutKey {
+                    view_state: ViewState::Expanded,
+                    width: 80,
+                    show_thinking: false,
+                    content_hash: 1,
+                    sidecar_hash: 2,
+                },
+                exact_height: 3,
+            }],
+        }
+    }
+
     #[test]
     fn cache_round_trips_entries() {
-        let entries = vec![entry()];
-        let encoded = encode(&entries).expect("encode cache");
+        let data = DisplayCacheData {
+            entries: vec![entry()],
+            row_indexes: vec![row_index()],
+        };
+        let encoded = encode(&data).expect("encode cache");
         let decoded = decode(&encoded).expect("decode cache");
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].id, entries[0].id);
-        assert_eq!(decoded[0].key, entries[0].key);
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(decoded.entries[0].id, data.entries[0].id);
+        assert_eq!(decoded.entries[0].key, data.entries[0].key);
+        assert_eq!(decoded.row_indexes.len(), 1);
+        assert_eq!(decoded.row_indexes[0].nodes[0].exact_height, 3);
     }
 
     #[test]
     fn corrupt_cache_is_a_miss() {
-        let mut encoded = encode(&[entry()]).expect("encode cache");
+        let data = DisplayCacheData {
+            entries: vec![entry()],
+            row_indexes: Vec::new(),
+        };
+        let mut encoded = encode(&data).expect("encode cache");
         encoded[0] = b'X';
         assert!(matches!(decode(&encoded), Err(DecodeError::BadMagic)));
         assert!(matches!(
@@ -214,19 +304,22 @@ mod tests {
     fn filesystem_round_trip_persists_entries() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("session.ir.bin");
-        let entries = vec![entry()];
-        write_at_path(&path, &entries);
+        let data = DisplayCacheData {
+            entries: vec![entry()],
+            row_indexes: Vec::new(),
+        };
+        write_at_path(&path, &data);
         let decoded = read_at_path(&path);
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].id, entries[0].id);
-        assert_eq!(decoded[0].key, entries[0].key);
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(decoded.entries[0].id, data.entries[0].id);
+        assert_eq!(decoded.entries[0].key, data.entries[0].key);
     }
 
     #[test]
     fn empty_cache_skips_filesystem_write() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("session.ir.bin");
-        write_at_path(&path, &[]);
+        write_at_path(&path, &DisplayCacheData::default());
         assert!(!path.exists());
     }
 }

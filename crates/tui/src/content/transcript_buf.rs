@@ -1,6 +1,6 @@
 use super::display_block::{
-    measure_block, render_block_into, CompileJob, DisplayCacheEntry, DisplayModel, MeasureCtx,
-    RenderCtx,
+    measure_block, render_block_into, CompileJob, DisplayModel, DisplayRowIndexEntry,
+    DisplayRowIndexNode, MeasureCtx, RenderCtx,
 };
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
@@ -29,6 +29,7 @@ pub(crate) struct TranscriptProjection {
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     cached_rows: Option<CachedRows>,
     exact_rows: ExactRowIndex,
+    cached_row_indexes: Vec<DisplayRowIndexEntry>,
     #[cfg(test)]
     counters: TranscriptProjectionCounters,
 }
@@ -231,6 +232,62 @@ impl ExactRowIndex {
         first..end
     }
 
+    fn hydrate_from_cache(
+        &mut self,
+        history: &BlockHistory,
+        entry: &DisplayRowIndexEntry,
+        base_key: LayoutKey,
+    ) -> bool {
+        if entry.width != base_key.width || entry.show_thinking != base_key.show_thinking {
+            return false;
+        }
+        if entry.nodes.len() != history.order.len() {
+            return false;
+        }
+        let mut nodes = Vec::with_capacity(entry.nodes.len());
+        for (index, cached) in entry.nodes.iter().enumerate() {
+            let id = history.order[index];
+            if cached.id != id {
+                return false;
+            }
+            let key = history.resolve_key(id, base_key);
+            if cached.key != key {
+                return false;
+            }
+            nodes.push(ExactBlockRow {
+                id,
+                key,
+                estimated_height: cached.exact_height,
+                exact_height: Some(cached.exact_height),
+            });
+        }
+        self.nodes = nodes;
+        self.generation = history.generation();
+        self.width = base_key.width;
+        self.show_thinking = base_key.show_thinking;
+        self.rebuild_prefix_rows();
+        true
+    }
+
+    fn cache_entry(&self) -> Option<DisplayRowIndexEntry> {
+        if self.nodes.is_empty() || self.nodes.iter().any(|node| node.exact_height.is_none()) {
+            return None;
+        }
+        Some(DisplayRowIndexEntry {
+            width: self.width,
+            show_thinking: self.show_thinking,
+            nodes: self
+                .nodes
+                .iter()
+                .map(|node| DisplayRowIndexNode {
+                    id: node.id,
+                    key: node.key,
+                    exact_height: node.exact_height.unwrap_or(node.estimated_height),
+                })
+                .collect(),
+        })
+    }
+
     fn rebuild_prefix_rows(&mut self) {
         self.prefix_rows.clear();
         self.prefix_rows.reserve(self.nodes.len() + 1);
@@ -377,6 +434,27 @@ fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
     }
 }
 
+fn row_index_entry_matches(history: &BlockHistory, entry: &DisplayRowIndexEntry) -> bool {
+    if entry.nodes.len() != history.order.len() {
+        return false;
+    }
+    let base_key = base_layout_key(entry.width, entry.show_thinking);
+    entry.nodes.iter().enumerate().all(|(index, node)| {
+        let id = history.order[index];
+        node.id == id && node.key == history.resolve_key(id, base_key)
+    })
+}
+
+fn upsert_row_index_entry(entries: &mut Vec<DisplayRowIndexEntry>, entry: DisplayRowIndexEntry) {
+    if let Some(existing) = entries.iter_mut().find(|existing| {
+        existing.width == entry.width && existing.show_thinking == entry.show_thinking
+    }) {
+        *existing = entry;
+    } else {
+        entries.push(entry);
+    }
+}
+
 fn render_display_block_to_buffer(
     display_model: &DisplayModel,
     id: BlockId,
@@ -410,6 +488,7 @@ impl TranscriptProjection {
             visible_total_rows: 0,
             cached_rows: None,
             exact_rows: ExactRowIndex::default(),
+            cached_row_indexes: Vec::new(),
             #[cfg(test)]
             counters: TranscriptProjectionCounters::default(),
         }
@@ -418,18 +497,44 @@ impl TranscriptProjection {
     pub(crate) fn hydrate_display_cache(
         &mut self,
         history: &mut BlockHistory,
-        entries: Vec<DisplayCacheEntry>,
+        data: crate::content::display_cache::DisplayCacheData,
     ) -> usize {
-        let hydrated = self.display_model.hydrate_many(history, entries);
+        self.cached_row_indexes = data.row_indexes;
+        let hydrated = self.display_model.hydrate_many(history, data.entries);
         if hydrated > 0 {
             self.display_model_generation = history.generation();
         }
         smelt_perf::perf::record_value("transcript:display_model:hydrated", hydrated as u64);
+        smelt_perf::perf::record_value(
+            "transcript:row_index_cache:loaded",
+            self.cached_row_indexes.len() as u64,
+        );
         hydrated
     }
 
-    pub(crate) fn display_cache_entries(&self, history: &BlockHistory) -> Vec<DisplayCacheEntry> {
-        self.display_model.cache_entries(&history.order)
+    pub(crate) fn display_cache_data(
+        &self,
+        history: &BlockHistory,
+    ) -> crate::content::display_cache::DisplayCacheData {
+        crate::content::display_cache::DisplayCacheData {
+            entries: self.display_model.cache_entries(&history.order),
+            row_indexes: self.row_index_cache_entries(history),
+        }
+    }
+
+    fn row_index_cache_entries(&self, history: &BlockHistory) -> Vec<DisplayRowIndexEntry> {
+        let mut entries: Vec<DisplayRowIndexEntry> = self
+            .cached_row_indexes
+            .iter()
+            .filter(|entry| row_index_entry_matches(history, entry))
+            .cloned()
+            .collect();
+        if let Some(current) = self.exact_rows.cache_entry() {
+            if row_index_entry_matches(history, &current) {
+                upsert_row_index_entry(&mut entries, current);
+            }
+        }
+        entries
     }
 
     /// Snapshot of the visibly laid-out blocks: `(BlockId, first_row, rows)`.
@@ -528,6 +633,36 @@ impl TranscriptProjection {
         });
     }
 
+    fn try_hydrate_row_index(
+        &mut self,
+        history: &BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        base_key: LayoutKey,
+    ) -> bool {
+        if self.exact_rows.is_current(history, width, show_thinking) {
+            return true;
+        }
+        let Some(entry) = self
+            .cached_row_indexes
+            .iter()
+            .find(|entry| entry.width == width && entry.show_thinking == show_thinking)
+        else {
+            smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
+            return false;
+        };
+        let hydrated = self.exact_rows.hydrate_from_cache(history, entry, base_key);
+        smelt_perf::perf::record_value(
+            if hydrated {
+                "transcript:row_index_cache:hydrated"
+            } else {
+                "transcript:row_index_cache:hydrate_reject"
+            },
+            1,
+        );
+        hydrated
+    }
+
     pub(crate) fn rebuild_row_index(
         &mut self,
         history: &mut BlockHistory,
@@ -539,9 +674,19 @@ impl TranscriptProjection {
             "transcript:rebuild_row_index:blocks",
             history.order.len() as u64,
         );
+        smelt_perf::perf::record_value(
+            "transcript:rebuild_row_index:generation",
+            history.generation(),
+        );
         self.gc_if_stale(history, width);
         let base_key = base_layout_key(width, show_thinking);
-        let reused_index = self.exact_rows.sync_stable_order_prefix(history, base_key);
+        let hydrated_index = self.try_hydrate_row_index(history, width, show_thinking, base_key);
+        let reused_index =
+            hydrated_index || self.exact_rows.sync_stable_order_prefix(history, base_key);
+        smelt_perf::perf::record_value(
+            "transcript:rebuild_row_index:reused_index",
+            u64::from(reused_index),
+        );
         if !reused_index {
             let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
             self.exact_rows
@@ -569,6 +714,16 @@ impl TranscriptProjection {
             "transcript:rebuild_row_index:missing",
             missing.len() as u64,
         );
+        if let (Some(first), Some(last)) = (missing.first(), missing.last()) {
+            smelt_perf::perf::record_value(
+                "transcript:rebuild_row_index:missing:first_index",
+                *first as u64,
+            );
+            smelt_perf::perf::record_value(
+                "transcript:rebuild_row_index:missing:last_index",
+                *last as u64,
+            );
+        }
         self.ensure_block_indices(history, &missing);
         for i in missing {
             self.measure_display_block_height(history, i);
@@ -1577,6 +1732,35 @@ mod tests {
         assert_eq!(
             counters.exact_height_measured_blocks, block_count,
             "width change must remeasure all block heights"
+        );
+    }
+
+    #[test]
+    fn exact_row_index_round_trips_through_display_cache() {
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let mut projection = TranscriptProjection::new();
+        let total = projection.exact_total_rows(&mut transcript.history, 80, false);
+        assert_eq!(total, 199);
+        let cache = projection.display_cache_data(&transcript.history);
+        assert_eq!(cache.row_indexes.len(), 1);
+
+        let mut hydrated = TranscriptProjection::new();
+        hydrated.hydrate_display_cache(&mut transcript.history, cache);
+        hydrated.reset_counters();
+
+        assert_eq!(
+            hydrated.exact_total_rows(&mut transcript.history, 80, false),
+            total
+        );
+        assert_eq!(
+            hydrated.counters(),
+            TranscriptProjectionCounters::default(),
+            "hydrated exact row index should avoid compiling or measuring blocks"
         );
     }
 

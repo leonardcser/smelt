@@ -946,6 +946,10 @@ Completed in this slice:
 - `ExactRowIndex` syncs itself when the existing order remains a stable prefix, so appended blocks do not force historical row remeasurement; order-prefix changes still fall back to a full index rebuild.
 - Cache-miss compilation now flows through independent `CompileJob`s from `collect_compile_jobs`; those jobs can be scheduled in parallel once profiling identifies the right threshold and executor. The current caller keeps sequential execution to avoid adding scheduler complexity before it is needed.
 - Synthetic 10 MB baseline improved from `first_ms=4394 resize_ms=4849` to `first_ms=2415 resize_ms=2785`, with visible projection at `visible_ms=3`.
+- Resume tracing identified three remaining concrete costs in real 11 MB sessions: stale `session.ir.bin` decoded as bincode failure instead of a version miss, exact row-index rebuilds repeatedly measuring unchanged historical blocks, and unconditional session/display-cache writes on resume+quit.
+- The display cache format now persists both compiled display entries and exact row-index entries keyed by width, `show_thinking`, ordered `BlockId`s, and per-block `LayoutKey`s. Hydration validates every cached node against current history before installing the prefix index, so exact row totals can be restored without a full measurement pass.
+- Session saves now fingerprint the timestamp-normalized session snapshot plus display cache and skip unchanged writes when there are no image blobs to flush. This keeps resume+quit from rewriting `session.json` and `session.ir.bin` just because `updated_at_ms` would have changed.
+- Added traces for display-cache row-index read/write counts, row-index cache hydration/rejection/miss, row-index generation/reuse, and the first/last missing block indexes during row-index rebuild.
 
 Next measurements:
 

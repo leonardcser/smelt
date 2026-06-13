@@ -33,7 +33,7 @@ impl TranscriptView {
 
     pub(crate) fn from_transcript_with_display_cache(
         transcript: Transcript,
-        display_cache: Vec<crate::content::display_block::DisplayCacheEntry>,
+        display_cache: crate::content::display_cache::DisplayCacheData,
     ) -> Self {
         let mut view = Self::from_transcript(transcript);
         view.projection
@@ -44,7 +44,7 @@ impl TranscriptView {
     pub(crate) fn replace_transcript_with_display_cache(
         &mut self,
         transcript: Transcript,
-        display_cache: Vec<crate::content::display_block::DisplayCacheEntry>,
+        display_cache: crate::content::display_cache::DisplayCacheData,
     ) {
         *self = Self::from_transcript_with_display_cache(transcript, display_cache);
     }
@@ -165,11 +165,8 @@ impl TranscriptView {
         &mut self.transcript.history
     }
 
-    pub(crate) fn display_cache_entries(
-        &self,
-    ) -> Vec<crate::content::display_block::DisplayCacheEntry> {
-        self.projection
-            .display_cache_entries(&self.transcript.history)
+    pub(crate) fn display_cache_data(&self) -> crate::content::display_cache::DisplayCacheData {
+        self.projection.display_cache_data(&self.transcript.history)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

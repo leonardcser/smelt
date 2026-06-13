@@ -4,7 +4,7 @@ use smelt_core::content::LayoutContext;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 1;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
@@ -39,6 +39,20 @@ pub(crate) struct DisplayCacheEntry {
     pub(crate) id: BlockId,
     pub(crate) key: DisplayCacheKey,
     pub(crate) block: DisplayBlock,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DisplayRowIndexEntry {
+    pub(crate) width: u16,
+    pub(crate) show_thinking: bool,
+    pub(crate) nodes: Vec<DisplayRowIndexNode>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DisplayRowIndexNode {
+    pub(crate) id: BlockId,
+    pub(crate) key: LayoutKey,
+    pub(crate) exact_height: u64,
 }
 
 pub(crate) struct CompileJob {

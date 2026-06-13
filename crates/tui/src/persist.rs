@@ -19,7 +19,7 @@ pub(crate) struct Blob {
 pub(crate) struct PersistRequest {
     pub(crate) session: Session,
     pub(crate) blobs: Vec<Blob>,
-    pub(crate) display_cache: Vec<crate::content::display_block::DisplayCacheEntry>,
+    pub(crate) display_cache: crate::content::display_cache::DisplayCacheData,
 }
 
 enum Cmd {
@@ -114,7 +114,11 @@ fn write(req: &PersistRequest) {
     );
     smelt_perf::perf::record_value(
         "persist:write:display_cache_entries",
-        req.display_cache.len() as u64,
+        req.display_cache.entries.len() as u64,
+    );
+    smelt_perf::perf::record_value(
+        "persist:write:display_cache_row_indexes",
+        req.display_cache.row_indexes.len() as u64,
     );
     smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
     let session_dir = session::dir_for(&req.session);
