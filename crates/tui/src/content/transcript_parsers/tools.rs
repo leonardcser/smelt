@@ -102,7 +102,7 @@ fn print_tool_line(
     width: usize,
 ) -> u16 {
     out.push_hl(pill_color);
-    out.print("\u{23fa}");
+    out.print("*");
     out.pop_style();
     let timer = tool_title_suffix(elapsed);
     let (summary, suffix_spans) = split_title_summary(summary, &timer, status);
@@ -339,9 +339,9 @@ fn selectable_line_text(spans: &[StyledSpan]) -> String {
 fn tool_title_source_text(name: &str, line_source: &str, include_title: bool) -> String {
     if include_title {
         if line_source.is_empty() {
-            format!("\u{23fa} {name}")
+            format!("* {name}")
         } else {
-            format!("\u{23fa} {name} {line_source}")
+            format!("* {name} {line_source}")
         }
     } else {
         line_source.to_string()

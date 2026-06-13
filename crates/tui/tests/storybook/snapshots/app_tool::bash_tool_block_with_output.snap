@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 assertion_line: 344
 expression: frame.text()
 ---
-⏺ bash git status --short
+* bash git status --short
    M src/lib.rs
   ?? src/new.rs
 

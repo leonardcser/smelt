@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 assertion_line: 344
 expression: frame.text()
 ---
-⏺ bash cat missing.txt
+* bash cat missing.txt
   cat: missing.txt: No such file or directory
 
 

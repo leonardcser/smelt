@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 assertion_line: 384
 expression: frame.text()
 ---
-⏺ bash sleep 5  (timeout: 2m 0s)
+* bash sleep 5  (timeout: 2m 0s)
 
 
 

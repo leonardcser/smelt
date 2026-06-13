@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 assertion_line: 344
 expression: frame.text()
 ---
-⏺ read_file
+* read_file
   1 lines
 
 

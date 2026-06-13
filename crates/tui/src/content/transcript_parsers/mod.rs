@@ -721,7 +721,7 @@ mod tests {
         );
         assert_eq!(
             display[0].source_text.as_deref(),
-            Some("\u{23fa} bash echo hello && echo world && echo done"),
+            Some("* bash echo hello && echo world && echo done"),
         );
         assert!(!display[0].soft_wrapped);
         for line in &display[1..] {
@@ -1239,13 +1239,13 @@ mod tests {
             );
         }
 
-        // ToolCall header begins with the `⏺` glyph (no indent).
+        // ToolCall header begins with the `*` pill glyph (no indent).
         let tc = tool_call();
         let state = pending_tool_state();
         let lines = render(&tc, Some(&state));
         assert!(
-            lines[0].text.starts_with('\u{23fa}'),
-            "tool header should start with ⏺: {:?}",
+            lines[0].text.starts_with('*'),
+            "tool header should start with pill '*': {:?}",
             lines[0].text
         );
 

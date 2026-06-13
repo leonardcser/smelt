@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 assertion_line: 344
 expression: frame.text()
 ---
-⏺ edit_notebook analysis.ipynb
+* edit_notebook analysis.ipynb
    1 - import pandas
    2 - df = pandas.read_csv('data.csv')
    1 + import pandas as pd

@@ -2114,14 +2114,14 @@ mod tests {
     fn copy_tool_title_includes_pill_name_and_summary() {
         let buf = project_tool_title("bash", protocol::StyledLines::from_plain("ls -la"));
 
-        assert_eq!(copy_first_row(&buf), "\u{23fa} bash ls -la");
+        assert_eq!(copy_first_row(&buf), "* bash ls -la");
     }
 
     #[test]
     fn copy_tool_title_includes_pill_and_name_when_summary_is_empty() {
         let buf = project_tool_title("bash", protocol::StyledLines::empty());
 
-        assert_eq!(copy_first_row(&buf), "\u{23fa} bash");
+        assert_eq!(copy_first_row(&buf), "* bash");
     }
 
     #[test]
@@ -2141,7 +2141,7 @@ mod tests {
         let buf = project_tool_title("bash", summary);
 
         assert!(buf.get_line(0).unwrap_or("").contains("timeout"));
-        assert_eq!(copy_first_row(&buf), "\u{23fa} bash echo hi");
+        assert_eq!(copy_first_row(&buf), "* bash echo hi");
     }
 
     #[test]

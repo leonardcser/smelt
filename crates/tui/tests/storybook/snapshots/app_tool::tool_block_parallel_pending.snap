@@ -3,10 +3,10 @@ source: crates/tui/tests/storybook/app_ctx.rs
 assertion_line: 344
 expression: frame.text()
 ---
-⏺ read_file a.rs
+* read_file a.rs
   0 lines
 
-⏺ read_file b.rs
+* read_file b.rs
   0 lines
 
 
