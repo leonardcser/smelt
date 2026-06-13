@@ -2332,7 +2332,6 @@ mod tests {
                         })),
                         user_message: None,
                         body: None,
-                        layout_revision: 0,
                     },
                 );
             }

@@ -901,7 +901,7 @@ pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMa
 }
 
 /// Write `contents` to `path` atomically via a tmp file + rename.
-fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
+pub fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
     let Some(dir) = path.parent() else { return };
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return;

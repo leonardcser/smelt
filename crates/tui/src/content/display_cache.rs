@@ -13,9 +13,16 @@ pub(crate) fn path_for_session(session: &Session) -> PathBuf {
 }
 
 pub(crate) fn read_for_session(session: &Session) -> Vec<DisplayCacheEntry> {
+    read_at_path(&path_for_session(session))
+}
+
+pub(crate) fn write_for_session(session: &Session, entries: &[DisplayCacheEntry]) {
+    write_at_path(&path_for_session(session), entries);
+}
+
+fn read_at_path(path: &Path) -> Vec<DisplayCacheEntry> {
     let _perf = smelt_perf::perf::begin("session_ir:read");
-    let path = path_for_session(session);
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = std::fs::read(path) else {
         return Vec::new();
     };
     smelt_perf::perf::record_value("session_ir:read:bytes", bytes.len() as u64);
@@ -24,15 +31,17 @@ pub(crate) fn read_for_session(session: &Session) -> Vec<DisplayCacheEntry> {
     entries
 }
 
-pub(crate) fn write_for_session(session: &Session, entries: &[DisplayCacheEntry]) {
+fn write_at_path(path: &Path, entries: &[DisplayCacheEntry]) {
     let _perf = smelt_perf::perf::begin("session_ir:write");
-    let path = path_for_session(session);
+    if entries.is_empty() {
+        return;
+    }
     let Some(bytes) = encode(entries) else {
         return;
     };
     smelt_perf::perf::record_value("session_ir:write:entries", entries.len() as u64);
     smelt_perf::perf::record_value("session_ir:write:bytes", bytes.len() as u64);
-    atomic_write(&path, &bytes);
+    smelt_core::session::atomic_write(path, &bytes, smelt_core::session::now_ms());
 }
 
 fn encode(entries: &[DisplayCacheEntry]) -> Option<Vec<u8>> {
@@ -108,18 +117,6 @@ fn read_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
     Some(value)
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) {
-    let Some(dir) = path.parent() else { return };
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(dir);
-    let tmp = dir.join(format!("{name}.{}.tmp", smelt_core::session::now_ms()));
-    if std::fs::write(&tmp, contents).is_ok() {
-        let _ = std::fs::rename(&tmp, path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +150,25 @@ mod tests {
         encoded[0] = b'X';
         assert!(decode(&encoded).is_none());
         assert!(decode(&encoded[..8]).is_none());
+    }
+
+    #[test]
+    fn filesystem_round_trip_persists_entries() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("session.ir.bin");
+        let entries = vec![entry()];
+        write_at_path(&path, &entries);
+        let decoded = read_at_path(&path);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].id, entries[0].id);
+        assert_eq!(decoded[0].key, entries[0].key);
+    }
+
+    #[test]
+    fn empty_cache_skips_filesystem_write() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("session.ir.bin");
+        write_at_path(&path, &[]);
+        assert!(!path.exists());
     }
 }

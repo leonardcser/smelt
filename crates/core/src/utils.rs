@@ -1,3 +1,11 @@
+/// Stable hash of a serializable value. Serializes through `serde_json::Value`
+/// first so map keys are sorted, then hashes the resulting bytes with seahash.
+pub fn hash_serializable<T: serde::Serialize>(value: &T) -> u64 {
+    let value = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+    let bytes = serde_json::to_vec(&value).unwrap_or_default();
+    seahash::hash(&bytes)
+}
+
 pub fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")

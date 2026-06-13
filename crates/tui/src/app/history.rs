@@ -240,7 +240,6 @@ fn push_assistant_blocks(
                 output: Some(Box::new(output)),
                 user_message: None,
                 body: None,
-                layout_revision: 0,
             },
             smelt_core::BlockOrigin::History(history_index),
         );

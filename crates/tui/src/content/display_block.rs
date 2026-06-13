@@ -356,7 +356,6 @@ mod tests {
                 })),
                 user_message: None,
                 body: Some(body),
-                layout_revision: 1,
             },
         );
         let id = warm.history.order[0];
@@ -378,7 +377,6 @@ mod tests {
                 })),
                 user_message: None,
                 body: None,
-                layout_revision: 0,
             },
         );
         let mut hydrated = DisplayModel::new();

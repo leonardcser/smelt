@@ -319,7 +319,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         }
     }
 
@@ -715,7 +714,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: 30,
@@ -759,7 +757,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: 80,
@@ -806,7 +803,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         };
         let pending_display = layout_block_test(&block, Some(&pending), &ctx);
         assert!(pending_display[0]
@@ -819,7 +815,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         };
         let done_display = layout_block_test(&block, Some(&done), &ctx);
         assert!(done_display[0].text.contains("echo hi  2s"));
@@ -831,7 +826,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         };
         let failed_display = layout_block_test(&block, Some(&failed), &ctx);
         assert!(failed_display[0].text.contains("echo hi  1m5s"));
@@ -858,7 +852,6 @@ mod tests {
                 output: None,
                 user_message: None,
                 body: None,
-                layout_revision: 0,
             };
             layout_block_test(&block, Some(&state), &ctx)[0]
                 .text
@@ -908,7 +901,6 @@ mod tests {
             })),
             user_message: None,
             body: Some(body),
-            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: W as u16,
@@ -949,7 +941,6 @@ mod tests {
                 output: None,
                 user_message: None,
                 body: Some(body),
-                layout_revision: 0,
             };
             let ctx = LayoutContext {
                 width: W as u16,
@@ -996,7 +987,6 @@ mod tests {
                 output: None,
                 user_message: None,
                 body: Some(body),
-                layout_revision: 0,
             };
             let ctx = LayoutContext {
                 width: W as u16,
@@ -1099,7 +1089,6 @@ mod tests {
             })),
             user_message: None,
             body: Some(ToolBody::Layout(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))),
-            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: W as u16,
@@ -1134,7 +1123,6 @@ mod tests {
             })),
             user_message: None,
             body: Some(body),
-            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: W as u16,
@@ -1177,7 +1165,6 @@ mod tests {
             })),
             user_message: None,
             body: None,
-            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: W as u16,
@@ -1212,7 +1199,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         };
         let ctx = LayoutContext {
             width: 80,

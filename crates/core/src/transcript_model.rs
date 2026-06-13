@@ -79,10 +79,6 @@ pub struct ToolState {
     /// Width-independent output of the plugin `render(args, output, ctx)` hook.
     /// Computed on content/status changes and reused across terminal widths.
     pub body: Option<crate::content::block_layout::ToolBody>,
-    /// Monotonic in-memory marker for callers that need to observe tool-body
-    /// installs. Layout keys use [`ToolState::display_hash`] so persisted
-    /// display caches can validate against stable sidecar content.
-    pub layout_revision: u64,
 }
 
 impl ToolState {
@@ -98,25 +94,7 @@ impl ToolState {
     }
 
     pub fn display_hash(&self) -> u64 {
-        #[derive(serde::Serialize)]
-        struct StableToolState<'a> {
-            status: ToolStatus,
-            elapsed: Option<Duration>,
-            output: &'a Option<ToolOutputRef>,
-            user_message: &'a Option<String>,
-            body: &'a Option<crate::content::block_layout::ToolBody>,
-        }
-
-        let stable = StableToolState {
-            status: self.status,
-            elapsed: self.elapsed,
-            output: &self.output,
-            user_message: &self.user_message,
-            body: &self.body,
-        };
-        let value = serde_json::to_value(&stable).unwrap_or(serde_json::Value::Null);
-        let bytes = serde_json::to_vec(&value).unwrap_or_default();
-        seahash::hash(&bytes)
+        crate::utils::hash_serializable(self)
     }
 }
 
@@ -170,18 +148,8 @@ impl Block {
     /// / output / elapsed) is deliberately *not* hashed - mutable tool
     /// state lives separately and is invalidated via
     /// `BlockHistory::invalidate_block_layout`.
-    ///
-    /// Implementation: serialize through `serde_json::Value` first
-    /// (whose `Map` is a `BTreeMap` without the `preserve_order`
-    /// feature) so the `HashMap<String, Value>` arg fields are emitted
-    /// in sorted-key order, then hash the resulting bytes. Without the
-    /// intermediate `to_value` step, two blocks with identical content
-    /// but different HashMap insertion orders would produce different
-    /// hashes.
     pub fn content_hash(&self) -> u64 {
-        let value = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
-        let bytes = serde_json::to_vec(&value).unwrap_or_default();
-        seahash::hash(&bytes)
+        crate::utils::hash_serializable(self)
     }
 
     /// Raw source text for the block, before markdown rendering. Used
@@ -810,7 +778,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         }
     }
 

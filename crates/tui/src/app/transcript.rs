@@ -882,7 +882,6 @@ fn store_tool_body_results(history: &mut BlockHistory, bodies: Vec<(String, Tool
     for (call_id, body) in bodies {
         if let Some(state) = history.tool_states.get_mut(&call_id) {
             state.body = Some(body);
-            state.layout_revision = state.layout_revision.wrapping_add(1);
             changed = true;
         }
     }

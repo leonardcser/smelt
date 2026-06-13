@@ -153,7 +153,6 @@ mod tests {
             output: None,
             user_message: None,
             body: None,
-            layout_revision: 0,
         }
     }
 
