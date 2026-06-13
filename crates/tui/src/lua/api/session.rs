@@ -575,14 +575,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let scroll_target = scroll_top
                     .map(crate::content::transcript_buf::ScrollTarget::visible_row)
                     .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail);
-                let block_ids = view.history().order.clone();
-                app.prerender_tool_blocks_in_history_for_ids(
-                    view.history_mut(),
-                    width,
-                    &block_ids,
-                );
                 let theme = app.ui.theme().clone();
-                let plan =
+                let mut plan =
+                    view.plan_projection_measured(width, show_thinking, scroll_target, height, &theme);
+                crate::app::transcript::prerender_tool_bodies_for_ids(
+                    &app.lua,
+                    view.history_mut(),
+                    plan.block_ids(),
+                );
+                plan =
                     view.plan_projection_measured(width, show_thinking, scroll_target, height, &theme);
                 let out = {
                     let target = app.ui.buf_mut(buf.id)?;

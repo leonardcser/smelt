@@ -19,14 +19,6 @@ pub(super) fn render(
     state: &ToolState,
     width: usize,
 ) -> u16 {
-    let rendered = state
-        .render_cache
-        .as_ref()
-        .filter(|(w, layout)| {
-            *w as usize == width
-                || smelt_core::content::block_layout::rendered_layout_width_independent(layout)
-        })
-        .map(|(_, layout)| layout);
     render_tool(
         out,
         name,
@@ -36,7 +28,7 @@ pub(super) fn render(
         elapsed,
         state.output.as_deref(),
         state.user_message.as_deref(),
-        rendered,
+        state.body.as_ref(),
         width,
     )
 }

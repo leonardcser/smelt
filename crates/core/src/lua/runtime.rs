@@ -104,7 +104,6 @@ fn keymap_mode_matches(binding_mode: &str, active_mode: &str) -> bool {
 
 /// Context passed to a tool's `render(args, output, ctx)` hook.
 pub struct ToolRenderCtx<'a> {
-    pub width: usize,
     pub summary: &'a str,
     /// `"pending" | "ok" | "err" | "denied" | "confirm"`
     pub status: &'a str,
@@ -1419,7 +1418,6 @@ impl LuaRuntime {
                 return None;
             }
         };
-        let _ = ctx_table.set("width", ctx.width);
         let _ = ctx_table.set("summary", ctx.summary);
         let _ = ctx_table.set("status", ctx.status);
         if let Some(secs) = ctx.elapsed_secs {

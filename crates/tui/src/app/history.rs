@@ -239,7 +239,7 @@ fn push_assistant_blocks(
                 elapsed: elapsed_ms.map(Duration::from_millis),
                 output: Some(Box::new(output)),
                 user_message: None,
-                render_cache: None,
+                body: None,
                 layout_revision: 0,
             },
             smelt_core::BlockOrigin::History(history_index),

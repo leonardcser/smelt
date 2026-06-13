@@ -152,7 +152,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         }
     }

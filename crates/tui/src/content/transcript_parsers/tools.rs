@@ -4,7 +4,10 @@ use crate::content::source_view::{render_source_view, SourceView, SourceViewTarg
 use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
-use smelt_core::content::block_layout::{RenderedLayout, RenderedLeaf};
+use smelt_core::content::block_layout::{
+    solve_hbox_widths, BlockLayout, IrLeaf, LayoutIr, RenderedLayout, RenderedLeaf, TextSpec,
+    ToolBody,
+};
 use smelt_core::content::builder::{replay_buffer_row_into, LineBuilder};
 use smelt_core::content::highlight::InlineSyntax;
 use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
@@ -23,7 +26,7 @@ pub(super) fn render_tool(
     elapsed: Option<Duration>,
     output: Option<&ToolOutput>,
     user_message: Option<&str>,
-    rendered: Option<&RenderedLayout>,
+    body: Option<&ToolBody>,
     width: usize,
 ) -> u16 {
     let color: HlGroup = match status {
@@ -44,12 +47,44 @@ pub(super) fn render_tool(
         rows += 1;
     }
     if status != ToolStatus::Denied {
-        if let Some(layout) = rendered {
+        if let Some(body) = body {
             let inner_width = block_inner_width(width) as u16;
-            rows += replay_rendered(out, layout, inner_width);
+            rows += render_tool_body(out, body, inner_width);
         } else if let Some(out_data) = output {
             if !out_data.content.trim().is_empty() {
                 rows += print_tool_output(out, name, out_data, args, width);
+            }
+        }
+    }
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn measure_tool_height(
+    name: &str,
+    summary: &StyledLines,
+    status: ToolStatus,
+    elapsed: Option<Duration>,
+    output: Option<&ToolOutput>,
+    user_message: Option<&str>,
+    body: Option<&ToolBody>,
+    width: usize,
+) -> u16 {
+    let time = if status == ToolStatus::Confirm {
+        None
+    } else {
+        elapsed
+    };
+    let mut rows = measure_tool_line(name, summary, status, time, width);
+    if user_message.is_some() {
+        rows = rows.saturating_add(1);
+    }
+    if status != ToolStatus::Denied {
+        if let Some(body) = body {
+            rows = rows.saturating_add(measure_tool_body(body, block_inner_width(width) as u16));
+        } else if let Some(out_data) = output {
+            if !out_data.content.trim().is_empty() {
+                rows = rows.saturating_add(measure_tool_output(&out_data.content, width));
             }
         }
     }
@@ -254,6 +289,41 @@ fn print_tool_line(
     rows
 }
 
+fn measure_tool_line(
+    name: &str,
+    summary: &StyledLines,
+    status: ToolStatus,
+    elapsed: Option<Duration>,
+    width: usize,
+) -> u16 {
+    let timer = tool_title_suffix(elapsed);
+    let (summary, suffix_spans) = split_title_summary(summary, &timer, status);
+    let has_summary = !summary.as_plain_text().is_empty();
+    let suffix_text_len: usize = suffix_spans.iter().map(|s| s.text.len()).sum();
+    let suffix_len = suffix_text_len
+        + suffix_spans.len().saturating_sub(1)
+        + 2 * usize::from(has_summary && !suffix_spans.is_empty());
+    let has_title_tail = has_summary || !suffix_spans.is_empty();
+    let ly = tool_line_layout(name, suffix_len, has_title_tail, width);
+    let max_seg = ly.max_summary.max(1);
+    let total: usize = summary
+        .0
+        .iter()
+        .map(|spans| {
+            let line = InlineLine::new(
+                spans
+                    .iter()
+                    .map(|s| InlineRun::new(s.text.clone(), (), BreakPolicy::BreakOnSpaces))
+                    .collect(),
+            );
+            line.wrap_fragments(max_seg).len()
+        })
+        .sum::<usize>()
+        .max(1);
+    let shown = total.min(MAX_TOOL_BLOCK_ROWS);
+    (shown + usize::from(total > MAX_TOOL_BLOCK_ROWS)) as u16
+}
+
 fn split_title_summary(
     summary: &StyledLines,
     timer: &str,
@@ -340,9 +410,209 @@ fn tool_title_source_text(name: &str, line_source: &str, include_title: bool) ->
     }
 }
 
-fn replay_rendered(out: &mut LineBuilder, layout: &RenderedLayout, inner_width: u16) -> u16 {
-    let cap = MAX_TOOL_BLOCK_ROWS as u16;
-    replay_node(out, layout, cap, inner_width, true)
+fn render_tool_body(out: &mut LineBuilder, body: &ToolBody, inner_width: u16) -> u16 {
+    match body {
+        ToolBody::Layout(layout) => {
+            render_layout_ir_node(out, layout, MAX_TOOL_BLOCK_ROWS as u16, inner_width, true)
+        }
+    }
+}
+
+pub(crate) fn measure_tool_body(body: &ToolBody, inner_width: u16) -> u16 {
+    match body {
+        ToolBody::Layout(layout) => {
+            measure_layout_ir_node(layout, MAX_TOOL_BLOCK_ROWS as u16, inner_width)
+        }
+    }
+}
+
+fn render_layout_ir_node(
+    out: &mut LineBuilder,
+    layout: &LayoutIr,
+    rows_cap: u16,
+    width: u16,
+    with_gutter: bool,
+) -> u16 {
+    if rows_cap == 0 {
+        return 0;
+    }
+    match layout {
+        BlockLayout::Leaf(leaf) => render_ir_leaf(out, leaf, rows_cap, width, with_gutter),
+        BlockLayout::Vbox(items) => {
+            let mut written = 0u16;
+            for child in items {
+                let remaining = rows_cap.saturating_sub(written);
+                if remaining == 0 {
+                    break;
+                }
+                written = written.saturating_add(render_layout_ir_node(
+                    out,
+                    child,
+                    remaining,
+                    width,
+                    with_gutter,
+                ));
+            }
+            written
+        }
+        BlockLayout::Hbox(items) => render_ir_hbox(out, items, rows_cap, width, with_gutter),
+    }
+}
+
+fn measure_layout_ir_node(layout: &LayoutIr, rows_cap: u16, width: u16) -> u16 {
+    if rows_cap == 0 {
+        return 0;
+    }
+    match layout {
+        BlockLayout::Leaf(leaf) => measure_ir_leaf(leaf, rows_cap, width),
+        BlockLayout::Vbox(items) => {
+            let mut rows = 0u16;
+            for child in items {
+                let remaining = rows_cap.saturating_sub(rows);
+                if remaining == 0 {
+                    break;
+                }
+                rows = rows.saturating_add(measure_layout_ir_node(child, remaining, width));
+            }
+            rows
+        }
+        BlockLayout::Hbox(items) => {
+            let widths = solve_hbox_widths(items, width);
+            items
+                .iter()
+                .zip(widths)
+                .map(|(item, w)| measure_layout_ir_node(&item.layout, rows_cap, w))
+                .max()
+                .unwrap_or(0)
+                .min(rows_cap)
+        }
+    }
+}
+
+fn render_ir_leaf(
+    out: &mut LineBuilder,
+    leaf: &IrLeaf,
+    rows_cap: u16,
+    width: u16,
+    with_gutter: bool,
+) -> u16 {
+    match leaf {
+        IrLeaf::Text(spec) => render_text_spec(out, spec, rows_cap, width, with_gutter),
+        IrLeaf::DiffIr(cache) => {
+            let target = SourceViewTarget::new(
+                if with_gutter {
+                    BLOCK_GUTTER_W as u16
+                } else {
+                    0
+                },
+                u16::MAX,
+            );
+            render_source_view(out, SourceView::DiffIr(cache), target)
+        }
+    }
+}
+
+fn measure_ir_leaf(leaf: &IrLeaf, rows_cap: u16, width: u16) -> u16 {
+    match leaf {
+        IrLeaf::Text(spec) => measure_text_spec(spec, width).min(rows_cap),
+        IrLeaf::DiffIr(cache) => smelt_core::content::highlight::measure_diff_ir(
+            cache,
+            width,
+            smelt_core::content::highlight::GutterStyle::InlineLineNumbers,
+            BLOCK_GUTTER_W as u16,
+        ),
+    }
+}
+
+fn render_text_spec(
+    out: &mut LineBuilder,
+    spec: &TextSpec,
+    rows_cap: u16,
+    width: u16,
+    with_gutter: bool,
+) -> u16 {
+    let hl = spec.hl_group.as_deref().map(intern);
+    let mut rows = 0u16;
+    'outer: for line in spec.content.lines() {
+        let expanded = line.replace('\t', "    ");
+        let (spans, ranges, boundaries) = wrap_ansi(&expanded, width as usize);
+        if ranges.len() > 1 {
+            out.mark_wrapped();
+        }
+        for &(ws, we) in &ranges {
+            if rows >= rows_cap {
+                break 'outer;
+            }
+            if with_gutter {
+                out.print_gutter(BLOCK_GUTTER_SPACE);
+            }
+            match hl {
+                Some(group) => out.push_hl(group),
+                None => out.push_dim(),
+            }
+            emit_ansi_row(out, &spans, &boundaries, ws, we);
+            out.pop_style();
+            out.newline();
+            rows = rows.saturating_add(1);
+        }
+    }
+    rows
+}
+
+fn measure_text_spec(spec: &TextSpec, width: u16) -> u16 {
+    spec.content
+        .lines()
+        .map(|line| {
+            let expanded = line.replace('\t', "    ");
+            let (_, ranges, _) = wrap_ansi(&expanded, width as usize);
+            ranges.len() as u16
+        })
+        .sum()
+}
+
+fn render_ir_hbox(
+    out: &mut LineBuilder,
+    items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
+    rows_cap: u16,
+    total_width: u16,
+    with_gutter: bool,
+) -> u16 {
+    let widths = solve_hbox_widths(items, total_width);
+    let mut buffers = Vec::with_capacity(items.len());
+    let theme = out.theme().clone();
+    for (idx, item) in items.iter().enumerate() {
+        let width = widths.get(idx).copied().unwrap_or(0);
+        let mut buf = smelt_core::buffer::Buffer::new(
+            smelt_core::buffer::BufId(idx as u64 + 1),
+            Default::default(),
+        );
+        {
+            let mut col = LineBuilder::new(&mut buf, &theme, width);
+            render_layout_ir_node(&mut col, &item.layout, rows_cap, width, false);
+            col.finish();
+        }
+        buffers.push(buf);
+    }
+    let row_total = buffers
+        .iter()
+        .map(|buf| buf.line_count() as u16)
+        .max()
+        .unwrap_or(0)
+        .min(rows_cap);
+    for r in 0..row_total {
+        if with_gutter {
+            out.print_gutter(BLOCK_GUTTER_SPACE);
+        }
+        for (idx, buf) in buffers.iter().enumerate() {
+            let col_w = widths.get(idx).copied().unwrap_or(0);
+            let emitted = emit_buffer_row_clipped(buf, r, col_w, out);
+            if emitted < col_w {
+                out.print(&" ".repeat((col_w - emitted) as usize));
+            }
+        }
+        out.newline();
+    }
+    row_total
 }
 
 /// Render a `RenderedLayout` directly into `out` without a tool-block gutter
@@ -397,6 +667,7 @@ fn render_leaf(
     );
     match leaf {
         RenderedLeaf::Buf(buf) => replay_leaf(out, buf, rows_cap, width, with_gutter),
+        RenderedLeaf::Text(spec) => render_text_spec(out, spec, rows_cap, width, with_gutter),
         RenderedLeaf::Diff(spec) => {
             render_source_view(out, SourceView::Diff(spec), source_view_target)
         }
@@ -684,6 +955,19 @@ fn print_dim_non_selectable(out: &mut LineBuilder, time_str: &str) {
         out.print_with_meta(time_str, meta);
         out.pop_style();
     }
+}
+
+fn measure_tool_output(content: &str, width: usize) -> u16 {
+    let max_cols = super::metrics::block_inner_width(width);
+    let total_rows: usize = content
+        .lines()
+        .map(|line| {
+            let expanded = line.replace('\t', "    ");
+            let (_, ranges, _) = wrap_ansi(&expanded, max_cols);
+            ranges.len()
+        })
+        .sum();
+    (total_rows.min(MAX_TOOL_BLOCK_ROWS) + usize::from(total_rows > MAX_TOOL_BLOCK_ROWS)) as u16
 }
 
 pub fn render_wrapped_output(

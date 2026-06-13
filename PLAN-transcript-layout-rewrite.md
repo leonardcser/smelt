@@ -838,19 +838,28 @@ Conclusion: the large mixed baseline is still dominated by full markdown/tool/di
 
 **Completed slice:** `CachedInlineDiff` became serializable `DiffIr` in `crates/core/src/content/highlight/diff.rs`; it stores diff structure, expanded text, line numbers, and syntax extension without persistent syntax style ranges or duplicated layout text. Syntax style spans are computed in `print_diff_ir` during rendering. `measure_diff_ir` measures wrapped rows from the IR without syntect, and `print_diff_ir` now applies `skip`/`max_rows` to visual rows so measurement and rendering use the same row model. File-view leaves compile to the same IR via `build_file_view_ir`, and rendered layouts made only of IR/spec leaves are marked width-independent so resize can reuse them instead of rerunning tool extraction. Validation: `cargo nextest run --workspace` (3043 passed, 1 skipped) and `cargo clippy --workspace --all-targets -- -D warnings`.
 
-### Phase 5: Tool body IR and global tool prerender removal
+### Phase 5: Tool body IR and global tool prerender removal — complete
 
 **Goal:** historical tool blocks are cheap to measure; tool render hooks run only on content changes or DisplayIR cache misses, never because width changed.
 
-- Introduce `ToolBody` IR.
-- Convert built-in tool outputs (bash, grep, etc.) to produce `ToolBody::Text` or `ToolBody::Layout(LayoutIr)`.
-- Replace `ToolState.render_cache` with width-independent `ToolBody` in the `DisplayModel`, keyed by content hash + stable sidecar hash + tool renderer version.
-- `ToolBody` is computed once per content change, not per width.
-- Remove `prerender_transcript_tool_blocks_for_ids(tw, &all_block_ids)` from the render loop.
-- In `measure_all_heights`, tool blocks measure from `ToolBody` IR.
-- In `project_visible_range`, visible tool blocks render from `ToolBody` IR.
-- Update the Lua tool-renderer API to return declarative `LayoutIr` primitives; remove `layout.leaf(buf_id)` and `ctx.width`.
-- Built-in/bundled tools are migrated first. No buffer-leaf compatibility shim is kept; add only declarative primitives that are justified by real built-in needs.
+Completed slice:
+
+- Introduced serializable `ToolBody` / `LayoutIr` with `Text` and `DiffIr` leaves.
+- Replaced `ToolState.render_cache` with width-independent `ToolState.body`.
+- Added native declarative Lua `smelt.layout.text` and `smelt.layout.tool_output`; bundled text/diff/file-view tool renderers now compile to `ToolBody` without persistent buffers.
+- Removed the render-loop call that prerendered every transcript tool block at the current width.
+- Projection now computes tool bodies only for the planned visible block window, stores them as width-independent sidecar display state, then replans against the updated row index.
+- Tool block measurement reads `ToolBody` directly, including text wrapping and diff/file-view IR measurement, before falling back to raw output for tools without a compiled body.
+- Visible materialization renders `ToolBody` directly; width changes rewrap the body and do not rerun Lua render hooks for hidden tools with cached bodies.
+- Removed `ctx.width` from `ToolRenderCtx`; regenerated Lua API docs/stubs.
+
+Validation:
+
+- `cargo test -p smelt-core diff`
+- `cargo test -p smelt-tui transcript_buf`
+- `cargo test -p smelt-tui transcript_parsers`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace` → `3043 passed, 1 skipped`
 
 **Deliverable:** resize does not rerun Lua tool render hooks for hidden tools.
 

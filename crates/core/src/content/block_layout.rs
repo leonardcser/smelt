@@ -1,22 +1,18 @@
-//! Composable layout tree returned by a tool's `render` callback.
+//! Composable width-independent layout trees returned by tool render callbacks.
 //!
-//! Generic over the buffer payload so the same hierarchy serves two roles:
-//! - `BlockLayout<BufId>` (alias `LuaLayout`) - what the Lua hook returns; the
-//!   `Buf` leaf carries a buffer id the plugin rendered into via `smelt.buf` /
-//!   `smelt.diff.render`, and `Diff` / `FileView` leaves carry specs the worker
-//!   renders into its block buffer directly - no scratch buffer, no replay seam.
-//! - `BlockLayout<Box<Buffer>>` (alias `RenderedLayout`) - main-thread-extracted
-//!   form. `Buf(id)` becomes `Buf(box)` (buffer destroyed out of `app.ui` and
-//!   owned outright); specs pass through verbatim. This survives a thread hop
-//!   to the parallel layout workers, which cannot touch `app.ui`.
+//! `BlockLayout<BufId>` (alias `LuaLayout`) is the raw Lua-returned shape. The
+//! transcript stores `ToolBody`, which contains only serializable, width-independent
+//! leaves (`Text` and `DiffIr`). Buffer leaves are transient Lua values and are
+//! not preserved in tool bodies.
 
 use crate::buffer::{BufId, Buffer};
 use crate::content::highlight::DiffIr;
+use serde::{Deserialize, Serialize};
 
 /// Inline-diff render directive. The worker calls `print_inline_diff` directly,
 /// so width / indent / bg-fill / wrap math all live in one render path with no
 /// scratch-buffer seam.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiffSpec {
     pub old: String,
     pub new: String,
@@ -27,19 +23,34 @@ pub struct DiffSpec {
 
 /// File-view render directive (all-Context diff IR). Used by `write_file` and
 /// notebook insert mode - same renderer as `Diff`, single line-number column.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileViewSpec {
     pub content: String,
     pub path: String,
     pub lang: Option<String>,
 }
 
+/// Plain text layout leaf. Wrapping is computed at measurement/render time.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextSpec {
+    pub content: String,
+    pub hl_group: Option<String>,
+}
+
+/// Width-independent leaf stored in a tool body.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum IrLeaf {
+    Text(TextSpec),
+    DiffIr(DiffIr),
+}
+
 /// A leaf parameterised on the buffer payload `B`. With `B = BufId` this is the
 /// Lua-returned shape; with `B = Box<Buffer>` it's the main-thread-extracted
 /// shape. Diff/FileView arms are identical in both.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Leaf<B> {
     Buf(B),
+    Text(TextSpec),
     Diff(DiffSpec),
     FileView(FileViewSpec),
     DiffIr(DiffIr),
@@ -47,8 +58,14 @@ pub enum Leaf<B> {
 
 pub type LuaLeaf = Leaf<BufId>;
 pub type RenderedLeaf = Leaf<Box<Buffer>>;
+pub type LayoutIr = BlockLayout<IrLeaf>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ToolBody {
+    Layout(LayoutIr),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Constraint {
     /// Fixed width in display columns.
     Length(u16),
@@ -56,34 +73,17 @@ pub enum Constraint {
     Fill(u16),
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HboxItem<L = LuaLeaf> {
     pub constraint: Constraint,
     pub layout: BlockLayout<L>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BlockLayout<L = LuaLeaf> {
     Leaf(L),
     Vbox(Vec<BlockLayout<L>>),
     Hbox(Vec<HboxItem<L>>),
-}
-
-impl<L: Clone> Clone for HboxItem<L> {
-    fn clone(&self) -> Self {
-        Self {
-            constraint: self.constraint,
-            layout: self.layout.clone(),
-        }
-    }
-}
-
-impl<L: Clone> Clone for BlockLayout<L> {
-    fn clone(&self) -> Self {
-        match self {
-            BlockLayout::Leaf(l) => BlockLayout::Leaf(l.clone()),
-            BlockLayout::Vbox(v) => BlockLayout::Vbox(v.clone()),
-            BlockLayout::Hbox(v) => BlockLayout::Hbox(v.clone()),
-        }
-    }
 }
 
 impl<L> BlockLayout<L> {
@@ -120,7 +120,10 @@ pub fn rendered_layout_width_independent(layout: &RenderedLayout) -> bool {
     match layout {
         BlockLayout::Leaf(RenderedLeaf::Buf(_)) => false,
         BlockLayout::Leaf(
-            RenderedLeaf::Diff(_) | RenderedLeaf::FileView(_) | RenderedLeaf::DiffIr(_),
+            RenderedLeaf::Text(_)
+            | RenderedLeaf::Diff(_)
+            | RenderedLeaf::FileView(_)
+            | RenderedLeaf::DiffIr(_),
         ) => true,
         BlockLayout::Vbox(items) => items.iter().all(rendered_layout_width_independent),
         BlockLayout::Hbox(items) => items

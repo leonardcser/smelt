@@ -76,11 +76,9 @@ pub struct ToolState {
     pub elapsed: Option<Duration>,
     pub output: Option<ToolOutputRef>,
     pub user_message: Option<String>,
-    /// Output of the plugin `render(args, output, ctx)` hook, pre-baked on the main
-    /// thread before parallel layout. `None` means "not yet rendered (or invalidated)";
-    /// the tuple's `u16` is the width the layout was rendered at - a mismatch on read
-    /// triggers re-render. Cleared automatically by every mutator on `ToolState`.
-    pub render_cache: Option<(u16, crate::content::block_layout::RenderedLayout)>,
+    /// Width-independent output of the plugin `render(args, output, ctx)` hook.
+    /// Computed on content/status changes and reused across terminal widths.
+    pub body: Option<crate::content::block_layout::ToolBody>,
     /// Bumped when mutable tool state changes. Tool call blocks keep immutable
     /// `Block` content, so the transcript layout key needs this sidecar
     /// revision to avoid reusing stale rendered rows.
@@ -95,8 +93,8 @@ impl ToolState {
         )
     }
 
-    pub fn invalidate_render_cache(&mut self) {
-        self.render_cache = None;
+    pub fn invalidate_body(&mut self) {
+        self.body = None;
     }
 }
 
@@ -345,6 +343,10 @@ impl BlockHistory {
 
     pub(crate) fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub fn invalidate_display_cache(&mut self) {
+        self.bump_generation();
     }
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
@@ -785,7 +787,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         }
     }

@@ -227,6 +227,12 @@ pub(crate) struct ProjectionPlan {
     block_ids: Vec<BlockId>,
 }
 
+impl ProjectionPlan {
+    pub(crate) fn block_ids(&self) -> &[BlockId] {
+        &self.block_ids
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScrollAnchor {
     Row(RowIndex),
@@ -318,11 +324,33 @@ fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
     }
 }
 
-fn measure_block_content_height(block: &Block, width: u16) -> Option<RowIndex> {
+fn measure_block_content_height(
+    block: &Block,
+    state: Option<&smelt_core::transcript_model::ToolState>,
+    width: u16,
+) -> Option<RowIndex> {
     match block {
         Block::CodeLine { content, lang } => {
             let block = parse_code_block(&[content.as_str()], lang);
             Some(measure_code_block(&block, width as usize) as RowIndex)
+        }
+        Block::ToolCall {
+            name,
+            summary,
+            args: _,
+            ..
+        } => {
+            let state = state?;
+            Some(crate::content::transcript_parsers::measure_tool_height(
+                name,
+                summary,
+                state.status,
+                state.elapsed,
+                state.output.as_deref(),
+                state.user_message.as_deref(),
+                state.body.as_ref(),
+                width as usize,
+            ) as RowIndex)
         }
         _ => None,
     }
@@ -523,8 +551,12 @@ impl TranscriptProjection {
         if node.exact_height.is_some() {
             return true;
         }
-        let Some(rows) = measure_block_content_height(history.block_at(index), node.key.width)
-        else {
+        let block = history.block_at(index);
+        let state = match block {
+            Block::ToolCall { call_id, .. } => history.tool_states.get(call_id),
+            _ => None,
+        };
+        let Some(rows) = measure_block_content_height(block, state, node.key.width) else {
             return false;
         };
         let rows = node.key.view_state.measured_height(rows);
@@ -2336,7 +2368,7 @@ mod tests {
                             metadata: None,
                         })),
                         user_message: None,
-                        render_cache: None,
+                        body: None,
                         layout_revision: 0,
                     },
                 );
@@ -2379,8 +2411,8 @@ mod tests {
         bytes
     }
 
-    fn install_large_mixed_diff_render_caches(history: &mut BlockHistory, width: u16) -> usize {
-        use smelt_core::content::block_layout::{BlockLayout, RenderedLeaf};
+    fn install_large_mixed_diff_bodies(history: &mut BlockHistory) -> usize {
+        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, ToolBody};
 
         let call_ids: Vec<String> = history
             .order
@@ -2405,7 +2437,7 @@ mod tests {
                 "",
                 Some("rs"),
             );
-            state.render_cache = Some((width, BlockLayout::Leaf(RenderedLeaf::DiffIr(cache))));
+            state.body = Some(ToolBody::Layout(BlockLayout::Leaf(IrLeaf::DiffIr(cache))));
             installed += 1;
         }
         installed
@@ -2449,7 +2481,7 @@ mod tests {
 
         let alloc_start = smelt_perf::alloc::snapshot();
         let diff_cache_start = std::time::Instant::now();
-        let diff_caches = install_large_mixed_diff_render_caches(&mut transcript.history, 100);
+        let diff_caches = install_large_mixed_diff_bodies(&mut transcript.history);
         let diff_cache_elapsed = diff_cache_start.elapsed();
 
         let first_start = std::time::Instant::now();
@@ -2466,8 +2498,7 @@ mod tests {
         let first_alloc = smelt_perf::alloc::delta(alloc_start, smelt_perf::alloc::snapshot());
 
         let resize_diff_cache_start = std::time::Instant::now();
-        let resize_diff_caches =
-            install_large_mixed_diff_render_caches(&mut transcript.history, 72);
+        let resize_diff_caches = install_large_mixed_diff_bodies(&mut transcript.history);
         let resize_diff_cache_elapsed = resize_diff_cache_start.elapsed();
 
         let resize_start = std::time::Instant::now();

@@ -127,9 +127,6 @@ impl TuiApp {
         let now = self.core.clock.instant_now();
         self.parser
             .sync_active_tool_elapsed_at(self.transcript.history_mut(), now);
-        let tw = self.transcript_width() as u16;
-        let block_ids = self.transcript.history().order.clone();
-        self.prerender_transcript_tool_blocks_for_ids(tw, &block_ids);
 
         // Split-borrow app fields so the render-prep hook can materialize the
         // transcript through the generic `Ui` path while paint callbacks still
@@ -167,7 +164,19 @@ impl TuiApp {
                         )
                     };
                     let width = request.content_width.max(1);
-                    let plan = transcript.plan_projection_measured(
+                    let mut plan = transcript.plan_projection_measured(
+                        width,
+                        show_thinking,
+                        scroll_target,
+                        viewport_rows,
+                        &theme,
+                    );
+                    crate::app::transcript::prerender_tool_bodies_for_ids(
+                        lua,
+                        transcript.history_mut(),
+                        plan.block_ids(),
+                    );
+                    plan = transcript.plan_projection_measured(
                         width,
                         show_thinking,
                         scroll_target,

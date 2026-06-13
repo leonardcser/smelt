@@ -58,20 +58,18 @@ axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horiz
 ## `smelt.layout.text`
 
 ```lua
-fun(content: string, opts: table?): any
+fun(content: string, opts: table?): table
 ```
 
-Build a leaf layout from a string. Common pattern for `render` callbacks.
+Plain text layout leaf. `opts.hl_group` may name a theme group; without it, text renders dimmed. Wrapping is computed by the transcript at the current width.
 
 ## `smelt.layout.tool_output`
 
 ```lua
-fun(output: table, ctx: table?, opts: table?): any
+fun(output: table, ctx: table?, opts: table?): table
 ```
 
-Render tool stdout/stderr-style text at the tool block width. Use this for
-tool results and errors so long diagnostics wrap instead of widening the
-transcript horizontally.
+Plain text tool-output layout leaf. Error output defaults to the `ErrorMsg` highlight group unless `opts.hl_group` is provided.
 
 ## `smelt.layout.vbox`
 

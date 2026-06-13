@@ -2,7 +2,7 @@
 
 use crate::buffer::BufId;
 use crate::content::block_layout::{
-    BlockLayout, Constraint, DiffSpec, FileViewSpec, HboxItem, LuaLeaf,
+    BlockLayout, Constraint, DiffSpec, FileViewSpec, HboxItem, LuaLeaf, TextSpec,
 };
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
@@ -74,6 +74,37 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Buf(BufId(
                 buf_id,
             )))))
+        },
+    )?;
+    m.fn_(
+        "text",
+        "Plain text layout leaf. `opts.hl_group` may name a theme group; without it, text renders dimmed. Wrapping is computed by the transcript at the current width.",
+        &["content", "opts"],
+        |_, (content, opts): (String, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let hl_group = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten());
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Text(TextSpec {
+                content,
+                hl_group,
+            }))))
+        },
+    )?;
+    m.fn_(
+        "tool_output",
+        "Plain text tool-output layout leaf. Error output defaults to the `ErrorMsg` highlight group unless `opts.hl_group` is provided.",
+        &["output", "ctx", "opts"],
+        |_, (output, _ctx, opts): (mlua::Table, Option<mlua::Table>, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let content: String = output.get::<Option<String>>("content")?.unwrap_or_default();
+            let is_error = output.get::<Option<bool>>("is_error")?.unwrap_or(false);
+            let hl_group = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten())
+                .or_else(|| is_error.then(|| "ErrorMsg".to_string()));
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Text(TextSpec {
+                content,
+                hl_group,
+            }))))
         },
     )?;
     m.fn_(

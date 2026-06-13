@@ -793,10 +793,10 @@ Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callback
   
 - `smelt.layout.sep` :: `fun(char: string?): any`
   Build a 1×1 leaf from a single glyph.
-- `smelt.layout.text` :: `fun(content: string, opts: table?): any`
-  Build a leaf layout from a string.
-- `smelt.layout.tool_output` :: `fun(output: table, ctx: table?, opts: table?): any`
-  Render tool stdout/stderr-style text at the tool block width.
+- `smelt.layout.text` :: `fun(content: string, opts: table?): table`
+  Plain text layout leaf.
+- `smelt.layout.tool_output` :: `fun(output: table, ctx: table?, opts: table?): table`
+  Plain text tool-output layout leaf.
 - `smelt.layout.vbox` :: `fun(items: table): table`
   Stack `items` vertically into a single block layout.
 

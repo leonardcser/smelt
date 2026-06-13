@@ -346,33 +346,6 @@ end
 -- namespace is absent, so we no-op the definitions rather than crash on
 -- nil-index. This keeps `_bootstrap.lua` loadable against any tier.
 if smelt.layout and smelt.layout.leaf then
-  -- Build a leaf layout from a string. Common pattern for `render` callbacks.
-  ---@type fun(content: string, opts: table?): any
-  function smelt.layout.text(content, opts)
-    local buf = smelt.buf.new()
-    smelt.render.text(buf, content or "", opts)
-    return smelt.layout.leaf(buf)
-  end
-
-  -- Render tool stdout/stderr-style text at the tool block width. Use this for
-  -- tool results and errors so long diagnostics wrap instead of widening the
-  -- transcript horizontally.
-  ---@type fun(output: table, ctx: table?, opts: table?): any
-  function smelt.layout.tool_output(output, ctx, opts)
-    output = output or {}
-    local merged = {}
-    if type(opts) == "table" then
-      for k, v in pairs(opts) do merged[k] = v end
-    end
-    if output.is_error and merged.hl_group == nil then
-      merged.hl_group = "ErrorMsg"
-    end
-    if ctx and ctx.width and merged.width == nil then
-      merged.width = ctx.width
-    end
-    return smelt.layout.text(output.content or "", merged)
-  end
-
   ---@type fun(content: string): any
   function smelt.layout.markdown(content)
     local buf = smelt.buf.new()

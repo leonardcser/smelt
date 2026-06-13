@@ -240,7 +240,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
   render = function(args, output, ctx)
     local items = {}
     if args.prompt and args.prompt ~= "" then
-      table.insert(items, smelt.layout.text(args.prompt, { width = ctx and ctx.width or nil }))
+      table.insert(items, smelt.layout.text(args.prompt))
     end
     table.insert(items, smelt.layout.tool_output(output, ctx))
     return smelt.layout.vbox(items)

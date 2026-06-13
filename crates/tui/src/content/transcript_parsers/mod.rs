@@ -26,6 +26,7 @@ mod user;
 #[cfg(test)]
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
+pub(crate) use tools::measure_tool_height;
 pub use tools::render_layout_into;
 
 /// Per-tool row cap (applied to command header and output body separately).
@@ -317,7 +318,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         }
     }
@@ -713,7 +714,7 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(1)),
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         };
         let ctx = LayoutContext {
@@ -757,7 +758,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         };
         let ctx = LayoutContext {
@@ -804,7 +805,7 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(2)),
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         };
         let pending_display = layout_block_test(&block, Some(&pending), &ctx);
@@ -817,7 +818,7 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(2)),
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         };
         let done_display = layout_block_test(&block, Some(&done), &ctx);
@@ -829,7 +830,7 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(65)),
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         };
         let failed_display = layout_block_test(&block, Some(&failed), &ctx);
@@ -856,7 +857,7 @@ mod tests {
                 elapsed: Some(elapsed),
                 output: None,
                 user_message: None,
-                render_cache: None,
+                body: None,
                 layout_revision: 0,
             };
             layout_block_test(&block, Some(&state), &ctx)[0]
@@ -873,25 +874,18 @@ mod tests {
         assert!(render_elapsed(std::time::Duration::from_secs(3660)).contains("  1h1m"));
     }
 
-    /// Regression guard for the silent fall-through where parallel layout workers
-    /// couldn't reach Lua, so `render_tool` dropped to `render_wrapped_output` and showed
-    /// the raw `output.content` (e.g. "wrote 562 bytes to poem.txt") instead of the
-    /// plugin-rendered body. The fix pre-bakes the render on the main thread and stashes
-    /// it on `ToolState.render_cache`; this test asserts that when a cache is present,
+    /// Width-independent tool bodies are precomputed on the main thread and
+    /// stashed on `ToolState.body`; this test asserts that when a body is present,
     /// its content reaches the transcript and `output.content` does not.
     #[test]
-    fn tool_render_cache_replaces_raw_output() {
-        use smelt_core::content::block_layout::BlockLayout;
+    fn tool_body_replaces_raw_output() {
+        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, TextSpec, ToolBody};
         use smelt_core::transcript_model::ToolOutput;
 
-        let mut payload = Buffer::new(BufId(99), BufCreateOpts::default());
-        payload.set_all_lines(vec!["fn main() {".into(), "    println!(\"hi\");".into()]);
-        let cache = (
-            W as u16,
-            BlockLayout::Leaf(smelt_core::content::block_layout::RenderedLeaf::Buf(
-                Box::new(payload),
-            )),
-        );
+        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+            content: "fn main() {\n    println!(\"hi\");".into(),
+            hl_group: None,
+        })));
 
         let mut args = HashMap::new();
         args.insert(
@@ -913,7 +907,7 @@ mod tests {
                 metadata: None,
             })),
             user_message: None,
-            render_cache: Some(cache),
+            body: Some(body),
             layout_revision: 0,
         };
         let ctx = LayoutContext {
@@ -933,16 +927,16 @@ mod tests {
         );
         assert!(
             !joined.contains("RAW_FALLBACK_TEXT"),
-            "raw output.content must not leak when render_cache is present, got: {joined:?}"
+            "raw output.content must not leak when body is present, got: {joined:?}"
         );
     }
 
     #[test]
     fn edit_file_diff_body_column_stays_stable_across_completion() {
-        use smelt_core::content::block_layout::RenderedLayout;
+        use smelt_core::content::block_layout::ToolBody;
         use smelt_core::transcript_model::ToolOutput;
 
-        fn render_insert_column(layout: RenderedLayout, status: ToolStatus) -> usize {
+        fn render_insert_column(body: ToolBody, status: ToolStatus) -> usize {
             let block = Block::ToolCall {
                 call_id: "c-edit-shift".into(),
                 name: "edit_file".into(),
@@ -954,7 +948,7 @@ mod tests {
                 elapsed: None,
                 output: None,
                 user_message: None,
-                render_cache: Some((W as u16, layout)),
+                body: Some(body),
                 layout_revision: 0,
             };
             let ctx = LayoutContext {
@@ -973,9 +967,8 @@ mod tests {
             args: &HashMap<String, serde_json::Value>,
             output: Option<&ToolOutput>,
             status: &'static str,
-        ) -> RenderedLayout {
+        ) -> ToolBody {
             let ctx = smelt_core::lua::runtime::ToolRenderCtx {
-                width: W,
                 summary: "",
                 status,
                 elapsed_secs: None,
@@ -986,10 +979,11 @@ mod tests {
                 .lua
                 .render_tool_layout("edit_file", args, output, ctx)
                 .expect("edit_file should render a layout");
-            crate::app::transcript::extract_rendered_layout(&layout, &mut app.app.ui)
+            crate::app::transcript::compile_tool_body(&layout)
+                .expect("edit_file body should compile")
         }
 
-        fn layout_text(layout: RenderedLayout) -> String {
+        fn layout_text(body: ToolBody) -> String {
             let block = Block::ToolCall {
                 call_id: "c-edit-shift".into(),
                 name: "edit_file".into(),
@@ -1001,7 +995,7 @@ mod tests {
                 elapsed: None,
                 output: None,
                 user_message: None,
-                render_cache: Some((W as u16, layout)),
+                body: Some(body),
                 layout_revision: 0,
             };
             let ctx = LayoutContext {
@@ -1061,14 +1055,13 @@ mod tests {
         assert_eq!(pending_col, finished_col);
     }
 
-    /// Width-independent IR caches are safe to replay after resize; they rewrap at render time.
     #[test]
-    fn tool_render_ir_cache_reused_on_width_mismatch() {
-        use smelt_core::content::block_layout::{BlockLayout, RenderedLeaf};
+    fn tool_body_ir_replaces_output_fallback() {
+        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, ToolBody};
         use smelt_core::transcript_model::ToolOutput;
 
         let ir = smelt_core::content::highlight::build_file_view_ir("IR_LAYOUT\n", Some("txt"));
-        let stale_cache = ((W as u16) + 10, BlockLayout::Leaf(RenderedLeaf::DiffIr(ir)));
+        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::DiffIr(ir)));
 
         let block = Block::ToolCall {
             call_id: "c-ir".into(),
@@ -1085,7 +1078,7 @@ mod tests {
                 metadata: None,
             })),
             user_message: None,
-            render_cache: Some(stale_cache),
+            body: Some(body),
             layout_revision: 0,
         };
         let ctx = LayoutContext {
@@ -1101,31 +1094,20 @@ mod tests {
             .join("");
         assert!(
             joined.contains("IR_LAYOUT"),
-            "width-independent IR cache should be reused, got: {joined:?}"
+            "tool body should render, got: {joined:?}"
         );
         assert!(
             !joined.contains("FALLBACK"),
-            "IR cache should replace output fallback, got: {joined:?}"
+            "tool body should replace output fallback, got: {joined:?}"
         );
     }
 
-    /// Width-dependent buffer caches are ignored after resize and the body falls back to output.content.
     #[test]
-    fn tool_render_cache_ignored_on_width_mismatch() {
-        use smelt_core::content::block_layout::BlockLayout;
+    fn tool_without_body_falls_back_to_output() {
         use smelt_core::transcript_model::ToolOutput;
 
-        let mut payload = Buffer::new(BufId(99), BufCreateOpts::default());
-        payload.set_all_lines(vec!["STALE_LAYOUT".into()]);
-        let stale_cache = (
-            (W as u16) + 10, // cached width != ctx.width
-            BlockLayout::Leaf(smelt_core::content::block_layout::RenderedLeaf::Buf(
-                Box::new(payload),
-            )),
-        );
-
         let block = Block::ToolCall {
-            call_id: "c-stale".into(),
+            call_id: "c-fallback".into(),
             name: "write_file".into(),
             summary: protocol::StyledLines::from_plain("x.rs"),
             args: HashMap::new(),
@@ -1139,7 +1121,7 @@ mod tests {
                 metadata: None,
             })),
             user_message: None,
-            render_cache: Some(stale_cache),
+            body: None,
             layout_revision: 0,
         };
         let ctx = LayoutContext {
@@ -1154,12 +1136,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("");
         assert!(
-            !joined.contains("STALE_LAYOUT"),
-            "stale-width cache must not be used, got: {joined:?}"
-        );
-        assert!(
             joined.contains("FALLBACK"),
-            "expected fallback to output.content on width mismatch, got: {joined:?}"
+            "expected fallback to output.content without body, got: {joined:?}"
         );
     }
 
@@ -1178,7 +1156,7 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(3)),
             output: None,
             user_message: None,
-            render_cache: None,
+            body: None,
             layout_revision: 0,
         };
         let ctx = LayoutContext {

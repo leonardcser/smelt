@@ -8,7 +8,7 @@ use crate::smelt_edit::{BufCreateOpts, Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 
 use smelt_core::content::block_layout::{
-    rendered_layout_width_independent, BlockLayout, HboxItem, RenderedLayout,
+    BlockLayout, HboxItem, IrLeaf, LayoutIr, RenderedLayout, ToolBody,
 };
 use smelt_core::content::transcript::Transcript;
 use smelt_core::transcript_model::{
@@ -258,7 +258,6 @@ struct ToolRenderJob {
 
 fn collect_tool_render_jobs(
     history: &BlockHistory,
-    width: u16,
     ids: impl Iterator<Item = BlockId>,
 ) -> Vec<ToolRenderJob> {
     let mut jobs = Vec::new();
@@ -281,11 +280,7 @@ fn collect_tool_render_jobs(
         if matches!(state.status, ToolStatus::Denied) {
             continue;
         }
-        if state
-            .render_cache
-            .as_ref()
-            .is_some_and(|(w, layout)| *w == width || rendered_layout_width_independent(layout))
-        {
+        if state.body.is_some() {
             continue;
         }
         jobs.push(ToolRenderJob {
@@ -720,85 +715,6 @@ impl TuiApp {
         changed
     }
 
-    pub(crate) fn prerender_tool_blocks_in_history_for_ids(
-        &mut self,
-        history: &mut BlockHistory,
-        width: u16,
-        ids: &[BlockId],
-    ) {
-        let _perf = smelt_perf::perf::begin("tool:prerender_history");
-        smelt_perf::perf::record_value("tool:prerender_history:requested", ids.len() as u64);
-        let jobs = collect_tool_render_jobs(history, width, ids.iter().copied());
-        smelt_perf::perf::record_value("tool:prerender_history:jobs", jobs.len() as u64);
-        let rendered = self.render_tool_jobs(width, jobs);
-        smelt_perf::perf::record_value("tool:prerender_history:rendered", rendered.len() as u64);
-        Self::store_tool_render_results(history, width, rendered);
-    }
-
-    /// Main-thread pre-pass: run plugin `render` hooks for the tool blocks the
-    /// next projection can actually materialize. The Lua VM is single-threaded;
-    /// worker layout downstream only reads the cached owned buffers.
-    pub(crate) fn prerender_transcript_tool_blocks_for_ids(&mut self, width: u16, ids: &[BlockId]) {
-        let _perf = smelt_perf::perf::begin("tool:prerender_transcript");
-        smelt_perf::perf::record_value("tool:prerender_transcript:requested", ids.len() as u64);
-        let jobs = collect_tool_render_jobs(self.transcript.history(), width, ids.iter().copied());
-        smelt_perf::perf::record_value("tool:prerender_transcript:jobs", jobs.len() as u64);
-        let rendered = self.render_tool_jobs(width, jobs);
-        smelt_perf::perf::record_value("tool:prerender_transcript:rendered", rendered.len() as u64);
-        Self::store_tool_render_results(self.transcript.history_mut(), width, rendered);
-    }
-
-    fn render_tool_jobs(
-        &mut self,
-        width: u16,
-        jobs: Vec<ToolRenderJob>,
-    ) -> Vec<(String, RenderedLayout)> {
-        let _perf = smelt_perf::perf::begin("tool:render_jobs");
-        smelt_perf::perf::record_value("tool:render_jobs:jobs", jobs.len() as u64);
-        let mut rendered_jobs = Vec::new();
-        if jobs.is_empty() {
-            return rendered_jobs;
-        }
-
-        for job in jobs {
-            let status_label = match job.status {
-                ToolStatus::Pending => "pending",
-                ToolStatus::Ok => "ok",
-                ToolStatus::Err => "err",
-                ToolStatus::Denied => "denied",
-                ToolStatus::Confirm => "confirm",
-            };
-            let ctx = smelt_core::lua::runtime::ToolRenderCtx {
-                width: width as usize,
-                summary: "",
-                status: status_label,
-                elapsed_secs: job.elapsed_secs,
-                call_id: Some(&job.call_id),
-            };
-            let Some(layout) = ({
-                let _perf = smelt_perf::perf::begin("tool:render_job");
-                self.lua
-                    .render_tool_layout(&job.name, &job.args, job.output.as_ref(), ctx)
-            }) else {
-                continue;
-            };
-            rendered_jobs.push((job.call_id, extract_rendered_layout(&layout, &mut self.ui)));
-        }
-        rendered_jobs
-    }
-
-    fn store_tool_render_results(
-        history: &mut BlockHistory,
-        width: u16,
-        rendered_jobs: Vec<(String, RenderedLayout)>,
-    ) {
-        for (call_id, rendered) in rendered_jobs {
-            if let Some(state) = history.tool_states.get_mut(&call_id) {
-                state.render_cache = Some((width, rendered));
-            }
-        }
-    }
-
     /// Per-line selection ranges (line, col_start, col_end) in display-cell units.
     /// No-op when no vim visual or selection anchor is active.
     #[cfg(test)]
@@ -907,6 +823,127 @@ impl TuiApp {
     }
 }
 
+pub(crate) fn prerender_tool_bodies_for_ids(
+    lua: &smelt_core::lua::runtime::LuaRuntime,
+    history: &mut BlockHistory,
+    ids: &[BlockId],
+) {
+    let _perf = smelt_perf::perf::begin("tool:prerender_bodies");
+    smelt_perf::perf::record_value("tool:prerender_bodies:requested", ids.len() as u64);
+    let jobs = collect_tool_render_jobs(history, ids.iter().copied());
+    smelt_perf::perf::record_value("tool:prerender_bodies:jobs", jobs.len() as u64);
+    let bodies = render_tool_body_jobs(lua, jobs);
+    smelt_perf::perf::record_value("tool:prerender_bodies:rendered", bodies.len() as u64);
+    store_tool_body_results(history, bodies);
+}
+
+fn render_tool_body_jobs(
+    lua: &smelt_core::lua::runtime::LuaRuntime,
+    jobs: Vec<ToolRenderJob>,
+) -> Vec<(String, ToolBody)> {
+    let _perf = smelt_perf::perf::begin("tool:render_body_jobs");
+    smelt_perf::perf::record_value("tool:render_body_jobs:jobs", jobs.len() as u64);
+    let mut rendered_jobs = Vec::new();
+    for job in jobs {
+        let status_label = match job.status {
+            ToolStatus::Pending => "pending",
+            ToolStatus::Ok => "ok",
+            ToolStatus::Err => "err",
+            ToolStatus::Denied => "denied",
+            ToolStatus::Confirm => "confirm",
+        };
+        let ctx = smelt_core::lua::runtime::ToolRenderCtx {
+            summary: "",
+            status: status_label,
+            elapsed_secs: job.elapsed_secs,
+            call_id: Some(&job.call_id),
+        };
+        let Some(layout) = ({
+            let _perf = smelt_perf::perf::begin("tool:render_body_job");
+            lua.render_tool_layout(&job.name, &job.args, job.output.as_ref(), ctx)
+        }) else {
+            continue;
+        };
+        if let Some(body) = compile_tool_body(&layout) {
+            rendered_jobs.push((job.call_id, body));
+        }
+    }
+    rendered_jobs
+}
+
+fn store_tool_body_results(history: &mut BlockHistory, bodies: Vec<(String, ToolBody)>) {
+    let mut changed = false;
+    for (call_id, body) in bodies {
+        if let Some(state) = history.tool_states.get_mut(&call_id) {
+            state.body = Some(body);
+            state.layout_revision = state.layout_revision.wrapping_add(1);
+            changed = true;
+        }
+    }
+    if changed {
+        history.invalidate_display_cache();
+    }
+}
+
+pub(crate) fn compile_tool_body(layout: &BlockLayout) -> Option<ToolBody> {
+    compile_layout_ir(layout).map(ToolBody::Layout)
+}
+
+fn compile_layout_ir(layout: &BlockLayout) -> Option<LayoutIr> {
+    use smelt_core::content::block_layout::{LuaLeaf, TextSpec};
+    match layout {
+        BlockLayout::Leaf(LuaLeaf::Buf(_)) => None,
+        BlockLayout::Leaf(LuaLeaf::Text(spec)) => Some(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+            content: spec.content.clone(),
+            hl_group: spec.hl_group.clone(),
+        }))),
+        BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
+            let ext = spec
+                .lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext);
+            let ir = smelt_core::content::highlight::build_diff_ir_ext(
+                &spec.old,
+                &spec.new,
+                &spec.path,
+                &spec.anchor,
+                ext,
+            );
+            Some(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))
+        }
+        BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
+            let ext = spec
+                .lang
+                .as_deref()
+                .map(smelt_core::content::highlight::lang_to_ext)
+                .or_else(|| {
+                    std::path::Path::new(&spec.path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                });
+            let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
+            Some(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))
+        }
+        BlockLayout::Leaf(LuaLeaf::DiffIr(ir)) => {
+            Some(BlockLayout::Leaf(IrLeaf::DiffIr(ir.clone())))
+        }
+        BlockLayout::Vbox(items) => Some(BlockLayout::Vbox(
+            items.iter().filter_map(compile_layout_ir).collect(),
+        )),
+        BlockLayout::Hbox(items) => Some(BlockLayout::Hbox(
+            items
+                .iter()
+                .filter_map(|item| {
+                    Some(HboxItem {
+                        constraint: item.constraint,
+                        layout: compile_layout_ir(&item.layout)?,
+                    })
+                })
+                .collect(),
+        )),
+    }
+}
+
 /// Move every leaf buffer out of `ui` into a `RenderedLayout`. Missing buf ids fall back
 /// to an empty placeholder so a registration race doesn't take down the frame.
 pub(crate) fn extract_rendered_layout(
@@ -920,6 +957,9 @@ pub(crate) fn extract_rendered_layout(
                 .buf_destroy(*id)
                 .unwrap_or_else(|| Buffer::new(*id, BufCreateOpts::default()));
             BlockLayout::Leaf(RenderedLeaf::Buf(Box::new(buf)))
+        }
+        BlockLayout::Leaf(LuaLeaf::Text(spec)) => {
+            BlockLayout::Leaf(RenderedLeaf::Text(spec.clone()))
         }
         BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
             let _perf = smelt_perf::perf::begin("render:diff_ir");

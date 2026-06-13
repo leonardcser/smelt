@@ -31,14 +31,12 @@ layout.markdown = nil
 ---@type fun(char: string?): any
 layout.sep = nil
 
---- Build a leaf layout from a string. Common pattern for `render` callbacks.
----@type fun(content: string, opts: table?): any
+--- Plain text layout leaf. `opts.hl_group` may name a theme group; without it, text renders dimmed. Wrapping is computed by the transcript at the current width.
+---@type fun(content: string, opts: table?): table
 layout.text = nil
 
---- Render tool stdout/stderr-style text at the tool block width. Use this for
---- tool results and errors so long diagnostics wrap instead of widening the
---- transcript horizontally.
----@type fun(output: table, ctx: table?, opts: table?): any
+--- Plain text tool-output layout leaf. Error output defaults to the `ErrorMsg` highlight group unless `opts.hl_group` is provided.
+---@type fun(output: table, ctx: table?, opts: table?): table
 layout.tool_output = nil
 
 --- Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`/`layout.diff`/`layout.file_view`.
