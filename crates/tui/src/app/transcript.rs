@@ -169,6 +169,10 @@ impl TranscriptView {
         self.projection.display_cache_data(&self.transcript.history)
     }
 
+    pub(crate) fn display_cache_generation(&self) -> u64 {
+        self.projection.display_cache_generation()
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.transcript.history.is_empty()
     }
@@ -265,9 +269,11 @@ struct ToolRenderJob {
 fn collect_tool_render_jobs(
     history: &BlockHistory,
     ids: impl Iterator<Item = BlockId>,
-) -> Vec<ToolRenderJob> {
+) -> (Vec<ToolRenderJob>, usize) {
     let mut jobs = Vec::new();
+    let mut requested = 0;
     for id in ids {
+        requested += 1;
         let Some(block) = history.blocks.get(&id) else {
             continue;
         };
@@ -298,7 +304,7 @@ fn collect_tool_render_jobs(
             elapsed_secs: state.elapsed.map(|d| d.as_secs()),
         });
     }
-    jobs
+    (jobs, requested)
 }
 
 type TranscriptBlockSnapshot = (
@@ -825,14 +831,17 @@ impl TuiApp {
     }
 }
 
-pub(crate) fn prerender_tool_bodies_for_ids(
+pub(crate) fn prerender_tool_bodies_for_range(
     lua: &smelt_core::lua::runtime::LuaRuntime,
     history: &mut BlockHistory,
-    ids: &[BlockId],
+    range: std::ops::Range<usize>,
 ) -> bool {
     let _perf = smelt_perf::perf::begin("tool:prerender_bodies");
-    smelt_perf::perf::record_value("tool:prerender_bodies:requested", ids.len() as u64);
-    let jobs = collect_tool_render_jobs(history, ids.iter().copied());
+    let start = range.start.min(history.order.len());
+    let end = range.end.min(history.order.len()).max(start);
+    let (jobs, requested) =
+        collect_tool_render_jobs(history, history.order[start..end].iter().copied());
+    smelt_perf::perf::record_value("tool:prerender_bodies:requested", requested as u64);
     smelt_perf::perf::record_value("tool:prerender_bodies:jobs", jobs.len() as u64);
     let bodies = render_tool_body_jobs(lua, jobs);
     smelt_perf::perf::record_value("tool:prerender_bodies:rendered", bodies.len() as u64);
@@ -877,13 +886,9 @@ fn render_tool_body_jobs(
 fn store_tool_body_results(history: &mut BlockHistory, bodies: Vec<(String, ToolBody)>) -> bool {
     let mut changed = false;
     for (call_id, body) in bodies {
-        if let Some(state) = history.tool_states.get_mut(&call_id) {
+        changed |= history.update_tool_state(&call_id, |state| {
             state.body = Some(body);
-            changed = true;
-        }
-    }
-    if changed {
-        history.invalidate_display_cache();
+        });
     }
     changed
 }

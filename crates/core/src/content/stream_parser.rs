@@ -37,9 +37,8 @@ impl StreamParser {
     }
 
     pub fn sync_active_tool_elapsed_at(&self, history: &mut BlockHistory, now: Instant) {
-        let mut changed = false;
         for tool in &self.active_tools {
-            let Some(state) = history.tool_states.get_mut(&tool.call_id) else {
+            let Some(state) = history.tool_states.get(&tool.call_id) else {
                 continue;
             };
             if state.status != ToolStatus::Pending {
@@ -49,12 +48,11 @@ impl StreamParser {
             if elapsed_bucket(state.elapsed) == elapsed_bucket(Some(elapsed)) {
                 continue;
             }
-            state.elapsed = Some(elapsed);
-            state.invalidate_body();
-            changed = true;
-        }
-        if changed {
-            history.bump_generation();
+            let call_id = tool.call_id.clone();
+            history.update_tool_state(&call_id, |state| {
+                state.elapsed = Some(elapsed);
+                state.invalidate_body();
+            });
         }
     }
 
@@ -553,14 +551,12 @@ impl StreamParser {
         call_id: &str,
         mutator: impl FnOnce(&mut ToolState),
     ) {
-        let Some(state) = history.tool_states.get_mut(call_id) else {
-            return;
-        };
-        mutator(state);
-        // Any mutation can shift what the plugin's `render` would produce, so drop
-        // the pre-baked layout; the next render pass refills it on the main thread.
-        state.invalidate_body();
-        history.bump_generation();
+        history.update_tool_state(call_id, |state| {
+            mutator(state);
+            // Any mutation can shift what the plugin's `render` would produce, so drop
+            // the pre-baked layout; the next render pass refills it on the main thread.
+            state.invalidate_body();
+        });
     }
 
     // ── Exec lifecycle ──────────────────────────────────────────────

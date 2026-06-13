@@ -284,6 +284,9 @@ impl TuiApp {
         self.core.config.api_key_env = resolved.api_key_env.clone();
         self.core.config.provider_type = resolved.provider_type.clone();
         self.core.config.model_config = (&resolved.config).into();
+        if record {
+            self.session_dirty = true;
+        }
         let api_key = self.resolve_api_key().unwrap_or_default();
         if record && self.core.config.remember.model {
             state::set_selected_model(resolved.key.clone());
@@ -366,6 +369,7 @@ impl TuiApp {
         }
         // Publish new mode before Lua/tool snapshots for future requests.
         if old != mode {
+            self.session_dirty = true;
             self.core
                 .cells
                 .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
@@ -390,6 +394,9 @@ impl TuiApp {
     /// resume doesn't overwrite the user's last explicit pick.
     pub(crate) fn set_reasoning_effort(&mut self, effort: ReasoningEffort, record: bool) {
         self.core.config.reasoning_effort = effort;
+        if record {
+            self.session_dirty = true;
+        }
         if record && self.core.config.remember.reasoning_effort {
             state::set_reasoning_effort(effort);
         }

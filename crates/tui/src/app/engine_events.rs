@@ -58,6 +58,7 @@ impl TuiApp {
                     };
                 }
                 let cost = cost_usd.unwrap_or(0.0);
+                self.session_dirty = true;
                 self.core.session.session_cost_usd += cost;
                 self.core.session.session_usage.accumulate(&usage);
                 crate::metrics::append(&crate::metrics::MetricsEntry {

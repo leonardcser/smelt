@@ -298,10 +298,12 @@ impl TuiApp {
         &mut self,
         append: &protocol::HistoryAppend,
     ) -> protocol::HistoryAppendResult {
+        self.session_dirty = true;
         protocol::apply_history_append(&mut self.core.session.history, append)
     }
 
     pub(crate) fn sync_session_snapshot(&mut self) {
+        self.session_dirty = true;
         self.core.session.updated_at_ms = session::now_ms();
         self.core.session.mode = Some(self.core.config.mode.as_str().to_string());
         self.core.session.reasoning_effort = Some(self.core.config.reasoning_effort);
@@ -328,6 +330,7 @@ impl TuiApp {
     }
 
     pub(crate) fn snapshot_accounting(&mut self) {
+        self.session_dirty = true;
         if self.context_tokens_updated_this_turn && self.core.session.context_tokens.is_some() {
             self.core.session.context_tokens_history_len = Some(self.core.session.history.len());
         }
@@ -501,6 +504,8 @@ impl TuiApp {
             display_cache,
         );
         self.persisted_fingerprints = persisted_fingerprints;
+        self.session_dirty = false;
+        self.persisted_display_cache_generation = self.transcript.display_cache_generation();
 
         if let Some((_, meta)) = self.core.session.turn_metas.last() {
             self.working.restore_from_turn_meta(meta);
@@ -524,10 +529,7 @@ impl TuiApp {
             return;
         }
         self.session_save_pending = false;
-        self.sync_session_snapshot();
-        let session = self.core.session.clone();
-        let display_cache = self.transcript.display_cache_data();
-        let fingerprints = persist_fingerprints(&session, &display_cache);
+        let display_cache_generation = self.transcript.display_cache_generation();
         let blobs: Vec<crate::persist::Blob> = self
             .input
             .store
@@ -537,10 +539,27 @@ impl TuiApp {
             .into_iter()
             .map(|(filename, data_url)| crate::persist::Blob { filename, data_url })
             .collect();
+        if !self.session_dirty
+            && self.persisted_display_cache_generation == display_cache_generation
+            && self.persisted_fingerprints.is_some()
+            && blobs.is_empty()
+        {
+            smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
+            return;
+        }
+        let mut session = self.core.session.clone();
+        session.updated_at_ms = session::now_ms();
+        session.mode = Some(self.core.config.mode.as_str().to_string());
+        session.reasoning_effort = Some(self.core.config.reasoning_effort);
+        session.model = Some(self.current_model_key());
+        let display_cache = self.transcript.display_cache_data();
+        let fingerprints = persist_fingerprints(&session, &display_cache);
         if fingerprints.is_some()
             && self.persisted_fingerprints.as_ref() == fingerprints.as_ref()
             && blobs.is_empty()
         {
+            self.session_dirty = false;
+            self.persisted_display_cache_generation = display_cache_generation;
             smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             return;
         }
@@ -549,6 +568,8 @@ impl TuiApp {
             *guard = Some(session.clone());
         }
         self.persisted_fingerprints = fingerprints;
+        self.session_dirty = false;
+        self.persisted_display_cache_generation = display_cache_generation;
         self.persister.save(crate::persist::PersistRequest {
             session,
             blobs,

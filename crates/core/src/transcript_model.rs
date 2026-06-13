@@ -298,6 +298,7 @@ pub struct BlockHistory {
     pub(crate) content_hashes: HashMap<BlockId, u64>,
     pub(crate) next_id: u64,
     pub tool_states: HashMap<String, ToolState>,
+    tool_display_hashes: HashMap<String, u64>,
     /// Absent entries default to `ViewState::Expanded`.
     pub(crate) view_states: HashMap<BlockId, ViewState>,
     /// Absent entries default to `Status::Done`.
@@ -319,6 +320,7 @@ impl BlockHistory {
             content_hashes: HashMap::new(),
             next_id: 0,
             tool_states: HashMap::new(),
+            tool_display_hashes: HashMap::new(),
             view_states: HashMap::new(),
             statuses: HashMap::new(),
             origins: HashMap::new(),
@@ -496,7 +498,9 @@ impl BlockHistory {
         call_id: String,
         state: ToolState,
     ) -> BlockId {
-        self.tool_states.insert(call_id, state);
+        let hash = state.display_hash();
+        self.tool_states.insert(call_id.clone(), state);
+        self.tool_display_hashes.insert(call_id, hash);
         self.push(block)
     }
 
@@ -507,8 +511,25 @@ impl BlockHistory {
         state: ToolState,
         origin: BlockOrigin,
     ) -> BlockId {
-        self.tool_states.insert(call_id, state);
+        let hash = state.display_hash();
+        self.tool_states.insert(call_id.clone(), state);
+        self.tool_display_hashes.insert(call_id, hash);
         self.push_with_origin(block, origin)
+    }
+
+    pub fn update_tool_state(
+        &mut self,
+        call_id: &str,
+        mutator: impl FnOnce(&mut ToolState),
+    ) -> bool {
+        let Some(state) = self.tool_states.get_mut(call_id) else {
+            return false;
+        };
+        mutator(state);
+        self.tool_display_hashes
+            .insert(call_id.to_string(), state.display_hash());
+        self.bump_generation();
+        true
     }
 
     /// Replace block content in place. Preserves `BlockId`, `Status`, and
@@ -534,6 +555,7 @@ impl BlockHistory {
         self.content_hashes.clear();
         self.next_id = 0;
         self.tool_states.clear();
+        self.tool_display_hashes.clear();
         self.view_states.clear();
         self.statuses.clear();
         self.origins.clear();
@@ -560,11 +582,9 @@ impl BlockHistory {
     /// `LayoutKey` so cache lookups and layout passes agree.
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
         let sidecar_hash = match self.blocks.get(&id) {
-            Some(Block::ToolCall { call_id, .. }) => self
-                .tool_states
-                .get(call_id)
-                .map(ToolState::display_hash)
-                .unwrap_or(0),
+            Some(Block::ToolCall { call_id, .. }) => {
+                self.tool_display_hashes.get(call_id).copied().unwrap_or(0)
+            }
             _ => 0,
         };
         LayoutKey {
@@ -605,6 +625,7 @@ impl BlockHistory {
             })
             .collect();
         self.tool_states.retain(|cid, _| live.contains(cid));
+        self.tool_display_hashes.retain(|cid, _| live.contains(cid));
     }
 }
 

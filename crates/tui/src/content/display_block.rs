@@ -169,15 +169,16 @@ impl DisplayModel {
                 );
                 return false;
             };
-            let Some(current_state) = history.tool_states.get_mut(call_id) else {
+            let Some(current_state) = history.tool_states.get(call_id) else {
                 smelt_perf::perf::record_value(
                     "transcript:display_model:hydrate_reject:missing_tool_state",
                     1,
                 );
                 return false;
             };
+            let cached_body = state.body.clone();
             let mut candidate = current_state.clone();
-            candidate.body = state.body.clone();
+            candidate.body = cached_body.clone();
             if candidate.display_hash() != entry.key.sidecar_hash {
                 smelt_perf::perf::record_value(
                     "transcript:display_model:hydrate_reject:tool_sidecar_hash",
@@ -185,7 +186,9 @@ impl DisplayModel {
                 );
                 return false;
             }
-            current_state.body = candidate.body;
+            history.update_tool_state(call_id, |state| {
+                state.body = cached_body;
+            });
         }
 
         let key = history.resolve_key(

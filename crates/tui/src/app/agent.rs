@@ -105,6 +105,7 @@ impl TuiApp {
         self.show_user_message(display, content.image_labels());
         if self.core.session.first_user_message.is_none() {
             self.core.session.first_user_message = Some(text.clone().into_owned());
+            self.session_dirty = true;
         }
         self.core
             .session
@@ -362,6 +363,7 @@ impl TuiApp {
         self.show_user_message(&display, vec![]);
         if self.core.session.first_user_message.is_none() {
             self.core.session.first_user_message = Some(display.clone());
+            self.session_dirty = true;
         }
 
         self.dispatch_prepared_turn(PreparedTurn {
@@ -455,6 +457,7 @@ impl TuiApp {
             meta
         };
         let meta = self.pending_turn_meta.take().unwrap_or(finished_meta);
+        self.session_dirty = true;
         self.core
             .session
             .turn_metas
