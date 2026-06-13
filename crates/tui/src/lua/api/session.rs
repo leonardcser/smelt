@@ -523,6 +523,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided; `opts.show_thinking` defaults to the current UI setting. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.",
         &["id", "opts"],
         |lua, (id, opts): (String, mlua::Table)| -> LuaResult<Option<mlua::Table>> {
+            let _perf = smelt_perf::perf::begin("session:render_preview_into");
             let buf: super::buf::LuaBuf = opts.get("buf")?;
             let win = opts.get::<Option<super::win::LuaWin>>("win").ok().flatten();
             let width = opts
@@ -543,12 +544,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .map(|ts| format!("{id}:{ts}"));
 
             let rendered = crate::lua::with_app(|app| {
+                let _perf = smelt_perf::perf::begin("session:render_preview_into:app");
                 let show_thinking =
                     show_thinking_opt.unwrap_or(app.core.config.settings.show_thinking);
                 let mut cached_key = cache_key_hint.clone();
                 let mut cached_view = cached_key
                     .as_deref()
                     .and_then(|key| app.resume_preview_cache.take(key));
+                smelt_perf::perf::record_value(
+                    "session:render_preview_into:cache_hit",
+                    u64::from(cached_view.is_some()),
+                );
 
                 if cached_view.is_none() {
                     let session = smelt_core::session::load(&id)?;

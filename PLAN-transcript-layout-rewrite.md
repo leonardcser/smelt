@@ -11,6 +11,8 @@
 5. Remove before adding. If an abstraction no longer pulls its weight, delete it rather than wrap it.
 6. Refactor/consolidate along the way. If cleanup is worth doing for the final architecture, do it as part of the migration instead of deferring it because it is large.
 7. Exactness is non-negotiable. Speed must come from avoiding wasted work, not from faking data.
+8. Implementation code, comments, test names, and commit messages should describe the enduring domain behavior, not migration bookkeeping. Phase labels belong in this plan and task notes, not in production identifiers or committed test names.
+9. Keep this plan current as work lands: mark completed slices with code references, baseline numbers, and any changed conclusions so later phases start from the current truth rather than stale intent.
 
 ---
 
@@ -581,6 +583,44 @@ Do not carry compatibility scaffolding across phases. When a new path is proven,
 - Add property tests: for random blocks and widths, `measure(width)` must equal the number of rows produced by `render_range(width, all_rows)`.
 
 **Deliverable:** benchmark + baselines.
+
+**Completed slice:** instrumentation and a large mixed-transcript baseline are in place.
+
+- Perf scopes added around session load subparts (`crates/core/src/session.rs`), session preview (`crates/tui/src/lua/api/session.rs`), session-to-transcript conversion (`crates/tui/src/app/history.rs`), tool prerender/diff extraction (`crates/tui/src/app/transcript.rs`), rendered-block cache misses (`crates/tui/src/content/block_buffers.rs`), and transcript measurement/projection/range/copy paths (`crates/tui/src/content/transcript_buf.rs`).
+- The ignored baseline test is `mixed_large_transcript_projection_baseline` in `crates/tui/src/content/transcript_buf.rs`. It builds a ~10 MB mixed transcript with user text, markdown headings/tables/fenced code, thinking, exec output, and `edit_file`-style tool calls with prebuilt diff render caches. It prints one stable `TRANSCRIPT_LAYOUT_BASELINE ...` line for copying into this plan.
+- Current regression coverage includes current projection range/full-row equivalence for randomized block mixes and widths. This is intentionally not the final independent `measure(width) == render_range(width, all_rows)` property; that property lands once the new IR has a true non-rendering measurement path.
+
+Baseline command:
+
+```bash
+cargo test -p smelt-tui mixed_large_transcript_projection_baseline -- --ignored --nocapture
+```
+
+Baseline result from this branch/test build:
+
+```text
+TRANSCRIPT_LAYOUT_BASELINE input_bytes=10497943 generated_bytes=10499021 blocks=3404 total_rows=120137 diff_caches=128 diff_cache_ms=1631 resize_diff_caches=128 resize_diff_cache_ms=1626 first_ms=810 resize_ms=914 visible_ms=3 allocs=3166449 bytes_allocated=576051070 visible_rows=80
+```
+
+Top duration totals from the same run:
+
+| label | count | total |
+|---|---:|---:|
+| `render:text` | 1024 | 3.461 s |
+| `render:markdown` | 1024 | 3.456 s |
+| `render:build_diff_cache` | 256 | 3.247 s |
+| `transcript:plan_projection_measured` | 2 | 1.723 s |
+| `transcript:measure_all_heights` | 3 | 1.723 s |
+| `transcript:measure_all_heights:measure_chunk` | 14 | 1.711 s |
+| `transcript:render_block_cache:ensure_many` | 17 | 1.708 s |
+| `render:tool_call` | 256 | 1.653 s |
+| `render:inline_diff_cached` | 256 | 1.645 s |
+| `transcript:render_block_cache:layout_misses` | 15 | 1.588 s |
+| `render:code_block` | 1024 | 875 ms |
+| `render:exec` | 400 | 379 ms |
+| `render:wrapped_output` | 400 | 364 ms |
+
+Current conclusion: visible materialization after measurement is cheap (~3 ms for 80 rows). The expensive work is still eager full-transcript height measurement, which currently renders all blocks and rebuilds/render-replays diff/tool/markdown/code paths. This confirms the migration should attack width-independent IR and measurement before optimizing visible-row copying.
 
 ### Phase 1: Introduce `InlineLine` and share wrapping
 

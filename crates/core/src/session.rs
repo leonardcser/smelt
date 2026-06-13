@@ -914,19 +914,37 @@ fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
 
 /// Load by exact ID or unique prefix (git-style short ID).
 pub fn load(id_or_prefix: &str) -> Option<Session> {
-    let id = resolve_prefix(id_or_prefix)?;
+    let _perf = smelt_perf::perf::begin("session:load");
+    let id = {
+        let _perf = smelt_perf::perf::begin("session:load:resolve");
+        resolve_prefix(id_or_prefix)?
+    };
     load_exact(&id)
 }
 
 fn load_exact(id: &str) -> Option<Session> {
+    let _perf = smelt_perf::perf::begin("session:load:exact");
     let dir_path = sessions_dir().join(id);
-    let contents = fs::read_to_string(dir_path.join("session.json")).ok()?;
-    let mut session: Session = serde_json::from_str(&contents).ok()?;
+    let contents = {
+        let _perf = smelt_perf::perf::begin("session:load:read_json");
+        fs::read_to_string(dir_path.join("session.json")).ok()?
+    };
+    smelt_perf::perf::record_value("session:load:json_bytes", contents.len() as u64);
+    let mut session: Session = {
+        let _perf = smelt_perf::perf::begin("session:load:parse_json");
+        serde_json::from_str(&contents).ok()?
+    };
+    smelt_perf::perf::record_value("session:load:history_items", session.history.len() as u64);
 
     let blob_dir = dir_path.join("blobs");
     if blob_dir.is_dir() {
-        let blob_to_url = crate::attachment::AttachmentStore::load_blobs(&blob_dir);
+        let blob_to_url = {
+            let _perf = smelt_perf::perf::begin("session:load:read_blobs");
+            crate::attachment::AttachmentStore::load_blobs(&blob_dir)
+        };
+        smelt_perf::perf::record_value("session:load:blobs", blob_to_url.len() as u64);
         if !blob_to_url.is_empty() {
+            let _perf = smelt_perf::perf::begin("session:load:internalize_blobs");
             internalize_blobs(&mut session.history, &blob_to_url);
         }
     }

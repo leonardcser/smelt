@@ -76,6 +76,8 @@ impl RenderedBlockCache {
         keys: &[LayoutKey],
         theme: &Theme,
     ) -> usize {
+        let _perf = smelt_perf::perf::begin("transcript:render_block_cache:ensure_many");
+        smelt_perf::perf::record_value("transcript:render_block_cache:requested", ids.len() as u64);
         debug_assert_eq!(ids.len(), keys.len());
         assert!(
             ids.len() <= Self::MAX_BLOCKS,
@@ -115,37 +117,42 @@ impl RenderedBlockCache {
             return 0;
         }
         let rendered = tasks.len();
+        smelt_perf::perf::record_value("transcript:render_block_cache:misses", rendered as u64);
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
             .clamp(1, 8);
+        smelt_perf::perf::record_value("transcript:render_block_cache:workers", workers as u64);
         let chunk_size = tasks.len().div_ceil(workers).max(1);
 
-        let results: Vec<(BlockId, LayoutKey, Buffer)> = std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(workers);
-            for chunk in tasks.chunks(chunk_size) {
-                handles.push(scope.spawn(move || {
-                    let mut out: Vec<(BlockId, LayoutKey, Buffer)> =
-                        Vec::with_capacity(chunk.len());
-                    for t in chunk {
-                        let lctx = smelt_core::content::LayoutContext::new(
-                            t.key.width,
-                            t.key.show_thinking,
-                            t.key.view_state,
-                        );
-                        let mut buf = Buffer::new(t.buf_id, BufCreateOpts::default());
-                        let _outcome =
-                            layout_block_into(&mut buf, theme, t.block, t.tool_state, &lctx);
-                        out.push((t.id, t.key, buf));
-                    }
-                    out
-                }));
-            }
-            handles
-                .into_iter()
-                .flat_map(|h| h.join().expect("layout worker panicked"))
-                .collect()
-        });
+        let results: Vec<(BlockId, LayoutKey, Buffer)> = {
+            let _perf = smelt_perf::perf::begin("transcript:render_block_cache:layout_misses");
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(workers);
+                for chunk in tasks.chunks(chunk_size) {
+                    handles.push(scope.spawn(move || {
+                        let mut out: Vec<(BlockId, LayoutKey, Buffer)> =
+                            Vec::with_capacity(chunk.len());
+                        for t in chunk {
+                            let lctx = smelt_core::content::LayoutContext::new(
+                                t.key.width,
+                                t.key.show_thinking,
+                                t.key.view_state,
+                            );
+                            let mut buf = Buffer::new(t.buf_id, BufCreateOpts::default());
+                            let _outcome =
+                                layout_block_into(&mut buf, theme, t.block, t.tool_state, &lctx);
+                            out.push((t.id, t.key, buf));
+                        }
+                        out
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .flat_map(|h| h.join().expect("layout worker panicked"))
+                    .collect()
+            })
+        };
 
         for (id, key, buf) in results {
             self.blocks.insert(id, CachedBlock { key, buf });

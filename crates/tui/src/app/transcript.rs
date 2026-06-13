@@ -720,8 +720,12 @@ impl TuiApp {
         width: u16,
         ids: &[BlockId],
     ) {
+        let _perf = smelt_perf::perf::begin("tool:prerender_history");
+        smelt_perf::perf::record_value("tool:prerender_history:requested", ids.len() as u64);
         let jobs = collect_tool_render_jobs(history, width, ids.iter().copied());
+        smelt_perf::perf::record_value("tool:prerender_history:jobs", jobs.len() as u64);
         let rendered = self.render_tool_jobs(width, jobs);
+        smelt_perf::perf::record_value("tool:prerender_history:rendered", rendered.len() as u64);
         Self::store_tool_render_results(history, width, rendered);
     }
 
@@ -729,8 +733,12 @@ impl TuiApp {
     /// next projection can actually materialize. The Lua VM is single-threaded;
     /// worker layout downstream only reads the cached owned buffers.
     pub(crate) fn prerender_transcript_tool_blocks_for_ids(&mut self, width: u16, ids: &[BlockId]) {
+        let _perf = smelt_perf::perf::begin("tool:prerender_transcript");
+        smelt_perf::perf::record_value("tool:prerender_transcript:requested", ids.len() as u64);
         let jobs = collect_tool_render_jobs(self.transcript.history(), width, ids.iter().copied());
+        smelt_perf::perf::record_value("tool:prerender_transcript:jobs", jobs.len() as u64);
         let rendered = self.render_tool_jobs(width, jobs);
+        smelt_perf::perf::record_value("tool:prerender_transcript:rendered", rendered.len() as u64);
         Self::store_tool_render_results(self.transcript.history_mut(), width, rendered);
     }
 
@@ -739,6 +747,8 @@ impl TuiApp {
         width: u16,
         jobs: Vec<ToolRenderJob>,
     ) -> Vec<(String, RenderedLayout)> {
+        let _perf = smelt_perf::perf::begin("tool:render_jobs");
+        smelt_perf::perf::record_value("tool:render_jobs:jobs", jobs.len() as u64);
         let mut rendered_jobs = Vec::new();
         if jobs.is_empty() {
             return rendered_jobs;
@@ -759,10 +769,11 @@ impl TuiApp {
                 elapsed_secs: job.elapsed_secs,
                 call_id: Some(&job.call_id),
             };
-            let Some(layout) =
+            let Some(layout) = ({
+                let _perf = smelt_perf::perf::begin("tool:render_job");
                 self.lua
                     .render_tool_layout(&job.name, &job.args, job.output.as_ref(), ctx)
-            else {
+            }) else {
                 continue;
             };
             rendered_jobs.push((job.call_id, extract_rendered_layout(&layout, &mut self.ui)));
@@ -905,6 +916,7 @@ pub(crate) fn extract_rendered_layout(
             BlockLayout::Leaf(RenderedLeaf::Buf(Box::new(buf)))
         }
         BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
+            let _perf = smelt_perf::perf::begin("render:diff_cache");
             let ext = spec
                 .lang
                 .as_deref()

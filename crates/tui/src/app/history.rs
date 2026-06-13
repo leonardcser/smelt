@@ -11,6 +11,11 @@ pub(crate) fn build_transcript_from_session(
     lua: &crate::lua::LuaRuntime,
     session: &session::Session,
 ) -> Transcript {
+    let _perf = smelt_perf::perf::begin("transcript:build_from_session");
+    smelt_perf::perf::record_value(
+        "transcript:build_from_session:history_items",
+        session.history.len() as u64,
+    );
     let mut transcript = Transcript::new();
     if session.history.is_empty() {
         return transcript;
@@ -60,6 +65,10 @@ pub(crate) fn build_transcript_from_session(
         );
     }
 
+    smelt_perf::perf::record_value(
+        "transcript:build_from_session:blocks",
+        transcript.history.order.len() as u64,
+    );
     transcript
 }
 
