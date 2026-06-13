@@ -119,9 +119,10 @@ function smelt.confirm.open(handle_id)
 
   local header_leaf  = smelt.dialog.content({ buf = header_buf, wrap = false })
   local preview_leaf = smelt.dialog.content({
-    buf = preview_buf,
-    interactive = has_preview,
-    readonly = true,
+    buf         = preview_buf,
+    surface     = "selectable_text",
+    readonly    = true,
+    wrap        = false,
   })
   local allow_leaf, allow_buf = smelt.dialog.content({ wrap = false })
   allow_buf:styled({ { { text = "Allow?", style = { dim = true } } } })
