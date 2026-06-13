@@ -58,7 +58,7 @@ pub enum ToolStatus {
     Denied,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
@@ -70,7 +70,7 @@ pub type ToolOutputRef = Box<ToolOutput>;
 /// Mutable sidecar for a committed `Block::ToolCall`, keyed by `call_id`.
 /// Splitting mutable fields out keeps `Block::ToolCall` immutable so its
 /// layout can be cached permanently.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolState {
     pub status: ToolStatus,
     pub elapsed: Option<Duration>,
@@ -79,9 +79,9 @@ pub struct ToolState {
     /// Width-independent output of the plugin `render(args, output, ctx)` hook.
     /// Computed on content/status changes and reused across terminal widths.
     pub body: Option<crate::content::block_layout::ToolBody>,
-    /// Bumped when mutable tool state changes. Tool call blocks keep immutable
-    /// `Block` content, so the transcript layout key needs this sidecar
-    /// revision to avoid reusing stale rendered rows.
+    /// Monotonic in-memory marker for callers that need to observe tool-body
+    /// installs. Layout keys use [`ToolState::display_hash`] so persisted
+    /// display caches can validate against stable sidecar content.
     pub layout_revision: u64,
 }
 
@@ -96,9 +96,31 @@ impl ToolState {
     pub fn invalidate_body(&mut self) {
         self.body = None;
     }
+
+    pub fn display_hash(&self) -> u64 {
+        #[derive(serde::Serialize)]
+        struct StableToolState<'a> {
+            status: ToolStatus,
+            elapsed: Option<Duration>,
+            output: &'a Option<ToolOutputRef>,
+            user_message: &'a Option<String>,
+            body: &'a Option<crate::content::block_layout::ToolBody>,
+        }
+
+        let stable = StableToolState {
+            status: self.status,
+            elapsed: self.elapsed,
+            output: &self.output,
+            user_message: &self.user_message,
+            body: &self.body,
+        };
+        let value = serde_json::to_value(&stable).unwrap_or(serde_json::Value::Null);
+        let bytes = serde_json::to_vec(&value).unwrap_or_default();
+        seahash::hash(&bytes)
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Block {
     User {
         text: String,
@@ -573,7 +595,7 @@ impl BlockHistory {
             Some(Block::ToolCall { call_id, .. }) => self
                 .tool_states
                 .get(call_id)
-                .map(|state| state.layout_revision)
+                .map(ToolState::display_hash)
                 .unwrap_or(0),
             _ => 0,
         };

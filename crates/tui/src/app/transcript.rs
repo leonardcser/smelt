@@ -31,8 +31,22 @@ impl TranscriptView {
         }
     }
 
-    pub(crate) fn replace_transcript(&mut self, transcript: Transcript) {
-        *self = Self::from_transcript(transcript);
+    pub(crate) fn from_transcript_with_display_cache(
+        transcript: Transcript,
+        display_cache: Vec<crate::content::display_block::DisplayCacheEntry>,
+    ) -> Self {
+        let mut view = Self::from_transcript(transcript);
+        view.projection
+            .hydrate_display_cache(&mut view.transcript.history, display_cache);
+        view
+    }
+
+    pub(crate) fn replace_transcript_with_display_cache(
+        &mut self,
+        transcript: Transcript,
+        display_cache: Vec<crate::content::display_block::DisplayCacheEntry>,
+    ) {
+        *self = Self::from_transcript_with_display_cache(transcript, display_cache);
     }
 
     pub(crate) fn invalidate_theme(&mut self) {
@@ -149,6 +163,13 @@ impl TranscriptView {
 
     pub(crate) fn history_mut(&mut self) -> &mut BlockHistory {
         &mut self.transcript.history
+    }
+
+    pub(crate) fn display_cache_entries(
+        &self,
+    ) -> Vec<crate::content::display_block::DisplayCacheEntry> {
+        self.projection
+            .display_cache_entries(&self.transcript.history)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

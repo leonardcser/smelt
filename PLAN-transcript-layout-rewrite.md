@@ -907,41 +907,35 @@ Validation:
 
 **Deliverable:** codebase has fewer files and concepts; all tests pass.
 
-### Phase 8: Implement `session.ir.bin`
+### Phase 8: Implement `session.ir.bin` — complete
 
 **Goal:** resume large sessions without reparsing/recompiling every block.
 
-Disk persistence is required for the target UX and has been a DisplayIR design constraint from the start. This phase wires the already-serializable DisplayIR into the on-disk sidecar. The canonical session JSON remains the source of truth; DisplayIR is stored in a separate disposable cache file next to the session, for example:
+Disk persistence is required for the target UX and has been a DisplayIR design constraint from the start. This phase wires the already-serializable DisplayIR into the on-disk sidecar. The canonical session JSON remains the source of truth; DisplayIR is stored in a separate disposable cache file next to the session:
 
 ```text
 sessions/<id>/session.json
 sessions/<id>/session.ir.bin
 ```
 
-- Add a binary persistent display cache at `sessions/<id>/session.ir.bin` (`bincode`, `postcard`, or equivalent internal Rust-only format).
-- Start the file with a small fixed header before the encoded payload:
-  - magic bytes (for example `SMELTIR\0`),
-  - IR cache format version,
-  - renderer version,
-  - Smelt/build version,
-  - checksum or payload length if useful for partial-write detection.
-- Cache compiled `DisplayBlock`s keyed by:
-  - block content hash,
-  - stable sidecar hash,
-  - renderer version,
-  - Smelt/IR cache schema version,
-  - tool renderer version for tool layouts.
-- On load:
-  - read `session.json`,
-  - read `session.ir.bin` if present,
-  - hydrate matching `DisplayBlock`s,
-  - compile missing/stale entries,
-  - write back the updated cache asynchronously or at a safe save point.
-- Treat cache corruption, missing files, version mismatch, and partial writes as cache misses.
-- Do not store theme-dependent syntax highlighting, visible rows, or width-dependent wraps in the persistent cache.
-- Keep session cache handling simple: missing/stale cache rebuilds from canonical `session.json`; no cross-version cache migration layer.
+Completed slice:
 
-**Deliverable:** resume/preview avoids markdown/diff/tool IR recompilation for unchanged historical blocks.
+- Added binary `session.ir.bin` persistence with fixed magic bytes, cache format version, renderer version, Smelt build version, and payload length checks.
+- Persisted display-cache entries from the TUI persister alongside `session.json`; corrupt, missing, partial, renderer-mismatched, and build-mismatched sidecars are treated as cache misses.
+- Hydrated display caches for both full session resume and resume-picker previews.
+- Switched tool-call sidecar keys from in-memory layout revisions to stable serialized tool display state, including cached tool bodies, so warm resumes can skip Lua tool-body rendering for unchanged historical tool calls.
+- Kept the sidecar disposable: no migration layer and no theme-, width-, or visible-row-dependent data is stored.
+- Added unit coverage for sidecar round-tripping, corruption handling, display-model hydration, and cached tool-body hydration.
+
+Validation:
+
+- `cargo test -p smelt-tui display_cache`
+- `cargo test -p smelt-tui display_block`
+- `cargo test -p smelt-tui transcript_buf`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace` → `3050 passed, 1 skipped`
+
+**Deliverable:** resume/preview can hydrate unchanged historical `DisplayBlock`s and cached tool bodies from `session.ir.bin`; cache misses rebuild from canonical `session.json`.
 
 ### Phase 9: Performance polish and future-proofing
 

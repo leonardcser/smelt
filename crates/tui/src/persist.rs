@@ -19,6 +19,7 @@ pub(crate) struct Blob {
 pub(crate) struct PersistRequest {
     pub(crate) session: Session,
     pub(crate) blobs: Vec<Blob>,
+    pub(crate) display_cache: Vec<crate::content::display_block::DisplayCacheEntry>,
 }
 
 enum Cmd {
@@ -111,6 +112,7 @@ fn write(req: &PersistRequest) {
     let blob_dir = session_dir.join("blobs");
     let url_to_blob = write_blobs(&blob_dir, &req.blobs);
     session::save_with_blobs(&req.session, &url_to_blob);
+    crate::content::display_cache::write_for_session(&req.session, &req.display_cache);
 }
 
 fn write_blobs(

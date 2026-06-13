@@ -6,15 +6,15 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
-    content_hash: u64,
-    sidecar_hash: u64,
-    renderer_version: u64,
+    pub(crate) content_hash: u64,
+    pub(crate) sidecar_hash: u64,
+    pub(crate) renderer_version: u64,
 }
 
 impl DisplayCacheKey {
-    fn new(content_hash: u64, sidecar_hash: u64) -> Self {
+    pub(crate) fn new(content_hash: u64, sidecar_hash: u64) -> Self {
         Self {
             content_hash,
             sidecar_hash,
@@ -27,11 +27,18 @@ impl DisplayCacheKey {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum DisplayBlock {
     Legacy { block: Block },
     CodeLine { block: Block, code: CodeBlock },
     ToolCall { block: Block, state: ToolState },
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DisplayCacheEntry {
+    pub(crate) id: BlockId,
+    pub(crate) key: DisplayCacheKey,
+    pub(crate) block: DisplayBlock,
 }
 
 impl DisplayBlock {
@@ -84,6 +91,81 @@ impl DisplayModel {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.blocks.len()
+    }
+
+    pub(crate) fn hydrate_many(
+        &mut self,
+        history: &mut BlockHistory,
+        entries: Vec<DisplayCacheEntry>,
+    ) -> usize {
+        let mut hydrated = 0;
+        for entry in entries {
+            if self.hydrate_one(history, entry) {
+                hydrated += 1;
+            }
+        }
+        hydrated
+    }
+
+    fn hydrate_one(&mut self, history: &mut BlockHistory, entry: DisplayCacheEntry) -> bool {
+        let Some(current_block) = history.blocks.get(&entry.id).cloned() else {
+            return false;
+        };
+        if entry.block.block() != &current_block {
+            return false;
+        }
+
+        if let DisplayBlock::ToolCall { state, .. } = &entry.block {
+            let Block::ToolCall { call_id, .. } = &current_block else {
+                return false;
+            };
+            let Some(current_state) = history.tool_states.get_mut(call_id) else {
+                return false;
+            };
+            let mut candidate = current_state.clone();
+            candidate.body = state.body.clone();
+            if candidate.display_hash() != entry.key.sidecar_hash {
+                return false;
+            }
+            current_state.body = candidate.body;
+        }
+
+        let key = history.resolve_key(
+            entry.id,
+            LayoutKey {
+                width: 0,
+                show_thinking: false,
+                view_state: ViewState::Expanded,
+                content_hash: 0,
+                sidecar_hash: 0,
+            },
+        );
+        let display_key = DisplayCacheKey::from_layout_key(key);
+        if display_key != entry.key {
+            return false;
+        }
+
+        self.blocks.insert(
+            entry.id,
+            CachedDisplayBlock {
+                key: display_key,
+                block: entry.block,
+            },
+        );
+        true
+    }
+
+    pub(crate) fn cache_entries(&self, order: &[BlockId]) -> Vec<DisplayCacheEntry> {
+        order
+            .iter()
+            .filter_map(|id| {
+                self.blocks.get(id).map(|cached| DisplayCacheEntry {
+                    id: *id,
+                    key: cached.key,
+                    block: cached.block.clone(),
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn ensure_many(
@@ -207,4 +289,102 @@ pub(crate) fn render_block_into(
         block.tool_state(),
         &lctx,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::content::block_layout::{BlockLayout, IrLeaf, TextSpec, ToolBody};
+    use smelt_core::content::transcript::Transcript;
+    use smelt_core::transcript_model::{ToolOutput, ToolStatus};
+
+    fn base_key(history: &BlockHistory, id: BlockId) -> LayoutKey {
+        history.resolve_key(
+            id,
+            LayoutKey {
+                width: 80,
+                show_thinking: false,
+                view_state: ViewState::Expanded,
+                content_hash: 0,
+                sidecar_hash: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn hydrated_cache_entries_avoid_recompile() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::CodeLine {
+            content: "fn main() {}".into(),
+            lang: "rust".into(),
+        });
+        let id = transcript.history.order[0];
+        let key = base_key(&transcript.history, id);
+
+        let mut model = DisplayModel::new();
+        assert_eq!(model.ensure_many(&transcript.history, &[id], &[key]), 1);
+        let entries = model.cache_entries(&transcript.history.order);
+
+        let mut hydrated = DisplayModel::new();
+        assert_eq!(hydrated.hydrate_many(&mut transcript.history, entries), 1);
+        assert_eq!(hydrated.ensure_many(&transcript.history, &[id], &[key]), 0);
+    }
+
+    #[test]
+    fn hydrated_tool_entry_installs_cached_body() {
+        let block = Block::ToolCall {
+            call_id: "call-1".into(),
+            name: "write_file".into(),
+            summary: "write file".into(),
+            args: Default::default(),
+        };
+        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+            content: "cached body".into(),
+            hl_group: None,
+        })));
+
+        let mut warm = Transcript::new();
+        warm.push_tool_call(
+            block.clone(),
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: None,
+                output: Some(Box::new(ToolOutput {
+                    content: "ok".into(),
+                    is_error: false,
+                    metadata: None,
+                })),
+                user_message: None,
+                body: Some(body),
+                layout_revision: 1,
+            },
+        );
+        let id = warm.history.order[0];
+        let key = base_key(&warm.history, id);
+        let mut model = DisplayModel::new();
+        assert_eq!(model.ensure_many(&warm.history, &[id], &[key]), 1);
+        let entries = model.cache_entries(&warm.history.order);
+
+        let mut cold = Transcript::new();
+        cold.push_tool_call(
+            block,
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: None,
+                output: Some(Box::new(ToolOutput {
+                    content: "ok".into(),
+                    is_error: false,
+                    metadata: None,
+                })),
+                user_message: None,
+                body: None,
+                layout_revision: 0,
+            },
+        );
+        let mut hydrated = DisplayModel::new();
+        assert_eq!(hydrated.hydrate_many(&mut cold.history, entries), 1);
+        assert!(cold.history.tool_states["call-1"].body.is_some());
+        let cold_key = base_key(&cold.history, id);
+        assert_eq!(hydrated.ensure_many(&cold.history, &[id], &[cold_key]), 0);
+    }
 }

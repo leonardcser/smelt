@@ -1,12 +1,13 @@
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeBlock {
     lang: String,
     lines: Vec<CodeBlockLine>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeBlockLine {
     text: String,
     layout: InlineLine<()>,

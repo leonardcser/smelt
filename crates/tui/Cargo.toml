@@ -28,6 +28,7 @@ futures-core = { workspace = true }
 mlua = { workspace = true }
 tempfile = { workspace = true }
 notify = { workspace = true }
+bincode = "1"
 
 [dev-dependencies]
 insta = { workspace = true }

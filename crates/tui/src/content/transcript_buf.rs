@@ -1,4 +1,6 @@
-use super::display_block::{measure_block, render_block_into, DisplayModel, MeasureCtx, RenderCtx};
+use super::display_block::{
+    measure_block, render_block_into, DisplayCacheEntry, DisplayModel, MeasureCtx, RenderCtx,
+};
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
@@ -359,6 +361,23 @@ impl TranscriptProjection {
             #[cfg(test)]
             counters: TranscriptProjectionCounters::default(),
         }
+    }
+
+    pub(crate) fn hydrate_display_cache(
+        &mut self,
+        history: &mut BlockHistory,
+        entries: Vec<DisplayCacheEntry>,
+    ) -> usize {
+        let hydrated = self.display_model.hydrate_many(history, entries);
+        if hydrated > 0 {
+            self.display_model_generation = history.generation();
+        }
+        smelt_perf::perf::record_value("transcript:display_model:hydrated", hydrated as u64);
+        hydrated
+    }
+
+    pub(crate) fn display_cache_entries(&self, history: &BlockHistory) -> Vec<DisplayCacheEntry> {
+        self.display_model.cache_entries(&history.order)
     }
 
     /// Snapshot of the visibly laid-out blocks: `(BlockId, first_row, rows)`.

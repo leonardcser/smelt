@@ -492,8 +492,11 @@ impl TuiApp {
         if let Some(ref slug) = self.core.session.slug {
             self.set_task_label(slug.clone());
         }
-        self.transcript
-            .replace_transcript(build_transcript_from_session(&self.lua, &self.core.session));
+        let display_cache = crate::content::display_cache::read_for_session(&self.core.session);
+        self.transcript.replace_transcript_with_display_cache(
+            build_transcript_from_session(&self.lua, &self.core.session),
+            display_cache,
+        );
 
         if let Some((_, meta)) = self.core.session.turn_metas.last() {
             self.working.restore_from_turn_meta(meta);
@@ -518,6 +521,7 @@ impl TuiApp {
         }
         self.session_save_pending = false;
         self.sync_session_snapshot();
+        let display_cache = self.transcript.display_cache_entries();
         let blobs = self
             .input
             .store
@@ -530,6 +534,7 @@ impl TuiApp {
         self.persister.save(crate::persist::PersistRequest {
             session: self.core.session.clone(),
             blobs,
+            display_cache,
         });
     }
 

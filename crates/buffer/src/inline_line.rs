@@ -6,9 +6,10 @@
 
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BreakPolicy {
     /// Prefer spaces as break points; spaces remain part of wrapped rows.
     #[default]
@@ -21,7 +22,7 @@ pub enum BreakPolicy {
     PreserveSpaces,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineRun<T> {
     pub text: String,
     pub meta: T,
@@ -46,7 +47,7 @@ pub struct WrappedRun<T> {
     pub break_policy: BreakPolicy,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineLine<T> {
     pub runs: Vec<InlineRun<T>>,
 }
