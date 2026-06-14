@@ -1,0 +1,90 @@
+use super::*;
+
+#[test]
+fn builds_a_fresh_test_app() {
+    let app = TestApp::builder().build();
+    let s = app.state();
+    assert!(!s.cmdline_open);
+    assert!(!s.quit_requested);
+    assert!(!s.agent_running);
+    assert_eq!(s.app_focus, AppFocus::Prompt);
+    assert!(s.queued_inputs.is_empty());
+}
+
+#[test]
+fn feed_one_records_alloc_delta_with_tick_near_zero() {
+    let mut app = TestApp::builder().build();
+    assert!(app.last_alloc_delta().is_none());
+    app.feed_one(SourceEvent::Tick(10));
+    let delta = app.last_alloc_delta().expect("delta after first event");
+    assert!(
+        delta.allocs < 32,
+        "Tick should allocate near zero, got {} allocs / {} bytes",
+        delta.allocs,
+        delta.bytes_grown
+    );
+}
+
+#[test]
+fn keystroke_stays_within_default_alloc_budget() {
+    let mut app = TestApp::builder().build();
+    // Warm caches with a discarded first keystroke so this test
+    // measures steady-state cost, not first-event init.
+    app.type_char('a');
+    app.feed_one_within_budget(
+        SourceEvent::Term(Event::Key(KeyEvent {
+            code: KeyCode::Char('b'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })),
+        AllocBudget::DEFAULT,
+    );
+    let delta = app.last_alloc_delta().expect("delta recorded");
+    // Print observed steady-state cost so it's visible in `cargo test
+    // -- --nocapture` runs and during budget-tuning sweeps.
+    eprintln!(
+        "steady-state keystroke delta: {} allocs / {} bytes",
+        delta.allocs, delta.bytes_grown
+    );
+}
+
+#[test]
+fn custom_command_turn_includes_registered_lua_tools() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    let payload = app
+        .start_custom_command_with_lua_tool(0)
+        .expect("custom command should send StartTurn");
+    assert!(
+        payload.tools.iter().any(|t| t.name == "fuzz_custom_tool_0"),
+        "registered Lua tool missing from custom command payload: {:?}",
+        payload.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn engine_ask_probe_registers_pending_callback() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.start_engine_ask_probe("summarize this");
+    assert!(app.pending_ask_id().is_some());
+}
+
+#[test]
+fn ctrl_w_pane_chord_expires_after_tick_past_window() {
+    let mut app = TestApp::builder().build();
+    app.press_mod(KeyCode::Char('w'), KeyModifiers::CONTROL);
+    assert!(
+        app.app.timers.pending_pane_chord.is_some(),
+        "Ctrl-W arms the pane chord"
+    );
+
+    // 1000ms > PANE_CHORD_WINDOW (750ms).
+    app.feed_one(SourceEvent::Tick(1000));
+    // Follow-up key after expiry: handler drops the pending chord and
+    // returns None so the key falls through to normal dispatch.
+    app.press(KeyCode::Char('j'));
+    assert!(
+        app.app.timers.pending_pane_chord.is_none(),
+        "expired pane chord should be cleared on the next key"
+    );
+}

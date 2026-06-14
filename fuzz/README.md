@@ -1,6 +1,6 @@
 # smelt fuzz
 
-Fifteen targets covering distinct surfaces:
+Fourteen targets covering distinct surfaces:
 
 | target | what it fuzzes | how |
 |---|---|---|

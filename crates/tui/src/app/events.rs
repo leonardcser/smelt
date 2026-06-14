@@ -103,11 +103,11 @@ impl TuiApp {
                 if self.handle_focused_search_key(k) {
                     return false;
                 }
-                if matches!(self.run_key_cascade(k), crate::smelt_edit::Status::Consumed) {
-                    self.flush_lua_callbacks();
+                if self.handle_search_open_before_window_dispatch(k) {
                     return false;
                 }
-                if self.try_open_search_for_key(k) {
+                if matches!(self.run_key_cascade(k), crate::smelt_edit::Status::Consumed) {
+                    self.flush_lua_callbacks();
                     return false;
                 }
                 self.flush_lua_callbacks();
@@ -294,6 +294,10 @@ impl TuiApp {
         self.handle_search_key_for_target(win, k)
     }
 
+    fn handle_search_open_before_window_dispatch(&mut self, k: KeyEvent) -> bool {
+        self.try_open_search_for_key(k)
+    }
+
     pub(crate) fn try_open_search_for_key(&mut self, k: KeyEvent) -> bool {
         match (k.code, k.modifiers) {
             (KeyCode::Char('/'), KeyModifiers::NONE) => {
@@ -320,6 +324,13 @@ impl TuiApp {
         }
         if let Event::Mouse(me) = *ev {
             return Some(self.handle_mouse(me));
+        }
+        if let Event::Key(k) = *ev {
+            if matches!(self.app_focus, crate::app::AppFocus::Content)
+                && self.handle_search_open_before_window_dispatch(k)
+            {
+                return Some(EventOutcome::Noop);
+            }
         }
         // Buffer-local Lua keymaps win over global (nvim priority). Skipped when an overlay
         // owns focus - overlay-leaf dispatch happens upstream.

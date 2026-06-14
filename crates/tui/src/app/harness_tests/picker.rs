@@ -1,0 +1,132 @@
+use super::*;
+
+#[test]
+fn picker_open_focuses_overlay() {
+    let mut app = TestApp::builder().build();
+    let leaf = open_test_picker(&mut app, &["one", "two", "three"], 0);
+    let s = app.state();
+    assert!(s.focused_overlay.is_some());
+    assert_eq!(app.app.ui.focus(), Some(leaf));
+}
+
+#[test]
+fn picker_open_renders_items_into_buffer() {
+    let mut app = TestApp::builder().build();
+    let leaf = open_test_picker(&mut app, &["alpha", "beta", "gamma"], 0);
+    let lines = picker_buffer_lines(&app, leaf);
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].contains("alpha"));
+    assert!(lines[1].contains("beta"));
+    assert!(lines[2].contains("gamma"));
+}
+
+#[test]
+fn picker_set_items_replaces_buffer_contents() {
+    let mut app = TestApp::builder().build();
+    let leaf = open_test_picker(&mut app, &["foo", "bar"], 0);
+    let new_items: Vec<_> = ["x", "y", "z"]
+        .iter()
+        .map(|s| crate::picker::PickerItem::new(*s))
+        .collect();
+    crate::picker::set_items(&mut app.app, leaf, new_items, 0);
+    let lines = picker_buffer_lines(&app, leaf);
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].contains("x"));
+    assert!(lines[2].contains("z"));
+}
+
+#[test]
+fn picker_set_selected_moves_cursor() {
+    let mut app = TestApp::builder().build();
+    let leaf = open_test_picker(&mut app, &["a", "b", "c", "d"], 0);
+    let initial_cpos = app.app.ui.win(leaf).map(|w| w.cpos()).unwrap_or(0);
+
+    crate::picker::set_selected(&mut app.app, leaf, 2);
+    let new_cpos = app.app.ui.win(leaf).map(|w| w.cpos()).unwrap_or(0);
+    assert_ne!(initial_cpos, new_cpos, "cursor moved with selection");
+}
+
+#[test]
+fn picker_wheel_pans_viewport_when_unfocused() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = TestApp::builder().build();
+    let items: Vec<crate::picker::PickerItem> = (0..40)
+        .map(|i| crate::picker::PickerItem::new(format!("item {i}")))
+        .collect();
+    let _guard = crate::lua::install_app_ptr(&mut app.app);
+    let leaf = crate::picker::open(
+        &mut app.app,
+        items,
+        0,
+        crate::picker::PickerPlacement::ScreenCenter,
+        false, // non-focusable: focus stays on prompt
+        false,
+        10,
+    )
+    .expect("picker leaf created");
+    drop(_guard);
+
+    // Render to populate the viewport.
+    app.app.render_normal(false);
+    assert_eq!(app.app.ui.win(leaf).map(|w| w.scroll_top()), Some(0));
+
+    let leaf_rect = app
+        .app
+        .ui
+        .paint_rect(crate::smelt_edit::PaintId::from(leaf))
+        .expect("picker leaf has a rect after render");
+    // Pick a cell inside the picker rect.
+    let row = leaf_rect.top + 1;
+    let col = leaf_rect.left + 1;
+
+    let scroll = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        row,
+        column: col,
+        modifiers: crossterm::event::KeyModifiers::empty(),
+    };
+    let _ = scroll; // silence unused-warning if path below ignores it
+    let _ = MouseButton::Left;
+
+    let pre_scroll = app.app.ui.win(leaf).unwrap().scroll_top();
+    let _ = app.app.ui.scroll_at(row, col, 3);
+    let post_scroll = app.app.ui.win(leaf).unwrap().scroll_top();
+    assert!(
+        post_scroll > pre_scroll,
+        "wheel over unfocused picker must pan scroll_top (pre={pre_scroll}, post={post_scroll})",
+    );
+}
+
+#[test]
+fn picker_forget_drops_state() {
+    let mut app = TestApp::builder().build();
+    let leaf = open_test_picker(&mut app, &["a", "b"], 0);
+    assert!(app.app.picker_state.contains_key(&leaf));
+
+    crate::picker::forget(&mut app.app, leaf);
+    assert!(!app.app.picker_state.contains_key(&leaf));
+}
+
+#[test]
+fn picker_filter_workflow_via_set_items() {
+    let mut app = TestApp::builder().build();
+    let leaf = open_test_picker(&mut app, &["apple", "apricot", "banana", "cherry"], 0);
+    assert_eq!(picker_buffer_lines(&app, leaf).len(), 4);
+
+    // Simulate "filter as user types": narrow set_items, then narrow again.
+    let filtered: Vec<_> = ["apple", "apricot"]
+        .iter()
+        .map(|s| crate::picker::PickerItem::new(*s))
+        .collect();
+    crate::picker::set_items(&mut app.app, leaf, filtered, 0);
+    assert_eq!(picker_buffer_lines(&app, leaf).len(), 2);
+
+    let single: Vec<_> = ["apple"]
+        .iter()
+        .map(|s| crate::picker::PickerItem::new(*s))
+        .collect();
+    crate::picker::set_items(&mut app.app, leaf, single, 0);
+    let lines = picker_buffer_lines(&app, leaf);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("apple"));
+}

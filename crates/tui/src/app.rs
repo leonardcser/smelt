@@ -4,6 +4,8 @@ pub(crate) mod cmdline_edit;
 pub(crate) mod content_keys;
 pub(crate) mod engine_events;
 pub(crate) mod events;
+#[cfg(test)]
+mod harness_tests;
 pub(crate) mod history;
 pub(crate) mod host_dispatch;
 pub(crate) mod lua_bridge;

@@ -1907,17 +1907,10 @@ mod tests {
 
     #[test]
     fn session_round_trips_through_wire_form_preserving_history_and_snapshots() {
-        // Verify lossless save → load → save: history shape, snapshot
-        // keys, costs, and context tokens all survive a round-trip
-        // through the `messages: Vec<Message>` on-disk JSON shape.
-        //
-        // Note: `ToolInvocation.elapsed_ms` is NOT carried by the wire
-        // `Message::tool` shape - it is engine-internal telemetry. The
-        // canonical on-disk source for per-call elapsed times is
-        // `turn_metas.tool_elapsed`, which the renderer reads as a
-        // fallback. We zero `elapsed_ms` on the original side before
-        // comparing so the round-trip is checked against what the
-        // format actually persists.
+        // Verify lossless save → load → save: native history rows,
+        // snapshot keys, costs, and context tokens all survive a
+        // round-trip through the current `history: Vec<HistoryItem>`
+        // on-disk JSON shape.
         let inv_ok = ToolInvocation {
             call_id: "c1".into(),
             name: "read".into(),
@@ -1989,12 +1982,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_drops_inv_elapsed_ms_but_turn_metas_preserves_it() {
-        // The `elapsed_ms` field on ToolInvocation is engine-only
-        // telemetry; the wire `Message::tool` shape doesn't carry it.
-        // The architectural channel that DOES carry per-call elapsed
-        // times across save/load is `turn_metas.tool_elapsed`. Verify
-        // both halves of that contract.
+    fn round_trip_preserves_tool_elapsed_metadata() {
         let mut original = Session::new(7, std::path::PathBuf::from("/w"));
         original
             .history
@@ -2030,10 +2018,7 @@ mod tests {
             .find_map(|i| i.as_assistant())
             .unwrap()
             .invocations[0];
-        assert_eq!(
-            restored_inv.elapsed_ms, None,
-            "inv.elapsed_ms is engine-only - should be lost across the wire form"
-        );
+        assert_eq!(restored_inv.elapsed_ms, Some(42));
         let restored_meta_elapsed = round.turn_metas[0].1.tool_elapsed.get("c1").copied();
         assert_eq!(
             restored_meta_elapsed,
