@@ -7,6 +7,7 @@ use crate::content::ColumnAlignment;
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
 use pulldown_cmark::{Event, Options, Parser, Tag};
+use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
 
 /// Render a markdown table. `alignments` may be empty (defaults to left for all
@@ -479,7 +480,7 @@ pub struct InlineStyle {
     pub group: Option<HlGroup>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InlineSpan {
     pub text: String,
     pub style: InlineStyle,
@@ -491,78 +492,160 @@ pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
     }
 
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    // Force pulldown-cmark into paragraph context so inline rendering does not
-    // reinterpret table cells or thinking lines that happen to start with block
-    // markers like `- ` or `# `.
-    let source = format!("x {text}");
-    let parser = Parser::new_ext(&source, options);
-    let mut skip_prefix_bytes = 2;
+    lower_inline_events(text, Parser::new_ext(text, options).into_offset_iter(), dim)
+}
+
+pub fn lower_inline_events<'a>(
+    source: &str,
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    dim: bool,
+) -> Vec<InlineSpan> {
     let mut styles = vec![InlineStyle {
         dim,
         ..Default::default()
     }];
+    let mut pending_prefixes = Vec::new();
     let mut out = Vec::new();
 
-    for event in parser {
+    for (event, range) in events {
         match event {
-            Event::Start(tag) => push_tag_style(&mut styles, tag),
-            Event::End(_) if styles.len() > 1 => {
-                styles.pop();
+            Event::Start(tag) => {
+                flush_pending_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.start,
+                    &mut out,
+                    *styles.last().unwrap(),
+                );
+                if tag_preserves_source_prefix(&tag) {
+                    pending_prefixes.push(PendingPrefix {
+                        start: range.start,
+                        end: range.end,
+                    });
+                }
+                push_tag_style(&mut styles, tag);
+            }
+            Event::End(_) => {
+                flush_pending_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.end,
+                    &mut out,
+                    *styles.last().unwrap(),
+                );
+                if styles.len() > 1 {
+                    styles.pop();
+                }
             }
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
-                push_inline_text_span(
+                flush_pending_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.start,
                     &mut out,
-                    text.as_ref(),
                     *styles.last().unwrap(),
-                    &mut skip_prefix_bytes,
                 );
+                push_inline_span(&mut out, text.as_ref(), *styles.last().unwrap());
             }
             Event::Code(text) => {
-                push_inline_text_span(
+                flush_pending_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.start,
+                    &mut out,
+                    *styles.last().unwrap(),
+                );
+                push_inline_span(
                     &mut out,
                     text.as_ref(),
                     InlineStyle {
                         group: Some(intern("SmeltAccent")),
                         ..*styles.last().unwrap()
                     },
-                    &mut skip_prefix_bytes,
                 );
             }
             Event::SoftBreak | Event::HardBreak => {
-                push_inline_text_span(
+                flush_pending_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.start,
                     &mut out,
-                    " ",
                     *styles.last().unwrap(),
-                    &mut skip_prefix_bytes,
                 );
+                push_inline_span(&mut out, " ", *styles.last().unwrap());
             }
             Event::TaskListMarker(checked) => {
-                push_inline_text_span(
+                flush_pending_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.start,
+                    &mut out,
+                    *styles.last().unwrap(),
+                );
+                push_inline_span(
                     &mut out,
                     if checked { "[x] " } else { "[ ] " },
                     *styles.last().unwrap(),
-                    &mut skip_prefix_bytes,
                 );
             }
             Event::FootnoteReference(text) => {
-                push_inline_text_span(
+                flush_pending_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.start,
                     &mut out,
-                    text.as_ref(),
                     *styles.last().unwrap(),
-                    &mut skip_prefix_bytes,
                 );
+                push_inline_span(&mut out, text.as_ref(), *styles.last().unwrap());
             }
-            Event::Rule => push_inline_text_span(
-                &mut out,
-                "---",
-                *styles.last().unwrap(),
-                &mut skip_prefix_bytes,
-            ),
+            Event::Rule => {
+                flush_pending_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.start,
+                    &mut out,
+                    *styles.last().unwrap(),
+                );
+                push_inline_span(&mut out, "---", *styles.last().unwrap());
+            }
             _ => {}
         }
     }
 
     out
+}
+
+#[derive(Clone, Copy)]
+struct PendingPrefix {
+    start: usize,
+    end: usize,
+}
+
+fn flush_pending_prefixes(
+    source: &str,
+    pending: &mut Vec<PendingPrefix>,
+    up_to: usize,
+    out: &mut Vec<InlineSpan>,
+    style: InlineStyle,
+) {
+    let mut i = 0;
+    while i < pending.len() {
+        let prefix = pending[i];
+        let end = up_to.min(prefix.end);
+        if prefix.start < end {
+            let text = smelt_buffer::text::slice(source, prefix.start..end);
+            push_inline_span(out, text, style);
+            pending.remove(i);
+        } else if prefix.end <= up_to {
+            pending.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn tag_preserves_source_prefix(tag: &Tag<'_>) -> bool {
+    matches!(tag, Tag::Heading { .. } | Tag::BlockQuote(_) | Tag::Item)
 }
 
 fn push_tag_style(styles: &mut Vec<InlineStyle>, tag: Tag<'_>) {
@@ -583,25 +666,6 @@ fn push_tag_style(styles: &mut Vec<InlineStyle>, tag: Tag<'_>) {
         _ => style,
     };
     styles.push(next);
-}
-
-fn push_inline_text_span(
-    out: &mut Vec<InlineSpan>,
-    text: &str,
-    style: InlineStyle,
-    skip_prefix_bytes: &mut usize,
-) {
-    let text = if *skip_prefix_bytes == 0 {
-        text
-    } else if text.len() <= *skip_prefix_bytes {
-        *skip_prefix_bytes -= text.len();
-        ""
-    } else {
-        let (_, text) = text.split_at(*skip_prefix_bytes);
-        *skip_prefix_bytes = 0;
-        text
-    };
-    push_inline_span(out, text, style);
 }
 
 fn push_inline_span(out: &mut Vec<InlineSpan>, text: &str, style: InlineStyle) {

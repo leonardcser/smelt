@@ -211,7 +211,7 @@ Use `pulldown-cmark` **only as the parser** and translate its event stream into 
 
 Build the AST from `pulldown-cmark::Parser::into_offset_iter()` so block nodes and inline spans can carry source byte ranges into the original markdown. The semantic AST is not enough on its own: copy/yank fidelity depends on attaching original markdown source to rendered rows.
 
-This replaces the custom line-oriented markdown renderer in `display_renderers/markdown.rs` and fixes bugs that are fundamentally parsing bugs: malformed/nested code blocks, tables whose inline code spans were not recognized as a single cell token, escaped characters, and other cases where the hand-rolled parser lost nesting information. Rendering was not the problem; the AST was.
+This replaces the custom line-oriented markdown renderer in `display_renderers/markdown.rs` and fixes bugs that are fundamentally parsing bugs: malformed/nested code blocks, tables whose inline code spans were not recognized as a single cell token, escaped characters, and other cases where the hand-rolled parser lost nesting information. Rendering was not the problem; the AST was. Current implementation classifies paragraph/heading/blockquote/list blocks from parser events, stores per-line inline spans in `MarkdownNode::Text`, and leaves only streaming preview boundary detection as an explicitly scoped partial-input heuristic.
 
 Dependency:
 

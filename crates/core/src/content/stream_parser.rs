@@ -203,7 +203,7 @@ impl StreamParser {
     }
 
     fn sync_streaming_text(history: &mut BlockHistory, at: &mut ActiveText) {
-        let in_table = !at.table_rows.is_empty() || at.current_line.trim_start().starts_with('|');
+        let in_table = !at.table_rows.is_empty() || Self::is_streaming_table_line(&at.current_line);
         if in_table {
             let mut content = String::new();
             for row in &at.table_rows {
@@ -212,7 +212,7 @@ impl StreamParser {
                 }
                 content.push_str(row);
             }
-            if at.current_line.trim_start().starts_with('|') {
+            if Self::is_streaming_table_line(&at.current_line) {
                 if !content.is_empty() {
                     content.push('\n');
                 }
@@ -251,8 +251,6 @@ impl StreamParser {
     }
 
     fn process_text_line(history: &mut BlockHistory, at: &mut ActiveText, line: &str) {
-        let trimmed = line.trim_start();
-
         if let Some((fence_len, info)) = markdown_opening_fence(line) {
             if at.in_code_block.is_some() {
                 Self::append_paragraph_line(at, line);
@@ -275,7 +273,7 @@ impl StreamParser {
             return;
         }
 
-        if trimmed.starts_with('|') {
+        if Self::is_streaming_table_line(line) {
             Self::flush_paragraph(history, at);
             at.table_rows.push(line.to_string());
             return;
@@ -294,6 +292,12 @@ impl StreamParser {
         Self::flush_table(history, at);
 
         Self::append_paragraph_line(at, line);
+    }
+
+    // Streaming sees incomplete markdown, so final parsing remains in markdown_ir;
+    // this only keeps pipe-prefixed partial rows together while chunks arrive.
+    fn is_streaming_table_line(line: &str) -> bool {
+        line.trim_start().starts_with('|')
     }
 
     fn append_paragraph_line(at: &mut ActiveText, line: &str) {
@@ -348,7 +352,7 @@ impl StreamParser {
                 at.in_code_block = None;
                 at.fence_backticks = 0;
             }
-            if !at.current_line.is_empty() && at.current_line.trim_start().starts_with('|') {
+            if !at.current_line.is_empty() && Self::is_streaming_table_line(&at.current_line) {
                 at.table_rows.push(std::mem::take(&mut at.current_line));
             }
             Self::flush_table(history, &mut at);

@@ -1,11 +1,11 @@
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
-    emit_inline_spans, inline_spans_width, measure_markdown_table, parse_inline_spans,
-    render_code_block, render_markdown_table, wrap_inline_spans, InlineSpan, InlineStyle,
+    emit_inline_spans, inline_spans_width, measure_markdown_table, render_code_block,
+    render_markdown_table, wrap_inline_spans, InlineSpan, InlineStyle,
 };
 use smelt_core::content::markdown_ir::{
-    parse_markdown, MarkdownBlock, MarkdownNode, MarkdownTextKind,
+    parse_markdown, MarkdownBlock, MarkdownLine, MarkdownNode, MarkdownTextKind,
 };
 use smelt_core::content::{is_markdown_list_item, split_markdown_list_prefix};
 use smelt_core::theme::intern;
@@ -59,11 +59,10 @@ fn render_markdown_block(
         match node {
             MarkdownNode::Source { range } => {
                 let source = smelt_buffer::text::slice(block.source, range.clone());
-                render_text_lines(out, source, MarkdownTextKind::Paragraph, &ctx, &mut state);
+                render_source_lines(out, source, MarkdownTextKind::Paragraph, &ctx, &mut state);
             }
-            MarkdownNode::Text { range, kind } => {
-                let source = smelt_buffer::text::slice(block.source, range.clone());
-                render_text_lines(out, source, *kind, &ctx, &mut state);
+            MarkdownNode::Text { lines, kind, .. } => {
+                render_text_lines(out, block.source, lines, *kind, &ctx, &mut state);
             }
             MarkdownNode::Code { lang, body, .. } => {
                 render_block_gap(out, &mut state);
@@ -123,7 +122,7 @@ fn measure_markdown_block(
         match node {
             MarkdownNode::Source { range } => {
                 let source = smelt_buffer::text::slice(block.source, range.clone());
-                measure_text_lines(
+                measure_source_lines(
                     source,
                     MarkdownTextKind::Paragraph,
                     max_cols,
@@ -131,9 +130,8 @@ fn measure_markdown_block(
                     &mut state,
                 );
             }
-            MarkdownNode::Text { range, kind } => {
-                let source = smelt_buffer::text::slice(block.source, range.clone());
-                measure_text_lines(source, *kind, max_cols, dim, &mut state);
+            MarkdownNode::Text { lines, kind, .. } => {
+                measure_text_lines(block.source, lines, *kind, max_cols, dim, &mut state);
             }
             MarkdownNode::Code { lang, body, .. } => {
                 measure_block_gap(&mut state);
@@ -173,12 +171,15 @@ fn measure_markdown_block(
 }
 
 #[derive(Default)]
-struct MeasureState {
+struct FlowState {
     rows: u16,
     last_content_was_heading: bool,
     pending_blank: bool,
     prev_was_block: bool,
 }
+
+type MeasureState = FlowState;
+type RenderState = FlowState;
 
 fn measure_block_gap(state: &mut MeasureState) {
     let mut gap_emitted = false;
@@ -206,7 +207,7 @@ fn measure_text_gap(state: &mut MeasureState, kind: MarkdownTextKind) -> bool {
     state.rows != before
 }
 
-fn measure_text_lines(
+fn measure_source_lines(
     source: &str,
     kind: MarkdownTextKind,
     max_cols: usize,
@@ -247,25 +248,72 @@ fn measure_text_lines(
         if state.prev_was_block && !gap_emitted {
             state.rows = state.rows.saturating_add(1);
         }
+        let spans = fallback_markdown_line_spans(line, kind, dim);
         state.rows = state
             .rows
-            .saturating_add(measure_markdown_line(line, kind, max_cols, dim));
+            .saturating_add(wrap_inline_spans(&spans, max_cols).len() as u16);
         state.last_content_was_heading = kind == MarkdownTextKind::Heading;
         state.prev_was_block = false;
         i += 1;
     }
 }
 
-fn measure_markdown_line(line: &str, kind: MarkdownTextKind, max_cols: usize, dim: bool) -> u16 {
-    wrap_inline_spans(&markdown_line_spans(line, kind, dim), max_cols).len() as u16
-}
+fn measure_text_lines(
+    source: &str,
+    lines: &[MarkdownLine],
+    kind: MarkdownTextKind,
+    max_cols: usize,
+    dim: bool,
+    state: &mut MeasureState,
+) {
+    let mut started = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = smelt_buffer::text::slice(source, lines[i].source.clone());
+        if line.trim().is_empty() {
+            let mut next_i = i + 1;
+            while next_i < lines.len()
+                && smelt_buffer::text::slice(source, lines[next_i].source.clone())
+                    .trim()
+                    .is_empty()
+            {
+                next_i += 1;
+            }
+            if state.rows > 0
+                && !state.last_content_was_heading
+                && next_i < lines.len()
+                && !is_markdown_list_item(smelt_buffer::text::slice(
+                    source,
+                    lines[next_i].source.clone(),
+                ))
+            {
+                state.pending_blank = true;
+            }
+            i = next_i;
+            continue;
+        }
 
-#[derive(Default)]
-struct RenderState {
-    rows: u16,
-    last_content_was_heading: bool,
-    pending_blank: bool,
-    prev_was_block: bool,
+        let mut gap_emitted = false;
+        if !started {
+            gap_emitted = measure_text_gap(state, kind);
+            started = true;
+        }
+        if state.pending_blank {
+            state.rows = state.rows.saturating_add(1);
+            state.pending_blank = false;
+            gap_emitted = true;
+        }
+        if state.prev_was_block && !gap_emitted {
+            state.rows = state.rows.saturating_add(1);
+        }
+        let spans = markdown_line_spans(line, &lines[i].spans, kind, dim);
+        state.rows = state
+            .rows
+            .saturating_add(wrap_inline_spans(&spans, max_cols).len() as u16);
+        state.last_content_was_heading = kind == MarkdownTextKind::Heading;
+        state.prev_was_block = false;
+        i += 1;
+    }
 }
 
 fn render_block_gap(out: &mut LineBuilder, state: &mut RenderState) {
@@ -303,7 +351,7 @@ fn render_text_gap(out: &mut LineBuilder, state: &mut RenderState, kind: Markdow
     state.rows != before
 }
 
-fn render_text_lines(
+fn render_source_lines(
     out: &mut LineBuilder,
     source: &str,
     kind: MarkdownTextKind,
@@ -346,7 +394,66 @@ fn render_text_lines(
             out.newline();
             state.rows += 1;
         }
-        render_markdown_line(out, line, kind, ctx, state);
+        let spans = fallback_markdown_line_spans(line, kind, ctx.dim);
+        render_markdown_line(out, line, &spans, ctx, state);
+        state.last_content_was_heading = kind == MarkdownTextKind::Heading;
+        state.prev_was_block = false;
+        i += 1;
+    }
+}
+
+fn render_text_lines(
+    out: &mut LineBuilder,
+    source: &str,
+    lines: &[MarkdownLine],
+    kind: MarkdownTextKind,
+    ctx: &RenderTextCtx<'_>,
+    state: &mut RenderState,
+) {
+    let mut started = false;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = smelt_buffer::text::slice(source, lines[i].source.clone());
+        if line.trim().is_empty() {
+            let mut next_i = i + 1;
+            while next_i < lines.len()
+                && smelt_buffer::text::slice(source, lines[next_i].source.clone())
+                    .trim()
+                    .is_empty()
+            {
+                next_i += 1;
+            }
+            if state.rows > 0
+                && !state.last_content_was_heading
+                && next_i < lines.len()
+                && !is_markdown_list_item(smelt_buffer::text::slice(
+                    source,
+                    lines[next_i].source.clone(),
+                ))
+            {
+                state.pending_blank = true;
+            }
+            i = next_i;
+            continue;
+        }
+
+        let mut gap_emitted = false;
+        if !started {
+            gap_emitted = render_text_gap(out, state, kind);
+            started = true;
+        }
+        if state.pending_blank {
+            out.newline();
+            state.rows += 1;
+            state.pending_blank = false;
+            gap_emitted = true;
+        }
+        if state.prev_was_block && !gap_emitted {
+            out.newline();
+            state.rows += 1;
+        }
+        let spans = markdown_line_spans(line, &lines[i].spans, kind, ctx.dim);
+        render_markdown_line(out, line, &spans, ctx, state);
         state.last_content_was_heading = kind == MarkdownTextKind::Heading;
         state.prev_was_block = false;
         i += 1;
@@ -356,11 +463,11 @@ fn render_text_lines(
 fn render_markdown_line(
     out: &mut LineBuilder,
     line: &str,
-    kind: MarkdownTextKind,
+    spans: &[InlineSpan],
     ctx: &RenderTextCtx<'_>,
     state: &mut RenderState,
 ) {
-    let wrapped = wrap_inline_spans(&markdown_line_spans(line, kind, ctx.dim), ctx.max_cols);
+    let wrapped = wrap_inline_spans(spans, ctx.max_cols);
     if wrapped.len() > 1 {
         out.mark_wrapped();
     }
@@ -383,35 +490,49 @@ fn render_markdown_line(
     state.rows += wrapped.len() as u16;
 }
 
-fn markdown_line_spans(line: &str, kind: MarkdownTextKind, dim: bool) -> Vec<InlineSpan> {
+fn fallback_markdown_line_spans(line: &str, kind: MarkdownTextKind, dim: bool) -> Vec<InlineSpan> {
+    let trimmed = line.trim_start();
+    let body = if kind == MarkdownTextKind::List {
+        split_markdown_list_prefix(trimmed).1
+    } else {
+        trimmed
+    };
+    markdown_line_spans(
+        line,
+        &smelt_core::content::highlight::parse_inline_spans(body, false),
+        kind,
+        dim,
+    )
+}
+
+fn markdown_line_spans(
+    line: &str,
+    base_spans: &[InlineSpan],
+    kind: MarkdownTextKind,
+    dim: bool,
+) -> Vec<InlineSpan> {
     let trimmed = line.trim_start();
     let leading_ws = &line[..line.len() - trimmed.len()];
     let mut line_spans = Vec::new();
 
     if kind == MarkdownTextKind::Heading {
-        line_spans.push(InlineSpan {
-            text: trimmed.to_string(),
-            style: InlineStyle {
-                bold: true,
-                dim,
-                group: Some(intern("SmeltHeading")),
-                ..Default::default()
-            },
-        });
+        line_spans.extend(base_spans.iter().cloned().map(|mut span| {
+            span.style.bold = true;
+            span.style.dim |= dim;
+            span.style.group = Some(intern("SmeltHeading"));
+            span
+        }));
     } else if kind == MarkdownTextKind::BlockQuote {
-        line_spans.push(InlineSpan {
-            text: trimmed.to_string(),
-            style: InlineStyle {
-                dim: true,
-                italic: true,
-                ..Default::default()
-            },
-        });
+        line_spans.extend(base_spans.iter().cloned().map(|mut span| {
+            span.style.dim = true;
+            span.style.italic = true;
+            span
+        }));
     } else {
-        let (prefix, body) = if kind == MarkdownTextKind::List {
-            split_markdown_list_prefix(trimmed)
+        let prefix = if kind == MarkdownTextKind::List {
+            split_markdown_list_prefix(trimmed).0
         } else {
-            ("", trimmed)
+            ""
         };
         if !leading_ws.is_empty() {
             line_spans.push(InlineSpan {
@@ -431,7 +552,10 @@ fn markdown_line_spans(line: &str, kind: MarkdownTextKind, dim: bool) -> Vec<Inl
                 },
             });
         }
-        line_spans.extend(parse_inline_spans(body, dim));
+        line_spans.extend(base_spans.iter().cloned().map(|mut span| {
+            span.style.dim |= dim;
+            span
+        }));
     }
 
     line_spans
@@ -475,14 +599,15 @@ mod tests {
 
     #[test]
     fn markdown_line_spans_use_shared_block_markers() {
-        let heading = markdown_line_spans("#not heading", MarkdownTextKind::Paragraph, false);
+        let heading =
+            fallback_markdown_line_spans("#not heading", MarkdownTextKind::Paragraph, false);
         assert_ne!(heading[0].style.group, Some(intern("SmeltHeading")));
 
-        let bullet = markdown_line_spans("+ item", MarkdownTextKind::List, false);
+        let bullet = fallback_markdown_line_spans("+ item", MarkdownTextKind::List, false);
         assert_eq!(bullet[0].text, "+ ");
         assert!(bullet[0].style.dim);
 
-        let ordered = markdown_line_spans("12) item", MarkdownTextKind::List, false);
+        let ordered = fallback_markdown_line_spans("12) item", MarkdownTextKind::List, false);
         assert_eq!(ordered[0].text, "12) ");
         assert!(ordered[0].style.dim);
     }

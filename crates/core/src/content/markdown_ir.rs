@@ -2,12 +2,19 @@ use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::content::ColumnAlignment;
+use crate::content::highlight::{parse_inline_spans, InlineSpan};
+use crate::content::{split_markdown_list_prefix, ColumnAlignment};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkdownBlock<'a> {
     pub source: &'a str,
     pub nodes: Vec<MarkdownNode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkdownLine {
+    pub source: Range<usize>,
+    pub spans: Vec<InlineSpan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +25,7 @@ pub enum MarkdownNode {
     Text {
         range: Range<usize>,
         kind: MarkdownTextKind,
+        lines: Vec<MarkdownLine>,
     },
     Code {
         range: Range<usize>,
@@ -47,6 +55,7 @@ enum SpecialBlock {
     Text {
         range: Range<usize>,
         kind: MarkdownTextKind,
+        lines: Vec<MarkdownLine>,
     },
     Code {
         range: Range<usize>,
@@ -75,7 +84,7 @@ impl SpecialBlock {
 
     fn into_node(self) -> MarkdownNode {
         match self {
-            SpecialBlock::Text { range, kind } => MarkdownNode::Text { range, kind },
+            SpecialBlock::Text { range, kind, lines } => MarkdownNode::Text { range, kind, lines },
             SpecialBlock::Code { range, lang, body } => MarkdownNode::Code { range, lang, body },
             SpecialBlock::Table {
                 range,
@@ -118,6 +127,25 @@ pub fn parse_markdown(source: &str) -> MarkdownBlock<'_> {
     }
 
     MarkdownBlock { source, nodes }
+}
+
+pub fn ends_with_heading(source: &str) -> bool {
+    parse_markdown(source)
+        .nodes
+        .iter()
+        .rev()
+        .find_map(|node| match node {
+            MarkdownNode::Text { kind, .. } => Some(*kind),
+            MarkdownNode::Source { range }
+                if smelt_buffer::text::slice(source, range.clone())
+                    .trim()
+                    .is_empty() =>
+            {
+                None
+            }
+            _ => Some(MarkdownTextKind::Paragraph),
+        })
+        == Some(MarkdownTextKind::Heading)
 }
 
 fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
@@ -163,6 +191,7 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
                 out.push(SpecialBlock::Text {
                     range: open.start..range.end,
                     kind: open.kind,
+                    lines: markdown_lines(source, open.start..range.end, open.kind),
                 });
             }
             Event::Text(_) => {
@@ -245,6 +274,46 @@ fn tag_end_for_text(tag: &Tag<'_>) -> TagEnd {
         Tag::List(start) => TagEnd::List(start.is_some()),
         _ => unreachable!("only text container tags are converted"),
     }
+}
+
+fn markdown_lines(source: &str, range: Range<usize>, kind: MarkdownTextKind) -> Vec<MarkdownLine> {
+    line_ranges(source, range)
+        .into_iter()
+        .map(|line_range| MarkdownLine {
+            spans: markdown_line_spans(source, line_range.clone(), kind),
+            source: line_range,
+        })
+        .collect()
+}
+
+fn line_ranges(source: &str, range: Range<usize>) -> Vec<Range<usize>> {
+    let text = smelt_buffer::text::slice(source, range.clone());
+    let mut out = Vec::new();
+    let mut start = range.start;
+    for line in text.split_inclusive('\n') {
+        let line_len = line.trim_end_matches(['\r', '\n']).len();
+        out.push(start..start + line_len);
+        start += line.len();
+    }
+    if !text.ends_with('\n') && out.is_empty() && !text.is_empty() {
+        out.push(range.start..range.end);
+    }
+    out
+}
+
+fn markdown_line_spans(
+    source: &str,
+    line_range: Range<usize>,
+    kind: MarkdownTextKind,
+) -> Vec<InlineSpan> {
+    let line = smelt_buffer::text::slice(source, line_range);
+    let trimmed = line.trim_start();
+    let body = if kind == MarkdownTextKind::List {
+        split_markdown_list_prefix(trimmed).1
+    } else {
+        trimmed
+    };
+    parse_inline_spans(body, false)
 }
 
 fn map_alignment(alignment: Alignment) -> ColumnAlignment {
@@ -332,6 +401,37 @@ mod tests {
                 MarkdownTextKind::List,
             ]
         );
+    }
+
+    #[test]
+    fn parse_markdown_lowers_inline_spans_into_text_lines() {
+        let source = "Paragraph with **bold** and `code`.\n\n- **item**\n";
+        let block = parse_markdown(source);
+        let mut text_nodes = block.nodes.iter().filter_map(|node| match node {
+            MarkdownNode::Text { kind, lines, .. } => Some((*kind, lines)),
+            _ => None,
+        });
+
+        let (paragraph_kind, paragraph_lines) = text_nodes.next().expect("paragraph");
+        assert_eq!(paragraph_kind, MarkdownTextKind::Paragraph);
+        assert_eq!(paragraph_lines.len(), 1);
+        assert_eq!(paragraph_lines[0].spans[1].text, "bold");
+        assert!(paragraph_lines[0].spans[1].style.bold);
+        assert_eq!(paragraph_lines[0].spans[3].text, "code");
+        assert!(paragraph_lines[0].spans[3].style.group.is_some());
+
+        let (list_kind, list_lines) = text_nodes.next().expect("list");
+        assert_eq!(list_kind, MarkdownTextKind::List);
+        assert_eq!(list_lines.len(), 1);
+        assert_eq!(list_lines[0].spans[0].text, "item");
+        assert!(list_lines[0].spans[0].style.bold);
+    }
+
+    #[test]
+    fn ends_with_heading_uses_parser_classification() {
+        assert!(ends_with_heading("Paragraph\n\n# Tail\n"));
+        assert!(!ends_with_heading("# Not tail\n\nParagraph"));
+        assert!(!ends_with_heading("```markdown\n# Not heading\n```"));
     }
 
     #[test]
