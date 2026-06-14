@@ -22,13 +22,13 @@ impl TuiApp {
         }
 
         let win_id = self.well_known.transcript;
+        if self.try_open_search_for_key(k) {
+            return EventOutcome::Noop;
+        }
         let status = self.dispatch_window_viewer_key(win_id, k);
         if matches!(status, crate::smelt_edit::Status::Consumed) {
             self.snap_transcript_cursor();
             return EventOutcome::Redraw;
-        }
-        if self.try_open_search_for_key(k) {
-            return EventOutcome::Noop;
         }
         EventOutcome::Noop
     }
