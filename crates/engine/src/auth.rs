@@ -234,3 +234,121 @@ async fn kimi_code_login(
         ..Default::default()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn authenticated_path_accepts_single_absolute_path() {
+        assert_eq!(
+            authenticated_path("/backend-api/me").unwrap(),
+            "/backend-api/me"
+        );
+    }
+
+    #[test]
+    fn authenticated_path_rejects_relative_double_slash_and_scheme() {
+        assert!(authenticated_path("relative").is_err());
+        assert!(authenticated_path("//evil.test/path").is_err());
+        assert!(authenticated_path("/https://evil.test/path").is_err());
+    }
+
+    async fn spawn_one_response(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let req = String::from_utf8_lossy(&buf);
+                let Some((headers, body)) = req.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                    })
+                    .unwrap_or(0);
+                if body.len() >= content_len {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).to_string();
+            let resp = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            req
+        });
+        (format!("http://{addr}/auth-test"), task)
+    }
+
+    #[tokio::test]
+    async fn send_authenticated_request_sends_get_with_auth_and_accept() {
+        let (url, task) = spawn_one_response(r#"{"ok":true}"#).await;
+        let client = reqwest::Client::new();
+
+        let resp = send_authenticated_request(&client, "GET", url, None, |req| {
+            req.header("Authorization", "Bearer test-token")
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(resp.status, 201);
+        assert_eq!(resp.body, r#"{"ok":true}"#);
+        let request = task.await.unwrap();
+        assert!(request.starts_with("GET /auth-test HTTP/1.1"), "{request}");
+        assert!(
+            request.contains("authorization: Bearer test-token"),
+            "{request}"
+        );
+        assert!(request.contains("accept: application/json"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn send_authenticated_request_sends_post_body() {
+        let (url, task) = spawn_one_response("done").await;
+        let client = reqwest::Client::new();
+
+        let resp =
+            send_authenticated_request(&client, "POST", url, Some(b"payload".to_vec()), |req| req)
+                .await
+                .unwrap();
+
+        assert_eq!(resp.status, 201);
+        assert_eq!(resp.body, "done");
+        let request = task.await.unwrap();
+        assert!(request.starts_with("POST /auth-test HTTP/1.1"), "{request}");
+        assert!(request.ends_with("payload"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn send_authenticated_request_rejects_unsupported_method_before_network() {
+        let client = reqwest::Client::new();
+        let err = send_authenticated_request(
+            &client,
+            "DELETE",
+            "http://127.0.0.1:9/nope".into(),
+            None,
+            |req| req,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("unsupported authenticated request method: DELETE"));
+    }
+}

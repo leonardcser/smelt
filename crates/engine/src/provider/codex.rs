@@ -1062,6 +1062,82 @@ mod tests {
     }
 
     #[test]
+    fn parse_jwt_claims_returns_none_when_payload_is_not_json() {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+        let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-json");
+        assert!(parse_jwt_claims(&format!("{header}.{body}.sig")).is_none());
+    }
+
+    #[test]
+    fn apply_headers_includes_bearer_and_optional_account_id() {
+        let client = reqwest::Client::new();
+        let req = CodexTokens {
+            access_token: "access-token".into(),
+            refresh_token: "refresh-token".into(),
+            expires_at: 0,
+            account_id: Some("acct-123".into()),
+            last_refresh: 0,
+        }
+        .apply_headers(client.get("https://example.invalid"))
+        .build()
+        .unwrap();
+
+        assert_eq!(
+            req.headers().get("authorization").unwrap(),
+            "Bearer access-token"
+        );
+        assert_eq!(req.headers().get("ChatGPT-Account-ID").unwrap(), "acct-123");
+    }
+
+    #[test]
+    fn merge_token_response_prefers_new_account_id_from_id_token() {
+        let access = jwt_with(&serde_json::json!({"exp": 1_800_000_000_u64}));
+        let id = jwt_with(&serde_json::json!({"chatgpt_account_id": "new-acct"}));
+        let resp = TokenResponse {
+            access_token: Some(access),
+            refresh_token: Some("new-refresh".into()),
+            id_token: Some(id),
+            expires_in: None,
+        };
+
+        let out = merge_token_response(resp, Some(&previous_tokens()), 1_000).unwrap();
+
+        assert_eq!(out.account_id.as_deref(), Some("new-acct"));
+    }
+
+    #[test]
+    fn merge_token_response_reuses_previous_access_token_when_missing() {
+        let resp = TokenResponse {
+            access_token: None,
+            refresh_token: Some("new-refresh".into()),
+            id_token: None,
+            expires_in: Some(60),
+        };
+
+        let out = merge_token_response(resp, Some(&previous_tokens()), 1_000).unwrap();
+
+        assert_eq!(out.access_token, "prev-access");
+        assert_eq!(out.refresh_token, "new-refresh");
+        assert_eq!(out.expires_at, 1_060);
+    }
+
+    #[test]
+    fn codex_model_metadata_preserves_display_and_context() {
+        let meta: protocol::ModelMetadata = CodexModel {
+            slug: "codex-mini".into(),
+            display_name: "Codex Mini".into(),
+            description: Some("desc".into()),
+            context_window: Some(1234),
+        }
+        .into();
+
+        assert_eq!(meta.id, "codex-mini");
+        assert_eq!(meta.display_name.as_deref(), Some("Codex Mini"));
+        assert_eq!(meta.context_window, Some(1234));
+        assert_eq!(meta.supports_reasoning, None);
+    }
+
+    #[test]
     fn generate_state_produces_nonempty_unique_strings() {
         let a = generate_state();
         let b = generate_state();

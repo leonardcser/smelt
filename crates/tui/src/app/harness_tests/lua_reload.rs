@@ -55,6 +55,74 @@ fn lua_history_entries_and_search_return_sequences() {
 }
 
 #[test]
+fn lua_model_settings_metrics_and_render_contracts_are_available() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r##"
+            local model = smelt.model()
+            assert(type(model) == "string")
+            local models = smelt.model.list()
+            assert(type(models) == "table")
+            if #models > 0 then
+                assert(type(models[1].key) == "string")
+                assert(type(models[1].name) == "string")
+                assert(type(models[1].provider_type) == "string")
+            end
+            local pricing = smelt.model.pricing()
+            assert(type(pricing.input) == "number")
+            assert(type(pricing.output) == "number")
+            assert(type(pricing.cache_read) == "number")
+            assert(type(pricing.cache_write) == "number")
+            assert(type(pricing.source) == "string")
+            local max_tokens = smelt.model.max_tokens()
+            assert(max_tokens == nil or type(max_tokens) == "number")
+
+            local original = smelt.settings.show_thinking
+            assert(type(original) == "boolean")
+            smelt.settings.show_thinking = not original
+            assert(smelt.settings.show_thinking == not original)
+            smelt.settings.show_thinking = original
+            local schema = smelt.settings.schema()
+            assert(#schema > 0)
+            assert(type(schema[1].key) == "string")
+            assert(type(schema[1].kind) == "string")
+            assert(not pcall(function() return smelt.settings.not_a_real_setting end))
+            assert(not pcall(function() smelt.settings.show_thinking = "bad" end))
+
+            smelt.metrics.perf.clear()
+            smelt.metrics.perf.set_enabled(true)
+            local perf = smelt.metrics.perf.snapshot()
+            assert(perf.enabled == true)
+            assert(type(perf.durations) == "table")
+            assert(type(perf.values) == "table")
+            smelt.metrics.perf.set_enabled(false)
+            assert(smelt.metrics.perf.snapshot().enabled == false)
+            assert(type(smelt.metrics.entries()) == "table")
+
+            local b = smelt.buf.new({ name = "coverage.render.text" })
+            smelt.render.text(b, "alpha\nbeta", { width = 20, hl_group = "Normal" })
+            assert(b:line(1) == "alpha")
+            assert(b:line(2) == "beta")
+
+            local md = smelt.buf.new({ name = "coverage.render.markdown" })
+            smelt.render.markdown(md, "# Title")
+            assert(type(md:line(1)) == "string")
+
+            local code = smelt.buf.new({ name = "coverage.render.syntax" })
+            smelt.render.syntax(code, { content = "fn main() {}", lang = "rust" })
+            assert(type(code:line(1)) == "string")
+
+            local left = smelt.buf.new({ name = "coverage.render.diff.left" })
+            local right = smelt.buf.new({ name = "coverage.render.diff.right" })
+            smelt.render.diff_split(left, right, { old = "one\ntwo", new = "one\nthree", lang = "text" })
+            assert(left:line(1) ~= nil)
+            assert(right:line(1) ~= nil)
+        "##,
+    ));
+}
+
+#[test]
 fn reload_clears_surviving_prompt_keymaps() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(

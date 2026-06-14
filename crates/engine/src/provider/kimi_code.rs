@@ -577,4 +577,125 @@ mod tests {
         assert_eq!(models[0].supports_tool_use, Some(true));
         assert!(models[0].matches_name("Moonshot V1"));
     }
+
+    #[test]
+    fn json_u32_accepts_positive_numbers_and_numeric_strings_only() {
+        assert_eq!(json_u32(&serde_json::json!(42)), Some(42));
+        assert_eq!(json_u32(&serde_json::json!("42")), Some(42));
+        assert_eq!(json_u32(&serde_json::json!(0)), None);
+        assert_eq!(json_u32(&serde_json::json!("0")), None);
+        assert_eq!(json_u32(&serde_json::json!("nope")), None);
+        assert_eq!(json_u32(&serde_json::json!(u64::MAX)), None);
+    }
+
+    #[test]
+    fn token_from_response_requires_core_fields() {
+        let missing_access = token_from_response(&serde_json::json!({
+            "refresh_token": "refresh",
+            "expires_in": 60
+        }))
+        .unwrap_err();
+        assert!(missing_access.contains("access_token"));
+
+        let missing_refresh = token_from_response(&serde_json::json!({
+            "access_token": "access",
+            "expires_in": 60
+        }))
+        .unwrap_err();
+        assert!(missing_refresh.contains("refresh_token"));
+
+        let missing_expiry = token_from_response(&serde_json::json!({
+            "access_token": "access",
+            "refresh_token": "refresh"
+        }))
+        .unwrap_err();
+        assert!(missing_expiry.contains("expires_in"));
+    }
+
+    #[test]
+    fn token_from_response_defaults_optional_scope_and_type() {
+        let before = unix_now();
+        let tokens = token_from_response(&serde_json::json!({
+            "access_token": "access",
+            "refresh_token": "refresh",
+            "expires_in": 60
+        }))
+        .unwrap();
+
+        assert_eq!(tokens.access_token, "access");
+        assert_eq!(tokens.refresh_token, "refresh");
+        assert_eq!(tokens.scope, "");
+        assert_eq!(tokens.token_type, "Bearer");
+        assert!(tokens.expires_at >= before + 60);
+    }
+
+    #[test]
+    fn oauth_error_prefers_structured_fields_before_raw_body() {
+        let resp = OAuthResponse {
+            status: 400,
+            body: "raw body".into(),
+            json: serde_json::json!({"message": "structured message"}),
+        };
+        assert_eq!(
+            oauth_error(&resp, "Refresh failed"),
+            "Refresh failed (HTTP 400): structured message"
+        );
+
+        let raw = OAuthResponse {
+            status: 500,
+            body: "server exploded".into(),
+            json: serde_json::Value::Null,
+        };
+        assert_eq!(
+            oauth_error(&raw, "Refresh failed"),
+            "Refresh failed (HTTP 500): server exploded"
+        );
+    }
+
+    use serial_test::serial;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        old_value: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let old_value = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, old_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.old_value {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_cached_model_info_reads_legacy_shapes_and_ignores_bad_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _cache_guard = EnvVarGuard::set("XDG_CACHE_HOME", tmp.path());
+
+        let path = models_cache_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"["kimi-a", "kimi-b"]"#).unwrap();
+        assert_eq!(load_cached_models(), vec!["kimi-a", "kimi-b"]);
+
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version": 999,
+                "models": [{"id": "ignored", "context_length": 1}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(load_cached_model_info().is_empty());
+    }
 }
