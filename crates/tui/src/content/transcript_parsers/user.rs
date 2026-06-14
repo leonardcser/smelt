@@ -55,6 +55,12 @@ pub(super) fn render(
     })
 }
 
+pub(super) fn measure(text: &str, width: usize) -> u16 {
+    let text_w = chrome_text_width(width);
+    let geom = UserBlockGeometry::new(text);
+    super::chrome::measure(&geom.lines, text_w)
+}
+
 fn print_highlights(
     out: &mut LineBuilder,
     text: &str,

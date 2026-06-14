@@ -17,6 +17,19 @@ pub(super) struct ChunkPos {
     pub char_start: usize,
 }
 
+pub(super) fn measure(lines: &[String], text_w: usize) -> u16 {
+    let mut rows = 2u16; // top and bottom padding rows
+    for logical in lines {
+        if logical.is_empty() {
+            rows = rows.saturating_add(1);
+            continue;
+        }
+        let line = InlineLine::plain(logical.as_str(), ());
+        rows = rows.saturating_add(line.wrap_plain_ranges(text_w).len() as u16);
+    }
+    rows
+}
+
 pub(super) fn render(
     out: &mut LineBuilder,
     lines: &[String],

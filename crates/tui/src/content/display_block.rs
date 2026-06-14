@@ -1,4 +1,4 @@
-use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
+use crate::smelt_edit::{Buffer, Theme};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block, CodeBlock};
 use smelt_core::content::LayoutContext;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
@@ -351,7 +351,10 @@ pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
             }
             _ => unreachable!("tool display block must wrap a tool call block"),
         },
-        DisplayBlock::Legacy { .. } => measure_legacy_by_rendering(block, ctx),
+        DisplayBlock::Legacy { block } => {
+            let lctx = LayoutContext::new(ctx.width, ctx.show_thinking, ctx.view_state);
+            crate::content::transcript_parsers::measure_block(block, None, &lctx)
+        }
     };
     ctx.view_state.measured_height(expanded_rows)
 }
@@ -374,18 +377,6 @@ fn measure_block_label(block: &DisplayBlock) -> &'static str {
     }
 }
 
-fn measure_legacy_by_rendering(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
-    let theme = Theme::default();
-    let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-    let render_ctx = RenderCtx {
-        width: ctx.width,
-        show_thinking: ctx.show_thinking,
-        view_state: ViewState::Expanded,
-        theme: &theme,
-    };
-    render_block_into(&mut buf, block, render_ctx).line_count as u64
-}
-
 pub(crate) fn render_block_into(
     buf: &mut Buffer,
     block: &DisplayBlock,
@@ -404,6 +395,7 @@ pub(crate) fn render_block_into(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::smelt_edit::{BufCreateOpts, BufId};
     use smelt_core::content::block_layout::{BlockLayout, IrLeaf, TextSpec, ToolBody};
     use smelt_core::content::transcript::Transcript;
     use smelt_core::transcript_model::{ToolOutput, ToolStatus};
@@ -419,6 +411,77 @@ mod tests {
                 sidecar_hash: 0,
             },
         )
+    }
+
+    fn rendered_rows(block: &DisplayBlock, width: u16, show_thinking: bool) -> u64 {
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        render_block_into(
+            &mut buf,
+            block,
+            RenderCtx {
+                width,
+                show_thinking,
+                view_state: ViewState::Expanded,
+                theme: &theme,
+            },
+        )
+        .line_count as u64
+    }
+
+    fn measured_rows(block: &DisplayBlock, width: u16, show_thinking: bool) -> u64 {
+        measure_block(
+            block,
+            MeasureCtx {
+                width,
+                show_thinking,
+                view_state: ViewState::Expanded,
+            },
+        )
+    }
+
+    #[test]
+    fn legacy_measurement_matches_rendered_rows() {
+        let blocks = [
+            Block::Text {
+                content: "# Heading\n\nParagraph with **bold** text that wraps across several rows at narrow widths.\n\n```rust\nfn main() { println!(\"hello\"); }\n```\n\n| col | val |\n| --- | --- |\n| a | table cell that wraps |"
+                    .into(),
+            },
+            Block::User {
+                text: "Please inspect @crates/tui/src/content/display_block.rs and this long line that wraps."
+                    .into(),
+                image_labels: vec![],
+            },
+            Block::ProcessStatus {
+                text: "running a long process status that wraps on narrow terminals".into(),
+            },
+            Block::Thinking {
+                content: "**Plan**\nThink through a long line that wraps in expanded thinking mode.".into(),
+            },
+            Block::Exec {
+                command: "echo a very long shell command that wraps".into(),
+                output: "output line that is also long enough to wrap in the transcript".into(),
+            },
+            Block::Compacted {
+                summary: "A compacted **summary** with enough text to wrap.".into(),
+            },
+            Block::Mode {
+                text: "plan".into(),
+                icon: "◈ ".into(),
+                hl_group: "SmeltAccent".into(),
+            },
+        ];
+
+        for block in blocks {
+            let display = compile_block(&block, None);
+            for show_thinking in [false, true] {
+                assert_eq!(
+                    measured_rows(&display, 36, show_thinking),
+                    rendered_rows(&display, 36, show_thinking),
+                    "measurement mismatch for {block:?}, show_thinking={show_thinking}"
+                );
+            }
+        }
     }
 
     #[test]

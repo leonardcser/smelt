@@ -43,6 +43,24 @@ pub(super) fn render(
     rows
 }
 
+pub(super) fn measure(content: &str, width: usize, show_thinking: bool) -> u16 {
+    if !show_thinking {
+        let (label, line_count) = thinking_summary(content);
+        return measure_thinking_summary(width, &label, line_count);
+    }
+    let max_cols = block_inner_width(width);
+    content
+        .lines()
+        .map(|line| {
+            let mut spans = parse_inline_spans(line, true);
+            for span in &mut spans {
+                span.style.italic = true;
+            }
+            wrap_inline_spans(&spans, max_cols).len() as u16
+        })
+        .sum()
+}
+
 /// Returns `(label, non_empty_line_count)`. Uses the first `**bold**` line as label if present.
 pub(super) fn thinking_summary(content: &str) -> (String, usize) {
     let mut label = None;
@@ -62,6 +80,13 @@ pub(super) fn thinking_summary(content: &str) -> (String, usize) {
         }
     }
     (label.unwrap_or_else(|| "thinking".to_string()), lines)
+}
+
+fn measure_thinking_summary(width: usize, label: &str, line_count: usize) -> u16 {
+    let summary = format!("{label} ({})", pluralize(line_count, "line", "lines"));
+    let max_cols = block_inner_width(width);
+    let line = InlineLine::plain(summary.as_str(), ());
+    line.wrap_plain_ranges(max_cols).len() as u16
 }
 
 fn render_thinking_summary(

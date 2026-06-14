@@ -7,7 +7,7 @@ use smelt_core::style::Color;
 use smelt_core::theme::intern;
 
 use super::metrics::chrome_text_width;
-use super::tools::render_wrapped_output;
+use super::tools::{measure_wrapped_output, render_wrapped_output};
 
 pub(super) fn render(out: &mut LineBuilder, command: &str, output: &str, width: usize) -> u16 {
     let text_w = chrome_text_width(width);
@@ -33,6 +33,17 @@ pub(super) fn render(out: &mut LineBuilder, command: &str, output: &str, width: 
 
     if !output.is_empty() {
         rows += render_wrapped_output(out, output, false, width);
+    }
+    rows
+}
+
+pub(super) fn measure(command: &str, output: &str, width: usize) -> u16 {
+    let text_w = chrome_text_width(width);
+    let command = crate::content::display_safe_text(&format!("!{command}"));
+    let lines = [command];
+    let mut rows = super::chrome::measure(&lines, text_w);
+    if !output.is_empty() {
+        rows = rows.saturating_add(measure_wrapped_output(output, width));
     }
     rows
 }

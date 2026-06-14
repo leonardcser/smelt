@@ -29,6 +29,37 @@ pub use markdown::render_markdown_inner;
 pub(crate) use tools::measure_tool_height;
 pub use tools::render_tool_body_into;
 
+pub(crate) fn measure_block(block: &Block, state: Option<&ToolState>, ctx: &LayoutContext) -> u64 {
+    let width = ctx.width as usize;
+    let expanded_rows = match block {
+        Block::User { text, .. } => user::measure(text, width),
+        Block::Mode { .. } => 1,
+        Block::ProcessStatus { text } => process_status::measure(text, width),
+        Block::Thinking { content } => thinking::measure(content, width, ctx.show_thinking),
+        Block::Text { content } => text::measure(content, width),
+        Block::CodeLine { content, lang } => {
+            let block = smelt_core::content::code_block::parse_code_block(&[content], lang);
+            smelt_core::content::code_block::measure_code_block(&block, width) as u16
+        }
+        Block::ToolCall { name, summary, .. } => {
+            let state = state.expect("ToolCall block requires ToolState");
+            tools::measure_tool_height(
+                name,
+                summary,
+                state.status,
+                state.elapsed,
+                state.output.as_deref(),
+                state.user_message.as_deref(),
+                state.body.as_ref(),
+                width,
+            )
+        }
+        Block::Exec { command, output } => exec::measure(command, output, width),
+        Block::Compacted { summary } => compacted::measure(summary, width),
+    } as u64;
+    ctx.view_state.measured_height(expanded_rows)
+}
+
 /// Per-tool row cap (applied to command header and output body separately).
 const MAX_TOOL_BLOCK_ROWS: usize = 20;
 

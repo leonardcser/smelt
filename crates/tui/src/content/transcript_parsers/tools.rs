@@ -753,7 +753,7 @@ fn print_dim_non_selectable(out: &mut LineBuilder, time_str: &str) {
     }
 }
 
-fn measure_tool_output(content: &str, width: usize) -> u16 {
+pub(super) fn measure_wrapped_output(content: &str, width: usize) -> u16 {
     let max_cols = super::metrics::block_inner_width(width);
     let total_rows: usize = content
         .lines()
@@ -764,6 +764,10 @@ fn measure_tool_output(content: &str, width: usize) -> u16 {
         })
         .sum();
     (total_rows.min(MAX_TOOL_BLOCK_ROWS) + usize::from(total_rows > MAX_TOOL_BLOCK_ROWS)) as u16
+}
+
+fn measure_tool_output(content: &str, width: usize) -> u16 {
+    measure_wrapped_output(content, width)
 }
 
 pub fn render_tool_body_into(out: &mut LineBuilder, body: &ToolBody, width: u16) -> u16 {

@@ -1,6 +1,8 @@
 use smelt_core::content::builder::LineBuilder;
-use smelt_core::content::code_block::parse_code_block;
-use smelt_core::content::highlight::{render_code_block, render_markdown_table};
+use smelt_core::content::code_block::{measure_code_block, parse_code_block};
+use smelt_core::content::highlight::{
+    measure_markdown_table, render_code_block, render_markdown_table,
+};
 use smelt_core::content::markdown_ir::{parse_markdown, MarkdownBlock, MarkdownNode};
 use smelt_core::theme::intern;
 
@@ -15,6 +17,17 @@ pub fn render_markdown_inner(
     let _perf = smelt_perf::perf::begin("render:markdown");
     let block = parse_markdown(content);
     render_markdown_block(out, &block, width, indent, dim, bctx)
+}
+
+pub fn measure_markdown_inner(
+    content: &str,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+) -> u16 {
+    let block = parse_markdown(content);
+    measure_markdown_block(&block, width, indent, dim, bctx)
 }
 
 fn render_markdown_block(
@@ -70,6 +83,176 @@ fn render_markdown_block(
     }
 
     state.rows
+}
+
+fn measure_markdown_block(
+    block: &MarkdownBlock<'_>,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+) -> u16 {
+    let max_cols = if let Some(b) = bctx {
+        b.inner_w
+    } else {
+        width.saturating_sub(indent.len() + 1)
+    };
+    let mut state = MeasureState::default();
+
+    for node in &block.nodes {
+        match node {
+            MarkdownNode::Source { range } => {
+                let source = smelt_buffer::text::slice(block.source, range.clone());
+                measure_source_lines(source, max_cols, dim, &mut state);
+            }
+            MarkdownNode::Code { lang, body, .. } => {
+                measure_block_gap(&mut state);
+                let code_lines: Vec<&str> = body
+                    .iter()
+                    .flat_map(|range| {
+                        smelt_buffer::text::slice(block.source, range.clone()).lines()
+                    })
+                    .collect();
+                let code_block = parse_code_block(&code_lines, lang);
+                state.rows = state
+                    .rows
+                    .saturating_add(measure_code_block(&code_block, width) as u16);
+                state.last_content_was_heading = false;
+                state.prev_was_block = true;
+            }
+            MarkdownNode::Table { range } => {
+                measure_block_gap(&mut state);
+                let source = smelt_buffer::text::slice(block.source, range.clone());
+                let lines: Vec<&str> = source.lines().collect();
+                state.rows = state.rows.saturating_add(measure_markdown_table_from_lines(
+                    &lines, width, dim, bctx, indent,
+                ));
+                state.last_content_was_heading = false;
+                state.prev_was_block = true;
+            }
+            MarkdownNode::Rule { .. } => {
+                measure_block_gap(&mut state);
+                state.rows = state.rows.saturating_add(1);
+                state.last_content_was_heading = false;
+                state.prev_was_block = true;
+            }
+        }
+    }
+
+    state.rows
+}
+
+#[derive(Default)]
+struct MeasureState {
+    rows: u16,
+    last_content_was_heading: bool,
+    pending_blank: bool,
+    prev_was_block: bool,
+}
+
+fn measure_block_gap(state: &mut MeasureState) {
+    let mut gap_emitted = false;
+    if state.pending_blank {
+        state.rows = state.rows.saturating_add(1);
+        state.pending_blank = false;
+        gap_emitted = true;
+    }
+    if state.rows > 0 && !gap_emitted && !state.last_content_was_heading {
+        state.rows = state.rows.saturating_add(1);
+    }
+}
+
+fn measure_source_lines(source: &str, max_cols: usize, dim: bool, state: &mut MeasureState) {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.trim().is_empty() {
+            let mut next_i = i + 1;
+            while next_i < lines.len() && lines[next_i].trim().is_empty() {
+                next_i += 1;
+            }
+            if state.rows > 0
+                && !state.last_content_was_heading
+                && next_i < lines.len()
+                && !is_list_item(lines[next_i])
+            {
+                state.pending_blank = true;
+            }
+            i = next_i;
+            continue;
+        }
+
+        let mut gap_emitted = false;
+        if state.pending_blank {
+            state.rows = state.rows.saturating_add(1);
+            state.pending_blank = false;
+            gap_emitted = true;
+        }
+        if state.prev_was_block && !gap_emitted {
+            state.rows = state.rows.saturating_add(1);
+        }
+        state.rows = state
+            .rows
+            .saturating_add(measure_markdown_line(line, max_cols, dim));
+        state.last_content_was_heading = line.trim_start().starts_with('#');
+        state.prev_was_block = false;
+        i += 1;
+    }
+}
+
+fn measure_markdown_line(line: &str, max_cols: usize, dim: bool) -> u16 {
+    use smelt_core::content::highlight::{
+        parse_inline_spans, wrap_inline_spans, InlineSpan, InlineStyle,
+    };
+
+    let trimmed = line.trim_start();
+    let leading_ws = &line[..line.len() - trimmed.len()];
+    let mut line_spans: Vec<InlineSpan> = Vec::new();
+
+    if trimmed.starts_with('#') {
+        line_spans.push(InlineSpan {
+            text: trimmed.to_string(),
+            style: InlineStyle {
+                bold: true,
+                dim,
+                group: Some(intern("SmeltHeading")),
+                ..Default::default()
+            },
+        });
+    } else if trimmed.starts_with('>') {
+        line_spans.push(InlineSpan {
+            text: trimmed.to_string(),
+            style: InlineStyle {
+                dim: true,
+                italic: true,
+                ..Default::default()
+            },
+        });
+    } else {
+        let (prefix, body) = split_list_prefix(trimmed);
+        if !leading_ws.is_empty() {
+            line_spans.push(InlineSpan {
+                text: leading_ws.to_string(),
+                style: InlineStyle {
+                    dim,
+                    ..Default::default()
+                },
+            });
+        }
+        if !prefix.is_empty() {
+            line_spans.push(InlineSpan {
+                text: prefix.to_string(),
+                style: InlineStyle {
+                    dim: true,
+                    ..Default::default()
+                },
+            });
+        }
+        line_spans.extend(parse_inline_spans(body, dim));
+    }
+
+    wrap_inline_spans(&line_spans, max_cols).len() as u16
 }
 
 #[derive(Default)]
@@ -352,6 +535,29 @@ fn render_markdown_table_from_lines(
     let n = render_markdown_table(out, &table_rows, &alignments, width, dim, bctx, indent);
     out.stamp_copy_group(start, &lines.join("\n"));
     n
+}
+
+fn measure_markdown_table_from_lines(
+    lines: &[&str],
+    width: usize,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    indent: &str,
+) -> u16 {
+    let mut alignments = Vec::new();
+    let mut table_rows: Vec<Vec<String>> = Vec::new();
+    for line in lines {
+        if smelt_core::content::is_table_separator(line) {
+            if alignments.is_empty() {
+                alignments = smelt_core::content::parse_table_alignments(line);
+            }
+            continue;
+        }
+        let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
+        let cells: Vec<String> = trimmed.split('|').map(|c| c.trim().to_string()).collect();
+        table_rows.push(cells);
+    }
+    measure_markdown_table(&table_rows, &alignments, width, dim, bctx, indent)
 }
 
 #[cfg(test)]

@@ -35,10 +35,7 @@ pub fn render_markdown_table(
         return 0;
     }
 
-    let max_table = match bctx {
-        Some(b) => b.inner_w,
-        None => width.saturating_sub(display_width(indent)),
-    };
+    let max_table = markdown_table_width(width, bctx, indent);
     let align_for = |c: usize| alignments.get(c).copied().unwrap_or_default();
 
     let start = out.line_count();
@@ -60,6 +57,101 @@ pub fn render_markdown_table(
     total_rows += render_border(out, &col_widths, bctx, indent, "┗", "┻", "┛");
     out.stamp_chrome_delimited_block(start);
     total_rows
+}
+
+pub fn measure_markdown_table(
+    rows: &[Vec<String>],
+    alignments: &[ColumnAlignment],
+    width: usize,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+) -> u16 {
+    let _ = alignments;
+    if rows.is_empty() {
+        return 0;
+    }
+    let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if num_cols == 0 {
+        return 0;
+    }
+
+    let max_table = markdown_table_width(width, bctx, indent);
+    let Some(col_widths) = fit_column_widths(rows, num_cols, max_table) else {
+        return measure_table_stacked(rows, max_table, dim);
+    };
+
+    let header_rows = rows
+        .first()
+        .map(|header| measure_table_row(header, &col_widths, dim))
+        .unwrap_or(0);
+    let body_rows: u16 = rows
+        .iter()
+        .skip(1)
+        .map(|row| measure_table_row(row, &col_widths, dim))
+        .sum();
+    header_rows.saturating_add(body_rows).saturating_add(3) // top border, header separator, bottom border
+}
+
+fn markdown_table_width(
+    width: usize,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+) -> usize {
+    match bctx {
+        Some(b) => b.inner_w,
+        None => width.saturating_sub(display_width(indent)),
+    }
+}
+
+fn measure_table_row(row: &[String], widths: &[usize], dim: bool) -> u16 {
+    row.iter()
+        .enumerate()
+        .map(|(c, cell)| measure_cell_rows(cell, widths.get(c).copied().unwrap_or(0), dim))
+        .max()
+        .unwrap_or(1)
+}
+
+fn measure_table_stacked(rows: &[Vec<String>], max_table: usize, dim: bool) -> u16 {
+    let header = match rows.first() {
+        Some(h) => h,
+        None => return 0,
+    };
+    let label_width = header
+        .iter()
+        .map(|h| strip_markdown_markers(h).width())
+        .max()
+        .unwrap_or(0);
+    let content_width = max_table.max(1);
+    let label_value_indent = 2 + label_width + 2;
+    let side_by_side = label_width > 0 && label_value_indent < content_width;
+    let value_width = content_width.saturating_sub(label_value_indent).max(1);
+    let mut total_rows = 0u16;
+    for (ri, row) in rows.iter().skip(1).enumerate() {
+        if ri > 0 {
+            total_rows = total_rows.saturating_add(1);
+        }
+        for (c, cell) in row.iter().enumerate() {
+            let label = header.get(c).map(|s| s.as_str()).unwrap_or("");
+            if side_by_side {
+                total_rows = total_rows.saturating_add(measure_cell_rows(cell, value_width, dim));
+            } else {
+                let inner_indent = content_width.min(2);
+                let text_width = content_width.saturating_sub(inner_indent).max(1);
+                if !label.is_empty() {
+                    total_rows =
+                        total_rows.saturating_add(measure_cell_rows(label, text_width, dim));
+                }
+                total_rows = total_rows.saturating_add(measure_cell_rows(cell, text_width, dim));
+            }
+        }
+    }
+    total_rows
+}
+
+fn measure_cell_rows(text: &str, max_width: usize, dim: bool) -> u16 {
+    let spans = parse_inline_spans(text, dim);
+    wrap_inline_spans(&spans, max_width).len() as u16
 }
 
 /// Pick a final width per column that fits within `max_table` (including the

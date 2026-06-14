@@ -59,8 +59,8 @@ pub use diff::{
     SplitDiffPlan, SplitSide,
 };
 pub use inline::{
-    emit_inline_spans, inline_spans_width, parse_inline_spans, render_markdown_table,
-    wrap_inline_spans, InlineSpan, InlineStyle,
+    emit_inline_spans, inline_spans_width, measure_markdown_table, parse_inline_spans,
+    render_markdown_table, wrap_inline_spans, InlineSpan, InlineStyle,
 };
 pub use syntax::{
     lang_to_ext, print_code_lines, print_syntax_file, print_syntax_file_ext, render_code_block,
