@@ -181,7 +181,8 @@ fn push_unique(keys: &mut Vec<String>, key: String) {
 pub(crate) fn catalog_key<'a>(provider_type: &'a str, api_base: &'a str) -> Option<&'a str> {
     match provider_type {
         "kimi-code" => Some("kimi-for-coding"),
-        // Compatibility for configs written before Kimi Code had its own provider kind.
+        // COMPAT(kimi-anthropic-compatible-provider-kind): configs from before
+        // Kimi Code had its own provider kind used anthropic-compatible.
         "anthropic-compatible" if crate::provider::kimi_code::is_api_base(api_base) => {
             Some("kimi-for-coding")
         }

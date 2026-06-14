@@ -267,15 +267,11 @@ pub fn replace_last_note_kind(
     true
 }
 
-// ---- Legacy `Vec<Message>` ↔ `Vec<HistoryItem>` conversion ------------
+// Provider-wire `Vec<Message>` ↔ semantic `Vec<HistoryItem>` conversion.
 //
-// The wire format (Anthropic / OpenAI request bodies) and on-disk session
-// files still serialize as `Vec<Message>`. Conversion happens at two
-// boundaries: deserializing an old session file, and building an LLM
-// request body. Both directions are loss-free for *valid* histories. The
-// `Vec<Message> -> Vec<HistoryItem>` direction also repairs orphan tool_use
-// blocks by synthesizing a "interrupted" result, which is what makes
-// resuming a session that was killed mid-tool safe (see issue #8).
+// `history_to_messages` is the current provider request path. `history_from_messages`
+// is COMPAT(session-v1-messages): it loads old session files and repairs orphan
+// tool_use blocks by synthesizing an "interrupted" result (see issue #8).
 
 use crate::message::{Message, Role};
 
@@ -292,8 +288,8 @@ pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
 
 /// Convert user-role wire content into semantic history.
 ///
-/// Reserved `[smelt:*]` prefixes are legacy/model-visible encodings for
-/// internal notes, not real user turns.
+/// COMPAT(session-v1-messages): reserved `[smelt:*]` prefixes are old
+/// model-visible encodings for internal notes, not real user turns.
 pub fn history_item_from_user_content(content: Content) -> HistoryItem {
     match note_from_user_content(&content) {
         Some(note) => HistoryItem::Note(note),
@@ -304,7 +300,8 @@ pub fn history_item_from_user_content(content: Content) -> HistoryItem {
     }
 }
 
-/// Fold a legacy `Vec<Message>` into `Vec<HistoryItem>`.
+/// COMPAT(session-v1-messages): fold old `Vec<Message>` session logs into
+/// `Vec<HistoryItem>`.
 ///
 /// Pairs each assistant message that has `tool_calls` with the immediately
 /// following `Role::Tool` messages by `tool_call_id`. Any `tool_call` whose

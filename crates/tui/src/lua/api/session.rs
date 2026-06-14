@@ -317,6 +317,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(Some(messages_to_lua(lua, &messages)?))
         },
     )?;
+    // COMPAT(lua-session-messages-write): keep the `messages(list)` setter for
+    // plugins that still replace history with provider-style message rows.
     // smelt.session.messages() reads (optional opts table filters);
     // smelt.session.messages(list) atomically replaces the message list,
     // clears snapshots, restores the screen, and saves the session.

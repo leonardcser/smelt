@@ -1020,11 +1020,10 @@ impl<'a> Turn<'a> {
 
             self.apply_pending_history_items_for_request();
 
-            // Fire `smelt.provider.middleware{on_request=...}` hooks
-            // against the wire-format view. The host trait still speaks
-            // `Vec<Message>` for plugin-compatibility; any replacement is
-            // folded back into the `HistoryItem` shape (which repairs any
-            // orphan tool_use a misbehaving plugin might introduce).
+            // COMPAT(lua-provider-middleware-messages): plugin hooks still see
+            // `Vec<Message>`; any replacement is folded back into `HistoryItem`
+            // shape (which repairs any orphan tool_use a misbehaving plugin might
+            // introduce).
             let request_view = protocol::history_to_messages(&self.history);
             if let Some(Some(replacement)) = self
                 .host_call(|reply| crate::host::HostCall::ProviderRequest {

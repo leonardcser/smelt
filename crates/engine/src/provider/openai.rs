@@ -52,6 +52,8 @@ fn effort_label(effort: ReasoningEffort) -> String {
     }
 }
 
+// COMPAT(openai-reasoning-summary-shape): old sessions may contain OpenAI
+// Responses reasoning summaries as an object or string; current wire uses an array.
 fn normalize_openai_reasoning_item(data: &serde_json::Value) -> serde_json::Value {
     let mut out = data.clone();
     let Some(obj) = out.as_object_mut() else {

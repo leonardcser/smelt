@@ -135,6 +135,8 @@ pub struct Session {
 
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
 
+// COMPAT(session-v1-messages): load old session.json files that stored
+// provider-style messages instead of native HistoryItem rows.
 /// Legacy on-disk JSON shape. Older sessions stored provider-style messages;
 /// snapshot keys are in `Vec<Message>` position space and get remapped to
 /// `Vec<HistoryItem>` positions on load.
@@ -170,6 +172,7 @@ struct SessionWire {
     #[serde(default)]
     pub context_tokens_history_len: Option<usize>,
     #[serde(default)]
+    // COMPAT(session-v1-messages): old sessions used this field name.
     #[serde(alias = "display_context_tokens")]
     pub visible_context_tokens: Option<u32>,
     #[serde(default)]
@@ -217,6 +220,7 @@ struct SessionWireV2 {
     #[serde(default)]
     pub context_tokens_history_len: Option<usize>,
     #[serde(default)]
+    // COMPAT(session-v1-messages): old sessions used this field name.
     #[serde(alias = "display_context_tokens")]
     pub visible_context_tokens: Option<u32>,
     #[serde(default)]
@@ -237,6 +241,8 @@ struct SessionWireProbe {
     history: Option<serde_json::Value>,
 }
 
+// COMPAT(session-v1-messages): old snapshot keys were stored in provider-message
+// positions, not semantic history positions.
 /// `msg_to_hist[i]` = index into history that absorbed message i.
 /// `msg_len` = total messages count (history_to_messages length).
 fn remap_msg_to_hist<T: Clone>(
@@ -269,6 +275,7 @@ fn truncate_snapshots_after<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize)
     }
 }
 
+// COMPAT(session-v1-messages): rebuild accounting from old cost-only snapshots.
 fn legacy_accounting_snapshots(
     cost_snapshots: Vec<(usize, f64)>,
     context_tokens: Option<u32>,
@@ -627,8 +634,8 @@ impl Session {
                 .context_tokens_history_len
                 .is_some_and(|len| len <= hist_idx)
         {
-            // Legacy sessions may not have accounting snapshots; keep a
-            // baseline that still fits the rewound history.
+            // COMPAT(session-v1-messages): old sessions may not have accounting
+            // snapshots; keep a baseline that still fits the rewound history.
         } else {
             self.clear_context_tokens();
         }
@@ -997,8 +1004,8 @@ pub fn list_sessions() -> Vec<SessionMeta> {
     out
 }
 
-/// Uses `meta.json` when present; falls back to `session.json` and regenerates
-/// the sidecar for older sessions.
+/// COMPAT(session-search-sidecar-missing): uses `meta.json` when present;
+/// falls back to `session.json` and regenerates the sidecar for older sessions.
 fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
     if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
         if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
@@ -1079,9 +1086,10 @@ fn build_search_blob(history: &[HistoryItem]) -> String {
     out
 }
 
-/// Read the searchable text blob for `id`. Falls back to regenerating from
-/// `session.json` (and caching to disk) when the `content.txt` sidecar is
-/// missing - older sessions written before the sidecar existed.
+/// Read the searchable text blob for `id`.
+///
+/// COMPAT(session-search-sidecar-missing): falls back to regenerating from
+/// `session.json` and caching to disk when the `content.txt` sidecar is missing.
 pub fn load_search_blob(id: &str) -> Option<String> {
     let _perf = smelt_perf::perf::begin("session:load_search_blob");
     let session_dir = sessions_dir().join(id);

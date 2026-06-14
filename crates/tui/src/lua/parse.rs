@@ -328,7 +328,8 @@ pub(crate) fn border(opts: &mlua::Table) -> Result<Option<Border>, String> {
                     other => *slot = edge_opt(other)?,
                 }
             }
-            // Back-compat: `sides = { "top", "left" }` or `sides = { top = true }`.
+            // COMPAT(lua-border-sides): old border shape `sides = { "top" }`
+            // or `sides = { top = true }`.
             if let mlua::Value::Table(st) =
                 t.get::<mlua::Value>("sides").unwrap_or(mlua::Value::Nil)
             {

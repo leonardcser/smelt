@@ -589,6 +589,8 @@ impl TuiApp {
             if let Some(id) = history.order.last().copied() {
                 let replaces_mode_block = kind == protocol::HistoryNoteKind::ModeChange
                     && matches!(history.blocks.get(&id), Some(Block::Mode { .. }));
+                // COMPAT(legacy-process-status-notes): replace old mode-note user
+                // text when appending a semantic mode block.
                 let replaces_legacy_prefixed_text = kind == protocol::HistoryNoteKind::ModeChange
                     && matches!(
                         history.blocks.get(&id),

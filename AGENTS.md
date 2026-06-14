@@ -22,6 +22,12 @@ set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120
 
 ## Conventions
 
+### Compatibility debt
+
+Mark removable compatibility code with `COMPAT(<id>)` and add the id to
+`docs/compat.md` with when/why to remove it. Don't tag normal fallbacks or
+provider quirks unless we intend to delete them.
+
 ### UTF-8 safety
 
 Byte offsets in this codebase routinely survive across source mutations

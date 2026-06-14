@@ -602,6 +602,8 @@ fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
     }
 }
 
+// COMPAT(legacy-process-status-notes): old sessions stored background process
+// status as plain user text before HistoryNote::ProcessStatus existed.
 fn is_legacy_process_status_note(text: &str) -> bool {
     let Some(status) = text.strip_prefix("Background process ") else {
         return false;

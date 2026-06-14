@@ -32,8 +32,9 @@ impl BufFormat {
     /// Resolve a mode from a Lua opts table. Recognised shapes:
     /// - `{ mode = "plain" }` / `{ mode = "markdown" }` / `{ mode = "md" }`
     /// - `{ mode = "code", lang = "bash", diff_base? }`
-    /// - Legacy aliases: `bash`/`sh`/`shell` (→ Code lang=bash), `file` + `path` (lang from ext),
-    ///   `diff` + `path` (+ optional `old`) (Code with diff_base).
+    /// - COMPAT(lua-buffer-mode-aliases): legacy aliases `bash`/`sh`/`shell`
+    ///   (→ Code lang=bash), `file` + `path` (lang from ext), `diff` + `path`
+    ///   (+ optional `old`) (Code with diff_base).
     pub(crate) fn from_lua_spec(mode: &str, opts: &mlua::Table) -> Result<Self, String> {
         match mode {
             "plain" => Ok(Self::Plain),
