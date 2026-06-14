@@ -12,9 +12,6 @@ use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
-const HEAD_OVERSCAN_ROWS: RowIndex = 20;
-const TAIL_OVERSCAN_ROWS: RowIndex = 20;
-
 pub(crate) struct TranscriptProjection {
     display_model: DisplayModel,
     display_model_generation: u64,
@@ -896,19 +893,19 @@ impl TranscriptProjection {
             .scroll_top_for_resize_anchor(history, resize_anchor)
             .unwrap_or_else(|| scroll_target.as_scroll_top());
         let scroll_top = clamp_scroll(requested_scroll_top, total_rows, viewport_rows);
-        let viewport_end = scroll_top
-            .saturating_add(viewport_rows as RowIndex)
-            .min(total_rows);
+        let visible_rows = viewport_rows.max(1) as RowIndex;
+        let viewport_end = scroll_top.saturating_add(visible_rows).min(total_rows);
+        // Exact row heights make the visible window precise; keep half a viewport
+        // preloaded so nearby scrolls can reuse the materialized buffer.
+        let preload_rows = visible_rows / 2;
         let row_window = match scroll_target {
             ScrollTarget::Visible(ScrollAnchor::Row(_)) => {
-                let start = scroll_top.saturating_sub(HEAD_OVERSCAN_ROWS);
-                let end = viewport_end
-                    .saturating_add(TAIL_OVERSCAN_ROWS)
-                    .min(total_rows);
+                let start = scroll_top.saturating_sub(preload_rows);
+                let end = viewport_end.saturating_add(preload_rows).min(total_rows);
                 start..end
             }
             ScrollTarget::Visible(ScrollAnchor::Tail) => {
-                let start = scroll_top.saturating_sub(HEAD_OVERSCAN_ROWS);
+                let start = scroll_top.saturating_sub(preload_rows);
                 start..total_rows
             }
         };
@@ -1963,6 +1960,55 @@ mod tests {
             projection.counters().range_materialized_blocks < transcript.history.order.len(),
             "tail projection should materialize a bounded block range"
         );
+    }
+
+    #[test]
+    fn visible_projection_preload_scales_with_viewport() {
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(18), Default::default());
+        let viewport_rows = 10;
+        let max_materialized = (viewport_rows as RowIndex).saturating_mul(2);
+
+        let top = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(0),
+            viewport_rows,
+        );
+        assert!(
+            top.materialized_rows <= max_materialized,
+            "top projection should preload relative to viewport height: {top:?}"
+        );
+        assert!(buf.lines().iter().any(|line| line == "line 0"));
+
+        let tail = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_tail(),
+            viewport_rows,
+        );
+        assert!(
+            tail.materialized_rows <= max_materialized,
+            "tail projection should preload relative to viewport height: {tail:?}"
+        );
+        assert_eq!(
+            tail.clamped_scroll,
+            tail.total_rows.saturating_sub(viewport_rows as RowIndex)
+        );
+        assert!(buf.lines().iter().any(|line| line == "line 99"));
     }
 
     #[test]
