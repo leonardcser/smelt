@@ -267,7 +267,7 @@ impl TuiApp {
             token,
             APP_SEQUENCE_BINDINGS,
             now,
-            crate::app::CHORD_TIMEOUT_MS,
+            crate::app::APP_SEQUENCE_TIMEOUT_MS,
         ) {
             smelt_core::keymap::SequenceStep::Run(AppSequenceAction::HardEsc) => {
                 Some(self.handle_hard_escape_sequence())
@@ -310,13 +310,161 @@ impl TuiApp {
         }
     }
 
+    fn dispatch_window_lua_keymap(&mut self, key: KeyEvent) -> Option<EventOutcome> {
+        if self.ui.focused_overlay().is_some() {
+            return None;
+        }
+
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
+                              win: crate::smelt_edit::WinId,
+                              payload: &crate::smelt_edit::Payload| {
+            lua.queue_invocation(handle, win, payload);
+        };
+        let result = self
+            .ui
+            .dispatch_event(crate::smelt_edit::Event::Key(key), &mut lua_invoke);
+        if matches!(result, crate::smelt_edit::Status::Consumed) {
+            self.flush_lua_callbacks();
+            return Some(EventOutcome::Noop);
+        }
+        None
+    }
+
+    fn global_lua_keymaps_can_handle(&self, key: KeyEvent) -> bool {
+        !(matches!(key.code, KeyCode::Esc)
+            && key.modifiers == KeyModifiers::NONE
+            && self.focused_vim_mode() == Some(crate::smelt_edit::VimMode::Insert)
+            && self.timers.pending_chord.is_none())
+    }
+
+    fn pending_lua_keymap_cancelled_by(
+        &self,
+        key: KeyEvent,
+        token: &str,
+        vim_mode: Option<&str>,
+    ) -> bool {
+        let Some(pending) = &self.timers.pending_chord else {
+            return false;
+        };
+        let cancel_key = matches!(key.code, KeyCode::Esc) && key.modifiers == KeyModifiers::NONE
+            || matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+                && key.modifiers == KeyModifiers::CONTROL;
+        if !cancel_key {
+            return false;
+        }
+
+        let mut candidate = pending.tokens.concat();
+        candidate.push_str(token);
+        !self.lua.chord_has_binding(&candidate, vim_mode)
+            && !self.lua.chord_has_longer(&candidate, vim_mode)
+    }
+
+    fn dispatch_single_global_lua_keymap(&mut self, key: KeyEvent) -> bool {
+        if !self.global_lua_keymaps_can_handle(key) {
+            return false;
+        }
+        let Some(token) = crate::lua::chord_string(key) else {
+            return false;
+        };
+        let vim_mode = self.current_vim_mode_label();
+        use smelt_core::lua::runtime::KeymapResult;
+        match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
+            KeymapResult::Consumed => {
+                self.flush_lua_callbacks();
+                true
+            }
+            KeymapResult::PassThrough | KeymapResult::NoBinding => {
+                self.flush_lua_callbacks();
+                false
+            }
+        }
+    }
+
+    fn dispatch_global_lua_keymap(&mut self, key: KeyEvent) -> Option<EventOutcome> {
+        if !self.global_lua_keymaps_can_handle(key) {
+            return None;
+        }
+
+        let Some(token) = crate::lua::chord_string(key) else {
+            return self.timers.pending_chord.take().map(|_| EventOutcome::Noop);
+        };
+
+        let had_pending = self.timers.pending_chord.is_some();
+        let vim_mode = self.current_vim_mode_label();
+        if self.pending_lua_keymap_cancelled_by(key, &token, vim_mode.as_deref()) {
+            self.timers.pending_chord = None;
+            return Some(EventOutcome::Noop);
+        }
+        use smelt_core::lua::runtime::KeymapResult;
+
+        // If no sequence is pending, try exact single-key bindings first. Once a
+        // prefix is pending, the next key belongs to that sequence before any
+        // single-key binding gets a chance, matching Vim's modal mapping feel.
+        if !had_pending {
+            match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
+                KeymapResult::Consumed => {
+                    self.timers.pending_chord = None;
+                    self.flush_lua_callbacks();
+                    return Some(EventOutcome::Noop);
+                }
+                KeymapResult::PassThrough | KeymapResult::NoBinding => {
+                    self.flush_lua_callbacks();
+                }
+            }
+        }
+
+        if self.timers.pending_chord.is_none() {
+            self.timers.pending_chord = Some(crate::app::PendingChord {
+                tokens: Vec::new(),
+                vim_mode_at_start: if self.input.vim_enabled(self.prompt_win()) {
+                    Some(self.prompt_win().vim_mode())
+                } else {
+                    None
+                },
+            });
+        }
+        let (mut tokens, vim_mode_at_start) = {
+            let p = self.timers.pending_chord.take().unwrap();
+            (p.tokens, p.vim_mode_at_start)
+        };
+        tokens.push(token);
+
+        let mut oracle = LuaChordOracle {
+            lua: &self.lua,
+            vim_mode: vim_mode.as_deref(),
+            vim_mode_at_start,
+        };
+        let outcome = smelt_core::keymap::match_chord(tokens, &mut oracle);
+        self.flush_lua_callbacks();
+        match outcome {
+            smelt_core::keymap::ChordOutcome::Consumed => Some(EventOutcome::Noop),
+            smelt_core::keymap::ChordOutcome::Pending { tokens } => {
+                if tokens.is_empty() {
+                    self.timers.pending_chord = None;
+                    if had_pending {
+                        return Some(EventOutcome::Noop);
+                    }
+                } else {
+                    self.timers.pending_chord = Some(crate::app::PendingChord {
+                        tokens,
+                        vim_mode_at_start,
+                    });
+                    return Some(EventOutcome::Noop);
+                }
+                None
+            }
+        }
+    }
+
     // ── Idle event handler ───────────────────────────────────────────────
 
     /// Shared preamble for idle and agent-running paths.
     ///
     /// Returns `Some(outcome)` when consumed; `None` to continue with path-specific logic.
     ///
-    /// Dispatch priority: resize/mouse → Lua keymaps → pane chords → cmdline `:` → content focus → overlay keys.
+    /// Dispatch priority: resize/mouse → content search opener → window-local Lua
+    /// keymaps → global Lua keymaps → pane chords → cmdline `:` → content focus → overlay keys.
     fn dispatch_common(&mut self, ev: &Event) -> Option<EventOutcome> {
         if let Event::Resize(w, h) = *ev {
             self.handle_resize(w, h);
@@ -331,98 +479,11 @@ impl TuiApp {
             {
                 return Some(EventOutcome::Noop);
             }
-        }
-        // Buffer-local Lua keymaps win over global (nvim priority). Skipped when an overlay
-        // owns focus - overlay-leaf dispatch happens upstream.
-        if let Event::Key(k) = *ev {
-            if self.ui.focused_overlay().is_none() {
-                let lua = &self.lua;
-                let mut lua_invoke =
-                    |handle: crate::smelt_edit::LuaHandle,
-                     win: crate::smelt_edit::WinId,
-                     payload: &crate::smelt_edit::Payload| {
-                        lua.queue_invocation(handle, win, payload);
-                    };
-                let result = self
-                    .ui
-                    .dispatch_event(crate::smelt_edit::Event::Key(k), &mut lua_invoke);
-                if matches!(result, crate::smelt_edit::Status::Consumed) {
-                    self.flush_lua_callbacks();
-                    return Some(EventOutcome::Noop);
-                }
+            if let Some(outcome) = self.dispatch_window_lua_keymap(k) {
+                return Some(outcome);
             }
-        }
-
-        // Global Lua keymaps. Handlers may return `false` to fall through.
-        // Multi-key sequences accumulate in `self.timers.pending_chord` until exact-matched or timed out.
-        if let Event::Key(k) = *ev {
-            if let Some(token) = crate::lua::chord_string(k) {
-                let vim_mode = self.current_vim_mode_label();
-                use smelt_core::lua::runtime::KeymapResult;
-
-                // Single-key first - allocation-free common case.
-                match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
-                    KeymapResult::Consumed => {
-                        self.timers.pending_chord = None;
-                        self.flush_lua_callbacks();
-                        return Some(EventOutcome::Noop);
-                    }
-                    KeymapResult::PassThrough | KeymapResult::NoBinding => {
-                        self.flush_lua_callbacks();
-                    }
-                }
-
-                // Multi-key chord: drop stale pending sequence, then append and match.
-                let now = self.core.clock.instant_now();
-                if let Some(pending) = &self.timers.pending_chord {
-                    if smelt_core::keymap::chord_expired(
-                        pending.started,
-                        now,
-                        crate::app::CHORD_TIMEOUT_MS,
-                    ) {
-                        self.timers.pending_chord = None;
-                    }
-                }
-                if self.timers.pending_chord.is_none() {
-                    self.timers.pending_chord = Some(crate::app::PendingChord {
-                        tokens: Vec::new(),
-                        started: now,
-                        vim_mode_at_start: if self.input.vim_enabled(self.prompt_win()) {
-                            Some(self.prompt_win().vim_mode())
-                        } else {
-                            None
-                        },
-                    });
-                }
-                let (mut tokens, started, vim_mode_at_start) = {
-                    let p = self.timers.pending_chord.take().unwrap();
-                    (p.tokens, p.started, p.vim_mode_at_start)
-                };
-                tokens.push(token);
-
-                let mut oracle = LuaChordOracle {
-                    lua: &self.lua,
-                    vim_mode: vim_mode.as_deref(),
-                    vim_mode_at_start,
-                };
-                let outcome = smelt_core::keymap::match_chord(tokens, &mut oracle);
-                self.flush_lua_callbacks();
-                match outcome {
-                    smelt_core::keymap::ChordOutcome::Consumed => {
-                        return Some(EventOutcome::Noop);
-                    }
-                    smelt_core::keymap::ChordOutcome::Pending { tokens } => {
-                        if tokens.is_empty() {
-                            self.timers.pending_chord = None;
-                        } else {
-                            self.timers.pending_chord = Some(crate::app::PendingChord {
-                                tokens,
-                                started,
-                                vim_mode_at_start,
-                            });
-                        }
-                    }
-                }
+            if let Some(outcome) = self.dispatch_global_lua_keymap(k) {
+                return Some(outcome);
             }
         }
         if let Some(outcome) = self.handle_pane_chord(ev) {
@@ -1010,18 +1071,8 @@ impl TuiApp {
 
         // Tier 2: global Lua keymap (single-chord lookup only - overlays
         // don't participate in the chord-buffering path).
-        if let Some(token) = crate::lua::chord_string(k) {
-            let vim_mode = self.current_vim_mode_label();
-            use smelt_core::lua::runtime::KeymapResult;
-            match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
-                KeymapResult::Consumed => {
-                    self.flush_lua_callbacks();
-                    return Status::Consumed;
-                }
-                KeymapResult::PassThrough | KeymapResult::NoBinding => {
-                    self.flush_lua_callbacks();
-                }
-            }
+        if self.dispatch_single_global_lua_keymap(k) {
+            return Status::Consumed;
         }
 
         // Tier 3: vim viewer keys for vim-enabled read-only overlay leaves.
@@ -1076,7 +1127,9 @@ impl TuiApp {
             None => return false,
         };
         let in_insert = vim_enabled && vim_mode == crate::smelt_edit::VimMode::Insert;
-        if in_insert {
+        let insert_escape =
+            in_insert && k.code == KeyCode::Esc && k.modifiers == KeyModifiers::NONE;
+        if in_insert && !insert_escape {
             return false;
         }
         if k.code == KeyCode::Esc
@@ -1624,6 +1677,108 @@ mod tests {
             "queued input should be drained instead of left pending"
         );
         assert_eq!(state.prompt_text, "queued steer");
+    }
+
+    #[test]
+    fn vim_insert_esc_bypasses_global_esc_prefix_on_focused_surface() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        assert!(app.run_lua(
+            r#"
+                smelt.keymap.set("", "<Esc><Esc>", function()
+                    _G.esc_esc_hit = (_G.esc_esc_hit or 0) + 1
+                end)
+            "#
+        ));
+        app.app.handle_resize(80, 16);
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: "transcript row".to_string(),
+            });
+        app.render_silent();
+        app.app.app_focus = crate::app::AppFocus::Content;
+        app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+        app.app.transcript_win_mut().set_vim_enabled(true);
+        app.app
+            .transcript_win_mut()
+            .set_vim_mode(crate::smelt_edit::VimMode::Insert);
+
+        app.press(KeyCode::Esc);
+
+        assert_eq!(
+            app.app.transcript_win().vim_mode(),
+            crate::smelt_edit::VimMode::Normal
+        );
+        assert!(app.app.timers.pending_chord.is_none());
+        assert_eq!(app.lua_int_global("esc_esc_hit"), None);
+    }
+
+    #[test]
+    fn lua_keymap_prefix_enters_pending_state_until_match() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        assert!(app.run_lua(
+            r#"
+                smelt.keymap.set_leader("<space>")
+                smelt.keymap.set("n", "<leader>r", function()
+                    _G.leader_hit = (_G.leader_hit or 0) + 1
+                end)
+            "#
+        ));
+        app.app
+            .prompt_win_mut()
+            .set_vim_mode(crate::smelt_edit::VimMode::Normal);
+
+        app.press(KeyCode::Char(' '));
+
+        assert_eq!(app.state().prompt_text, "");
+        assert!(app.app.timers.pending_chord.is_some());
+        app.app.publish_diff_cells();
+        assert_eq!(
+            app.app
+                .core
+                .cells
+                .get::<String>("keymap_pending")
+                .as_deref(),
+            Some("<space>")
+        );
+
+        app.press(KeyCode::Char('r'));
+
+        assert_eq!(app.lua_int_global("leader_hit"), Some(1));
+        assert!(app.app.timers.pending_chord.is_none());
+    }
+
+    #[test]
+    fn lua_keymap_prefix_clears_on_escape_cancel() {
+        let mut app = TestApp::builder().with_vim(true).build();
+        assert!(app.run_lua(
+            r#"
+                smelt.keymap.set_leader("<space>")
+                smelt.keymap.set("n", "<leader>r", function()
+                    _G.leader_hit = (_G.leader_hit or 0) + 1
+                end)
+            "#
+        ));
+        app.app
+            .prompt_win_mut()
+            .set_vim_mode(crate::smelt_edit::VimMode::Normal);
+
+        app.press(KeyCode::Char(' '));
+        app.press(KeyCode::Esc);
+        app.app.publish_diff_cells();
+
+        assert!(app.app.timers.pending_chord.is_none());
+        assert_eq!(
+            app.app
+                .core
+                .cells
+                .get::<String>("keymap_pending")
+                .as_deref(),
+            Some("")
+        );
+
+        app.press(KeyCode::Char('r'));
+
+        assert_eq!(app.lua_int_global("leader_hit"), None);
     }
 
     #[test]

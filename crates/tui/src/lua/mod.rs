@@ -142,7 +142,7 @@ pub(crate) fn normalize_mode(mode: &str) -> Option<String> {
             "" | "*" | "any" | "all" => "",
             "n" | "normal" => "n",
             "i" | "insert" => "i",
-            "v" | "visual" => "v",
+            "v" | "visual" | "visual_line" | "visualline" => "v",
             _ => return None,
         }
         .to_string(),
@@ -1494,6 +1494,104 @@ mod tests {
         assert!(err.is_none(), "reload: {err:?}");
         let leader: String = rt.lua.load("return smelt.keymap.leader()").eval().unwrap();
         assert_eq!(leader, "\\");
+    }
+
+    #[test]
+    fn keymap_list_includes_optional_description() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap.set("n", "gd", function() end, { desc = "go to definition" })
+                    smelt.keymap.set("", "?", function() end)
+                "#,
+            )
+            .exec()
+            .expect("exec");
+
+        let rows: mlua::Table = rt.lua.load("return smelt.keymap.list()").eval().unwrap();
+        let mut found_desc = false;
+        let mut found_without_desc = false;
+        for row in rows.sequence_values::<mlua::Table>() {
+            let row = row.unwrap();
+            let chord: String = row.get("chord").unwrap();
+            let desc: Option<String> = row.get("desc").unwrap();
+            if chord == "gd" {
+                assert_eq!(desc.as_deref(), Some("go to definition"));
+                found_desc = true;
+            }
+            if chord == "?" {
+                assert_eq!(desc, None);
+                found_without_desc = true;
+            }
+        }
+        assert!(found_desc);
+        assert!(found_without_desc);
+    }
+
+    #[test]
+    fn keymap_prefixes_returns_effective_mode_filtered_rows() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap.set_leader("<space>")
+                    smelt.keymap.set("", "<leader>g", function() end, { desc = "global" })
+                    smelt.keymap.set("n", "<leader>r", function() end, { desc = "run" })
+                    smelt.keymap.set("i", "<leader>i", function() end, { desc = "insert" })
+                "#,
+            )
+            .exec()
+            .expect("exec");
+
+        let rows: mlua::Table = rt
+            .lua
+            .load(r#"return smelt.keymap.prefixes("<space>", "normal")"#)
+            .eval()
+            .unwrap();
+        let first: mlua::Table = rows.get(1).unwrap();
+        let second: mlua::Table = rows.get(2).unwrap();
+        assert_eq!(first.get::<String>("suffix").unwrap(), "g");
+        assert_eq!(first.get::<String>("desc").unwrap(), "global");
+        assert_eq!(second.get::<String>("suffix").unwrap(), "r");
+        assert_eq!(second.get::<String>("desc").unwrap(), "run");
+        assert_eq!(rows.raw_len(), 2);
+
+        let insert_rows: mlua::Table = rt
+            .lua
+            .load(r#"return smelt.keymap.prefixes("<space>", "insert")"#)
+            .eval()
+            .unwrap();
+        assert_eq!(insert_rows.raw_len(), 2);
+        let insert_second: mlua::Table = insert_rows.get(2).unwrap();
+        assert_eq!(insert_second.get::<String>("suffix").unwrap(), "i");
+    }
+
+    #[test]
+    fn keymap_prefixes_prefers_mode_specific_over_global_same_chord() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                    smelt.keymap.set_leader("<space>")
+                    smelt.keymap.set("", "<leader>r", function() end, { desc = "global" })
+                    smelt.keymap.set("n", "<leader>r", function() end, { desc = "normal" })
+                "#,
+            )
+            .exec()
+            .expect("exec");
+
+        let rows: mlua::Table = rt
+            .lua
+            .load(r#"return smelt.keymap.prefixes("<space>", "n")"#)
+            .eval()
+            .unwrap();
+        assert_eq!(rows.raw_len(), 1);
+        let first: mlua::Table = rows.get(1).unwrap();
+        assert_eq!(first.get::<String>("chord").unwrap(), "<space>r");
+        assert_eq!(first.get::<String>("suffix").unwrap(), "r");
+        assert_eq!(first.get::<String>("mode").unwrap(), "n");
+        assert_eq!(first.get::<String>("desc").unwrap(), "normal");
     }
 
     #[test]

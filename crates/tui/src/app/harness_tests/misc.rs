@@ -86,7 +86,7 @@ fn slow_double_escape_is_two_single_escapes() {
     app.start_turn(1);
 
     app.press(KeyCode::Esc);
-    app.feed_one(SourceEvent::Tick(crate::app::CHORD_TIMEOUT_MS + 1));
+    app.feed_one(SourceEvent::Tick(crate::app::APP_SEQUENCE_TIMEOUT_MS + 1));
     app.press(KeyCode::Esc);
 
     assert!(

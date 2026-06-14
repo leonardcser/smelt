@@ -9,7 +9,7 @@
 --
 -- The built-in `core` source reads engine state directly from cells
 -- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`,
--- `permission_pending`, `cursor_pos`). Plugins extend the line by
+-- `permission_pending`, `keymap_pending`, `cursor_pos`). Plugins extend the line by
 -- registering additional sources via `M.add(name, fn)`.
 
 local bar = require("smelt._bar")
@@ -108,6 +108,16 @@ local function core_compose()
   if cell("permission_pending") then
     items[#items + 1] = {
       text = "permission pending",
+      style = { fg = "SmeltAccent", bold = true },
+      priority = 2,
+      separated = true,
+    }
+  end
+
+  local keymap_pending = cell("keymap_pending")
+  if keymap_pending and keymap_pending ~= "" then
+    items[#items + 1] = {
+      text = "key " .. keymap_pending,
       style = { fg = "SmeltAccent", bold = true },
       priority = 2,
       separated = true,

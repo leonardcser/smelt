@@ -381,6 +381,7 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "history_epoch",
     "input_epoch",
     "input_submit",
+    "keymap_pending",
     "model",
     "now",
     "permission_pending",
@@ -698,6 +699,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("stream_delta", EventStub);
     cells.declare("stream_phase", EventStub);
     cells.declare("input_submit", String::new());
+    cells.declare("keymap_pending", String::new());
 
     cells
 }

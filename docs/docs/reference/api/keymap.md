@@ -28,17 +28,25 @@ Return the current `<leader>` expansion used when registering keymaps. Defaults 
 fun(): table
 ```
 
-Return the set of currently-bound `{ mode, chord }` rows. `mode` is the canonical short form (`"n"`/`"i"`/`"v"`/`""`).
+Return the set of currently-bound `{ mode, chord, desc? }` rows. `mode` is the canonical short form (`"n"`/`"i"`/`"v"`/`""`). `chord` is the display form after canonicalization and `<leader>` expansion.
+
+## `smelt.keymap.prefixes`
+
+```lua
+fun(pending: string, mode: string?): table
+```
+
+Return effective keymaps that extend `pending` in `mode` as `{ mode, chord, suffix, desc? }` rows. `pending` may be empty to list top-level mappings, otherwise it is canonicalized with the current leader. `mode` accepts the same forms as `set`; when omitted, the focused Vim mode is used (or Normal outside an app). Mode-specific bindings shadow global bindings for the same chord.
 
 ## `smelt.keymap.set`
 
 ```lua
-fun(mode: string, chord: string, handler: fun()): smelt.Reg
+fun(mode: string, chord: string, handler: fun(), opts: table?): smelt.Reg
 ```
 
 Types: [`smelt.Reg`](types.md#smeltreg)
 
-Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
+Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. `opts.desc` is an optional one-line description used by keybinding help UIs. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
 
 ## `smelt.keymap.set_leader`
 

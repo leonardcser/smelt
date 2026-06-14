@@ -455,6 +455,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 | Plugin | Summary |
 | --- | --- |
 | `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `exit_plan_mode` tool. |
+| `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- PLUGINS_END -->
 
@@ -1207,8 +1208,10 @@ Register chord→callback bindings and inspect the layered help index.
 - `smelt.keymap.leader` :: `fun(): string`
   Return the current `<leader>` expansion used when registering keymaps.
 - `smelt.keymap.list` :: `fun(): table`
-  Return the set of currently-bound `{ mode, chord }` rows.
-- `smelt.keymap.set` :: `fun(mode: string, chord: string, handler: fun()): smelt.Reg`
+  Return the set of currently-bound `{ mode, chord, desc? }` rows.
+- `smelt.keymap.prefixes` :: `fun(pending: string, mode: string?): table`
+  Return effective keymaps that extend `pending` in `mode` as `{ mode, chord, suffix, desc? }` rows.
+- `smelt.keymap.set` :: `fun(mode: string, chord: string, handler: fun(), opts: table?): smelt.Reg`
   Bind `chord` in `mode` to a Lua callback.
 - `smelt.keymap.set_leader` :: `fun(leader: string): nil`
   Set the `<leader>` expansion for subsequent keymap registrations.

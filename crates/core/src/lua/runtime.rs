@@ -50,7 +50,7 @@ const EARLY_DIRS: &[&str] = &["early"];
 /// calling `require("smelt.plugins.<name>")` from their `init.lua`. Exposed
 /// so the `gen-lua-docs` xtask can emit an opt-in vs autoload table in the
 /// `customize` skill.
-pub const OPTIONAL_PLUGINS: &[&str] = &["smelt.plugins.plan_mode"];
+pub const OPTIONAL_PLUGINS: &[&str] = &["smelt.plugins.plan_mode", "smelt.plugins.which_key"];
 
 /// Outcome of dispatching a keymap chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +60,41 @@ pub enum KeymapResult {
     /// Handler ran and returned `false`; key falls through.
     PassThrough,
     NoBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeymapPrefix {
+    pub mode: String,
+    pub chord: String,
+    pub suffix: String,
+    pub description: Option<String>,
+}
+
+fn keymap_mode_char(mode: &str) -> Option<&'static str> {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "" | "*" | "any" | "all" => Some(""),
+        "n" | "normal" => Some("n"),
+        "i" | "insert" => Some("i"),
+        "v" | "visual" | "visual_line" | "visualline" => Some("v"),
+        _ => match mode {
+            "Normal" => Some("n"),
+            "Insert" => Some("i"),
+            "Visual" | "VisualLine" => Some("v"),
+            _ => None,
+        },
+    }
+}
+
+fn dispatch_mode_char(current_mode: Option<&str>) -> Option<&'static str> {
+    current_mode.map(|mode| keymap_mode_char(mode).unwrap_or("n"))
+}
+
+fn query_mode_char(current_mode: Option<&str>) -> &'static str {
+    current_mode.and_then(keymap_mode_char).unwrap_or("n")
+}
+
+fn keymap_mode_matches(binding_mode: &str, active_mode: &str) -> bool {
+    binding_mode.is_empty() || binding_mode == active_mode
 }
 
 /// Context passed to a tool's `render(args, output, ctx)` hook.
@@ -635,19 +670,14 @@ impl LuaRuntime {
             let Ok(map) = self.shared.keymaps.lock() else {
                 return KeymapResult::NoBinding;
             };
-            let mode_char = current_mode.map(|m| match m {
-                "Normal" => "n",
-                "Insert" => "i",
-                "Visual" => "v",
-                _ => "n",
-            });
-            let handle = mode_char
+            let mode_char = dispatch_mode_char(current_mode);
+            let entry = mode_char
                 .and_then(|mc| map.get(&(mc.to_string(), chord.to_string())))
                 .or_else(|| map.get(&(String::new(), chord.to_string())));
-            let Some(handle) = handle else {
+            let Some(entry) = entry else {
                 return KeymapResult::NoBinding;
             };
-            let Ok(f) = self.lua.registry_value::<mlua::Function>(&handle.key) else {
+            let Ok(f) = self.lua.registry_value::<mlua::Function>(&entry.handle.key) else {
                 return KeymapResult::NoBinding;
             };
             f
@@ -692,12 +722,7 @@ impl LuaRuntime {
         let Ok(map) = self.shared.keymaps.lock() else {
             return false;
         };
-        let mode_char = current_mode.map(|m| match m {
-            "Normal" => "n",
-            "Insert" => "i",
-            "Visual" => "v",
-            _ => "n",
-        });
+        let mode_char = dispatch_mode_char(current_mode);
         mode_char
             .map(|mc| map.contains_key(&(mc.to_string(), chord.to_string())))
             .unwrap_or(false)
@@ -709,14 +734,9 @@ impl LuaRuntime {
         let Ok(map) = self.shared.keymaps.lock() else {
             return false;
         };
-        let mode_char = match current_mode {
-            Some("Normal") => "n",
-            Some("Insert") => "i",
-            Some("Visual") => "v",
-            _ => "n",
-        };
+        let mode_char = query_mode_char(current_mode);
         for (m, chord) in map.keys() {
-            if (m == mode_char || m.is_empty())
+            if keymap_mode_matches(m, mode_char)
                 && chord.len() > sequence.len()
                 && chord.starts_with(sequence)
             {
@@ -724,6 +744,46 @@ impl LuaRuntime {
             }
         }
         false
+    }
+
+    /// Return effective registered chords that strictly extend `sequence` in `current_mode`.
+    pub fn keymap_prefixes(&self, sequence: &str, current_mode: Option<&str>) -> Vec<KeymapPrefix> {
+        let Ok(map) = self.shared.keymaps.lock() else {
+            return Vec::new();
+        };
+        let mode_char = query_mode_char(current_mode);
+        let mut rows: Vec<KeymapPrefix> = map
+            .iter()
+            .filter_map(|((mode, chord), entry)| {
+                if !keymap_mode_matches(mode, mode_char)
+                    || chord.len() <= sequence.len()
+                    || !chord.starts_with(sequence)
+                {
+                    return None;
+                }
+                Some(KeymapPrefix {
+                    mode: mode.clone(),
+                    chord: chord.clone(),
+                    suffix: chord[sequence.len()..].to_string(),
+                    description: entry.description.clone(),
+                })
+            })
+            .collect();
+
+        rows.sort_by(|a, b| {
+            a.chord
+                .cmp(&b.chord)
+                .then_with(|| a.mode.is_empty().cmp(&b.mode.is_empty()))
+                .then_with(|| a.description.cmp(&b.description))
+        });
+        rows.dedup_by(|a, b| a.chord == b.chord);
+        rows.sort_by(|a, b| {
+            a.suffix
+                .cmp(&b.suffix)
+                .then_with(|| a.description.cmp(&b.description))
+                .then_with(|| a.mode.cmp(&b.mode))
+        });
+        rows
     }
 
     pub fn cycle_mode(&self) {

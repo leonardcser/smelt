@@ -15,12 +15,16 @@ keymap.help_sections = nil
 ---@type fun(): string
 keymap.leader = nil
 
---- Return the set of currently-bound `{ mode, chord }` rows. `mode` is the canonical short form (`"n"`/`"i"`/`"v"`/`""`).
+--- Return the set of currently-bound `{ mode, chord, desc? }` rows. `mode` is the canonical short form (`"n"`/`"i"`/`"v"`/`""`). `chord` is the display form after canonicalization and `<leader>` expansion.
 ---@type fun(): table
 keymap.list = nil
 
---- Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
----@type fun(mode: string, chord: string, handler: fun()): smelt.Reg
+--- Return effective keymaps that extend `pending` in `mode` as `{ mode, chord, suffix, desc? }` rows. `pending` may be empty to list top-level mappings, otherwise it is canonicalized with the current leader. `mode` accepts the same forms as `set`; when omitted, the focused Vim mode is used (or Normal outside an app). Mode-specific bindings shadow global bindings for the same chord.
+---@type fun(pending: string, mode: string?): table
+keymap.prefixes = nil
+
+--- Bind `chord` in `mode` to a Lua callback. `mode` is `"n"|"i"|"v"|""` (or the long form `normal`/`insert`/`visual`); the chord is canonicalized at registration and unknown values raise immediately. `opts.desc` is an optional one-line description used by keybinding help UIs. Re-binding the same `(mode, chord)` overwrites the prior handler. Returns a `Reg` whose `:remove()` drops the binding.
+---@type fun(mode: string, chord: string, handler: fun(), opts: table?): smelt.Reg
 keymap.set = nil
 
 --- Set the `<leader>` expansion for subsequent keymap registrations. `leader` must be one canonicalizable key token, e.g. `<space>` or a single backslash (`\`). Existing keymaps keep the expansion they were registered with.

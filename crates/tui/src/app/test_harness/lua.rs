@@ -115,8 +115,8 @@ impl TestApp {
             }
         }
         if let Ok(kms) = core.keymaps.lock() {
-            for (k, h) in kms.iter() {
-                check(&format!("keymaps[{k:?}]"), h);
+            for (k, entry) in kms.iter() {
+                check(&format!("keymaps[{k:?}]"), &entry.handle);
             }
         }
         if let Ok(tools) = core.tools.lock() {

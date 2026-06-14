@@ -309,14 +309,12 @@ pub(crate) struct Timers {
 /// State carried between keys of a multi-key chord. See [`Timers::pending_chord`].
 pub(crate) struct PendingChord {
     pub(crate) tokens: Vec<String>,
-    /// Wall time of the first key; chords older than [`CHORD_TIMEOUT_MS`] are discarded.
-    pub(crate) started: Instant,
     /// Vim mode captured before the first key was dispatched; surfaced to chord handlers.
     pub(crate) vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
 }
 
-/// Idle time after which a pending chord expires and the next key starts a fresh sequence.
-pub(crate) const CHORD_TIMEOUT_MS: u64 = 500;
+/// Idle time after which an app-level sequence such as Esc Esc expires.
+pub(crate) const APP_SEQUENCE_TIMEOUT_MS: u64 = 500;
 
 /// Idle time after the last keypress before showing a deferred permission dialog.
 pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
@@ -804,12 +802,24 @@ impl TuiApp {
         }
     }
 
-    /// Publish `vim_mode`, `confirms_pending`, `now`, `spinner_frame`,
-    /// and the `work_*` family of cells whenever their values change.
+    fn keymap_pending_cell_value(&self) -> String {
+        self.timers
+            .pending_chord
+            .as_ref()
+            .map(|pending| crate::lua::display_chord_sequence(&pending.tokens.concat()))
+            .unwrap_or_default()
+    }
+
+    /// Publish `vim_mode`, `keymap_pending`, `confirms_pending`, `now`,
+    /// `spinner_frame`, and the `work_*` family of cells whenever their values change.
     pub(crate) fn publish_diff_cells(&mut self) {
+        let keymap_pending = self.keymap_pending_cell_value();
         self.core
             .cells
             .publish_if_changed("vim_mode", self.vim_mode_cell_value());
+        self.core
+            .cells
+            .publish_if_changed("keymap_pending", keymap_pending);
         self.core
             .cells
             .publish_if_changed("confirms_pending", !self.core.confirms.is_clear());
@@ -1641,11 +1651,10 @@ impl TuiApp {
                 .next_deadline()
                 .map(|deadline| deadline.saturating_duration_since(now));
             let next_notification_delay = self.notification_expiry_delay();
-            let next_idle_delay = match (next_timer_delay, next_notification_delay) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(delay), None) | (None, Some(delay)) => Some(delay),
-                (None, None) => None,
-            };
+            let next_idle_delay = [next_timer_delay, next_notification_delay]
+                .into_iter()
+                .flatten()
+                .min();
 
             tokio::select! {
                 biased;
@@ -1714,6 +1723,7 @@ impl TuiApp {
                     }
 
                     self.dispatch_ui_window_events(false);
+                    self.publish_diff_cells();
                     self.render_normal(self.agent.is_some());
                 }
 
@@ -1795,6 +1805,7 @@ impl TuiApp {
                     self.tick_timers();
                     self.drive_lua_tasks();
                     self.dismiss_expired_notification();
+                    self.publish_diff_cells();
                     self.render_normal(self.agent.is_some());
                 }
 

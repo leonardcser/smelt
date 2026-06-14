@@ -59,6 +59,11 @@ pub struct RegisteredCommand {
     pub hidden: bool,
 }
 
+pub struct RegisteredKeymap {
+    pub handle: LuaHandle,
+    pub description: Option<String>,
+}
+
 pub struct ToolHandles {
     pub execute: LuaHandle,
     pub approval_patterns: Option<LuaHandle>,
@@ -76,7 +81,7 @@ pub struct LuaShared {
     /// `LuaHandle`, but worker threads (e.g. parallel block layout) need
     /// to ask "is `/foo` a known command?" - this is the answer.
     pub command_names: Arc<Mutex<HashSet<String>>>,
-    pub keymaps: Mutex<HashMap<(String, String), LuaHandle>>,
+    pub keymaps: Mutex<HashMap<(String, String), RegisteredKeymap>>,
     /// Canonical single-token expansion for `<leader>` in keymap registrations.
     /// Matches nvim's default leader (`\\`) unless user config sets another token.
     pub keymap_leader: Mutex<String>,
