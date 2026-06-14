@@ -5,7 +5,7 @@ use smelt_core::content::builder::LineBuilder;
 
 use super::markdown::{measure_markdown_inner, render_markdown_inner};
 
-pub(crate) fn render(out: &mut LineBuilder, summary: &str, width: usize) -> u16 {
+pub(in crate::content) fn render(out: &mut LineBuilder, summary: &str, width: usize) -> u16 {
     let label = " compacted ";
     let label_len = label.len();
     let remaining = width.saturating_sub(label_len);
@@ -20,6 +20,6 @@ pub(crate) fn render(out: &mut LineBuilder, summary: &str, width: usize) -> u16 
     1 + render_markdown_inner(out, summary, width, "", true, None)
 }
 
-pub(crate) fn measure(summary: &str, width: usize) -> u16 {
+pub(in crate::content) fn measure(summary: &str, width: usize) -> u16 {
     1 + measure_markdown_inner(summary, width, "", true, None)
 }

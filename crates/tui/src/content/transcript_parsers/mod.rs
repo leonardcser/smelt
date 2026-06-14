@@ -3,93 +3,33 @@
 pub mod markdown;
 mod tools;
 
-pub(crate) mod chrome;
-pub(crate) mod code_line;
-pub(crate) mod compacted;
-pub(crate) mod exec;
-pub(crate) mod metrics;
-pub(crate) mod mode;
-pub(crate) mod process_status;
-pub(crate) mod text;
-pub(crate) mod thinking;
-pub(crate) mod tool_call;
-pub(crate) mod user;
+mod chrome;
+pub(in crate::content) mod compacted;
+pub(in crate::content) mod exec;
+mod metrics;
+pub(in crate::content) mod mode;
+pub(in crate::content) mod process_status;
+pub(in crate::content) mod text;
+pub(in crate::content) mod thinking;
+pub(in crate::content) mod tool_call;
+pub(in crate::content) mod user;
 
 #[cfg(test)]
 use markdown::is_horizontal_rule;
 pub use markdown::render_markdown_inner;
-pub(crate) use tools::measure_tool_height;
+pub(in crate::content) use tools::measure_tool_height;
 pub use tools::render_tool_body_into;
 
 /// Per-tool row cap (applied to command header and output body separately).
 const MAX_TOOL_BLOCK_ROWS: usize = 20;
 
 #[cfg(test)]
-use smelt_core::content::builder::LineBuilder;
-#[cfg(test)]
-use smelt_core::transcript_model::{Block, ToolState};
-
-#[cfg(test)]
-pub(super) fn render_block(
-    out: &mut LineBuilder,
-    block: &Block,
-    state: Option<&ToolState>,
-    width: usize,
-    show_thinking: bool,
-) -> u16 {
-    let _perf = smelt_perf::perf::begin(match block {
-        Block::User { .. } => "render:user",
-        Block::Mode { .. } => "render:mode",
-        Block::ProcessStatus { .. } => "render:process_status",
-        Block::Thinking { .. } => "render:thinking",
-        Block::Text { .. } => "render:text",
-        Block::CodeLine { .. } => "render:code_line",
-        Block::ToolCall { .. } => "render:tool_call",
-        Block::Compacted { .. } => "render:compacted",
-        Block::Exec { .. } => "render:exec",
-    });
-    match block {
-        Block::User { text, image_labels } => user::render(out, text, image_labels, width),
-        Block::Mode {
-            text,
-            icon,
-            hl_group,
-        } => mode::render(out, text, icon, hl_group),
-        Block::ProcessStatus { text } => process_status::render(out, text),
-        Block::Thinking { content } => thinking::render(out, content, width, show_thinking),
-        Block::Text { content } => text::render(out, content, width),
-        Block::CodeLine { content, lang } => code_line::render(out, content, lang, width),
-        Block::ToolCall {
-            call_id,
-            name,
-            summary,
-            args,
-        } => {
-            let state = state.expect("ToolCall layout requires ToolState");
-            tool_call::render(
-                out,
-                call_id,
-                name,
-                summary,
-                args,
-                state.status,
-                state.elapsed,
-                state,
-                width,
-            )
-        }
-        Block::Compacted { summary } => compacted::render(out, summary, width),
-        Block::Exec { command, output } => exec::render(out, command, output, width),
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::thinking::thinking_summary;
     use super::*;
+    use crate::content::display_block::{compile_block, render_block_into, RenderCtx};
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
-    use smelt_core::content::builder::LineBuilder;
     use smelt_core::content::LayoutContext;
     use smelt_core::theme::Theme;
     use smelt_core::transcript_model::{gap_between, Block, ToolState, ToolStatus, ViewState};
@@ -104,6 +44,27 @@ mod tests {
         )
     }
 
+    fn render_block_test_into(
+        buf: &mut Buffer,
+        theme: &Theme,
+        block: &Block,
+        state: Option<&ToolState>,
+        ctx: LayoutContext,
+    ) -> u16 {
+        let display = compile_block(block, state);
+        render_block_into(
+            buf,
+            &display,
+            RenderCtx {
+                width: ctx.width,
+                show_thinking: ctx.show_thinking,
+                view_state: ctx.view_state,
+                theme,
+            },
+        )
+        .line_count as u16
+    }
+
     fn layout_block_test(
         block: &Block,
         state: Option<&ToolState>,
@@ -111,18 +72,8 @@ mod tests {
     ) -> Vec<TestLine> {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-        let outcome = {
-            let mut out = LineBuilder::new(&mut buf, &theme, ctx.width);
-            render_block(
-                &mut out,
-                block,
-                state,
-                ctx.width as usize,
-                ctx.show_thinking,
-            );
-            out.finish()
-        };
-        read_buffer(&buf, &theme, outcome.line_count)
+        let rows = render_block_test_into(&mut buf, &theme, block, state, *ctx) as usize;
+        read_buffer(&buf, &theme, rows)
     }
 
     fn text(s: &str) -> Block {
@@ -180,9 +131,14 @@ mod tests {
 
     fn block_rows(block: &Block) -> u16 {
         let (mut buf, theme) = mk_collector_buf();
-        let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let st = state_for(block);
-        render_block(&mut out, block, st.as_ref(), W, true)
+        render_block_test_into(
+            &mut buf,
+            &theme,
+            block,
+            st.as_ref(),
+            LayoutContext::new(W as u16, true, ViewState::Expanded),
+        )
     }
 
     fn tool_gap_for(blocks: &[Block]) -> u16 {
@@ -194,7 +150,6 @@ mod tests {
 
     fn render_all_at_once(blocks: &[Block]) -> (u16, u16, u16) {
         let (mut buf, theme) = mk_collector_buf();
-        let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let mut total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -204,7 +159,13 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                render_block_test_into(
+                    &mut buf,
+                    &theme,
+                    &blocks[i],
+                    st.as_ref(),
+                    LayoutContext::new(W as u16, true, ViewState::Expanded),
+                )
             };
             total += gap + rows;
         }
@@ -214,7 +175,6 @@ mod tests {
 
     fn render_split(blocks: &[Block]) -> (u16, u16, u16) {
         let (mut buf, theme) = mk_collector_buf();
-        let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let mut block_rows_total = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -224,7 +184,13 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                render_block_test_into(
+                    &mut buf,
+                    &theme,
+                    &blocks[i],
+                    st.as_ref(),
+                    LayoutContext::new(W as u16, true, ViewState::Expanded),
+                )
             };
             block_rows_total += gap + rows;
         }
@@ -234,7 +200,6 @@ mod tests {
 
     fn render_incremental(blocks: &[Block]) -> (u16, u16, u16) {
         let (mut buf, theme) = mk_collector_buf();
-        let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
         let mut cumulative = 0u16;
         for i in 0..blocks.len() {
             let gap = if i > 0 {
@@ -244,7 +209,13 @@ mod tests {
             };
             let rows = {
                 let st = state_for(&blocks[i]);
-                render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                render_block_test_into(
+                    &mut buf,
+                    &theme,
+                    &blocks[i],
+                    st.as_ref(),
+                    LayoutContext::new(W as u16, true, ViewState::Expanded),
+                )
             };
             cumulative += gap + rows;
         }
@@ -380,7 +351,6 @@ mod tests {
             // This frame renders blocks[flushed..end]
             let mut frame_block_rows = 0u16;
             let (mut buf, theme) = mk_collector_buf();
-            let mut out = LineBuilder::new(&mut buf, &theme, W as u16);
             for i in flushed..end {
                 let gap = if i > 0 {
                     gap_between(&blocks[i - 1], &blocks[i])
@@ -389,7 +359,13 @@ mod tests {
                 };
                 let rows = {
                     let st = state_for(&blocks[i]);
-                    render_block(&mut out, &blocks[i], st.as_ref(), W, true)
+                    render_block_test_into(
+                        &mut buf,
+                        &theme,
+                        &blocks[i],
+                        st.as_ref(),
+                        LayoutContext::new(W as u16, true, ViewState::Expanded),
+                    )
                 };
                 frame_block_rows += gap + rows;
             }

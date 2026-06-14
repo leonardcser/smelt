@@ -216,7 +216,9 @@ mod tests {
         DisplayCacheEntry {
             id: smelt_core::transcript_model::BlockId::new(7),
             key: DisplayCacheKey::new(block.content_hash(), 0),
-            block: DisplayBlock::Text { block },
+            block: DisplayBlock::Text {
+                content: "hello".into(),
+            },
         }
     }
 
@@ -244,10 +246,25 @@ mod tests {
             body: None,
         };
         let key = DisplayCacheKey::new(block.content_hash(), state.display_hash());
+        let Block::ToolCall {
+            call_id,
+            name,
+            summary,
+            args,
+        } = block
+        else {
+            unreachable!()
+        };
         DisplayCacheEntry {
             id: smelt_core::transcript_model::BlockId::new(8),
             key,
-            block: DisplayBlock::ToolCall { block, state },
+            block: DisplayBlock::ToolCall {
+                call_id,
+                name,
+                summary,
+                args,
+                state,
+            },
         }
     }
 
@@ -296,10 +313,7 @@ mod tests {
         assert_eq!(decoded.entries[0].id, data.entries[0].id);
         assert_eq!(decoded.entries[0].key, data.entries[0].key);
         match &decoded.entries[0].block {
-            DisplayBlock::ToolCall { block, state } => {
-                let Block::ToolCall { args, .. } = block else {
-                    panic!("expected tool call block");
-                };
+            DisplayBlock::ToolCall { args, state, .. } => {
                 assert_eq!(
                     args["url"],
                     serde_json::json!({ "href": "https://example.test" })

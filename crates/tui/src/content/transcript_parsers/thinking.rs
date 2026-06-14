@@ -8,7 +8,7 @@ use smelt_core::content::inline_line::InlineLine;
 use super::metrics::{block_inner_width, THINKING_GUTTER};
 use super::tools::pluralize;
 
-pub(crate) fn render(
+pub(in crate::content) fn render(
     out: &mut LineBuilder,
     content: &str,
     width: usize,
@@ -43,7 +43,7 @@ pub(crate) fn render(
     rows
 }
 
-pub(crate) fn measure(content: &str, width: usize, show_thinking: bool) -> u16 {
+pub(in crate::content) fn measure(content: &str, width: usize, show_thinking: bool) -> u16 {
     if !show_thinking {
         let (label, line_count) = thinking_summary(content);
         return measure_thinking_summary(width, &label, line_count);

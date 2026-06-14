@@ -9,7 +9,12 @@ use smelt_core::theme::intern;
 use super::metrics::chrome_text_width;
 use super::tools::{measure_wrapped_output, render_wrapped_output};
 
-pub(crate) fn render(out: &mut LineBuilder, command: &str, output: &str, width: usize) -> u16 {
+pub(in crate::content) fn render(
+    out: &mut LineBuilder,
+    command: &str,
+    output: &str,
+    width: usize,
+) -> u16 {
     let text_w = chrome_text_width(width);
     let exec_fg = out
         .theme()
@@ -37,7 +42,7 @@ pub(crate) fn render(out: &mut LineBuilder, command: &str, output: &str, width: 
     rows
 }
 
-pub(crate) fn measure(command: &str, output: &str, width: usize) -> u16 {
+pub(in crate::content) fn measure(command: &str, output: &str, width: usize) -> u16 {
     let text_w = chrome_text_width(width);
     let command = crate::content::display_safe_text(&format!("!{command}"));
     let lines = [command];

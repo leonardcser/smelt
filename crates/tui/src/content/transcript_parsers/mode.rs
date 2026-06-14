@@ -2,7 +2,12 @@
 
 use smelt_core::content::builder::LineBuilder;
 
-pub(crate) fn render(out: &mut LineBuilder, text: &str, icon: &str, hl_group: &str) -> u16 {
+pub(in crate::content) fn render(
+    out: &mut LineBuilder,
+    text: &str,
+    icon: &str,
+    hl_group: &str,
+) -> u16 {
     let mut style = out.theme().get(hl_group);
     style.bg = None;
     style.italic = false;

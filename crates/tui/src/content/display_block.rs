@@ -9,7 +9,7 @@ use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 2;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
@@ -34,15 +34,43 @@ impl DisplayCacheKey {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum DisplayBlock {
-    User { block: Block },
-    Mode { block: Block },
-    ProcessStatus { block: Block },
-    Thinking { block: Block },
-    Text { block: Block },
-    CodeLine { block: Block, code: CodeBlock },
-    ToolCall { block: Block, state: ToolState },
-    Exec { block: Block },
-    Compacted { block: Block },
+    User {
+        text: String,
+        image_labels: Vec<String>,
+    },
+    Mode {
+        text: String,
+        icon: String,
+        hl_group: String,
+    },
+    ProcessStatus {
+        text: String,
+    },
+    Thinking {
+        content: String,
+    },
+    Text {
+        content: String,
+    },
+    CodeLine {
+        content: String,
+        lang: String,
+        code: CodeBlock,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        summary: protocol::StyledLines,
+        args: HashMap<String, serde_json::Value>,
+        state: ToolState,
+    },
+    Exec {
+        command: String,
+        output: String,
+    },
+    Compacted {
+        summary: String,
+    },
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -86,17 +114,91 @@ impl CompileJob {
 }
 
 impl DisplayBlock {
-    fn block(&self) -> &Block {
-        match self {
-            Self::User { block }
-            | Self::Mode { block }
-            | Self::ProcessStatus { block }
-            | Self::Thinking { block }
-            | Self::Text { block }
-            | Self::CodeLine { block, .. }
-            | Self::ToolCall { block, .. }
-            | Self::Exec { block }
-            | Self::Compacted { block } => block,
+    fn matches_block(&self, block: &Block) -> bool {
+        match (self, block) {
+            (
+                Self::User { text, image_labels },
+                Block::User {
+                    text: block_text,
+                    image_labels: block_image_labels,
+                },
+            ) => text == block_text && image_labels == block_image_labels,
+            (
+                Self::Mode {
+                    text,
+                    icon,
+                    hl_group,
+                },
+                Block::Mode {
+                    text: block_text,
+                    icon: block_icon,
+                    hl_group: block_hl_group,
+                },
+            ) => text == block_text && icon == block_icon && hl_group == block_hl_group,
+            (Self::ProcessStatus { text }, Block::ProcessStatus { text: block_text }) => {
+                text == block_text
+            }
+            (
+                Self::Thinking { content },
+                Block::Thinking {
+                    content: block_content,
+                },
+            ) => content == block_content,
+            (
+                Self::Text { content },
+                Block::Text {
+                    content: block_content,
+                },
+            ) => content == block_content,
+            (
+                Self::CodeLine {
+                    content,
+                    lang,
+                    code,
+                },
+                Block::CodeLine {
+                    content: block_content,
+                    lang: block_lang,
+                },
+            ) => {
+                content == block_content
+                    && lang == block_lang
+                    && code == &parse_code_block(&[content.as_str()], lang)
+            }
+            (
+                Self::ToolCall {
+                    call_id,
+                    name,
+                    summary,
+                    args,
+                    ..
+                },
+                Block::ToolCall {
+                    call_id: block_call_id,
+                    name: block_name,
+                    summary: block_summary,
+                    args: block_args,
+                },
+            ) => {
+                call_id == block_call_id
+                    && name == block_name
+                    && summary == block_summary
+                    && args == block_args
+            }
+            (
+                Self::Exec { command, output },
+                Block::Exec {
+                    command: block_command,
+                    output: block_output,
+                },
+            ) => command == block_command && output == block_output,
+            (
+                Self::Compacted { summary },
+                Block::Compacted {
+                    summary: block_summary,
+                },
+            ) => summary == block_summary,
+            _ => false,
         }
     }
 }
@@ -163,7 +265,7 @@ impl DisplayModel {
             );
             return false;
         };
-        if entry.block.block() != &current_block {
+        if !entry.block.matches_block(&current_block) {
             smelt_perf::perf::record_value(
                 "transcript:display_model:hydrate_reject:block_mismatch",
                 1,
@@ -171,14 +273,7 @@ impl DisplayModel {
             return false;
         }
 
-        if let DisplayBlock::ToolCall { state, .. } = &entry.block {
-            let Block::ToolCall { call_id, .. } = &current_block else {
-                smelt_perf::perf::record_value(
-                    "transcript:display_model:hydrate_reject:tool_block_mismatch",
-                    1,
-                );
-                return false;
-            };
+        if let DisplayBlock::ToolCall { call_id, state, .. } = &entry.block {
             let Some(current_state) = history.tool_state(call_id) else {
                 smelt_perf::perf::record_value(
                     "transcript:display_model:hydrate_reject:missing_tool_state",
@@ -326,36 +421,51 @@ impl DisplayModel {
 
 pub(crate) fn compile_block(block: &Block, state: Option<&ToolState>) -> DisplayBlock {
     match block {
-        Block::User { .. } => DisplayBlock::User {
-            block: block.clone(),
+        Block::User { text, image_labels } => DisplayBlock::User {
+            text: text.clone(),
+            image_labels: image_labels.clone(),
         },
-        Block::Mode { .. } => DisplayBlock::Mode {
-            block: block.clone(),
+        Block::Mode {
+            text,
+            icon,
+            hl_group,
+        } => DisplayBlock::Mode {
+            text: text.clone(),
+            icon: icon.clone(),
+            hl_group: hl_group.clone(),
         },
-        Block::ProcessStatus { .. } => DisplayBlock::ProcessStatus {
-            block: block.clone(),
+        Block::ProcessStatus { text } => DisplayBlock::ProcessStatus { text: text.clone() },
+        Block::Thinking { content } => DisplayBlock::Thinking {
+            content: content.clone(),
         },
-        Block::Thinking { .. } => DisplayBlock::Thinking {
-            block: block.clone(),
-        },
-        Block::Text { .. } => DisplayBlock::Text {
-            block: block.clone(),
+        Block::Text { content } => DisplayBlock::Text {
+            content: content.clone(),
         },
         Block::CodeLine { content, lang } => DisplayBlock::CodeLine {
-            block: block.clone(),
+            content: content.clone(),
+            lang: lang.clone(),
             code: parse_code_block(&[content.as_str()], lang),
         },
-        Block::ToolCall { call_id, .. } => DisplayBlock::ToolCall {
-            block: block.clone(),
+        Block::ToolCall {
+            call_id,
+            name,
+            summary,
+            args,
+        } => DisplayBlock::ToolCall {
+            call_id: call_id.clone(),
+            name: name.clone(),
+            summary: summary.clone(),
+            args: args.clone(),
             state: state
                 .cloned()
                 .unwrap_or_else(|| panic!("missing ToolState for tool call `{call_id}`")),
         },
-        Block::Exec { .. } => DisplayBlock::Exec {
-            block: block.clone(),
+        Block::Exec { command, output } => DisplayBlock::Exec {
+            command: command.clone(),
+            output: output.clone(),
         },
-        Block::Compacted { .. } => DisplayBlock::Compacted {
-            block: block.clone(),
+        Block::Compacted { summary } => DisplayBlock::Compacted {
+            summary: summary.clone(),
         },
     }
 }
@@ -364,49 +474,31 @@ pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
     let _perf = smelt_perf::perf::begin(measure_block_label(block));
     let width = ctx.width as usize;
     let expanded_rows = match block {
-        DisplayBlock::User { block } => match block {
-            Block::User { text, .. } => user::measure(text, width) as u64,
-            _ => unreachable!("user display block must wrap a user block"),
-        },
+        DisplayBlock::User { text, .. } => user::measure(text, width) as u64,
         DisplayBlock::Mode { .. } => 1,
-        DisplayBlock::ProcessStatus { block } => match block {
-            Block::ProcessStatus { text } => process_status::measure(text, width) as u64,
-            _ => unreachable!("process-status display block must wrap a process-status block"),
-        },
-        DisplayBlock::Thinking { block } => match block {
-            Block::Thinking { content } => {
-                thinking::measure(content, width, ctx.show_thinking) as u64
-            }
-            _ => unreachable!("thinking display block must wrap a thinking block"),
-        },
-        DisplayBlock::Text { block } => match block {
-            Block::Text { content } => text::measure(content, width) as u64,
-            _ => unreachable!("text display block must wrap a text block"),
-        },
+        DisplayBlock::ProcessStatus { text } => process_status::measure(text, width) as u64,
+        DisplayBlock::Thinking { content } => {
+            thinking::measure(content, width, ctx.show_thinking) as u64
+        }
+        DisplayBlock::Text { content } => text::measure(content, width) as u64,
         DisplayBlock::CodeLine { code, .. } => measure_code_block(code, width) as u64,
-        DisplayBlock::ToolCall { block, state } => match block {
-            Block::ToolCall { name, summary, .. } => {
-                crate::content::transcript_parsers::measure_tool_height(
-                    name,
-                    summary,
-                    state.status,
-                    state.elapsed,
-                    state.output.as_deref(),
-                    state.user_message.as_deref(),
-                    state.body.as_ref(),
-                    width,
-                ) as u64
-            }
-            _ => unreachable!("tool display block must wrap a tool call block"),
-        },
-        DisplayBlock::Exec { block } => match block {
-            Block::Exec { command, output } => exec::measure(command, output, width) as u64,
-            _ => unreachable!("exec display block must wrap an exec block"),
-        },
-        DisplayBlock::Compacted { block } => match block {
-            Block::Compacted { summary } => compacted::measure(summary, width) as u64,
-            _ => unreachable!("compacted display block must wrap a compacted block"),
-        },
+        DisplayBlock::ToolCall {
+            name,
+            summary,
+            state,
+            ..
+        } => crate::content::transcript_parsers::measure_tool_height(
+            name,
+            summary,
+            state.status,
+            state.elapsed,
+            state.output.as_deref(),
+            state.user_message.as_deref(),
+            state.body.as_ref(),
+            width,
+        ) as u64,
+        DisplayBlock::Exec { command, output } => exec::measure(command, output, width) as u64,
+        DisplayBlock::Compacted { summary } => compacted::measure(summary, width) as u64,
     };
     ctx.view_state.measured_height(expanded_rows)
 }
@@ -446,60 +538,37 @@ fn render_expanded_block(
 ) -> u16 {
     let _perf = smelt_perf::perf::begin(render_block_label(block));
     match block {
-        DisplayBlock::User { block } => match block {
-            Block::User { text, image_labels } => user::render(out, text, image_labels, width),
-            _ => unreachable!("user display block must wrap a user block"),
-        },
-        DisplayBlock::Mode { block } => match block {
-            Block::Mode {
-                text,
-                icon,
-                hl_group,
-            } => mode::render(out, text, icon, hl_group),
-            _ => unreachable!("mode display block must wrap a mode block"),
-        },
-        DisplayBlock::ProcessStatus { block } => match block {
-            Block::ProcessStatus { text } => process_status::render(out, text),
-            _ => unreachable!("process-status display block must wrap a process-status block"),
-        },
-        DisplayBlock::Thinking { block } => match block {
-            Block::Thinking { content } => thinking::render(out, content, width, show_thinking),
-            _ => unreachable!("thinking display block must wrap a thinking block"),
-        },
-        DisplayBlock::Text { block } => match block {
-            Block::Text { content } => text::render(out, content, width),
-            _ => unreachable!("text display block must wrap a text block"),
-        },
+        DisplayBlock::User { text, image_labels } => user::render(out, text, image_labels, width),
+        DisplayBlock::Mode {
+            text,
+            icon,
+            hl_group,
+        } => mode::render(out, text, icon, hl_group),
+        DisplayBlock::ProcessStatus { text } => process_status::render(out, text),
+        DisplayBlock::Thinking { content } => thinking::render(out, content, width, show_thinking),
+        DisplayBlock::Text { content } => text::render(out, content, width),
         DisplayBlock::CodeLine { code, .. } => {
             render_code_block(out, code, width, false, None, false)
         }
-        DisplayBlock::ToolCall { block, state } => match block {
-            Block::ToolCall {
-                call_id,
-                name,
-                summary,
-                args,
-            } => tool_call::render(
-                out,
-                call_id,
-                name,
-                summary,
-                args,
-                state.status,
-                state.elapsed,
-                state,
-                width,
-            ),
-            _ => unreachable!("tool display block must wrap a tool call block"),
-        },
-        DisplayBlock::Exec { block } => match block {
-            Block::Exec { command, output } => exec::render(out, command, output, width),
-            _ => unreachable!("exec display block must wrap an exec block"),
-        },
-        DisplayBlock::Compacted { block } => match block {
-            Block::Compacted { summary } => compacted::render(out, summary, width),
-            _ => unreachable!("compacted display block must wrap a compacted block"),
-        },
+        DisplayBlock::ToolCall {
+            call_id,
+            name,
+            summary,
+            args,
+            state,
+        } => tool_call::render(
+            out,
+            call_id,
+            name,
+            summary,
+            args,
+            state.status,
+            state.elapsed,
+            state,
+            width,
+        ),
+        DisplayBlock::Exec { command, output } => exec::render(out, command, output, width),
+        DisplayBlock::Compacted { summary } => compacted::render(out, summary, width),
     }
 }
 
@@ -764,6 +833,29 @@ mod tests {
         let mut hydrated = DisplayModel::new();
         assert_eq!(hydrated.hydrate_many(&mut transcript.history, entries), 1);
         assert_eq!(hydrated.ensure_many(&transcript.history, &[id], &[key]), 0);
+    }
+
+    #[test]
+    fn hydrated_cache_rejects_mismatched_display_variant() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::User {
+            text: "hello".into(),
+            image_labels: vec![],
+        });
+        let id = transcript.history.order[0];
+        let current = transcript.history.blocks.get(&id).unwrap();
+        let key = base_key(&transcript.history, id);
+        let entries = vec![DisplayCacheEntry {
+            id,
+            key: DisplayCacheKey::new(current.content_hash(), 0),
+            block: DisplayBlock::Text {
+                content: "hello".into(),
+            },
+        }];
+
+        let mut hydrated = DisplayModel::new();
+        assert_eq!(hydrated.hydrate_many(&mut transcript.history, entries), 0);
+        assert_eq!(hydrated.ensure_many(&transcript.history, &[id], &[key]), 1);
     }
 
     #[test]
