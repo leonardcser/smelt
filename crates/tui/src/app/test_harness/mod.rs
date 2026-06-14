@@ -24,6 +24,7 @@ pub use crate::event_source::SourceEvent;
 mod driver;
 mod invariants;
 mod lua;
+mod probes;
 mod state;
 mod synthetic;
 

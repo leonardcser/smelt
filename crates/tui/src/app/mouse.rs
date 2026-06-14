@@ -899,8 +899,8 @@ mod tests {
             .viewport
             .expect("render populated transcript viewport");
         let top = app.transcript_win().scroll_top();
-        let start_rel = 2u16;
-        let end_rel = 4u16;
+        let start_rel = 3u16;
+        let end_rel = 5u16;
         let start_local = app
             .transcript_win()
             .local_visual_row(top.saturating_add(start_rel as crate::smelt_edit::RowIndex))
@@ -961,8 +961,8 @@ mod tests {
             .transcript_win()
             .viewport
             .expect("render populated transcript viewport");
-        let start_rel = 2u16;
-        let end_rel = 4u16;
+        let start_rel = 3u16;
+        let end_rel = 5u16;
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             row: vp.rect.top.saturating_add(start_rel),
@@ -1009,8 +1009,8 @@ mod tests {
             .viewport
             .expect("render populated transcript viewport");
         let top = app.transcript_win().scroll_top();
-        let start_rel = 2u16;
-        let end_rel = 4u16;
+        let start_rel = 3u16;
+        let end_rel = 5u16;
         let start_local = app
             .transcript_win()
             .local_visual_row(top.saturating_add(start_rel as crate::smelt_edit::RowIndex))
