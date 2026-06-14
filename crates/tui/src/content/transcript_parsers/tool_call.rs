@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn render(
+pub(crate) fn render(
     out: &mut LineBuilder,
     _call_id: &str,
     name: &str,

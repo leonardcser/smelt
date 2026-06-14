@@ -1,6 +1,11 @@
+use crate::content::transcript_parsers::{
+    compacted, exec, mode, process_status, text, thinking, tool_call, user,
+};
 use crate::smelt_edit::{Buffer, Theme};
+use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block, CodeBlock};
-use smelt_core::content::LayoutContext;
+use smelt_core::content::highlight::render_code_block;
+use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
@@ -29,9 +34,15 @@ impl DisplayCacheKey {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum DisplayBlock {
-    Legacy { block: Block },
+    User { block: Block },
+    Mode { block: Block },
+    ProcessStatus { block: Block },
+    Thinking { block: Block },
+    Text { block: Block },
     CodeLine { block: Block, code: CodeBlock },
     ToolCall { block: Block, state: ToolState },
+    Exec { block: Block },
+    Compacted { block: Block },
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -77,16 +88,15 @@ impl CompileJob {
 impl DisplayBlock {
     fn block(&self) -> &Block {
         match self {
-            Self::Legacy { block }
+            Self::User { block }
+            | Self::Mode { block }
+            | Self::ProcessStatus { block }
+            | Self::Thinking { block }
+            | Self::Text { block }
             | Self::CodeLine { block, .. }
-            | Self::ToolCall { block, .. } => block,
-        }
-    }
-
-    fn tool_state(&self) -> Option<&ToolState> {
-        match self {
-            Self::ToolCall { state, .. } => Some(state),
-            _ => None,
+            | Self::ToolCall { block, .. }
+            | Self::Exec { block }
+            | Self::Compacted { block } => block,
         }
     }
 }
@@ -316,6 +326,21 @@ impl DisplayModel {
 
 pub(crate) fn compile_block(block: &Block, state: Option<&ToolState>) -> DisplayBlock {
     match block {
+        Block::User { .. } => DisplayBlock::User {
+            block: block.clone(),
+        },
+        Block::Mode { .. } => DisplayBlock::Mode {
+            block: block.clone(),
+        },
+        Block::ProcessStatus { .. } => DisplayBlock::ProcessStatus {
+            block: block.clone(),
+        },
+        Block::Thinking { .. } => DisplayBlock::Thinking {
+            block: block.clone(),
+        },
+        Block::Text { .. } => DisplayBlock::Text {
+            block: block.clone(),
+        },
         Block::CodeLine { content, lang } => DisplayBlock::CodeLine {
             block: block.clone(),
             code: parse_code_block(&[content.as_str()], lang),
@@ -326,7 +351,10 @@ pub(crate) fn compile_block(block: &Block, state: Option<&ToolState>) -> Display
                 .cloned()
                 .unwrap_or_else(|| panic!("missing ToolState for tool call `{call_id}`")),
         },
-        _ => DisplayBlock::Legacy {
+        Block::Exec { .. } => DisplayBlock::Exec {
+            block: block.clone(),
+        },
+        Block::Compacted { .. } => DisplayBlock::Compacted {
             block: block.clone(),
         },
     }
@@ -334,8 +362,28 @@ pub(crate) fn compile_block(block: &Block, state: Option<&ToolState>) -> Display
 
 pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
     let _perf = smelt_perf::perf::begin(measure_block_label(block));
+    let width = ctx.width as usize;
     let expanded_rows = match block {
-        DisplayBlock::CodeLine { code, .. } => measure_code_block(code, ctx.width as usize) as u64,
+        DisplayBlock::User { block } => match block {
+            Block::User { text, .. } => user::measure(text, width) as u64,
+            _ => unreachable!("user display block must wrap a user block"),
+        },
+        DisplayBlock::Mode { .. } => 1,
+        DisplayBlock::ProcessStatus { block } => match block {
+            Block::ProcessStatus { text } => process_status::measure(text, width) as u64,
+            _ => unreachable!("process-status display block must wrap a process-status block"),
+        },
+        DisplayBlock::Thinking { block } => match block {
+            Block::Thinking { content } => {
+                thinking::measure(content, width, ctx.show_thinking) as u64
+            }
+            _ => unreachable!("thinking display block must wrap a thinking block"),
+        },
+        DisplayBlock::Text { block } => match block {
+            Block::Text { content } => text::measure(content, width) as u64,
+            _ => unreachable!("text display block must wrap a text block"),
+        },
+        DisplayBlock::CodeLine { code, .. } => measure_code_block(code, width) as u64,
         DisplayBlock::ToolCall { block, state } => match block {
             Block::ToolCall { name, summary, .. } => {
                 crate::content::transcript_parsers::measure_tool_height(
@@ -346,34 +394,34 @@ pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
                     state.output.as_deref(),
                     state.user_message.as_deref(),
                     state.body.as_ref(),
-                    ctx.width as usize,
+                    width,
                 ) as u64
             }
             _ => unreachable!("tool display block must wrap a tool call block"),
         },
-        DisplayBlock::Legacy { block } => {
-            let lctx = LayoutContext::new(ctx.width, ctx.show_thinking, ctx.view_state);
-            crate::content::transcript_parsers::measure_block(block, None, &lctx)
-        }
+        DisplayBlock::Exec { block } => match block {
+            Block::Exec { command, output } => exec::measure(command, output, width) as u64,
+            _ => unreachable!("exec display block must wrap an exec block"),
+        },
+        DisplayBlock::Compacted { block } => match block {
+            Block::Compacted { summary } => compacted::measure(summary, width) as u64,
+            _ => unreachable!("compacted display block must wrap a compacted block"),
+        },
     };
     ctx.view_state.measured_height(expanded_rows)
 }
 
 fn measure_block_label(block: &DisplayBlock) -> &'static str {
     match block {
+        DisplayBlock::User { .. } => "transcript:measure_block:user",
+        DisplayBlock::Mode { .. } => "transcript:measure_block:mode",
+        DisplayBlock::ProcessStatus { .. } => "transcript:measure_block:process_status",
+        DisplayBlock::Thinking { .. } => "transcript:measure_block:thinking",
+        DisplayBlock::Text { .. } => "transcript:measure_block:text",
         DisplayBlock::CodeLine { .. } => "transcript:measure_block:code_line",
         DisplayBlock::ToolCall { .. } => "transcript:measure_block:tool_call",
-        DisplayBlock::Legacy { block } => match block {
-            Block::User { .. } => "transcript:measure_block:legacy:user",
-            Block::Mode { .. } => "transcript:measure_block:legacy:mode",
-            Block::ProcessStatus { .. } => "transcript:measure_block:legacy:process_status",
-            Block::Thinking { .. } => "transcript:measure_block:legacy:thinking",
-            Block::Text { .. } => "transcript:measure_block:legacy:text",
-            Block::CodeLine { .. } => "transcript:measure_block:legacy:code_line",
-            Block::ToolCall { .. } => "transcript:measure_block:legacy:tool_call",
-            Block::Exec { .. } => "transcript:measure_block:legacy:exec",
-            Block::Compacted { .. } => "transcript:measure_block:legacy:compacted",
-        },
+        DisplayBlock::Exec { .. } => "transcript:measure_block:exec",
+        DisplayBlock::Compacted { .. } => "transcript:measure_block:compacted",
     }
 }
 
@@ -381,15 +429,230 @@ pub(crate) fn render_block_into(
     buf: &mut Buffer,
     block: &DisplayBlock,
     ctx: RenderCtx<'_>,
-) -> smelt_core::content::builder::Outcome {
-    let lctx = LayoutContext::new(ctx.width, ctx.show_thinking, ctx.view_state);
-    crate::content::transcript_parsers::layout_block_into(
-        buf,
-        ctx.theme,
-        block.block(),
-        block.tool_state(),
-        &lctx,
-    )
+) -> Outcome {
+    let outcome = {
+        let mut out = LineBuilder::new(buf, ctx.theme, ctx.width);
+        render_expanded_block(&mut out, block, ctx.width as usize, ctx.show_thinking);
+        out.finish()
+    };
+    apply_view_state(buf, ctx.theme, ctx.width, ctx.view_state, outcome)
+}
+
+fn render_expanded_block(
+    out: &mut LineBuilder,
+    block: &DisplayBlock,
+    width: usize,
+    show_thinking: bool,
+) -> u16 {
+    let _perf = smelt_perf::perf::begin(render_block_label(block));
+    match block {
+        DisplayBlock::User { block } => match block {
+            Block::User { text, image_labels } => user::render(out, text, image_labels, width),
+            _ => unreachable!("user display block must wrap a user block"),
+        },
+        DisplayBlock::Mode { block } => match block {
+            Block::Mode {
+                text,
+                icon,
+                hl_group,
+            } => mode::render(out, text, icon, hl_group),
+            _ => unreachable!("mode display block must wrap a mode block"),
+        },
+        DisplayBlock::ProcessStatus { block } => match block {
+            Block::ProcessStatus { text } => process_status::render(out, text),
+            _ => unreachable!("process-status display block must wrap a process-status block"),
+        },
+        DisplayBlock::Thinking { block } => match block {
+            Block::Thinking { content } => thinking::render(out, content, width, show_thinking),
+            _ => unreachable!("thinking display block must wrap a thinking block"),
+        },
+        DisplayBlock::Text { block } => match block {
+            Block::Text { content } => text::render(out, content, width),
+            _ => unreachable!("text display block must wrap a text block"),
+        },
+        DisplayBlock::CodeLine { code, .. } => {
+            render_code_block(out, code, width, false, None, false)
+        }
+        DisplayBlock::ToolCall { block, state } => match block {
+            Block::ToolCall {
+                call_id,
+                name,
+                summary,
+                args,
+            } => tool_call::render(
+                out,
+                call_id,
+                name,
+                summary,
+                args,
+                state.status,
+                state.elapsed,
+                state,
+                width,
+            ),
+            _ => unreachable!("tool display block must wrap a tool call block"),
+        },
+        DisplayBlock::Exec { block } => match block {
+            Block::Exec { command, output } => exec::render(out, command, output, width),
+            _ => unreachable!("exec display block must wrap an exec block"),
+        },
+        DisplayBlock::Compacted { block } => match block {
+            Block::Compacted { summary } => compacted::render(out, summary, width),
+            _ => unreachable!("compacted display block must wrap a compacted block"),
+        },
+    }
+}
+
+fn render_block_label(block: &DisplayBlock) -> &'static str {
+    match block {
+        DisplayBlock::User { .. } => "render:user",
+        DisplayBlock::Mode { .. } => "render:mode",
+        DisplayBlock::ProcessStatus { .. } => "render:process_status",
+        DisplayBlock::Thinking { .. } => "render:thinking",
+        DisplayBlock::Text { .. } => "render:text",
+        DisplayBlock::CodeLine { .. } => "render:code_line",
+        DisplayBlock::ToolCall { .. } => "render:tool_call",
+        DisplayBlock::Exec { .. } => "render:exec",
+        DisplayBlock::Compacted { .. } => "render:compacted",
+    }
+}
+
+fn apply_view_state(
+    buf: &mut Buffer,
+    theme: &Theme,
+    width: u16,
+    state: ViewState,
+    outcome: Outcome,
+) -> Outcome {
+    let total = outcome.line_count;
+    let target_total = state.measured_height(total as u64) as usize;
+    let start = buf.line_count().saturating_sub(total);
+    match state {
+        ViewState::Expanded => outcome,
+        ViewState::Collapsed => {
+            if state.elides_rows(total as u64) {
+                let hidden = total - 1;
+                buf.set_lines(start + 1, start + total, vec![]);
+                let after_truncate_outcome = Outcome {
+                    line_count: 1,
+                    ..outcome
+                };
+                let with_ellipsis = append_ellipsis(
+                    buf,
+                    theme,
+                    width,
+                    &format!("… {hidden} more lines"),
+                    after_truncate_outcome,
+                );
+                Outcome {
+                    line_count: target_total,
+                    ..with_ellipsis
+                }
+            } else {
+                outcome
+            }
+        }
+        ViewState::TrimmedHead { keep } => {
+            let keep = keep as usize;
+            if state.elides_rows(total as u64) {
+                let hidden = total - keep;
+                buf.set_lines(start + keep, start + total, vec![]);
+                let after_truncate_outcome = Outcome {
+                    line_count: keep,
+                    ..outcome
+                };
+                let with_ellipsis = append_ellipsis(
+                    buf,
+                    theme,
+                    width,
+                    &format!("… {hidden} more lines"),
+                    after_truncate_outcome,
+                );
+                Outcome {
+                    line_count: target_total,
+                    ..with_ellipsis
+                }
+            } else {
+                outcome
+            }
+        }
+        ViewState::TrimmedTail { keep } => {
+            let keep = keep as usize;
+            if state.elides_rows(total as u64) {
+                let hidden = total - keep;
+                buf.set_lines(start, start + (total - keep), vec![]);
+                let mut kept_lines: Vec<String> = (0..keep)
+                    .map(|i| buf.get_line(start + i).unwrap_or("").to_string())
+                    .collect();
+                let kept_decorations: Vec<_> = (0..keep)
+                    .map(|i| buf.decoration_at(start + i).clone())
+                    .collect();
+                let kept_highlights: Vec<_> =
+                    (0..keep).map(|i| buf.highlights_at(start + i)).collect();
+                buf.set_lines(start, start + keep, vec![]);
+                append_ellipsis(
+                    buf,
+                    theme,
+                    width,
+                    &format!("… {hidden} more lines above"),
+                    Outcome {
+                        line_count: 0,
+                        ..outcome
+                    },
+                );
+                let cur_len = buf.line_count();
+                buf.set_lines(cur_len, cur_len, std::mem::take(&mut kept_lines));
+                for (i, hl_list) in kept_highlights.into_iter().enumerate() {
+                    let row = cur_len + i;
+                    for span in hl_list {
+                        buf.add_highlight_group_with_meta(
+                            row,
+                            span.col_start,
+                            span.col_end,
+                            span.hl,
+                            span.meta,
+                        );
+                    }
+                }
+                for (i, dec) in kept_decorations.into_iter().enumerate() {
+                    if dec != smelt_core::buffer::LineDecoration::default() {
+                        buf.set_decoration(cur_len + i, dec);
+                    }
+                }
+                Outcome {
+                    line_count: target_total,
+                    ..outcome
+                }
+            } else {
+                outcome
+            }
+        }
+    }
+}
+
+fn append_ellipsis(
+    buf: &mut Buffer,
+    theme: &Theme,
+    width: u16,
+    text: &str,
+    outcome: Outcome,
+) -> Outcome {
+    let added = {
+        let mut col = LineBuilder::new(buf, theme, width);
+        col.push_dim();
+        col.push_hl(intern("Comment"));
+        col.print(text);
+        col.pop_style();
+        col.pop_style();
+        col.newline();
+        col.finish()
+    };
+    Outcome {
+        line_count: outcome.line_count + added.line_count,
+        was_wrapped: outcome.was_wrapped || added.was_wrapped,
+        max_line_width: outcome.max_line_width.max(added.max_line_width),
+        layout_width: outcome.layout_width,
+    }
 }
 
 #[cfg(test)]

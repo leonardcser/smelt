@@ -11,13 +11,13 @@ use smelt_core::theme::intern;
 
 use super::metrics::CHROME_INNER_PAD;
 
-pub(super) struct ChunkPos {
+pub(crate) struct ChunkPos {
     pub chunk_idx: usize,
     pub logical_line: usize,
     pub char_start: usize,
 }
 
-pub(super) fn measure(lines: &[String], text_w: usize) -> u16 {
+pub(crate) fn measure(lines: &[String], text_w: usize) -> u16 {
     let mut rows = 2u16; // top and bottom padding rows
     for logical in lines {
         if logical.is_empty() {
@@ -30,7 +30,7 @@ pub(super) fn measure(lines: &[String], text_w: usize) -> u16 {
     rows
 }
 
-pub(super) fn render(
+pub(crate) fn render(
     out: &mut LineBuilder,
     lines: &[String],
     text_w: usize,

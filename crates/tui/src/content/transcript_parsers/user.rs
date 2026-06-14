@@ -6,12 +6,12 @@ use smelt_core::theme::intern;
 use super::metrics::chrome_text_width;
 
 /// Preprocessed user message layout: tab-expanded, blank-trimmed lines.
-pub(super) struct UserBlockGeometry {
+pub(crate) struct UserBlockGeometry {
     pub lines: Vec<String>,
 }
 
 impl UserBlockGeometry {
-    pub(super) fn new(text: &str) -> Self {
+    pub(crate) fn new(text: &str) -> Self {
         let all_lines: Vec<String> = text
             .lines()
             .map(|l| crate::content::display_safe_text(&l.replace('\t', "    ")))
@@ -29,7 +29,7 @@ impl UserBlockGeometry {
     }
 }
 
-pub(super) fn render(
+pub(crate) fn render(
     out: &mut LineBuilder,
     text: &str,
     image_labels: &[String],
@@ -55,7 +55,7 @@ pub(super) fn render(
     })
 }
 
-pub(super) fn measure(text: &str, width: usize) -> u16 {
+pub(crate) fn measure(text: &str, width: usize) -> u16 {
     let text_w = chrome_text_width(width);
     let geom = UserBlockGeometry::new(text);
     super::chrome::measure(&geom.lines, text_w)

@@ -1,27 +1,19 @@
-//! Dispatcher for per-`Block`-variant renderers. `layout_block_into` is the entry point;
-//! `render_block` fans out to per-variant files and `apply_view_state` collapses the result.
-
-use smelt_core::buffer::Buffer;
-use smelt_core::content::builder::{LineBuilder, Outcome};
-use smelt_core::content::LayoutContext;
-use smelt_core::theme::intern;
-use smelt_core::theme::Theme;
-use smelt_core::transcript_model::{Block, ToolState, ViewState};
+//! Per-`Block`-variant transcript renderers.
 
 pub mod markdown;
 mod tools;
 
-mod chrome;
-mod code_line;
-mod compacted;
-mod exec;
-mod metrics;
-mod mode;
-mod process_status;
-mod text;
-mod thinking;
-mod tool_call;
-mod user;
+pub(crate) mod chrome;
+pub(crate) mod code_line;
+pub(crate) mod compacted;
+pub(crate) mod exec;
+pub(crate) mod metrics;
+pub(crate) mod mode;
+pub(crate) mod process_status;
+pub(crate) mod text;
+pub(crate) mod thinking;
+pub(crate) mod tool_call;
+pub(crate) mod user;
 
 #[cfg(test)]
 use markdown::is_horizontal_rule;
@@ -29,197 +21,15 @@ pub use markdown::render_markdown_inner;
 pub(crate) use tools::measure_tool_height;
 pub use tools::render_tool_body_into;
 
-pub(crate) fn measure_block(block: &Block, state: Option<&ToolState>, ctx: &LayoutContext) -> u64 {
-    let width = ctx.width as usize;
-    let expanded_rows = match block {
-        Block::User { text, .. } => user::measure(text, width),
-        Block::Mode { .. } => 1,
-        Block::ProcessStatus { text } => process_status::measure(text, width),
-        Block::Thinking { content } => thinking::measure(content, width, ctx.show_thinking),
-        Block::Text { content } => text::measure(content, width),
-        Block::CodeLine { content, lang } => {
-            let block = smelt_core::content::code_block::parse_code_block(&[content], lang);
-            smelt_core::content::code_block::measure_code_block(&block, width) as u16
-        }
-        Block::ToolCall { name, summary, .. } => {
-            let state = state.expect("ToolCall block requires ToolState");
-            tools::measure_tool_height(
-                name,
-                summary,
-                state.status,
-                state.elapsed,
-                state.output.as_deref(),
-                state.user_message.as_deref(),
-                state.body.as_ref(),
-                width,
-            )
-        }
-        Block::Exec { command, output } => exec::measure(command, output, width),
-        Block::Compacted { summary } => compacted::measure(summary, width),
-    } as u64;
-    ctx.view_state.measured_height(expanded_rows)
-}
-
 /// Per-tool row cap (applied to command header and output body separately).
 const MAX_TOOL_BLOCK_ROWS: usize = 20;
 
-/// Render `block` into `buf`, then apply its view state. `state` is required for `ToolCall`.
-pub fn layout_block_into(
-    buf: &mut Buffer,
-    theme: &Theme,
-    block: &Block,
-    state: Option<&ToolState>,
-    ctx: &LayoutContext,
-) -> Outcome {
-    let width = ctx.width as usize;
-    let show_thinking = ctx.show_thinking;
-    let outcome = {
-        let mut col = LineBuilder::new(buf, theme, ctx.width);
-        render_block(&mut col, block, state, width, show_thinking);
-        col.finish()
-    };
-    apply_view_state(buf, theme, ctx.width, ctx.view_state, outcome)
-}
+#[cfg(test)]
+use smelt_core::content::builder::LineBuilder;
+#[cfg(test)]
+use smelt_core::transcript_model::{Block, ToolState};
 
-fn apply_view_state(
-    buf: &mut Buffer,
-    theme: &Theme,
-    width: u16,
-    state: ViewState,
-    outcome: Outcome,
-) -> Outcome {
-    let total = outcome.line_count;
-    let target_total = state.measured_height(total as u64) as usize;
-    let start = buf.line_count().saturating_sub(total);
-    match state {
-        ViewState::Expanded => outcome,
-        ViewState::Collapsed => {
-            if state.elides_rows(total as u64) {
-                let hidden = total - 1;
-                // Keep first line, drop the rest.
-                buf.set_lines(start + 1, start + total, vec![]);
-                let after_truncate_outcome = Outcome {
-                    line_count: 1,
-                    ..outcome
-                };
-                let with_ellipsis = append_ellipsis(
-                    buf,
-                    theme,
-                    width,
-                    &format!("… {hidden} more lines"),
-                    after_truncate_outcome,
-                );
-                Outcome {
-                    line_count: target_total,
-                    ..with_ellipsis
-                }
-            } else {
-                outcome
-            }
-        }
-        ViewState::TrimmedHead { keep } => {
-            let keep = keep as usize;
-            if state.elides_rows(total as u64) {
-                let hidden = total - keep;
-                buf.set_lines(start + keep, start + total, vec![]);
-                let after_truncate_outcome = Outcome {
-                    line_count: keep,
-                    ..outcome
-                };
-                let with_ellipsis = append_ellipsis(
-                    buf,
-                    theme,
-                    width,
-                    &format!("… {hidden} more lines"),
-                    after_truncate_outcome,
-                );
-                Outcome {
-                    line_count: target_total,
-                    ..with_ellipsis
-                }
-            } else {
-                outcome
-            }
-        }
-        ViewState::TrimmedTail { keep } => {
-            let keep = keep as usize;
-            if state.elides_rows(total as u64) {
-                let hidden = total - keep;
-                buf.set_lines(start, start + (total - keep), vec![]);
-                let mut kept_lines: Vec<String> = (0..keep)
-                    .map(|i| buf.get_line(start + i).unwrap_or("").to_string())
-                    .collect();
-                let kept_decorations: Vec<_> = (0..keep)
-                    .map(|i| buf.decoration_at(start + i).clone())
-                    .collect();
-                let kept_highlights: Vec<_> =
-                    (0..keep).map(|i| buf.highlights_at(start + i)).collect();
-                buf.set_lines(start, start + keep, vec![]);
-                append_ellipsis(
-                    buf,
-                    theme,
-                    width,
-                    &format!("… {hidden} more lines above"),
-                    Outcome {
-                        line_count: 0,
-                        ..outcome
-                    },
-                );
-                let cur_len = buf.line_count();
-                buf.set_lines(cur_len, cur_len, std::mem::take(&mut kept_lines));
-                for (i, hl_list) in kept_highlights.into_iter().enumerate() {
-                    let row = cur_len + i;
-                    for span in hl_list {
-                        buf.add_highlight_group_with_meta(
-                            row,
-                            span.col_start,
-                            span.col_end,
-                            span.hl,
-                            span.meta,
-                        );
-                    }
-                }
-                for (i, dec) in kept_decorations.into_iter().enumerate() {
-                    if dec != smelt_core::buffer::LineDecoration::default() {
-                        buf.set_decoration(cur_len + i, dec);
-                    }
-                }
-                Outcome {
-                    line_count: target_total,
-                    ..outcome
-                }
-            } else {
-                outcome
-            }
-        }
-    }
-}
-
-fn append_ellipsis(
-    buf: &mut Buffer,
-    theme: &Theme,
-    width: u16,
-    text: &str,
-    outcome: Outcome,
-) -> Outcome {
-    let added = {
-        let mut col = LineBuilder::new(buf, theme, width);
-        col.push_dim();
-        col.push_hl(intern("Comment"));
-        col.print(text);
-        col.pop_style();
-        col.pop_style();
-        col.newline();
-        col.finish()
-    };
-    Outcome {
-        line_count: outcome.line_count + added.line_count,
-        was_wrapped: outcome.was_wrapped || added.was_wrapped,
-        max_line_width: outcome.max_line_width.max(added.max_line_width),
-        layout_width: outcome.layout_width,
-    }
-}
-
+#[cfg(test)]
 pub(super) fn render_block(
     out: &mut LineBuilder,
     block: &Block,
@@ -280,8 +90,9 @@ mod tests {
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
     use smelt_core::content::builder::LineBuilder;
+    use smelt_core::content::LayoutContext;
     use smelt_core::theme::Theme;
-    use smelt_core::transcript_model::{gap_between, ToolStatus};
+    use smelt_core::transcript_model::{gap_between, Block, ToolState, ToolStatus, ViewState};
     use std::collections::HashMap;
 
     const W: usize = 80;
@@ -300,7 +111,17 @@ mod tests {
     ) -> Vec<TestLine> {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-        let outcome = layout_block_into(&mut buf, &theme, block, state, ctx);
+        let outcome = {
+            let mut out = LineBuilder::new(&mut buf, &theme, ctx.width);
+            render_block(
+                &mut out,
+                block,
+                state,
+                ctx.width as usize,
+                ctx.show_thinking,
+            );
+            out.finish()
+        };
         read_buffer(&buf, &theme, outcome.line_count)
     }
 

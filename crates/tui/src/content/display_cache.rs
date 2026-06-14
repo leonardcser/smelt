@@ -216,7 +216,7 @@ mod tests {
         DisplayCacheEntry {
             id: smelt_core::transcript_model::BlockId::new(7),
             key: DisplayCacheKey::new(block.content_hash(), 0),
-            block: DisplayBlock::Legacy { block },
+            block: DisplayBlock::Text { block },
         }
     }
 
