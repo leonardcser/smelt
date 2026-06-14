@@ -1,18 +1,13 @@
-//! Inline markdown rendering: emphasis grammar (`*`, `_`, `` ` ``,
-//! `~~`), inline-span flattening + word-wrap, and the markdown table
-//! renderer that uses both.
+//! Inline markdown rendering: pulldown-cmark inline event lowering,
+//! inline-span wrapping, and the markdown table renderer that uses both.
 
 use crate::content::builder::{display_width, LineBuilder};
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::content::ColumnAlignment;
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 use unicode_width::UnicodeWidthStr;
-
-use super::util::{
-    breakable_positions, can_open_emphasis, find_closing_run, find_code_close, find_strike_close,
-    run_length, strip_markdown_markers,
-};
 
 /// Render a markdown table. `alignments` may be empty (defaults to left for all
 /// columns) or shorter than the column count (missing entries default to left).
@@ -447,114 +442,29 @@ fn emit_table_label_spans(out: &mut LineBuilder, spans: &[InlineSpan], dim: bool
 
 /// Visual width of the longest unwrappable segment; used for minimum column widths.
 fn min_visual_width(text: &str) -> usize {
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let breakable = breakable_positions(text);
-
     let mut max_w = 0usize;
-    let mut seg_start = 0;
-    for ci in 0..len {
-        if breakable[ci] {
-            if ci > seg_start {
-                let seg: String = chars[seg_start..ci].iter().collect();
-                max_w = max_w.max(strip_markdown_markers(&seg).width());
-            }
-            seg_start = ci + 1;
+    for span in parse_inline_spans(text, false) {
+        let is_code = span.style.group == Some(intern("SmeltAccent"));
+        if is_code {
+            max_w = max_w.max(span.text.width());
+        } else {
+            max_w = max_w.max(
+                span.text
+                    .split(' ')
+                    .map(UnicodeWidthStr::width)
+                    .max()
+                    .unwrap_or(0),
+            );
         }
-    }
-    if seg_start < len {
-        let seg: String = chars[seg_start..].iter().collect();
-        max_w = max_w.max(strip_markdown_markers(&seg).width());
     }
     max_w
 }
 
-// ── Inline markdown AST + parser ─────────────────────────────────────────
-//
-// A small `InlineNode` tree lets nested spans (bold containing italic, etc.) push styles
-// rather than flatly resetting. Delimiter matching is strict on run length: `**text*`
-// emits the whole unmatched run as literal so the trailing `*` never re-enters as an opener.
-
-enum InlineNode {
-    Text(String),
-    Code(String),
-    Strike(Vec<InlineNode>),
-    Bold(Vec<InlineNode>),
-    Italic(Vec<InlineNode>),
-    BoldItalic(Vec<InlineNode>),
-}
-
-fn parse_inline(chars: &[char], start: usize, end: usize) -> Vec<InlineNode> {
-    let mut nodes: Vec<InlineNode> = Vec::new();
-    let mut plain = String::new();
-    let mut i = start;
-
-    macro_rules! flush_plain {
-        () => {
-            if !plain.is_empty() {
-                nodes.push(InlineNode::Text(std::mem::take(&mut plain)));
-            }
-        };
-    }
-
-    while i < end {
-        // Code span (precedence over emphasis: CommonMark §6.1).
-        if chars[i] == '`' {
-            if let Some(close) = find_code_close(chars, i + 1, end) {
-                flush_plain!();
-                let content: String = chars[i + 1..close].iter().collect();
-                nodes.push(InlineNode::Code(content));
-                i = close + 1;
-                continue;
-            }
-        }
-
-        // Strikethrough `~~text~~`.
-        if i + 1 < end && chars[i] == '~' && chars[i + 1] == '~' {
-            if let Some(close) = find_strike_close(chars, i + 2, end) {
-                flush_plain!();
-                let inner = parse_inline(chars, i + 2, close);
-                nodes.push(InlineNode::Strike(inner));
-                i = close + 2;
-                continue;
-            }
-        }
-
-        // Emphasis: `*italic*`, `**bold**`, `***both***`.
-        if chars[i] == '*' || chars[i] == '_' {
-            let marker = chars[i];
-            let open_run = run_length(chars, i, end, marker);
-
-            if (1..=3).contains(&open_run) && can_open_emphasis(chars, i, open_run, end, marker) {
-                if let Some(close) = find_closing_run(chars, i + open_run, end, marker, open_run) {
-                    flush_plain!();
-                    let inner = parse_inline(chars, i + open_run, close);
-                    let node = match open_run {
-                        1 => InlineNode::Italic(inner),
-                        2 => InlineNode::Bold(inner),
-                        3 => InlineNode::BoldItalic(inner),
-                        _ => unreachable!("run length checked by contains()"),
-                    };
-                    nodes.push(node);
-                    i = close + open_run;
-                    continue;
-                }
-            }
-
-            // No match: emit the whole run as literal to avoid re-entry as a new opener.
-            for _ in 0..open_run {
-                plain.push(marker);
-            }
-            i += open_run;
-            continue;
-        }
-
-        plain.push(chars[i]);
-        i += 1;
-    }
-
-    flush_plain!();
-    nodes
+fn strip_markdown_markers(text: &str) -> String {
+    parse_inline_spans(text, false)
+        .into_iter()
+        .map(|span| span.text)
+        .collect()
 }
 
 // ── Parse-then-wrap pipeline ─────────────────────────────────────────
@@ -576,78 +486,135 @@ pub struct InlineSpan {
 }
 
 pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
-    let chars: Vec<char> = text.chars().collect();
-    let nodes = parse_inline(&chars, 0, chars.len());
-    let base = InlineStyle {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    // Force pulldown-cmark into paragraph context so inline rendering does not
+    // reinterpret table cells or thinking lines that happen to start with block
+    // markers like `- ` or `# `.
+    let source = format!("x {text}");
+    let parser = Parser::new_ext(&source, options);
+    let mut skip_prefix_bytes = 2;
+    let mut styles = vec![InlineStyle {
         dim,
         ..Default::default()
-    };
+    }];
     let mut out = Vec::new();
-    flatten_nodes_into(&nodes, &base, &mut out);
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => push_tag_style(&mut styles, tag),
+            Event::End(_) if styles.len() > 1 => {
+                styles.pop();
+            }
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                push_inline_text_span(
+                    &mut out,
+                    text.as_ref(),
+                    *styles.last().unwrap(),
+                    &mut skip_prefix_bytes,
+                );
+            }
+            Event::Code(text) => {
+                push_inline_text_span(
+                    &mut out,
+                    text.as_ref(),
+                    InlineStyle {
+                        group: Some(intern("SmeltAccent")),
+                        ..*styles.last().unwrap()
+                    },
+                    &mut skip_prefix_bytes,
+                );
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                push_inline_text_span(
+                    &mut out,
+                    " ",
+                    *styles.last().unwrap(),
+                    &mut skip_prefix_bytes,
+                );
+            }
+            Event::TaskListMarker(checked) => {
+                push_inline_text_span(
+                    &mut out,
+                    if checked { "[x] " } else { "[ ] " },
+                    *styles.last().unwrap(),
+                    &mut skip_prefix_bytes,
+                );
+            }
+            Event::FootnoteReference(text) => {
+                push_inline_text_span(
+                    &mut out,
+                    text.as_ref(),
+                    *styles.last().unwrap(),
+                    &mut skip_prefix_bytes,
+                );
+            }
+            Event::Rule => push_inline_text_span(
+                &mut out,
+                "---",
+                *styles.last().unwrap(),
+                &mut skip_prefix_bytes,
+            ),
+            _ => {}
+        }
+    }
+
     out
 }
 
-fn flatten_nodes_into(nodes: &[InlineNode], style: &InlineStyle, out: &mut Vec<InlineSpan>) {
-    for node in nodes {
-        match node {
-            InlineNode::Text(s) if !s.is_empty() => {
-                out.push(InlineSpan {
-                    text: s.clone(),
-                    style: *style,
-                });
-            }
-            InlineNode::Text(_) => {}
-            InlineNode::Code(s) => {
-                out.push(InlineSpan {
-                    text: s.clone(),
-                    style: InlineStyle {
-                        group: Some(intern("SmeltAccent")),
-                        ..*style
-                    },
-                });
-            }
-            InlineNode::Bold(ch) => {
-                flatten_nodes_into(
-                    ch,
-                    &InlineStyle {
-                        bold: true,
-                        ..*style
-                    },
-                    out,
-                );
-            }
-            InlineNode::Italic(ch) => {
-                flatten_nodes_into(
-                    ch,
-                    &InlineStyle {
-                        italic: true,
-                        ..*style
-                    },
-                    out,
-                );
-            }
-            InlineNode::BoldItalic(ch) => {
-                flatten_nodes_into(
-                    ch,
-                    &InlineStyle {
-                        bold: true,
-                        italic: true,
-                        ..*style
-                    },
-                    out,
-                );
-            }
-            InlineNode::Strike(ch) => {
-                flatten_nodes_into(
-                    ch,
-                    &InlineStyle {
-                        crossedout: true,
-                        ..*style
-                    },
-                    out,
-                );
-            }
-        }
+fn push_tag_style(styles: &mut Vec<InlineStyle>, tag: Tag<'_>) {
+    let style = *styles.last().unwrap();
+    let next = match tag {
+        Tag::Emphasis => InlineStyle {
+            italic: true,
+            ..style
+        },
+        Tag::Strong => InlineStyle {
+            bold: true,
+            ..style
+        },
+        Tag::Strikethrough => InlineStyle {
+            crossedout: true,
+            ..style
+        },
+        _ => style,
+    };
+    styles.push(next);
+}
+
+fn push_inline_text_span(
+    out: &mut Vec<InlineSpan>,
+    text: &str,
+    style: InlineStyle,
+    skip_prefix_bytes: &mut usize,
+) {
+    let text = if *skip_prefix_bytes == 0 {
+        text
+    } else if text.len() <= *skip_prefix_bytes {
+        *skip_prefix_bytes -= text.len();
+        ""
+    } else {
+        let (_, text) = text.split_at(*skip_prefix_bytes);
+        *skip_prefix_bytes = 0;
+        text
+    };
+    push_inline_span(out, text, style);
+}
+
+fn push_inline_span(out: &mut Vec<InlineSpan>, text: &str, style: InlineStyle) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = out.last_mut().filter(|span| span.style == style) {
+        last.text.push_str(text);
+    } else {
+        out.push(InlineSpan {
+            text: text.to_string(),
+            style,
+        });
     }
 }
 
@@ -761,6 +728,12 @@ mod tests {
     #[test]
     fn empty_string() {
         assert_eq!(parse(""), vec![]);
+    }
+
+    #[test]
+    fn inline_context_preserves_block_markers_as_text() {
+        assert_eq!(parse("- item"), vec![p("- item")]);
+        assert_eq!(parse("# heading"), vec![p("# heading")]);
     }
 
     // ── Bold ───────────────────────────────────────────────────────────
@@ -880,18 +853,16 @@ mod tests {
         assert_eq!(parse("`unclosed"), vec![p("`unclosed")]);
     }
 
-    /// Regression: `**text*` (3 stars) is an unclosed bold, NOT an
-    /// opened bold that collapses to italic. Previously the parser
-    /// dropped the leading `*` and produced an italic, giving the user
-    /// an "inverted" result (italic instead of bold).
+    /// CommonMark parses the trailing single `*` as an italic delimiter and
+    /// leaves the unmatched leading `*` literal.
     #[test]
     fn odd_star_count_does_not_invert_emphasis() {
-        assert_eq!(parse("**text*"), vec![p("**text*")]);
+        assert_eq!(parse("**text*"), vec![p("*"), i("text")]);
     }
 
     #[test]
     fn odd_star_count_trailing_double() {
-        assert_eq!(parse("*text**"), vec![p("*text**")]);
+        assert_eq!(parse("*text**"), vec![i("text"), p("*")]);
     }
 
     // ── Nested emphasis (CommonMark supports this) ────────────────────
@@ -990,8 +961,7 @@ mod tests {
 
     #[test]
     fn four_star_run_is_literal() {
-        // Runs of 4+ delimiters have no standard meaning; keep them literal.
-        assert_eq!(parse("****text****"), vec![p("****text****")]);
+        assert_eq!(parse("****text****"), vec![b("text")]);
     }
 
     #[test]
@@ -1073,10 +1043,8 @@ mod tests {
 
     #[test]
     fn strip_markers_matches_parse_for_unclosed_bold() {
-        // The old parser produced `*` + italic("text") for `**text*`,
-        // giving width=4 after stripping. The new parser keeps the run
-        // literal, so stripping should return the whole thing.
-        assert_eq!(strip_markdown_markers("**text*"), "**text*");
+        // Keep stripping in lockstep with pulldown-cmark inline parsing.
+        assert_eq!(strip_markdown_markers("**text*"), "*text");
     }
 
     fn render_code_block(

@@ -723,7 +723,7 @@ Conclusion: this slice intentionally centralizes behavior without changing the r
 - Added `pulldown-cmark` to `smelt_core` with default features disabled.
 - Added `smelt_core::content::markdown_ir::{MarkdownBlock, MarkdownNode, parse_markdown}` in `crates/core/src/content/markdown_ir.rs`. This first IR slice borrows the source and keeps source ranges for plain source, fenced/indented code blocks, tables, and horizontal rules; code nodes also store language and body ranges, and table nodes store parser-derived alignments and cell boundaries.
 - Updated `crates/tui/src/content/display_renderers/markdown.rs` to render from `MarkdownBlock` while preserving the existing Smelt line renderer for source ranges and the existing code/rule renderers for specialized nodes. Table rendering now consumes parser-derived rows instead of reparsing pipe-delimited source lines.
-- Kept current copy/source behavior for rendered markdown tables and current spacing behavior for headings, lists, code blocks, tables, and horizontal rules. The bridge intentionally still renders ordinary source lines with the existing inline renderer until full paragraph/list/inline AST lowering lands.
+- Kept current copy/source behavior for rendered markdown tables and current spacing behavior for headings, lists, code blocks, tables, and horizontal rules. Ordinary source lines still use existing line-level block heuristics, but inline emphasis/code/strike/link/autolink parsing now comes from `pulldown-cmark` instead of Smelt's old custom delimiter parser.
 - The old backtick-fence helpers remain in `smelt_core::content` for now because they are tested parsing primitives, but the transcript markdown renderer no longer uses them.
 
 Validation:

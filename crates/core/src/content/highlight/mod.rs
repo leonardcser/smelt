@@ -6,7 +6,6 @@ use syntect::parsing::SyntaxSet;
 pub mod diff;
 pub mod inline;
 pub mod syntax;
-pub mod util;
 
 /// How the highlight renderers paint the left margin / gutter.
 ///
