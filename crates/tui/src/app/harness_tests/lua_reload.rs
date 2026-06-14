@@ -217,6 +217,140 @@ fn lua_buf_win_overlay_contracts_are_available() {
 }
 
 #[test]
+fn lua_prompt_text_theme_work_keymap_and_vim_contracts_are_available() {
+    let mut app = TestApp::builder().with_vim(true).build();
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .lua
+            .lua
+            .load(
+                r##"
+            smelt.prompt.set_text("aéz")
+            assert(smelt.prompt.text() == "aéz", "prompt text roundtrip")
+            assert(smelt.prompt.cursor(999) == #"aéz", "prompt cursor clamps")
+            assert(smelt.prompt.replace_range(1, 3, "X") == 2, "prompt replace cursor")
+            assert(smelt.prompt.text() == "aXz", "prompt replace snaps utf8 range")
+            assert(type(smelt.prompt.win()) == "userdata", "prompt win")
+            smelt.prompt.set_section("coverage", "section body")
+            smelt.prompt.remove_section("coverage")
+            assert(type(smelt.prompt.queued()) == "table", "prompt queued")
+            assert(smelt.prompt.has_stash() == false, "prompt stash")
+
+            assert(smelt.text.width("界") == 2, "wide char width")
+            assert(smelt.text.line_count("a\nb") == 2, "line count")
+            assert(smelt.text.slugify("Hello, Smelt!") == "hello-smelt", "slugify")
+            assert(smelt.text.truncate("éx", 2) == "é", "truncate keeps utf8 boundary")
+            assert(smelt.text.truncate("abcdef", 3, { keep = "tail", prefix = "…" }) == "…def", "tail truncate")
+            assert(smelt.text.fit("x", 4, { align = "right", fill = "." }) == "...x", "fit right")
+            assert(smelt.text.format_duration(65) == "1m 5s", "duration")
+            assert(smelt.text.format_tokens(1200) == "1.2k", "tokens")
+            assert(smelt.text.format_cost(1.25) == "$1.25", "cost")
+
+            smelt.theme.set("CoverageContract", { fg = { ansi = 42 }, bold = true })
+            local style = smelt.theme.get("CoverageContract")
+            assert(style.fg.ansi == 42, "theme fg")
+            assert(style.bold == true, "theme bold")
+            assert(type(smelt.theme.snapshot().CoverageContract) == "table", "theme snapshot")
+            assert(type(smelt.theme.is_light()) == "boolean", "theme light")
+
+            assert(smelt.work.is_busy() == false, "work initially idle")
+            local guard = smelt.work.guard()
+            assert(smelt.work.guard_current(guard) == true, "work guard current")
+            local busy = smelt.work.busy("coverage")
+            assert(smelt.work.is_busy() == true, "work busy")
+            assert(busy:remove() == true, "work remove")
+            assert(smelt.work.is_busy() == false, "work idle after remove")
+
+            local old_leader = smelt.keymap.leader()
+            smelt.keymap.set_leader("<space>")
+            assert(smelt.keymap.leader() == "<space>", "leader set")
+            local reg = smelt.keymap.set("n", "<leader>t", function() end)
+            local found = false
+            for _, row in ipairs(smelt.keymap.list()) do
+                if row.mode == "n" and row.chord == "<space>t" then found = true end
+            end
+            assert(found, "keymap listed")
+            assert(reg:remove() == true, "keymap reg remove")
+            assert(smelt.keymap.unset("n", "<leader>t") == false, "keymap already removed")
+            smelt.keymap.set_leader(old_leader)
+            assert(type(smelt.keymap.help_sections()) == "table", "help sections")
+
+            assert(smelt.vim.mode() == "insert", "initial vim mode")
+            smelt.vim.set_mode("normal")
+            assert(smelt.vim.mode() == "normal", "vim mode set")
+            smelt.vim.set_mode("insert")
+        "##,
+            )
+            .exec()
+            .expect("lua prompt/text/theme/work/keymap/vim contracts");
+    }
+
+    assert_eq!(app.state().prompt_text, "aXz");
+}
+
+#[test]
+fn lua_picker_permissions_notify_engine_and_ui_contracts_are_available() {
+    let mut app = TestApp::builder().build();
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .lua
+            .lua
+            .load(
+                r#"
+            local size = smelt.ui.size()
+            assert(type(size.width) == "number" and type(size.height) == "number", "ui size")
+            assert(type(smelt.win.transcript()) == "userdata", "transcript win")
+            assert(type(smelt.win.TRANSCRIPT) == "userdata", "transcript constant")
+            assert(type(smelt.win.PROMPT) == "userdata", "prompt constant")
+
+            local picker = smelt.picker.new({
+                title = "Coverage Picker",
+                items = {
+                    "one",
+                    { label = "two", description = "second" },
+                },
+            })
+            assert(tostring(picker):find("Picker#", 1, true) == 1, "picker tostring")
+            assert(type(picker:win()) == "userdata", "picker win")
+            assert(picker:selected() == 0, "picker initial selected")
+            assert(picker:move(1) == picker, "picker move chain")
+            assert(picker:selected() == 1, "picker moved")
+            assert(picker:items({ "replacement" }, 0) == picker, "picker items chain")
+            assert(picker:selected() == 0, "picker selected reset")
+            picker:close()
+
+            local perms = smelt.permissions.list()
+            assert(type(perms.session) == "table", "permission session list")
+            assert(type(perms.workspace) == "table", "permission workspace list")
+            local tool_decision = smelt.permissions.check_tool("default", "bash")
+            local subcommand_decision = smelt.permissions.check("default", "bash", "git status")
+            assert(type(tool_decision) == "string" and #tool_decision > 0, "permission tool decision")
+            assert(type(subcommand_decision) == "string" and #subcommand_decision > 0, "permission subcommand decision")
+            smelt.permissions.set_rules({ default = { tools = { ask = { "*" } } } })
+
+            smelt.notify("hello from lua contract", "coverage")
+            smelt.notify.warn("careful from lua contract", "coverage")
+            smelt.notify.error("error from lua contract", "coverage")
+
+            assert(smelt.engine.is_running() == false, "engine running")
+            assert(type(smelt.engine.summary_prefix()) == "string", "summary prefix")
+            local prep = smelt.engine.on_prepare_request(function(req, reply) reply(nil) end)
+            assert(prep:remove() == true, "prepare hook remove")
+            local limit = smelt.engine.on_context_limit(function(messages, reply) reply(nil) end)
+            assert(limit:remove() == true, "context hook remove")
+            assert(not pcall(function() smelt.engine.ask({ system = "" }) end), "ask validates system")
+        "#,
+            )
+            .exec()
+            .expect("lua picker/permissions/notify/engine/ui contracts");
+    }
+}
+
+#[test]
 fn reload_clears_surviving_prompt_keymaps() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(
