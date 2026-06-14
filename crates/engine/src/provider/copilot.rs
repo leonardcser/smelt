@@ -5,7 +5,7 @@
 use crate::log;
 use crate::paths::state_dir;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::auth_storage::CredStore;
@@ -35,6 +35,29 @@ fn cred_store() -> CredStore {
     }
 }
 
+#[derive(Clone)]
+struct CopilotAuthEnv {
+    token_store: CredStore,
+    copilot_token_url: String,
+    models_cache_path: PathBuf,
+    now: fn() -> u64,
+}
+
+impl CopilotAuthEnv {
+    fn production() -> Self {
+        Self {
+            token_store: cred_store(),
+            copilot_token_url: COPILOT_TOKEN_URL.to_string(),
+            models_cache_path: cache_path(),
+            now: unix_now,
+        }
+    }
+}
+
+fn now(env: &CopilotAuthEnv) -> u64 {
+    (env.now)()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CopilotTokens {
     pub(crate) refresh_token: String,
@@ -46,18 +69,25 @@ pub(crate) struct CopilotTokens {
 }
 
 impl CopilotTokens {
-    pub(crate) fn needs_refresh(&self) -> bool {
-        let now = unix_now();
+    fn needs_refresh_at(&self, now: u64) -> bool {
         now + 60 >= self.expires_at
     }
 
     pub(crate) fn save(&self) -> Result<(), String> {
+        self.save_to(&cred_store())
+    }
+
+    fn save_to(&self, store: &CredStore) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        cred_store().save(&json)
+        store.save(&json)
     }
 
     pub(crate) fn load() -> Option<Self> {
-        let json = cred_store().load()?;
+        Self::load_from(&cred_store())
+    }
+
+    fn load_from(store: &CredStore) -> Option<Self> {
+        let json = store.load()?;
         serde_json::from_str(&json).ok()
     }
 
@@ -178,7 +208,7 @@ pub(crate) async fn device_code_login(
     };
     if !models.is_empty() {
         (callbacks.on_progress)(&format!("Fetched {} Copilot models", models.len()));
-        save_models_cache(&models);
+        save_models_cache_to(&cache_path(), &models);
     }
 
     Ok(tokens)
@@ -266,14 +296,35 @@ async fn poll_for_github_token(
     }
 }
 
+struct CopilotTokenRequest {
+    url: String,
+    authorization: String,
+}
+
+fn build_copilot_token_request(env: &CopilotAuthEnv, github_token: &str) -> CopilotTokenRequest {
+    CopilotTokenRequest {
+        url: env.copilot_token_url.clone(),
+        authorization: format!("Bearer {github_token}"),
+    }
+}
+
 async fn fetch_copilot_token(
     client: &reqwest::Client,
     github_token: &str,
 ) -> Result<(String, u64, String), String> {
+    fetch_copilot_token_with_env(client, github_token, &CopilotAuthEnv::production()).await
+}
+
+async fn fetch_copilot_token_with_env(
+    client: &reqwest::Client,
+    github_token: &str,
+    env: &CopilotAuthEnv,
+) -> Result<(String, u64, String), String> {
+    let spec = build_copilot_token_request(env, github_token);
     let mut req = client
-        .get(COPILOT_TOKEN_URL)
+        .get(spec.url)
         .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {github_token}"));
+        .header("Authorization", spec.authorization);
     for (k, v) in base_headers() {
         req = req.header(k, v);
     }
@@ -314,16 +365,25 @@ pub(crate) async fn refresh_tokens(
     client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<CopilotTokens, String> {
-    let (access, expires_at, api_base) = fetch_copilot_token(client, refresh_token).await?;
+    refresh_tokens_with_env(client, refresh_token, &CopilotAuthEnv::production()).await
+}
+
+async fn refresh_tokens_with_env(
+    client: &reqwest::Client,
+    refresh_token: &str,
+    env: &CopilotAuthEnv,
+) -> Result<CopilotTokens, String> {
+    let (access, expires_at, api_base) =
+        fetch_copilot_token_with_env(client, refresh_token, env).await?;
     let tokens = CopilotTokens {
         refresh_token: refresh_token.to_string(),
         access_token: access,
         expires_at,
         api_base,
-        last_refresh: unix_now(),
+        last_refresh: now(env),
     };
     tokens
-        .save()
+        .save_to(&env.token_store)
         .map_err(|e| format!("failed to save tokens: {e}"))?;
     log::entry(
         log::Level::Debug,
@@ -336,12 +396,19 @@ pub(crate) async fn refresh_tokens(
 pub(crate) async fn ensure_access_token_full(
     client: &reqwest::Client,
 ) -> Result<CopilotTokens, String> {
-    let tokens =
-        CopilotTokens::load().ok_or("not logged in to GitHub Copilot; run `smelt auth` first")?;
-    if !tokens.needs_refresh() {
+    ensure_access_token_full_with_env(client, &CopilotAuthEnv::production()).await
+}
+
+async fn ensure_access_token_full_with_env(
+    client: &reqwest::Client,
+    env: &CopilotAuthEnv,
+) -> Result<CopilotTokens, String> {
+    let tokens = CopilotTokens::load_from(&env.token_store)
+        .ok_or("not logged in to GitHub Copilot; run `smelt auth` first")?;
+    if !tokens.needs_refresh_at(now(env)) {
         return Ok(tokens);
     }
-    refresh_tokens(client, &tokens.refresh_token).await
+    refresh_tokens_with_env(client, &tokens.refresh_token, env).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,7 +581,11 @@ fn cache_path() -> PathBuf {
 }
 
 pub(crate) fn load_cached_models() -> Vec<CopilotModel> {
-    let Ok(data) = std::fs::read_to_string(cache_path()) else {
+    load_cached_models_from(&cache_path())
+}
+
+fn load_cached_models_from(path: &Path) -> Vec<CopilotModel> {
+    let Ok(data) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let models: Vec<CopilotModel> = serde_json::from_str(&data).unwrap_or_default();
@@ -527,16 +598,22 @@ pub(crate) fn load_cached_models() -> Vec<CopilotModel> {
         .collect()
 }
 
-fn save_models_cache(models: &[CopilotModel]) {
-    let path = cache_path();
+fn save_models_cache_to(path: &Path, models: &[CopilotModel]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, serde_json::to_string(models).unwrap_or_default());
+    let _ = std::fs::write(path, serde_json::to_string(models).unwrap_or_default());
 }
 
 pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CopilotModel> {
-    let Ok(tokens) = ensure_access_token_full(client).await else {
+    refresh_models_cache_with_env(client, &CopilotAuthEnv::production()).await
+}
+
+async fn refresh_models_cache_with_env(
+    client: &reqwest::Client,
+    env: &CopilotAuthEnv,
+) -> Vec<CopilotModel> {
+    let Ok(tokens) = ensure_access_token_full_with_env(client, env).await else {
         return Vec::new();
     };
     let models = match fetch_available_models(client, &tokens.access_token, &tokens.api_base).await
@@ -544,7 +621,7 @@ pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<Copilo
         Ok(m) => m,
         Err(_) => return Vec::new(),
     };
-    save_models_cache(&models);
+    save_models_cache_to(&env.models_cache_path, &models);
     models
 }
 
@@ -659,20 +736,20 @@ mod tests {
 
     #[test]
     fn needs_refresh_true_when_within_60s_of_expiry() {
-        let t = tokens(unix_now() + 30);
-        assert!(t.needs_refresh());
+        let t = tokens(1_030);
+        assert!(t.needs_refresh_at(1_000));
     }
 
     #[test]
     fn needs_refresh_true_when_past_expiry() {
-        let t = tokens(unix_now().saturating_sub(1));
-        assert!(t.needs_refresh());
+        let t = tokens(999);
+        assert!(t.needs_refresh_at(1_000));
     }
 
     #[test]
     fn needs_refresh_false_when_expiry_far_future() {
-        let t = tokens(unix_now() + 3600);
-        assert!(!t.needs_refresh());
+        let t = tokens(4_600);
+        assert!(!t.needs_refresh_at(1_000));
     }
 
     // ---- base_headers ----
@@ -691,6 +768,99 @@ mod tests {
             kv.get("Copilot-Integration-Id"),
             Some(&COPILOT_INTEGRATION_ID)
         );
+    }
+
+    fn fixed_now() -> u64 {
+        1_000
+    }
+
+    fn test_env(token_url: String, token_path: std::path::PathBuf) -> CopilotAuthEnv {
+        CopilotAuthEnv {
+            token_store: CredStore {
+                keyring_service: None,
+                keyring_user: None,
+                file_path: token_path,
+                env_var: None,
+            },
+            copilot_token_url: token_url,
+            models_cache_path: std::path::PathBuf::from("unused-model-cache.json"),
+            now: fixed_now,
+        }
+    }
+
+    async fn spawn_json_response(body: String) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            req
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    #[test]
+    fn build_copilot_token_request_uses_env_url_and_bearer_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(
+            "https://copilot-token.example".to_string(),
+            tmp.path().join("tokens.json"),
+        );
+
+        let req = build_copilot_token_request(&env, "github-token");
+
+        assert_eq!(req.url, "https://copilot-token.example");
+        assert_eq!(req.authorization, "Bearer github-token");
+    }
+
+    #[tokio::test]
+    async fn refresh_tokens_with_env_uses_local_store_and_fixed_clock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (token_url, task) = spawn_json_response(
+            serde_json::json!({
+                "token": "tid=abc;proxy-ep=proxy.business.githubcopilot.com",
+                "expires_at": 1_500_u64
+            })
+            .to_string(),
+        )
+        .await;
+        let env = test_env(token_url, tmp.path().join("tokens.json"));
+
+        let tokens = refresh_tokens_with_env(&reqwest::Client::new(), "github-refresh", &env)
+            .await
+            .unwrap();
+
+        assert_eq!(tokens.refresh_token, "github-refresh");
+        assert_eq!(tokens.expires_at, 1_500);
+        assert_eq!(tokens.last_refresh, fixed_now());
+        assert_eq!(tokens.api_base, "https://api.business.githubcopilot.com");
+        let request = task.await.unwrap();
+        assert!(request.starts_with("GET / HTTP/1.1"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer github-refresh"));
+        let saved = std::fs::read_to_string(&env.token_store.file_path).unwrap();
+        assert!(saved.contains("github-refresh"), "{saved}");
+        assert!(saved.contains("api.business.githubcopilot.com"), "{saved}");
     }
 
     // ---- parse_models_response ----
