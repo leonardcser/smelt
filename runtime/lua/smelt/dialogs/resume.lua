@@ -37,11 +37,25 @@ local function display_title(entry)
   return (line:match("^%s*(.-)%s*$") or line)
 end
 
+local SIZE_WIDTH = 6
+
 local function format_size(bytes)
   if bytes == nil or bytes <= 0 then return "" end
   if bytes < 1024 then return string.format("%dB", bytes) end
-  if bytes < 1024 * 1024 then return string.format("%.1fK", bytes / 1024) end
-  return string.format("%.1fM", bytes / 1024 / 1024)
+
+  local units = { "K", "M", "G", "T", "P" }
+  local value = bytes / 1024
+  local unit_idx = 1
+  local text = string.format("%.1f%s", value, units[unit_idx])
+  while #text > SIZE_WIDTH and unit_idx < #units do
+    value = value / 1024
+    unit_idx = unit_idx + 1
+    text = string.format("%.1f%s", value, units[unit_idx])
+  end
+  if #text > SIZE_WIDTH then
+    text = string.format("%.0f%s", value, units[unit_idx])
+  end
+  return text
 end
 
 local function time_ago(ts_ms, now_ms)
@@ -53,7 +67,7 @@ local function time_ago(ts_ms, now_ms)
   return string.format("%dd", math.floor(delta / 86400))
 end
 
-local LEADING, SIZE_COL, TIME_COL, GAP = 1, 6, 4, 1
+local LEADING, SIZE_COL, TIME_COL, GAP = 1, SIZE_WIDTH, 4, 1
 local PREVIEW_MIN_TERM_WIDTH = 100
 
 local function make_render(now_ms)
@@ -68,10 +82,17 @@ local function make_render(now_ms)
       time_ago(ts, now_ms),
       string.rep(" ", GAP)
     )
-    local indent = string.rep("  ", entry.depth or 0)
+    local prefix = entry.tree_prefix or ""
+    local marks = { { col = 0, opts = { end_col = #meta, dim = true } } }
+    if prefix ~= "" then
+      marks[#marks + 1] = {
+        col = #meta,
+        opts = { end_col = #meta + #prefix, dim = true },
+      }
+    end
     return {
-      text  = meta .. indent .. display_title(entry),
-      marks = { { col = 0, opts = { end_col = #meta, dim = true } } },
+      text  = meta .. prefix .. display_title(entry),
+      marks = marks,
     }
   end
 end
@@ -84,16 +105,6 @@ local function update_state_label(buf, workspace_only)
     virt_text_pos = "right_align",
     dim           = true,
   })
-end
-
-local function reverse_in_place(items)
-  local i, j = 1, #items
-  while i < j do
-    items[i], items[j] = items[j], items[i]
-    i = i + 1
-    j = j - 1
-  end
-  return items
 end
 
 -- Wire the `--resume` CLI flag (declared in `smelt/early/resume.lua`) to a
@@ -125,14 +136,10 @@ smelt.cmd.register("resume", function()
     local workspace_only = true
     local query          = ""
 
-    -- Expand flat list into DFS-ordered tree (depth field for fork indent).
-    local tree_entries = smelt.session.tree(entries)
-    reverse_in_place(tree_entries)
-
     -- Pre-build title haystacks once. Hot path runs `smelt.fuzzy.score` against
     -- these per refilter; rebuilding per call would re-concatenate strings.
     local title_hays = {}
-    for _, e in ipairs(tree_entries) do
+    for _, e in ipairs(entries) do
       title_hays[e.id] = display_title(e) .. " " .. (e.subtitle or "")
     end
 
@@ -143,24 +150,29 @@ smelt.cmd.register("resume", function()
     local function ensure_texts()
       if texts ~= nil then return end
       local ids = {}
-      for _, e in ipairs(tree_entries) do table.insert(ids, e.id) end
+      for _, e in ipairs(entries) do table.insert(ids, e.id) end
       local raw = smelt.session.texts(ids)
       local lowered = {}
       for k, v in pairs(raw) do lowered[k] = v:lower() end
       texts = lowered
     end
 
-    local function make_filter()
-      local q_lower = query:lower()
-      return function(entry)
-        if workspace_only and entry.cwd ~= current_cwd then return false end
-        if query == "" then return true end
-        if smelt.fuzzy.score(title_hays[entry.id] or "", query) ~= nil then
-          return true
-        end
-        local blob = texts and texts[entry.id]
-        return blob ~= nil and blob:find(q_lower, 1, true) ~= nil
+    local function entry_matches(entry)
+      if workspace_only and entry.cwd ~= current_cwd then return false end
+      if query == "" then return true end
+      if smelt.fuzzy.score(title_hays[entry.id] or "", query) ~= nil then
+        return true
       end
+      local blob = texts and texts[entry.id]
+      return blob ~= nil and blob:find(query:lower(), 1, true) ~= nil
+    end
+
+    local function visible_tree()
+      local visible = {}
+      for _, e in ipairs(entries) do
+        if entry_matches(e) then table.insert(visible, e) end
+      end
+      return smelt.session.tree(visible, { order = "asc" })
     end
 
     local task_id = smelt.task.alloc()
@@ -202,9 +214,8 @@ smelt.cmd.register("resume", function()
     local list = smelt.list.new({
       leaf       = list_leaf,
       buf        = list_buf,
-      items      = tree_entries,
+      items      = visible_tree(),
       render     = make_render(now_ms),
-      filter     = make_filter(),
       anchor     = "bottom",
       empty_text = "  (no matching sessions)",
     })
@@ -280,7 +291,7 @@ smelt.cmd.register("resume", function()
     end
 
     local function refilter()
-      list:set_filter(make_filter())
+      list:set_items(visible_tree())
       select_bottom()
       schedule_preview()
     end
@@ -339,14 +350,12 @@ smelt.cmd.register("resume", function()
       local e = list:selected()
       if not e then return end
       smelt.session.delete(e.id)
-      for i, x in ipairs(tree_entries) do
-        if x.id == e.id then table.remove(tree_entries, i); break end
+      for i, x in ipairs(entries) do
+        if x.id == e.id then table.remove(entries, i); break end
       end
       title_hays[e.id] = nil
       if texts then texts[e.id] = nil end
-      list:set_items(tree_entries)
-      select_bottom()
-      schedule_preview()
+      refilter()
     end
 
     local function toggle_workspace()

@@ -170,31 +170,42 @@ app_story!(resume_dialog, |ctx| {
     let cwd = ctx.app_cwd().to_string();
     let entries = [
         (
-            "sess-aaaa1111",
-            "investigate parser regression",
-            now_ms - 5 * 60 * 1000,
-            12_345u64,
-        ),
-        (
-            "sess-bbbb2222",
-            "wire up the diff renderer",
-            now_ms - 2 * 3600 * 1000,
-            4_096,
-        ),
-        (
-            "sess-cccc3333",
-            "first pass at the resume picker",
-            now_ms - 26 * 3600 * 1000,
-            87_654,
-        ),
-        (
-            "sess-dddd4444",
+            "sess-root-old",
             "spike: notebook preview",
             now_ms - 5 * 86400 * 1000,
             1_500_000,
+            None::<&str>,
+        ),
+        (
+            "sess-root-forked",
+            "first pass at the resume picker",
+            now_ms - 26 * 3600 * 1000,
+            87_654,
+            None,
+        ),
+        (
+            "sess-fork-a",
+            "fix prompt keybindings",
+            now_ms - 7 * 3600 * 1000,
+            1_037_000,
+            Some("sess-root-forked"),
+        ),
+        (
+            "sess-fork-b",
+            "wire up the diff renderer",
+            now_ms - 2 * 3600 * 1000,
+            4_096,
+            Some("sess-root-forked"),
+        ),
+        (
+            "sess-nested",
+            "investigate parser regression",
+            now_ms - 5 * 60 * 1000,
+            12_345u64,
+            Some("sess-fork-b"),
         ),
     ];
-    for (id, title, ts, bytes) in entries {
+    for (id, title, ts, bytes, parent_id) in entries {
         let meta = smelt_core::session::SessionMeta {
             id: id.to_string(),
             title: Some(title.to_string()),
@@ -206,7 +217,7 @@ app_story!(resume_dialog, |ctx| {
             reasoning_effort: None,
             model: None,
             cwd: Some(cwd.clone()),
-            parent_id: None,
+            parent_id: parent_id.map(str::to_string),
             context_tokens: None,
             text_bytes: Some(bytes),
         };

@@ -189,14 +189,20 @@ fun(entries: table[], opts: table?): table[]
 ```
 
 Arrange a flat list of session entries (as returned by `smelt.session.list`)
-into a DFS-ordered tree by `parent_id`. Each returned entry gets a `depth`
-field (0 = root, 1 = first-level fork, ...). Roots come first, sorted by
-`opts.sort_by` descending (default `"updated_at_ms"`); each root is
-immediately followed by its children, sorted by the same key.
+into a DFS-ordered tree by `parent_id`. Each returned entry is a shallow
+copy with tree metadata:
+  * `depth` - 0 for roots, 1 for first-level forks, ...
+  * `tree_prefix` - printable tree gutter (`├─ ` / `└─ ` with ancestors)
+  * `tree_is_last` - true when this entry is the last sibling
+  * `tree_has_children` - true when this entry has visible children
+  * `tree_sort_value` - max `opts.sort_by` value in this entry's subtree
 
-Entries whose `parent_id` references an id not present in `entries` are
-treated as roots - this is what makes the function safe under workspace
-filtering, where a fork's parent may have been filtered out.
+Families sort by the newest descendant, so a resumed fork pulls its root
+conversation next to it instead of leaving the root behind in strict
+root-updated order. `opts.order = "asc"` is useful for bottom-anchored lists:
+old families render first, recent families end up at the bottom, while each
+parent still renders before its children. Entries whose `parent_id` references
+an id not present in `entries` are treated as roots.
 
 ## `smelt.session.turns`
 
