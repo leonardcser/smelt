@@ -6,10 +6,11 @@ use smelt_core::permissions::rules::{
     ModeBehavior, RawModePerms, RawPerms, RawRuleSet, ToolDefaults, ToolEffectKind, ToolPermDefaults,
 };
 use smelt_core::permissions::{
-    builtin_subpattern_parser, split_shell_commands, split_shell_commands_with_ops, Permissions,
-    ToolOrigin,
+    builtin_subpattern_parser, split_shell_commands, split_shell_commands_with_ops, Decision,
+    PermissionRequirement, Permissions, ToolOrigin,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct Input {
@@ -144,7 +145,46 @@ fn origin(raw: u8) -> ToolOrigin {
     }
 }
 
+fn path_resolver() -> Arc<smelt_core::permissions::PathsFn> {
+    Arc::new(|name, args| match name {
+        "read" | "edit" => args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    })
+}
+
+fn approval_candidates(input: &Input) -> Vec<String> {
+    let mut out = vec!["*".to_string()];
+    for candidate in [&input.value, &input.command, &input.url, &input.path] {
+        if !candidate.is_empty() && !out.iter().any(|existing| existing == candidate) {
+            out.push(candidate.clone());
+        }
+    }
+    out
+}
+
+fn assert_outcome_shape(outcome: &smelt_core::permissions::PermissionOutcome) {
+    match outcome.decision {
+        Decision::Allow | Decision::Deny | Decision::Error(_) => {
+            assert!(outcome.missing_requirements.is_empty())
+        }
+        Decision::Ask => assert!(!outcome.missing_requirements.is_empty()),
+    }
+    if outcome
+        .missing_requirements
+        .iter()
+        .any(|req| matches!(req, PermissionRequirement::PathPrefix { .. }))
+    {
+        assert_eq!(outcome.decision, Decision::Ask);
+    }
+}
+
 fuzz_target!(|input: Input| {
+    let candidates = approval_candidates(&input);
     let raw = RawPerms {
         default: raw_mode(input.default),
         modes: HashMap::from([
@@ -161,7 +201,9 @@ fuzz_target!(|input: Input| {
     defaults.tool_effects.insert("edit".into(), ToolEffectKind::PathWrite);
     defaults.tool_decisions.insert(
         "read".into(),
-        ToolPermDefaults { modes: HashMap::from([("normal".into(), smelt_core::permissions::Decision::Allow)]) },
+        ToolPermDefaults {
+            modes: HashMap::from([("normal".into(), Decision::Allow)]),
+        },
     );
 
     let behaviors = HashMap::from([
@@ -185,8 +227,10 @@ fuzz_target!(|input: Input| {
 
     let mut perms = Permissions::from_raw_with_mode_behaviors(&raw, &defaults, behaviors);
     perms.set_workspace(std::env::current_dir().unwrap_or_default());
+    perms.set_paths_fn(path_resolver());
 
     let mode = protocol::AgentMode::parse(if input.read_only { "plan" } else { "normal" }).unwrap();
+    let request_origin = origin(input.origin);
     let _tool_decision = perms.check_tool(mode.clone(), &input.tool);
     let _sub_decision = perms.check_subcommand(mode.clone(), &input.bucket, &input.value);
     let _bash_decision = perms.check_subcommand(mode.clone(), "bash", &input.command);
@@ -194,13 +238,48 @@ fuzz_target!(|input: Input| {
     let _split_with_ops = split_shell_commands_with_ops(&input.command);
 
     let args = HashMap::from([
-        ("command".to_string(), serde_json::Value::String(input.command)),
-        ("url".to_string(), serde_json::Value::String(input.url)),
-        ("path".to_string(), serde_json::Value::String(input.path)),
+        (
+            "command".to_string(),
+            serde_json::Value::String(input.command.clone()),
+        ),
+        ("url".to_string(), serde_json::Value::String(input.url.clone())),
+        (
+            "path".to_string(),
+            serde_json::Value::String(input.path.clone()),
+        ),
     ]);
-    let outcome = perms.evaluate_tool(mode, origin(input.origin), &input.tool, &args);
-    if outcome.downgraded_by_workspace {
-        assert_eq!(outcome.decision, smelt_core::permissions::Decision::Ask);
-        assert!(!outcome.outside_workspace_paths.is_empty());
+    let outcome = perms.evaluate_tool(mode.clone(), request_origin.clone(), &input.tool, &args);
+    assert_outcome_shape(&outcome);
+
+    let approval_tool = if request_origin == ToolOrigin::Mcp {
+        "mcp"
+    } else {
+        input.tool.as_str()
+    };
+    let options = perms.approval_options(approval_tool, &candidates, &outcome);
+    for grant_set in &options.grant_sets {
+        assert!(!grant_set.is_empty());
+        assert!(outcome
+            .missing_requirements
+            .iter()
+            .all(|req| grant_set.iter().any(|grant| grant.satisfies(req))));
+    }
+
+    let has_empty_command_requirement = outcome.missing_requirements.iter().any(|req| {
+        matches!(req, PermissionRequirement::Command { command, .. } if command.is_empty())
+    });
+    if outcome.decision == Decision::Ask && !has_empty_command_requirement {
+        if let Some(grant_set) = options.grant_sets.first() {
+            {
+                let mut approvals = perms.approvals.write().unwrap();
+                for grant in grant_set.iter().cloned() {
+                    approvals.add_session_grant(grant);
+                }
+            }
+            let approved =
+                perms.evaluate_tool_with_approvals(mode, request_origin, &input.tool, &args);
+            assert_eq!(approved.decision, Decision::Allow);
+            assert!(approved.missing_requirements.is_empty());
+        }
     }
 });
