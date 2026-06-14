@@ -676,6 +676,105 @@ mod tests {
         }
     }
 
+    async fn spawn_oauth_response(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let req = String::from_utf8_lossy(&buf);
+                let Some((headers, request_body)) = req.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                    })
+                    .unwrap_or(0);
+                if request_body.len() >= content_len {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            req
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn access_token_returns_cached_token_without_refresh_when_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _state_guard = EnvVarGuard::set("XDG_STATE_HOME", tmp.path());
+        let _token_guard = EnvVarGuard::set(
+            TOKENS_ENV,
+            serde_json::json!({
+                "access_token": "cached-access",
+                "refresh_token": "cached-refresh",
+                "expires_at": unix_now() + 3600,
+            })
+            .to_string(),
+        );
+
+        let token = access_token(&reqwest::Client::new()).await.unwrap();
+
+        assert_eq!(token, "cached-access");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn access_token_refreshes_expired_cached_token_and_persists_fresh_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _state_guard = EnvVarGuard::set("XDG_STATE_HOME", tmp.path());
+        let _token_guard = EnvVarGuard::set(
+            TOKENS_ENV,
+            serde_json::json!({
+                "access_token": "expired-access",
+                "refresh_token": "expired-refresh",
+                "expires_at": unix_now().saturating_sub(1),
+            })
+            .to_string(),
+        );
+        let (host, task) = spawn_oauth_response(
+            r#"{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":120}"#,
+        )
+        .await;
+        let _host_guard = EnvVarGuard::set("KIMI_CODE_OAUTH_HOST", host);
+
+        let token = access_token(&reqwest::Client::new()).await.unwrap();
+
+        assert_eq!(token, "fresh-access");
+        let request = task.await.unwrap();
+        assert!(request.starts_with("POST /api/oauth/token HTTP/1.1"));
+        assert!(request.contains("grant_type=refresh_token"), "{request}");
+        assert!(
+            request.contains("refresh_token=expired-refresh"),
+            "{request}"
+        );
+        let saved = std::fs::read_to_string(token_path()).unwrap();
+        assert!(saved.contains("fresh-access"), "{saved}");
+        assert!(saved.contains("fresh-refresh"), "{saved}");
+    }
+
     #[test]
     #[serial]
     fn load_cached_model_info_reads_legacy_shapes_and_ignores_bad_version() {

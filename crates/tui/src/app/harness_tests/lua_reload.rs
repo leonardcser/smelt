@@ -123,6 +123,100 @@ fn lua_model_settings_metrics_and_render_contracts_are_available() {
 }
 
 #[test]
+fn lua_buf_win_overlay_contracts_are_available() {
+    let mut app = TestApp::builder().build();
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .lua
+            .lua
+            .load(
+                r##"
+            local ns = smelt.ns("coverage.buf_win_overlay")
+            assert(type(ns) == "number", "ns returns number")
+
+            local buf = smelt.buf.new({ name = "coverage.contract.buf", readonly = true, editable = true })
+            assert(tostring(buf):find("Buf#", 1, true) == 1, "buf tostring")
+            assert(buf:readonly() == true, "initial readonly")
+            assert(buf:readonly(false) == buf, "readonly setter chain")
+            assert(buf:readonly() == false, "readonly setter value")
+            assert(buf:source("alpha\nβeta") == buf, "source setter chain")
+            assert(buf:source() == "alpha\nβeta", "source getter")
+            assert(buf:lines({ "one", "two" }) == buf, "lines setter chain")
+            local lines = buf:lines()
+            assert(#lines == 2, "line count")
+            assert(lines[1] == "one", "first line")
+            assert(lines[2] == "two", "second line")
+            assert(buf:line(1) == "one", "line getter")
+            assert(buf:line(0) == nil, "line zero nil")
+            local mark_id = buf:mark(ns, 1, 1, { end_row = 1, end_col = 3, hl_group = "Normal" })
+            assert(type(mark_id) == "number", "mark id")
+            assert(buf:clear_ns(ns) == buf, "clear ns chain")
+            assert(buf:styled({
+                { { text = "styled", style = { bold = true, fg = { 255, 0, 0 } } } },
+            }) == buf, "styled chain")
+            assert(type(buf:line(1)) == "string", "styled line")
+
+            local win = smelt.win.new(buf, {
+                name = "coverage.contract.win",
+                surface = "selectable_text",
+                wrap = false,
+                scrollbar = false,
+            })
+            assert(tostring(win):find("Win#", 1, true) == 1)
+            assert(win:buf():source() == buf:source())
+            assert(win:cursor(1) == win)
+            assert(type(win:cursor()) == "number")
+            assert(win:move_cursor(-1) == win)
+            assert(win:placeholder("ghost", { accept_keys = { "tab" }, dismiss_keys = { "esc" } }) == win)
+            assert(win:placeholder_text() == "ghost")
+            win:clear_placeholder()
+            assert(win:placeholder_text() == nil)
+            assert(type(win:scroll()) == "table")
+            assert(win:scroll(0) == win)
+            assert(win:scroll("tail") == win)
+            local win_reg = win:key("x", function() end)
+            assert(win_reg:remove() == true)
+
+            local measure = smelt.ui.layout.measure(12, 3)
+            local mw, mh = measure:get()
+            assert(mw == 12 and mh == 3)
+            measure:set(14, 4)
+            mw, mh = measure:get()
+            assert(mw == 14 and mh == 4)
+
+            local layout = smelt.ui.layout.vbox({
+                { smelt.ui.layout.leaf(win, { measure = measure, title = "Leaf" }), height = "fill" },
+            }, { gap = 0, title = "VBox" })
+            local overlay = smelt.overlay.new({
+                name = "coverage.contract.overlay",
+                title = "Coverage Overlay",
+                anchor = "screen_at",
+                corner = "nw",
+                row = 0, col = 0,
+                width = 30, height = 8,
+                layout = layout,
+            })
+            assert(tostring(overlay):find("Overlay#", 1, true) == 1)
+            local overlay_reg = overlay:key("y", function() end)
+            assert(overlay_reg:remove() == true)
+        "##,
+            )
+            .exec()
+            .expect("lua buf/win/overlay contracts");
+    }
+
+    assert!(app.app.ui.named_buf("coverage.contract.buf").is_some());
+    assert!(app.app.ui.named_win("coverage.contract.win").is_some());
+    assert!(app
+        .app
+        .ui
+        .named_overlay("coverage.contract.overlay")
+        .is_some());
+}
+
+#[test]
 fn reload_clears_surviving_prompt_keymaps() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(
