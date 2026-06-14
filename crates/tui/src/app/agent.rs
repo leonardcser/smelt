@@ -10,6 +10,7 @@ use std::time::Duration;
 
 struct PreparedTurn {
     content: Content,
+    display: Option<String>,
     model: String,
     reasoning_effort: protocol::ReasoningEffort,
     api_base: String,
@@ -128,6 +129,7 @@ impl TuiApp {
 
         self.dispatch_prepared_turn(PreparedTurn {
             content,
+            display: None,
             model: self.core.config.model.clone(),
             reasoning_effort: self.core.config.reasoning_effort,
             api_base: self.core.config.api_base.clone(),
@@ -159,6 +161,7 @@ impl TuiApp {
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
                 content: turn.content,
+                display: turn.display,
                 mode: self.core.config.mode.clone(),
                 model: turn.model,
                 reasoning_effort: turn.reasoning_effort,
@@ -207,7 +210,11 @@ impl TuiApp {
         } else {
             cmd.body.clone()
         };
-        let display = format!("/{}", cmd.display);
+        let display = if self.core.config.settings.redact_secrets {
+            engine::redact::redact(&format!("/{}", cmd.display))
+        } else {
+            format!("/{}", cmd.display)
+        };
         let submitted = match evaluated.trim() {
             "" => None,
             trimmed => Some(trimmed.to_string()),
@@ -221,9 +228,10 @@ impl TuiApp {
             self.core
                 .session
                 .history
-                .push(protocol::history_item_from_user_content(Content::text(
-                    evaluated.clone(),
-                )));
+                .push(protocol::HistoryItem::user_with_display(
+                    Content::text(evaluated.clone()),
+                    display.clone(),
+                ));
             self.sync_session_snapshot();
             self.core.session.history.pop();
         }
@@ -349,6 +357,7 @@ impl TuiApp {
 
         self.dispatch_prepared_turn(PreparedTurn {
             content: Content::text(evaluated),
+            display: Some(display),
             model,
             reasoning_effort: reasoning,
             api_base,

@@ -1,7 +1,7 @@
 use crate::config;
 use protocol::{
-    history_from_messages, history_to_message_positions, history_to_messages,
-    message_to_history_positions, HistoryItem, Message, ReasoningEffort, TokenUsage, TurnMeta,
+    history_from_messages, history_to_messages, message_to_history_positions, HistoryItem, Message,
+    ReasoningEffort, TokenUsage, TurnMeta,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -92,12 +92,11 @@ impl Default for ContextCheckpoint {
 /// In-memory conversation state.
 ///
 /// Storage shape is `Vec<HistoryItem>` (the sum-type history that makes
-/// orphan tool_calls impossible). The on-disk JSON format remains the
-/// legacy `messages: Vec<Message>` for backward compatibility - conversion
-/// happens in the `Serialize`/`Deserialize` impls via the
-/// [`SessionWire`] shadow type. Loading an older session also repairs any
-/// orphan tool_use blocks by synthesizing an "interrupted" tool result
-/// (see [`protocol::history_from_messages`]).
+/// orphan tool_calls impossible). Current session files persist that history
+/// directly. Older files with legacy `messages: Vec<Message>` still load via a
+/// compatibility reader that converts them into history and repairs orphan
+/// tool_use blocks by synthesizing an "interrupted" tool result (see
+/// [`protocol::history_from_messages`]).
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
@@ -134,10 +133,11 @@ pub struct Session {
     pub session_usage: TokenUsage,
 }
 
-/// On-disk JSON shape. Kept stable so older sessions deserialize without a
-/// migration pass. Snapshot keys are stored in `Vec<Message>` position
-/// space - the `Session` deserialize impl translates them into
-/// `Vec<HistoryItem>` positions on load and back on save.
+const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
+
+/// Legacy on-disk JSON shape. Older sessions stored provider-style messages;
+/// snapshot keys are in `Vec<Message>` position space and get remapped to
+/// `Vec<HistoryItem>` positions on load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionWire {
     pub id: String,
@@ -184,6 +184,59 @@ struct SessionWire {
     pub session_usage: TokenUsage,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionWireV2 {
+    pub schema_version: u32,
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub first_user_message: Option<String>,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub history: Vec<HistoryItem>,
+    #[serde(default)]
+    pub checkpoint: Option<ContextCheckpoint>,
+    #[serde(default)]
+    pub context_tokens: Option<u32>,
+    #[serde(default)]
+    pub context_tokens_history_len: Option<usize>,
+    #[serde(default)]
+    #[serde(alias = "display_context_tokens")]
+    pub visible_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub turn_metas: Vec<(usize, TurnMeta)>,
+    #[serde(default)]
+    pub accounting_snapshots: Vec<(usize, AccountingSnapshot)>,
+    #[serde(default)]
+    pub session_cost_usd: f64,
+    #[serde(default)]
+    pub session_usage: TokenUsage,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SessionWireProbe {
+    #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default)]
+    history: Option<serde_json::Value>,
+}
+
 /// `msg_to_hist[i]` = index into history that absorbed message i.
 /// `msg_len` = total messages count (history_to_messages length).
 fn remap_msg_to_hist<T: Clone>(
@@ -214,31 +267,6 @@ fn truncate_snapshots_after<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize)
     while snapshots.last().is_some_and(|(len, _)| *len > hist_idx) {
         snapshots.pop();
     }
-}
-
-/// `hist_to_msg[i]` = message index at which history item i starts.
-/// `msg_len` = total messages count.
-fn remap_hist_to_msg<T: Clone>(
-    snapshots: &[(usize, T)],
-    hist_to_msg: &[usize],
-    msg_len: usize,
-) -> Vec<(usize, T)> {
-    snapshots
-        .iter()
-        .map(|(hist_pos, v)| {
-            let msg_pos = if *hist_pos == 0 {
-                0
-            } else if *hist_pos < hist_to_msg.len() {
-                // Snapshot was taken at history.len() == hist_pos, i.e.
-                // after history[hist_pos-1] landed. That maps to the
-                // message index of the next history item.
-                hist_to_msg[*hist_pos]
-            } else {
-                msg_len
-            };
-            (msg_pos, v.clone())
-        })
-        .collect()
 }
 
 fn legacy_accounting_snapshots(
@@ -328,17 +356,38 @@ impl From<SessionWire> for Session {
     }
 }
 
-impl From<&Session> for SessionWire {
+impl From<SessionWireV2> for Session {
+    fn from(w: SessionWireV2) -> Self {
+        let context_tokens = w.context_tokens;
+        Self {
+            id: w.id,
+            title: w.title,
+            slug: w.slug,
+            first_user_message: w.first_user_message,
+            created_at_ms: w.created_at_ms,
+            updated_at_ms: w.updated_at_ms,
+            mode: w.mode,
+            reasoning_effort: w.reasoning_effort,
+            model: w.model,
+            cwd: w.cwd,
+            parent_id: w.parent_id,
+            history: w.history,
+            checkpoint: w.checkpoint,
+            context_tokens,
+            context_tokens_history_len: w.context_tokens_history_len,
+            visible_context_tokens: w.visible_context_tokens.or(context_tokens),
+            turn_metas: w.turn_metas,
+            accounting_snapshots: w.accounting_snapshots,
+            session_cost_usd: w.session_cost_usd,
+            session_usage: w.session_usage,
+        }
+    }
+}
+
+impl From<&Session> for SessionWireV2 {
     fn from(s: &Session) -> Self {
-        let table = history_to_message_positions(&s.history);
-        let messages = history_to_messages(&s.history);
-        let msg_len = messages.len();
-        let cost_snapshots: Vec<(usize, f64)> = s
-            .accounting_snapshots
-            .iter()
-            .map(|(len, snapshot)| (*len, snapshot.cost_usd))
-            .collect();
-        SessionWire {
+        SessionWireV2 {
+            schema_version: CURRENT_SESSION_SCHEMA_VERSION,
             id: s.id.clone(),
             title: s.title.clone(),
             slug: s.slug.clone(),
@@ -350,14 +399,13 @@ impl From<&Session> for SessionWire {
             model: s.model.clone(),
             cwd: s.cwd.clone(),
             parent_id: s.parent_id.clone(),
-            messages,
+            history: s.history.clone(),
             checkpoint: s.checkpoint.clone(),
             context_tokens: s.context_tokens,
             context_tokens_history_len: s.context_tokens_history_len,
             visible_context_tokens: s.visible_context_tokens,
-            cost_snapshots: remap_hist_to_msg(&cost_snapshots, &table, msg_len),
-            turn_metas: remap_hist_to_msg(&s.turn_metas, &table, msg_len),
-            accounting_snapshots: remap_hist_to_msg(&s.accounting_snapshots, &table, msg_len),
+            turn_metas: s.turn_metas.clone(),
+            accounting_snapshots: s.accounting_snapshots.clone(),
             session_cost_usd: s.session_cost_usd,
             session_usage: s.session_usage.clone(),
         }
@@ -366,13 +414,28 @@ impl From<&Session> for SessionWire {
 
 impl Serialize for Session {
     fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
-        SessionWire::from(self).serialize(ser)
+        SessionWireV2::from(self).serialize(ser)
     }
 }
 
 impl<'de> Deserialize<'de> for Session {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        SessionWire::deserialize(de).map(Session::from)
+        let value = serde_json::Value::deserialize(de)?;
+        let probe: SessionWireProbe =
+            serde_json::from_value(value.clone()).map_err(serde::de::Error::custom)?;
+        match (probe.schema_version, probe.history.is_some()) {
+            (Some(CURRENT_SESSION_SCHEMA_VERSION), _) | (None, true) => {
+                serde_json::from_value::<SessionWireV2>(value)
+                    .map(Session::from)
+                    .map_err(serde::de::Error::custom)
+            }
+            (Some(version), _) => Err(serde::de::Error::custom(format!(
+                "unsupported session schema version {version}"
+            ))),
+            (None, false) => serde_json::from_value::<SessionWire>(value)
+                .map(Session::from)
+                .map_err(serde::de::Error::custom),
+        }
     }
 }
 
@@ -787,7 +850,7 @@ pub fn estimate_message_tokens(messages: &[Message]) -> u32 {
 }
 
 pub fn is_context_checkpoint_summary(item: &HistoryItem, summary_prefix: &str) -> bool {
-    let HistoryItem::User { content } = item else {
+    let HistoryItem::User { content, .. } = item else {
         return false;
     };
     content
@@ -961,7 +1024,7 @@ fn compute_text_bytes(history: &[HistoryItem]) -> u64 {
     let mut total: u64 = 0;
     for item in history {
         match item {
-            HistoryItem::System { content } | HistoryItem::User { content } => {
+            HistoryItem::System { content } | HistoryItem::User { content, .. } => {
                 total += content.text_content().len() as u64;
             }
             HistoryItem::Note(note) => {
@@ -1002,7 +1065,7 @@ fn build_search_blob(history: &[HistoryItem]) -> String {
     let mut out = String::new();
     for item in history {
         let text_opt = match item {
-            HistoryItem::User { content } => Some(content.text_content()),
+            HistoryItem::User { content, .. } => Some(content.text_content()),
             HistoryItem::Assistant(turn) => turn.content.as_ref().map(|c| c.text_content()),
             HistoryItem::System { .. } | HistoryItem::Note(_) => None,
         };
@@ -1059,7 +1122,7 @@ fn rewrite_image_urls<F: Fn(&mut String)>(content: &mut protocol::Content, swap:
 fn rewrite_history_image_urls<F: Fn(&mut String)>(history: &mut [HistoryItem], swap: F) {
     for item in history {
         match item {
-            HistoryItem::System { content } | HistoryItem::User { content } => {
+            HistoryItem::System { content } | HistoryItem::User { content, .. } => {
                 rewrite_image_urls(content, &swap);
             }
             HistoryItem::Assistant(turn) => {
@@ -1158,6 +1221,7 @@ mod tests {
     fn user_item(text: &str) -> HistoryItem {
         HistoryItem::User {
             content: Content::Text(text.into()),
+            display: None,
         }
     }
     fn assistant_text_item(text: &str) -> HistoryItem {
@@ -1182,6 +1246,61 @@ mod tests {
             pre_checkpoint_context_tokens: None,
             pre_checkpoint_context_history_len: None,
         }
+    }
+
+    #[test]
+    fn session_serializes_history_native_with_user_display() {
+        let mut s = fixture_session();
+        s.history.push(HistoryItem::User {
+            content: Content::Text("expanded command body".into()),
+            display: Some("/reflect".into()),
+        });
+
+        let json = serde_json::to_value(&s).expect("serialize session");
+        assert_eq!(json["schema_version"], CURRENT_SESSION_SCHEMA_VERSION);
+        assert!(json.get("messages").is_none());
+        assert_eq!(json["history"][0]["display"], "/reflect");
+
+        let loaded: Session = serde_json::from_value(json).expect("deserialize session");
+        assert!(matches!(
+            &loaded.history[0],
+            HistoryItem::User { content, display: Some(display) }
+                if content.text_content() == "expanded command body" && display == "/reflect"
+        ));
+    }
+
+    #[test]
+    fn legacy_messages_session_loads_with_no_user_display() {
+        let json = serde_json::json!({
+            "id": "legacy",
+            "created_at_ms": 1,
+            "updated_at_ms": 1,
+            "messages": [{
+                "role": "user",
+                "content": "expanded command body"
+            }]
+        });
+
+        let loaded: Session = serde_json::from_value(json).expect("deserialize legacy session");
+        assert!(matches!(
+            &loaded.history[0],
+            HistoryItem::User { content, display: None }
+                if content.text_content() == "expanded command body"
+        ));
+    }
+
+    #[test]
+    fn unsupported_session_schema_version_is_rejected() {
+        let json = serde_json::json!({
+            "schema_version": 99,
+            "id": "future",
+            "history": []
+        });
+
+        let err = serde_json::from_value::<Session>(json).expect_err("future schema should fail");
+        assert!(err
+            .to_string()
+            .contains("unsupported session schema version 99"));
     }
 
     // ── Context checkpoints ──────────────────────────────────────────
@@ -1388,7 +1507,7 @@ mod tests {
 
         assert_eq!(model.len(), 3);
         assert!(
-            matches!(&model[0], HistoryItem::User { content } if content.text_content().contains("summary text"))
+            matches!(&model[0], HistoryItem::User { content, .. } if content.text_content().contains("summary text"))
         );
         assert_eq!(model[1..], s.history[2..]);
     }
@@ -1660,12 +1779,13 @@ mod tests {
                 url: url.to_string(),
                 label: None,
             }]),
+            display: None,
         }
     }
 
     fn first_image_url(item: &HistoryItem) -> &str {
         match item {
-            HistoryItem::User { content } | HistoryItem::System { content } => match content {
+            HistoryItem::User { content, .. } | HistoryItem::System { content } => match content {
                 Content::Parts(parts) => match &parts[0] {
                     ContentPart::ImageUrl { url, .. } => url,
                     _ => panic!("expected image part"),
@@ -1709,7 +1829,7 @@ mod tests {
         map.insert("foo".into(), "bar".into());
         internalize_blobs(&mut items, &map);
         match &items[0] {
-            HistoryItem::User { content } => match content {
+            HistoryItem::User { content, .. } => match content {
                 Content::Text(t) => assert_eq!(t, "hello"),
                 _ => panic!("expected text content"),
             },

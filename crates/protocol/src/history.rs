@@ -24,8 +24,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryItem {
-    System { content: Content },
-    User { content: Content },
+    System {
+        content: Content,
+    },
+    User {
+        content: Content,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        display: Option<String>,
+    },
     Assistant(AssistantStep),
     Note(HistoryNote),
 }
@@ -193,7 +199,17 @@ impl HistoryItem {
     }
 
     pub fn user(content: Content) -> Self {
-        HistoryItem::User { content }
+        HistoryItem::User {
+            content,
+            display: None,
+        }
+    }
+
+    pub fn user_with_display(content: Content, display: impl Into<String>) -> Self {
+        HistoryItem::User {
+            content,
+            display: Some(display.into()),
+        }
     }
 
     pub fn note(note: HistoryNote) -> Self {
@@ -281,7 +297,10 @@ pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
 pub fn history_item_from_user_content(content: Content) -> HistoryItem {
     match note_from_user_content(&content) {
         Some(note) => HistoryItem::Note(note),
-        None => HistoryItem::User { content },
+        None => HistoryItem::User {
+            content,
+            display: None,
+        },
     }
 }
 
@@ -379,7 +398,7 @@ pub fn history_to_messages(items: &[HistoryItem]) -> Vec<Message> {
             HistoryItem::System { content } => {
                 out.push(Message::system_content(content.clone()));
             }
-            HistoryItem::User { content } => {
+            HistoryItem::User { content, .. } => {
                 out.push(Message::user(content.clone()));
             }
             HistoryItem::Note(note) => {
@@ -565,7 +584,9 @@ mod tests {
     #[test]
     fn ordinary_user_content_stays_user() {
         let item = history_item_from_user_content(Content::text("hello"));
-        assert!(matches!(item, HistoryItem::User { content } if content.text_content() == "hello"));
+        assert!(
+            matches!(item, HistoryItem::User { content, .. } if content.text_content() == "hello")
+        );
     }
 
     #[test]

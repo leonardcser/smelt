@@ -128,6 +128,7 @@ mod tests {
         let body = big("same ");
         let history = vec![HistoryItem::User {
             content: Content::text(body.clone()),
+            display: None,
         }];
         assert!(duplicate_of(&body, false, &history).is_none());
     }

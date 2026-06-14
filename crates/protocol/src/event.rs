@@ -342,6 +342,8 @@ pub enum EngineEvent {
 pub struct StartTurnPayload {
     pub turn_id: u64,
     pub content: Content,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub display: Option<String>,
     pub mode: AgentMode,
     pub model: String,
     pub reasoning_effort: ReasoningEffort,
@@ -644,6 +646,7 @@ mod tests {
         let p = StartTurnPayload {
             turn_id: 1,
             content: Content::text("hi"),
+            display: None,
             mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,

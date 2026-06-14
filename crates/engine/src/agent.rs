@@ -51,7 +51,7 @@ pub(crate) async fn engine_task(
                 match cmd {
                     UiCommand::StartTurn(payload) => {
                         let protocol::StartTurnPayload {
-                            turn_id, content: input_content, mode, model, reasoning_effort,
+                            turn_id, content: input_content, display, mode, model, reasoning_effort,
                             history, api_base, api_key, session_id, session_dir: _,
                             model_config_overrides, permission_overrides,
                             system_prompt: tui_system_prompt, tools,
@@ -87,6 +87,7 @@ pub(crate) async fn engine_task(
                             reasoning_effort,
                             turn_id,
                             model,
+                            display,
                             system_prompt,
                             tools,
                             permission_overrides,
@@ -580,6 +581,7 @@ struct Turn<'a> {
     reasoning_effort: ReasoningEffort,
     turn_id: u64,
     model: String,
+    display: Option<String>,
     system_prompt: String,
     tools: Vec<protocol::ToolDef>,
     permission_overrides: Option<protocol::PermissionOverrides>,
@@ -649,20 +651,29 @@ impl<'a> Turn<'a> {
     }
 
     /// Append a user turn, redacting content first when `redact_secrets` is on.
-    fn push_user(&mut self, mut content: Content) {
-        if self.config.redact_secrets {
+    fn push_user(&mut self, mut content: Content, display: Option<String>) {
+        let display = if self.config.redact_secrets {
             crate::redact::redact_content(&mut content);
-        }
-        self.history.push(HistoryItem::User { content });
+            display.map(|text| crate::redact::redact(&text))
+        } else {
+            display
+        };
+        self.history.push(HistoryItem::User { content, display });
     }
 
     /// Append current-turn content that may be a synthetic internal note.
-    fn push_turn_content(&mut self, mut content: Content) {
-        if self.config.redact_secrets {
+    fn push_turn_content(&mut self, mut content: Content, display: Option<String>) {
+        let display = if self.config.redact_secrets {
             crate::redact::redact_content(&mut content);
+            display.map(|text| crate::redact::redact(&text))
+        } else {
+            display
+        };
+        let mut item = protocol::history_item_from_user_content(content);
+        if let HistoryItem::User { display: slot, .. } = &mut item {
+            *slot = display;
         }
-        self.history
-            .push(protocol::history_item_from_user_content(content));
+        self.history.push(item);
     }
 
     /// Append an assistant step atomically. When `invocations` is non-empty,
@@ -889,7 +900,7 @@ impl<'a> Turn<'a> {
                     text: text.clone(),
                     count: 1,
                 });
-                self.push_user(Content::text(text));
+                self.push_user(Content::text(text), None);
                 self.emit_messages_snapshot();
                 true
             }
@@ -946,7 +957,7 @@ impl<'a> Turn<'a> {
         self.history.extend(history);
 
         if !content.is_empty() {
-            self.push_turn_content(content);
+            self.push_turn_content(content, self.display.clone());
         }
         self.emit_messages_snapshot();
 
@@ -2268,6 +2279,7 @@ mod tests {
             reasoning_effort: ReasoningEffort::Off,
             turn_id: 1,
             model: "m".into(),
+            display: None,
             system_prompt: "sys".into(),
             tools: Vec::new(),
             permission_overrides: None,
@@ -2278,12 +2290,16 @@ mod tests {
             tool_elapsed: HashMap::new(),
         };
 
-        turn.push_turn_content(Content::text(protocol::process_status_note(
-            "Background process 751225 exited with code 1.",
-        )));
-        turn.push_turn_content(Content::text(protocol::mode_change_note(
-            "now in apply mode.",
-        )));
+        turn.push_turn_content(
+            Content::text(protocol::process_status_note(
+                "Background process 751225 exited with code 1.",
+            )),
+            None,
+        );
+        turn.push_turn_content(
+            Content::text(protocol::mode_change_note("now in apply mode.")),
+            None,
+        );
 
         assert!(matches!(
             &turn.history[1],

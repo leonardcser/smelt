@@ -77,9 +77,12 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
                 entry.set("kind", "system")?;
                 entry.set("content", content.text_content())?;
             }
-            protocol::HistoryItem::User { content } => {
+            protocol::HistoryItem::User { content, display } => {
                 entry.set("kind", "user")?;
                 entry.set("content", content.text_content())?;
+                if let Some(display) = display {
+                    entry.set("display", display.as_str())?;
+                }
             }
             protocol::HistoryItem::Assistant(step) => {
                 entry.set("kind", "assistant")?;
@@ -420,7 +423,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             let mut idx = 1;
             for item in history {
                 match item {
-                    protocol::HistoryItem::User { content } => {
+                    protocol::HistoryItem::User { content, .. } => {
                         let row = lua.create_table()?;
                         row.set("role", "user")?;
                         row.set("content", content.text_content())?;

@@ -35,7 +35,9 @@ pub(crate) fn build_transcript_from_session(
             });
         }
         match item {
-            HistoryItem::User { content } => push_user_block(&mut transcript, lua, content),
+            HistoryItem::User { content, display } => {
+                push_user_block(&mut transcript, lua, content, display.as_deref())
+            }
             HistoryItem::Assistant(turn) => {
                 push_assistant_blocks(&mut transcript, lua, turn, &tool_elapsed)
             }
@@ -75,7 +77,12 @@ fn push_note_block(
     transcript.push(history_note_to_block(lua, note));
 }
 
-fn push_user_block(transcript: &mut Transcript, lua: &crate::lua::LuaRuntime, content: &Content) {
+fn push_user_block(
+    transcript: &mut Transcript,
+    lua: &crate::lua::LuaRuntime,
+    content: &Content,
+    display: Option<&str>,
+) {
     let text = content.text_content();
     let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
     if let Some(rest) = text.strip_prefix(prefix_marker) {
@@ -102,14 +109,15 @@ fn push_user_block(transcript: &mut Transcript, lua: &crate::lua::LuaRuntime, co
         return;
     }
     let image_labels = content.image_labels();
+    let display_source = display.unwrap_or(&text);
     let display_text = if image_labels.is_empty() {
-        text.into_owned()
+        display_source.to_string()
     } else {
         let suffix = image_labels.join(" ");
-        if text.is_empty() {
+        if display_source.is_empty() {
             suffix
         } else {
-            format!("{text} {suffix}")
+            format!("{display_source} {suffix}")
         }
     };
     transcript.push(Block::User {
@@ -530,6 +538,7 @@ impl TuiApp {
         let images: Vec<(String, String)> = match self.core.session.history.get(hist_idx) {
             Some(HistoryItem::User {
                 content: Content::Parts(parts),
+                ..
             }) => parts
                 .iter()
                 .filter_map(|p| match p {
@@ -636,6 +645,24 @@ mod checkpoint_tests {
             .processes
             .spawn(id.clone(), "sleep 30", child, std::time::Instant::now());
         id
+    }
+
+    #[test]
+    fn restore_screen_uses_user_display_when_present() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![HistoryItem::User {
+            content: Content::text("expanded command body"),
+            display: Some("/reflect".into()),
+        }];
+
+        app.app.restore_screen();
+
+        let history = app.app.transcript.history();
+        let id = history.order[0];
+        assert!(matches!(
+            history.blocks.get(&id),
+            Some(Block::User { text, .. }) if text == "/reflect"
+        ));
     }
 
     #[test]
@@ -766,7 +793,7 @@ mod checkpoint_tests {
         assert_eq!(model.len(), 3); // summary + recent + recent reply
         let first = &model[0];
         assert!(
-            matches!(first, HistoryItem::User { content } if content.text_content().contains("summary text")),
+            matches!(first, HistoryItem::User { content, .. } if content.text_content().contains("summary text")),
             "first item should be the summary user message"
         );
     }
@@ -907,7 +934,7 @@ mod checkpoint_tests {
         let model = session.model_history("PREFIX:");
         assert_eq!(model.len(), 3); // summary + user("2") + assistant("2a")
         assert!(
-            matches!(&model[0], HistoryItem::User { content } if content.text_content().contains("s"))
+            matches!(&model[0], HistoryItem::User { content, .. } if content.text_content().contains("s"))
         );
         assert_eq!(model[1..], vec![user("2"), assistant("2a")]);
     }
