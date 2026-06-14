@@ -6,7 +6,7 @@ use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::content::ColumnAlignment;
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
 
@@ -430,6 +430,9 @@ fn emit_table_label_spans(out: &mut LineBuilder, spans: &[InlineSpan], dim: bool
         if span.style.italic {
             out.set_italic();
         }
+        if span.style.underline {
+            out.set_underline();
+        }
         if span.style.crossedout {
             out.set_crossedout();
         }
@@ -475,6 +478,7 @@ pub struct InlineStyle {
     pub bold: bool,
     pub italic: bool,
     pub dim: bool,
+    pub underline: bool,
     pub crossedout: bool,
     /// Theme group for the span; `None` for plain text.
     pub group: Option<HlGroup>,
@@ -504,10 +508,26 @@ pub fn lower_inline_events<'a>(
         ..Default::default()
     }];
     let mut out = Vec::new();
+    let mut link_stack = Vec::new();
 
     for (event, _) in events {
         match event {
-            Event::Start(tag) => push_tag_style(&mut styles, tag),
+            Event::Start(tag) => {
+                if let Some(link) = pending_link(&tag) {
+                    link_stack.push(link);
+                }
+                push_tag_style(&mut styles, tag);
+            }
+            Event::End(TagEnd::Link) => {
+                if styles.len() > 1 {
+                    styles.pop();
+                }
+                if let Some(link) = link_stack.pop() {
+                    if link.emit_suffix {
+                        push_link_suffix(&mut out, &link.destination, *styles.last().unwrap());
+                    }
+                }
+            }
             Event::End(_) if styles.len() > 1 => {
                 styles.pop();
             }
@@ -528,16 +548,44 @@ pub fn lower_inline_event_lines<'a>(
         ..Default::default()
     }];
     let mut out = vec![Vec::new(); line_ranges.len()];
+    let mut link_stack = Vec::new();
 
     for (event, range) in events {
         match event {
-            Event::Start(tag) => push_tag_style(&mut styles, tag),
+            Event::Start(tag) => {
+                let line_index = line_index_for_event(line_ranges, &range);
+                if let Some(link) = pending_link(&tag) {
+                    link_stack.push((link, line_index));
+                }
+                push_tag_style(&mut styles, tag);
+            }
+            Event::End(TagEnd::Link) => {
+                if styles.len() > 1 {
+                    styles.pop();
+                }
+                if let Some((link, line_index)) = link_stack.pop() {
+                    if link.emit_suffix {
+                        if let Some(line_index) =
+                            line_index.or_else(|| line_index_for_event(line_ranges, &range))
+                        {
+                            push_link_suffix(
+                                &mut out[line_index],
+                                &link.destination,
+                                *styles.last().unwrap(),
+                            );
+                        }
+                    }
+                }
+            }
             Event::End(_) if styles.len() > 1 => {
                 styles.pop();
             }
             event => {
                 if let Some(line_index) = line_index_for_event(line_ranges, &range) {
                     lower_inline_event(event, &mut out[line_index], &styles);
+                    if let Some((_, link_line_index)) = link_stack.last_mut() {
+                        *link_line_index = Some(line_index);
+                    }
                 }
             }
         }
@@ -563,6 +611,7 @@ fn lower_inline_fragment_events<'a>(
     }];
     let mut pending_prefixes = Vec::new();
     let mut out = Vec::new();
+    let mut link_stack = Vec::new();
 
     for (event, range) in events {
         match event {
@@ -574,6 +623,9 @@ fn lower_inline_fragment_events<'a>(
                     &mut out,
                     *styles.last().unwrap(),
                 );
+                if let Some(link) = pending_link(&tag) {
+                    link_stack.push(link);
+                }
                 if fragment_tag_preserves_source_prefix(&tag) {
                     pending_prefixes.push(PendingPrefix {
                         start: range.start,
@@ -581,6 +633,23 @@ fn lower_inline_fragment_events<'a>(
                     });
                 }
                 push_tag_style(&mut styles, tag);
+            }
+            Event::End(TagEnd::Link) => {
+                flush_fragment_prefixes(
+                    source,
+                    &mut pending_prefixes,
+                    range.end,
+                    &mut out,
+                    *styles.last().unwrap(),
+                );
+                if styles.len() > 1 {
+                    styles.pop();
+                }
+                if let Some(link) = link_stack.pop() {
+                    if link.emit_suffix {
+                        push_link_suffix(&mut out, &link.destination, *styles.last().unwrap());
+                    }
+                }
             }
             Event::End(_) => {
                 flush_fragment_prefixes(
@@ -643,6 +712,39 @@ fn fragment_tag_preserves_source_prefix(tag: &Tag<'_>) -> bool {
     matches!(tag, Tag::Heading { .. } | Tag::BlockQuote(_) | Tag::Item)
 }
 
+struct PendingLink {
+    destination: String,
+    emit_suffix: bool,
+}
+
+fn pending_link(tag: &Tag<'_>) -> Option<PendingLink> {
+    match tag {
+        Tag::Link {
+            link_type,
+            dest_url,
+            ..
+        } => Some(PendingLink {
+            destination: dest_url.to_string(),
+            emit_suffix: !matches!(link_type, LinkType::Autolink | LinkType::Email),
+        }),
+        _ => None,
+    }
+}
+
+fn push_link_suffix(out: &mut Vec<InlineSpan>, destination: &str, style: InlineStyle) {
+    push_inline_span(out, " (", style);
+    push_inline_span(out, destination, link_style(style));
+    push_inline_span(out, ")", style);
+}
+
+fn link_style(style: InlineStyle) -> InlineStyle {
+    InlineStyle {
+        underline: true,
+        group: Some(intern("SmeltLink")),
+        ..style
+    }
+}
+
 fn lower_inline_event(event: Event<'_>, out: &mut Vec<InlineSpan>, styles: &[InlineStyle]) {
     match event {
         Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
@@ -693,6 +795,10 @@ fn push_tag_style(styles: &mut Vec<InlineStyle>, tag: Tag<'_>) {
             crossedout: true,
             ..style
         },
+        Tag::Link {
+            link_type: LinkType::Autolink | LinkType::Email,
+            ..
+        } => link_style(style),
         _ => style,
     };
     styles.push(next);
@@ -742,6 +848,7 @@ pub fn emit_inline_spans(out: &mut LineBuilder, spans: &[InlineSpan]) {
                 bold: span.style.bold,
                 italic: span.style.italic,
                 dim: span.style.dim,
+                underline: span.style.underline,
                 crossedout: span.style.crossedout,
                 ..Default::default()
             },
@@ -767,7 +874,7 @@ mod tests {
     /// Parse `text` into styled inline spans and return a compact
     /// `Vec<(tag, text)>` representation.
     /// Tags: "plain", "bold", "italic", "bi" (bold+italic), "code",
-    /// "strike". Adjacent spans with the same style are merged.
+    /// "strike", "link". Adjacent spans with the same style are merged.
     fn parse(text: &str) -> Vec<(&'static str, String)> {
         parse_inline_spans(text, false)
             .into_iter()
@@ -778,16 +885,25 @@ mod tests {
 
     fn tag_for(style: &InlineStyle) -> &'static str {
         let is_code = style.group == Some(intern("SmeltAccent"));
-        match (style.bold, style.italic, style.crossedout, is_code) {
-            (false, false, false, false) => "plain",
-            (true, false, false, false) => "bold",
-            (false, true, false, false) => "italic",
-            (true, true, false, false) => "bi",
-            (false, false, true, false) => "strike",
-            (false, false, false, true) => "code",
-            (true, false, false, true) => "bold+code",
-            (false, true, false, true) => "italic+code",
-            (true, true, false, true) => "bi+code",
+        let is_link = style.group == Some(intern("SmeltLink"));
+        match (
+            style.bold,
+            style.italic,
+            style.underline,
+            style.crossedout,
+            is_code,
+            is_link,
+        ) {
+            (false, false, false, false, false, false) => "plain",
+            (true, false, false, false, false, false) => "bold",
+            (false, true, false, false, false, false) => "italic",
+            (true, true, false, false, false, false) => "bi",
+            (false, false, false, true, false, false) => "strike",
+            (false, false, false, false, true, false) => "code",
+            (true, false, false, false, true, false) => "bold+code",
+            (false, true, false, false, true, false) => "italic+code",
+            (true, true, false, false, true, false) => "bi+code",
+            (false, false, true, false, false, true) => "link",
             _ => "mixed",
         }
     }
@@ -810,6 +926,9 @@ mod tests {
     }
     fn s(s: &str) -> (&'static str, String) {
         ("strike", s.into())
+    }
+    fn l(s: &str) -> (&'static str, String) {
+        ("link", s.into())
     }
 
     // ── Plain ──────────────────────────────────────────────────────────
@@ -887,6 +1006,30 @@ mod tests {
     fn inline_code_with_stars_inside() {
         // Stars inside backticks are literal.
         assert_eq!(parse("`*not bold*`"), vec![c("*not bold*")]);
+    }
+
+    #[test]
+    fn markdown_link_appends_styled_destination() {
+        assert_eq!(
+            parse("[Google](https://www.google.com)"),
+            vec![p("Google ("), l("https://www.google.com"), p(")")]
+        );
+    }
+
+    #[test]
+    fn markdown_autolink_styles_destination_without_duplicate_suffix() {
+        assert_eq!(
+            parse("<https://example.com>"),
+            vec![l("https://example.com")]
+        );
+    }
+
+    #[test]
+    fn markdown_link_keeps_code_distinct_from_destination() {
+        assert_eq!(
+            parse("[`Google`](https://www.google.com)"),
+            vec![c("Google"), p(" ("), l("https://www.google.com"), p(")")]
+        );
     }
 
     #[test]

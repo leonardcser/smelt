@@ -90,9 +90,8 @@ app_story!(text_block_markdown_inline_emphasis, |ctx| {
 });
 
 app_story!(text_block_markdown_link, |ctx| {
-    // `[label](url)` becomes an inline link span via `parse_inline_spans`.
-    // Both autolinks (`<https://…>`) and inline links should land on the
-    // accent group so they're visually distinct from body text.
+    // `[label](url)` renders as `label (url)`, with the URL styled via
+    // SmeltLink. Autolinks render as the URL itself with the same link style.
     ctx.set_viewport(60, 8);
     ctx.engine(EngineEvent::Text {
         content:

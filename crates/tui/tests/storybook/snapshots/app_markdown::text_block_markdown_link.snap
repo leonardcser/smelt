@@ -3,8 +3,8 @@ source: crates/tui/tests/storybook/app_ctx.rs
 assertion_line: 384
 expression: frame.text()
 ---
-See the docs or visit https://example.com directly.
-
+See the docs (https://example.com/docs) or visit
+https://example.com directly.
 
 
 ─ ✿ working… ───────────────────────────────────────────────
