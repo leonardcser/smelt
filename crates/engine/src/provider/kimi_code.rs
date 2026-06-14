@@ -1,6 +1,6 @@
 use crate::paths::{cache_dir, state_dir};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rand::RngExt;
@@ -114,11 +114,36 @@ fn default_bearer() -> String {
 
 fn cred_store() -> CredStore {
     CredStore {
-        keyring_service: "smelt-kimi-code-auth",
-        keyring_user: "default",
+        keyring_service: Some("smelt-kimi-code-auth"),
+        keyring_user: Some("default"),
         file_path: token_path(),
-        env_var: TOKENS_ENV,
+        env_var: Some(TOKENS_ENV),
     }
+}
+
+#[derive(Clone)]
+struct KimiAuthEnv {
+    oauth_host: String,
+    api_base: String,
+    token_store: CredStore,
+    models_cache_path: PathBuf,
+    now: fn() -> u64,
+}
+
+impl KimiAuthEnv {
+    fn production() -> Self {
+        Self {
+            oauth_host: oauth_host(),
+            api_base: api_base(),
+            token_store: cred_store(),
+            models_cache_path: models_cache_path(),
+            now: unix_now,
+        }
+    }
+}
+
+fn now(env: &KimiAuthEnv) -> u64 {
+    (env.now)()
 }
 
 fn token_path() -> PathBuf {
@@ -126,13 +151,17 @@ fn token_path() -> PathBuf {
 }
 
 impl KimiCodeTokens {
-    fn save(&self) -> Result<(), String> {
+    fn save_to(&self, store: &CredStore) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        cred_store().save(&json)
+        store.save(&json)
     }
 
     fn load() -> Option<Self> {
-        let json = cred_store().load()?;
+        Self::load_from(&cred_store())
+    }
+
+    fn load_from(store: &CredStore) -> Option<Self> {
+        let json = store.load()?;
         serde_json::from_str(&json).ok()
     }
 
@@ -264,7 +293,7 @@ fn oauth_host() -> String {
         .to_string()
 }
 
-fn token_from_response(value: &serde_json::Value) -> Result<KimiCodeTokens, String> {
+fn token_from_response_at(value: &serde_json::Value, now: u64) -> Result<KimiCodeTokens, String> {
     let access_token = value["access_token"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -281,7 +310,7 @@ fn token_from_response(value: &serde_json::Value) -> Result<KimiCodeTokens, Stri
     Ok(KimiCodeTokens {
         access_token,
         refresh_token,
-        expires_at: unix_now().saturating_add(expires_in),
+        expires_at: now.saturating_add(expires_in),
         scope: value["scope"].as_str().unwrap_or_default().to_string(),
         token_type: value["token_type"].as_str().unwrap_or("Bearer").to_string(),
     })
@@ -293,19 +322,35 @@ struct OAuthResponse {
     json: serde_json::Value,
 }
 
+struct OAuthFormRequest {
+    url: String,
+    body: String,
+}
+
+fn build_oauth_form_request(
+    env: &KimiAuthEnv,
+    path: &str,
+    params: &[(&str, &str)],
+) -> OAuthFormRequest {
+    OAuthFormRequest {
+        url: format!("{}{}", env.oauth_host, path),
+        body: url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(params.iter().copied())
+            .finish(),
+    }
+}
+
 async fn post_form(
     client: &reqwest::Client,
+    env: &KimiAuthEnv,
     path: &str,
     params: &[(&str, &str)],
 ) -> Result<OAuthResponse, String> {
-    let url = format!("{}{}", oauth_host(), path);
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(params.iter().copied())
-        .finish();
-    let resp = apply_default_headers(client.post(&url))
+    let spec = build_oauth_form_request(env, path, params);
+    let resp = apply_default_headers(client.post(&spec.url))
         .header("Accept", "application/json")
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
+        .body(spec.body)
         .send()
         .await
         .map_err(|e| format!("OAuth request failed: {e}"))?;
@@ -329,8 +374,17 @@ pub(crate) async fn login(
     client: &reqwest::Client,
     callbacks: &LoginCallbacks<'_>,
 ) -> Result<KimiCodeTokens, String> {
+    login_with_env(client, callbacks, &KimiAuthEnv::production()).await
+}
+
+async fn login_with_env(
+    client: &reqwest::Client,
+    callbacks: &LoginCallbacks<'_>,
+    env: &KimiAuthEnv,
+) -> Result<KimiCodeTokens, String> {
     let auth = post_form(
         client,
+        env,
         "/api/oauth/device_authorization",
         &[("client_id", CLIENT_ID)],
     )
@@ -349,13 +403,14 @@ pub(crate) async fn login(
         .filter(|s| !s.is_empty())
         .ok_or("device authorization response missing verification_uri_complete")?;
     let mut interval = auth.json["interval"].as_u64().unwrap_or(5);
-    let expires_at = unix_now().saturating_add(auth.json["expires_in"].as_u64().unwrap_or(15 * 60));
+    let expires_at = now(env).saturating_add(auth.json["expires_in"].as_u64().unwrap_or(15 * 60));
     (callbacks.on_prompt)(callback_url, user_code);
 
-    while unix_now() < expires_at {
+    while now(env) < expires_at {
         tokio::time::sleep(Duration::from_secs(interval)).await;
         let resp = post_form(
             client,
+            env,
             "/api/oauth/token",
             &[
                 ("client_id", CLIENT_ID),
@@ -366,12 +421,12 @@ pub(crate) async fn login(
         .await?;
 
         if resp.status == 200 {
-            let tokens = token_from_response(&resp.json)?;
-            tokens.save()?;
-            let models = fetch_models_with_token(client, &tokens.access_token).await;
+            let tokens = token_from_response_at(&resp.json, now(env))?;
+            tokens.save_to(&env.token_store)?;
+            let models = fetch_models_with_token(client, &env.api_base, &tokens.access_token).await;
             if let Ok(models) = models {
                 if !models.is_empty() {
-                    save_models_cache(&models);
+                    save_models_cache_to(&env.models_cache_path, &models);
                 }
             }
             return Ok(tokens);
@@ -397,15 +452,23 @@ pub(crate) async fn login(
 }
 
 pub async fn access_token(client: &reqwest::Client) -> Result<String, String> {
-    let Some(tokens) = KimiCodeTokens::load() else {
+    access_token_with_env(client, &KimiAuthEnv::production()).await
+}
+
+async fn access_token_with_env(
+    client: &reqwest::Client,
+    env: &KimiAuthEnv,
+) -> Result<String, String> {
+    let Some(tokens) = KimiCodeTokens::load_from(&env.token_store) else {
         return Err("not logged in to Kimi Code".to_string());
     };
-    if tokens.expires_at > unix_now().saturating_add(60) {
+    if tokens.expires_at > now(env).saturating_add(60) {
         return Ok(tokens.access_token);
     }
 
     let resp = post_form(
         client,
+        env,
         "/api/oauth/token",
         &[
             ("client_id", CLIENT_ID),
@@ -417,9 +480,9 @@ pub async fn access_token(client: &reqwest::Client) -> Result<String, String> {
     if resp.status != 200 {
         return Err(oauth_error(&resp, "Token refresh failed"));
     }
-    let fresh = token_from_response(&resp.json)?;
+    let fresh = token_from_response_at(&resp.json, now(env))?;
     let token = fresh.access_token.clone();
-    fresh.save()?;
+    fresh.save_to(&env.token_store)?;
     Ok(token)
 }
 
@@ -429,8 +492,18 @@ pub async fn authenticated_request(
     body: Option<Vec<u8>>,
     client: &reqwest::Client,
 ) -> Result<crate::auth::AuthenticatedResponse, String> {
-    let token = access_token(client).await?;
-    let url = format!("{}{}", api_base(), crate::auth::authenticated_path(path)?);
+    authenticated_request_with_env(method, path, body, client, &KimiAuthEnv::production()).await
+}
+
+async fn authenticated_request_with_env(
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    client: &reqwest::Client,
+    env: &KimiAuthEnv,
+) -> Result<crate::auth::AuthenticatedResponse, String> {
+    let token = access_token_with_env(client, env).await?;
+    let url = format!("{}{}", env.api_base, crate::auth::authenticated_path(path)?);
     crate::auth::send_authenticated_request(client, method, url, body, |req| {
         apply_default_headers(req).bearer_auth(token)
     })
@@ -442,7 +515,11 @@ fn models_cache_path() -> PathBuf {
 }
 
 pub fn load_cached_model_info() -> Vec<KimiCodeModelInfo> {
-    let Ok(data) = std::fs::read_to_string(models_cache_path()) else {
+    load_cached_model_info_from(&models_cache_path())
+}
+
+fn load_cached_model_info_from(path: &Path) -> Vec<KimiCodeModelInfo> {
+    let Ok(data) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     if let Ok(cache) = serde_json::from_str::<KimiCodeModelsCache>(&data) {
@@ -475,14 +552,13 @@ pub fn load_cached_models() -> Vec<String> {
         .collect()
 }
 
-fn save_models_cache(models: &[KimiCodeModelInfo]) {
-    let cache_path = models_cache_path();
+fn save_models_cache_to(cache_path: &Path, models: &[KimiCodeModelInfo]) {
     if let Some(parent) = cache_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let cache = KimiCodeModelsCache::new(models.to_vec());
     let _ = std::fs::write(
-        &cache_path,
+        cache_path,
         serde_json::to_string_pretty(&cache).unwrap_or_default(),
     );
 }
@@ -498,9 +574,10 @@ fn parse_models_response(json: &serde_json::Value) -> Vec<KimiCodeModelInfo> {
 
 async fn fetch_models_with_token(
     client: &reqwest::Client,
+    api_base: &str,
     token: &str,
 ) -> Result<Vec<KimiCodeModelInfo>, String> {
-    let resp = apply_default_headers(client.get(format!("{}/models", api_base())))
+    let resp = apply_default_headers(client.get(format!("{api_base}/models")))
         .bearer_auth(token)
         .header("Accept", "application/json")
         .send()
@@ -521,10 +598,17 @@ async fn fetch_models_with_token(
 }
 
 pub async fn fetch_model_info(client: &reqwest::Client) -> Result<Vec<KimiCodeModelInfo>, String> {
-    let token = access_token(client).await?;
-    let models = fetch_models_with_token(client, &token).await?;
+    fetch_model_info_with_env(client, &KimiAuthEnv::production()).await
+}
+
+async fn fetch_model_info_with_env(
+    client: &reqwest::Client,
+    env: &KimiAuthEnv,
+) -> Result<Vec<KimiCodeModelInfo>, String> {
+    let token = access_token_with_env(client, env).await?;
+    let models = fetch_models_with_token(client, &env.api_base, &token).await?;
     if !models.is_empty() {
-        save_models_cache(&models);
+        save_models_cache_to(&env.models_cache_path, &models);
     }
     Ok(models)
 }
@@ -590,43 +674,54 @@ mod tests {
 
     #[test]
     fn token_from_response_requires_core_fields() {
-        let missing_access = token_from_response(&serde_json::json!({
-            "refresh_token": "refresh",
-            "expires_in": 60
-        }))
+        let missing_access = token_from_response_at(
+            &serde_json::json!({
+                "refresh_token": "refresh",
+                "expires_in": 60
+            }),
+            100,
+        )
         .unwrap_err();
         assert!(missing_access.contains("access_token"));
 
-        let missing_refresh = token_from_response(&serde_json::json!({
-            "access_token": "access",
-            "expires_in": 60
-        }))
+        let missing_refresh = token_from_response_at(
+            &serde_json::json!({
+                "access_token": "access",
+                "expires_in": 60
+            }),
+            100,
+        )
         .unwrap_err();
         assert!(missing_refresh.contains("refresh_token"));
 
-        let missing_expiry = token_from_response(&serde_json::json!({
-            "access_token": "access",
-            "refresh_token": "refresh"
-        }))
+        let missing_expiry = token_from_response_at(
+            &serde_json::json!({
+                "access_token": "access",
+                "refresh_token": "refresh"
+            }),
+            100,
+        )
         .unwrap_err();
         assert!(missing_expiry.contains("expires_in"));
     }
 
     #[test]
-    fn token_from_response_defaults_optional_scope_and_type() {
-        let before = unix_now();
-        let tokens = token_from_response(&serde_json::json!({
-            "access_token": "access",
-            "refresh_token": "refresh",
-            "expires_in": 60
-        }))
+    fn token_from_response_uses_supplied_now_and_defaults_optional_fields() {
+        let tokens = token_from_response_at(
+            &serde_json::json!({
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_in": 60
+            }),
+            1_000,
+        )
         .unwrap();
 
         assert_eq!(tokens.access_token, "access");
         assert_eq!(tokens.refresh_token, "refresh");
         assert_eq!(tokens.scope, "");
         assert_eq!(tokens.token_type, "Bearer");
-        assert!(tokens.expires_at >= before + 60);
+        assert_eq!(tokens.expires_at, 1_060);
     }
 
     #[test]
@@ -652,28 +747,50 @@ mod tests {
         );
     }
 
-    use serial_test::serial;
-
-    struct EnvVarGuard {
-        key: &'static str,
-        old_value: Option<std::ffi::OsString>,
+    fn fixed_now() -> u64 {
+        1_000
     }
 
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let old_value = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, old_value }
+    fn test_token_store(path: PathBuf) -> CredStore {
+        CredStore {
+            keyring_service: None,
+            keyring_user: None,
+            file_path: path,
+            env_var: None,
         }
     }
 
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.old_value {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
+    fn test_env(oauth_host: String, token_path: PathBuf, cache_path: PathBuf) -> KimiAuthEnv {
+        KimiAuthEnv {
+            oauth_host,
+            api_base: "http://127.0.0.1:9".to_string(),
+            token_store: test_token_store(token_path),
+            models_cache_path: cache_path,
+            now: fixed_now,
         }
+    }
+
+    #[test]
+    fn build_oauth_form_request_uses_env_host_and_urlencoded_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(
+            "https://auth.example".to_string(),
+            tmp.path().join("tokens.json"),
+            tmp.path().join("models.json"),
+        );
+
+        let req = build_oauth_form_request(
+            &env,
+            "/api/oauth/token",
+            &[
+                ("client_id", "client-1"),
+                ("scope", "a b"),
+                ("redirect", "x/y"),
+            ],
+        );
+
+        assert_eq!(req.url, "https://auth.example/api/oauth/token");
+        assert_eq!(req.body, "client_id=client-1&scope=a+b&redirect=x%2Fy");
     }
 
     async fn spawn_oauth_response(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
@@ -721,46 +838,55 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
     async fn access_token_returns_cached_token_without_refresh_when_fresh() {
         let tmp = tempfile::tempdir().unwrap();
-        let _state_guard = EnvVarGuard::set("XDG_STATE_HOME", tmp.path());
-        let _token_guard = EnvVarGuard::set(
-            TOKENS_ENV,
-            serde_json::json!({
-                "access_token": "cached-access",
-                "refresh_token": "cached-refresh",
-                "expires_at": unix_now() + 3600,
-            })
-            .to_string(),
+        let env = test_env(
+            "http://127.0.0.1:9".to_string(),
+            tmp.path().join("tokens.json"),
+            tmp.path().join("models.json"),
         );
+        KimiCodeTokens {
+            access_token: "cached-access".to_string(),
+            refresh_token: "cached-refresh".to_string(),
+            expires_at: fixed_now() + 3_600,
+            scope: String::new(),
+            token_type: default_bearer(),
+        }
+        .save_to(&env.token_store)
+        .unwrap();
 
-        let token = access_token(&reqwest::Client::new()).await.unwrap();
+        let token = access_token_with_env(&reqwest::Client::new(), &env)
+            .await
+            .unwrap();
 
         assert_eq!(token, "cached-access");
     }
 
     #[tokio::test]
-    #[serial]
     async fn access_token_refreshes_expired_cached_token_and_persists_fresh_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let _state_guard = EnvVarGuard::set("XDG_STATE_HOME", tmp.path());
-        let _token_guard = EnvVarGuard::set(
-            TOKENS_ENV,
-            serde_json::json!({
-                "access_token": "expired-access",
-                "refresh_token": "expired-refresh",
-                "expires_at": unix_now().saturating_sub(1),
-            })
-            .to_string(),
-        );
         let (host, task) = spawn_oauth_response(
             r#"{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":120}"#,
         )
         .await;
-        let _host_guard = EnvVarGuard::set("KIMI_CODE_OAUTH_HOST", host);
+        let env = test_env(
+            host,
+            tmp.path().join("tokens.json"),
+            tmp.path().join("models.json"),
+        );
+        KimiCodeTokens {
+            access_token: "expired-access".to_string(),
+            refresh_token: "expired-refresh".to_string(),
+            expires_at: fixed_now().saturating_sub(1),
+            scope: String::new(),
+            token_type: default_bearer(),
+        }
+        .save_to(&env.token_store)
+        .unwrap();
 
-        let token = access_token(&reqwest::Client::new()).await.unwrap();
+        let token = access_token_with_env(&reqwest::Client::new(), &env)
+            .await
+            .unwrap();
 
         assert_eq!(token, "fresh-access");
         let request = task.await.unwrap();
@@ -770,21 +896,41 @@ mod tests {
             request.contains("refresh_token=expired-refresh"),
             "{request}"
         );
-        let saved = std::fs::read_to_string(token_path()).unwrap();
+        let saved = std::fs::read_to_string(&env.token_store.file_path).unwrap();
         assert!(saved.contains("fresh-access"), "{saved}");
         assert!(saved.contains("fresh-refresh"), "{saved}");
     }
 
     #[test]
-    #[serial]
-    fn load_cached_model_info_reads_legacy_shapes_and_ignores_bad_version() {
+    fn load_cached_model_info_from_reads_current_and_legacy_shapes() {
         let tmp = tempfile::tempdir().unwrap();
-        let _cache_guard = EnvVarGuard::set("XDG_CACHE_HOME", tmp.path());
+        let path = tmp.path().join("models.json");
 
-        let path = models_cache_path();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string(&KimiCodeModelsCache::new(vec![KimiCodeModelInfo {
+                id: "kimi-current".to_string(),
+                context_length: Some(128_000),
+                supports_reasoning: Some(true),
+                supports_image_in: None,
+                supports_video_in: None,
+                supports_tool_use: None,
+                display_name: Some("Kimi Current".to_string()),
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let current = load_cached_model_info_from(&path);
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].id, "kimi-current");
+        assert_eq!(current[0].context_length, Some(128_000));
+
         std::fs::write(&path, r#"["kimi-a", "kimi-b"]"#).unwrap();
-        assert_eq!(load_cached_models(), vec!["kimi-a", "kimi-b"]);
+        let legacy_ids: Vec<_> = load_cached_model_info_from(&path)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(legacy_ids, vec!["kimi-a", "kimi-b"]);
 
         std::fs::write(
             &path,
@@ -795,6 +941,9 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert!(load_cached_model_info().is_empty());
+        assert!(load_cached_model_info_from(&path).is_empty());
+
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load_cached_model_info_from(&path).is_empty());
     }
 }

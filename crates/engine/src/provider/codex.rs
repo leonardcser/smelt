@@ -18,10 +18,10 @@ use super::unix_now;
 
 fn cred_store() -> CredStore {
     CredStore {
-        keyring_service: "smelt-codex-auth",
-        keyring_user: "default",
+        keyring_service: Some("smelt-codex-auth"),
+        keyring_user: Some("default"),
         file_path: state_dir().join("codex_auth.json"),
-        env_var: CODEX_TOKENS_ENV,
+        env_var: Some(CODEX_TOKENS_ENV),
     }
 }
 

@@ -28,10 +28,10 @@ const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 
 fn cred_store() -> CredStore {
     CredStore {
-        keyring_service: "smelt-copilot-auth",
-        keyring_user: "default",
+        keyring_service: Some("smelt-copilot-auth"),
+        keyring_user: Some("default"),
         file_path: state_dir().join("copilot_auth.json"),
-        env_var: COPILOT_TOKENS_ENV,
+        env_var: Some(COPILOT_TOKENS_ENV),
     }
 }
 

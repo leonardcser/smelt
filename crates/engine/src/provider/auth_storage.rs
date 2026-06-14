@@ -3,11 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub(crate) struct CredStore {
-    pub(crate) keyring_service: &'static str,
-    pub(crate) keyring_user: &'static str,
+    pub(crate) keyring_service: Option<&'static str>,
+    pub(crate) keyring_user: Option<&'static str>,
     pub(crate) file_path: PathBuf,
-    pub(crate) env_var: &'static str,
+    pub(crate) env_var: Option<&'static str>,
 }
 
 /// Write `json` to `path`, creating parent dirs and applying 0600 perms on unix. Pure I/O.
@@ -32,8 +33,10 @@ impl CredStore {
     }
 
     pub(crate) fn load(&self) -> Option<String> {
-        if let Ok(json) = std::env::var(self.env_var) {
-            return Some(json);
+        if let Some(env_var) = self.env_var {
+            if let Ok(json) = std::env::var(env_var) {
+                return Some(json);
+            }
         }
         if let Some(json) = self.keyring_load() {
             return Some(json);
@@ -47,19 +50,26 @@ impl CredStore {
     }
 
     fn keyring_save(&self, json: &str) -> Result<(), String> {
-        let entry = keyring::Entry::new(self.keyring_service, self.keyring_user)
-            .map_err(|e| e.to_string())?;
+        let (Some(service), Some(user)) = (self.keyring_service, self.keyring_user) else {
+            return Ok(());
+        };
+        let entry = keyring::Entry::new(service, user).map_err(|e| e.to_string())?;
         entry.set_password(json).map_err(|e| e.to_string())
     }
 
     fn keyring_load(&self) -> Option<String> {
-        let entry = keyring::Entry::new(self.keyring_service, self.keyring_user).ok()?;
+        let (Some(service), Some(user)) = (self.keyring_service, self.keyring_user) else {
+            return None;
+        };
+        let entry = keyring::Entry::new(service, user).ok()?;
         entry.get_password().ok()
     }
 
     fn keyring_delete(&self) -> Result<(), String> {
-        let entry = keyring::Entry::new(self.keyring_service, self.keyring_user)
-            .map_err(|e| e.to_string())?;
+        let (Some(service), Some(user)) = (self.keyring_service, self.keyring_user) else {
+            return Ok(());
+        };
+        let entry = keyring::Entry::new(service, user).map_err(|e| e.to_string())?;
         entry.delete_credential().map_err(|e| e.to_string())
     }
 }
@@ -122,10 +132,10 @@ mod tests {
         // Use a keyring service/user pair the OS keyring almost certainly
         // doesn't know about so keyring_load returns None.
         CredStore {
-            keyring_service: "smelt-test-nonexistent-service-xyzzy-9f3c",
-            keyring_user: "smelt-test-nonexistent-user-xyzzy-9f3c",
+            keyring_service: Some("smelt-test-nonexistent-service-xyzzy-9f3c"),
+            keyring_user: Some("smelt-test-nonexistent-user-xyzzy-9f3c"),
             file_path,
-            env_var,
+            env_var: Some(env_var),
         }
     }
 
@@ -137,9 +147,9 @@ mod tests {
             "SMELT_TEST_AUTH_ENV_PRIORITY_A",
         );
         // SAFETY: env-var mutation in tests; unique name avoids cross-test races.
-        unsafe { std::env::set_var(store.env_var, "from-env") };
+        unsafe { std::env::set_var(store.env_var.unwrap(), "from-env") };
         let loaded = store.load();
-        unsafe { std::env::remove_var(store.env_var) };
+        unsafe { std::env::remove_var(store.env_var.unwrap()) };
         assert_eq!(loaded.as_deref(), Some("from-env"));
     }
 
@@ -149,9 +159,9 @@ mod tests {
         let path = dir.path().join("creds.json");
         std::fs::write(&path, "from-file").unwrap();
         let store = unique_store(path, "SMELT_TEST_AUTH_ENV_PRIORITY_B");
-        unsafe { std::env::set_var(store.env_var, "from-env") };
+        unsafe { std::env::set_var(store.env_var.unwrap(), "from-env") };
         let loaded = store.load();
-        unsafe { std::env::remove_var(store.env_var) };
+        unsafe { std::env::remove_var(store.env_var.unwrap()) };
         assert_eq!(loaded.as_deref(), Some("from-env"));
     }
 
@@ -159,7 +169,7 @@ mod tests {
     fn load_returns_none_when_env_unset_and_no_file() {
         let dir = tempdir().unwrap();
         let store = unique_store(dir.path().join("creds.json"), "SMELT_TEST_AUTH_ENV_UNSET_C");
-        unsafe { std::env::remove_var(store.env_var) };
+        unsafe { std::env::remove_var(store.env_var.unwrap()) };
         assert!(store.load().is_none());
     }
 
