@@ -4,11 +4,16 @@
 use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
+struct KeyringTarget {
+    service: &'static str,
+    user: &'static str,
+}
+
+#[derive(Clone)]
 pub(crate) struct CredStore {
-    pub(crate) keyring_service: Option<&'static str>,
-    pub(crate) keyring_user: Option<&'static str>,
+    keyring: Option<KeyringTarget>,
     pub(crate) file_path: PathBuf,
-    pub(crate) env_var: Option<&'static str>,
+    env_var: Option<&'static str>,
 }
 
 /// Write `json` to `path`, creating parent dirs and applying 0600 perms on unix. Pure I/O.
@@ -26,6 +31,37 @@ pub(super) fn write_secure(path: &Path, json: &str) -> Result<(), String> {
 }
 
 impl CredStore {
+    pub(crate) fn production(
+        service: &'static str,
+        user: &'static str,
+        file_path: PathBuf,
+        env_var: &'static str,
+    ) -> Self {
+        Self {
+            keyring: Some(KeyringTarget { service, user }),
+            file_path,
+            env_var: Some(env_var),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn file_only(file_path: PathBuf) -> Self {
+        Self {
+            keyring: None,
+            file_path,
+            env_var: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn env_only(file_path: PathBuf, env_var: &'static str) -> Self {
+        Self {
+            keyring: None,
+            file_path,
+            env_var: Some(env_var),
+        }
+    }
+
     pub(crate) fn save(&self, json: &str) -> Result<(), String> {
         write_secure(&self.file_path, json)?;
         let _ = self.keyring_save(json);
@@ -50,26 +86,26 @@ impl CredStore {
     }
 
     fn keyring_save(&self, json: &str) -> Result<(), String> {
-        let (Some(service), Some(user)) = (self.keyring_service, self.keyring_user) else {
+        let Some(keyring) = &self.keyring else {
             return Ok(());
         };
-        let entry = keyring::Entry::new(service, user).map_err(|e| e.to_string())?;
+        let entry =
+            keyring::Entry::new(keyring.service, keyring.user).map_err(|e| e.to_string())?;
         entry.set_password(json).map_err(|e| e.to_string())
     }
 
     fn keyring_load(&self) -> Option<String> {
-        let (Some(service), Some(user)) = (self.keyring_service, self.keyring_user) else {
-            return None;
-        };
-        let entry = keyring::Entry::new(service, user).ok()?;
+        let keyring = self.keyring.as_ref()?;
+        let entry = keyring::Entry::new(keyring.service, keyring.user).ok()?;
         entry.get_password().ok()
     }
 
     fn keyring_delete(&self) -> Result<(), String> {
-        let (Some(service), Some(user)) = (self.keyring_service, self.keyring_user) else {
+        let Some(keyring) = &self.keyring else {
             return Ok(());
         };
-        let entry = keyring::Entry::new(service, user).map_err(|e| e.to_string())?;
+        let entry =
+            keyring::Entry::new(keyring.service, keyring.user).map_err(|e| e.to_string())?;
         entry.delete_credential().map_err(|e| e.to_string())
     }
 }
@@ -129,14 +165,7 @@ mod tests {
     }
 
     fn unique_store(file_path: PathBuf, env_var: &'static str) -> CredStore {
-        // Use a keyring service/user pair the OS keyring almost certainly
-        // doesn't know about so keyring_load returns None.
-        CredStore {
-            keyring_service: Some("smelt-test-nonexistent-service-xyzzy-9f3c"),
-            keyring_user: Some("smelt-test-nonexistent-user-xyzzy-9f3c"),
-            file_path,
-            env_var: Some(env_var),
-        }
+        CredStore::env_only(file_path, env_var)
     }
 
     #[test]

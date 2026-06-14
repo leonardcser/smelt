@@ -17,12 +17,12 @@ use super::auth_storage::CredStore;
 use super::unix_now;
 
 fn cred_store() -> CredStore {
-    CredStore {
-        keyring_service: Some("smelt-codex-auth"),
-        keyring_user: Some("default"),
-        file_path: state_dir().join("codex_auth.json"),
-        env_var: Some(CODEX_TOKENS_ENV),
-    }
+    CredStore::production(
+        "smelt-codex-auth",
+        "default",
+        state_dir().join("codex_auth.json"),
+        CODEX_TOKENS_ENV,
+    )
 }
 
 #[derive(Clone)]
@@ -40,10 +40,6 @@ impl CodexAuthEnv {
             now: unix_now,
         }
     }
-}
-
-fn now(env: &CodexAuthEnv) -> u64 {
-    (env.now)()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,9 +170,16 @@ fn generate_state() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-struct TokenRefreshRequest {
+struct TokenRefreshRequest<'a> {
     url: String,
-    body: serde_json::Value,
+    body: TokenRefreshBody<'a>,
+}
+
+#[derive(Serialize)]
+struct TokenRefreshBody<'a> {
+    client_id: &'static str,
+    grant_type: &'static str,
+    refresh_token: &'a str,
 }
 
 struct TokenExchangeRequest {
@@ -188,14 +191,17 @@ fn token_url(env: &CodexAuthEnv) -> String {
     format!("{}/oauth/token", env.issuer)
 }
 
-fn build_refresh_request(env: &CodexAuthEnv, refresh_token: &str) -> TokenRefreshRequest {
+fn build_refresh_request<'a>(
+    env: &CodexAuthEnv,
+    refresh_token: &'a str,
+) -> TokenRefreshRequest<'a> {
     TokenRefreshRequest {
         url: token_url(env),
-        body: serde_json::json!({
-            "client_id": CLIENT_ID,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }),
+        body: TokenRefreshBody {
+            client_id: CLIENT_ID,
+            grant_type: "refresh_token",
+            refresh_token,
+        },
     }
 }
 
@@ -424,7 +430,7 @@ async fn exchange_code_with_env(
         .await
         .map_err(|e| format!("bad token response: {e}"))?;
 
-    save_token_response_to(tokens, None, &env.token_store, now(env))
+    save_token_response_to(tokens, None, &env.token_store, (env.now)())
 }
 
 pub(crate) async fn refresh_tokens(
@@ -460,7 +466,7 @@ async fn refresh_tokens_with_env(
         .await
         .map_err(|e| format!("bad refresh response: {e}"))?;
 
-    let result = save_token_response_to(tokens, previous.as_ref(), &env.token_store, now(env))?;
+    let result = save_token_response_to(tokens, previous.as_ref(), &env.token_store, (env.now)())?;
 
     log::entry(
         log::Level::Debug,
@@ -799,7 +805,7 @@ async fn ensure_access_token_full_with_env(
     let tokens = CodexTokens::load_from(&env.token_store)
         .ok_or("not logged in to Codex; run `smelt auth` first")?;
 
-    if !tokens.needs_refresh_at(now(env)) {
+    if !tokens.needs_refresh_at((env.now)()) {
         return Ok(tokens);
     }
 
@@ -814,6 +820,7 @@ async fn ensure_access_token(client: &reqwest::Client) -> Result<(String, Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::test_http::spawn_json_response;
     use base64::Engine;
 
     fn jwt_with(payload: &serde_json::Value) -> String {
@@ -967,58 +974,9 @@ mod tests {
     fn test_env(issuer: String, token_path: std::path::PathBuf) -> CodexAuthEnv {
         CodexAuthEnv {
             issuer,
-            token_store: CredStore {
-                keyring_service: None,
-                keyring_user: None,
-                file_path: token_path,
-                env_var: None,
-            },
+            token_store: CredStore::file_only(token_path),
             now: fixed_now,
         }
-    }
-
-    async fn spawn_json_response(body: String) -> (String, tokio::task::JoinHandle<String>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            loop {
-                let mut chunk = [0u8; 1024];
-                let n = stream.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                let req = String::from_utf8_lossy(&buf);
-                let Some((headers, request_body)) = req.split_once("\r\n\r\n") else {
-                    continue;
-                };
-                let content_len = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.split_once(':').and_then(|(name, value)| {
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                    })
-                    .unwrap_or(0);
-                if request_body.len() >= content_len {
-                    break;
-                }
-            }
-            let req = String::from_utf8_lossy(&buf).to_string();
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(resp.as_bytes()).await.unwrap();
-            req
-        });
-        (format!("http://{addr}"), task)
     }
 
     #[test]
@@ -1032,9 +990,10 @@ mod tests {
         let req = build_refresh_request(&env, "refresh-token");
 
         assert_eq!(req.url, "https://issuer.example/oauth/token");
-        assert_eq!(req.body["client_id"], CLIENT_ID);
-        assert_eq!(req.body["grant_type"], "refresh_token");
-        assert_eq!(req.body["refresh_token"], "refresh-token");
+        let body = serde_json::to_value(&req.body).unwrap();
+        assert_eq!(body["client_id"], CLIENT_ID);
+        assert_eq!(body["grant_type"], "refresh_token");
+        assert_eq!(body["refresh_token"], "refresh-token");
     }
 
     #[tokio::test]

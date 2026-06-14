@@ -27,12 +27,12 @@ const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
 const COPILOT_TOKENS_ENV: &str = "SMELT_COPILOT_TOKENS";
 
 fn cred_store() -> CredStore {
-    CredStore {
-        keyring_service: Some("smelt-copilot-auth"),
-        keyring_user: Some("default"),
-        file_path: state_dir().join("copilot_auth.json"),
-        env_var: Some(COPILOT_TOKENS_ENV),
-    }
+    CredStore::production(
+        "smelt-copilot-auth",
+        "default",
+        state_dir().join("copilot_auth.json"),
+        COPILOT_TOKENS_ENV,
+    )
 }
 
 #[derive(Clone)]
@@ -52,10 +52,6 @@ impl CopilotAuthEnv {
             now: unix_now,
         }
     }
-}
-
-fn now(env: &CopilotAuthEnv) -> u64 {
-    (env.now)()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +116,45 @@ pub(crate) fn base_headers() -> [(&'static str, &'static str); 4] {
         ("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION),
         ("Copilot-Integration-Id", COPILOT_INTEGRATION_ID),
     ]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GitHubPollDecision {
+    Authorized(String),
+    Pending,
+    SlowDown { interval_ms: u64 },
+    Failed(String),
+}
+
+fn github_poll_decision(data: &serde_json::Value, current_interval_ms: u64) -> GitHubPollDecision {
+    if let Some(token) = data.get("access_token").and_then(|v| v.as_str()) {
+        return GitHubPollDecision::Authorized(token.to_string());
+    }
+
+    let error = data.get("error").and_then(|v| v.as_str()).unwrap_or("");
+    match error {
+        "authorization_pending" => GitHubPollDecision::Pending,
+        "slow_down" => {
+            let interval_ms = data
+                .get("interval")
+                .and_then(|v| v.as_u64())
+                .map(|n| n * 1000)
+                .unwrap_or_else(|| current_interval_ms.saturating_add(5000).max(1000));
+            GitHubPollDecision::SlowDown { interval_ms }
+        }
+        other => {
+            let desc = data
+                .get("error_description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let suffix = if desc.is_empty() {
+                String::new()
+            } else {
+                format!(": {desc}")
+            };
+            GitHubPollDecision::Failed(format!("Device flow failed: {other}{suffix}"))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -263,35 +298,18 @@ async fn poll_for_github_token(
             Err(e) => return Err(format!("bad token poll response: {e}")),
         };
 
-        if let Some(token) = data.get("access_token").and_then(|v| v.as_str()) {
-            return Ok(token.to_string());
-        }
-
-        let error = data.get("error").and_then(|v| v.as_str()).unwrap_or("");
-        match error {
-            "authorization_pending" => continue,
-            "slow_down" => {
+        match github_poll_decision(&data, interval_ms) {
+            GitHubPollDecision::Authorized(token) => return Ok(token),
+            GitHubPollDecision::Pending => continue,
+            GitHubPollDecision::SlowDown {
+                interval_ms: next_interval_ms,
+            } => {
                 slow_down_count += 1;
-                if let Some(n) = data.get("interval").and_then(|v| v.as_u64()) {
-                    interval_ms = n * 1000;
-                } else {
-                    interval_ms = interval_ms.saturating_add(5000).max(1000);
-                }
+                interval_ms = next_interval_ms;
                 multiplier = slow_down_multiplier;
                 continue;
             }
-            other => {
-                let desc = data
-                    .get("error_description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let suffix = if desc.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {desc}")
-                };
-                return Err(format!("Device flow failed: {other}{suffix}"));
-            }
+            GitHubPollDecision::Failed(message) => return Err(message),
         }
     }
 }
@@ -380,7 +398,7 @@ async fn refresh_tokens_with_env(
         access_token: access,
         expires_at,
         api_base,
-        last_refresh: now(env),
+        last_refresh: (env.now)(),
     };
     tokens
         .save_to(&env.token_store)
@@ -405,7 +423,7 @@ async fn ensure_access_token_full_with_env(
 ) -> Result<CopilotTokens, String> {
     let tokens = CopilotTokens::load_from(&env.token_store)
         .ok_or("not logged in to GitHub Copilot; run `smelt auth` first")?;
-    if !tokens.needs_refresh_at(now(env)) {
+    if !tokens.needs_refresh_at((env.now)()) {
         return Ok(tokens);
     }
     refresh_tokens_with_env(client, &tokens.refresh_token, env).await
@@ -676,6 +694,7 @@ fn open_browser(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::test_http::spawn_json_response;
 
     #[test]
     fn client_id_decodes() {
@@ -770,52 +789,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn github_poll_decision_classifies_success_pending_slowdown_and_errors() {
+        assert_eq!(
+            github_poll_decision(&serde_json::json!({"access_token": "github-token"}), 5_000),
+            GitHubPollDecision::Authorized("github-token".to_string())
+        );
+        assert_eq!(
+            github_poll_decision(
+                &serde_json::json!({"error": "authorization_pending"}),
+                5_000
+            ),
+            GitHubPollDecision::Pending
+        );
+        assert_eq!(
+            github_poll_decision(&serde_json::json!({"error": "slow_down"}), 5_000),
+            GitHubPollDecision::SlowDown {
+                interval_ms: 10_000
+            }
+        );
+        assert_eq!(
+            github_poll_decision(
+                &serde_json::json!({"error": "slow_down", "interval": 7}),
+                5_000
+            ),
+            GitHubPollDecision::SlowDown { interval_ms: 7_000 }
+        );
+        assert_eq!(
+            github_poll_decision(
+                &serde_json::json!({"error": "bad_verification_code", "error_description": "nope"}),
+                5_000
+            ),
+            GitHubPollDecision::Failed(
+                "Device flow failed: bad_verification_code: nope".to_string()
+            )
+        );
+    }
+
     fn fixed_now() -> u64 {
         1_000
     }
 
     fn test_env(token_url: String, token_path: std::path::PathBuf) -> CopilotAuthEnv {
         CopilotAuthEnv {
-            token_store: CredStore {
-                keyring_service: None,
-                keyring_user: None,
-                file_path: token_path,
-                env_var: None,
-            },
+            token_store: CredStore::file_only(token_path),
             copilot_token_url: token_url,
             models_cache_path: std::path::PathBuf::from("unused-model-cache.json"),
             now: fixed_now,
         }
-    }
-
-    async fn spawn_json_response(body: String) -> (String, tokio::task::JoinHandle<String>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            loop {
-                let mut chunk = [0u8; 1024];
-                let n = stream.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let req = String::from_utf8_lossy(&buf).to_string();
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(resp.as_bytes()).await.unwrap();
-            req
-        });
-        (format!("http://{addr}"), task)
     }
 
     #[test]

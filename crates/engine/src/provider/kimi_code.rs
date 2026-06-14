@@ -113,12 +113,7 @@ fn default_bearer() -> String {
 }
 
 fn cred_store() -> CredStore {
-    CredStore {
-        keyring_service: Some("smelt-kimi-code-auth"),
-        keyring_user: Some("default"),
-        file_path: token_path(),
-        env_var: Some(TOKENS_ENV),
-    }
+    CredStore::production("smelt-kimi-code-auth", "default", token_path(), TOKENS_ENV)
 }
 
 #[derive(Clone)]
@@ -140,10 +135,6 @@ impl KimiAuthEnv {
             now: unix_now,
         }
     }
-}
-
-fn now(env: &KimiAuthEnv) -> u64 {
-    (env.now)()
 }
 
 fn token_path() -> PathBuf {
@@ -370,6 +361,37 @@ fn oauth_error(resp: &OAuthResponse, context: &str) -> String {
     format!("{context} (HTTP {}): {detail}", resp.status)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DevicePollDecision {
+    Authorized,
+    Continue {
+        interval: u64,
+        progress: &'static str,
+    },
+    Expired,
+    Denied,
+}
+
+fn device_poll_decision(resp: &OAuthResponse, interval: u64) -> Result<DevicePollDecision, String> {
+    if resp.status == 200 {
+        return Ok(DevicePollDecision::Authorized);
+    }
+
+    match resp.json["error"].as_str().unwrap_or_default() {
+        "authorization_pending" => Ok(DevicePollDecision::Continue {
+            interval,
+            progress: "Waiting for browser authorization...",
+        }),
+        "slow_down" => Ok(DevicePollDecision::Continue {
+            interval: interval.saturating_add(5),
+            progress: "Waiting for browser authorization...",
+        }),
+        "expired_token" => Ok(DevicePollDecision::Expired),
+        "access_denied" => Ok(DevicePollDecision::Denied),
+        _ => Err(oauth_error(resp, "Device token polling failed")),
+    }
+}
+
 pub(crate) async fn login(
     client: &reqwest::Client,
     callbacks: &LoginCallbacks<'_>,
@@ -403,10 +425,11 @@ async fn login_with_env(
         .filter(|s| !s.is_empty())
         .ok_or("device authorization response missing verification_uri_complete")?;
     let mut interval = auth.json["interval"].as_u64().unwrap_or(5);
-    let expires_at = now(env).saturating_add(auth.json["expires_in"].as_u64().unwrap_or(15 * 60));
+    let expires_at =
+        (env.now)().saturating_add(auth.json["expires_in"].as_u64().unwrap_or(15 * 60));
     (callbacks.on_prompt)(callback_url, user_code);
 
-    while now(env) < expires_at {
+    while (env.now)() < expires_at {
         tokio::time::sleep(Duration::from_secs(interval)).await;
         let resp = post_form(
             client,
@@ -420,31 +443,32 @@ async fn login_with_env(
         )
         .await?;
 
-        if resp.status == 200 {
-            let tokens = token_from_response_at(&resp.json, now(env))?;
-            tokens.save_to(&env.token_store)?;
-            let models = fetch_models_with_token(client, &env.api_base, &tokens.access_token).await;
-            if let Ok(models) = models {
-                if !models.is_empty() {
-                    save_models_cache_to(&env.models_cache_path, &models);
+        match device_poll_decision(&resp, interval)? {
+            DevicePollDecision::Authorized => {
+                let tokens = token_from_response_at(&resp.json, (env.now)())?;
+                tokens.save_to(&env.token_store)?;
+                let models =
+                    fetch_models_with_token(client, &env.api_base, &tokens.access_token).await;
+                if let Ok(models) = models {
+                    if !models.is_empty() {
+                        save_models_cache_to(&env.models_cache_path, &models);
+                    }
                 }
+                return Ok(tokens);
             }
-            return Ok(tokens);
-        }
-
-        match resp.json["error"].as_str().unwrap_or_default() {
-            "authorization_pending" => {
-                (callbacks.on_progress)("Waiting for browser authorization...")
+            DevicePollDecision::Continue {
+                interval: next_interval,
+                progress,
+            } => {
+                interval = next_interval;
+                (callbacks.on_progress)(progress);
             }
-            "slow_down" => {
-                interval = interval.saturating_add(5);
-                (callbacks.on_progress)("Waiting for browser authorization...")
+            DevicePollDecision::Expired => {
+                return Err("Kimi Code authorization expired; run login again".to_string());
             }
-            "expired_token" => {
-                return Err("Kimi Code authorization expired; run login again".to_string())
+            DevicePollDecision::Denied => {
+                return Err("Kimi Code authorization was denied".to_string())
             }
-            "access_denied" => return Err("Kimi Code authorization was denied".to_string()),
-            _ => return Err(oauth_error(&resp, "Device token polling failed")),
         }
     }
 
@@ -462,7 +486,7 @@ async fn access_token_with_env(
     let Some(tokens) = KimiCodeTokens::load_from(&env.token_store) else {
         return Err("not logged in to Kimi Code".to_string());
     };
-    if tokens.expires_at > now(env).saturating_add(60) {
+    if tokens.expires_at > (env.now)().saturating_add(60) {
         return Ok(tokens.access_token);
     }
 
@@ -480,7 +504,7 @@ async fn access_token_with_env(
     if resp.status != 200 {
         return Err(oauth_error(&resp, "Token refresh failed"));
     }
-    let fresh = token_from_response_at(&resp.json, now(env))?;
+    let fresh = token_from_response_at(&resp.json, (env.now)())?;
     let token = fresh.access_token.clone();
     fresh.save_to(&env.token_store)?;
     Ok(token)
@@ -637,6 +661,7 @@ pub(crate) fn cached_supports_reasoning(model: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::test_http::spawn_json_response;
 
     #[test]
     fn parse_models_response_keeps_kimi_metadata() {
@@ -725,6 +750,45 @@ mod tests {
     }
 
     #[test]
+    fn device_poll_decision_classifies_pending_slowdown_and_terminal_errors() {
+        let pending = OAuthResponse {
+            status: 400,
+            body: String::new(),
+            json: serde_json::json!({"error": "authorization_pending"}),
+        };
+        assert_eq!(
+            device_poll_decision(&pending, 5).unwrap(),
+            DevicePollDecision::Continue {
+                interval: 5,
+                progress: "Waiting for browser authorization..."
+            }
+        );
+
+        let slow_down = OAuthResponse {
+            status: 400,
+            body: String::new(),
+            json: serde_json::json!({"error": "slow_down"}),
+        };
+        assert_eq!(
+            device_poll_decision(&slow_down, 5).unwrap(),
+            DevicePollDecision::Continue {
+                interval: 10,
+                progress: "Waiting for browser authorization..."
+            }
+        );
+
+        let expired = OAuthResponse {
+            status: 400,
+            body: String::new(),
+            json: serde_json::json!({"error": "expired_token"}),
+        };
+        assert_eq!(
+            device_poll_decision(&expired, 5).unwrap(),
+            DevicePollDecision::Expired
+        );
+    }
+
+    #[test]
     fn oauth_error_prefers_structured_fields_before_raw_body() {
         let resp = OAuthResponse {
             status: 400,
@@ -752,12 +816,7 @@ mod tests {
     }
 
     fn test_token_store(path: PathBuf) -> CredStore {
-        CredStore {
-            keyring_service: None,
-            keyring_user: None,
-            file_path: path,
-            env_var: None,
-        }
+        CredStore::file_only(path)
     }
 
     fn test_env(oauth_host: String, token_path: PathBuf, cache_path: PathBuf) -> KimiAuthEnv {
@@ -793,50 +852,6 @@ mod tests {
         assert_eq!(req.body, "client_id=client-1&scope=a+b&redirect=x%2Fy");
     }
 
-    async fn spawn_oauth_response(body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            loop {
-                let mut chunk = [0u8; 1024];
-                let n = stream.read(&mut chunk).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                let req = String::from_utf8_lossy(&buf);
-                let Some((headers, request_body)) = req.split_once("\r\n\r\n") else {
-                    continue;
-                };
-                let content_len = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.split_once(':').and_then(|(name, value)| {
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                    })
-                    .unwrap_or(0);
-                if request_body.len() >= content_len {
-                    break;
-                }
-            }
-            let req = String::from_utf8_lossy(&buf).to_string();
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(resp.as_bytes()).await.unwrap();
-            req
-        });
-        (format!("http://{addr}"), task)
-    }
-
     #[tokio::test]
     async fn access_token_returns_cached_token_without_refresh_when_fresh() {
         let tmp = tempfile::tempdir().unwrap();
@@ -865,7 +880,7 @@ mod tests {
     #[tokio::test]
     async fn access_token_refreshes_expired_cached_token_and_persists_fresh_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let (host, task) = spawn_oauth_response(
+        let (host, task) = spawn_json_response(
             r#"{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":120}"#,
         )
         .await;

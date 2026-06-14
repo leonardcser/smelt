@@ -205,6 +205,56 @@ pub(crate) fn unix_now() -> u64 {
         .as_secs()
 }
 
+#[cfg(test)]
+pub(crate) mod test_http {
+    pub(crate) async fn spawn_json_response(
+        body: impl Into<String>,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let body = body.into();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let req = String::from_utf8_lossy(&buf);
+                let Some((headers, request_body)) = req.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                    })
+                    .unwrap_or(0);
+                if request_body.len() >= content_len {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            req
+        });
+        (format!("http://{addr}"), task)
+    }
+}
+
 impl ProviderError {
     fn is_retryable(&self) -> bool {
         matches!(
