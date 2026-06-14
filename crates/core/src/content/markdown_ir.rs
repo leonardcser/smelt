@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::content::highlight::{lower_inline_events, InlineSpan, InlineStyle};
+use crate::content::highlight::{lower_inline_event_lines, InlineSpan, InlineStyle};
 use crate::content::ColumnAlignment;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,12 +204,24 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
             Event::End(end) if text_stack.last().is_some_and(|open| open.end == end) => {
                 let open = text_stack.pop().unwrap();
                 let text_range = open.start..range.end;
-                out.push(SpecialBlock::Text {
-                    range: text_range.clone(),
-                    kind: open.kind,
-                    lines: markdown_lines(source, text_range, open.kind, &open.events),
-                });
+                let lines = if text_stack.is_empty() {
+                    Some(markdown_lines(
+                        source,
+                        text_range.clone(),
+                        open.kind,
+                        &open.events,
+                    ))
+                } else {
+                    None
+                };
                 push_open_text_event(&mut text_stack, Event::End(end), range);
+                if let Some(lines) = lines {
+                    out.push(SpecialBlock::Text {
+                        range: text_range,
+                        kind: open.kind,
+                        lines,
+                    });
+                }
             }
             Event::Text(_) => {
                 if let Some((_, _, body)) = code.as_mut() {
@@ -321,11 +333,19 @@ fn markdown_lines<'a>(
     kind: MarkdownTextKind,
     events: &[(Event<'a>, Range<usize>)],
 ) -> Vec<MarkdownLine> {
-    line_ranges(source, range)
+    let ranges = line_ranges(source, range);
+    let inline_lines = lower_inline_event_lines(events.iter().cloned(), &ranges, false);
+
+    ranges
         .into_iter()
-        .map(|line_range| MarkdownLine {
-            spans: markdown_line_spans(source, line_range.clone(), kind, events),
-            source: line_range,
+        .zip(inline_lines)
+        .map(|(line_range, inline_spans)| {
+            let mut spans = structural_prefix_spans(source, line_range.clone(), kind, events);
+            spans.extend(inline_spans);
+            MarkdownLine {
+                source: line_range,
+                spans,
+            }
         })
         .collect()
 }
@@ -343,22 +363,6 @@ fn line_ranges(source: &str, range: Range<usize>) -> Vec<Range<usize>> {
         out.push(range.start..range.end);
     }
     out
-}
-
-fn markdown_line_spans<'a>(
-    source: &str,
-    line_range: Range<usize>,
-    kind: MarkdownTextKind,
-    events: &[(Event<'a>, Range<usize>)],
-) -> Vec<InlineSpan> {
-    let line_events: Vec<(Event<'a>, Range<usize>)> = events
-        .iter()
-        .filter(|(_, range)| range.start >= line_range.start && range.start < line_range.end)
-        .cloned()
-        .collect();
-    let mut spans = structural_prefix_spans(source, line_range.clone(), kind, &line_events);
-    spans.extend(lower_inline_events(source, line_events, false));
-    spans
 }
 
 fn structural_prefix_spans<'a>(
@@ -380,7 +384,7 @@ fn structural_prefix_spans<'a>(
     let prefix_end = events
         .iter()
         .filter_map(|(event, range)| visible_event_start(event).then_some(range.start))
-        .filter(|&start| start >= prefix_start)
+        .filter(|&start| start >= prefix_start && start < line_range.end)
         .min()
         .unwrap_or(line_range.end);
     let prefix = smelt_buffer::text::slice(source, prefix_start..prefix_end);
@@ -518,6 +522,27 @@ mod tests {
         assert!(list_lines[0].spans[0].style.bold);
     }
 
+    #[test]
+    fn parse_markdown_keeps_inline_style_across_source_lines() {
+        let source = "para **bold\nstill** tail\n";
+        let block = parse_markdown(source);
+        let lines = block
+            .nodes
+            .iter()
+            .find_map(|node| match node {
+                MarkdownNode::Text { lines, .. } => Some(lines),
+                _ => None,
+            })
+            .expect("text node");
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[1].text, "bold");
+        assert!(lines[0].spans[1].style.bold);
+        assert_eq!(lines[1].spans[0].text, "still");
+        assert!(lines[1].spans[0].style.bold);
+        assert_eq!(lines[1].spans[1].text, " tail");
+        assert!(!lines[1].spans[1].style.bold);
+    }
     #[test]
     fn parse_markdown_preserves_nested_structural_prefixes() {
         let source = "# Title\n\n> - item\n";

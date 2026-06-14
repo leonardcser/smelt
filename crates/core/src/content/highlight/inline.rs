@@ -496,7 +496,6 @@ pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
 }
 
 pub fn lower_inline_events<'a>(
-    _source: &str,
     events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
     dim: bool,
 ) -> Vec<InlineSpan> {
@@ -517,6 +516,40 @@ pub fn lower_inline_events<'a>(
     }
 
     out
+}
+
+pub fn lower_inline_event_lines<'a>(
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    line_ranges: &[Range<usize>],
+    dim: bool,
+) -> Vec<Vec<InlineSpan>> {
+    let mut styles = vec![InlineStyle {
+        dim,
+        ..Default::default()
+    }];
+    let mut out = vec![Vec::new(); line_ranges.len()];
+
+    for (event, range) in events {
+        match event {
+            Event::Start(tag) => push_tag_style(&mut styles, tag),
+            Event::End(_) if styles.len() > 1 => {
+                styles.pop();
+            }
+            event => {
+                if let Some(line_index) = line_index_for_event(line_ranges, &range) {
+                    lower_inline_event(event, &mut out[line_index], &styles);
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn line_index_for_event(line_ranges: &[Range<usize>], range: &Range<usize>) -> Option<usize> {
+    line_ranges
+        .iter()
+        .position(|line| range.start >= line.start && range.start < line.end)
 }
 
 fn lower_inline_fragment_events<'a>(
