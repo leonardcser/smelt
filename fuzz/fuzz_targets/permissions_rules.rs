@@ -265,21 +265,26 @@ fuzz_target!(|input: Input| {
             .all(|req| grant_set.iter().any(|grant| grant.satisfies(req))));
     }
 
-    let has_empty_command_requirement = outcome.missing_requirements.iter().any(|req| {
-        matches!(req, PermissionRequirement::Command { command, .. } if command.is_empty())
-    });
-    if outcome.decision == Decision::Ask && !has_empty_command_requirement {
+    if outcome.decision == Decision::Ask {
         if let Some(grant_set) = options.grant_sets.first() {
-            {
+            let requirements_satisfied = {
                 let mut approvals = perms.approvals.write().unwrap();
                 for grant in grant_set.iter().cloned() {
                     approvals.add_session_grant(grant);
                 }
-            }
+                outcome
+                    .missing_requirements
+                    .iter()
+                    .all(|req| approvals.requirement_satisfied(req))
+            };
             let approved =
                 perms.evaluate_tool_with_approvals(mode, request_origin, &input.tool, &args);
-            assert_eq!(approved.decision, Decision::Allow);
-            assert!(approved.missing_requirements.is_empty());
+            if requirements_satisfied {
+                assert_eq!(approved.decision, Decision::Allow);
+                assert!(approved.missing_requirements.is_empty());
+            } else {
+                assert_eq!(approved.decision, Decision::Ask);
+            }
         }
     }
 });
