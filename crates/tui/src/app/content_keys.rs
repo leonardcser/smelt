@@ -27,6 +27,9 @@ impl TuiApp {
             self.snap_transcript_cursor();
             return EventOutcome::Redraw;
         }
+        if self.try_open_search_for_key(k) {
+            return EventOutcome::Noop;
+        }
         EventOutcome::Noop
     }
 }

@@ -72,22 +72,6 @@ smelt.cmd.register("help", function()
   end)
 end, { desc = "show keybindings" })
 
--- `?` opens /help unless it would land as text in an editable buffer the user
--- is actively typing into. That narrows the literal-`?` carve-out to: prompt
--- focus AND non-empty content AND vim is in insert mode (or vim is disabled,
--- so every keystroke is text). Vim normal/visual mode is always a "command"
--- context - `?` opens help even when the prompt has content. Returning false
--- passes the keystroke through to the buffer so it lands as a real `?`.
-smelt.keymap.set("", "?", function()
-  if smelt.focus() == "prompt" then
-    local vim_mode = smelt.vim.mode()
-    local typing = vim_mode == nil or vim_mode == "insert"
-    if typing then
-      local txt = smelt.prompt.text()
-      if txt and txt ~= "" then
-        return false
-      end
-    end
-  end
+smelt.keymap.set("", "<F1>", function()
   smelt.cmd.run("help")
 end)

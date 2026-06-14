@@ -6,7 +6,7 @@
 
 | Key                             | Action                                  |
 | ------------------------------- | --------------------------------------- |
-| `Enter`                         | Submit message                          |
+| `Enter`                         | Submit message; with an empty prompt, continue the turn when history exists |
 | `Ctrl+J` / `Shift+Enter`        | Insert newline                          |
 | `Ctrl+R`                        | Fuzzy search input history              |
 | `Ctrl+S`                        | Stash / unstash input                   |
@@ -18,7 +18,7 @@
 | `Esc Esc`                       | Cancel agent / compaction / rewind      |
 | `↑` / `↓` / `Ctrl+P` / `Ctrl+N` | Previous / next line (history at edges) |
 | `Tab`                           | Accept ghost text completion            |
-| `?`                             | Open help (empty input only)            |
+| `F1`                            | Open help                               |
 | `Cmd+V`                         | Paste image from clipboard              |
 
 While the agent is running, queued messages stack up. `Esc` flushes them back

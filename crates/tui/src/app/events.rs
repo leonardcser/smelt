@@ -103,11 +103,11 @@ impl TuiApp {
                 if self.handle_focused_search_key(k) {
                     return false;
                 }
-                if self.try_open_search_for_key(k) {
-                    return false;
-                }
                 if matches!(self.run_key_cascade(k), crate::smelt_edit::Status::Consumed) {
                     self.flush_lua_callbacks();
+                    return false;
+                }
+                if self.try_open_search_for_key(k) {
                     return false;
                 }
                 self.flush_lua_callbacks();
@@ -191,6 +191,11 @@ impl TuiApp {
                 let remaining = std::mem::take(&mut self.queued_inputs);
                 self.discard_turn(true);
                 self.queued_inputs = remaining;
+                false
+            }
+            EventOutcome::ContinueTurn => {
+                let turn = self.begin_agent_turn("", protocol::Content::text(""));
+                self.agent = Some(turn);
                 false
             }
             EventOutcome::Exec(handle) => {
@@ -289,7 +294,7 @@ impl TuiApp {
         self.handle_search_key_for_target(win, k)
     }
 
-    fn try_open_search_for_key(&mut self, k: KeyEvent) -> bool {
+    pub(crate) fn try_open_search_for_key(&mut self, k: KeyEvent) -> bool {
         match (k.code, k.modifiers) {
             (KeyCode::Char('/'), KeyModifiers::NONE) => {
                 self.open_search_input(crate::app::search::SearchDirection::Forward)
@@ -315,13 +320,6 @@ impl TuiApp {
         }
         if let Event::Mouse(me) = *ev {
             return Some(self.handle_mouse(me));
-        }
-        // Viewer search has nvim priority over global `?`/`/` mappings when
-        // focus is on a searchable readonly surface.
-        if let Event::Key(k) = *ev {
-            if self.try_open_search_for_key(k) {
-                return Some(EventOutcome::Noop);
-            }
         }
         // Buffer-local Lua keymaps win over global (nvim priority). Skipped when an overlay
         // owns focus - overlay-leaf dispatch happens upstream.
@@ -547,14 +545,12 @@ impl TuiApp {
             if let Some(action) = keymap::lookup(code, modifiers, &ctx) {
                 match action {
                     KeyAction::CancelAgent => {
-                        self.queued_inputs.clear();
                         return EventOutcome::CancelAgent;
                     }
                     KeyAction::ClearBuffer => {
                         self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                         self.input.clear(&mut pctx);
-                        self.queued_inputs.clear();
                         return EventOutcome::Noop;
                     }
                     _ => {}
@@ -729,7 +725,13 @@ impl TuiApp {
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
             Action::Submit { content, display } => EventOutcome::Submit { content, display },
-            Action::SubmitEmpty => EventOutcome::Noop,
+            Action::SubmitEmpty => {
+                if self.can_continue_turn() {
+                    EventOutcome::ContinueTurn
+                } else {
+                    EventOutcome::Noop
+                }
+            }
             Action::EditInEditor => {
                 self.edit_in_editor();
                 EventOutcome::Noop

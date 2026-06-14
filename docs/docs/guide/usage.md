@@ -8,7 +8,8 @@ The agent streams its response and may call tools along the way.
 - `Ctrl+R` fuzzy-searches your input history
 - `Ctrl+X Ctrl+E` opens your `$EDITOR` for longer messages
 - `Ctrl+C` clears the input, cancels the agent, or quits (context-dependent)
-- `?` (with empty input) opens the help dialog
+- `Enter` submits; with an empty prompt, it continues the turn when history exists
+- `F1` opens the help dialog
 
 ## Modes
 

@@ -263,6 +263,8 @@ pub(crate) enum EventOutcome {
     CancelAgent,
     /// Cancel the running agent and immediately start a new turn with the oldest queued message.
     InterruptWithQueued,
+    /// Start a new turn without adding prompt text.
+    ContinueTurn,
     Submit {
         content: Content,
         display: String,
@@ -420,6 +422,10 @@ impl TuiApp {
 
     pub(crate) fn agent_is_running(&self) -> bool {
         self.active_agent_turn_id().is_some()
+    }
+
+    pub(crate) fn can_continue_turn(&self) -> bool {
+        !self.core.session.history.is_empty()
     }
 
     pub(crate) fn drain_queued_inputs_into_prompt(&mut self) {
