@@ -1355,6 +1355,7 @@ impl TuiApp {
         })
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn notification_win(&self) -> Option<crate::smelt_edit::WinId> {
         self.notification.map(|notification| notification.win)
     }
