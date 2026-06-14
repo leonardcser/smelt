@@ -214,6 +214,7 @@ async fn debounce_loop(raw_rx: &mut UnboundedReceiver<()>, signal_tx: UnboundedS
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::event::{DataChange, ModifyKind};
     use std::path::Path;
 
     #[test]
@@ -232,5 +233,64 @@ mod tests {
     fn relevant_path_rejects_unrelated_extensions() {
         assert!(!relevant_path(Path::new("foo.txt")));
         assert!(!relevant_path(Path::new("notes.json")));
+    }
+
+    #[test]
+    fn relevant_event_ignores_access_and_metadata_only_changes() {
+        let access = notify::Event {
+            kind: EventKind::Access(notify::event::AccessKind::Close(
+                notify::event::AccessMode::Write,
+            )),
+            paths: vec![PathBuf::from("init.lua")],
+            attrs: notify::event::EventAttributes::default(),
+        };
+        assert!(!relevant(&access));
+
+        let metadata = notify::Event {
+            kind: EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+            paths: vec![PathBuf::from("AGENTS.md")],
+            attrs: notify::event::EventAttributes::default(),
+        };
+        assert!(!relevant(&metadata));
+    }
+
+    #[test]
+    fn relevant_event_accepts_rescan_and_relevant_path() {
+        let rescan = notify::Event {
+            kind: EventKind::Other,
+            paths: Vec::new(),
+            attrs: notify::event::EventAttributes::default(),
+        };
+        assert!(relevant(&rescan));
+
+        let data_change = notify::Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![PathBuf::from("plugins/init.lua")],
+            attrs: notify::event::EventAttributes::default(),
+        };
+        assert!(relevant(&data_change));
+    }
+
+    #[tokio::test]
+    async fn debounce_loop_coalesces_bursts() {
+        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            debounce_loop(&mut raw_rx, signal_tx).await;
+        });
+
+        raw_tx.send(()).unwrap();
+        raw_tx.send(()).unwrap();
+        assert!(tokio::time::timeout(DEBOUNCE / 2, signal_rx.recv())
+            .await
+            .is_err());
+        assert!(tokio::time::timeout(DEBOUNCE * 2, signal_rx.recv())
+            .await
+            .unwrap()
+            .is_some());
+        assert!(signal_rx.try_recv().is_err());
+
+        drop(raw_tx);
+        task.await.unwrap();
     }
 }

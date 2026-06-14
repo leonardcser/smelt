@@ -64,3 +64,60 @@ impl TuiApp {
         self.snap_transcript_cursor();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::AppFocus;
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    #[test]
+    fn ctrl_w_starts_pane_chord_without_toggling_focus() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+
+        let outcome = app.handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+
+        assert!(matches!(outcome, Some(EventOutcome::Noop)));
+        assert_eq!(app.app_focus, AppFocus::Prompt);
+        assert!(app.timers.pending_pane_chord.is_some());
+    }
+
+    #[test]
+    fn pane_chord_toggles_to_content_only_when_transcript_has_content() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        app.handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let outcome = app.handle_pane_chord(&key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(outcome, Some(EventOutcome::Redraw)));
+        assert_eq!(app.app_focus, AppFocus::Prompt);
+
+        app.push_block(smelt_core::Block::Text {
+            content: "content".into(),
+        });
+        app.handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        let outcome = app.handle_pane_chord(&key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(outcome, Some(EventOutcome::Redraw)));
+        assert_eq!(app.app_focus, AppFocus::Content);
+        assert!(app.timers.pending_pane_chord.is_none());
+    }
+
+    #[test]
+    fn non_navigation_key_clears_pending_pane_chord() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        app.handle_pane_chord(&key(KeyCode::Char('w'), KeyModifiers::CONTROL));
+
+        let outcome = app.handle_pane_chord(&key(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert!(outcome.is_none());
+        assert_eq!(app.app_focus, AppFocus::Prompt);
+        assert!(app.timers.pending_pane_chord.is_none());
+    }
+}

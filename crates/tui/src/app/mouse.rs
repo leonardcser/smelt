@@ -898,20 +898,21 @@ mod tests {
             .transcript_win()
             .viewport
             .expect("render populated transcript viewport");
-        let top = app.transcript_win().scroll_top();
-        let start_rel = 3u16;
-        let end_rel = 5u16;
-        let start_local = app
-            .transcript_win()
-            .local_visual_row(top.saturating_add(start_rel as crate::smelt_edit::RowIndex))
-            as usize;
-        let expected_start = app
-            .ui
-            .buf(app.transcript_win().buf)
-            .and_then(|buf| buf.get_line(start_local))
-            .unwrap_or("")
-            .to_string();
-        assert!(!expected_start.is_empty());
+        let (start_rel, expected_start) = {
+            let win = app.transcript_win();
+            let top = win.scroll_top();
+            let buf = app.ui.buf(win.buf).expect("transcript buffer");
+            (0..vp.rect.height)
+                .find_map(|rel| {
+                    let local = win.local_visual_row(
+                        top.saturating_add(rel as crate::smelt_edit::RowIndex),
+                    ) as usize;
+                    let line = buf.get_line(local)?;
+                    line.starts_with("line ").then(|| (rel, line.to_string()))
+                })
+                .expect("visible transcript line")
+        };
+        let end_rel = start_rel.saturating_add(2).min(vp.rect.height.saturating_sub(1));
 
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -937,7 +938,7 @@ mod tests {
 
         let yanked = app.core.clipboard.kill_ring.current();
         assert!(
-            yanked.contains(&expected_start),
+            yanked.starts_with(&expected_start),
             "selection should start at clicked row {expected_start:?}, got {yanked:?}"
         );
         assert!(
@@ -1008,20 +1009,21 @@ mod tests {
             .transcript_win()
             .viewport
             .expect("render populated transcript viewport");
-        let top = app.transcript_win().scroll_top();
-        let start_rel = 3u16;
-        let end_rel = 5u16;
-        let start_local = app
-            .transcript_win()
-            .local_visual_row(top.saturating_add(start_rel as crate::smelt_edit::RowIndex))
-            as usize;
-        let expected_start = app
-            .ui
-            .buf(app.transcript_win().buf)
-            .and_then(|buf| buf.get_line(start_local))
-            .unwrap_or("")
-            .to_string();
-        assert!(!expected_start.is_empty());
+        let (start_rel, expected_start) = {
+            let win = app.transcript_win();
+            let top = win.scroll_top();
+            let buf = app.ui.buf(win.buf).expect("transcript buffer");
+            (0..vp.rect.height)
+                .find_map(|rel| {
+                    let local = win.local_visual_row(
+                        top.saturating_add(rel as crate::smelt_edit::RowIndex),
+                    ) as usize;
+                    let line = buf.get_line(local)?;
+                    line.starts_with("line ").then(|| (rel, line.to_string()))
+                })
+                .expect("visible transcript line")
+        };
+        let end_rel = start_rel.saturating_add(2).min(vp.rect.height.saturating_sub(1));
 
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1050,7 +1052,7 @@ mod tests {
 
         let yanked = app.core.clipboard.kill_ring.current();
         assert!(
-            yanked.contains(&expected_start),
+            yanked.starts_with(&expected_start),
             "streaming during drag should keep selection anchored at clicked row {expected_start:?}, got {yanked:?}"
         );
         assert!(

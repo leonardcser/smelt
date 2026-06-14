@@ -2452,4 +2452,77 @@ mod tests {
         ); // mid 'é'
         assert_eq!(input.win.cpos(), 1, "cpos must snap to a char boundary");
     }
+
+    #[test]
+    fn backspace_deletes_whole_utf8_codepoint() {
+        let mut input = Harness::new();
+        input.buf.set_source("aéb".to_string());
+        input.win.set_cpos("aé".len());
+
+        input.state.backspace(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
+
+        assert_eq!(input.buf.source(), "ab");
+        assert_eq!(input.win.cpos(), 1);
+    }
+
+    #[test]
+    fn forward_delete_deletes_whole_utf8_codepoint() {
+        let mut input = Harness::new();
+        input.buf.set_source("aéb".to_string());
+        input.win.set_cpos(1);
+
+        input.state.delete_char_forward(&mut PromptCtx {
+            buf: &mut input.buf,
+            win: &mut input.win,
+        });
+
+        assert_eq!(input.buf.source(), "ab");
+        assert_eq!(input.win.cpos(), 1);
+    }
+
+    #[test]
+    fn paste_normalizes_crlf_and_strips_attachment_markers() {
+        let mut input = Harness::new();
+        let data = format!("a\r\nb\rc{m}", m = ATTACHMENT_MARKER);
+
+        input.state.insert_paste(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            data,
+        );
+
+        assert_eq!(input.buf.source(), "a\nb\nc");
+        assert!(input.buf.attachment_ids.is_empty());
+        assert_eq!(input.win.cpos(), input.buf.source().len());
+    }
+
+    #[test]
+    fn line_motion_clamps_to_existing_lines() {
+        let mut input = Harness::new();
+        input.buf.set_source("one\ntwo\nthree".to_string());
+        input.win.set_cpos(0);
+
+        input.state.scroll_lines(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            99,
+        );
+        assert_eq!(input.win.cpos(), "one\ntwo\n".len());
+
+        input.state.scroll_lines(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            -99,
+        );
+        assert_eq!(input.win.cpos(), 0);
+    }
 }

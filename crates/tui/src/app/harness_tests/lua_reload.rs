@@ -1,6 +1,60 @@
 use super::*;
 
 #[test]
+fn lua_config_session_and_transcript_contracts_are_available() {
+    let mut app = TestApp::builder().build();
+    app.push_user_block("hello from lua api test");
+    app.app.push_block(smelt_core::Block::Text {
+        content: "assistant line".into(),
+    });
+    app.app.render_normal_to(false, &mut std::io::sink());
+
+    assert!(app.run_lua(
+        r#"
+            assert(type(smelt.config.provider_type()) == "string")
+            assert(type(smelt.config.api_base()) == "string")
+            assert(type(smelt.config.api_key_env()) == "string")
+            assert(type(smelt.config.model_config()) == "table")
+
+            assert(smelt.session.title() == nil)
+            smelt.session.title("Lua Contract Title", "lua-contract-title")
+            assert(smelt.session.title() == "Lua Contract Title")
+            assert(smelt.session.slug() == "lua-contract-title")
+            assert(type(smelt.session.cwd()) == "string")
+            assert(type(smelt.session.tokens()) == "table")
+
+            assert(smelt.transcript.is_empty() == false)
+            local text = smelt.transcript.text()
+            assert(text:find("hello from lua api test", 1, true))
+            local blocks = smelt.transcript.blocks()
+            assert(#blocks >= 1)
+            assert(type(blocks[1].idx) == "number")
+            assert(type(blocks[1].role) == "string")
+            assert(type(smelt.transcript.rows(0, 2)) == "table")
+        "#,
+    ));
+}
+
+#[test]
+fn lua_history_entries_and_search_return_sequences() {
+    let mut app = TestApp::builder().build();
+    app.app.input_history.push("first prompt".into());
+    app.app.input_history.push("second search target".into());
+
+    assert!(app.run_lua(
+        r#"
+            local entries = smelt.history.entries()
+            assert(#entries >= 2)
+            assert(entries[#entries] == "second search target")
+            local matches = smelt.history.search("target")
+            assert(#matches >= 1)
+            assert(type(matches[1].index) == "number")
+            assert(type(matches[1].score) == "number")
+        "#,
+    ));
+}
+
+#[test]
 fn reload_clears_surviving_prompt_keymaps() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(
