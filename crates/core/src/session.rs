@@ -2006,7 +2006,10 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_preserves_tool_elapsed_metadata() {
+    fn round_trip_preserves_inv_elapsed_ms_and_turn_metas() {
+        // Native history carries ToolInvocation telemetry directly, while
+        // turn_metas.tool_elapsed remains available for legacy message-shaped
+        // sessions and render fallbacks. Verify both channels survive save/load.
         let mut original = Session::new(7, std::path::PathBuf::from("/w"));
         original
             .history
@@ -2042,7 +2045,11 @@ mod tests {
             .find_map(|i| i.as_assistant())
             .unwrap()
             .invocations[0];
-        assert_eq!(restored_inv.elapsed_ms, Some(42));
+        assert_eq!(
+            restored_inv.elapsed_ms,
+            Some(42),
+            "native history should preserve invocation elapsed telemetry"
+        );
         let restored_meta_elapsed = round.turn_metas[0].1.tool_elapsed.get("c1").copied();
         assert_eq!(
             restored_meta_elapsed,
