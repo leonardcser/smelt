@@ -88,6 +88,7 @@ nav = [
     { "`smelt.timer`" = "reference/api/timer.md" },
     { "`smelt.tools`" = "reference/api/tools.md" },
     { "`smelt.transcript`" = "reference/api/transcript.md" },
+    { "`smelt.transcript.defaults`" = "reference/api/transcript_defaults.md" },
     { "`smelt.trust`" = "reference/api/trust.md" },
     { "`smelt.ui`" = "reference/api/ui.md" },
     { "`smelt.ui.layout`" = "reference/api/ui_layout.md" },

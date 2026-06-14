@@ -621,7 +621,10 @@ impl Default for LuaRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smelt_core::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
     use smelt_core::lua::api::lua_table_to_json;
+    use smelt_core::lua::runtime::TranscriptRenderCtx;
+    use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
 
     /// Stub `smelt.notify` / `smelt.notify.error` to push into `_G.test_log` / `_G.test_err`.
     fn install_test_notify(rt: &LuaRuntime) {
@@ -844,6 +847,156 @@ mod tests {
             .eval()
             .expect("eval");
         assert!(!target.is_empty(), "smelt.build.target should be non-empty");
+    }
+
+    fn render_transcript_block(
+        rt: &LuaRuntime,
+        block: &Block,
+        state: Option<&ToolState>,
+    ) -> BlockLayout {
+        rt.render_transcript_layout(
+            BlockId::new(7),
+            0,
+            block,
+            state,
+            TranscriptRenderCtx {
+                show_thinking: true,
+            },
+        )
+    }
+
+    fn assert_text_layout(layout: &BlockLayout, expected: &str) {
+        let BlockLayout::Leaf(LuaLeaf::Text(TextSpec { content, .. })) = layout else {
+            panic!("expected text layout, got {layout:?}");
+        };
+        assert_eq!(content, expected);
+    }
+
+    #[test]
+    fn transcript_default_renderer_handles_simple_blocks() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+
+        let assistant = Block::Text {
+            content: "hello".into(),
+        };
+        let layout = render_transcript_block(&rt, &assistant, None);
+        assert_text_layout(&layout, "hello");
+
+        let mode = Block::Mode {
+            text: "plan".into(),
+            icon: "◇ ".into(),
+            hl_group: "SmeltModeDefault".into(),
+        };
+        let layout = render_transcript_block(&rt, &mode, None);
+        assert_text_layout(&layout, "◇ plan");
+
+        let tool = Block::ToolCall {
+            call_id: "call-1".into(),
+            name: "bash".into(),
+            summary: protocol::StyledLines::from_plain("echo hi"),
+            args: std::collections::HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: Some(std::time::Duration::from_secs(65)),
+            output: Some(Box::new(ToolOutput {
+                content: "hi".into(),
+                is_error: false,
+                metadata: None,
+            })),
+            user_message: Some("done".into()),
+        };
+        let layout = render_transcript_block(&rt, &tool, Some(&state));
+        let BlockLayout::Vbox(items) = layout else {
+            panic!("expected tool vbox");
+        };
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn transcript_renderer_extension_composes_and_invalidates() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let g0 = rt.transcript_renderer_generation();
+
+        rt.lua
+            .load(
+                r#"
+                local transcript = require("smelt.transcript")
+                transcript.set_renderer(function(block, ctx)
+                  return smelt.layout.text("base:" .. block.kind .. ":" .. tostring(ctx.renderer_generation ~= nil))
+                end)
+                _G.transcript_reg = transcript.extend_renderer("test_wrap", function(next, block, ctx)
+                  return smelt.layout.gutter(next(block, ctx), { text = "> " })
+                end)
+            "#,
+            )
+            .exec()
+            .unwrap();
+        let g1 = rt.transcript_renderer_generation();
+        assert!(g1 > g0);
+
+        let block = Block::User {
+            text: "hello".into(),
+            image_labels: Vec::new(),
+        };
+        let layout = render_transcript_block(&rt, &block, None);
+        let BlockLayout::Gutter { child, spec } = layout else {
+            panic!("expected middleware gutter");
+        };
+        assert_eq!(spec.text, "> ");
+        assert_text_layout(&child, "base:user:true");
+
+        let removed: bool = rt
+            .lua
+            .load("return _G.transcript_reg:remove()")
+            .eval()
+            .unwrap();
+        assert!(removed);
+        let g2 = rt.transcript_renderer_generation();
+        assert!(g2 > g1);
+        let layout = render_transcript_block(&rt, &block, None);
+        assert_text_layout(&layout, "base:user:true");
+
+        rt.lua
+            .load("return require('smelt.transcript').invalidate_renderer()")
+            .eval::<u64>()
+            .unwrap();
+        assert!(rt.transcript_renderer_generation() > g2);
+    }
+
+    #[test]
+    fn transcript_renderer_nil_and_errors_fall_back_but_empty_hides() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        install_test_notify(&rt);
+        let block = Block::Text {
+            content: "fallback".into(),
+        };
+
+        rt.lua
+            .load("require('smelt.transcript').set_renderer(function() error('boom') end)")
+            .exec()
+            .unwrap();
+        let layout = render_transcript_block(&rt, &block, None);
+        assert_text_layout(&layout, "fallback");
+        assert!(drain_errors(&rt).iter().any(|e| e.contains("boom")));
+
+        rt.lua
+            .load("require('smelt.transcript').set_renderer(function() return nil end)")
+            .exec()
+            .unwrap();
+        let layout = render_transcript_block(&rt, &block, None);
+        assert_text_layout(&layout, "fallback");
+        assert!(drain_errors(&rt).iter().any(|e| e.contains("returned nil")));
+
+        rt.lua
+            .load("require('smelt.transcript').set_renderer(function() return smelt.layout.empty() end)")
+            .exec()
+            .unwrap();
+        let layout = render_transcript_block(&rt, &block, None);
+        assert!(matches!(layout, BlockLayout::Empty));
     }
 
     #[test]

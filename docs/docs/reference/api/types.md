@@ -650,6 +650,53 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `watchdog_grace_ms` | `integer` |  | Extra time added when a tool argument sets the watchdog deadline, in milliseconds. |
 | `override` | `boolean` |  | Replace a core tool of the same name (advanced). |
 
+### `smelt.transcript.Block`
+
+Semantic transcript block snapshot passed to the root renderer.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `integer` | yes | Stable block id within the session. |
+| `index` | `integer` | yes | Zero-based block index in transcript order. |
+| `kind` | `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"mode"|"process_status"|"compacted"` | yes | Block kind. |
+| `text` | `string` |  | User/mode/process text. |
+| `content` | `string` |  | Assistant/thinking/code content. |
+| `image_labels` | `string[]` |  | User image labels. |
+| `icon` | `string` |  | Mode icon. |
+| `hl_group` | `string` |  | Mode/process highlight group. |
+| `lang` | `string` |  | Code language. |
+| `call_id` | `string` |  | Tool call id. |
+| `name` | `string` |  | Tool name. |
+| `args` | `table` |  | Tool arguments. |
+| `summary` | `any` |  | Tool styled summary lines or compacted summary text. |
+| `summary_text` | `string` |  | Tool summary flattened to plain text. |
+| `status` | `"pending"|"confirm"|"ok"|"err"|"denied"` |  | Tool status. |
+| `elapsed_secs` | `integer` |  | Terminal/static tool elapsed seconds. |
+| `user_message` | `string` |  | Tool user-facing status message. |
+| `output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Tool output snapshot. |
+| `command` | `string` |  | Exec command. |
+
+### `smelt.transcript.Context`
+
+Renderer context. Width, theme, and scroll state are intentionally absent.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `show_thinking` | `boolean` | yes | Whether thinking blocks should render expanded. |
+| `renderer_generation` | `integer` | yes | Current renderer generation used for cache invalidation. |
+| `surface` | `string` | yes | Rendering surface name, currently `"transcript"`. |
+| `limits` | `table` | yes | Numeric product row budgets such as `tool_output_rows`. |
+
+### `smelt.transcript.ToolOutput`
+
+Tool output snapshot passed to transcript renderers.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `content` | `string` | yes | Captured output text. |
+| `is_error` | `boolean` | yes | True when the tool result is an error. |
+| `metadata` | `table` |  | Tool-specific structured metadata. |
+
 ### `smelt.ui.layout.Measure`
 
 Shareable natural-size handle returned by `smelt.ui.layout.measure`.

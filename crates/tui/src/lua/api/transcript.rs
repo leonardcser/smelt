@@ -23,13 +23,8 @@ fn block_snapshot_table(
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
-    let m = LuaMod::under(
-        lua,
-        smelt,
-        "transcript",
-        "Read rendered transcript display text. UiHost-only.",
-        Tier::UiHost,
-    )?;
+    let transcript: mlua::Table = smelt.get("transcript")?;
+    let m = LuaMod::extend(lua, transcript, "smelt.transcript", Tier::UiHost);
     m.fn_(
         "text",
         "Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).",

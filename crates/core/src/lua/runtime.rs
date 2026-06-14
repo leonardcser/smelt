@@ -8,10 +8,12 @@ use std::time::Instant;
 use include_dir::{include_dir, Dir, DirEntry};
 use mlua::prelude::*;
 
+use crate::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
 use crate::lua::{
     json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
+use crate::transcript_model::{Block, BlockId, ToolState, ToolStatus};
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
@@ -26,6 +28,8 @@ static EMBEDDED_SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtim
 /// Lua chunks executed at `register_api` time, in order: primitives before consumers.
 pub const BOOTSTRAP_FILES: &[&str] = &[
     "_bootstrap.lua",
+    "transcript/defaults.lua",
+    "transcript.lua",
     "dialog.lua",
     "list.lua",
     "session.lua",
@@ -111,6 +115,11 @@ pub struct ToolRenderCtx<'a> {
     pub elapsed_secs: Option<u64>,
     /// `None` for synthetic renders (preview / dialog title).
     pub call_id: Option<&'a str>,
+}
+
+/// Context passed to the root transcript renderer.
+pub struct TranscriptRenderCtx {
+    pub show_thinking: bool,
 }
 
 /// Headless-safe Lua runtime.
@@ -1368,6 +1377,102 @@ impl LuaRuntime {
         out
     }
 
+    pub fn transcript_renderer_generation(&self) -> u64 {
+        self.shared
+            .transcript_renderer_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Call the root transcript renderer and return its layout tree. Renderer
+    /// errors, nil returns, invalid return types, or missing renderers use a
+    /// small Rust fallback layout so transcript projection stays usable.
+    pub fn render_transcript_layout(
+        &self,
+        id: BlockId,
+        index: usize,
+        block: &Block,
+        state: Option<&ToolState>,
+        ctx: TranscriptRenderCtx,
+    ) -> BlockLayout {
+        let render_fn = {
+            let slot = self
+                .shared
+                .transcript_renderer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(handle) = slot.as_ref() else {
+                return fallback_transcript_layout(block, state, ctx.show_thinking);
+            };
+            match self.lua.registry_value::<mlua::Function>(&handle.key) {
+                Ok(f) => f,
+                Err(e) => {
+                    self.record_error(format!("transcript render: renderer handle: {e}"));
+                    return fallback_transcript_layout(block, state, ctx.show_thinking);
+                }
+            }
+        };
+
+        let block_table = match transcript_block_to_lua_table(&self.lua, id, index, block, state) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("transcript render: build block: {e}"));
+                return fallback_transcript_layout(block, state, ctx.show_thinking);
+            }
+        };
+        let ctx_table = match transcript_render_ctx_to_lua_table(
+            &self.lua,
+            ctx.show_thinking,
+            self.transcript_renderer_generation(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("transcript render: build ctx: {e}"));
+                return fallback_transcript_layout(block, state, ctx.show_thinking);
+            }
+        };
+
+        let result: mlua::Value = match render_fn.call((block_table, ctx_table)) {
+            Ok(v) => v,
+            Err(e) => {
+                self.record_error(format!(
+                    "transcript render `{}` #{index}: {e}",
+                    transcript_block_kind(block)
+                ));
+                return fallback_transcript_layout(block, state, ctx.show_thinking);
+            }
+        };
+
+        match result {
+            mlua::Value::UserData(ud) => {
+                match ud.borrow::<crate::lua::api::layout::LuaBlockLayout>() {
+                    Ok(layout) => layout.0.clone(),
+                    Err(e) => {
+                        self.record_error(format!(
+                            "transcript render `{}` #{index}: expected smelt.layout value: {e}",
+                            transcript_block_kind(block)
+                        ));
+                        fallback_transcript_layout(block, state, ctx.show_thinking)
+                    }
+                }
+            }
+            mlua::Value::Nil => {
+                self.record_error(format!(
+                    "transcript render `{}` #{index}: returned nil; use smelt.layout.empty() to hide a block",
+                    transcript_block_kind(block)
+                ));
+                fallback_transcript_layout(block, state, ctx.show_thinking)
+            }
+            other => {
+                self.record_error(format!(
+                    "transcript render `{}` #{index}: expected smelt.layout value, got {}",
+                    transcript_block_kind(block),
+                    other.type_name()
+                ));
+                fallback_transcript_layout(block, state, ctx.show_thinking)
+            }
+        }
+    }
+
     /// Call a tool's `render(args, output, ctx)` hook and return the composed `BlockLayout` tree.
     pub fn render_tool_layout(
         &self,
@@ -1786,6 +1891,284 @@ impl LuaRuntime {
         lua.globals().set("smelt_keymap", smelt_keymap)?;
 
         Ok(())
+    }
+}
+
+fn transcript_block_kind(block: &Block) -> &'static str {
+    match block {
+        Block::User { .. } => "user",
+        Block::Mode { .. } => "mode",
+        Block::ProcessStatus { .. } => "process_status",
+        Block::Thinking { .. } => "thinking",
+        Block::Text { .. } => "assistant",
+        Block::CodeLine { .. } => "code",
+        Block::ToolCall { .. } => "tool",
+        Block::Exec { .. } => "exec",
+        Block::Compacted { .. } => "compacted",
+    }
+}
+
+fn tool_status_label(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Pending => "pending",
+        ToolStatus::Confirm => "confirm",
+        ToolStatus::Ok => "ok",
+        ToolStatus::Err => "err",
+        ToolStatus::Denied => "denied",
+    }
+}
+
+fn transcript_render_ctx_to_lua_table(
+    lua: &Lua,
+    show_thinking: bool,
+    renderer_generation: u64,
+) -> LuaResult<mlua::Table> {
+    let ctx = lua.create_table()?;
+    ctx.set("show_thinking", show_thinking)?;
+    ctx.set("renderer_generation", renderer_generation)?;
+    ctx.set("surface", "transcript")?;
+
+    let limits = lua.create_table()?;
+    limits.set("tool_header_rows", 20u16)?;
+    limits.set("tool_body_rows", 20u16)?;
+    limits.set("tool_output_rows", 20u16)?;
+    ctx.set("limits", limits)?;
+    Ok(ctx)
+}
+
+fn transcript_block_to_lua_table(
+    lua: &Lua,
+    id: BlockId,
+    index: usize,
+    block: &Block,
+    state: Option<&ToolState>,
+) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("id", id.0)?;
+    t.set("index", index)?;
+    t.set("kind", transcript_block_kind(block))?;
+
+    match block {
+        Block::User { text, image_labels } => {
+            t.set("text", text.as_str())?;
+            let labels = lua.create_table_with_capacity(image_labels.len(), 0)?;
+            for (i, label) in image_labels.iter().enumerate() {
+                labels.set(i + 1, label.as_str())?;
+            }
+            t.set("image_labels", labels)?;
+        }
+        Block::Mode {
+            text,
+            icon,
+            hl_group,
+        } => {
+            t.set("text", text.as_str())?;
+            t.set("icon", icon.as_str())?;
+            t.set("hl_group", hl_group.as_str())?;
+        }
+        Block::ProcessStatus { text } => {
+            t.set("text", text.as_str())?;
+        }
+        Block::Thinking { content } | Block::Text { content } => {
+            t.set("content", content.as_str())?;
+        }
+        Block::CodeLine { content, lang } => {
+            t.set("content", content.as_str())?;
+            t.set("lang", lang.as_str())?;
+        }
+        Block::ToolCall {
+            call_id,
+            name,
+            summary,
+            args,
+        } => {
+            t.set("call_id", call_id.as_str())?;
+            t.set("name", name.as_str())?;
+            t.set("summary", crate::lua::serde_to_lua(lua, summary)?)?;
+            t.set("summary_text", summary.as_plain_text())?;
+            t.set("args", args_to_lua_table(lua, args)?)?;
+            let status = state.map(|s| s.status).unwrap_or(ToolStatus::Pending);
+            t.set("status", tool_status_label(status))?;
+            if let Some(elapsed) = state.and_then(|s| s.elapsed) {
+                t.set("elapsed_secs", elapsed.as_secs())?;
+            }
+            if let Some(message) = state.and_then(|s| s.user_message.as_deref()) {
+                t.set("user_message", message)?;
+            }
+            if let Some(output) = state.and_then(|s| s.output.as_deref()) {
+                t.set("output", tool_output_to_lua_table(lua, output)?)?;
+            }
+        }
+        Block::Exec { command, output } => {
+            t.set("command", command.as_str())?;
+            t.set("output", output.as_str())?;
+        }
+        Block::Compacted { summary } => {
+            t.set("summary", summary.as_str())?;
+        }
+    }
+
+    Ok(t)
+}
+
+fn args_to_lua_table(
+    lua: &Lua,
+    args: &HashMap<String, serde_json::Value>,
+) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    for (key, value) in args {
+        t.set(key.as_str(), json_to_lua(lua, value)?)?;
+    }
+    Ok(t)
+}
+
+fn tool_output_to_lua_table(
+    lua: &Lua,
+    output: &crate::transcript_model::ToolOutput,
+) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    t.set("content", output.content.as_str())?;
+    t.set("is_error", output.is_error)?;
+    if let Some(metadata) = &output.metadata {
+        t.set("metadata", json_to_lua(lua, metadata)?)?;
+    }
+    Ok(t)
+}
+
+fn layout_text(content: impl Into<String>, hl_group: Option<&str>, ansi: bool) -> BlockLayout {
+    BlockLayout::Leaf(LuaLeaf::Text(TextSpec {
+        content: content.into(),
+        hl_group: hl_group.map(str::to_string),
+        ansi,
+    }))
+}
+
+fn fallback_transcript_layout(
+    block: &Block,
+    state: Option<&ToolState>,
+    show_thinking: bool,
+) -> BlockLayout {
+    match block {
+        Block::User { text, .. } => layout_text(text.clone(), None, false),
+        Block::Mode {
+            text,
+            icon,
+            hl_group,
+        } => layout_text(format!("{icon}{text}"), Some(hl_group), false),
+        Block::ProcessStatus { text } => layout_text(text.clone(), Some("SmeltProcess"), false),
+        Block::Thinking { content } => {
+            if show_thinking {
+                BlockLayout::Gutter {
+                    child: Box::new(layout_text(content.clone(), None, false)),
+                    spec: crate::content::block_layout::GutterSpec {
+                        text: "│ ".to_string(),
+                    },
+                }
+            } else {
+                layout_text(thinking_fallback_summary(content), None, false)
+            }
+        }
+        Block::Text { content } | Block::CodeLine { content, .. } => {
+            layout_text(content.clone(), None, false)
+        }
+        Block::ToolCall {
+            name,
+            summary,
+            call_id: _,
+            args: _,
+        } => {
+            let status = state.map(|s| s.status).unwrap_or(ToolStatus::Pending);
+            let mut items = Vec::new();
+            let mut header = format!("* {name}");
+            let summary_text = summary.as_plain_text();
+            if !summary_text.is_empty() {
+                header.push(' ');
+                header.push_str(&summary_text);
+            }
+            if let Some(elapsed) = state.and_then(|s| s.elapsed) {
+                if !matches!(status, ToolStatus::Confirm) {
+                    header.push_str(&format!(" ({})", format_elapsed_secs(elapsed.as_secs())));
+                }
+            }
+            items.push(layout_text(header, Some(tool_status_hl(status)), false));
+            if let Some(message) = state.and_then(|s| s.user_message.as_deref()) {
+                items.push(BlockLayout::Gutter {
+                    child: Box::new(layout_text(message.to_string(), None, false)),
+                    spec: crate::content::block_layout::GutterSpec {
+                        text: "  ".to_string(),
+                    },
+                });
+            }
+            if !matches!(status, ToolStatus::Denied) {
+                if let Some(output) = state.and_then(|s| s.output.as_deref()) {
+                    if !output.content.is_empty() {
+                        items.push(BlockLayout::Gutter {
+                            child: Box::new(layout_text(
+                                output.content.clone(),
+                                output.is_error.then_some("ErrorMsg"),
+                                true,
+                            )),
+                            spec: crate::content::block_layout::GutterSpec {
+                                text: "  ".to_string(),
+                            },
+                        });
+                    }
+                }
+            }
+            BlockLayout::Vbox(items)
+        }
+        Block::Exec { command, output } => {
+            let mut items = vec![layout_text(format!("!{command}"), None, false)];
+            if !output.is_empty() {
+                items.push(layout_text(output.clone(), None, true));
+            }
+            BlockLayout::Vbox(items)
+        }
+        Block::Compacted { summary } => BlockLayout::Vbox(vec![
+            layout_text(" compacted ", None, false),
+            layout_text(summary.clone(), None, false),
+        ]),
+    }
+}
+
+fn tool_status_hl(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Pending => "SmeltToolPending",
+        ToolStatus::Ok => "SmeltSuccess",
+        ToolStatus::Err | ToolStatus::Denied => "ErrorMsg",
+        ToolStatus::Confirm => "SmeltAccent",
+    }
+}
+
+fn format_elapsed_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        let h = secs / 3600;
+        let rest = secs % 3600;
+        format!("{}h {}m {}s", h, rest / 60, rest % 60)
+    }
+}
+
+fn thinking_fallback_summary(content: &str) -> String {
+    let non_empty = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    if non_empty == 0 {
+        return "thinking".to_string();
+    }
+    let first = content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("thinking");
+    if non_empty == 1 {
+        format!("thinking: {first}")
+    } else {
+        format!("thinking: {first} (+{} lines)", non_empty.saturating_sub(1))
     }
 }
 

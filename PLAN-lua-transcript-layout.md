@@ -968,6 +968,20 @@ Exit criteria:
 - renderer errors do not break transcript rendering;
 - default Lua renderers produce current snapshots for simple block cases.
 
+Status after implementation:
+
+- `smelt.transcript` is now a host-tier namespace with one Rust-facing root renderer handle, plus Lua wrapper helpers in `runtime/lua/smelt/transcript.lua`: `set_renderer`, `get_renderer`, `extend_renderer`, and `invalidate_renderer`.
+- Renderer generation lives in `LuaShared`; `set_renderer`, `extend_renderer`, extension removal, explicit invalidation, and reload all bump it. Transcript projections and resume previews observe that generation and clear derived display caches when it changes. Width/theme/scroll changes do not bump it.
+- The bundled default root renderer is installed during bootstrap through the same public `set_renderer` API and calls `smelt.transcript.defaults.render(block, ctx)`.
+- Rust can now invoke the root renderer with semantic block snapshots and a width/theme-independent context. Errors, `nil`, invalid return types, or missing renderers record an error and fall back to minimal Rust layout; `layout.empty()` remains the explicit zero-row/hide result.
+- `smelt.transcript.defaults` has default functions for every current block kind and keeps the raw tool-output helper as ordinary Lua composition over `layout.text`, `layout.gutter`, and `layout.cap`.
+- Unit coverage exercises default simple-block rendering, middleware composition/removal/generation behavior, explicit invalidation, renderer error fallback, `nil` fallback, and `layout.empty()` hiding.
+
+Deferred debt:
+
+- The live transcript projection still uses the existing Rust block renderers until Phase 4/5 migrate tool and non-tool blocks to root-renderer-produced LayoutIR. This preserves visible output while the root API and default Lua policy become available.
+- Because the current primitive slice lacks markdown, panel, runs/line, code, separator, style, source/copy/selectable, and elapsed primitives, Phase 3 defaults are fallback-safe and structurally complete but intentionally do not attempt to reproduce every product visual. The snapshot-preserving migrations land with the corresponding primitives in Phase 4/5.
+
 ### Phase 4 — Move tool rendering to full-block Lua layout
 
 Goal: delete body-only tool render semantics and move tool chrome policy to bundled Lua.

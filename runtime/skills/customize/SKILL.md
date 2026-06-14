@@ -1103,6 +1103,68 @@ Register, unregister, and resolve plugin tools for the engine.
 - `smelt.tools.unregister` :: `fun(name: string): boolean`
   Unregister a previously-registered tool by `name`.
 
+#### `smelt.transcript`
+
+Transcript display policy and rendered transcript inspection.
+
+- `smelt.transcript.block_at_row` :: `fun(row: integer): table?`
+  Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block.
+- `smelt.transcript.blocks` :: `fun(): table`
+  Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
+- `smelt.transcript.extend_renderer` :: `fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): smelt.Reg`
+  Add or replace named middleware around the root renderer.
+- `smelt.transcript.get_renderer` :: `fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?`
+  Return the current composed root transcript renderer, or nil before the default renderer has been installed.
+- `smelt.transcript.invalidate_renderer` :: `fun(): integer`
+  Bump the renderer generation after changing closed-over state that affects renderer output without calling `set_renderer`, `extend_renderer`, or a registration's `:remove()`.
+- `smelt.transcript.is_empty` :: `fun(): boolean`
+  Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
+- `smelt.transcript.rows` :: `fun(start: integer, count: integer): table`
+  Return rendered transcript display rows in `[start, start + count)`.
+- `smelt.transcript.set_renderer` :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil`
+  Replace the base transcript renderer.
+- `smelt.transcript.text` :: `fun(): string`
+  Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
+- `smelt.transcript.visible_blocks` :: `fun(): table`
+  Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries.
+
+#### `smelt.transcript.defaults`
+
+Bundled default transcript renderers.
+
+- `smelt.transcript.defaults.render` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render any semantic transcript block with the bundled default policy.
+- `smelt.transcript.defaults.render_assistant` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render assistant text.
+- `smelt.transcript.defaults.render_code` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a code block with the current primitive slice.
+- `smelt.transcript.defaults.render_compacted` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a compacted-history marker.
+- `smelt.transcript.defaults.render_exec` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render an exec block.
+- `smelt.transcript.defaults.render_mode` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a mode note.
+- `smelt.transcript.defaults.render_process_status` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a process-status note.
+- `smelt.transcript.defaults.render_thinking` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render thinking, either expanded with the current gutter or folded to a deterministic text summary when `ctx.show_thinking` is false.
+- `smelt.transcript.defaults.render_thinking_summary` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a compact thinking summary.
+- `smelt.transcript.defaults.render_tool` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a tool block using the current generic primitives and explicit item construction.
+- `smelt.transcript.defaults.render_tool_body` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table?`
+  Render a tool body.
+- `smelt.transcript.defaults.render_tool_header` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table`
+  Render the default one-line tool header.
+- `smelt.transcript.defaults.render_tool_output` :: `fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table`
+  Render raw tool output using generic layout primitives: text, gutter, and a rendered-row cap.
+- `smelt.transcript.defaults.render_unknown` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render unknown block kinds without failing the transcript.
+- `smelt.transcript.defaults.render_user` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a user block.
+- `smelt.transcript.defaults.render_user_text` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render user text.
+
 #### `smelt.trust`
 
 Query and mutate the per-project content trust store.
@@ -1470,23 +1532,6 @@ Apply, read, and override the active colorscheme.
   Snapshot every group currently set on the active theme into a `{ group = StyleDecl }` table.
 - `smelt.theme.use` :: `fun(name: string): nil`
   Load colorscheme `name` from `runtime/lua/smelt/colorschemes/<name>.lua` and apply it.
-
-#### `smelt.transcript`
-
-Read rendered transcript display text.
-
-- `smelt.transcript.block_at_row` :: `fun(row: integer): table?`
-  Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block.
-- `smelt.transcript.blocks` :: `fun(): table`
-  Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
-- `smelt.transcript.is_empty` :: `fun(): boolean`
-  Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
-- `smelt.transcript.rows` :: `fun(start: integer, count: integer): table`
-  Return rendered transcript display rows in `[start, start + count)`.
-- `smelt.transcript.text` :: `fun(): string`
-  Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
-- `smelt.transcript.visible_blocks` :: `fun(): table`
-  Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries.
 
 #### `smelt.ui`
 

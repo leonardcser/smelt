@@ -28,6 +28,7 @@ pub(crate) struct TranscriptProjection {
     exact_rows: ExactRowIndex,
     cached_row_indexes: Vec<DisplayRowIndexEntry>,
     display_cache_generation: u64,
+    renderer_generation: Option<u64>,
     #[cfg(test)]
     counters: TranscriptProjectionCounters,
 }
@@ -499,6 +500,7 @@ impl TranscriptProjection {
             exact_rows: ExactRowIndex::default(),
             cached_row_indexes: Vec::new(),
             display_cache_generation: 0,
+            renderer_generation: None,
             #[cfg(test)]
             counters: TranscriptProjectionCounters::default(),
         }
@@ -538,6 +540,23 @@ impl TranscriptProjection {
 
     pub(crate) fn display_cache_generation(&self) -> u64 {
         self.display_cache_generation
+    }
+
+    pub(crate) fn invalidate_renderer_if_changed(&mut self, generation: u64) -> bool {
+        if self.renderer_generation == Some(generation) {
+            return false;
+        }
+        let initialized = self.renderer_generation.is_some();
+        self.renderer_generation = Some(generation);
+        if !initialized {
+            return false;
+        }
+        self.display_model = DisplayModel::new();
+        self.display_model_generation = u64::MAX;
+        self.cached_row_indexes.clear();
+        self.clear_materialized_state();
+        self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
+        true
     }
 
     pub(crate) fn has_tool_body(&self, history: &BlockHistory, id: BlockId, call_id: &str) -> bool {

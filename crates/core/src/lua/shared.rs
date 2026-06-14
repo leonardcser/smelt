@@ -98,6 +98,8 @@ pub struct LuaShared {
     /// content is computed rather than streamed.
     pub win_renderers: Mutex<HashMap<u64, LuaHandle>>,
     pub tools: Mutex<HashMap<String, ToolHandles>>,
+    pub transcript_renderer: Mutex<Option<LuaHandle>>,
+    pub transcript_renderer_generation: AtomicU64,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     /// Callbacks registered for `smelt.engine.ask`. Separate from
     /// `callbacks` so `fire_ask_callback` can't accidentally fire a
@@ -245,6 +247,8 @@ impl Default for LuaShared {
             main_layout_composer: Mutex::new(None),
             win_renderers: Mutex::new(HashMap::new()),
             tools: Mutex::new(HashMap::new()),
+            transcript_renderer: Mutex::new(None),
+            transcript_renderer_generation: AtomicU64::new(0),
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -303,6 +307,11 @@ impl LuaShared {
         if let Ok(mut m) = self.tools.lock() {
             m.clear();
         }
+        if let Ok(mut renderer) = self.transcript_renderer.lock() {
+            *renderer = None;
+        }
+        self.transcript_renderer_generation
+            .fetch_add(1, Ordering::AcqRel);
         if let Ok(mut m) = self.callbacks.lock() {
             m.clear();
         }

@@ -173,6 +173,10 @@ impl TranscriptView {
         self.projection.display_cache_generation()
     }
 
+    pub(crate) fn invalidate_renderer_if_changed(&mut self, generation: u64) -> bool {
+        self.projection.invalidate_renderer_if_changed(generation)
+    }
+
     pub(crate) fn prerender_tool_bodies_for_range(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -261,6 +265,12 @@ impl ResumePreviewCache {
     pub(crate) fn invalidate_theme(&mut self) {
         for view in self.views.values_mut() {
             view.invalidate_theme();
+        }
+    }
+
+    pub(crate) fn invalidate_renderer_if_changed(&mut self, generation: u64) {
+        for view in self.views.values_mut() {
+            view.invalidate_renderer_if_changed(generation);
         }
     }
 }
@@ -459,6 +469,7 @@ impl TuiApp {
     /// `Arc<Vec<String>>` until the generation, width, or `show_thinking` changes.
     pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let _perf = smelt_perf::perf::begin("transcript:materialize_rows_full");
+        self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         self.transcript.build_rows(tw, show_thinking, &theme)
@@ -469,6 +480,7 @@ impl TuiApp {
         show_thinking: bool,
     ) -> crate::smelt_edit::RowIndex {
         let _perf = smelt_perf::perf::begin("transcript:measure_rows_exact");
+        self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         self.transcript.exact_total_rows(tw, show_thinking)
     }
@@ -480,6 +492,7 @@ impl TuiApp {
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
         let _perf = smelt_perf::perf::begin("transcript:materialize_rows_range");
+        self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         self.transcript
@@ -534,6 +547,7 @@ impl TuiApp {
     }
 
     pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
+        self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let layout = self
             .transcript
@@ -688,6 +702,13 @@ impl TuiApp {
     pub(crate) fn invalidate_for_theme(&mut self) {
         self.transcript.invalidate_theme();
         self.resume_preview_cache.invalidate_theme();
+    }
+
+    pub(crate) fn sync_transcript_renderer_generation(&mut self) {
+        let generation = self.lua.transcript_renderer_generation();
+        self.transcript.invalidate_renderer_if_changed(generation);
+        self.resume_preview_cache
+            .invalidate_renderer_if_changed(generation);
     }
 
     /// Install a complete theme and publish it to the process-wide active slot.

@@ -47,6 +47,7 @@ mod state;
 mod task;
 mod timer;
 mod tools;
+mod transcript;
 mod trust;
 
 use mlua::prelude::*;
@@ -167,6 +168,7 @@ pub fn register_host_api(
     task::register(lua, smelt, shared)?;
     timer::register(lua, smelt)?;
     tools::register(lua, smelt, shared)?;
+    transcript::register(lua, smelt, shared)?;
     trust::register(lua, smelt)?;
     Ok(())
 }

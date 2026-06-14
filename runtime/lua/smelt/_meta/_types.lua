@@ -448,6 +448,41 @@
 ---@field watchdog_grace_ms? integer Extra time added when a tool argument sets the watchdog deadline, in milliseconds.
 ---@field override? boolean Replace a core tool of the same name (advanced).
 
+--- Semantic transcript block snapshot passed to the root renderer.
+---@class smelt.transcript.Block
+---@field id integer Stable block id within the session.
+---@field index integer Zero-based block index in transcript order.
+---@field kind "user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"mode"|"process_status"|"compacted" Block kind.
+---@field text? string User/mode/process text.
+---@field content? string Assistant/thinking/code content.
+---@field image_labels? string[] User image labels.
+---@field icon? string Mode icon.
+---@field hl_group? string Mode/process highlight group.
+---@field lang? string Code language.
+---@field call_id? string Tool call id.
+---@field name? string Tool name.
+---@field args? table Tool arguments.
+---@field summary? any Tool styled summary lines or compacted summary text.
+---@field summary_text? string Tool summary flattened to plain text.
+---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
+---@field elapsed_secs? integer Terminal/static tool elapsed seconds.
+---@field user_message? string Tool user-facing status message.
+---@field output? smelt.transcript.ToolOutput Tool output snapshot.
+---@field command? string Exec command.
+
+--- Renderer context. Width, theme, and scroll state are intentionally absent.
+---@class smelt.transcript.Context
+---@field show_thinking boolean Whether thinking blocks should render expanded.
+---@field renderer_generation integer Current renderer generation used for cache invalidation.
+---@field surface string Rendering surface name, currently `"transcript"`.
+---@field limits table Numeric product row budgets such as `tool_output_rows`.
+
+--- Tool output snapshot passed to transcript renderers.
+---@class smelt.transcript.ToolOutput
+---@field content string Captured output text.
+---@field is_error boolean True when the tool result is an error.
+---@field metadata? table Tool-specific structured metadata.
+
 --- Shareable natural-size handle returned by `smelt.ui.layout.measure`.
 ---@class smelt.ui.layout.Measure
 ---@field set fun(w: integer, h: integer): nil Update the measured natural size.
