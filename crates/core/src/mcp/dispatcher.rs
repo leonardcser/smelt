@@ -71,11 +71,6 @@ impl ToolDispatcher for McpDispatcher {
     ) -> Option<ToolEvaluation> {
         self.def_for(name)?;
         let summary = args_summary(args);
-        let summary_text = if summary.is_empty() {
-            name.to_string()
-        } else {
-            format!("{name} {}", summary.as_plain_text())
-        };
         let permissions;
         let active_permissions = if let Some(overrides) = permission_overrides {
             permissions = self.permissions.with_overrides(overrides);
@@ -83,13 +78,8 @@ impl ToolDispatcher for McpDispatcher {
         } else {
             self.permissions.as_ref()
         };
-        let outcome = active_permissions.evaluate_tool_with_approvals(
-            mode,
-            ToolOrigin::Mcp,
-            name,
-            args,
-            &summary_text,
-        );
+        let outcome =
+            active_permissions.evaluate_tool_with_approvals(mode, ToolOrigin::Mcp, name, args);
         let decision = outcome.decision;
         Some(ToolEvaluation {
             decision,

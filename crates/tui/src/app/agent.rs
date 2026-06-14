@@ -599,11 +599,7 @@ impl TuiApp {
     ) -> bool {
         let label = match &choice {
             ConfirmChoice::Yes => "approved",
-            ConfirmChoice::Always(_) => "always",
-            ConfirmChoice::AlwaysPatterns(ref pats, _) => {
-                pats.first().map(|s| s.as_str()).unwrap_or("pattern")
-            }
-            ConfirmChoice::AlwaysDir(dir, _) => dir.as_str(),
+            ConfirmChoice::Grant(option) => option.label.as_str(),
             ConfirmChoice::No => "denied",
         };
         if let Some(ref msg) = message {
@@ -615,64 +611,18 @@ impl TuiApp {
                 self.send_permission_decision(request_id, true, message);
                 false
             }
-            ConfirmChoice::Always(scope) => {
-                match scope {
+            ConfirmChoice::Grant(option) => {
+                match option.scope {
                     ApprovalScope::Session => {
-                        self.core
-                            .permissions
-                            .approvals
-                            .write()
-                            .unwrap()
-                            .add_session_tool(tool_name, vec![]);
+                        let mut approvals = self.core.permissions.approvals.write().unwrap();
+                        for grant in option.grants {
+                            approvals.add_session_grant(grant);
+                        }
                     }
                     ApprovalScope::Workspace => {
-                        smelt_core::permissions::store::add_tool(&self.cwd, tool_name, vec![]);
-                        self.reload_workspace_permissions();
-                    }
-                }
-                self.set_active_status(call_id, ToolStatus::Pending);
-                self.send_permission_decision(request_id, true, message);
-                false
-            }
-            ConfirmChoice::AlwaysPatterns(ref patterns, scope) => {
-                let compiled: Vec<glob::Pattern> = patterns
-                    .iter()
-                    .filter_map(|p| glob::Pattern::new(p).ok())
-                    .collect();
-                match scope {
-                    ApprovalScope::Session => {
-                        self.core
-                            .permissions
-                            .approvals
-                            .write()
-                            .unwrap()
-                            .add_session_tool(tool_name, compiled);
-                    }
-                    ApprovalScope::Workspace => {
-                        smelt_core::permissions::store::add_tool(
-                            &self.cwd,
-                            tool_name,
-                            patterns.clone(),
-                        );
-                        self.reload_workspace_permissions();
-                    }
-                }
-                self.set_active_status(call_id, ToolStatus::Pending);
-                self.send_permission_decision(request_id, true, message);
-                false
-            }
-            ConfirmChoice::AlwaysDir(ref dir, scope) => {
-                match scope {
-                    ApprovalScope::Session => {
-                        self.core
-                            .permissions
-                            .approvals
-                            .write()
-                            .unwrap()
-                            .add_session_dir(std::path::PathBuf::from(dir));
-                    }
-                    ApprovalScope::Workspace => {
-                        smelt_core::permissions::store::add_dir(&self.cwd, dir);
+                        for grant in option.grants {
+                            add_workspace_grant(&self.cwd, grant);
+                        }
                         self.reload_workspace_permissions();
                     }
                 }
@@ -729,20 +679,16 @@ impl TuiApp {
 
                 let permissions = self.active_permissions();
 
-                let summary_plain = req.summary.as_plain_text();
                 let outcome = permissions.evaluate_tool_with_approvals(
                     self.core.config.mode.clone(),
                     smelt_core::permissions::ToolOrigin::Lua,
                     &req.tool_name,
                     &req.args,
-                    &summary_plain,
                 );
                 if outcome.decision == Decision::Allow {
                     self.send_permission_decision(req.request_id, true, None);
                     return true;
                 }
-
-                let outside_paths = outcome.outside_workspace_paths.clone();
 
                 if should_queue {
                     self.set_active_status(&req.call_id, ToolStatus::Confirm);
@@ -751,24 +697,12 @@ impl TuiApp {
                     return true;
                 }
 
-                req.outside_dir = if outcome.downgraded_by_workspace && !outside_paths.is_empty() {
-                    let raw = std::path::Path::new(&outside_paths[0]);
-                    let expanded = engine::paths::expand_tilde(raw);
-                    let abs_dir = if expanded.is_dir() {
-                        expanded
-                    } else {
-                        expanded.parent().unwrap_or(&expanded).to_path_buf()
-                    };
-                    Some(engine::paths::collapse_tilde(&abs_dir))
-                } else {
-                    None
-                };
-
-                if !req.approval_patterns.is_empty() {
-                    let rt = permissions.approvals.read().unwrap();
-                    req.approval_patterns
-                        .retain(|p| !rt.has_pattern(&req.tool_name, p));
-                }
+                let options = permissions.approval_options(
+                    &req.tool_name,
+                    &req.approval_candidates,
+                    &outcome,
+                );
+                req.grant_options = confirm_grant_options(options.grant_sets, &self.cwd);
 
                 self.close_focused_non_blocking_overlay();
                 self.set_active_status(&req.call_id, ToolStatus::Confirm);
@@ -778,11 +712,7 @@ impl TuiApp {
                     tool_name: req.tool_name.clone(),
                     summary: req.summary.clone(),
                     args: req.args.clone(),
-                    outside_dir: req
-                        .outside_dir
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned()),
-                    approval_patterns: req.approval_patterns.clone(),
+                    grant_options: req.grant_options.clone(),
                 };
                 let handle_id = self.core.confirms.register(*req);
                 self.core.cells.set_dyn(
@@ -795,6 +725,53 @@ impl TuiApp {
                 self.lua.fire_confirm_open(handle_id);
                 true
             }
+        }
+    }
+}
+
+fn confirm_grant_options(
+    grant_sets: Vec<Vec<smelt_core::permissions::PermissionGrant>>,
+    cwd: &str,
+) -> Vec<smelt_core::transcript_model::ConfirmApprovalOption> {
+    let mut out = Vec::new();
+    for grants in grant_sets {
+        let subject = smelt_core::permissions::PermissionGrant::display_subjects(&grants);
+        let idx = out.len();
+        out.push(smelt_core::transcript_model::ConfirmApprovalOption {
+            id: format!("grant_{idx}_session"),
+            label: format!("allow {subject} for this session"),
+            scope: ApprovalScope::Session,
+            grants: grants.clone(),
+        });
+        out.push(smelt_core::transcript_model::ConfirmApprovalOption {
+            id: format!("grant_{idx}_workspace"),
+            label: format!("allow {subject} in {}", pretty_cwd(cwd)),
+            scope: ApprovalScope::Workspace,
+            grants,
+        });
+    }
+    out
+}
+
+fn pretty_cwd(cwd: &str) -> String {
+    engine::paths::collapse_tilde(std::path::Path::new(cwd))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn add_workspace_grant(cwd: &str, grant: smelt_core::permissions::PermissionGrant) {
+    match grant {
+        smelt_core::permissions::PermissionGrant::Tool { tool } => {
+            smelt_core::permissions::store::add_tool(cwd, &tool, Vec::new());
+        }
+        smelt_core::permissions::PermissionGrant::Command { tool, pattern } => {
+            smelt_core::permissions::store::add_tool(cwd, &tool, vec![pattern]);
+        }
+        smelt_core::permissions::PermissionGrant::PathPrefix { dir } => {
+            let dir = engine::paths::collapse_tilde(&dir)
+                .to_string_lossy()
+                .into_owned();
+            smelt_core::permissions::store::add_dir(cwd, &dir);
         }
     }
 }

@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 384
 expression: frame.text()
 ---
 
@@ -18,10 +17,10 @@ expression: frame.text()
  bash: cat /etc/hosts
 
  Allow?
-  1. yes
-  2. no
-  3. allow bash:cat, bash:cat/* /etc
-  4. allow bash:cat, bash:cat/* /etc in ~/cwd
+  1. allow once
+  2. deny
+  3. allow cat *, /etc for this session
+  4. allow cat *, /etc in ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                 1:1 0%

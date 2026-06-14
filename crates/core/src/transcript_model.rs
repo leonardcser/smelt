@@ -3,6 +3,7 @@
 //! `app::transcript::Transcript`, which adds streaming and paint orchestration.
 
 use crate::paused_timer::PausedTimer;
+use crate::permissions::PermissionGrant;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -40,11 +41,10 @@ pub struct ConfirmRequest {
     pub call_id: String,
     pub tool_name: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub approval_patterns: Vec<String>,
-    pub outside_dir: Option<std::path::PathBuf>,
+    pub approval_candidates: Vec<String>,
+    pub grant_options: Vec<ConfirmApprovalOption>,
     /// Styled summary of the pending call. Sole source for the dialog
-    /// body header; the plain-text projection is what auto-approval
-    /// pattern matching compares against.
+    /// body header.
     pub summary: protocol::StyledLines,
     pub request_id: u64,
 }
@@ -187,7 +187,7 @@ impl Block {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ApprovalScope {
     Session,
     Workspace,
@@ -199,13 +199,20 @@ pub struct PermissionEntry {
     pub pattern: String,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ConfirmApprovalOption {
+    pub id: String,
+    pub label: String,
+    pub scope: ApprovalScope,
+    #[serde(skip)]
+    pub grants: Vec<PermissionGrant>,
+}
+
 #[derive(Clone, PartialEq, serde::Serialize)]
 pub enum ConfirmChoice {
     Yes,
     No,
-    Always(ApprovalScope),
-    AlwaysPatterns(Vec<String>, ApprovalScope),
-    AlwaysDir(String, ApprovalScope),
+    Grant(ConfirmApprovalOption),
 }
 
 /// Stable monotonic per-session handle. Mutating a block in place preserves its

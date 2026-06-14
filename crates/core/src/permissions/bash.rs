@@ -436,7 +436,7 @@ pub(super) fn analyze_shell_command(command: &str, base_dir: &Path) -> ShellAnal
 
         if command_name == "cd" {
             if let Some(target) = words.get(1).filter(|w| !w.starts_with('-')) {
-                let effect = PathEffect::from_raw(target.clone(), &cwd, PathAccess::Unknown);
+                let effect = PathEffect::from_directory(target.clone(), &cwd, PathAccess::Unknown);
                 cwd = effect.path.clone();
                 paths.push(effect);
             }
@@ -541,7 +541,11 @@ fn git_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
         match words[i].as_str() {
             "-C" => {
                 if let Some(path) = words.get(i + 1) {
-                    out.push(PathEffect::from_raw(path.clone(), cwd, PathAccess::Unknown));
+                    out.push(PathEffect::from_directory(
+                        path.clone(),
+                        cwd,
+                        PathAccess::Unknown,
+                    ));
                 }
                 i += 2;
             }
@@ -653,7 +657,7 @@ fn find_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
         if w.starts_with('-') {
             break;
         }
-        maybe_push_path(&mut out, w, cwd, PathAccess::Read);
+        maybe_push_dir(&mut out, w, cwd, PathAccess::Read);
     }
     out
 }
@@ -697,6 +701,12 @@ fn generic_paths<'a>(
 fn maybe_push_path(out: &mut Vec<PathEffect>, word: &str, cwd: &Path, access: PathAccess) {
     if looks_like_path(word) {
         out.push(PathEffect::from_raw(word.to_string(), cwd, access));
+    }
+}
+
+fn maybe_push_dir(out: &mut Vec<PathEffect>, word: &str, cwd: &Path, access: PathAccess) {
+    if looks_like_path(word) {
+        out.push(PathEffect::from_directory(word.to_string(), cwd, access));
     }
 }
 

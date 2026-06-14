@@ -9,6 +9,14 @@ use protocol::AgentMode;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+fn dirs_approved(rt: &RuntimeApprovals, paths: &[&str]) -> bool {
+    paths.iter().all(|path| {
+        rt.requirement_satisfied(&PermissionRequirement::PathPrefix {
+            dir: resolve_path(path, Path::new("/")),
+        })
+    })
+}
+
 fn mode(name: &str) -> AgentMode {
     AgentMode::parse(name).unwrap()
 }
@@ -1050,6 +1058,161 @@ fn workspace_downgrades_yolo_outside() {
 }
 
 #[test]
+fn session_dir_approval_covers_resolved_bash_cd_paths() {
+    let p = perms_with_workspace("/home/user/project");
+    let command = "cd /tmp && cat ./foo";
+    let args = args_with("command", command);
+
+    let before = p.evaluate_tool(yolo(), ToolOrigin::Lua, "bash", &args);
+    assert_eq!(before.decision, Decision::Ask);
+    assert_eq!(
+        before.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: PathBuf::from("/tmp")
+        }]
+    );
+
+    p.approvals
+        .write()
+        .unwrap()
+        .add_session_dir(PathBuf::from("/tmp"));
+
+    let after = p.evaluate_tool_with_approvals(yolo(), ToolOrigin::Lua, "bash", &args);
+    assert_eq!(after.decision, Decision::Allow);
+    assert!(after.missing_requirements.is_empty());
+}
+
+#[test]
+fn yolo_outside_workspace_dialog_offers_dir_not_command_pattern() {
+    let p = perms_with_workspace("/home/user/project");
+    let command = "rm -rf /tmp/foo";
+    let args = args_with("command", command);
+    let outcome = p.evaluate_tool(yolo(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: PathBuf::from("/tmp")
+        }]
+    );
+    let options = p.approval_options("bash", &["rm *".to_string()], &outcome);
+    assert_eq!(
+        options.grant_sets,
+        vec![vec![PermissionGrant::PathPrefix {
+            dir: PathBuf::from("/tmp")
+        }]]
+    );
+}
+
+#[test]
+fn command_pattern_offer_remains_when_subcommand_causes_ask() {
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", ruleset(&[], &["*"], &[]))]);
+    let p = permissions_from_mode(mode, true, PathBuf::from("/home/user/project"));
+    let command = "python3 ./build.py";
+    let args = args_with("command", command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert!(matches!(
+        outcome.missing_requirements.as_slice(),
+        [PermissionRequirement::Command { .. }]
+    ));
+    let options = p.approval_options("bash", &["python3 *".to_string()], &outcome);
+    assert_eq!(
+        options.grant_sets,
+        vec![vec![PermissionGrant::Command {
+            tool: "bash".to_string(),
+            pattern: "python3 *".to_string()
+        }]]
+    );
+}
+
+#[test]
+fn dialog_combines_dir_and_pattern_when_both_are_required() {
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", ruleset(&[], &["*"], &[]))]);
+    let p = permissions_from_mode(mode, true, PathBuf::from("/home/user/project"));
+    let command = "python3 /tmp/build.py";
+    let args = args_with("command", command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    let options = p.approval_options("bash", &["python3 *".to_string()], &outcome);
+    assert_eq!(
+        options.grant_sets,
+        vec![vec![
+            PermissionGrant::Command {
+                tool: "bash".to_string(),
+                pattern: "python3 *".to_string()
+            },
+            PermissionGrant::PathPrefix {
+                dir: PathBuf::from("/tmp")
+            }
+        ]]
+    );
+}
+
+#[test]
+fn dialog_combines_command_pattern_candidates() {
+    let mut tools = HashMap::new();
+    tools.insert("bash".to_string(), Decision::Allow);
+    let mode = mode_perms(tools, &[("bash", ruleset(&[], &["*"], &[]))]);
+    let p = permissions_from_mode(mode, true, PathBuf::from("/home/user/project"));
+    let command = "python3 /tmp/build.py";
+    let args = args_with("command", command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    let options = p.approval_options(
+        "bash",
+        &["python3 *".to_string(), "python3 /tmp/*".to_string()],
+        &outcome,
+    );
+    assert_eq!(
+        options.grant_sets,
+        vec![vec![
+            PermissionGrant::Command {
+                tool: "bash".to_string(),
+                pattern: "python3 *".to_string()
+            },
+            PermissionGrant::Command {
+                tool: "bash".to_string(),
+                pattern: "python3 /tmp/*".to_string()
+            },
+            PermissionGrant::PathPrefix {
+                dir: PathBuf::from("/tmp")
+            }
+        ]]
+    );
+}
+
+#[test]
+fn dialog_combines_path_grants_when_multiple_dirs_are_required() {
+    let p = perms_with_workspace("/home/user/project");
+    let command = "cat /tmp/a /var/b";
+    let args = args_with("command", command);
+    let outcome = p.evaluate_tool(yolo(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    let options = p.approval_options("bash", &[], &outcome);
+    assert_eq!(
+        options.grant_sets,
+        vec![vec![
+            PermissionGrant::PathPrefix {
+                dir: PathBuf::from("/tmp")
+            },
+            PermissionGrant::PathPrefix {
+                dir: PathBuf::from("/var")
+            }
+        ]]
+    );
+}
+
+#[test]
 fn workspace_yolo_allows_inside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("file_path", "/home/user/project/foo.txt");
@@ -1653,7 +1816,7 @@ fn runtime_tool_approval_does_not_bypass_workspace_restriction() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
     let args = args_with("command", "rm -rf /tmp/foo");
-    assert!(!rt.is_auto_approved(&p, normal(), "bash", &args, "rm -rf /tmp/foo"));
+    assert!(!rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1663,7 +1826,7 @@ fn runtime_tool_and_dir_approval_allow_outside_workspace_request() {
     rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "rm -rf /tmp/foo");
-    assert!(rt.is_auto_approved(&p, normal(), "bash", &args, "rm -rf /tmp/foo"));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1672,7 +1835,7 @@ fn runtime_dir_approval_allows_default_allowed_command_outside_workspace() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "cat /tmp/foo");
-    assert!(rt.is_auto_approved(&p, normal(), "bash", &args, "cat /tmp/foo"));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1681,13 +1844,7 @@ fn runtime_tool_approval_allows_inside_workspace_request() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
     let args = args_with("command", "rm -rf /home/user/project/target");
-    assert!(rt.is_auto_approved(
-        &p,
-        normal(),
-        "bash",
-        &args,
-        "rm -rf /home/user/project/target",
-    ));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1696,16 +1853,10 @@ fn runtime_dir_approval_does_not_affect_inside_workspace_request() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "rm -rf /home/user/project/target");
-    assert!(!rt.is_auto_approved(
-        &p,
-        normal(),
-        "bash",
-        &args,
-        "rm -rf /home/user/project/target",
-    ));
+    assert!(!rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
-// --- tilde path normalization in dirs_approved ---
+// --- tilde path normalization for path requirements ---
 
 #[test]
 fn dirs_approved_tilde_stored_absolute_queried() {
@@ -1713,7 +1864,7 @@ fn dirs_approved_tilde_stored_absolute_queried() {
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     let home = engine::paths::home_dir();
     let abs = format!("{}/syncthing/vault/file.txt", home.display());
-    assert!(rt.dirs_approved(&[abs]));
+    assert!(dirs_approved(&rt, &[&abs]));
 }
 
 #[test]
@@ -1721,53 +1872,49 @@ fn dirs_approved_absolute_stored_tilde_queried() {
     let home = engine::paths::home_dir();
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(home.join("syncthing"));
-    assert!(rt.dirs_approved(&["~/syncthing/vault/file.txt".to_string()]));
+    assert!(dirs_approved(&rt, &["~/syncthing/vault/file.txt"]));
 }
 
 #[test]
 fn dirs_approved_both_tilde() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
-    assert!(rt.dirs_approved(&["~/syncthing/vault".to_string()]));
+    assert!(dirs_approved(&rt, &["~/syncthing/vault"]));
 }
 
 #[test]
 fn dirs_approved_both_absolute() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp/data"));
-    assert!(rt.dirs_approved(&["/tmp/data/subdir/file.txt".to_string()]));
+    assert!(dirs_approved(&rt, &["/tmp/data/subdir/file.txt"]));
 }
 
 #[test]
 fn dirs_approved_no_false_prefix_match() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/sync"));
-    // ~/syncthing should NOT match ~/sync (different directory)
-    assert!(!rt.dirs_approved(&["~/syncthing/file.txt".to_string()]));
+    assert!(!dirs_approved(&rt, &["~/syncthing/file.txt"]));
 }
 
 #[test]
 fn dirs_approved_exact_dir_match() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing/vault"));
-    // File directly in the approved dir
-    assert!(rt.dirs_approved(&["~/syncthing/vault/file.txt".to_string()]));
+    assert!(dirs_approved(&rt, &["~/syncthing/vault/file.txt"]));
 }
 
 #[test]
 fn dirs_approved_parent_not_covered() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing/vault"));
-    // Parent dir is NOT covered
-    assert!(!rt.dirs_approved(&["~/syncthing/other/file.txt".to_string()]));
+    assert!(!dirs_approved(&rt, &["~/syncthing/other/file.txt"]));
 }
 
 #[test]
 fn dirs_approved_path_is_dir_itself() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
-    // Path that IS the approved dir (e.g. a directory argument)
-    assert!(rt.dirs_approved(&["/tmp".to_string()]));
+    assert!(dirs_approved(&rt, &["/tmp"]));
 }
 
 #[test]
@@ -1775,20 +1922,20 @@ fn dirs_approved_multiple_paths_all_covered() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     rt.add_session_dir(PathBuf::from("/tmp"));
-    assert!(rt.dirs_approved(&[
-        "~/syncthing/vault/a.txt".to_string(),
-        "/tmp/b.txt".to_string(),
-    ]));
+    assert!(dirs_approved(
+        &rt,
+        &["~/syncthing/vault/a.txt", "/tmp/b.txt"]
+    ));
 }
 
 #[test]
 fn dirs_approved_multiple_paths_one_uncovered() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
-    assert!(!rt.dirs_approved(&[
-        "~/syncthing/vault/a.txt".to_string(),
-        "/tmp/b.txt".to_string(),
-    ]));
+    assert!(!dirs_approved(
+        &rt,
+        &["~/syncthing/vault/a.txt", "/tmp/b.txt"]
+    ));
 }
 
 // --- tilde normalization in is_auto_approved ---
@@ -1817,7 +1964,7 @@ fn tilde_dir_approval_works_for_absolute_read_file() {
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     let file = format!("{}/syncthing/vault/notes.md", home.display());
     let args = args_with("file_path", &file);
-    assert!(rt.is_auto_approved(&p, normal(), "read_file", &args, &file));
+    assert!(rt.is_auto_approved(&p, normal(), "read_file", &args));
 }
 
 #[test]
@@ -1828,13 +1975,7 @@ fn absolute_dir_approval_works_for_tilde_bash() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(home.join("syncthing"));
     let args = args_with("command", "cat ~/syncthing/vault/notes.md");
-    assert!(rt.is_auto_approved(
-        &p,
-        normal(),
-        "bash",
-        &args,
-        "cat ~/syncthing/vault/notes.md",
-    ));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1845,7 +1986,7 @@ fn dir_approval_alone_insufficient_for_ask_command_outside_workspace() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     let args = args_with("command", "rm ~/syncthing/vault/old.md");
-    assert!(!rt.is_auto_approved(&p, normal(), "bash", &args, "rm ~/syncthing/vault/old.md",));
+    assert!(!rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1857,7 +1998,7 @@ fn dir_plus_tool_approval_for_ask_command_outside_workspace() {
     rt.add_session_dir(PathBuf::from("~/syncthing"));
     rt.add_session_tool("bash", vec![glob::Pattern::new("rm *").unwrap()]);
     let args = args_with("command", "rm ~/syncthing/vault/old.md");
-    assert!(rt.is_auto_approved(&p, normal(), "bash", &args, "rm ~/syncthing/vault/old.md",));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1866,7 +2007,7 @@ fn compound_command_default_allowed_with_dir_approval() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "find /tmp/data -type f | sort");
-    assert!(rt.is_auto_approved(&p, normal(), "bash", &args, "find /tmp/data -type f | sort",));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1877,13 +2018,7 @@ fn compound_command_with_ask_subcommand_needs_tool_approval() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/tmp"));
     let args = args_with("command", "find /tmp/data -name '*.py' | python3");
-    assert!(!rt.is_auto_approved(
-        &p,
-        normal(),
-        "bash",
-        &args,
-        "find /tmp/data -name '*.py' | python3",
-    ));
+    assert!(!rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 #[test]
@@ -1895,13 +2030,7 @@ fn compound_command_with_ask_subcommand_and_tool_approval() {
     rt.add_session_dir(PathBuf::from("/tmp"));
     rt.add_session_tool("bash", vec![glob::Pattern::new("python3").unwrap()]);
     let args = args_with("command", "find /tmp/data -name '*.py' | python3");
-    assert!(rt.is_auto_approved(
-        &p,
-        normal(),
-        "bash",
-        &args,
-        "find /tmp/data -name '*.py' | python3",
-    ));
+    assert!(rt.is_auto_approved(&p, normal(), "bash", &args));
 }
 
 // ── RuntimeApprovals lifecycle (backfill) ───────────────────────────
@@ -1997,7 +2126,7 @@ fn approvals_add_workspace_dir_dedupes_after_tilde_expansion() {
     // workspace_dirs is private; verify via dirs_approved against the temp path.
     let temp = std::env::temp_dir();
     let path_in = format!("{}/x", temp.to_string_lossy());
-    assert!(rt.dirs_approved(&[path_in]));
+    assert!(dirs_approved(&rt, &[&path_in]));
 }
 
 #[test]
@@ -2019,7 +2148,7 @@ fn approvals_clear_session_preserves_workspace_state() {
     rt.add_session_tool("bash", vec![pat("ls *")]);
     rt.clear_session();
     assert!(rt.has_pattern("bash", "git *"));
-    assert!(rt.dirs_approved(&["/work/x".into()]));
+    assert!(dirs_approved(&rt, &["/work/x"]));
 }
 
 #[test]
@@ -2065,21 +2194,21 @@ fn approvals_has_pattern_false_for_unknown_tool_or_pattern() {
 #[test]
 fn approvals_dirs_approved_returns_true_for_empty_paths() {
     let rt = RuntimeApprovals::new();
-    assert!(rt.dirs_approved(&[]));
+    assert!(dirs_approved(&rt, &[]));
 }
 
 #[test]
 fn approvals_dirs_approved_returns_false_when_no_dirs_registered() {
     let rt = RuntimeApprovals::new();
-    assert!(!rt.dirs_approved(&["/tmp/foo".into()]));
+    assert!(!dirs_approved(&rt, &["/tmp/foo"]));
 }
 
 #[test]
 fn approvals_dirs_approved_checks_parent_prefix_match() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_dir(PathBuf::from("/work"));
-    assert!(rt.dirs_approved(&["/work/sub/file.rs".into()]));
-    assert!(!rt.dirs_approved(&["/other/file.rs".into()]));
+    assert!(dirs_approved(&rt, &["/work/sub/file.rs"]));
+    assert!(!dirs_approved(&rt, &["/other/file.rs"]));
 }
 
 #[test]

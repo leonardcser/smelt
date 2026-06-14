@@ -1,15 +1,15 @@
 //! Session- and workspace-scoped runtime auto-approvals, augmenting static config rules.
 
 use crate::permissions::bash::split_shell_commands;
-use crate::permissions::rules::{check_ruleset, RuleSet};
-use crate::permissions::{PermissionOutcome, Permissions};
+use crate::permissions::rules::{check_ruleset, matches_rule, RuleSet};
+use crate::permissions::{workspace, PermissionGrant, PermissionRequirement, Permissions};
 use protocol::AgentMode;
 use protocol::Decision;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RuntimeApprovals {
     session_tools: HashMap<String, Vec<glob::Pattern>>,
     session_dirs: Vec<PathBuf>,
@@ -35,15 +35,23 @@ impl RuntimeApprovals {
     }
 
     pub fn add_session_dir(&mut self, dir: PathBuf) {
-        let dir = engine::paths::expand_tilde(&dir);
-        if !self.session_dirs.contains(&dir) {
+        let dir = normalize_approval_dir(&dir);
+        if !self
+            .session_dirs
+            .iter()
+            .any(|existing| workspace::paths_equivalent(existing, &dir))
+        {
             self.session_dirs.push(dir);
         }
     }
 
     pub fn add_workspace_dir(&mut self, dir: PathBuf) {
-        let dir = engine::paths::expand_tilde(&dir);
-        if !self.workspace_dirs.contains(&dir) {
+        let dir = normalize_approval_dir(&dir);
+        if !self
+            .workspace_dirs
+            .iter()
+            .any(|existing| workspace::paths_equivalent(existing, &dir))
+        {
             self.workspace_dirs.push(dir);
         }
     }
@@ -63,7 +71,7 @@ impl RuntimeApprovals {
         self.workspace_tools = tools;
         self.workspace_dirs = dirs
             .into_iter()
-            .map(|d| engine::paths::expand_tilde(&d))
+            .map(|d| normalize_approval_dir(&d))
             .collect();
     }
 
@@ -98,32 +106,11 @@ impl RuntimeApprovals {
             session.into_iter().chain(workspace).flatten().collect();
 
         subcmds.iter().all(|sc| {
-            all_pats.iter().any(|p| p.matches(sc))
+            all_pats.iter().any(|p| matches_rule(p, sc))
                 // Also check config allow patterns (e.g. bash's default_allow list).
                 || config_subpatterns
                     .is_some_and(|rs| check_ruleset(rs, sc) == Decision::Allow)
         })
-    }
-
-    pub fn is_auto_approved_for_outcome(
-        &self,
-        permissions: &Permissions,
-        mode: AgentMode,
-        tool_name: &str,
-        desc: &str,
-        outcome: &PermissionOutcome,
-    ) -> bool {
-        let config_subpatterns = permissions.subcommand_ruleset(mode, tool_name);
-        let tool_approved = self.is_approved(tool_name, desc, config_subpatterns);
-        if outcome.outside_workspace_paths.is_empty() {
-            return tool_approved;
-        }
-        let dirs_ok = self.dirs_approved(&outcome.outside_workspace_paths);
-        if dirs_ok && tool_approved {
-            return true;
-        }
-        // Directory approved + base Allow (downgraded only by workspace restriction) → auto-approve.
-        dirs_ok && outcome.downgraded_by_workspace
     }
 
     /// Full auto-approval check. Outside the workspace, directory approvals must also match.
@@ -133,7 +120,6 @@ impl RuntimeApprovals {
         mode: AgentMode,
         tool_name: &str,
         args: &HashMap<String, Value>,
-        desc: &str,
     ) -> bool {
         let outcome = permissions.evaluate_tool(
             mode.clone(),
@@ -141,15 +127,56 @@ impl RuntimeApprovals {
             tool_name,
             args,
         );
-        self.is_auto_approved_for_outcome(permissions, mode, tool_name, desc, &outcome)
+        let config_subpatterns = permissions.subcommand_ruleset(mode, tool_name);
+        if outcome.decision != Decision::Ask {
+            return self.is_approved(
+                tool_name,
+                tool_command_text(tool_name, args).unwrap_or_default(),
+                config_subpatterns,
+            );
+        }
+        outcome
+            .missing_requirements
+            .iter()
+            .all(|requirement| match requirement {
+                PermissionRequirement::Command { tool, command } => {
+                    self.is_approved(tool, command, config_subpatterns)
+                }
+                other => self.requirement_satisfied(other),
+            })
     }
 
     /// `true` when `pattern` is already approved for `tool_name`.
     pub fn has_pattern(&self, tool_name: &str, pattern: &str) -> bool {
         let check = |pats: Option<&Vec<glob::Pattern>>| -> bool {
-            pats.is_some_and(|ps| ps.iter().any(|p| p.as_str() == pattern))
+            pats.is_some_and(|ps| ps.is_empty() || ps.iter().any(|p| p.as_str() == pattern))
         };
         check(self.session_tools.get(tool_name)) || check(self.workspace_tools.get(tool_name))
+    }
+
+    pub fn add_session_grant(&mut self, grant: PermissionGrant) {
+        match grant {
+            PermissionGrant::Tool { tool } => self.add_session_tool(&tool, Vec::new()),
+            PermissionGrant::Command { tool, pattern } => {
+                if let Ok(pattern) = glob::Pattern::new(&pattern) {
+                    self.add_session_tool(&tool, vec![pattern]);
+                }
+            }
+            PermissionGrant::PathPrefix { dir } => self.add_session_dir(dir),
+        }
+    }
+
+    pub fn requirement_satisfied(&self, requirement: &PermissionRequirement) -> bool {
+        match requirement {
+            PermissionRequirement::Tool { tool } => {
+                self.session_tools.get(tool).is_some_and(Vec::is_empty)
+                    || self.workspace_tools.get(tool).is_some_and(Vec::is_empty)
+            }
+            PermissionRequirement::Command { tool, command } => {
+                self.is_approved(tool, command, None)
+            }
+            PermissionRequirement::PathPrefix { dir } => self.dir_approved_for_path(dir),
+        }
     }
 
     /// Iterate session tool approvals (for display in status UI).
@@ -178,33 +205,27 @@ impl RuntimeApprovals {
         self.session_tools = tools;
         self.session_dirs = dirs
             .into_iter()
-            .map(|d| engine::paths::expand_tilde(&d))
+            .map(|d| normalize_approval_dir(&d))
             .collect();
     }
 
-    /// Check whether all given outside-workspace paths are covered by
-    /// approved directories.  Stored dirs are always in expanded (absolute)
-    /// form - only the incoming paths need tilde expansion.
-    pub(crate) fn dirs_approved(&self, paths: &[String]) -> bool {
-        if paths.is_empty() {
-            return true;
-        }
-        let all_dirs: Vec<&PathBuf> = self
-            .session_dirs
+    fn dir_approved_for_path(&self, path: &Path) -> bool {
+        self.session_dirs
             .iter()
             .chain(self.workspace_dirs.iter())
-            .collect();
-        if all_dirs.is_empty() {
-            return false;
-        }
-        paths.iter().all(|p| {
-            let path = engine::paths::expand_tilde(Path::new(p));
-            let dir = path.parent().unwrap_or(&path);
-            all_dirs
-                .iter()
-                .any(|ad| dir.starts_with(ad.as_path()) || path.starts_with(ad.as_path()))
-        })
+            .any(|approved| workspace::path_prefix_matches(approved, path))
     }
+}
+
+fn tool_command_text<'a>(tool_name: &str, args: &'a HashMap<String, Value>) -> Option<&'a str> {
+    match tool_name {
+        "bash" => args.get("command").and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+fn normalize_approval_dir(dir: &Path) -> PathBuf {
+    workspace::normalize_path(&engine::paths::expand_tilde(dir))
 }
 
 fn add_tool_patterns(

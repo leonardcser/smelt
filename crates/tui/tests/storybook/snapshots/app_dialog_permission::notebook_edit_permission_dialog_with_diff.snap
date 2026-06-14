@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 384
 expression: frame.text()
 ---
 
@@ -24,10 +23,10 @@ expression: frame.text()
   3 + print(df.head())
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  Allow?
-  1. yes
-  2. no
-  3. always allow
-  4. always allow in ~/cwd
+  1. allow once
+  2. deny
+  3. allow edit_notebook for this session
+  4. allow edit_notebook in ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                 1:1 0%

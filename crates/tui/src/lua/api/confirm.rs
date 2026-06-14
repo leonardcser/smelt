@@ -24,7 +24,7 @@ use mlua::prelude::*;
 use smelt_core::cells::ConfirmResolved;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
-use smelt_core::transcript_model::{ApprovalScope, ConfirmChoice, ConfirmRequest};
+use smelt_core::transcript_model::{ConfirmChoice, ConfirmRequest};
 
 use super::buf::LuaBuf;
 
@@ -145,7 +145,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     "confirm_resolved",
                     std::rc::Rc::new(ConfirmResolved {
                         handle_id,
-                        decision: decision_label(&choice).into(),
+                        decision: decision_label(&choice),
                     }),
                 );
                 let request_id = entry.req.request_id;
@@ -161,47 +161,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 }
 
 /// Stable string label for the `confirm_resolved` cell payload and `__resolve` input.
-fn decision_label(choice: &ConfirmChoice) -> &'static str {
+fn decision_label(choice: &ConfirmChoice) -> String {
     match choice {
-        ConfirmChoice::Yes => "yes",
-        ConfirmChoice::No => "no",
-        ConfirmChoice::Always(scope) => match scope {
-            ApprovalScope::Session => "always_session",
-            ApprovalScope::Workspace => "always_workspace",
-        },
-        ConfirmChoice::AlwaysPatterns(_, scope) => match scope {
-            ApprovalScope::Session => "always_pattern_session",
-            ApprovalScope::Workspace => "always_pattern_workspace",
-        },
-        ConfirmChoice::AlwaysDir(_, scope) => match scope {
-            ApprovalScope::Session => "always_dir_session",
-            ApprovalScope::Workspace => "always_dir_workspace",
-        },
+        ConfirmChoice::Yes => "yes".into(),
+        ConfirmChoice::No => "no".into(),
+        ConfirmChoice::Grant(option) => option.id.as_str().into(),
     }
 }
 
 /// Parse a decision label back into `ConfirmChoice`. Unknown labels become `No`.
 fn parse_decision(decision: &str, req: &ConfirmRequest) -> ConfirmChoice {
-    use ApprovalScope::*;
-    use ConfirmChoice::*;
     match decision {
-        "yes" => Yes,
-        "no" => No,
-        "always_session" => Always(Session),
-        "always_workspace" => Always(Workspace),
-        "always_pattern_session" => AlwaysPatterns(req.approval_patterns.clone(), Session),
-        "always_pattern_workspace" => AlwaysPatterns(req.approval_patterns.clone(), Workspace),
-        "always_dir_session" => AlwaysDir(outside_dir_string(req), Session),
-        "always_dir_workspace" => AlwaysDir(outside_dir_string(req), Workspace),
-        _ => No,
+        "yes" => ConfirmChoice::Yes,
+        "no" => ConfirmChoice::No,
+        id => req
+            .grant_options
+            .iter()
+            .find(|option| option.id == id)
+            .cloned()
+            .map(ConfirmChoice::Grant)
+            .unwrap_or(ConfirmChoice::No),
     }
-}
-
-fn outside_dir_string(req: &ConfirmRequest) -> String {
-    req.outside_dir
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 /// Call the tool's `preview` hook, move any returned buffer ids out of `app.ui`,

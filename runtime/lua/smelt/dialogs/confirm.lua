@@ -1,18 +1,6 @@
 -- Built-in tool-approval dialog. Override `smelt.confirm.open` in init.lua to
 -- swap the default UI. Tool `preview` callbacks live in each tool's Lua definition.
 
--- `~/`-rewrite of the process cwd for workspace-scoped "always allow" labels.
-local function pretty_cwd()
-  local cwd = smelt.os.cwd() or ""
-  local home = smelt.os.home()
-  if home and home ~= "" and cwd:sub(1, #home) == home then
-    local rest = cwd:sub(#home + 1)
-    if rest == "" then return "~" end
-    return "~" .. rest
-  end
-  return cwd
-end
-
 -- Build option labels and decision strings from the request payload.
 local function build_options(req)
   local labels, decisions = {}, {}
@@ -21,32 +9,13 @@ local function build_options(req)
     decisions[#decisions + 1] = decision
   end
 
-  push("yes", "yes")
-  push("no", "no")
+  push("allow once", "yes")
+  push("deny", "no")
 
-  local cwd = pretty_cwd()
-  local has_dir = req.outside_dir ~= nil and req.outside_dir ~= ""
-  local has_patterns = req.approval_patterns and #req.approval_patterns > 0
-
-  if has_dir then
-    local dir = req.outside_dir
-    push("allow " .. dir, "always_dir_session")
-    push("allow " .. dir .. " in " .. cwd, "always_dir_workspace")
-  end
-  if has_patterns then
-    local display = {}
-    for i, p in ipairs(req.approval_patterns) do
-      local d = p:gsub("/%*$", "")
-      local stripped = d:match("^[^:]+://(.+)$") or d
-      display[i] = stripped
+  for _, option in ipairs(req.grant_options or {}) do
+    if option.label and option.id then
+      push(option.label, option.id)
     end
-    local display_str = table.concat(display, ", ")
-    push("allow " .. display_str, "always_pattern_session")
-    push("allow " .. display_str .. " in " .. cwd, "always_pattern_workspace")
-  end
-  if not has_dir and not has_patterns then
-    push("always allow", "always_session")
-    push("always allow in " .. cwd, "always_workspace")
   end
 
   return labels, decisions

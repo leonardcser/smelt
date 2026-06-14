@@ -20,7 +20,7 @@ app_story!(bash_permission_dialog, |ctx| {
             ("command", json!("ls -la /tmp/foo")),
             ("description", json!("List files in /tmp/foo")),
         ]),
-        vec!["bash:ls/*".into()],
+        vec!["ls *".into()],
     );
     ctx.assert_snapshot();
 });
@@ -33,7 +33,7 @@ app_story!(bash_multiline_command_summary, |ctx| {
             "command",
             json!("for f in *.rs; do\n  rustfmt \"$f\"\ndone"),
         )]),
-        vec!["bash:for/*".into()],
+        vec!["for *".into()],
     );
     ctx.assert_snapshot();
 });
@@ -43,7 +43,7 @@ app_story!(bash_outside_workspace_extra_options, |ctx| {
     ctx.request_permission(
         "bash",
         args([("command", json!("cat /etc/hosts"))]),
-        vec!["bash:cat/*".into(), "bash:cat/* /etc/*".into()],
+        vec!["cat *".into(), "cat /etc/*".into()],
     );
     ctx.assert_snapshot();
 });
@@ -171,7 +171,7 @@ app_story!(web_fetch_permission_dialog_no_preview, |ctx| {
     ctx.request_permission(
         "web_fetch",
         args([("url", json!("https://example.com/page"))]),
-        vec!["web_fetch:https://example.com/*".into()],
+        vec!["https://example.com/*".into()],
     );
     ctx.assert_snapshot();
 });

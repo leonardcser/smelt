@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 344
 expression: frame.text()
 ---
 
@@ -20,10 +19,10 @@ expression: frame.text()
   1 + println!("hello, smelt");
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  Allow?
-  1. yes
-  2. no
-  3. always allow
-  4. always allow in ~/cwd
+  1. allow once
+  2. deny
+  3. allow edit_file for this session
+  4. allow edit_file in ~/cwd
 
   press tab to add a reason…
  ○ normal                                                                 1:1 0%

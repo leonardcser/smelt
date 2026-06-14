@@ -549,10 +549,7 @@ impl TuiApp {
         let input = PromptState::new();
         let vim_enabled = config.settings.vim;
 
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_default();
+        let cwd = env.cwd().to_string_lossy().into_owned();
 
         let app_config = config;
 

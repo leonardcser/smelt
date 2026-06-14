@@ -207,14 +207,15 @@ impl TestAppBuilder {
         };
 
         let clock = Arc::new(VirtualClock::new(Instant::now(), SystemTime::now()));
+        let home = engine::paths::home_dir();
         let env = Arc::new(engine::env::RuntimeEnv::scripted(
             4242,
-            std::path::PathBuf::from("/tmp/smelt-test/home"),
-            std::path::PathBuf::from("/tmp/smelt-test/home/.config"),
-            std::path::PathBuf::from("/tmp/smelt-test/home/.state"),
-            std::path::PathBuf::from("/tmp/smelt-test/home/.cache"),
-            std::path::PathBuf::from("/tmp/smelt-test/home/.data"),
-            std::path::PathBuf::from("/tmp/smelt-test/cwd"),
+            home.clone(),
+            home.join("config"),
+            home.join("state"),
+            home.join("cache"),
+            home.join("data"),
+            home.join("cwd"),
             std::num::NonZeroUsize::new(1).unwrap(),
         ));
 
@@ -2211,11 +2212,10 @@ fn reset_test_home() {
     // filesystem. We can't `remove_dir_all` `home` itself (it'd drop the
     // tempdir backing path), so iterate one level down.
     //
-    // Skip the `cwd` subdirectory - storybook tests pin the process cwd
-    // there so `smelt.os.cwd()` renders as `~/cwd`. On Unix deleting the
-    // cwd invalidates it (`getcwd` returns ENOENT), so parallel tests
-    // must not remove each other's working directory.
+    // Keep a stable `cwd` directory under HOME. The scripted RuntimeEnv
+    // uses it as the app cwd so story snapshots render `~/cwd`.
     let preserved = home.join("cwd");
+    let _ = std::fs::create_dir_all(&preserved);
     if let Ok(entries) = std::fs::read_dir(&home) {
         for entry in entries.flatten() {
             let path = entry.path();

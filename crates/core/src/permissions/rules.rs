@@ -227,7 +227,7 @@ pub(super) fn build_mode(
     ModePerms { tools, subcommands }
 }
 
-fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {
+pub(super) fn matches_rule(pat: &glob::Pattern, value: &str) -> bool {
     // Also match with a trailing space so "ls *" matches bare "ls" (no arguments).
     pat.matches(value) || pat.matches(&format!("{value} "))
 }

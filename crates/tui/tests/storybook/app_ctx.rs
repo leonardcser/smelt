@@ -36,26 +36,9 @@ pub struct AppStoryCtx {
 impl AppStoryCtx {
     pub fn new(name: &str) -> Self {
         let app = TestApp::builder().build();
-        // Pin the process cwd under $HOME (set by the harness to a
-        // per-process tempdir) so any dialog or status string that
-        // routes through `smelt.os.cwd()` renders as `~/cwd` and the
-        // snapshot is byte-stable across machines. Nextest runs each
-        // test in its own process, so the global `set_current_dir`
-        // doesn't race with parallel tests.
-        if let Some(home_raw) = std::env::var_os("HOME") {
-            // On macOS `$HOME` may live under `/var/folders/…`, while
-            // `std::env::set_current_dir` canonicalises through the
-            // `/private/var/…` symlink. Re-export `HOME` as the
-            // canonical path before changing cwd so the dialog's
-            // `pretty_cwd` prefix check matches and renders `~` instead
-            // of an absolute, machine-specific path.
-            let home_path = std::path::PathBuf::from(&home_raw);
-            let canon_home = std::fs::canonicalize(&home_path).unwrap_or(home_path);
-            std::env::set_var("HOME", &canon_home);
-            let cwd = canon_home.join("cwd");
-            let _ = std::fs::create_dir_all(&cwd);
-            let _ = std::env::set_current_dir(&cwd);
-        }
+        let cwd = std::path::Path::new(app.cwd_str());
+        let _ = std::fs::create_dir_all(cwd);
+        let _ = std::env::set_current_dir(cwd);
         Self {
             app,
             name: name.to_string(),
@@ -244,7 +227,7 @@ impl AppStoryCtx {
     /// clean relative path in the dialog header and snapshots stay
     /// byte-stable across machines.
     pub fn write_fixture(&self, rel_path: &str, contents: &str) -> String {
-        let cwd = std::env::current_dir().expect("cwd set by AppStoryCtx::new");
+        let cwd = std::path::PathBuf::from(self.app.cwd_str());
         let path = cwd.join(rel_path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create parent dir");

@@ -242,8 +242,8 @@ impl TuiApp {
                 call_id,
                 tool_name,
                 args,
-                approval_patterns,
-                outside_dir: None,
+                approval_candidates: approval_patterns,
+                grant_options: Vec::new(),
                 summary,
                 request_id,
             })),
@@ -337,18 +337,11 @@ impl TuiApp {
                 } else {
                     let permissions = self.active_permissions();
                     let active_mode = self.core.config.mode.clone();
-                    let summary_text = metadata.summary.as_plain_text();
-                    let label = if summary_text.is_empty() {
-                        tool_name.clone()
-                    } else {
-                        summary_text
-                    };
                     let outcome = permissions.evaluate_tool_with_approvals(
                         active_mode,
                         smelt_core::permissions::ToolOrigin::Lua,
                         &tool_name,
                         &args,
-                        &label,
                     );
                     outcome.decision
                 };

@@ -317,8 +317,7 @@ pub struct ConfirmRequested {
     /// Styled summary - the sole source of truth for the dialog body header.
     pub summary: protocol::StyledLines,
     pub args: std::collections::HashMap<String, serde_json::Value>,
-    pub outside_dir: Option<String>,
-    pub approval_patterns: Vec<String>,
+    pub grant_options: Vec<crate::transcript_model::ConfirmApprovalOption>,
 }
 
 /// Single entry in the `work_busy` cell payload. One per live
@@ -618,19 +617,15 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("handle_id", r.handle_id);
         let _ = t.set("tool_name", r.tool_name.as_str());
         let _ = t.set("summary", styled_lines_to_lua(lua, &r.summary));
-        match &r.outside_dir {
-            Some(s) => {
-                let _ = t.set("outside_dir", s.as_str());
+        if let Ok(options) = lua.create_table() {
+            for (i, option) in r.grant_options.iter().enumerate() {
+                if let Ok(option_tbl) = lua.create_table() {
+                    let _ = option_tbl.set("id", option.id.as_str());
+                    let _ = option_tbl.set("label", option.label.as_str());
+                    let _ = options.set(i + 1, option_tbl);
+                }
             }
-            None => {
-                let _ = t.set("outside_dir", mlua::Value::Nil);
-            }
-        }
-        if let Ok(patterns) = lua.create_table() {
-            for (i, p) in r.approval_patterns.iter().enumerate() {
-                let _ = patterns.set(i + 1, p.as_str());
-            }
-            let _ = t.set("approval_patterns", patterns);
+            let _ = t.set("grant_options", options);
         }
         if let Ok(args) = lua.create_table() {
             for (k, v) in &r.args {
@@ -1186,8 +1181,12 @@ mod tests {
                 tool_name: "bash".into(),
                 summary: protocol::StyledLines::from_plain("ls"),
                 args: std::collections::HashMap::new(),
-                outside_dir: None,
-                approval_patterns: vec!["bash:ls".into()],
+                grant_options: vec![crate::transcript_model::ConfirmApprovalOption {
+                    id: "grant_0_session".into(),
+                    label: "allow bash for this session".into(),
+                    scope: crate::transcript_model::ApprovalScope::Session,
+                    grants: Vec::new(),
+                }],
             }),
         );
 
@@ -1233,12 +1232,13 @@ mod tests {
                 let line: mlua::Table = summary.get(1).unwrap();
                 let span: mlua::Table = line.get(1).unwrap();
                 assert_eq!(span.get::<String>("text").unwrap(), "ls");
-                let patterns: mlua::Table = t.get("approval_patterns").unwrap();
-                assert_eq!(patterns.get::<String>(1).unwrap(), "bash:ls");
-                assert!(matches!(
-                    t.get::<mlua::Value>("outside_dir").unwrap(),
-                    mlua::Value::Nil
-                ));
+                let options: mlua::Table = t.get("grant_options").unwrap();
+                let option: mlua::Table = options.get(1).unwrap();
+                assert_eq!(option.get::<String>("id").unwrap(), "grant_0_session");
+                assert_eq!(
+                    option.get::<String>("label").unwrap(),
+                    "allow bash for this session"
+                );
             }
             other => panic!("expected Table, got {other:?}"),
         }
@@ -1320,8 +1320,7 @@ mod tests {
                 tool_name: "bash".into(),
                 summary: protocol::StyledLines::from_plain("ls"),
                 args: std::collections::HashMap::new(),
-                outside_dir: None,
-                approval_patterns: vec![],
+                grant_options: vec![],
             }),
         );
         cells.set_dyn(

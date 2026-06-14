@@ -41,11 +41,18 @@ pub enum PathAccess {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathTargetKind {
+    Directory,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathEffect {
     pub raw_path: String,
     pub base_dir: PathBuf,
     pub path: PathBuf,
     pub access: PathAccess,
+    pub target_kind: PathTargetKind,
 }
 
 impl PathEffect {
@@ -54,12 +61,30 @@ impl PathEffect {
         base_dir: &std::path::Path,
         access: PathAccess,
     ) -> Self {
+        Self::from_raw_with_kind(raw_path, base_dir, access, PathTargetKind::Unknown)
+    }
+
+    pub(super) fn from_directory(
+        raw_path: String,
+        base_dir: &std::path::Path,
+        access: PathAccess,
+    ) -> Self {
+        Self::from_raw_with_kind(raw_path, base_dir, access, PathTargetKind::Directory)
+    }
+
+    fn from_raw_with_kind(
+        raw_path: String,
+        base_dir: &std::path::Path,
+        access: PathAccess,
+        target_kind: PathTargetKind,
+    ) -> Self {
         let path = workspace::resolve_path(&raw_path, base_dir);
         Self {
             raw_path,
             base_dir: base_dir.to_path_buf(),
             path,
             access,
+            target_kind,
         }
     }
 }
@@ -114,10 +139,99 @@ pub struct PermissionRequest<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionRequirement {
+    Tool { tool: String },
+    Command { tool: String, command: String },
+    PathPrefix { dir: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionGrant {
+    Tool { tool: String },
+    Command { tool: String, pattern: String },
+    PathPrefix { dir: PathBuf },
+}
+
+impl PermissionGrant {
+    pub fn satisfies(&self, requirement: &PermissionRequirement) -> bool {
+        match (self, requirement) {
+            (PermissionGrant::Tool { tool: grant }, PermissionRequirement::Tool { tool }) => {
+                grant == tool
+            }
+            (
+                PermissionGrant::Tool { tool: grant },
+                PermissionRequirement::Command { tool, .. },
+            ) => grant == tool,
+            (
+                PermissionGrant::Command {
+                    tool: grant_tool,
+                    pattern,
+                },
+                PermissionRequirement::Command { tool, command },
+            ) => {
+                grant_tool == tool
+                    && glob::Pattern::new(pattern).is_ok_and(|p| rules::matches_rule(&p, command))
+            }
+            (
+                PermissionGrant::PathPrefix { dir },
+                PermissionRequirement::PathPrefix { dir: path },
+            ) => workspace::path_prefix_matches(dir, path),
+            _ => false,
+        }
+    }
+
+    pub fn display_subject(&self) -> String {
+        match self {
+            PermissionGrant::Tool { tool } => tool.clone(),
+            PermissionGrant::Command { pattern, .. } => {
+                let display = pattern.strip_suffix("/*").unwrap_or(pattern);
+                display
+                    .split_once("://")
+                    .map(|(_, rest)| rest.to_string())
+                    .unwrap_or_else(|| display.to_string())
+            }
+            PermissionGrant::PathPrefix { dir } => engine::paths::collapse_tilde(dir)
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+
+    pub fn display_subjects(grants: &[PermissionGrant]) -> String {
+        let mut command_head = None;
+        grants
+            .iter()
+            .map(|grant| {
+                let subject = grant.display_subject();
+                match grant {
+                    PermissionGrant::Command { .. } => {
+                        if let Some(head) = &command_head {
+                            subject
+                                .strip_prefix(head)
+                                .and_then(|rest| rest.strip_prefix(' '))
+                                .unwrap_or(&subject)
+                                .to_string()
+                        } else {
+                            command_head = subject.split_whitespace().next().map(str::to_string);
+                            subject
+                        }
+                    }
+                    _ => subject,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionOutcome {
     pub decision: Decision,
-    pub outside_workspace_paths: Vec<String>,
-    pub downgraded_by_workspace: bool,
+    pub missing_requirements: Vec<PermissionRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionApprovalOptions {
+    pub grant_sets: Vec<Vec<PermissionGrant>>,
 }
 
 /// Maps `(tool_name, args)` to filesystem paths the call would touch.
@@ -384,21 +498,31 @@ impl Permissions {
         }
     }
 
-    fn outside_workspace_effect_paths(&self, effects: &[ToolEffect]) -> Vec<String> {
+    fn outside_workspace_requirements(&self, effects: &[ToolEffect]) -> Vec<PermissionRequirement> {
         if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
             return vec![];
         }
         let workspace = self
             .workspace
             .canonicalize()
-            .unwrap_or_else(|_| self.workspace.clone());
+            .unwrap_or_else(|_| workspace::normalize_path(&self.workspace));
         let mut paths = Vec::new();
         Self::effect_paths(effects, &mut paths);
-        paths
-            .into_iter()
-            .filter(|path| !path.path.starts_with(&workspace))
-            .map(|path| path.raw_path.clone())
-            .collect()
+        let mut out = Vec::new();
+        for effect in paths {
+            if effect.path.starts_with(&workspace) {
+                continue;
+            }
+            let dir = display_dir_for_effect(effect);
+            let req = PermissionRequirement::PathPrefix { dir };
+            if !out
+                .iter()
+                .any(|existing| requirements_equivalent(existing, &req))
+            {
+                out.push(req);
+            }
+        }
+        out
     }
 
     fn mode_behavior(&self, mode: &AgentMode) -> ModeBehavior {
@@ -465,42 +589,331 @@ impl Permissions {
         origin: ToolOrigin,
         tool_name: &str,
         args: &HashMap<String, Value>,
-        summary: &str,
     ) -> PermissionOutcome {
-        let mut outcome = self.evaluate_tool(mode.clone(), origin, tool_name, args);
+        let mut outcome = self.evaluate_tool(mode, origin, tool_name, args);
         if outcome.decision == Decision::Ask {
             let approvals = self.approvals.read().unwrap();
-            if approvals.is_auto_approved_for_outcome(self, mode, tool_name, summary, &outcome) {
+            outcome
+                .missing_requirements
+                .retain(|req| !approvals.requirement_satisfied(req));
+            if outcome.missing_requirements.is_empty() {
                 outcome.decision = Decision::Allow;
             }
         }
         outcome
     }
 
+    pub fn approval_options(
+        &self,
+        tool_name: &str,
+        candidates: &[String],
+        outcome: &PermissionOutcome,
+    ) -> PermissionApprovalOptions {
+        if outcome.decision != Decision::Ask || outcome.missing_requirements.is_empty() {
+            return PermissionApprovalOptions { grant_sets: vec![] };
+        }
+
+        let approvals = self.approvals.read().unwrap();
+        let command_grants = self.approval_pattern_candidates(&approvals, tool_name, candidates);
+        let mut grants = Vec::new();
+
+        if !command_grants.is_empty() {
+            grants.push(
+                command_grants
+                    .iter()
+                    .map(|pattern| PermissionGrant::Command {
+                        tool: tool_name.to_string(),
+                        pattern: pattern.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        for requirement in &outcome.missing_requirements {
+            match requirement {
+                PermissionRequirement::Tool { tool } => {
+                    grants.push(vec![PermissionGrant::Tool { tool: tool.clone() }]);
+                }
+                PermissionRequirement::Command { tool, .. } if command_grants.is_empty() => {
+                    grants.push(vec![PermissionGrant::Tool { tool: tool.clone() }]);
+                }
+                PermissionRequirement::PathPrefix { dir } => {
+                    grants.push(vec![PermissionGrant::PathPrefix { dir: dir.clone() }]);
+                }
+                PermissionRequirement::Command { .. } => {}
+            }
+        }
+
+        let mut grant_sets = Vec::new();
+        for grant in &grants {
+            if grants_satisfy_requirements(grant, &outcome.missing_requirements) {
+                push_unique_grant_set(&mut grant_sets, grant.clone());
+            }
+        }
+
+        let combined: Vec<_> = grants.into_iter().flatten().collect();
+        if grant_sets.is_empty()
+            && combined.len() > 1
+            && grants_satisfy_requirements(&combined, &outcome.missing_requirements)
+        {
+            push_unique_grant_set(&mut grant_sets, combined);
+        }
+
+        PermissionApprovalOptions { grant_sets }
+    }
+
+    fn approval_pattern_candidates(
+        &self,
+        approvals: &RuntimeApprovals,
+        tool_name: &str,
+        candidates: &[String],
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for candidate in candidates {
+            if approvals.has_pattern(tool_name, candidate) || out.iter().any(|p| p == candidate) {
+                continue;
+            }
+            if glob::Pattern::new(candidate).is_ok() {
+                out.push(candidate.clone());
+            }
+        }
+        out
+    }
+
     pub fn evaluate_request(&self, request: PermissionRequest<'_>) -> PermissionOutcome {
         let behavior = self.mode_behavior(&request.mode);
-        let base = match request.origin {
-            ToolOrigin::Mcp => {
-                self.check_subcommand(request.mode.clone(), "mcp", request.tool_name)
-            }
-            ToolOrigin::Lua | ToolOrigin::Core => {
-                decide_base(self, request.mode.clone(), request.tool_name, request.args)
-            }
-        };
-        let base = read_only_adjusted_decision(&behavior, base, &request.effects);
-        let outside_workspace_paths = self.outside_workspace_effect_paths(&request.effects);
-        let downgraded_by_workspace =
-            base == Decision::Allow && !outside_workspace_paths.is_empty();
-        let decision = if downgraded_by_workspace {
-            Decision::Ask
-        } else {
-            base
-        };
-        PermissionOutcome {
-            decision,
-            outside_workspace_paths,
-            downgraded_by_workspace,
+        let base = base_evaluation(self, &request);
+        if base.decision == Decision::Deny {
+            return PermissionOutcome {
+                decision: Decision::Deny,
+                missing_requirements: Vec::new(),
+            };
         }
+
+        let adjusted = read_only_adjusted_decision(&behavior, base.decision, &request.effects);
+        if adjusted == Decision::Deny {
+            return PermissionOutcome {
+                decision: Decision::Deny,
+                missing_requirements: Vec::new(),
+            };
+        }
+
+        let mut missing = base.missing_requirements;
+        if adjusted == Decision::Ask && missing.is_empty() {
+            missing.push(PermissionRequirement::Tool {
+                tool: request.tool_name.to_string(),
+            });
+        }
+        missing.extend(self.outside_workspace_requirements(&request.effects));
+        dedupe_requirements(&mut missing);
+        PermissionOutcome {
+            decision: if missing.is_empty() {
+                Decision::Allow
+            } else {
+                Decision::Ask
+            },
+            missing_requirements: missing,
+        }
+    }
+}
+
+struct BaseEvaluation {
+    decision: Decision,
+    missing_requirements: Vec<PermissionRequirement>,
+}
+
+fn grants_satisfy_requirements(
+    grants: &[PermissionGrant],
+    requirements: &[PermissionRequirement],
+) -> bool {
+    requirements
+        .iter()
+        .all(|requirement| grants.iter().any(|grant| grant.satisfies(requirement)))
+}
+
+fn grant_equivalent(a: &PermissionGrant, b: &PermissionGrant) -> bool {
+    match (a, b) {
+        (PermissionGrant::PathPrefix { dir: a }, PermissionGrant::PathPrefix { dir: b }) => {
+            workspace::paths_equivalent(a, b)
+        }
+        _ => a == b,
+    }
+}
+
+fn grant_set_contains(set: &[PermissionGrant], grant: &PermissionGrant) -> bool {
+    set.iter().any(|existing| grant_equivalent(existing, grant))
+}
+
+fn grant_set_is_subset(a: &[PermissionGrant], b: &[PermissionGrant]) -> bool {
+    a.iter().all(|grant| grant_set_contains(b, grant))
+}
+
+fn push_unique_grant_set(sets: &mut Vec<Vec<PermissionGrant>>, set: Vec<PermissionGrant>) {
+    if sets
+        .iter()
+        .any(|existing| grant_set_is_subset(existing, &set))
+    {
+        return;
+    }
+    sets.retain(|existing| !grant_set_is_subset(&set, existing));
+    sets.push(set);
+}
+
+fn requirements_equivalent(a: &PermissionRequirement, b: &PermissionRequirement) -> bool {
+    match (a, b) {
+        (
+            PermissionRequirement::PathPrefix { dir: a },
+            PermissionRequirement::PathPrefix { dir: b },
+        ) => workspace::paths_equivalent(a, b),
+        _ => a == b,
+    }
+}
+
+fn dedupe_requirements(requirements: &mut Vec<PermissionRequirement>) {
+    let mut out = Vec::new();
+    for requirement in requirements.drain(..) {
+        if !out
+            .iter()
+            .any(|existing| requirements_equivalent(existing, &requirement))
+        {
+            out.push(requirement);
+        }
+    }
+    *requirements = out;
+}
+
+fn display_dir_for_effect(effect: &PathEffect) -> PathBuf {
+    let raw = std::path::Path::new(&effect.raw_path);
+    if effect.target_kind == PathTargetKind::Directory {
+        return if effect.raw_path.starts_with('/') || effect.raw_path.starts_with("~/") {
+            workspace::normalize_path(&engine::paths::expand_tilde(raw))
+        } else {
+            effect.path.clone()
+        };
+    }
+    if !raw.is_absolute() && !effect.raw_path.starts_with("~/") {
+        return effect.base_dir.clone();
+    }
+    effect
+        .path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| effect.path.clone())
+}
+
+fn base_evaluation(permissions: &Permissions, request: &PermissionRequest<'_>) -> BaseEvaluation {
+    match request.origin {
+        ToolOrigin::Mcp => {
+            let decision =
+                permissions.check_subcommand(request.mode.clone(), "mcp", request.tool_name);
+            BaseEvaluation {
+                decision: decision.clone(),
+                missing_requirements: requirements_for_decision(
+                    decision,
+                    PermissionRequirement::Command {
+                        tool: "mcp".to_string(),
+                        command: request.tool_name.to_string(),
+                    },
+                ),
+            }
+        }
+        ToolOrigin::Lua | ToolOrigin::Core => match request.tool_name {
+            "bash" => bash_evaluation(permissions, request.mode.clone(), request.args),
+            "web_fetch" => web_fetch_evaluation(permissions, request.mode.clone(), request.args),
+            tool => {
+                let decision = permissions.check_tool(request.mode.clone(), tool);
+                BaseEvaluation {
+                    decision: decision.clone(),
+                    missing_requirements: requirements_for_decision(
+                        decision,
+                        PermissionRequirement::Tool {
+                            tool: tool.to_string(),
+                        },
+                    ),
+                }
+            }
+        },
+    }
+}
+
+fn requirements_for_decision(
+    decision: Decision,
+    requirement: PermissionRequirement,
+) -> Vec<PermissionRequirement> {
+    if decision == Decision::Ask {
+        vec![requirement]
+    } else {
+        Vec::new()
+    }
+}
+
+fn bash_evaluation(
+    permissions: &Permissions,
+    mode: AgentMode,
+    args: &HashMap<String, Value>,
+) -> BaseEvaluation {
+    let tool = permissions.check_tool(mode.clone(), "bash");
+    if tool == Decision::Deny {
+        return BaseEvaluation {
+            decision: Decision::Deny,
+            missing_requirements: Vec::new(),
+        };
+    }
+
+    let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+    let sub = permissions.check_subcommand(mode.clone(), "bash", command);
+    if sub == Decision::Deny {
+        return BaseEvaluation {
+            decision: Decision::Deny,
+            missing_requirements: Vec::new(),
+        };
+    }
+    let asks_for_command = sub == Decision::Ask
+        || (sub == Decision::Allow
+            && permissions.mode_behavior(&mode).ask_on_output_redirection
+            && shell_has_output_redirection(command));
+    if asks_for_command {
+        return BaseEvaluation {
+            decision: Decision::Ask,
+            missing_requirements: vec![PermissionRequirement::Command {
+                tool: "bash".to_string(),
+                command: command.to_string(),
+            }],
+        };
+    }
+    BaseEvaluation {
+        decision: sub,
+        missing_requirements: Vec::new(),
+    }
+}
+
+fn web_fetch_evaluation(
+    permissions: &Permissions,
+    mode: AgentMode,
+    args: &HashMap<String, Value>,
+) -> BaseEvaluation {
+    let tool = permissions.check_tool(mode.clone(), "web_fetch");
+    if tool == Decision::Deny {
+        return BaseEvaluation {
+            decision: Decision::Deny,
+            missing_requirements: Vec::new(),
+        };
+    }
+
+    let url = args.get("url").and_then(Value::as_str).unwrap_or("");
+    let pattern = permissions.check_subcommand(mode, "web_fetch", url);
+    if pattern == Decision::Deny || pattern == Decision::Allow {
+        return BaseEvaluation {
+            decision: pattern,
+            missing_requirements: Vec::new(),
+        };
+    }
+    BaseEvaluation {
+        decision: Decision::Ask,
+        missing_requirements: vec![PermissionRequirement::Command {
+            tool: "web_fetch".to_string(),
+            command: url.to_string(),
+        }],
     }
 }
 
@@ -574,65 +987,24 @@ fn mcp_tool_name_disposition(name: &str) -> ReadOnlyDisposition {
     }
 }
 
+#[cfg(test)]
 fn decide_base(
     permissions: &Permissions,
     mode: AgentMode,
     tool_name: &str,
     args: &HashMap<String, Value>,
 ) -> Decision {
-    match tool_name {
-        "bash" => decide_bash(permissions, mode, args),
-        "web_fetch" => decide_web_fetch(permissions, mode, args),
-        _ => permissions.check_tool(mode, tool_name),
-    }
-}
-
-fn decide_bash(
-    permissions: &Permissions,
-    mode: AgentMode,
-    args: &HashMap<String, Value>,
-) -> Decision {
-    let tool = permissions.check_tool(mode.clone(), "bash");
-    if tool == Decision::Deny {
-        return Decision::Deny;
-    }
-
-    let command = args.get("command").and_then(Value::as_str).unwrap_or("");
-    let sub = permissions.check_subcommand(mode.clone(), "bash", command);
-    if sub == Decision::Deny {
-        return Decision::Deny;
-    }
-    if tool == Decision::Allow && sub == Decision::Ask {
-        return Decision::Ask;
-    }
-    if sub == Decision::Allow
-        && permissions.mode_behavior(&mode).ask_on_output_redirection
-        && shell_has_output_redirection(command)
-    {
-        return Decision::Ask;
-    }
-    sub
-}
-
-fn decide_web_fetch(
-    permissions: &Permissions,
-    mode: AgentMode,
-    args: &HashMap<String, Value>,
-) -> Decision {
-    let tool = permissions.check_tool(mode.clone(), "web_fetch");
-    if tool == Decision::Deny {
-        return Decision::Deny;
-    }
-
-    let url = args.get("url").and_then(Value::as_str).unwrap_or("");
-    let pattern = permissions.check_subcommand(mode, "web_fetch", url);
-    if pattern == Decision::Deny || pattern == Decision::Allow {
-        return pattern;
-    }
-    if tool == Decision::Allow && pattern == Decision::Ask {
-        return Decision::Ask;
-    }
-    pattern
+    base_evaluation(
+        permissions,
+        &PermissionRequest {
+            mode,
+            tool_name,
+            args,
+            origin: ToolOrigin::Lua,
+            effects: permissions.effects_for_tool(ToolOrigin::Lua, tool_name, args),
+        },
+    )
+    .decision
 }
 
 /// Shell-aware decision: splits on operators, folds subcommands to the worst decision,
