@@ -98,7 +98,7 @@ pub async fn ensure_loaded(client: &reqwest::Client) {
 }
 
 /// Look up `(provider_type, api_base, model)` in the catalog. Returns `None`
-/// if the catalog isn't loaded yet or the entry isn't listed.  The `api_base`
+/// if the catalog isn't loaded yet or the entry isn't listed. The `api_base`
 /// is used to disambiguate providers that share a wire format (e.g. Kimi
 /// exposes an Anthropic-compatible endpoint but has its own catalog key).
 pub fn lookup(provider_type: &str, api_base: &str, model: &str) -> Option<ModelEntry> {
@@ -174,20 +174,23 @@ fn push_unique(keys: &mut Vec<String>, key: String) {
     }
 }
 
+fn detected_catalog_key(api_base: &str) -> Option<&'static str> {
+    if crate::provider::kimi_code::is_api_base(api_base) {
+        return Some("kimi-for-coding");
+    }
+    None
+}
+
 /// Maps smelt's `provider_type` + `api_base` to the catalog key models.dev
-/// uses.  `openai-compatible` returns `None` because the catalog lists no
-/// generic provider for it.  The `api_base` is used to disambiguate
-/// providers that share a wire format.
+/// uses. `openai-compatible` returns `None` because the catalog lists no
+/// generic provider for it. The `api_base` is used to disambiguate providers
+/// that share a wire format.
 pub(crate) fn catalog_key<'a>(provider_type: &'a str, api_base: &'a str) -> Option<&'a str> {
     match provider_type {
         "kimi-code" => Some("kimi-for-coding"),
-        // COMPAT(kimi-anthropic-compatible-provider-kind): configs from before
-        // Kimi Code had its own provider kind used anthropic-compatible.
-        "anthropic-compatible" if crate::provider::kimi_code::is_api_base(api_base) => {
-            Some("kimi-for-coding")
-        }
+        "anthropic-compatible" => detected_catalog_key(api_base).or(Some("anthropic")),
         "openai" | "codex" => Some("openai"),
-        "anthropic" | "anthropic-compatible" => Some("anthropic"),
+        "anthropic" => Some("anthropic"),
         "copilot" | "github-copilot" => Some("github-copilot"),
         "openai-compatible" => None,
         other => Some(other),

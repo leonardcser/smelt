@@ -20,15 +20,6 @@ use tokio::sync::oneshot;
 /// to a default; both paths are intentional - dropping a `reply` is a
 /// "no-op" signal.
 pub enum HostCall {
-    /// Run `smelt.provider.middleware{on_request=...}` hooks against
-    /// the chat history about to be sent. `Some(msgs)` replaces the
-    /// engine's slice; `None` leaves it untouched. Hooks see the full
-    /// `Vec<Message>` including the system prompt at index 0.
-    ProviderRequest {
-        messages: Vec<Message>,
-        reply: oneshot::Sender<Option<Vec<Message>>>,
-    },
-
     /// Run `smelt.provider.middleware{on_response=...}` hooks against
     /// the assembled assistant message. `Some(msg)` replaces it before
     /// it's pushed to history; `None` keeps the original.

@@ -169,9 +169,6 @@ pub struct Hooks {
     /// `tools.middleware{after=...}` registry. Per-tool name; `""`
     /// matches every tool.
     pub tool_after: Arc<HookRegistry>,
-    /// `provider.middleware{on_request=...}` registry. Provider hooks
-    /// always use `name = ""`.
-    pub provider_request: Arc<HookRegistry>,
     /// `provider.middleware{on_response=...}` registry.
     pub provider_response: Arc<HookRegistry>,
     /// `smelt.engine.on_context_limit(fn)` registry. Engine consults
@@ -309,7 +306,6 @@ impl LuaShared {
         }
         self.hooks.tool_before.clear();
         self.hooks.tool_after.clear();
-        self.hooks.provider_request.clear();
         self.hooks.provider_response.clear();
         self.hooks.context_limit.clear();
         self.hooks.prepare_request.clear();

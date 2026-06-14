@@ -1020,23 +1020,6 @@ impl<'a> Turn<'a> {
 
             self.apply_pending_history_items_for_request();
 
-            // COMPAT(lua-provider-middleware-messages): plugin hooks still see
-            // `Vec<Message>`; any replacement is folded back into `HistoryItem`
-            // shape (which repairs any orphan tool_use a misbehaving plugin might
-            // introduce).
-            let request_view = protocol::history_to_messages(&self.history);
-            if let Some(Some(replacement)) = self
-                .host_call(|reply| crate::host::HostCall::ProviderRequest {
-                    messages: request_view,
-                    reply,
-                })
-                .await
-            {
-                warn_if_replacement_has_orphans(&replacement, "provider_request");
-                self.history = protocol::history_from_messages(replacement);
-                self.ensure_system_prefix();
-            }
-
             if self.prepare_request_with_host(&tool_defs).await {
                 continue;
             }
@@ -1255,17 +1238,6 @@ impl<'a> Turn<'a> {
             for cmd in deferred {
                 self.handle_turn_cmd(cmd);
             }
-        }
-    }
-
-    /// Make sure `self.history[0]` is the system prompt, inserting it if a
-    /// host hook replaced the history without preserving it. Called only
-    /// from the hook-replacement path.
-    fn ensure_system_prefix(&mut self) {
-        let needs_insert = !matches!(self.history.first(), Some(HistoryItem::System { .. }));
-        if needs_insert {
-            self.history
-                .insert(0, HistoryItem::system(&self.system_prompt));
         }
     }
 

@@ -317,14 +317,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(Some(messages_to_lua(lua, &messages)?))
         },
     )?;
-    // COMPAT(lua-session-messages-write): keep the `messages(list)` setter for
-    // plugins that still replace history with provider-style message rows.
-    // smelt.session.messages() reads (optional opts table filters);
-    // smelt.session.messages(list) atomically replaces the message list,
-    // clears snapshots, restores the screen, and saves the session.
     let msgs = m.sub(
         "messages",
-        "Session messages. Callable: `messages()` (or `messages(opts)`) returns persisted transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, or `opts.limit` to filter. `messages(list)` (a sequence of `{ role, content? }` rows) atomically replaces `session.messages`, drops token/cost/turn-meta snapshots, repaints the transcript, and saves the session. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.",
+        "Session messages. Callable: `messages()` (or `messages(opts)`) returns persisted transcript rows as `{ role, content?, tool_calls?, tool_call_id?, is_error? }`; pass `opts.roles`, `opts.include_tool`, `opts.since_index`, or `opts.limit` to filter. Use `smelt.session.model_messages()` for the model-visible history after checkpointing.",
     )?;
     msgs.callable(
         |lua, (_tbl, arg): (mlua::Table, Option<mlua::Table>)| -> LuaResult<mlua::Value> {
@@ -336,20 +331,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let out = messages_to_lua(lua, &messages)?;
                 return Ok(mlua::Value::Table(out));
             };
-            // Distinguish "filter opts table" (has named keys) from
-            // "messages list" (sequence of {role,...} entries).
-            let len = arg.raw_len();
-            let looks_like_list = len > 0
-                && arg
-                    .raw_get::<mlua::Value>(1)
-                    .map(|v| matches!(v, mlua::Value::Table(_)))
-                    .unwrap_or(false);
-            if looks_like_list {
-                let new_msgs = lua_messages_to_protocol(lua, &arg);
-                let new_history = protocol::history_from_messages(new_msgs);
-                crate::lua::with_app(|app| app.replace_history(new_history));
-                return Ok(mlua::Value::Nil);
-            }
             // Filter-opts path.
             let roles = arg.get::<Option<Vec<String>>>("roles")?;
             let include_tool = arg.get::<Option<bool>>("include_tool")?.unwrap_or(true);
@@ -406,7 +387,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "history",
-        "Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only; use `messages(list)` for legacy replacement.",
+        "Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let history = crate::lua::try_with_app(|app| app.core.session.history.clone())

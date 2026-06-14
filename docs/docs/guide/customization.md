@@ -230,14 +230,11 @@ statusline indicators and conditional keymaps.
 
 ## Provider Middleware
 
-Hook into the provider request/response cycle to log, redact, or rewrite
+Hook into assembled provider responses to log, redact, or rewrite assistant
 payloads:
 
 ```lua
 smelt.provider.middleware({
-  on_request = function(messages)
-    -- inspect or return a replacement messages array
-  end,
   on_response = function(message)
     -- inspect or return a replacement assistant message
   end,

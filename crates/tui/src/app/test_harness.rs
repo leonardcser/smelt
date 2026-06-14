@@ -1996,7 +1996,6 @@ impl TestApp {
         };
         check_reg("hooks.tool_before", &hooks.tool_before);
         check_reg("hooks.tool_after", &hooks.tool_after);
-        check_reg("hooks.provider_request", &hooks.provider_request);
         check_reg("hooks.provider_response", &hooks.provider_response);
         check_reg("hooks.context_limit", &hooks.context_limit);
         check_reg("hooks.lifecycle", &hooks.lifecycle);
@@ -5344,7 +5343,7 @@ mod tests {
                 models = { "seed-model" },
             })
             smelt.tools.middleware("", { before = function() end })
-            smelt.provider.middleware({ on_request = function() end })
+            smelt.provider.middleware({ on_response = function() end })
 
             -- core::timers (Lua-side)
             smelt.timer.every(100000, function() end)
@@ -5406,7 +5405,7 @@ mod tests {
             .iter()
             .any(|p| p.name.as_deref() == Some("seed_provider")));
         assert!(!shared.hooks.tool_before.is_empty());
-        assert!(!shared.hooks.provider_request.is_empty());
+        assert!(!shared.hooks.provider_response.is_empty());
         assert!(!app.app.core.timers.is_empty());
         assert!(!shared.tasks.lock().unwrap().is_empty());
         let anon_overlay = (1u32..)
@@ -5475,7 +5474,7 @@ mod tests {
             "tool middleware cleared"
         );
         assert!(
-            shared.hooks.provider_request.is_empty(),
+            shared.hooks.provider_response.is_empty(),
             "provider middleware cleared"
         );
         assert!(app.app.core.timers.is_empty(), "timers cleared");

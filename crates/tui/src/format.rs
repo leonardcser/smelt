@@ -32,9 +32,6 @@ impl BufFormat {
     /// Resolve a mode from a Lua opts table. Recognised shapes:
     /// - `{ mode = "plain" }` / `{ mode = "markdown" }` / `{ mode = "md" }`
     /// - `{ mode = "code", lang = "bash", diff_base? }`
-    /// - COMPAT(lua-buffer-mode-aliases): legacy aliases `bash`/`sh`/`shell`
-    ///   (→ Code lang=bash), `file` + `path` (lang from ext), `diff` + `path`
-    ///   (+ optional `old`) (Code with diff_base).
     pub(crate) fn from_lua_spec(mode: &str, opts: &mlua::Table) -> Result<Self, String> {
         match mode {
             "plain" => Ok(Self::Plain),
@@ -46,29 +43,6 @@ impl BufFormat {
                 let diff_base: Option<String> = opts.get("diff_base").ok();
                 Ok(Self::Code { lang, diff_base })
             }
-            "bash" | "sh" | "shell" => Ok(Self::Code {
-                lang: "bash".to_string(),
-                diff_base: None,
-            }),
-            "file" => {
-                let path: String = opts
-                    .get("path")
-                    .map_err(|_| "buf.create mode=file requires path".to_string())?;
-                Ok(Self::Code {
-                    lang: lang_from_path(&path),
-                    diff_base: None,
-                })
-            }
-            "diff" => {
-                let path: String = opts
-                    .get("path")
-                    .map_err(|_| "buf.create mode=diff requires path".to_string())?;
-                let old: String = opts.get("old").unwrap_or_default();
-                Ok(Self::Code {
-                    lang: lang_from_path(&path),
-                    diff_base: Some(old),
-                })
-            }
             other => Err(format!("unknown buffer mode: {other}")),
         }
     }
@@ -77,14 +51,6 @@ impl BufFormat {
     pub(crate) fn into_parser(self) -> Arc<dyn BufferParser> {
         Arc::new(ModeParser { mode: self })
     }
-}
-
-fn lang_from_path(path: &str) -> String {
-    std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("txt")
-        .to_string()
 }
 
 struct ModeParser {
@@ -264,10 +230,6 @@ mod tests {
         assert!(matches!(parse_mode("plain"), Ok(BufFormat::Plain)));
         assert!(matches!(parse_mode("markdown"), Ok(BufFormat::Markdown)));
         assert!(matches!(parse_mode("md"), Ok(BufFormat::Markdown)));
-        assert!(matches!(
-            parse_mode("bash"),
-            Ok(BufFormat::Code { lang, diff_base: None }) if lang == "bash"
-        ));
         assert!(parse_mode("unknown").is_err());
     }
 
@@ -285,29 +247,6 @@ mod tests {
         assert!(matches!(
             BufFormat::from_lua_spec("code", &tbl),
             Ok(BufFormat::Code { lang, diff_base: Some(base) }) if lang == "rust" && base == "old"
-        ));
-    }
-
-    #[test]
-    fn from_lua_spec_file_derives_lang_from_path() {
-        let lua = mlua::Lua::new();
-        let tbl = lua.create_table().unwrap();
-        tbl.set("path", "main.rs").unwrap();
-        assert!(matches!(
-            BufFormat::from_lua_spec("file", &tbl),
-            Ok(BufFormat::Code { lang, diff_base: None }) if lang == "rs"
-        ));
-    }
-
-    #[test]
-    fn from_lua_spec_diff_wraps_old_into_code() {
-        let lua = mlua::Lua::new();
-        let tbl = lua.create_table().unwrap();
-        tbl.set("path", "main.py").unwrap();
-        tbl.set("old", "pre").unwrap();
-        assert!(matches!(
-            BufFormat::from_lua_spec("diff", &tbl),
-            Ok(BufFormat::Code { lang, diff_base: Some(base) }) if lang == "py" && base == "pre"
         ));
     }
 }

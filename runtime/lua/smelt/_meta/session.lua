@@ -48,7 +48,7 @@ session.dir = nil
 ---@type fun(): nil
 session.fork = nil
 
---- Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only; use `messages(list)` for legacy replacement.
+--- Return the semantic session history as compaction-safe items. Rows are `{ kind = 'system'|'user'|'assistant'|'note', ... }`; assistant rows include `invocations`, and note rows include `note_kind` plus `text`. Read-only.
 ---@type fun(): table
 session.history = nil
 

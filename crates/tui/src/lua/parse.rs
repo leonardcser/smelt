@@ -328,13 +328,6 @@ pub(crate) fn border(opts: &mlua::Table) -> Result<Option<Border>, String> {
                     other => *slot = edge_opt(other)?,
                 }
             }
-            // COMPAT(lua-border-sides): old border shape `sides = { "top" }`
-            // or `sides = { top = true }`.
-            if let mlua::Value::Table(st) =
-                t.get::<mlua::Value>("sides").unwrap_or(mlua::Value::Nil)
-            {
-                apply_legacy_sides(&st, &mut b)?;
-            }
             if !b.any_side() {
                 return Ok(None);
             }
@@ -378,47 +371,6 @@ fn edge_opt(v: mlua::Value) -> Result<Option<EdgeStyle>, String> {
             other.type_name()
         )),
     }
-}
-
-fn apply_legacy_sides(st: &mlua::Table, b: &mut Border) -> Result<(), String> {
-    let mut saw_list = false;
-    let mut top = false;
-    let mut right = false;
-    let mut bottom = false;
-    let mut left = false;
-    for v in st.clone().sequence_values::<String>().flatten() {
-        saw_list = true;
-        match v.as_str() {
-            "top" => top = true,
-            "right" => right = true,
-            "bottom" => bottom = true,
-            "left" => left = true,
-            other => {
-                return Err(format!(
-                    "unknown border side '{other}' (expected top|right|bottom|left)"
-                ))
-            }
-        }
-    }
-    if !saw_list {
-        top = st.get::<bool>("top").unwrap_or(false);
-        right = st.get::<bool>("right").unwrap_or(false);
-        bottom = st.get::<bool>("bottom").unwrap_or(false);
-        left = st.get::<bool>("left").unwrap_or(false);
-    }
-    if top {
-        b.top = Some(EdgeStyle::new());
-    }
-    if right {
-        b.right = Some(EdgeStyle::new());
-    }
-    if bottom {
-        b.bottom = Some(EdgeStyle::new());
-    }
-    if left {
-        b.left = Some(EdgeStyle::new());
-    }
-    Ok(())
 }
 
 /// Parse `"nw"` / `"ne"` / `"sw"` / `"se"` into a `Corner`. Falls back to `default`.
@@ -680,19 +632,6 @@ mod tests {
         let lua = lua();
         let t = eval_table(&lua, r#"return { border = "none" }"#);
         assert!(border(&t).unwrap().is_none());
-    }
-
-    #[test]
-    fn border_table_with_partial_sides_legacy() {
-        let lua = lua();
-        let t = eval_table(
-            &lua,
-            r#"return { border = { style = "rounded", sides = { "top", "left" } } }"#,
-        );
-        let b = border(&t).unwrap().expect("some border");
-        assert_eq!(b.style, BorderStyle::Rounded);
-        assert!(b.top.is_some() && b.left.is_some());
-        assert!(b.right.is_none() && b.bottom.is_none());
     }
 
     #[test]

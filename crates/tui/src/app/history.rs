@@ -102,12 +102,6 @@ fn push_user_block(
         });
         return;
     }
-    if is_legacy_process_status_note(&text) {
-        transcript.push(Block::ProcessStatus {
-            text: text.into_owned(),
-        });
-        return;
-    }
     let image_labels = content.image_labels();
     let display_source = display.unwrap_or(&text);
     let display_text = if image_labels.is_empty() {
@@ -465,25 +459,6 @@ impl TuiApp {
         self.persister.flush();
     }
 
-    /// Atomically replace `session.messages` with `messages`. Clears accounting
-    /// and turn-meta snapshots (they key into pre-replacement positions),
-    /// resets `context_tokens`, repaints the screen, and saves the session.
-    /// No-op when `messages` is empty.
-    pub(crate) fn replace_history(&mut self, history: Vec<HistoryItem>) {
-        if history.is_empty() {
-            return;
-        }
-        self.core.session.history = history;
-        self.core.session.checkpoint = None;
-        self.core.session.turn_metas.clear();
-        self.core.session.clear_accounting_snapshots();
-        self.core.session.clear_context_tokens();
-
-        self.restore_screen();
-        self.save_session();
-        self.transcript_win_mut().scroll_to_bottom();
-    }
-
     pub(crate) fn install_context_checkpoint(
         &mut self,
         kind: String,
@@ -602,17 +577,6 @@ fn truncate_keyed<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
     }
 }
 
-// COMPAT(legacy-process-status-notes): old sessions stored background process
-// status as plain user text before HistoryNote::ProcessStatus existed.
-fn is_legacy_process_status_note(text: &str) -> bool {
-    let Some(status) = text.strip_prefix("Background process ") else {
-        return false;
-    };
-    status.ends_with(" completed successfully.")
-        || status.ends_with(" exited.")
-        || (status.contains(" exited with code ") && status.ends_with('.'))
-}
-
 #[cfg(test)]
 mod checkpoint_tests {
     use super::*;
@@ -672,22 +636,6 @@ mod checkpoint_tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         let note = "Background process 123 completed successfully.";
         app.app.core.session.history = vec![user(&protocol::process_status_note(note))];
-
-        app.app.restore_screen();
-
-        let history = app.app.transcript.history();
-        let id = history.order[0];
-        assert!(matches!(
-            history.blocks.get(&id),
-            Some(Block::ProcessStatus { text }) if text == note
-        ));
-    }
-
-    #[test]
-    fn restore_screen_rebuilds_legacy_process_status_notes_as_process_blocks() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        let note = "Background process 123 exited with code 1.";
-        app.app.core.session.history = vec![user(note)];
 
         app.app.restore_screen();
 
