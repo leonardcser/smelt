@@ -1,6 +1,6 @@
 //! Display renderers for compiled transcript blocks.
 
-pub mod markdown;
+mod markdown;
 mod tools;
 
 mod chrome;
@@ -16,9 +16,9 @@ pub(in crate::content) mod user;
 
 #[cfg(test)]
 use markdown::is_horizontal_rule;
-pub use markdown::render_markdown_inner;
+pub(crate) use markdown::render_markdown_inner;
 pub(in crate::content) use tools::measure_tool_height;
-pub use tools::render_tool_body_into;
+pub(crate) use tools::render_tool_body_into;
 
 /// Per-tool row cap (applied to command header and output body separately).
 const MAX_TOOL_BLOCK_ROWS: usize = 20;

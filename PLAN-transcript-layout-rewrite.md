@@ -211,7 +211,7 @@ Use `pulldown-cmark` **only as the parser** and translate its event stream into 
 
 Build the AST from `pulldown-cmark::Parser::into_offset_iter()` so block nodes and inline spans can carry source byte ranges into the original markdown. The semantic AST is not enough on its own: copy/yank fidelity depends on attaching original markdown source to rendered rows.
 
-This replaces the custom line-oriented markdown parser in `transcript_parsers/markdown.rs` and fixes bugs that are fundamentally parsing bugs: malformed/nested code blocks, tables whose inline code spans were not recognized as a single cell token, escaped characters, and other cases where the hand-rolled parser lost nesting information. Rendering was not the problem; the AST was.
+This replaces the custom line-oriented markdown renderer in `display_renderers/markdown.rs` and fixes bugs that are fundamentally parsing bugs: malformed/nested code blocks, tables whose inline code spans were not recognized as a single cell token, escaped characters, and other cases where the hand-rolled parser lost nesting information. Rendering was not the problem; the AST was.
 
 Dependency:
 
@@ -651,8 +651,8 @@ Current conclusion: visible materialization after measurement is cheap (~3 ms fo
 - Markdown inline/table wrapping now lowers `InlineSpan`s to `InlineLine<InlineStyle>` in `crates/core/src/content/highlight/inline.rs`.
 - Code block and file-view syntax wrapping now lower syntect regions to `InlineLine<Style>` with preserved-space wrapping in `crates/core/src/content/highlight/syntax.rs`.
 - Inline diff rendering now lowers cached render spans to `InlineLine<(u8, u8, u8)>` with preserved-space wrapping in `crates/core/src/content/highlight/diff.rs`.
-- ANSI/tool output wrapping now uses `InlineLine` break-on-space semantics in `crates/core/src/content/ansi.rs` and run-index fragments in `crates/tui/src/content/transcript_parsers/tools.rs`, removing the tool-title offset side table.
-- User/exec chrome, process-status rows, and collapsed thinking summaries now use `InlineLine` plain byte ranges in `crates/tui/src/content/transcript_parsers/chrome.rs`, `process_status.rs`, and `thinking.rs`.
+- ANSI/tool output wrapping now uses `InlineLine` break-on-space semantics in `crates/core/src/content/ansi.rs` and run-index fragments in `crates/tui/src/content/display_renderers/tools.rs`, removing the tool-title offset side table.
+- User/exec chrome, process-status rows, and collapsed thinking summaries now use `InlineLine` plain byte ranges in `crates/tui/src/content/display_renderers/chrome.rs`, `process_status.rs`, and `thinking.rs`.
 - Remaining direct uses of `smelt_buffer::wrap` are outside transcript/content rendering: low-level buffer visual layout (`crates/buffer/src/wrap.rs`, `crates/buffer/src/wrap_layout.rs`), the edit re-export (`crates/edit/src/text.rs`), and standalone formatting (`crates/tui/src/format.rs`). `InlineLine::wrap_plain_ranges` delegates to the low-level wrapper for plain single-run compatibility rather than duplicating that algorithm.
 
 Validation:
@@ -714,7 +714,7 @@ Conclusion: this slice intentionally centralizes behavior without changing the r
   - lists, blockquotes, links, images, task lists, strikethrough
   - copy/yank returning original markdown for the above
 - Run the new AST renderer against those tests. Where the old renderer was buggy, update the expected output to the correct behavior and document the fix.
-- Replace `crates/tui/src/content/transcript_parsers/markdown.rs` with the new AST renderer.
+- Replace `crates/tui/src/content/display_renderers/markdown.rs` with the new AST renderer.
 
 **Deliverable:** markdown blocks are parsed once to AST and measured/rendered from it; table layout and custom formatting remain Smelt code; the old line-oriented parser is deleted.
 
@@ -722,7 +722,7 @@ Conclusion: this slice intentionally centralizes behavior without changing the r
 
 - Added `pulldown-cmark` to `smelt_core` with default features disabled.
 - Added `smelt_core::content::markdown_ir::{MarkdownBlock, MarkdownNode, parse_markdown}` in `crates/core/src/content/markdown_ir.rs`. This first IR slice borrows the source and keeps source ranges for plain source, fenced/indented code blocks, tables, and horizontal rules; code nodes also store language and body ranges.
-- Updated `crates/tui/src/content/transcript_parsers/markdown.rs` to render from `MarkdownBlock` while preserving the existing Smelt line renderer for source ranges and the existing table/code/rule renderers for specialized nodes.
+- Updated `crates/tui/src/content/display_renderers/markdown.rs` to render from `MarkdownBlock` while preserving the existing Smelt line renderer for source ranges and the existing table/code/rule renderers for specialized nodes.
 - Kept current copy/source behavior for rendered markdown tables and current spacing behavior for headings, lists, code blocks, tables, and horizontal rules. The bridge intentionally still renders ordinary source lines with the existing inline renderer until full paragraph/list/inline AST lowering lands.
 - The old backtick-fence helpers remain in `smelt_core::content` for now because they are tested parsing primitives, but the transcript markdown renderer no longer uses them.
 
@@ -779,7 +779,7 @@ Conclusion: this slice moves markdown structural parsing into a reusable core IR
 
 - Added `smelt_core::content::code_block::{CodeBlock, parse_code_block, measure_code_block}` in `crates/core/src/content/code_block.rs`. `CodeBlock` stores language plus tab-expanded `InlineLine<()>` rows using preserved-space wrapping; measurement sums `InlineLine::wrap_rows(width.max(1))` and does not touch syntax highlighting.
 - Updated `crates/core/src/content/highlight/syntax.rs` so `render_code_block` consumes `CodeBlock` instead of raw lines. Rendering still computes syntect spans as a visible-render concern, but parsing/tab expansion and line wrapping now share the same IR as measurement.
-- Updated markdown fenced-code and streamed code-line renderers to parse `CodeBlock` before rendering (`crates/tui/src/content/transcript_parsers/markdown.rs`, `crates/tui/src/content/transcript_parsers/code_line.rs`).
+- Updated markdown fenced-code and streamed code-line renderers to parse `CodeBlock` before rendering (`crates/tui/src/content/display_renderers/markdown.rs`, `crates/tui/src/content/display_block.rs`).
 - Added a direct `Block::CodeLine` height path in `crates/tui/src/content/transcript_buf.rs`, including view-state and block-gap accounting, before falling back to `RenderedBlockCache` for other block variants. Code-line exact heights now leave `rendered_block_cache_len()` at zero and increment only the exact-height measurement counter in coverage.
 - The separate syntax render cache and row-range code-block renderer are still future work. This slice removes syntect/rendered-buffer measurement for `Block::CodeLine` while keeping the existing full-render path for markdown blocks and visible rendering.
 
@@ -859,7 +859,7 @@ Validation:
 
 - `cargo test -p smelt-core diff`
 - `cargo test -p smelt-tui transcript_buf`
-- `cargo test -p smelt-tui transcript_parsers`
+- `cargo test -p smelt-tui display_renderers`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo nextest run --workspace` → `3043 passed, 1 skipped`
 
@@ -880,7 +880,7 @@ Completed slice:
 Validation:
 
 - `cargo test -p smelt-tui transcript_buf`
-- `cargo test -p smelt-tui transcript_parsers`
+- `cargo test -p smelt-tui display_renderers`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo nextest run --workspace` → `3046 passed, 1 skipped`
 
@@ -976,12 +976,12 @@ Validation:
 
 - `cargo fmt --check`
 - `cargo test -p smelt-tui display_cache`
-- `cargo test -p smelt-tui transcript_parsers`
+- `cargo test -p smelt-tui display_renderers`
 - `cargo test -p smelt-core transcript_model`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo nextest run --workspace` → `3059 passed, 1 leaky, 1 skipped`
 
-**Deliverable:** complete. `DisplayBlock::Legacy` is gone, `transcript_parsers` no longer owns transcript layout, and the remaining full-row paths are intentional API choices rather than hidden measurement dependencies.
+**Deliverable:** complete. `DisplayBlock::Legacy` is gone, display renderer modules no longer own transcript layout, and the remaining full-row paths are intentional API choices rather than hidden measurement dependencies.
 
 ### Phase 11: Simplify materialization and clean up post-migration boundaries
 
@@ -1120,18 +1120,14 @@ Long-term goal: all three paths render/copy directly from IR row ranges, with `b
 
 ## 10. What to delete / rename
 
-### Deferred deletions
+### Completed deletions / renames
 
-These stay until `DisplayBlock::Legacy` has been migrated into explicit IR variants:
+- `DisplayBlock::Legacy` and the old `layout_block_into` path were removed.
+- `transcript_parsers` module → `display_renderers`; these modules remain as renderer implementations for compiled `DisplayBlock`s.
 
-- `crates/tui/src/content/transcript_parsers/mod.rs` — old `layout_block_into` path
-- `crates/tui/src/content/transcript_parsers/text.rs`, `markdown.rs`, `thinking.rs`, `user.rs`, `code_line.rs`, `compacted.rs`, `exec.rs`, `mode.rs`, `process_status.rs`, `tool_call.rs`, `tools.rs` — merged into `DisplayBlock` impls
-- `crates/core/src/content/block_layout.rs` — old `BlockLayout` if fully replaced by `LayoutIr`
+### Deferred deletions / renames
 
-### Likely renames
-
-- `transcript_parsers` module → `display` or `layout`
-- `BlockLayout` → `LayoutIr`
+- `BlockLayout` → `LayoutIr` if the Lua-returned tool preview/render shape is fully replaced.
 - `RenderedRowCache` (if optional visible-row cache is reintroduced)
 
 ### Keep

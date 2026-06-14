@@ -547,14 +547,10 @@ impl BlockHistory {
         call_id: &str,
         body: crate::content::block_layout::ToolBody,
     ) -> bool {
-        let Some(state) = self.tool_states.get_mut(call_id) else {
+        let Some(changed) = self.set_tool_body_and_hash(call_id, Some(body)) else {
             return false;
         };
-        let before = state.display_hash();
-        state.body = Some(body);
-        let after = state.display_hash();
-        self.tool_display_hashes.insert(call_id.to_string(), after);
-        if before == after {
+        if !changed {
             return false;
         }
         self.bump_generation();
@@ -566,14 +562,20 @@ impl BlockHistory {
         call_id: &str,
         body: Option<crate::content::block_layout::ToolBody>,
     ) -> bool {
-        let Some(state) = self.tool_states.get_mut(call_id) else {
-            return false;
-        };
+        self.set_tool_body_and_hash(call_id, body).unwrap_or(false)
+    }
+
+    fn set_tool_body_and_hash(
+        &mut self,
+        call_id: &str,
+        body: Option<crate::content::block_layout::ToolBody>,
+    ) -> Option<bool> {
+        let state = self.tool_states.get_mut(call_id)?;
         let before = state.display_hash();
         state.body = body;
         let after = state.display_hash();
         self.tool_display_hashes.insert(call_id.to_string(), after);
-        before != after
+        Some(before != after)
     }
 
     /// Replace block content in place. Preserves `BlockId`, `Status`, and
@@ -881,7 +883,7 @@ mod tests {
     #[test]
     fn tool_body_cache_hydration_does_not_bump_generation() {
         let mut history = BlockHistory::new();
-        history.push_with_state(
+        let id = history.push_with_state(
             Block::ToolCall {
                 call_id: "tc1".into(),
                 name: "x".into(),
@@ -892,9 +894,21 @@ mod tests {
             pending_state(),
         );
         let g = history.generation();
+        let base_key = LayoutKey {
+            width: 0,
+            show_thinking: false,
+            view_state: ViewState::Expanded,
+            content_hash: 0,
+            sidecar_hash: 0,
+        };
+        let before_sidecar = history.resolve_key(id, base_key).sidecar_hash;
 
         assert!(history.hydrate_tool_body_cache("tc1", Some(text_tool_body("cached body"))));
         assert_eq!(history.generation(), g);
+        assert_ne!(
+            history.resolve_key(id, base_key).sidecar_hash,
+            before_sidecar
+        );
     }
 
     #[test]
