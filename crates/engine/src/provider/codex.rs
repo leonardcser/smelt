@@ -25,6 +25,27 @@ fn cred_store() -> CredStore {
     }
 }
 
+#[derive(Clone)]
+struct CodexAuthEnv {
+    issuer: String,
+    token_store: CredStore,
+    now: fn() -> u64,
+}
+
+impl CodexAuthEnv {
+    fn production() -> Self {
+        Self {
+            issuer: ISSUER.to_string(),
+            token_store: cred_store(),
+            now: unix_now,
+        }
+    }
+}
+
+fn now(env: &CodexAuthEnv) -> u64 {
+    (env.now)()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CodexTokens {
     pub(crate) access_token: String,
@@ -36,19 +57,22 @@ pub(crate) struct CodexTokens {
 }
 
 impl CodexTokens {
-    pub(crate) fn needs_refresh(&self) -> bool {
-        let now = unix_now();
+    fn needs_refresh_at(&self, now: u64) -> bool {
         now + 60 >= self.expires_at
             || (self.last_refresh > 0 && now - self.last_refresh >= REFRESH_INTERVAL_SECS)
     }
 
-    pub(crate) fn save(&self) -> Result<(), String> {
+    fn save_to(&self, store: &CredStore) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        cred_store().save(&json)
+        store.save(&json)
     }
 
     pub(crate) fn load() -> Option<Self> {
-        let json = cred_store().load()?;
+        Self::load_from(&cred_store())
+    }
+
+    fn load_from(store: &CredStore) -> Option<Self> {
+        let json = store.load()?;
         serde_json::from_str(&json).ok()
     }
 
@@ -148,6 +172,49 @@ fn generate_state() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+struct TokenRefreshRequest {
+    url: String,
+    body: serde_json::Value,
+}
+
+struct TokenExchangeRequest {
+    url: String,
+    body: String,
+}
+
+fn token_url(env: &CodexAuthEnv) -> String {
+    format!("{}/oauth/token", env.issuer)
+}
+
+fn build_refresh_request(env: &CodexAuthEnv, refresh_token: &str) -> TokenRefreshRequest {
+    TokenRefreshRequest {
+        url: token_url(env),
+        body: serde_json::json!({
+            "client_id": CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }),
+    }
+}
+
+fn build_exchange_request(
+    env: &CodexAuthEnv,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> TokenExchangeRequest {
+    TokenExchangeRequest {
+        url: token_url(env),
+        body: url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "authorization_code")
+            .append_pair("code", code)
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("client_id", CLIENT_ID)
+            .append_pair("code_verifier", code_verifier)
+            .finish(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -320,18 +387,29 @@ async fn exchange_code(
     code_verifier: &str,
     redirect_uri: &str,
 ) -> Result<CodexTokens, String> {
-    let form_body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("grant_type", "authorization_code")
-        .append_pair("code", code)
-        .append_pair("redirect_uri", redirect_uri)
-        .append_pair("client_id", CLIENT_ID)
-        .append_pair("code_verifier", code_verifier)
-        .finish();
+    exchange_code_with_env(
+        client,
+        code,
+        code_verifier,
+        redirect_uri,
+        &CodexAuthEnv::production(),
+    )
+    .await
+}
+
+async fn exchange_code_with_env(
+    client: &reqwest::Client,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+    env: &CodexAuthEnv,
+) -> Result<CodexTokens, String> {
+    let spec = build_exchange_request(env, code, code_verifier, redirect_uri);
 
     let resp = client
-        .post(format!("{ISSUER}/oauth/token"))
+        .post(spec.url)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form_body)
+        .body(spec.body)
         .send()
         .await
         .map_err(|e| format!("token exchange failed: {e}"))?;
@@ -346,25 +424,28 @@ async fn exchange_code(
         .await
         .map_err(|e| format!("bad token response: {e}"))?;
 
-    save_token_response(tokens, None)
+    save_token_response_to(tokens, None, &env.token_store, now(env))
 }
 
 pub(crate) async fn refresh_tokens(
     client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<CodexTokens, String> {
-    let previous = CodexTokens::load();
+    refresh_tokens_with_env(client, refresh_token, &CodexAuthEnv::production()).await
+}
 
-    let body = serde_json::json!({
-        "client_id": CLIENT_ID,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-    });
+async fn refresh_tokens_with_env(
+    client: &reqwest::Client,
+    refresh_token: &str,
+    env: &CodexAuthEnv,
+) -> Result<CodexTokens, String> {
+    let previous = CodexTokens::load_from(&env.token_store);
+    let spec = build_refresh_request(env, refresh_token);
 
     let resp = client
-        .post(format!("{ISSUER}/oauth/token"))
+        .post(spec.url)
         .header("Content-Type", "application/json")
-        .json(&body)
+        .json(&spec.body)
         .send()
         .await
         .map_err(|e| format!("token refresh failed: {e}"))?;
@@ -379,7 +460,7 @@ pub(crate) async fn refresh_tokens(
         .await
         .map_err(|e| format!("bad refresh response: {e}"))?;
 
-    let result = save_token_response(tokens, previous.as_ref())?;
+    let result = save_token_response_to(tokens, previous.as_ref(), &env.token_store, now(env))?;
 
     log::entry(
         log::Level::Debug,
@@ -432,13 +513,15 @@ fn merge_token_response(
     })
 }
 
-fn save_token_response(
+fn save_token_response_to(
     tokens: TokenResponse,
     previous: Option<&CodexTokens>,
+    store: &CredStore,
+    now: u64,
 ) -> Result<CodexTokens, String> {
-    let result = merge_token_response(tokens, previous, unix_now())?;
+    let result = merge_token_response(tokens, previous, now)?;
     result
-        .save()
+        .save_to(store)
         .map_err(|e| format!("failed to save tokens: {e}"))?;
     Ok(result)
 }
@@ -706,13 +789,21 @@ pub(crate) async fn device_code_login(client: &reqwest::Client) -> Result<CodexT
 pub(crate) async fn ensure_access_token_full(
     client: &reqwest::Client,
 ) -> Result<CodexTokens, String> {
-    let tokens = CodexTokens::load().ok_or("not logged in to Codex; run `smelt auth` first")?;
+    ensure_access_token_full_with_env(client, &CodexAuthEnv::production()).await
+}
 
-    if !tokens.needs_refresh() {
+async fn ensure_access_token_full_with_env(
+    client: &reqwest::Client,
+    env: &CodexAuthEnv,
+) -> Result<CodexTokens, String> {
+    let tokens = CodexTokens::load_from(&env.token_store)
+        .ok_or("not logged in to Codex; run `smelt auth` first")?;
+
+    if !tokens.needs_refresh_at(now(env)) {
         return Ok(tokens);
     }
 
-    refresh_tokens(client, &tokens.refresh_token).await
+    refresh_tokens_with_env(client, &tokens.refresh_token, env).await
 }
 
 async fn ensure_access_token(client: &reqwest::Client) -> Result<(String, Option<String>), String> {
@@ -746,33 +837,33 @@ mod tests {
 
     #[test]
     fn needs_refresh_true_when_within_60_seconds_of_expiry() {
-        let t = tokens(unix_now() + 30, unix_now() - 100);
-        assert!(t.needs_refresh());
+        let t = tokens(1_030, 900);
+        assert!(t.needs_refresh_at(1_000));
     }
 
     #[test]
     fn needs_refresh_true_when_past_expiry() {
-        let t = tokens(unix_now().saturating_sub(100), unix_now() - 200);
-        assert!(t.needs_refresh());
+        let t = tokens(900, 800);
+        assert!(t.needs_refresh_at(1_000));
     }
 
     #[test]
     fn needs_refresh_false_when_expiry_far_and_recent_refresh() {
-        let t = tokens(unix_now() + 7200, unix_now() - 60);
-        assert!(!t.needs_refresh());
+        let t = tokens(8_200, 940);
+        assert!(!t.needs_refresh_at(1_000));
     }
 
     #[test]
     fn needs_refresh_true_when_last_refresh_older_than_interval() {
-        let t = tokens(unix_now() + 7200, unix_now() - (REFRESH_INTERVAL_SECS + 1));
-        assert!(t.needs_refresh());
+        let t = tokens(REFRESH_INTERVAL_SECS + 2_000, 1_000);
+        assert!(t.needs_refresh_at(1_000 + REFRESH_INTERVAL_SECS + 1));
     }
 
     #[test]
     fn needs_refresh_ignores_last_refresh_when_zero() {
         // last_refresh == 0 means never refreshed, the time-based check is skipped.
-        let t = tokens(unix_now() + 7200, 0);
-        assert!(!t.needs_refresh());
+        let t = tokens(8_200, 0);
+        assert!(!t.needs_refresh_at(1_000));
     }
 
     // ---- parse_jwt_claims ----
@@ -867,6 +958,118 @@ mod tests {
         assert!(url.contains("originator=smelt"));
         // redirect_uri is url-encoded.
         assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+    }
+
+    fn fixed_now() -> u64 {
+        1_000
+    }
+
+    fn test_env(issuer: String, token_path: std::path::PathBuf) -> CodexAuthEnv {
+        CodexAuthEnv {
+            issuer,
+            token_store: CredStore {
+                keyring_service: None,
+                keyring_user: None,
+                file_path: token_path,
+                env_var: None,
+            },
+            now: fixed_now,
+        }
+    }
+
+    async fn spawn_json_response(body: String) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            loop {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let req = String::from_utf8_lossy(&buf);
+                let Some((headers, request_body)) = req.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                    })
+                    .unwrap_or(0);
+                if request_body.len() >= content_len {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&buf).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+            req
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    #[test]
+    fn build_refresh_request_uses_env_issuer_and_json_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(
+            "https://issuer.example".to_string(),
+            tmp.path().join("tokens.json"),
+        );
+
+        let req = build_refresh_request(&env, "refresh-token");
+
+        assert_eq!(req.url, "https://issuer.example/oauth/token");
+        assert_eq!(req.body["client_id"], CLIENT_ID);
+        assert_eq!(req.body["grant_type"], "refresh_token");
+        assert_eq!(req.body["refresh_token"], "refresh-token");
+    }
+
+    #[tokio::test]
+    async fn refresh_tokens_with_env_uses_local_store_and_persists_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let access = jwt_with(&serde_json::json!({
+            "exp": 1_500_u64,
+            "chatgpt_account_id": "new-acct"
+        }));
+        let (issuer, task) = spawn_json_response(
+            serde_json::json!({
+                "access_token": access,
+                "expires_in": 120
+            })
+            .to_string(),
+        )
+        .await;
+        let env = test_env(issuer, tmp.path().join("tokens.json"));
+        previous_tokens().save_to(&env.token_store).unwrap();
+
+        let out = refresh_tokens_with_env(&reqwest::Client::new(), "prev-refresh", &env)
+            .await
+            .unwrap();
+
+        assert_eq!(out.refresh_token, "prev-refresh");
+        assert_eq!(out.expires_at, 1_500);
+        assert_eq!(out.account_id.as_deref(), Some("new-acct"));
+        assert_eq!(out.last_refresh, fixed_now());
+        let request = task.await.unwrap();
+        assert!(request.starts_with("POST /oauth/token HTTP/1.1"));
+        assert!(request.contains(r#""grant_type":"refresh_token""#));
+        assert!(request.contains(r#""refresh_token":"prev-refresh""#));
+        let saved = std::fs::read_to_string(&env.token_store.file_path).unwrap();
+        assert!(saved.contains("prev-refresh"), "{saved}");
+        assert!(saved.contains("new-acct"), "{saved}");
     }
 
     // ---- html_error ----
