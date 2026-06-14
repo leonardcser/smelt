@@ -904,15 +904,17 @@ mod tests {
             let buf = app.ui.buf(win.buf).expect("transcript buffer");
             (0..vp.rect.height)
                 .find_map(|rel| {
-                    let local = win.local_visual_row(
-                        top.saturating_add(rel as crate::smelt_edit::RowIndex),
-                    ) as usize;
+                    let local = win
+                        .local_visual_row(top.saturating_add(rel as crate::smelt_edit::RowIndex))
+                        as usize;
                     let line = buf.get_line(local)?;
                     line.starts_with("line ").then(|| (rel, line.to_string()))
                 })
                 .expect("visible transcript line")
         };
-        let end_rel = start_rel.saturating_add(2).min(vp.rect.height.saturating_sub(1));
+        let end_rel = start_rel
+            .saturating_add(2)
+            .min(vp.rect.height.saturating_sub(1));
 
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1015,15 +1017,17 @@ mod tests {
             let buf = app.ui.buf(win.buf).expect("transcript buffer");
             (0..vp.rect.height)
                 .find_map(|rel| {
-                    let local = win.local_visual_row(
-                        top.saturating_add(rel as crate::smelt_edit::RowIndex),
-                    ) as usize;
+                    let local = win
+                        .local_visual_row(top.saturating_add(rel as crate::smelt_edit::RowIndex))
+                        as usize;
                     let line = buf.get_line(local)?;
                     line.starts_with("line ").then(|| (rel, line.to_string()))
                 })
                 .expect("visible transcript line")
         };
-        let end_rel = start_rel.saturating_add(2).min(vp.rect.height.saturating_sub(1));
+        let end_rel = start_rel
+            .saturating_add(2)
+            .min(vp.rect.height.saturating_sub(1));
 
         let down = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
