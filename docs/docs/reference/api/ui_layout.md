@@ -28,7 +28,9 @@ Wrap a Win handle or paint id into a leaf node. `opts` accepts `border`, `title`
 fun(w: integer?, h: integer?): smelt.ui.layout.Measure
 ```
 
-Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.
+Types: [`smelt.ui.layout.Measure`](types.md#smeltuilayoutmeasure)
+
+Construct a shareable natural-size handle for use with `smelt.ui.layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.
 
 ## `smelt.ui.layout.set`
 

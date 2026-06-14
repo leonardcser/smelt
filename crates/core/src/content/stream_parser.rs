@@ -51,7 +51,6 @@ impl StreamParser {
             let call_id = tool.call_id.clone();
             history.update_tool_state(&call_id, |state| {
                 state.elapsed = Some(elapsed);
-                state.invalidate_body();
             });
         }
     }
@@ -389,7 +388,6 @@ impl StreamParser {
             elapsed: None,
             output: None,
             user_message: None,
-            body: None,
         };
         let block_id = history.push_with_state(block, call_id.clone(), state);
         history.set_status(block_id, Status::Streaming);
@@ -550,12 +548,7 @@ impl StreamParser {
         call_id: &str,
         mutator: impl FnOnce(&mut ToolState),
     ) {
-        history.update_tool_state(call_id, |state| {
-            mutator(state);
-            // Any mutation can shift what the plugin's `render` would produce, so drop
-            // the pre-baked layout; the next render pass refills it on the main thread.
-            state.invalidate_body();
-        });
+        history.update_tool_state(call_id, mutator);
     }
 
     // ── Exec lifecycle ──────────────────────────────────────────────

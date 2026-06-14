@@ -1,5 +1,5 @@
 use smelt_core::content::builder::LineBuilder;
-use smelt_core::content::highlight::{print_diff_ir, DiffIr, GutterStyle};
+use smelt_core::content::highlight::{DiffIr, GutterStyle};
 
 /// Semantic source-view content returned by Lua block-layout leaves.
 pub(crate) enum SourceView<'a> {
@@ -12,13 +12,22 @@ pub(crate) enum SourceView<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct SourceViewTarget {
     indent_cells: u16,
+    layout_width: u16,
+    skip_rows: u16,
     max_rows: u16,
 }
 
 impl SourceViewTarget {
-    pub(crate) const fn new(indent_cells: u16, max_rows: u16) -> Self {
+    pub(crate) const fn new(
+        indent_cells: u16,
+        layout_width: u16,
+        skip_rows: u16,
+        max_rows: u16,
+    ) -> Self {
         Self {
             indent_cells,
+            layout_width,
+            skip_rows,
             max_rows,
         }
     }
@@ -30,12 +39,13 @@ pub(crate) fn render_source_view(
     target: SourceViewTarget,
 ) -> u16 {
     match view {
-        SourceView::DiffIr(cache) => print_diff_ir(
+        SourceView::DiffIr(cache) => smelt_core::content::highlight::print_diff_ir_with_width(
             out,
             cache,
             GutterStyle::InlineLineNumbers,
             target.indent_cells,
-            0,
+            target.layout_width,
+            target.skip_rows,
             target.max_rows,
         ),
     }

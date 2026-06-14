@@ -152,7 +152,6 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            body: None,
         }
     }
 

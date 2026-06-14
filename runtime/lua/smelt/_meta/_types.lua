@@ -448,6 +448,11 @@
 ---@field watchdog_grace_ms? integer Extra time added when a tool argument sets the watchdog deadline, in milliseconds.
 ---@field override? boolean Replace a core tool of the same name (advanced).
 
+--- Shareable natural-size handle returned by `smelt.ui.layout.measure`.
+---@class smelt.ui.layout.Measure
+---@field set fun(w: integer, h: integer): nil Update the measured natural size.
+---@field get fun(): integer, integer Return the current measured width and height.
+
 --- Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.
 ---@class smelt.win.Win
 ---@field close fun(): nil Close the overlay leaf. No-op if the window is already closed.

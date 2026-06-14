@@ -226,6 +226,7 @@ mod tests {
         ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
             content: content.into(),
             hl_group: None,
+            ansi: false,
         })))
     }
 
@@ -242,7 +243,6 @@ mod tests {
             elapsed: Some(std::time::Duration::from_millis(12)),
             output: None,
             user_message: Some("done".into()),
-            body: Some(body.clone()),
         };
         ToolBodyCacheEntry {
             id: smelt_core::transcript_model::BlockId::new(8),

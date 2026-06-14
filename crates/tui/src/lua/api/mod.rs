@@ -121,36 +121,6 @@ impl LuaRuntime {
 
         smelt.set("keymap", smelt_keymap)?;
 
-        // Override `smelt.layout.leaf` so it accepts a `Buf` userdata in
-        // addition to the raw `u64` the host-tier registration accepts.
-        // Tools' `render` callbacks now own Buf handles, not numeric ids.
-        let layout_tbl: mlua::Table = smelt.get("layout")?;
-        LuaMod::extend(lua, layout_tbl, "smelt.layout", Tier::UiHost).fn_(
-            "leaf",
-            "Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.",
-            &["buf"],
-            |_, buf: mlua::Value| -> LuaResult<smelt_core::lua::api::layout::LuaBlockLayout> {
-                let id = match buf {
-                    mlua::Value::Integer(n) => smelt_core::buffer::BufId(n as u64),
-                    mlua::Value::UserData(ud) => ud.borrow::<buf::LuaBuf>()?.id,
-                    other => {
-                        return Err(mlua::Error::FromLuaConversionError {
-                            from: other.type_name(),
-                            to: "smelt.buf.Buf or integer".into(),
-                            message: Some(
-                                "smelt.layout.leaf: expected a Buf userdata or integer".into(),
-                            ),
-                        });
-                    }
-                };
-                Ok(smelt_core::lua::api::layout::LuaBlockLayout(
-                    smelt_core::content::block_layout::BlockLayout::Leaf(
-                        smelt_core::content::block_layout::LuaLeaf::Buf(id),
-                    ),
-                ))
-            },
-        )?;
-
         // Cross-cutting UiHost-tier additions to host modules.
         let cmd_tbl: mlua::Table = smelt.get("cmd")?;
         LuaMod::extend(lua, cmd_tbl, "smelt.cmd", Tier::UiHost).fn_(

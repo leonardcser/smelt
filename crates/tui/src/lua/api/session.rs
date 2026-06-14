@@ -582,9 +582,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let theme = app.ui.theme().clone();
                 let mut plan =
                     view.plan_projection_measured(width, show_thinking, scroll_target, height);
-                let tool_bodies_changed = crate::app::transcript::prerender_tool_bodies_for_range(
+                let tool_bodies_changed = view.prerender_tool_bodies_for_range(
                     &app.lua,
-                    view.history_mut(),
                     plan.block_range(),
                 );
                 if tool_bodies_changed {

@@ -47,9 +47,10 @@ mod tests {
         theme: &Theme,
         block: &Block,
         state: Option<&ToolState>,
+        body: Option<smelt_core::content::block_layout::ToolBody>,
         ctx: LayoutContext,
     ) -> u16 {
-        let display = compile_block(block, state);
+        let display = compile_block(block, state, body);
         render_block_into(
             buf,
             &display,
@@ -70,7 +71,20 @@ mod tests {
     ) -> Vec<TestLine> {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-        let rows = render_block_test_into(&mut buf, &theme, block, state, *ctx) as usize;
+        let rows = render_block_test_into(&mut buf, &theme, block, state, None, *ctx) as usize;
+        read_buffer(&buf, &theme, rows)
+    }
+
+    fn layout_block_test_with_body(
+        block: &Block,
+        state: Option<&ToolState>,
+        body: smelt_core::content::block_layout::ToolBody,
+        ctx: &LayoutContext,
+    ) -> Vec<TestLine> {
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let rows =
+            render_block_test_into(&mut buf, &theme, block, state, Some(body), *ctx) as usize;
         read_buffer(&buf, &theme, rows)
     }
 
@@ -119,7 +133,6 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            body: None,
         }
     }
 
@@ -135,6 +148,7 @@ mod tests {
             &theme,
             block,
             st.as_ref(),
+            None,
             LayoutContext::new(W as u16, true, ViewState::Expanded),
         )
     }
@@ -162,6 +176,7 @@ mod tests {
                     &theme,
                     &blocks[i],
                     st.as_ref(),
+                    None,
                     LayoutContext::new(W as u16, true, ViewState::Expanded),
                 )
             };
@@ -187,6 +202,7 @@ mod tests {
                     &theme,
                     &blocks[i],
                     st.as_ref(),
+                    None,
                     LayoutContext::new(W as u16, true, ViewState::Expanded),
                 )
             };
@@ -212,6 +228,7 @@ mod tests {
                     &theme,
                     &blocks[i],
                     st.as_ref(),
+                    None,
                     LayoutContext::new(W as u16, true, ViewState::Expanded),
                 )
             };
@@ -362,6 +379,7 @@ mod tests {
                         &theme,
                         &blocks[i],
                         st.as_ref(),
+                        None,
                         LayoutContext::new(W as u16, true, ViewState::Expanded),
                     )
                 };
@@ -517,7 +535,6 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(1)),
             output: None,
             user_message: None,
-            body: None,
         };
         let ctx = LayoutContext {
             width: 30,
@@ -560,7 +577,6 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            body: None,
         };
         let ctx = LayoutContext {
             width: 80,
@@ -606,7 +622,6 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(2)),
             output: None,
             user_message: None,
-            body: None,
         };
         let pending_display = layout_block_test(&block, Some(&pending), &ctx);
         assert!(pending_display[0]
@@ -618,7 +633,6 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(2)),
             output: None,
             user_message: None,
-            body: None,
         };
         let done_display = layout_block_test(&block, Some(&done), &ctx);
         assert!(done_display[0].text.contains("echo hi  2s"));
@@ -629,7 +643,6 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(65)),
             output: None,
             user_message: None,
-            body: None,
         };
         let failed_display = layout_block_test(&block, Some(&failed), &ctx);
         assert!(failed_display[0].text.contains("echo hi  1m5s"));
@@ -655,7 +668,6 @@ mod tests {
                 elapsed: Some(elapsed),
                 output: None,
                 user_message: None,
-                body: None,
             };
             layout_block_test(&block, Some(&state), &ctx)[0]
                 .text
@@ -671,9 +683,9 @@ mod tests {
         assert!(render_elapsed(std::time::Duration::from_secs(3660)).contains("  1h1m"));
     }
 
-    /// Width-independent tool bodies are precomputed on the main thread and
-    /// stashed on `ToolState.body`; this test asserts that when a body is present,
-    /// its content reaches the transcript and `output.content` does not.
+    /// Width-independent tool bodies are precomputed and stored in the display
+    /// model; this test asserts that when a body is present, its content reaches
+    /// the transcript and `output.content` does not.
     #[test]
     fn tool_body_replaces_raw_output() {
         use smelt_core::content::block_layout::{BlockLayout, IrLeaf, TextSpec, ToolBody};
@@ -682,6 +694,7 @@ mod tests {
         let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
             content: "fn main() {\n    println!(\"hi\");".into(),
             hl_group: None,
+            ansi: false,
         })));
 
         let mut args = HashMap::new();
@@ -704,14 +717,13 @@ mod tests {
                 metadata: None,
             })),
             user_message: None,
-            body: Some(body),
         };
         let ctx = LayoutContext {
             width: W as u16,
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx);
+        let display = layout_block_test_with_body(&block, Some(&state), body, &ctx);
         let joined: String = display
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.text.as_str()))
@@ -744,14 +756,13 @@ mod tests {
                 elapsed: None,
                 output: None,
                 user_message: None,
-                body: Some(body),
             };
             let ctx = LayoutContext {
                 width: W as u16,
                 show_thinking: true,
                 view_state: ViewState::Expanded,
             };
-            layout_block_test(&block, Some(&state), &ctx)
+            layout_block_test_with_body(&block, Some(&state), body, &ctx)
                 .into_iter()
                 .find_map(|line| line.text.find("inserted line"))
                 .expect("diff should render the inserted line")
@@ -790,14 +801,13 @@ mod tests {
                 elapsed: None,
                 output: None,
                 user_message: None,
-                body: Some(body),
             };
             let ctx = LayoutContext {
                 width: W as u16,
                 show_thinking: true,
                 view_state: ViewState::Expanded,
             };
-            layout_block_test(&block, Some(&state), &ctx)
+            layout_block_test_with_body(&block, Some(&state), body, &ctx)
                 .into_iter()
                 .map(|line| line.text)
                 .collect::<Vec<_>>()
@@ -858,18 +868,19 @@ mod tests {
             BlockLayout::Leaf(LuaLeaf::Text(TextSpec {
                 content: "kept".into(),
                 hl_group: None,
+                ansi: false,
             })),
             BlockLayout::Leaf(LuaLeaf::Buf(BufId(99))),
         ]);
 
         let err = crate::app::transcript::compile_tool_body(&layout)
             .expect_err("buffer leaves should reject the whole body");
-        assert!(err.contains("layout.leaf"), "unexpected error: {err}");
+        assert!(err.contains("buffer leaves"), "unexpected error: {err}");
     }
 
     #[test]
     fn tool_body_diff_ir_respects_tool_row_cap() {
-        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, ToolBody};
+        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, SourceViewIr, ToolBody};
         use smelt_core::transcript_model::ToolOutput;
 
         let content = (0..80)
@@ -883,6 +894,9 @@ mod tests {
             summary: protocol::StyledLines::from_plain("x.txt"),
             args: HashMap::new(),
         };
+        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
+            ir,
+        ))));
         let state = ToolState {
             status: ToolStatus::Ok,
             elapsed: None,
@@ -892,24 +906,127 @@ mod tests {
                 metadata: None,
             })),
             user_message: None,
-            body: Some(ToolBody::Layout(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))),
         };
         let ctx = LayoutContext {
             width: W as u16,
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx);
+        let display = layout_block_test_with_body(&block, Some(&state), body, &ctx);
         assert_eq!(display.len(), 1 + MAX_TOOL_BLOCK_ROWS);
     }
 
     #[test]
+    fn layout_gutter_reduces_child_wrap_width() {
+        use smelt_core::content::block_layout::{
+            BlockLayout, GutterSpec, IrLeaf, TextSpec, ToolBody,
+        };
+
+        let body = ToolBody::Layout(BlockLayout::Gutter {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                content: "abcdefghijk".into(),
+                hl_group: None,
+                ansi: false,
+            }))),
+            spec: GutterSpec { text: ">>".into() },
+        });
+        let block = Block::ToolCall {
+            call_id: "c-gutter-wrap".into(),
+            name: "bash".into(),
+            summary: protocol::StyledLines::from_plain("wrap"),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            output: None,
+            user_message: None,
+        };
+        let ctx = LayoutContext {
+            width: 15,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+
+        let display = layout_block_test_with_body(&block, Some(&state), body, &ctx);
+        let rows = display
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows.len(),
+            3,
+            "gutter should force the 11-cell child to wrap at 10 cells: {rows:?}"
+        );
+        assert_eq!(rows[1], ">>abcdefghij");
+        assert_eq!(rows[2], ">>k");
+    }
+
+    #[test]
+    fn tool_body_cap_tail_keeps_last_rows_and_marks_above() {
+        use smelt_core::content::block_layout::{
+            BlockLayout, CapKeep, CapMarker, CapSpec, IrLeaf, TextSpec, ToolBody,
+        };
+
+        let content = (0..10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = ToolBody::Layout(BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                content,
+                hl_group: None,
+                ansi: false,
+            }))),
+            spec: CapSpec {
+                rows: 3,
+                keep: CapKeep::Tail,
+                marker: Some(CapMarker::Above),
+            },
+        });
+
+        let block = Block::ToolCall {
+            call_id: "c-tail-cap".into(),
+            name: "bash".into(),
+            summary: protocol::StyledLines::from_plain("printf lines"),
+            args: HashMap::new(),
+        };
+        let state = ToolState {
+            status: ToolStatus::Ok,
+            elapsed: None,
+            output: None,
+            user_message: None,
+        };
+        let ctx = LayoutContext {
+            width: W as u16,
+            show_thinking: true,
+            view_state: ViewState::Expanded,
+        };
+
+        let display = layout_block_test_with_body(&block, Some(&state), body, &ctx);
+        let joined = display
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(joined.contains("... 7 lines above"), "got: {joined:?}");
+        assert!(joined.contains("line 7"), "got: {joined:?}");
+        assert!(joined.contains("line 8"), "got: {joined:?}");
+        assert!(joined.contains("line 9"), "got: {joined:?}");
+        assert!(!joined.contains("line 0"), "got: {joined:?}");
+    }
+
+    #[test]
     fn tool_body_ir_replaces_output_fallback() {
-        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, ToolBody};
+        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, SourceViewIr, ToolBody};
         use smelt_core::transcript_model::ToolOutput;
 
         let ir = smelt_core::content::highlight::build_file_view_ir("IR_LAYOUT\n", Some("txt"));
-        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::DiffIr(ir)));
+        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
+            ir,
+        ))));
 
         let block = Block::ToolCall {
             call_id: "c-ir".into(),
@@ -926,14 +1043,13 @@ mod tests {
                 metadata: None,
             })),
             user_message: None,
-            body: Some(body),
         };
         let ctx = LayoutContext {
             width: W as u16,
             show_thinking: true,
             view_state: ViewState::Expanded,
         };
-        let display = layout_block_test(&block, Some(&state), &ctx);
+        let display = layout_block_test_with_body(&block, Some(&state), body, &ctx);
         let joined: String = display
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.text.as_str()))
@@ -968,7 +1084,6 @@ mod tests {
                 metadata: None,
             })),
             user_message: None,
-            body: None,
         };
         let ctx = LayoutContext {
             width: W as u16,
@@ -1002,7 +1117,6 @@ mod tests {
             elapsed: Some(std::time::Duration::from_secs(3)),
             output: None,
             user_message: None,
-            body: None,
         };
         let ctx = LayoutContext {
             width: 80,

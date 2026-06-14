@@ -122,9 +122,9 @@ local function register_exit_plan_mode()
     summary = function(_) return "plan ready" end,
     render = function(args, output, ctx)
       if output.is_error then
-        return smelt.layout.tool_output(output, ctx)
+        return require("smelt.transcript.defaults").render_tool_output(output, ctx)
       end
-      return smelt.layout.markdown(args.plan_summary or "")
+      return smelt.layout.text(args.plan_summary or "")
     end,
     execute = function(args)
       local summary = args.plan_summary or ""

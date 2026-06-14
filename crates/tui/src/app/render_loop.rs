@@ -173,7 +173,7 @@ impl TuiApp {
                     let tool_bodies_changed =
                         crate::app::transcript::prerender_tool_bodies_for_range(
                             lua,
-                            transcript.history_mut(),
+                            transcript,
                             plan.block_range(),
                         );
                     if tool_bodies_changed {

@@ -153,7 +153,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
     local items = {}
     local content = (output.content or ""):gsub("%s+$", "")
     if content:match("%S") then
-      table.insert(items, smelt.layout.tool_output({
+      table.insert(items, require("smelt.transcript.defaults").render_tool_output({
         content = content,
         is_error = output.is_error,
       }, ctx))

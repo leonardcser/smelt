@@ -650,6 +650,15 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `watchdog_grace_ms` | `integer` |  | Extra time added when a tool argument sets the watchdog deadline, in milliseconds. |
 | `override` | `boolean` |  | Replace a core tool of the same name (advanced). |
 
+### `smelt.ui.layout.Measure`
+
+Shareable natural-size handle returned by `smelt.ui.layout.measure`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `set` | `fun(w: integer, h: integer): nil` | yes | Update the measured natural size. |
+| `get` | `fun(): integer, integer` | yes | Return the current measured width and height. |
+
 ### `smelt.win.Win`
 
 Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.

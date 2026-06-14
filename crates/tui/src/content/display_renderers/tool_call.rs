@@ -1,5 +1,6 @@
 //! `Block::ToolCall` renderer - thin delegation to `super::tools::render_tool`.
 
+use smelt_core::content::block_layout::ToolBody;
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::transcript_model::{ToolState, ToolStatus};
 
@@ -17,6 +18,7 @@ pub(in crate::content) fn render(
     status: ToolStatus,
     elapsed: Option<Duration>,
     state: &ToolState,
+    body: Option<&ToolBody>,
     width: usize,
 ) -> u16 {
     render_tool(
@@ -28,7 +30,7 @@ pub(in crate::content) fn render(
         elapsed,
         state.output.as_deref(),
         state.user_message.as_deref(),
-        state.body.as_ref(),
+        body,
         width,
     )
 }

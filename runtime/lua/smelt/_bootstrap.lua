@@ -341,29 +341,6 @@ smelt.tools.register = function(def)
   return __smelt_raw_tools_register__(def)
 end
 
--- The layout helpers depend on `smelt.layout.leaf` from the UiHost tier
--- (registered by the TUI crate). In headless/core-only contexts the
--- namespace is absent, so we no-op the definitions rather than crash on
--- nil-index. This keeps `_bootstrap.lua` loadable against any tier.
-if smelt.layout and smelt.layout.leaf then
-  ---@type fun(content: string): any
-  function smelt.layout.markdown(content)
-    local buf = smelt.buf.new()
-    smelt.render.markdown(buf, content or "")
-    return smelt.layout.leaf(buf)
-  end
-
-  -- Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
-  -- axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
-  ---@type fun(char: string?): any
-  function smelt.layout.sep(char)
-    local buf = smelt.buf.new()
-    buf:lines({ char or "─" })
-    return smelt.layout.leaf(buf)
-  end
-end
-
-
 -- Picker depends on `smelt.prompt.open_picker` (UiHost tier). Only
 -- attach the convenience wrapper when the prompt namespace is present.
 if smelt.picker and smelt.prompt and smelt.prompt.open_picker then

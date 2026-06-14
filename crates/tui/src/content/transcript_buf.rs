@@ -506,7 +506,7 @@ impl TranscriptProjection {
 
     pub(crate) fn hydrate_display_cache(
         &mut self,
-        history: &mut BlockHistory,
+        history: &BlockHistory,
         data: crate::content::display_cache::DisplayCacheData,
     ) -> usize {
         self.cached_row_indexes = data.row_indexes;
@@ -538,6 +538,33 @@ impl TranscriptProjection {
 
     pub(crate) fn display_cache_generation(&self) -> u64 {
         self.display_cache_generation
+    }
+
+    pub(crate) fn has_tool_body(&self, history: &BlockHistory, id: BlockId, call_id: &str) -> bool {
+        self.display_model.has_tool_body(history, id, call_id)
+    }
+
+    pub(crate) fn install_tool_body(
+        &mut self,
+        history: &BlockHistory,
+        id: BlockId,
+        call_id: String,
+        body: smelt_core::content::block_layout::ToolBody,
+    ) -> bool {
+        let Some(state) = history.tool_state(&call_id) else {
+            return false;
+        };
+        let key = crate::content::display_block::DisplayCacheKey::new(
+            history.content_hash(id),
+            state.display_hash(),
+        );
+        let changed = self.display_model.install_tool_body(id, call_id, key, body);
+        if changed {
+            self.clear_materialized_state();
+            self.cached_row_indexes.clear();
+            self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
+        }
+        changed
     }
 
     fn row_index_cache_entries(&self, history: &BlockHistory) -> Vec<DisplayRowIndexEntry> {
@@ -1696,6 +1723,53 @@ mod tests {
     }
 
     #[test]
+    fn installing_tool_body_invalidates_measured_rows() {
+        use smelt_core::content::block_layout::{BlockLayout, IrLeaf, TextSpec, ToolBody};
+
+        let mut transcript = Transcript::new();
+        transcript.push_tool_call(
+            Block::ToolCall {
+                call_id: "call-1".into(),
+                name: "edit_file".into(),
+                summary: protocol::StyledLines::from_plain("edit file"),
+                args: Default::default(),
+            },
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: None,
+                output: Some(Box::new(ToolOutput {
+                    content: "raw".into(),
+                    is_error: false,
+                    metadata: None,
+                })),
+                user_message: None,
+            },
+        );
+        let id = transcript.history.order[0];
+        let mut projection = TranscriptProjection::new();
+        let fallback_total = projection.exact_total_rows(&mut transcript.history, 80, false);
+
+        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+            content: "derived body\nsecond derived row\nthird derived row".into(),
+            hl_group: None,
+            ansi: false,
+        })));
+        assert!(projection.install_tool_body(&transcript.history, id, "call-1".into(), body));
+        projection.reset_counters();
+
+        let derived_total = projection.exact_total_rows(&mut transcript.history, 80, false);
+
+        assert!(
+            derived_total > fallback_total,
+            "derived body should replace the one-line raw fallback"
+        );
+        assert!(
+            projection.counters().exact_height_measured_blocks > 0,
+            "installing derived display data must force row heights to be measured again"
+        );
+    }
+
+    #[test]
     fn code_line_heights_measure_without_rendering_syntax() {
         let mut transcript = Transcript::new();
         for _ in 0..3 {
@@ -1766,7 +1840,7 @@ mod tests {
         assert_eq!(cache.row_indexes.len(), 1);
 
         let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&mut transcript.history, cache);
+        hydrated.hydrate_display_cache(&transcript.history, cache);
         hydrated.reset_counters();
 
         assert_eq!(
@@ -2741,7 +2815,6 @@ mod tests {
                             metadata: None,
                         })),
                         user_message: None,
-                        body: None,
                     },
                 );
             }
@@ -2783,21 +2856,24 @@ mod tests {
         bytes
     }
 
-    fn install_large_mixed_diff_bodies(history: &mut BlockHistory) -> usize {
+    fn install_large_mixed_diff_bodies(
+        projection: &mut TranscriptProjection,
+        history: &BlockHistory,
+    ) -> usize {
         use smelt_core::content::block_layout::{BlockLayout, IrLeaf, ToolBody};
 
-        let call_ids: Vec<String> = history
+        let jobs: Vec<(BlockId, String)> = history
             .order
             .iter()
             .filter_map(|id| match history.blocks.get(id) {
                 Some(Block::ToolCall { call_id, name, .. }) if name == "edit_file" => {
-                    Some(call_id.clone())
+                    Some((*id, call_id.clone()))
                 }
                 _ => None,
             })
             .collect();
         let mut installed = 0usize;
-        for (i, call_id) in call_ids.into_iter().enumerate() {
+        for (i, (id, call_id)) in jobs.into_iter().enumerate() {
             let (old, new) = large_mixed_diff_pair(i);
             let cache = smelt_core::content::highlight::build_diff_ir_ext(
                 &old,
@@ -2806,9 +2882,10 @@ mod tests {
                 "",
                 Some("rs"),
             );
-            if history.update_tool_state(&call_id, |state| {
-                state.body = Some(ToolBody::Layout(BlockLayout::Leaf(IrLeaf::DiffIr(cache))));
-            }) {
+            let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::SourceView(
+                smelt_core::content::block_layout::SourceViewIr::Diff(cache),
+            )));
+            if projection.install_tool_body(history, id, call_id, body) {
                 installed += 1;
             }
         }
@@ -2853,7 +2930,7 @@ mod tests {
 
         let alloc_start = smelt_perf::alloc::snapshot();
         let diff_cache_start = std::time::Instant::now();
-        let diff_caches = install_large_mixed_diff_bodies(&mut transcript.history);
+        let diff_caches = install_large_mixed_diff_bodies(&mut projection, &transcript.history);
         let diff_cache_elapsed = diff_cache_start.elapsed();
 
         let first_start = std::time::Instant::now();
@@ -2870,7 +2947,8 @@ mod tests {
         let first_alloc = smelt_perf::alloc::delta(alloc_start, smelt_perf::alloc::snapshot());
 
         let resize_diff_cache_start = std::time::Instant::now();
-        let resize_diff_caches = install_large_mixed_diff_bodies(&mut transcript.history);
+        let resize_diff_caches =
+            install_large_mixed_diff_bodies(&mut projection, &transcript.history);
         let resize_diff_cache_elapsed = resize_diff_cache_start.elapsed();
 
         let resize_start = std::time::Instant::now();

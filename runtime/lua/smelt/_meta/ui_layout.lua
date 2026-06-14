@@ -16,7 +16,7 @@ ui_layout.hbox = nil
 ---@type fun(win_or_paint: any, opts: table?): smelt.ui.layout
 ui_layout.leaf = nil
 
---- Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.
+--- Construct a shareable natural-size handle for use with `smelt.ui.layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.
 ---@type fun(w: integer?, h: integer?): smelt.ui.layout.Measure
 ui_layout.measure = nil
 

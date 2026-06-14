@@ -76,9 +76,6 @@ pub struct ToolState {
     pub elapsed: Option<Duration>,
     pub output: Option<ToolOutputRef>,
     pub user_message: Option<String>,
-    /// Width-independent output of the plugin `render(args, output, ctx)` hook.
-    /// Computed on content/status changes and reused across terminal widths.
-    pub body: Option<crate::content::block_layout::ToolBody>,
 }
 
 impl ToolState {
@@ -87,10 +84,6 @@ impl ToolState {
             self.status,
             ToolStatus::Ok | ToolStatus::Err | ToolStatus::Denied
         )
-    }
-
-    pub fn invalidate_body(&mut self) {
-        self.body = None;
     }
 
     pub fn display_hash(&self) -> u64 {
@@ -542,42 +535,6 @@ impl BlockHistory {
         true
     }
 
-    pub fn install_tool_body(
-        &mut self,
-        call_id: &str,
-        body: crate::content::block_layout::ToolBody,
-    ) -> bool {
-        let Some(changed) = self.set_tool_body_and_hash(call_id, Some(body)) else {
-            return false;
-        };
-        if !changed {
-            return false;
-        }
-        self.bump_generation();
-        true
-    }
-
-    pub fn hydrate_tool_body_cache(
-        &mut self,
-        call_id: &str,
-        body: Option<crate::content::block_layout::ToolBody>,
-    ) -> bool {
-        self.set_tool_body_and_hash(call_id, body).unwrap_or(false)
-    }
-
-    fn set_tool_body_and_hash(
-        &mut self,
-        call_id: &str,
-        body: Option<crate::content::block_layout::ToolBody>,
-    ) -> Option<bool> {
-        let state = self.tool_states.get_mut(call_id)?;
-        let before = state.display_hash();
-        state.body = body;
-        let after = state.display_hash();
-        self.tool_display_hashes.insert(call_id.to_string(), after);
-        Some(before != after)
-    }
-
     /// Replace block content in place. Preserves `BlockId`, `Status`, and
     /// `ViewState`. No-ops when the block doesn't exist (e.g. truncated during
     /// a stream). Same content hash skips the generation bump.
@@ -837,71 +794,7 @@ mod tests {
             elapsed: None,
             output: None,
             user_message: None,
-            body: None,
         }
-    }
-
-    fn text_tool_body(content: &str) -> crate::content::block_layout::ToolBody {
-        use crate::content::block_layout::{BlockLayout, IrLeaf, TextSpec, ToolBody};
-        ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-            content: content.into(),
-            hl_group: None,
-        })))
-    }
-
-    #[test]
-    fn tool_body_install_uses_explicit_generation_semantics() {
-        let mut history = BlockHistory::new();
-        history.push_with_state(
-            Block::ToolCall {
-                call_id: "tc1".into(),
-                name: "x".into(),
-                summary: "s".into(),
-                args: HashMap::new(),
-            },
-            "tc1".into(),
-            pending_state(),
-        );
-        let body = text_tool_body("cached body");
-        let g0 = history.generation();
-
-        assert!(history.install_tool_body("tc1", body.clone()));
-        let g1 = history.generation();
-        assert_ne!(g1, g0);
-
-        assert!(!history.install_tool_body("tc1", body));
-        assert_eq!(history.generation(), g1);
-    }
-
-    #[test]
-    fn tool_body_cache_hydration_does_not_bump_generation() {
-        let mut history = BlockHistory::new();
-        let id = history.push_with_state(
-            Block::ToolCall {
-                call_id: "tc1".into(),
-                name: "x".into(),
-                summary: "s".into(),
-                args: HashMap::new(),
-            },
-            "tc1".into(),
-            pending_state(),
-        );
-        let g = history.generation();
-        let base_key = LayoutKey {
-            width: 0,
-            show_thinking: false,
-            view_state: ViewState::Expanded,
-            content_hash: 0,
-            sidecar_hash: 0,
-        };
-        let before_sidecar = history.resolve_key(id, base_key).sidecar_hash;
-
-        assert!(history.hydrate_tool_body_cache("tc1", Some(text_tool_body("cached body"))));
-        assert_eq!(history.generation(), g);
-        assert_ne!(
-            history.resolve_key(id, base_key).sidecar_hash,
-            before_sidecar
-        );
     }
 
     #[test]

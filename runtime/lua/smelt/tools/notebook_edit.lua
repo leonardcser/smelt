@@ -77,7 +77,7 @@ smelt.tools.register({
   end,
   render = function(_, output, ctx)
     if output.is_error then
-      return smelt.layout.tool_output(output, ctx)
+      return require("smelt.transcript.defaults").render_tool_output(output, ctx)
     end
     local meta = output.metadata or {}
     return preview_layout(meta)

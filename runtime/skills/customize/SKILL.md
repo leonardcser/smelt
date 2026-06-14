@@ -779,24 +779,22 @@ Image file detection and base64 data-URL loading.
 
 #### `smelt.layout`
 
-Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callbacks.
+Declarative, width-independent content layout primitives for transcript/tool display.
 
+- `smelt.layout.cap` :: `fun(child: any, opts: table): table`
+  Cap a child by rendered rows.
 - `smelt.layout.diff` :: `fun(opts: table): table`
   Inline-diff render directive - the worker renders the diff directly into the block buffer.
+- `smelt.layout.empty` :: `fun(): table`
+  Explicit zero-row layout node.
 - `smelt.layout.file_view` :: `fun(opts: table): table`
   Syntax-highlighted file-view render directive - single line-number column, no diff bg.
+- `smelt.layout.gutter` :: `fun(child: any, opts: table?): table`
+  Render `child` with an explicit non-selectable gutter prefix on each emitted row.
 - `smelt.layout.hbox` :: `fun(items: table): table`
   Lay `items` out horizontally.
-- `smelt.layout.leaf` :: `fun(buf: any): table`
-  Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.
-- `smelt.layout.markdown` :: `fun(content: string): any`
-  
-- `smelt.layout.sep` :: `fun(char: string?): any`
-  Build a 1×1 leaf from a single glyph.
 - `smelt.layout.text` :: `fun(content: string, opts: table?): table`
   Plain text layout leaf.
-- `smelt.layout.tool_output` :: `fun(output: table, ctx: table?, opts: table?): table`
-  Plain text tool-output layout leaf.
 - `smelt.layout.vbox` :: `fun(items: table): table`
   Stack `items` vertically into a single block layout.
 
@@ -1506,7 +1504,7 @@ Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout.
 - `smelt.ui.layout.leaf` :: `fun(win_or_paint: any, opts: table?): smelt.ui.layout`
   Wrap a Win handle or paint id into a leaf node.
 - `smelt.ui.layout.measure` :: `fun(w: integer?, h: integer?): smelt.ui.layout.Measure`
-  Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`.
+  Construct a shareable natural-size handle for use with `smelt.ui.layout.leaf(opts.measure = ...)`.
 - `smelt.ui.layout.set` :: `fun(composer: function?): nil`
   Register the main layout composer.
 - `smelt.ui.layout.vbox` :: `fun(items: table, opts: table?): smelt.ui.layout`

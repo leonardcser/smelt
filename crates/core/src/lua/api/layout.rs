@@ -1,8 +1,8 @@
-//! `smelt.layout` - composable block layout (vbox/hbox/leaf) returned from tool `render` callbacks.
+//! `smelt.layout` - declarative, width-independent content layout returned from Lua display callbacks.
 
-use crate::buffer::BufId;
 use crate::content::block_layout::{
-    BlockLayout, Constraint, DiffSpec, FileViewSpec, HboxItem, LuaLeaf, TextSpec,
+    BlockLayout, CapKeep, CapMarker, CapSpec, Constraint, DiffSpec, FileViewSpec, GutterSpec,
+    HboxItem, LuaLeaf, TextSpec,
 };
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
@@ -11,6 +11,16 @@ use mlua::prelude::*;
 pub struct LuaBlockLayout(pub BlockLayout);
 
 impl mlua::UserData for LuaBlockLayout {}
+
+fn layout_from_value(value: mlua::Value, name: &str) -> LuaResult<BlockLayout> {
+    match value {
+        mlua::Value::UserData(ud) => Ok(ud.borrow::<LuaBlockLayout>()?.0.clone()),
+        other => Err(mlua::Error::external(format!(
+            "smelt.layout.{name}: expected layout userdata, got {}",
+            other.type_name()
+        ))),
+    }
+}
 
 fn collect_vbox_items(items: mlua::Table) -> LuaResult<Vec<BlockLayout>> {
     let mut out = Vec::new();
@@ -63,47 +73,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "layout",
-        "Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callbacks.",
+        "Declarative, width-independent content layout primitives for transcript/tool display.",
         Tier::Host,
     )?;
     m.fn_(
-        "leaf",
-        "Wrap a buffer id into a leaf block layout that renders the buffer's contents in place. (The TUI tier extends this to also accept a `Buf` userdata.)",
-        &["buf_id"],
-        |_, buf_id: u64| -> LuaResult<LuaBlockLayout> {
-            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Buf(BufId(
-                buf_id,
-            )))))
-        },
-    )?;
-    m.fn_(
         "text",
-        "Plain text layout leaf. `opts.hl_group` may name a theme group; without it, text renders dimmed. Wrapping is computed by the transcript at the current width.",
+        "Plain text layout leaf. `opts.hl_group` / `opts.hl` may name a theme group; without it, text renders dimmed. `opts.ansi = true` enables ANSI parsing. Wrapping is computed by the transcript at the current width.",
         &["content", "opts"],
         |_, (content, opts): (String, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
             let hl_group = opts
                 .as_ref()
-                .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten());
-            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Text(TextSpec {
-                content,
-                hl_group,
-            }))))
-        },
-    )?;
-    m.fn_(
-        "tool_output",
-        "Plain text tool-output layout leaf. Error output defaults to the `ErrorMsg` highlight group unless `opts.hl_group` is provided.",
-        &["output", "ctx", "opts"],
-        |_, (output, _ctx, opts): (mlua::Table, Option<mlua::Table>, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
-            let content: String = output.get::<Option<String>>("content")?.unwrap_or_default();
-            let is_error = output.get::<Option<bool>>("is_error")?.unwrap_or(false);
-            let hl_group = opts
-                .as_ref()
                 .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten())
-                .or_else(|| is_error.then(|| "ErrorMsg".to_string()));
+                .or_else(|| opts.as_ref().and_then(|t| t.get::<Option<String>>("hl").ok().flatten()));
+            let ansi = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("ansi").ok().flatten())
+                .unwrap_or(false);
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Text(TextSpec {
                 content,
                 hl_group,
+                ansi,
             }))))
         },
     )?;
@@ -146,8 +135,66 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "empty",
+        "Explicit zero-row layout node. Use this instead of returning nil when a renderer intentionally hides content.",
+        &[],
+        |_, ()| -> LuaResult<LuaBlockLayout> { Ok(LuaBlockLayout(BlockLayout::Empty)) },
+    )?;
+    m.fn_(
+        "gutter",
+        "Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child.",
+        &["child", "opts"],
+        |_, (child, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let child = layout_from_value(child, "gutter")?;
+            let text = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("text").ok().flatten())
+                .unwrap_or_else(|| "  ".to_string());
+            Ok(LuaBlockLayout(BlockLayout::Gutter {
+                child: Box::new(child),
+                spec: GutterSpec { text },
+            }))
+        },
+    )?;
+    m.fn_(
+        "cap",
+        "Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head` or `tail`; `opts.marker` is `above`, `below`, or nil.",
+        &["child", "opts"],
+        |_, (child, opts): (mlua::Value, mlua::Table)| -> LuaResult<LuaBlockLayout> {
+            let child = layout_from_value(child, "cap")?;
+            let rows = opts.get::<Option<u16>>("rows")?.unwrap_or(20);
+            let keep = match opts
+                .get::<Option<String>>("keep")?
+                .unwrap_or_else(|| "head".to_string())
+                .as_str()
+            {
+                "head" => CapKeep::Head,
+                "tail" => CapKeep::Tail,
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "smelt.layout.cap: invalid keep `{other}` (expected `head` or `tail`)"
+                    )))
+                }
+            };
+            let marker = match opts.get::<Option<String>>("marker")?.as_deref() {
+                None => None,
+                Some("above") => Some(CapMarker::Above),
+                Some("below") => Some(CapMarker::Below),
+                Some(other) => {
+                    return Err(mlua::Error::external(format!(
+                        "smelt.layout.cap: invalid marker `{other}` (expected `above`, `below`, or nil)"
+                    )))
+                }
+            };
+            Ok(LuaBlockLayout(BlockLayout::Cap {
+                child: Box::new(child),
+                spec: CapSpec { rows, keep, marker },
+            }))
+        },
+    )?;
+    m.fn_(
         "vbox",
-        "Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`/`layout.diff`/`layout.file_view`.",
+        "Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.empty`/`layout.text`/`layout.vbox`/`layout.hbox`/`layout.gutter`/`layout.cap`/`layout.diff`/`layout.file_view`.",
         &["items"],
         |_, items: mlua::Table| -> LuaResult<LuaBlockLayout> {
             Ok(LuaBlockLayout(BlockLayout::Vbox(collect_vbox_items(

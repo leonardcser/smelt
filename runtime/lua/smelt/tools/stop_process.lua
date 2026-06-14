@@ -29,7 +29,7 @@ smelt.tools.register({
     return args.id or ""
   end,
   render = function(_, output, ctx)
-    return smelt.layout.tool_output(output, ctx)
+    return require("smelt.transcript.defaults").render_tool_output(output, ctx)
   end,
   execute = function(args)
     local id = args.id or ""

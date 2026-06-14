@@ -242,7 +242,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
     if args.prompt and args.prompt ~= "" then
       table.insert(items, smelt.layout.text(args.prompt))
     end
-    table.insert(items, smelt.layout.tool_output(output, ctx))
+    table.insert(items, require("smelt.transcript.defaults").render_tool_output(output, ctx))
     return smelt.layout.vbox(items)
   end,
   execute = function(args)

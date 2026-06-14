@@ -14,7 +14,7 @@
 use crate::smelt_edit::layout::Border;
 use crate::smelt_edit::{Constraint, LayoutTree, Natural, NaturalRef, StaticNatural};
 use mlua::prelude::*;
-use smelt_core::lua::lua_type::LuaType;
+use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
 use smelt_term::Line;
 use std::sync::{Arc, Mutex};
@@ -53,6 +53,24 @@ impl mlua::UserData for LuaMeasure {
 
 impl LuaType for LuaMeasure {
     fn lua_type() -> String {
+        smelt_core::lua::doc::record_class(LuaClassDecl {
+            name: "smelt.ui.layout.Measure",
+            doc: "Shareable natural-size handle returned by `smelt.ui.layout.measure`.",
+            fields: vec![
+                LuaClassField {
+                    name: "set",
+                    ty: "fun(w: integer, h: integer): nil".into(),
+                    optional: false,
+                    doc: "Update the measured natural size.",
+                },
+                LuaClassField {
+                    name: "get",
+                    ty: "fun(): integer, integer".into(),
+                    optional: false,
+                    doc: "Return the current measured width and height.",
+                },
+            ],
+        });
         "smelt.ui.layout.Measure".into()
     }
 }
@@ -259,7 +277,7 @@ pub(crate) fn register_layout_constructors(m: &LuaMod) -> LuaResult<()> {
 
     m.fn_(
         "measure",
-        "Construct a shareable natural-size handle for use with `layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.",
+        "Construct a shareable natural-size handle for use with `smelt.ui.layout.leaf(opts.measure = ...)`. Initial size is `(w, h)` (default `(0, 0)`); update at any time via `handle:set(w, h)` to drive a live resize on the next frame. Read current size via `handle:get()`.",
         &["w", "h"],
         |_, (w, h): (Option<u16>, Option<u16>)| -> LuaResult<LuaMeasure> {
             Ok(LuaMeasure::new(w.unwrap_or(0), h.unwrap_or(0)))

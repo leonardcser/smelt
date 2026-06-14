@@ -37,7 +37,7 @@ impl TranscriptView {
     ) -> Self {
         let mut view = Self::from_transcript(transcript);
         view.projection
-            .hydrate_display_cache(&mut view.transcript.history, display_cache);
+            .hydrate_display_cache(&view.transcript.history, display_cache);
         view
     }
 
@@ -173,6 +173,14 @@ impl TranscriptView {
         self.projection.display_cache_generation()
     }
 
+    pub(crate) fn prerender_tool_bodies_for_range(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        range: std::ops::Range<usize>,
+    ) -> bool {
+        prerender_tool_bodies_for_range(lua, self, range)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.transcript.history.is_empty()
     }
@@ -258,6 +266,7 @@ impl ResumePreviewCache {
 }
 
 struct ToolRenderJob {
+    id: BlockId,
     call_id: String,
     name: String,
     args: HashMap<String, serde_json::Value>,
@@ -269,6 +278,7 @@ struct ToolRenderJob {
 fn collect_tool_render_jobs(
     history: &BlockHistory,
     ids: impl Iterator<Item = BlockId>,
+    has_body: impl Fn(BlockId, &str) -> bool,
 ) -> (Vec<ToolRenderJob>, usize) {
     let mut jobs = Vec::new();
     let mut requested = 0;
@@ -292,10 +302,11 @@ fn collect_tool_render_jobs(
         if matches!(state.status, ToolStatus::Denied) {
             continue;
         }
-        if state.body.is_some() {
+        if has_body(id, call_id) {
             continue;
         }
         jobs.push(ToolRenderJob {
+            id,
             call_id: call_id.clone(),
             name: name.clone(),
             args: args.clone(),
@@ -833,25 +844,29 @@ impl TuiApp {
 
 pub(crate) fn prerender_tool_bodies_for_range(
     lua: &smelt_core::lua::runtime::LuaRuntime,
-    history: &mut BlockHistory,
+    view: &mut TranscriptView,
     range: std::ops::Range<usize>,
 ) -> bool {
     let _perf = smelt_perf::perf::begin("tool:prerender_bodies");
+    let history = view.history();
     let start = range.start.min(history.order.len());
     let end = range.end.min(history.order.len()).max(start);
-    let (jobs, requested) =
-        collect_tool_render_jobs(history, history.order[start..end].iter().copied());
+    let (jobs, requested) = collect_tool_render_jobs(
+        history,
+        history.order[start..end].iter().copied(),
+        |id, call_id| view.projection.has_tool_body(history, id, call_id),
+    );
     smelt_perf::perf::record_value("tool:prerender_bodies:requested", requested as u64);
     smelt_perf::perf::record_value("tool:prerender_bodies:jobs", jobs.len() as u64);
     let bodies = render_tool_body_jobs(lua, jobs);
     smelt_perf::perf::record_value("tool:prerender_bodies:rendered", bodies.len() as u64);
-    store_tool_body_results(history, bodies)
+    store_tool_body_results(view, bodies)
 }
 
 fn render_tool_body_jobs(
     lua: &smelt_core::lua::runtime::LuaRuntime,
     jobs: Vec<ToolRenderJob>,
-) -> Vec<(String, ToolBody)> {
+) -> Vec<(BlockId, String, ToolBody)> {
     let _perf = smelt_perf::perf::begin("tool:render_body_jobs");
     smelt_perf::perf::record_value("tool:render_body_jobs:jobs", jobs.len() as u64);
     let mut rendered_jobs = Vec::new();
@@ -876,17 +891,22 @@ fn render_tool_body_jobs(
             continue;
         };
         match compile_tool_body(&layout) {
-            Ok(body) => rendered_jobs.push((job.call_id, body)),
+            Ok(body) => rendered_jobs.push((job.id, job.call_id, body)),
             Err(err) => lua.record_error(format!("tool render `{}`: {err}", job.name)),
         }
     }
     rendered_jobs
 }
 
-fn store_tool_body_results(history: &mut BlockHistory, bodies: Vec<(String, ToolBody)>) -> bool {
+fn store_tool_body_results(
+    view: &mut TranscriptView,
+    bodies: Vec<(BlockId, String, ToolBody)>,
+) -> bool {
     let mut changed = false;
-    for (call_id, body) in bodies {
-        changed |= history.install_tool_body(&call_id, body);
+    for (id, call_id, body) in bodies {
+        changed |= view
+            .projection
+            .install_tool_body(&view.transcript.history, id, call_id, body);
     }
     changed
 }
@@ -896,14 +916,16 @@ pub(crate) fn compile_tool_body(layout: &BlockLayout) -> Result<ToolBody, String
 }
 
 fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
-    use smelt_core::content::block_layout::{LuaLeaf, TextSpec};
+    use smelt_core::content::block_layout::{LuaLeaf, SourceViewIr, TextSpec};
     match layout {
+        BlockLayout::Empty => Ok(BlockLayout::Empty),
         BlockLayout::Leaf(LuaLeaf::Buf(_)) => {
-            Err("layout.leaf buffer leaves are not supported in tool bodies".into())
+            Err("buffer leaves are not supported in layout IR".into())
         }
         BlockLayout::Leaf(LuaLeaf::Text(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
             content: spec.content.clone(),
             hl_group: spec.hl_group.clone(),
+            ansi: spec.ansi,
         }))),
         BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
             let ext = spec
@@ -917,7 +939,9 @@ fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
                 &spec.anchor,
                 ext,
             );
-            Ok(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))
+            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
+                ir,
+            ))))
         }
         BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
             let ext = spec
@@ -930,9 +954,13 @@ fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
                         .and_then(|e| e.to_str())
                 });
             let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
-            Ok(BlockLayout::Leaf(IrLeaf::DiffIr(ir)))
+            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
+                ir,
+            ))))
         }
-        BlockLayout::Leaf(LuaLeaf::DiffIr(ir)) => Ok(BlockLayout::Leaf(IrLeaf::DiffIr(ir.clone()))),
+        BlockLayout::Leaf(LuaLeaf::SourceView(ir)) => {
+            Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir.clone())))
+        }
         BlockLayout::Vbox(items) => items
             .iter()
             .map(compile_layout_ir)
@@ -948,6 +976,14 @@ fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
             })
             .collect::<Result<Vec<_>, _>>()
             .map(BlockLayout::Hbox),
+        BlockLayout::Gutter { child, spec } => Ok(BlockLayout::Gutter {
+            child: Box::new(compile_layout_ir(child)?),
+            spec: spec.clone(),
+        }),
+        BlockLayout::Cap { child, spec } => Ok(BlockLayout::Cap {
+            child: Box::new(compile_layout_ir(child)?),
+            spec: spec.clone(),
+        }),
     }
 }
 

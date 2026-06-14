@@ -4,7 +4,15 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Composable block layout (vbox/hbox/leaf/diff/file_view) for tool render callbacks.
+Declarative, width-independent content layout primitives for transcript/tool display.
+
+## `smelt.layout.cap`
+
+```lua
+fun(child: any, opts: table): table
+```
+
+Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head` or `tail`; `opts.marker` is `above`, `below`, or nil.
 
 ## `smelt.layout.diff`
 
@@ -14,6 +22,14 @@ fun(opts: table): table
 
 Inline-diff render directive - the worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
 
+## `smelt.layout.empty`
+
+```lua
+fun(): table
+```
+
+Explicit zero-row layout node. Use this instead of returning nil when a renderer intentionally hides content.
+
 ## `smelt.layout.file_view`
 
 ```lua
@@ -21,6 +37,14 @@ fun(opts: table): table
 ```
 
 Syntax-highlighted file-view render directive - single line-number column, no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.
+
+## `smelt.layout.gutter`
+
+```lua
+fun(child: any, opts: table?): table
+```
+
+Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child.
 
 ## `smelt.layout.hbox`
 
@@ -30,46 +54,13 @@ fun(items: table): table
 
 Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` for a fixed-column or weighted slot.
 
-## `smelt.layout.leaf`
-
-```lua
-fun(buf: any): table
-```
-
-Wrap a `Buf` handle (or raw buf id) into a leaf block layout that renders the buffer's contents in place.
-
-## `smelt.layout.markdown`
-
-```lua
-fun(content: string): any
-```
-
-
-
-## `smelt.layout.sep`
-
-```lua
-fun(char: string?): any
-```
-
-Build a 1×1 leaf from a single glyph. Auto-repeats to fill the parent's
-axis: `sep("│")` in an hbox = vertical divider, `sep("─")` in a vbox = horizontal.
-
 ## `smelt.layout.text`
 
 ```lua
 fun(content: string, opts: table?): table
 ```
 
-Plain text layout leaf. `opts.hl_group` may name a theme group; without it, text renders dimmed. Wrapping is computed by the transcript at the current width.
-
-## `smelt.layout.tool_output`
-
-```lua
-fun(output: table, ctx: table?, opts: table?): table
-```
-
-Plain text tool-output layout leaf. Error output defaults to the `ErrorMsg` highlight group unless `opts.hl_group` is provided.
+Plain text layout leaf. `opts.hl_group` / `opts.hl` may name a theme group; without it, text renders dimmed. `opts.ansi = true` enables ANSI parsing. Wrapping is computed by the transcript at the current width.
 
 ## `smelt.layout.vbox`
 
@@ -77,5 +68,5 @@ Plain text tool-output layout leaf. Error output defaults to the `ErrorMsg` high
 fun(items: table): table
 ```
 
-Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.leaf`/`layout.vbox`/`layout.hbox`/`layout.diff`/`layout.file_view`.
+Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.empty`/`layout.text`/`layout.vbox`/`layout.hbox`/`layout.gutter`/`layout.cap`/`layout.diff`/`layout.file_view`.
 

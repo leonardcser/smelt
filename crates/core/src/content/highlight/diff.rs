@@ -546,6 +546,27 @@ pub fn print_diff_ir(
     skip: u16,
     max_rows: u16,
 ) -> u16 {
+    let layout_width = out.layout_width();
+    print_diff_ir_with_width(
+        out,
+        cache,
+        gutter,
+        indent_cells,
+        layout_width,
+        skip,
+        max_rows,
+    )
+}
+
+pub fn print_diff_ir_with_width(
+    out: &mut LineBuilder,
+    cache: &DiffIr,
+    gutter: GutterStyle,
+    indent_cells: u16,
+    layout_width: u16,
+    skip: u16,
+    max_rows: u16,
+) -> u16 {
     let _perf = smelt_perf::perf::begin("render:inline_diff_cached");
 
     // Single line-number column (` N `). The body sign ("+ "/"- "/"  ") is always
@@ -561,10 +582,10 @@ pub fn print_diff_ir(
     let sign_prefix = 2;
     let indent = indent_cells as usize;
     let indent_str = " ".repeat(indent);
-    let layout_width = if out.layout_width() == 0 {
+    let layout_width = if layout_width == 0 {
         default_width()
     } else {
-        out.layout_width() as usize
+        layout_width as usize
     };
     let max_content = layout_width
         .saturating_sub(indent + prefix_cells + sign_prefix)

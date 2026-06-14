@@ -85,7 +85,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
   end,
   render = function(_, output, ctx)
     if output.is_error then
-      return smelt.layout.tool_output(output, ctx)
+      return require("smelt.transcript.defaults").render_tool_output(output, ctx)
     end
     return smelt.layout.text(smelt.text.line_count(output.content or "") .. " lines")
   end,
