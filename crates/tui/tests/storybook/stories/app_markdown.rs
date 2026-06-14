@@ -42,7 +42,7 @@ app_story!(text_block_markdown_headings, |ctx| {
 
 app_story!(text_block_markdown_lists, |ctx| {
     // Bulleted, numbered, and a nested item. List prefixes (`- `,
-    // `1. `, indented `- `) render dim via `split_list_prefix`.
+    // `1. `, indented `- `) render dim via the shared markdown list helper.
     ctx.set_viewport(50, 14);
     ctx.engine(EngineEvent::Text {
         content: "- first item\n- second item\n  - nested item\n\n1. ordered one\n2. ordered two"
@@ -115,8 +115,8 @@ app_story!(text_block_markdown_soft_wrap, |ctx| {
 
 app_story!(text_block_markdown_mixed_nested_lists, |ctx| {
     // Bulleted list with a nested ordered list and an ordered list with
-    // a nested bullet. Exercises `split_list_prefix` recursion on both
-    // marker kinds at depth.
+    // a nested bullet. Exercises shared markdown list-prefix handling on
+    // both marker kinds at depth.
     ctx.set_viewport(50, 14);
     ctx.engine(EngineEvent::Text {
         content: "- top bullet\n  1. nested ordered one\n  2. nested ordered two\n- another top bullet\n\n1. ordered top\n   - nested bullet\n   - nested bullet two\n2. ordered tail".into(),

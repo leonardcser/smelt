@@ -69,6 +69,44 @@ pub fn is_table_separator(line: &str) -> bool {
             .all(|c| c == '-' || c == '|' || c == ':' || c == ' ')
 }
 
+/// Returns true for an ATX markdown heading line.
+pub fn is_markdown_heading_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+    (1..=6).contains(&hashes)
+        && trimmed[hashes..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+}
+
+/// Split a single markdown list-item line into its marker prefix and body.
+pub fn split_markdown_list_prefix(line: &str) -> (&str, &str) {
+    let bytes = line.as_bytes();
+    if bytes.len() >= 2 && matches!(bytes[0], b'-' | b'*' | b'+') && bytes[1].is_ascii_whitespace()
+    {
+        return (&line[..2], &line[2..]);
+    }
+
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if (1..=9).contains(&i)
+        && i + 1 < bytes.len()
+        && matches!(bytes[i], b'.' | b')')
+        && bytes[i + 1].is_ascii_whitespace()
+    {
+        return (&line[..i + 2], &line[i + 2..]);
+    }
+
+    ("", line)
+}
+
+pub fn is_markdown_list_item(line: &str) -> bool {
+    !split_markdown_list_prefix(line.trim_start()).0.is_empty()
+}
+
 /// Per-column alignment, parsed from a markdown table separator line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ColumnAlignment {
@@ -76,28 +114,6 @@ pub enum ColumnAlignment {
     Left,
     Center,
     Right,
-}
-
-/// Parse column alignments from a markdown table separator like `|:---|:---:|---:|`.
-/// Returns one entry per column: `:---` left, `:---:` center, `---:` right,
-/// otherwise [`ColumnAlignment::Left`]. Returns empty when `line` isn't a separator.
-pub fn parse_table_alignments(line: &str) -> Vec<ColumnAlignment> {
-    if !is_table_separator(line) {
-        return Vec::new();
-    }
-    line.trim()
-        .trim_start_matches('|')
-        .trim_end_matches('|')
-        .split('|')
-        .map(|cell| {
-            let c = cell.trim();
-            match (c.starts_with(':'), c.ends_with(':')) {
-                (true, true) => ColumnAlignment::Center,
-                (false, true) => ColumnAlignment::Right,
-                _ => ColumnAlignment::Left,
-            }
-        })
-        .collect()
 }
 
 /// A backtick fenced-code marker. `rest` is the text after the opening run.
@@ -130,22 +146,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_table_alignments_recognizes_all_three_markers() {
-        let got = parse_table_alignments("|:---|:---:|---:|---|");
-        assert_eq!(
-            got,
-            vec![
-                ColumnAlignment::Left,
-                ColumnAlignment::Center,
-                ColumnAlignment::Right,
-                ColumnAlignment::Left,
-            ]
-        );
+    fn markdown_heading_line_requires_atx_marker() {
+        assert!(is_markdown_heading_line("# Title"));
+        assert!(is_markdown_heading_line("###"));
+        assert!(!is_markdown_heading_line("#not heading"));
+        assert!(!is_markdown_heading_line("####### too many"));
     }
 
     #[test]
-    fn parse_table_alignments_returns_empty_for_non_separator() {
-        assert!(parse_table_alignments("| a | b |").is_empty());
+    fn markdown_list_prefix_matches_common_mark_markers() {
+        assert_eq!(split_markdown_list_prefix("- item"), ("- ", "item"));
+        assert_eq!(split_markdown_list_prefix("+ item"), ("+ ", "item"));
+        assert_eq!(split_markdown_list_prefix("12) item"), ("12) ", "item"));
+        assert_eq!(split_markdown_list_prefix("1.item"), ("", "1.item"));
+        assert!(is_markdown_list_item("  * item"));
     }
 
     #[test]

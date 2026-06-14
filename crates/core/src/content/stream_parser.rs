@@ -1,7 +1,7 @@
 //! Streaming input adapter: accumulates character deltas, detects structural boundaries
 //! (paragraphs, code blocks, tables), and writes finished blocks into `BlockHistory`.
 
-use super::{is_table_separator, markdown_closes_fence, markdown_opening_fence};
+use super::{markdown_closes_fence, markdown_opening_fence};
 use crate::transcript_model::{
     ActiveText, ActiveThinking, ActiveTool, Block, BlockHistory, BlockId, Status, ToolOutput,
     ToolOutputRef, ToolState, ToolStatus,
@@ -184,7 +184,6 @@ impl StreamParser {
             in_code_block: None,
             fence_backticks: 0,
             table_rows: Vec::new(),
-            table_data_rows: 0,
             streaming_id: None,
             table_streaming_id: None,
         });
@@ -278,9 +277,6 @@ impl StreamParser {
 
         if trimmed.starts_with('|') {
             Self::flush_paragraph(history, at);
-            if !is_table_separator(line) {
-                at.table_data_rows += 1;
-            }
             at.table_rows.push(line.to_string());
             return;
         }
@@ -316,7 +312,6 @@ impl StreamParser {
             } else {
                 history.push(Block::Text { content });
             }
-            at.table_data_rows = 0;
         } else if let Some(id) = at.table_streaming_id.take() {
             history.set_status(id, Status::Done);
         }

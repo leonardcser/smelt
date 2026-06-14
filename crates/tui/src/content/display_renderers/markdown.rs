@@ -1,9 +1,13 @@
-use smelt_core::content::builder::LineBuilder;
+use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
-    measure_markdown_table, render_code_block, render_markdown_table,
+    emit_inline_spans, inline_spans_width, measure_markdown_table, parse_inline_spans,
+    render_code_block, render_markdown_table, wrap_inline_spans, InlineSpan, InlineStyle,
 };
 use smelt_core::content::markdown_ir::{parse_markdown, MarkdownBlock, MarkdownNode};
+use smelt_core::content::{
+    is_markdown_heading_line, is_markdown_list_item, split_markdown_list_prefix,
+};
 use smelt_core::theme::intern;
 
 pub fn render_markdown_inner(
@@ -41,7 +45,7 @@ fn render_markdown_block(
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {
-        width.saturating_sub(indent.len() + 1)
+        width.saturating_sub(display_width(indent) + 1)
     };
     let mut state = RenderState::default();
 
@@ -61,7 +65,7 @@ fn render_markdown_block(
                     .collect();
                 let code_block = parse_code_block(&code_lines, lang);
                 state.rows += render_code_block(out, &code_block, width, dim, bctx, true);
-                state.last_content_line = None;
+                state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
             MarkdownNode::Table {
@@ -76,13 +80,13 @@ fn render_markdown_block(
                 let source = smelt_buffer::text::slice(block.source, range.clone())
                     .trim_end_matches(['\r', '\n']);
                 out.stamp_copy_group(start, source);
-                state.last_content_line = None;
+                state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
             MarkdownNode::Rule { .. } => {
                 render_block_gap(out, &mut state);
                 state.rows += render_horizontal_rule(out, bctx, indent);
-                state.last_content_line = None;
+                state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
         }
@@ -101,7 +105,7 @@ fn measure_markdown_block(
     let max_cols = if let Some(b) = bctx {
         b.inner_w
     } else {
-        width.saturating_sub(indent.len() + 1)
+        width.saturating_sub(display_width(indent) + 1)
     };
     let mut state = MeasureState::default();
 
@@ -181,7 +185,7 @@ fn measure_source_lines(source: &str, max_cols: usize, dim: bool, state: &mut Me
             if state.rows > 0
                 && !state.last_content_was_heading
                 && next_i < lines.len()
-                && !is_list_item(lines[next_i])
+                && !is_markdown_list_item(lines[next_i])
             {
                 state.pending_blank = true;
             }
@@ -201,70 +205,20 @@ fn measure_source_lines(source: &str, max_cols: usize, dim: bool, state: &mut Me
         state.rows = state
             .rows
             .saturating_add(measure_markdown_line(line, max_cols, dim));
-        state.last_content_was_heading = line.trim_start().starts_with('#');
+        state.last_content_was_heading = is_markdown_heading_line(line);
         state.prev_was_block = false;
         i += 1;
     }
 }
 
 fn measure_markdown_line(line: &str, max_cols: usize, dim: bool) -> u16 {
-    use smelt_core::content::highlight::{
-        parse_inline_spans, wrap_inline_spans, InlineSpan, InlineStyle,
-    };
-
-    let trimmed = line.trim_start();
-    let leading_ws = &line[..line.len() - trimmed.len()];
-    let mut line_spans: Vec<InlineSpan> = Vec::new();
-
-    if trimmed.starts_with('#') {
-        line_spans.push(InlineSpan {
-            text: trimmed.to_string(),
-            style: InlineStyle {
-                bold: true,
-                dim,
-                group: Some(intern("SmeltHeading")),
-                ..Default::default()
-            },
-        });
-    } else if trimmed.starts_with('>') {
-        line_spans.push(InlineSpan {
-            text: trimmed.to_string(),
-            style: InlineStyle {
-                dim: true,
-                italic: true,
-                ..Default::default()
-            },
-        });
-    } else {
-        let (prefix, body) = split_list_prefix(trimmed);
-        if !leading_ws.is_empty() {
-            line_spans.push(InlineSpan {
-                text: leading_ws.to_string(),
-                style: InlineStyle {
-                    dim,
-                    ..Default::default()
-                },
-            });
-        }
-        if !prefix.is_empty() {
-            line_spans.push(InlineSpan {
-                text: prefix.to_string(),
-                style: InlineStyle {
-                    dim: true,
-                    ..Default::default()
-                },
-            });
-        }
-        line_spans.extend(parse_inline_spans(body, dim));
-    }
-
-    wrap_inline_spans(&line_spans, max_cols).len() as u16
+    wrap_inline_spans(&markdown_line_spans(line, dim), max_cols).len() as u16
 }
 
 #[derive(Default)]
 struct RenderState {
     rows: u16,
-    last_content_line: Option<String>,
+    last_content_was_heading: bool,
     pending_blank: bool,
     prev_was_block: bool,
 }
@@ -277,15 +231,9 @@ fn render_block_gap(out: &mut LineBuilder, state: &mut RenderState) {
         state.pending_blank = false;
         gap_emitted = true;
     }
-    if state.rows > 0 && !gap_emitted {
-        let after_heading = state
-            .last_content_line
-            .as_deref()
-            .is_some_and(|l| l.trim_start().starts_with('#'));
-        if !after_heading {
-            out.newline();
-            state.rows += 1;
-        }
+    if state.rows > 0 && !gap_emitted && !state.last_content_was_heading {
+        out.newline();
+        state.rows += 1;
     }
 }
 
@@ -303,18 +251,14 @@ fn render_source_lines(
     while i < lines.len() {
         let line = lines[i];
         if line.trim().is_empty() {
-            let after_heading = state
-                .last_content_line
-                .as_deref()
-                .is_some_and(|l| l.trim_start().starts_with('#'));
             let mut next_i = i + 1;
             while next_i < lines.len() && lines[next_i].trim().is_empty() {
                 next_i += 1;
             }
             if state.rows > 0
-                && !after_heading
+                && !state.last_content_was_heading
                 && next_i < lines.len()
-                && !is_list_item(lines[next_i])
+                && !is_markdown_list_item(lines[next_i])
             {
                 state.pending_blank = true;
             }
@@ -334,7 +278,7 @@ fn render_source_lines(
             state.rows += 1;
         }
         render_markdown_line(out, line, max_cols, indent, dim, bctx, state);
-        state.last_content_line = Some(line.to_string());
+        state.last_content_was_heading = is_markdown_heading_line(line);
         state.prev_was_block = false;
         i += 1;
     }
@@ -349,58 +293,7 @@ fn render_markdown_line(
     bctx: Option<&smelt_core::content::BoxContext>,
     state: &mut RenderState,
 ) {
-    use smelt_core::content::highlight::{
-        emit_inline_spans, inline_spans_width, parse_inline_spans, wrap_inline_spans, InlineSpan,
-        InlineStyle,
-    };
-
-    let trimmed = line.trim_start();
-    let leading_ws = &line[..line.len() - trimmed.len()];
-    let mut line_spans: Vec<InlineSpan> = Vec::new();
-
-    if trimmed.starts_with('#') {
-        line_spans.push(InlineSpan {
-            text: trimmed.to_string(),
-            style: InlineStyle {
-                bold: true,
-                dim,
-                group: Some(intern("SmeltHeading")),
-                ..Default::default()
-            },
-        });
-    } else if trimmed.starts_with('>') {
-        line_spans.push(InlineSpan {
-            text: trimmed.to_string(),
-            style: InlineStyle {
-                dim: true,
-                italic: true,
-                ..Default::default()
-            },
-        });
-    } else {
-        let (prefix, body) = split_list_prefix(trimmed);
-        if !leading_ws.is_empty() {
-            line_spans.push(InlineSpan {
-                text: leading_ws.to_string(),
-                style: InlineStyle {
-                    dim,
-                    ..Default::default()
-                },
-            });
-        }
-        if !prefix.is_empty() {
-            line_spans.push(InlineSpan {
-                text: prefix.to_string(),
-                style: InlineStyle {
-                    dim: true,
-                    ..Default::default()
-                },
-            });
-        }
-        line_spans.extend(parse_inline_spans(body, dim));
-    }
-
-    let wrapped = wrap_inline_spans(&line_spans, max_cols);
+    let wrapped = wrap_inline_spans(&markdown_line_spans(line, dim), max_cols);
     if wrapped.len() > 1 {
         out.mark_wrapped();
     }
@@ -423,39 +316,54 @@ fn render_markdown_line(
     state.rows += wrapped.len() as u16;
 }
 
-fn split_list_prefix(line: &str) -> (&str, &str) {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i > 0 && i < bytes.len() && bytes[i] == b'.' {
-        let end = i + 1;
-        if end < bytes.len() && bytes[end] == b' ' {
-            return (&line[..end + 1], &line[end + 1..]);
-        }
-        return (&line[..end], &line[end..]);
-    }
-    if line.starts_with("- ") || line.starts_with("* ") {
-        return (&line[..2], &line[2..]);
-    }
-    ("", line)
-}
-
-fn is_list_item(line: &str) -> bool {
+fn markdown_line_spans(line: &str, dim: bool) -> Vec<InlineSpan> {
     let trimmed = line.trim_start();
-    if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-        return true;
+    let leading_ws = &line[..line.len() - trimmed.len()];
+    let mut line_spans = Vec::new();
+
+    if is_markdown_heading_line(trimmed) {
+        line_spans.push(InlineSpan {
+            text: trimmed.to_string(),
+            style: InlineStyle {
+                bold: true,
+                dim,
+                group: Some(intern("SmeltHeading")),
+                ..Default::default()
+            },
+        });
+    } else if trimmed.starts_with('>') {
+        line_spans.push(InlineSpan {
+            text: trimmed.to_string(),
+            style: InlineStyle {
+                dim: true,
+                italic: true,
+                ..Default::default()
+            },
+        });
+    } else {
+        let (prefix, body) = split_markdown_list_prefix(trimmed);
+        if !leading_ws.is_empty() {
+            line_spans.push(InlineSpan {
+                text: leading_ws.to_string(),
+                style: InlineStyle {
+                    dim,
+                    ..Default::default()
+                },
+            });
+        }
+        if !prefix.is_empty() {
+            line_spans.push(InlineSpan {
+                text: prefix.to_string(),
+                style: InlineStyle {
+                    dim: true,
+                    ..Default::default()
+                },
+            });
+        }
+        line_spans.extend(parse_inline_spans(body, dim));
     }
-    let bytes = trimmed.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_digit() {
-        i += 1;
-    }
-    if i > 0 && i < bytes.len() && bytes[i] == b'.' {
-        return true;
-    }
-    false
+
+    line_spans
 }
 
 #[cfg(test)]
@@ -520,6 +428,20 @@ fn render_horizontal_rule(
 mod tests {
     use super::*;
     use smelt_core::content::builder::test_util::render_test;
+
+    #[test]
+    fn markdown_line_spans_use_shared_block_markers() {
+        let heading = markdown_line_spans("#not heading", false);
+        assert_ne!(heading[0].style.group, Some(intern("SmeltHeading")));
+
+        let bullet = markdown_line_spans("+ item", false);
+        assert_eq!(bullet[0].text, "+ ");
+        assert!(bullet[0].style.dim);
+
+        let ordered = markdown_line_spans("12) item", false);
+        assert_eq!(ordered[0].text, "12) ");
+        assert!(ordered[0].style.dim);
+    }
 
     #[test]
     fn markdown_collapses_leading_blank_run_before_code_block() {

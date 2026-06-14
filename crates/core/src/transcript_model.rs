@@ -690,8 +690,6 @@ pub struct ActiveText {
     /// Used to match the correct closing fence for nested blocks.
     pub(crate) fence_backticks: usize,
     pub(crate) table_rows: Vec<String>,
-    /// Cached non-separator row count; avoids recomputing per frame.
-    pub(crate) table_data_rows: usize,
     pub(crate) streaming_id: Option<BlockId>,
     pub(crate) table_streaming_id: Option<BlockId>,
 }
@@ -723,12 +721,7 @@ fn ends_with_heading(block: &Block) -> bool {
     let Block::Text { content } = block else {
         return false;
     };
-    content
-        .lines()
-        .last()
-        .unwrap_or("")
-        .trim_start()
-        .starts_with('#')
+    crate::content::is_markdown_heading_line(content.lines().last().unwrap_or(""))
 }
 
 /// Heuristic: does this look like a `/command` line?
