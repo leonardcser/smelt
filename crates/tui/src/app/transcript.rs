@@ -886,9 +886,7 @@ fn render_tool_body_jobs(
 fn store_tool_body_results(history: &mut BlockHistory, bodies: Vec<(String, ToolBody)>) -> bool {
     let mut changed = false;
     for (call_id, body) in bodies {
-        changed |= history.update_tool_state(&call_id, |state| {
-            state.body = Some(body);
-        });
+        changed |= history.install_tool_body(&call_id, body);
     }
     changed
 }

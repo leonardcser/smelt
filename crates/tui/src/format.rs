@@ -67,7 +67,7 @@ impl BufferParser for ModeParser {
             }
             BufFormat::Markdown => {
                 render_into_buffer(buf, width, &theme, |sink| {
-                    crate::content::transcript_parsers::render_markdown_inner(
+                    crate::content::display_renderers::render_markdown_inner(
                         sink,
                         source,
                         width as usize,

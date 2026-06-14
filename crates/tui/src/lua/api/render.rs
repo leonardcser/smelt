@@ -87,7 +87,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let width = crate::content::term_width() as u16;
                 if let Some(buf) = app.ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
-                        crate::content::transcript_parsers::render_markdown_inner(
+                        crate::content::display_renderers::render_markdown_inner(
                             sink,
                             &source,
                             width as usize,

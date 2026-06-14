@@ -209,7 +209,7 @@ fn render_preview_into(
         return false;
     };
     crate::content::to_buffer::render_into_buffer(buf, width, &theme, |sink| {
-        crate::content::transcript_parsers::render_tool_body_into(sink, &body, width);
+        crate::content::display_renderers::render_tool_body_into(sink, &body, width);
     });
     true
 }

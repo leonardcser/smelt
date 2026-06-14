@@ -1,4 +1,4 @@
-//! Per-`Block`-variant transcript renderers.
+//! Display renderers for compiled transcript blocks.
 
 pub mod markdown;
 mod tools;

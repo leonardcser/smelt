@@ -530,15 +530,7 @@ impl TuiApp {
         }
         self.session_save_pending = false;
         let display_cache_generation = self.transcript.display_cache_generation();
-        let blobs: Vec<crate::persist::Blob> = self
-            .input
-            .store
-            .lock()
-            .unwrap()
-            .image_blobs()
-            .into_iter()
-            .map(|(filename, data_url)| crate::persist::Blob { filename, data_url })
-            .collect();
+        let blobs = self.pending_image_blobs();
         if !self.session_dirty
             && self.persisted_display_cache_generation == display_cache_generation
             && self.persisted_fingerprints.is_some()
@@ -547,11 +539,7 @@ impl TuiApp {
             smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             return;
         }
-        let mut session = self.core.session.clone();
-        session.updated_at_ms = session::now_ms();
-        session.mode = Some(self.core.config.mode.as_str().to_string());
-        session.reasoning_effort = Some(self.core.config.reasoning_effort);
-        session.model = Some(self.current_model_key());
+        let session = self.session_snapshot_for_persist();
         let display_cache = self.transcript.display_cache_data();
         let fingerprints = persist_fingerprints(&session, &display_cache);
         if fingerprints.is_some()
@@ -575,6 +563,26 @@ impl TuiApp {
             blobs,
             display_cache,
         });
+    }
+
+    fn pending_image_blobs(&self) -> Vec<crate::persist::Blob> {
+        self.input
+            .store
+            .lock()
+            .unwrap()
+            .image_blobs()
+            .into_iter()
+            .map(|(filename, data_url)| crate::persist::Blob { filename, data_url })
+            .collect()
+    }
+
+    fn session_snapshot_for_persist(&self) -> session::Session {
+        let mut session = self.core.session.clone();
+        session.updated_at_ms = session::now_ms();
+        session.mode = Some(self.core.config.mode.as_str().to_string());
+        session.reasoning_effort = Some(self.core.config.reasoning_effort);
+        session.model = Some(self.current_model_key());
+        session
     }
 
     /// Block until all queued persist writes complete. Call before reading session files from disk.

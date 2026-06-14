@@ -1,4 +1,4 @@
-use crate::content::transcript_parsers::{
+use crate::content::display_renderers::{
     compacted, exec, mode, process_status, text, thinking, tool_call, user,
 };
 use crate::smelt_edit::{Buffer, Theme};
@@ -291,9 +291,7 @@ impl DisplayModel {
                 );
                 return false;
             }
-            history.update_tool_state(call_id, |state| {
-                state.body = cached_body;
-            });
+            history.hydrate_tool_body_cache(call_id, cached_body);
         }
 
         let key = history.resolve_key(
@@ -487,7 +485,7 @@ pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
             summary,
             state,
             ..
-        } => crate::content::transcript_parsers::measure_tool_height(
+        } => crate::content::display_renderers::measure_tool_height(
             name,
             summary,
             state.status,

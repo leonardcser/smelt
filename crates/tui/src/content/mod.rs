@@ -4,13 +4,13 @@ pub(crate) mod prompt_spans;
 
 pub(crate) mod display_block;
 pub(crate) mod display_cache;
+pub mod display_renderers;
 pub(crate) mod layout;
 pub(crate) mod prompt_buf;
 pub(crate) mod prompt_parser;
 pub(crate) mod source_view;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
-pub mod transcript_parsers;
 
 pub(crate) fn display_safe_char(ch: char) -> char {
     if ch != '\n' && ch.is_control() {

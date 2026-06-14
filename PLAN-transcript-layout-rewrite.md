@@ -983,25 +983,37 @@ Validation:
 
 **Deliverable:** complete. `DisplayBlock::Legacy` is gone, `transcript_parsers` no longer owns transcript layout, and the remaining full-row paths are intentional API choices rather than hidden measurement dependencies.
 
-### Phase 11: Simplify transcript materialization windows
+### Phase 11: Simplify materialization and clean up post-migration boundaries
 
-**Goal:** remove leftover viewport/materialization magic numbers now that exact transcript row heights make the visible row window precise.
+**Goal:** remove leftover viewport/materialization magic numbers and simplify names/boundaries that still reflected the old parser-owned transcript layout model. Avoid bigger rendering abstractions until profiling proves they are worth the complexity.
+
+Resume profile after Phase 10/early Phase 11:
+
+- Resume-only visible projection is no longer the bottleneck: `transcript:project_visible_range` is ~3 ms, row-index rebuild/hydration is sub-millisecond, and `tool:prerender_bodies` does no hidden work.
+- Cold resume is now mostly data loading/reconstruction: `transcript:build_from_session` ~85-90 ms, JSON parse/read ~35-45 ms, and `session_ir` read/decode ~55 ms.
+- Resume + scroll + resize still shows occasional large materialization spikes when the viewport intersects a very large tool/diff block, but block-local row rendering is intentionally deferred for now because it would add a larger abstraction. The current cleanup keeps the code easier to reason about before taking that step.
 
 Completed:
 
 - Removed fixed transcript head/tail overscan constants (`20` rows each) from projection planning.
 - Visible-row and tail projections now preload half a viewport around the exact visible window. This preserves nearby-scroll reuse without tying materialization to an arbitrary global constant.
 - Added regression coverage that small viewports materialize a viewport-relative bounded window rather than inheriting a fixed large cushion.
+- Renamed `content::transcript_parsers` to `content::display_renderers`; these modules are display renderers for compiled `DisplayBlock`s, not owners of transcript parsing/layout.
+- Split explicit tool-body cache APIs out of normal tool-state mutation: runtime tool-body installation bumps history generation only when the display hash changes, while display-cache hydration restores derived bodies without treating it as canonical transcript mutation.
+- Refactored session persistence setup into small helpers for pending image blobs and the persist snapshot, making `save_session`'s skip/write decisions easier to audit.
 - Picker overscan remains unchanged because it is independent list virtualization, not transcript exact-row planning.
 
 Validation:
 
 - `cargo fmt --check`
+- `cargo test -p smelt-core transcript_model`
+- `cargo test -p smelt-tui display_renderers`
+- `cargo test -p smelt-tui display_cache`
 - `cargo test -p smelt-tui transcript_buf`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo nextest run --workspace` → `3060 passed, 1 skipped`
+- `cargo nextest run --workspace` → `3062 passed, 1 skipped`
 
-**Deliverable:** complete. Transcript projection uses exact row heights plus viewport-relative preload; no transcript overscan constants remain.
+**Deliverable:** complete. Transcript projection uses exact row heights plus viewport-relative preload; post-legacy renderer naming matches ownership; derived tool-body cache hydration no longer masquerades as normal transcript mutation.
 
 ---
 
