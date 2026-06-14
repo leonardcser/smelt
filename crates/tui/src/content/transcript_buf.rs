@@ -1364,6 +1364,15 @@ impl TranscriptProjection {
 }
 
 fn debug_assert_materialized_viewport(rows: MaterializedRows, viewport_rows: u16) {
+    if viewport_rows == 0 {
+        debug_assert!(
+            rows.clamped_scroll <= rows.total_rows,
+            "empty viewport scroll {} exceeds total rows {}",
+            rows.clamped_scroll,
+            rows.total_rows
+        );
+        return;
+    }
     let viewport_end = rows
         .clamped_scroll
         .saturating_add(viewport_rows as RowIndex)
