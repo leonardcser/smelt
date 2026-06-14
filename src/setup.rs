@@ -195,17 +195,17 @@ fn collect_provider(tmpl: &ProviderTemplate) -> Option<NewProvider> {
 async fn run_login(kind: AuthProvider) {
     let method = match kind {
         AuthProvider::Codex => {
-            let methods = &["Browser (opens a window)", "Device code (headless / SSH)"];
+            let browser_status = engine::auth::browser_status();
+            let methods = &["Browser callback", "Device code (headless / SSH)"];
             let choice = Select::new()
                 .with_prompt("Login method")
                 .items(methods)
-                .default(0)
+                .default(if browser_status.can_open() { 0 } else { 1 })
                 .interact()
-                .unwrap_or(0);
+                .unwrap_or(if browser_status.can_open() { 0 } else { 1 });
             if choice == 1 {
                 LoginMethod::DeviceCode
             } else {
-                println!("\nOpening browser for authorization...\n");
                 LoginMethod::Browser
             }
         }

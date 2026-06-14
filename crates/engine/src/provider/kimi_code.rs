@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use rand::RngExt;
 
-use super::auth_storage::CredStore;
-use super::unix_now;
+use super::{auth_storage::CredStore, unix_now, LoginCallbacks};
 
 pub const API_BASE: &str = "https://api.kimi.com/coding/v1";
 const OAUTH_HOST: &str = "https://auth.kimi.com";
@@ -18,11 +17,6 @@ pub fn is_api_base(api_base: &str) -> bool {
     api_base
         .trim_end_matches('/')
         .contains("api.kimi.com/coding")
-}
-
-pub struct LoginCallbacks<'a> {
-    pub on_prompt: &'a (dyn Fn(&str, &str) + Send + Sync),
-    pub on_progress: &'a (dyn Fn(&str) + Send + Sync),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -364,10 +358,7 @@ fn oauth_error(resp: &OAuthResponse, context: &str) -> String {
 #[derive(Debug, PartialEq, Eq)]
 enum DevicePollDecision {
     Authorized,
-    Continue {
-        interval: u64,
-        progress: &'static str,
-    },
+    Continue { interval: u64 },
     Expired,
     Denied,
 }
@@ -378,13 +369,9 @@ fn device_poll_decision(resp: &OAuthResponse, interval: u64) -> Result<DevicePol
     }
 
     match resp.json["error"].as_str().unwrap_or_default() {
-        "authorization_pending" => Ok(DevicePollDecision::Continue {
-            interval,
-            progress: "Waiting for browser authorization...",
-        }),
+        "authorization_pending" => Ok(DevicePollDecision::Continue { interval }),
         "slow_down" => Ok(DevicePollDecision::Continue {
             interval: interval.saturating_add(5),
-            progress: "Waiting for browser authorization...",
         }),
         "expired_token" => Ok(DevicePollDecision::Expired),
         "access_denied" => Ok(DevicePollDecision::Denied),
@@ -458,10 +445,8 @@ async fn login_with_env(
             }
             DevicePollDecision::Continue {
                 interval: next_interval,
-                progress,
             } => {
                 interval = next_interval;
-                (callbacks.on_progress)(progress);
             }
             DevicePollDecision::Expired => {
                 return Err("Kimi Code authorization expired; run login again".to_string());
@@ -758,10 +743,7 @@ mod tests {
         };
         assert_eq!(
             device_poll_decision(&pending, 5).unwrap(),
-            DevicePollDecision::Continue {
-                interval: 5,
-                progress: "Waiting for browser authorization..."
-            }
+            DevicePollDecision::Continue { interval: 5 }
         );
 
         let slow_down = OAuthResponse {
@@ -771,10 +753,7 @@ mod tests {
         };
         assert_eq!(
             device_poll_decision(&slow_down, 5).unwrap(),
-            DevicePollDecision::Continue {
-                interval: 10,
-                progress: "Waiting for browser authorization..."
-            }
+            DevicePollDecision::Continue { interval: 10 }
         );
 
         let expired = OAuthResponse {

@@ -16,6 +16,11 @@ use reqwest::Client;
 use serde::Serialize;
 use std::time::Duration;
 
+pub(crate) struct LoginCallbacks<'a> {
+    pub(crate) on_prompt: &'a (dyn Fn(&str, &str) + Send + Sync),
+    pub(crate) on_progress: &'a (dyn Fn(&str) + Send + Sync),
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolDefinition {
     #[serde(rename = "type")]

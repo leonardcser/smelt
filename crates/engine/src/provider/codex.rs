@@ -13,8 +13,7 @@ const REFRESH_INTERVAL_SECS: u64 = 8 * 24 * 3600; // 8 days, matching codex
 
 pub(crate) const CODEX_TOKENS_ENV: &str = "SMELT_CODEX_TOKENS";
 
-use super::auth_storage::CredStore;
-use super::unix_now;
+use super::{auth_storage::CredStore, unix_now, LoginCallbacks};
 
 fn cred_store() -> CredStore {
     CredStore::production(
@@ -271,9 +270,12 @@ padding:1rem;background:#3c140d;border-radius:.5rem}}</style>
     )
 }
 
-/// Run the browser-based OAuth + PKCE flow: starts a local server, opens the browser,
-/// waits for the callback, and exchanges the code for tokens.
-pub(crate) async fn browser_login(client: &reqwest::Client) -> Result<CodexTokens, String> {
+/// Run the browser-based OAuth + PKCE flow: starts a local server, presents the
+/// authorization URL, waits for the callback, and exchanges the code for tokens.
+pub(crate) async fn browser_login(
+    client: &reqwest::Client,
+    callbacks: &LoginCallbacks<'_>,
+) -> Result<CodexTokens, String> {
     let pkce = generate_pkce();
     let state = generate_state();
     let redirect_uri = format!("http://localhost:{OAUTH_PORT}/auth/callback");
@@ -283,7 +285,7 @@ pub(crate) async fn browser_login(client: &reqwest::Client) -> Result<CodexToken
         .await
         .map_err(|e| format!("failed to bind port {OAUTH_PORT}: {e}"))?;
 
-    open_browser(&auth_url);
+    (callbacks.on_prompt)(&auth_url, "");
 
     let (code, received_state) =
         tokio::time::timeout(Duration::from_secs(300), wait_for_callback(&listener))
@@ -353,38 +355,6 @@ async fn wait_for_callback(listener: &tokio::net::TcpListener) -> Result<(String
     let _ = stream.write_all(resp.as_bytes()).await;
 
     Ok((code, state))
-}
-
-fn open_browser(url: &str) {
-    use std::process::Stdio;
-
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", url])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
 }
 
 async fn exchange_code(
@@ -715,7 +685,10 @@ struct DeviceCodePollResponse {
 }
 
 /// Device-code flow for headless environments.
-pub(crate) async fn device_code_login(client: &reqwest::Client) -> Result<CodexTokens, String> {
+pub(crate) async fn device_code_login(
+    client: &reqwest::Client,
+    callbacks: &LoginCallbacks<'_>,
+) -> Result<CodexTokens, String> {
     let body = serde_json::json!({ "client_id": CLIENT_ID });
 
     let resp = client
@@ -741,9 +714,8 @@ pub(crate) async fn device_code_login(client: &reqwest::Client) -> Result<CodexT
     let dc: DeviceCodeResponse = serde_json::from_str(&text)
         .map_err(|e| format!("bad device code response: {e}\nBody: {text}"))?;
 
-    println!("\n  Open this URL in a browser:\n");
-    println!("    {ISSUER}/codex/device\n");
-    println!("  Then enter code: {}\n", dc.user_code);
+    let verification_url = format!("{ISSUER}/codex/device");
+    (callbacks.on_prompt)(&verification_url, &dc.user_code);
 
     let interval = Duration::from_secs(dc.interval.unwrap_or(5));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15 * 60);

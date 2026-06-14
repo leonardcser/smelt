@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::auth_storage::CredStore;
-use super::unix_now;
+use super::{auth_storage::CredStore, unix_now, LoginCallbacks};
 
 // VS Code Copilot Chat OAuth client ID, stored base64-encoded to avoid casual grep matches.
 const CLIENT_ID_B64: &str = "SXYxLmI1MDdhMDhjODdlY2ZlOTg=";
@@ -166,11 +165,6 @@ struct DeviceCodeResponse {
     expires_in: u64,
 }
 
-pub(crate) struct LoginCallbacks<'a> {
-    pub(crate) on_prompt: &'a (dyn Fn(&str, &str) + Send + Sync),
-    pub(crate) on_progress: &'a (dyn Fn(&str) + Send + Sync),
-}
-
 pub(crate) async fn device_code_login(
     client: &reqwest::Client,
     callbacks: &LoginCallbacks<'_>,
@@ -203,7 +197,6 @@ pub(crate) async fn device_code_login(
         .map_err(|e| format!("bad device code response: {e}"))?;
 
     (callbacks.on_prompt)(&device.verification_uri, &device.user_code);
-    open_browser(&device.verification_uri);
 
     let github_token = poll_for_github_token(
         client,
@@ -653,42 +646,6 @@ pub(crate) fn cached_context_window(model: &str) -> Option<u32> {
 
 pub(crate) fn cached_output_tokens(model: &str) -> Option<u32> {
     cached_model(model).and_then(|m| m.max_output_tokens)
-}
-
-fn open_browser(url: &str) {
-    use std::process::Stdio;
-
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/c", "start", url])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        let _ = url;
-    }
 }
 
 #[cfg(test)]
