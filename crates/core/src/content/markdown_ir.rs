@@ -1,6 +1,8 @@
 use std::ops::Range;
 
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+use crate::content::ColumnAlignment;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkdownBlock<'a> {
@@ -20,6 +22,8 @@ pub enum MarkdownNode {
     },
     Table {
         range: Range<usize>,
+        alignments: Vec<ColumnAlignment>,
+        rows: Vec<Vec<String>>,
     },
     Rule {
         range: Range<usize>,
@@ -35,6 +39,8 @@ enum SpecialBlock {
     },
     Table {
         range: Range<usize>,
+        alignments: Vec<ColumnAlignment>,
+        rows: Vec<Vec<String>>,
     },
     Rule {
         range: Range<usize>,
@@ -45,7 +51,7 @@ impl SpecialBlock {
     fn range(&self) -> Range<usize> {
         match self {
             SpecialBlock::Code { range, .. }
-            | SpecialBlock::Table { range }
+            | SpecialBlock::Table { range, .. }
             | SpecialBlock::Rule { range } => range.clone(),
         }
     }
@@ -53,7 +59,15 @@ impl SpecialBlock {
     fn into_node(self) -> MarkdownNode {
         match self {
             SpecialBlock::Code { range, lang, body } => MarkdownNode::Code { range, lang, body },
-            SpecialBlock::Table { range } => MarkdownNode::Table { range },
+            SpecialBlock::Table {
+                range,
+                alignments,
+                rows,
+            } => MarkdownNode::Table {
+                range,
+                alignments,
+                rows,
+            },
             SpecialBlock::Rule { range } => MarkdownNode::Rule { range },
         }
     }
@@ -96,7 +110,7 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
     let parser = Parser::new_ext(source, options).into_offset_iter();
     let mut out = Vec::new();
     let mut code: Option<(usize, String, Vec<Range<usize>>)> = None;
-    let mut table_start: Option<usize> = None;
+    let mut table: Option<TableBuild> = None;
 
     for (event, range) in parser {
         match event {
@@ -123,14 +137,40 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
                     body.push(range);
                 }
             }
-            Event::Start(Tag::Table(_)) => {
-                table_start = Some(range.start);
+            Event::Start(Tag::Table(alignments)) => {
+                table = Some(TableBuild {
+                    start: range.start,
+                    alignments: alignments.into_iter().map(map_alignment).collect(),
+                    rows: Vec::new(),
+                    current_row: None,
+                });
             }
             Event::End(TagEnd::Table) => {
-                if let Some(start) = table_start.take() {
+                if let Some(table) = table.take() {
                     out.push(SpecialBlock::Table {
-                        range: start..range.end,
+                        range: table.start..range.end,
+                        alignments: table.alignments,
+                        rows: table.rows,
                     });
+                }
+            }
+            Event::Start(Tag::TableHead | Tag::TableRow) => {
+                if let Some(table) = table.as_mut() {
+                    table.current_row = Some(Vec::new());
+                }
+            }
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
+                if let Some(table) = table.as_mut() {
+                    if let Some(row) = table.current_row.take() {
+                        table.rows.push(row);
+                    }
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                if let Some(table) = table.as_mut() {
+                    if let Some(row) = table.current_row.as_mut() {
+                        row.push(trim_cell_source(source, range));
+                    }
                 }
             }
             Event::Rule => out.push(SpecialBlock::Rule { range }),
@@ -139,6 +179,25 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
     }
 
     out
+}
+
+struct TableBuild {
+    start: usize,
+    alignments: Vec<ColumnAlignment>,
+    rows: Vec<Vec<String>>,
+    current_row: Option<Vec<String>>,
+}
+
+fn map_alignment(alignment: Alignment) -> ColumnAlignment {
+    match alignment {
+        Alignment::Center => ColumnAlignment::Center,
+        Alignment::Right => ColumnAlignment::Right,
+        Alignment::Left | Alignment::None => ColumnAlignment::Left,
+    }
+}
+
+fn trim_cell_source(source: &str, range: Range<usize>) -> String {
+    source.get(range).unwrap_or("").trim().to_string()
 }
 
 #[cfg(test)]
@@ -161,12 +220,34 @@ mod tests {
         let source = "before\n\n| a | b |\n| - | - |\n| c | d |\n\nafter";
         let block = parse_markdown(source);
         let table_source = block.nodes.iter().find_map(|node| match node {
-            MarkdownNode::Table { range } => Some(&source[range.clone()]),
+            MarkdownNode::Table { range, .. } => Some(&source[range.clone()]),
             _ => None,
         });
         assert_eq!(
             table_source.map(str::trim_end),
             Some("| a | b |\n| - | - |\n| c | d |")
+        );
+    }
+
+    #[test]
+    fn parse_markdown_table_uses_parser_cell_boundaries() {
+        let source = "| System | Mechanism | Outcome |\n|---|---|---|\n| **Smelt** | Unix `flock(LOCK_EX\\|LOCK_NB)` | Second |\n";
+        let block = parse_markdown(source);
+        let rows = block.nodes.iter().find_map(|node| match node {
+            MarkdownNode::Table { rows, .. } => Some(rows),
+            _ => None,
+        });
+
+        assert_eq!(
+            rows,
+            Some(&vec![
+                vec!["System".into(), "Mechanism".into(), "Outcome".into()],
+                vec![
+                    "**Smelt**".into(),
+                    "Unix `flock(LOCK_EX\\|LOCK_NB)`".into(),
+                    "Second".into(),
+                ],
+            ])
         );
     }
 

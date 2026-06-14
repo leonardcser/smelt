@@ -64,12 +64,18 @@ fn render_markdown_block(
                 state.last_content_line = None;
                 state.prev_was_block = true;
             }
-            MarkdownNode::Table { range } => {
+            MarkdownNode::Table {
+                range,
+                alignments,
+                rows,
+            } => {
                 render_block_gap(out, &mut state);
-                let source = smelt_buffer::text::slice(block.source, range.clone());
-                let lines: Vec<&str> = source.lines().collect();
+                let start = out.line_count();
                 state.rows +=
-                    render_markdown_table_from_lines(out, &lines, width, dim, bctx, indent);
+                    render_markdown_table(out, rows, alignments, width, dim, bctx, indent);
+                let source = smelt_buffer::text::slice(block.source, range.clone())
+                    .trim_end_matches(['\r', '\n']);
+                out.stamp_copy_group(start, source);
                 state.last_content_line = None;
                 state.prev_was_block = true;
             }
@@ -120,12 +126,12 @@ fn measure_markdown_block(
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
-            MarkdownNode::Table { range } => {
+            MarkdownNode::Table {
+                alignments, rows, ..
+            } => {
                 measure_block_gap(&mut state);
-                let source = smelt_buffer::text::slice(block.source, range.clone());
-                let lines: Vec<&str> = source.lines().collect();
-                state.rows = state.rows.saturating_add(measure_markdown_table_from_lines(
-                    &lines, width, dim, bctx, indent,
+                state.rows = state.rows.saturating_add(measure_markdown_table(
+                    rows, alignments, width, dim, bctx, indent,
                 ));
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
@@ -510,56 +516,6 @@ fn render_horizontal_rule(
     1
 }
 
-fn render_markdown_table_from_lines(
-    out: &mut LineBuilder,
-    lines: &[&str],
-    width: usize,
-    dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
-    indent: &str,
-) -> u16 {
-    let mut alignments = Vec::new();
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
-    for line in lines {
-        if smelt_core::content::is_table_separator(line) {
-            if alignments.is_empty() {
-                alignments = smelt_core::content::parse_table_alignments(line);
-            }
-            continue;
-        }
-        let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
-        let cells: Vec<String> = trimmed.split('|').map(|c| c.trim().to_string()).collect();
-        table_rows.push(cells);
-    }
-    let start = out.line_count();
-    let n = render_markdown_table(out, &table_rows, &alignments, width, dim, bctx, indent);
-    out.stamp_copy_group(start, &lines.join("\n"));
-    n
-}
-
-fn measure_markdown_table_from_lines(
-    lines: &[&str],
-    width: usize,
-    dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
-    indent: &str,
-) -> u16 {
-    let mut alignments = Vec::new();
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
-    for line in lines {
-        if smelt_core::content::is_table_separator(line) {
-            if alignments.is_empty() {
-                alignments = smelt_core::content::parse_table_alignments(line);
-            }
-            continue;
-        }
-        let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
-        let cells: Vec<String> = trimmed.split('|').map(|c| c.trim().to_string()).collect();
-        table_rows.push(cells);
-    }
-    measure_markdown_table(&table_rows, &alignments, width, dim, bctx, indent)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,5 +658,22 @@ mod tests {
         assert!(data_row.contains("┃ x    ┃"), "left: {data_row:?}");
         assert!(data_row.contains("┃  y   ┃"), "center: {data_row:?}");
         assert!(data_row.contains("┃    z ┃"), "right: {data_row:?}");
+    }
+
+    #[test]
+    fn rendered_table_keeps_escaped_pipe_inside_code_cell() {
+        let md = "| System | Mechanism | Outcome |\n|---|---|---|\n| **Smelt** | Unix `flock(LOCK_EX\\|LOCK_NB)` | Second |\n";
+        let block = render_test(120, |sink| {
+            render_markdown_inner(sink, md, 120, "", false, None);
+        });
+        let data_row = block
+            .lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .find(|s| s.contains("Smelt"))
+            .expect("data row");
+
+        assert_eq!(data_row.matches('┃').count(), 4, "row: {data_row:?}");
+        assert!(data_row.contains("LOCK_NB"), "row: {data_row:?}");
     }
 }
