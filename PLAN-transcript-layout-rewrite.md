@@ -921,7 +921,7 @@ sessions/<id>/session.ir.bin
 Completed slice:
 
 - Added binary `session.ir.bin` persistence with fixed magic bytes, cache format version, renderer version, Smelt build version, and payload length checks.
-- Persisted display-cache entries from the TUI persister alongside `session.json`; corrupt, missing, partial, renderer-mismatched, and build-mismatched sidecars are treated as cache misses.
+- Persisted derived display-cache data from the TUI persister alongside `session.json`; corrupt, missing, partial, renderer-mismatched, and build-mismatched sidecars are treated as cache misses.
 - Hydrated display caches for both full session resume and resume-picker previews.
 - Switched tool-call sidecar keys from in-memory layout revisions to stable serialized tool display state, including cached tool bodies, so warm resumes can skip Lua tool-body rendering for unchanged historical tool calls.
 - Kept the sidecar disposable: no migration layer and no theme-, width-, or visible-row-dependent data is stored.
@@ -935,7 +935,7 @@ Validation:
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo nextest run --workspace` → `3050 passed, 1 skipped`
 
-**Deliverable:** resume/preview can hydrate unchanged historical `DisplayBlock`s and cached tool bodies from `session.ir.bin`; cache misses rebuild from canonical `session.json`.
+**Deliverable:** resume/preview can hydrate unchanged derived display data from `session.ir.bin`; cache misses rebuild from canonical `session.json`.
 
 ### Phase 9: Performance measurement and fixes
 
@@ -947,7 +947,7 @@ Completed in this slice:
 - Cache-miss compilation now flows through independent `CompileJob`s from `collect_compile_jobs`; those jobs can be scheduled in parallel once profiling identifies the right threshold and executor. The current caller keeps sequential execution to avoid adding scheduler complexity before it is needed.
 - Synthetic 10 MB baseline improved from `first_ms=4394 resize_ms=4849` to `first_ms=2415 resize_ms=2785`, with visible projection at `visible_ms=3`.
 - Resume tracing identified three remaining concrete costs in real 11 MB sessions: stale `session.ir.bin` decoded as bincode failure instead of a version miss, exact row-index rebuilds repeatedly measuring unchanged historical blocks, and unconditional session/display-cache writes on resume+quit.
-- The display cache format now persists both compiled display entries and exact row-index entries keyed by width, `show_thinking`, ordered `BlockId`s, and per-block `LayoutKey`s. Hydration validates every cached node against current history before installing the prefix index, so exact row totals can be restored without a full measurement pass.
+- The display cache format now persists cached tool bodies and exact row-index entries keyed by width, `show_thinking`, ordered `BlockId`s, and per-block `LayoutKey`s. Hydration validates every cached node against current history before installing the prefix index, so exact row totals can be restored without a full measurement pass.
 - Session saves now fingerprint the timestamp-normalized session snapshot plus display cache and skip unchanged writes when there are no image blobs to flush. This keeps resume+quit from rewriting `session.json` and `session.ir.bin` just because `updated_at_ms` would have changed.
 - Added traces for display-cache row-index read/write counts, row-index cache hydration/rejection/miss, row-index generation/reuse, and the first/last missing block indexes during row-index rebuild.
 
@@ -967,7 +967,7 @@ Next measurements:
 Completed:
 
 - `DisplayBlock::Legacy` is gone. Transcript display ownership is now structurally typed, and production measurement/rendering dispatches over explicit `DisplayBlock` variants.
-- Hydration validates cached display entries against the current `Block` shape before installing them, preventing stale cache entries from crossing variant boundaries.
+- Tool-body hydration validates cached derived entries against the current `Block::ToolCall` shape before installing them, preventing stale cache entries from crossing block boundaries.
 - Parser-level production measurement/render fallbacks were removed; parser tests now exercise the compiled display-block path through `compile_block` and `render_block_into`.
 - Parser renderer visibility was narrowed, and the unused test-only catch-all renderer/code-line shim was deleted.
 - `build_rows` remains as an explicit full-transcript compatibility API; range consumers use exact row indexes plus intersecting block materialization.
@@ -1014,6 +1014,31 @@ Validation:
 - `cargo nextest run --workspace` → `3062 passed, 1 skipped`
 
 **Deliverable:** complete. Transcript projection uses exact row heights plus viewport-relative preload; post-legacy renderer naming matches ownership; derived tool-body cache hydration no longer masquerades as normal transcript mutation.
+
+### Phase 12: Make `session.ir.bin` a derived-data binary cache
+
+**Goal:** keep `session.json` as the only serialized transcript and make `session.ir.bin` a disposable derived-data sidecar with a binary payload.
+
+Completed:
+
+- Changed `DisplayCacheData` from serialized full display-block entries to derived tool-body entries plus exact row-index entries.
+- Tool-body cache entries store only the tool block id, call id, display cache key, and cached `ToolBody`. Non-tool blocks are compiled from canonical `BlockHistory` on demand instead of being duplicated in the sidecar.
+- Hydration installs cached tool bodies into `BlockHistory` only after validating the current block is the same tool call and the candidate state hashes to the cached display key.
+- Row-index hydration remains after tool-body hydration so row-index keys can validate against the restored sidecar hashes.
+- Replaced the JSON payload inside the binary sidecar with `bincode`; the fixed header remains. The cache format version was intentionally not bumped because old sidecars will be manually removed for this branch.
+- Updated persist/session-IR telemetry and tests to report tool-body counts rather than generic display entries.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test -p smelt-tui display_cache`
+- `cargo test -p smelt-tui display_block`
+- `cargo test -p smelt-tui transcript_buf`
+- `cargo test -p smelt-core transcript_model`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace` → `3062 passed, 1 skipped`
+
+**Deliverable:** complete. `session.ir.bin` now stores only derived tool-body and row-index cache data in a binary payload; deleting it loses no canonical transcript state and cache misses rebuild from `session.json`.
 
 ---
 

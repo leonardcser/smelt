@@ -2,6 +2,7 @@ use crate::content::display_renderers::{
     compacted, exec, mode, process_status, text, thinking, tool_call, user,
 };
 use crate::smelt_edit::{Buffer, Theme};
+use smelt_core::content::block_layout::ToolBody;
 use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block, CodeBlock};
 use smelt_core::content::highlight::render_code_block;
@@ -74,10 +75,11 @@ pub(crate) enum DisplayBlock {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DisplayCacheEntry {
+pub(crate) struct ToolBodyCacheEntry {
     pub(crate) id: BlockId,
+    pub(crate) call_id: String,
     pub(crate) key: DisplayCacheKey,
-    pub(crate) block: DisplayBlock,
+    pub(crate) body: ToolBody,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -110,96 +112,6 @@ impl CompileJob {
             state,
         } = self;
         (id, key, compile_block(&block, state.as_ref()))
-    }
-}
-
-impl DisplayBlock {
-    fn matches_block(&self, block: &Block) -> bool {
-        match (self, block) {
-            (
-                Self::User { text, image_labels },
-                Block::User {
-                    text: block_text,
-                    image_labels: block_image_labels,
-                },
-            ) => text == block_text && image_labels == block_image_labels,
-            (
-                Self::Mode {
-                    text,
-                    icon,
-                    hl_group,
-                },
-                Block::Mode {
-                    text: block_text,
-                    icon: block_icon,
-                    hl_group: block_hl_group,
-                },
-            ) => text == block_text && icon == block_icon && hl_group == block_hl_group,
-            (Self::ProcessStatus { text }, Block::ProcessStatus { text: block_text }) => {
-                text == block_text
-            }
-            (
-                Self::Thinking { content },
-                Block::Thinking {
-                    content: block_content,
-                },
-            ) => content == block_content,
-            (
-                Self::Text { content },
-                Block::Text {
-                    content: block_content,
-                },
-            ) => content == block_content,
-            (
-                Self::CodeLine {
-                    content,
-                    lang,
-                    code,
-                },
-                Block::CodeLine {
-                    content: block_content,
-                    lang: block_lang,
-                },
-            ) => {
-                content == block_content
-                    && lang == block_lang
-                    && code == &parse_code_block(&[content.as_str()], lang)
-            }
-            (
-                Self::ToolCall {
-                    call_id,
-                    name,
-                    summary,
-                    args,
-                    ..
-                },
-                Block::ToolCall {
-                    call_id: block_call_id,
-                    name: block_name,
-                    summary: block_summary,
-                    args: block_args,
-                },
-            ) => {
-                call_id == block_call_id
-                    && name == block_name
-                    && summary == block_summary
-                    && args == block_args
-            }
-            (
-                Self::Exec { command, output },
-                Block::Exec {
-                    command: block_command,
-                    output: block_output,
-                },
-            ) => command == block_command && output == block_output,
-            (
-                Self::Compacted { summary },
-                Block::Compacted {
-                    summary: block_summary,
-                },
-            ) => summary == block_summary,
-            _ => false,
-        }
     }
 }
 
@@ -238,100 +150,82 @@ impl DisplayModel {
         self.blocks.len()
     }
 
-    pub(crate) fn hydrate_many(
+    pub(crate) fn hydrate_tool_bodies(
         &mut self,
         history: &mut BlockHistory,
-        entries: Vec<DisplayCacheEntry>,
+        entries: Vec<ToolBodyCacheEntry>,
     ) -> usize {
         smelt_perf::perf::record_value(
-            "transcript:display_model:hydrate_requested",
+            "transcript:display_model:hydrate_tool_bodies_requested",
             entries.len() as u64,
         );
         let mut hydrated = 0;
         for entry in entries {
-            if self.hydrate_one(history, entry) {
+            if self.hydrate_tool_body(history, entry) {
                 hydrated += 1;
             }
         }
         hydrated
     }
 
-    fn hydrate_one(&mut self, history: &mut BlockHistory, entry: DisplayCacheEntry) -> bool {
-        smelt_perf::perf::record_value("transcript:display_model:hydrate_attempt", 1);
-        let Some(current_block) = history.blocks.get(&entry.id).cloned() else {
+    fn hydrate_tool_body(&mut self, history: &mut BlockHistory, entry: ToolBodyCacheEntry) -> bool {
+        smelt_perf::perf::record_value("transcript:display_model:hydrate_tool_body_attempt", 1);
+        let Some(Block::ToolCall { call_id, .. }) = history.blocks.get(&entry.id) else {
             smelt_perf::perf::record_value(
-                "transcript:display_model:hydrate_reject:missing_block",
+                "transcript:display_model:hydrate_reject:missing_tool_block",
                 1,
             );
             return false;
         };
-        if !entry.block.matches_block(&current_block) {
+        if call_id != &entry.call_id {
             smelt_perf::perf::record_value(
-                "transcript:display_model:hydrate_reject:block_mismatch",
+                "transcript:display_model:hydrate_reject:tool_call_id_mismatch",
                 1,
             );
             return false;
         }
-
-        if let DisplayBlock::ToolCall { call_id, state, .. } = &entry.block {
-            let Some(current_state) = history.tool_state(call_id) else {
-                smelt_perf::perf::record_value(
-                    "transcript:display_model:hydrate_reject:missing_tool_state",
-                    1,
-                );
-                return false;
-            };
-            let cached_body = state.body.clone();
-            let mut candidate = current_state.clone();
-            candidate.body = cached_body.clone();
-            if candidate.display_hash() != entry.key.sidecar_hash {
-                smelt_perf::perf::record_value(
-                    "transcript:display_model:hydrate_reject:tool_sidecar_hash",
-                    1,
-                );
-                return false;
-            }
-            history.hydrate_tool_body_cache(call_id, cached_body);
-        }
-
-        let key = history.resolve_key(
-            entry.id,
-            LayoutKey {
-                width: 0,
-                show_thinking: false,
-                view_state: ViewState::Expanded,
-                content_hash: 0,
-                sidecar_hash: 0,
-            },
-        );
-        let display_key = DisplayCacheKey::from_layout_key(key);
-        if display_key != entry.key {
+        let Some(current_state) = history.tool_state(&entry.call_id) else {
             smelt_perf::perf::record_value(
-                "transcript:display_model:hydrate_reject:key_mismatch",
+                "transcript:display_model:hydrate_reject:missing_tool_state",
+                1,
+            );
+            return false;
+        };
+        let mut candidate = current_state.clone();
+        candidate.body = Some(entry.body.clone());
+        let expected_key =
+            DisplayCacheKey::new(history.content_hash(entry.id), candidate.display_hash());
+        if expected_key != entry.key {
+            smelt_perf::perf::record_value(
+                "transcript:display_model:hydrate_reject:tool_body_key",
                 1,
             );
             return false;
         }
-
-        self.blocks.insert(
-            entry.id,
-            CachedDisplayBlock {
-                key: display_key,
-                block: entry.block,
-            },
-        );
-        smelt_perf::perf::record_value("transcript:display_model:hydrate_ok", 1);
+        history.hydrate_tool_body_cache(&entry.call_id, Some(entry.body));
+        smelt_perf::perf::record_value("transcript:display_model:hydrate_tool_body_ok", 1);
         true
     }
 
-    pub(crate) fn cache_entries(&self, order: &[BlockId]) -> Vec<DisplayCacheEntry> {
+    pub(crate) fn tool_body_cache_entries(
+        &self,
+        history: &BlockHistory,
+        order: &[BlockId],
+    ) -> Vec<ToolBodyCacheEntry> {
         order
             .iter()
             .filter_map(|id| {
-                self.blocks.get(id).map(|cached| DisplayCacheEntry {
+                let Block::ToolCall { call_id, .. } = history.blocks.get(id)? else {
+                    return None;
+                };
+                let state = history.tool_state(call_id)?;
+                let body = state.body.clone()?;
+                let key = DisplayCacheKey::new(history.content_hash(*id), state.display_hash());
+                Some(ToolBodyCacheEntry {
                     id: *id,
-                    key: cached.key,
-                    block: cached.block.clone(),
+                    call_id: call_id.clone(),
+                    key,
+                    body,
                 })
             })
             .collect()
@@ -815,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn hydrated_cache_entries_avoid_recompile() {
+    fn non_tool_blocks_are_not_cached_in_session_ir() {
         let mut transcript = Transcript::new();
         transcript.push(Block::CodeLine {
             content: "fn main() {}".into(),
@@ -826,38 +720,71 @@ mod tests {
 
         let mut model = DisplayModel::new();
         assert_eq!(model.ensure_many(&transcript.history, &[id], &[key]), 1);
-        let entries = model.cache_entries(&transcript.history.order);
+        assert!(model
+            .tool_body_cache_entries(&transcript.history, &transcript.history.order)
+            .is_empty());
 
         let mut hydrated = DisplayModel::new();
-        assert_eq!(hydrated.hydrate_many(&mut transcript.history, entries), 1);
-        assert_eq!(hydrated.ensure_many(&transcript.history, &[id], &[key]), 0);
-    }
-
-    #[test]
-    fn hydrated_cache_rejects_mismatched_display_variant() {
-        let mut transcript = Transcript::new();
-        transcript.push(Block::User {
-            text: "hello".into(),
-            image_labels: vec![],
-        });
-        let id = transcript.history.order[0];
-        let current = transcript.history.blocks.get(&id).unwrap();
-        let key = base_key(&transcript.history, id);
-        let entries = vec![DisplayCacheEntry {
-            id,
-            key: DisplayCacheKey::new(current.content_hash(), 0),
-            block: DisplayBlock::Text {
-                content: "hello".into(),
-            },
-        }];
-
-        let mut hydrated = DisplayModel::new();
-        assert_eq!(hydrated.hydrate_many(&mut transcript.history, entries), 0);
+        assert_eq!(
+            hydrated.hydrate_tool_bodies(&mut transcript.history, Vec::new()),
+            0
+        );
         assert_eq!(hydrated.ensure_many(&transcript.history, &[id], &[key]), 1);
     }
 
     #[test]
-    fn hydrated_tool_entry_installs_cached_body() {
+    fn hydrated_tool_body_rejects_mismatched_key() {
+        let block = Block::ToolCall {
+            call_id: "call-1".into(),
+            name: "write_file".into(),
+            summary: "write file".into(),
+            args: Default::default(),
+        };
+        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+            content: "cached body".into(),
+            hl_group: None,
+        })));
+
+        let mut transcript = Transcript::new();
+        transcript.push_tool_call(
+            block,
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: None,
+                output: Some(Box::new(ToolOutput {
+                    content: "ok".into(),
+                    is_error: false,
+                    metadata: None,
+                })),
+                user_message: None,
+                body: None,
+            },
+        );
+        let id = transcript.history.order[0];
+        let entry = ToolBodyCacheEntry {
+            id,
+            call_id: "call-1".into(),
+            key: DisplayCacheKey::new(transcript.history.content_hash(id), 999),
+            body,
+        };
+
+        let mut hydrated = DisplayModel::new();
+        assert_eq!(
+            hydrated.hydrate_tool_bodies(&mut transcript.history, vec![entry]),
+            0
+        );
+        assert!(transcript
+            .history
+            .tool_state("call-1")
+            .unwrap()
+            .body
+            .is_none());
+        let key = base_key(&transcript.history, id);
+        assert_eq!(hydrated.ensure_many(&transcript.history, &[id], &[key]), 1);
+    }
+
+    #[test]
+    fn hydrated_tool_body_installs_cached_body() {
         let block = Block::ToolCall {
             call_id: "call-1".into(),
             name: "write_file".into(),
@@ -884,11 +811,8 @@ mod tests {
                 body: Some(body),
             },
         );
-        let id = warm.history.order[0];
-        let key = base_key(&warm.history, id);
-        let mut model = DisplayModel::new();
-        assert_eq!(model.ensure_many(&warm.history, &[id], &[key]), 1);
-        let entries = model.cache_entries(&warm.history.order);
+        let entries =
+            DisplayModel::new().tool_body_cache_entries(&warm.history, &warm.history.order);
 
         let mut cold = Transcript::new();
         cold.push_tool_call(
@@ -905,10 +829,17 @@ mod tests {
                 body: None,
             },
         );
+        let id = cold.history.order[0];
         let mut hydrated = DisplayModel::new();
-        assert_eq!(hydrated.hydrate_many(&mut cold.history, entries), 1);
-        assert!(cold.history.tool_state("call-1").unwrap().body.is_some());
+        assert_eq!(hydrated.hydrate_tool_bodies(&mut cold.history, entries), 1);
+        let state = cold.history.tool_state("call-1").unwrap();
+        assert!(state.body.is_some());
         let cold_key = base_key(&cold.history, id);
-        assert_eq!(hydrated.ensure_many(&cold.history, &[id], &[cold_key]), 0);
+        assert_eq!(hydrated.ensure_many(&cold.history, &[id], &[cold_key]), 1);
+        let display = hydrated.get(id, cold_key).expect("compiled display block");
+        let DisplayBlock::ToolCall { state, .. } = display else {
+            panic!("expected tool call display block");
+        };
+        assert!(state.body.is_some());
     }
 }

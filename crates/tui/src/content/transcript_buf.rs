@@ -510,7 +510,9 @@ impl TranscriptProjection {
         data: crate::content::display_cache::DisplayCacheData,
     ) -> usize {
         self.cached_row_indexes = data.row_indexes;
-        let hydrated = self.display_model.hydrate_many(history, data.entries);
+        let hydrated = self
+            .display_model
+            .hydrate_tool_bodies(history, data.tool_bodies);
         if hydrated > 0 {
             self.display_model_generation = history.generation();
         }
@@ -527,7 +529,9 @@ impl TranscriptProjection {
         history: &BlockHistory,
     ) -> crate::content::display_cache::DisplayCacheData {
         crate::content::display_cache::DisplayCacheData {
-            entries: self.display_model.cache_entries(&history.order),
+            tool_bodies: self
+                .display_model
+                .tool_body_cache_entries(history, &history.order),
             row_indexes: self.row_index_cache_entries(history),
         }
     }
