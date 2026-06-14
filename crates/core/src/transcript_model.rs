@@ -721,7 +721,22 @@ fn ends_with_heading(block: &Block) -> bool {
     let Block::Text { content } = block else {
         return false;
     };
-    crate::content::is_markdown_heading_line(content.lines().last().unwrap_or(""))
+    crate::content::markdown_ir::parse_markdown(content)
+        .nodes
+        .iter()
+        .rev()
+        .find_map(|node| match node {
+            crate::content::markdown_ir::MarkdownNode::Text { kind, .. } => Some(*kind),
+            crate::content::markdown_ir::MarkdownNode::Source { range }
+                if smelt_buffer::text::slice(content, range.clone())
+                    .trim()
+                    .is_empty() =>
+            {
+                None
+            }
+            _ => Some(crate::content::markdown_ir::MarkdownTextKind::Paragraph),
+        })
+        == Some(crate::content::markdown_ir::MarkdownTextKind::Heading)
 }
 
 /// Heuristic: does this look like a `/command` line?

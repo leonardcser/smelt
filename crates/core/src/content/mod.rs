@@ -61,25 +61,6 @@ pub(crate) fn default_width() -> usize {
     80
 }
 
-/// Returns true for markdown table separator lines (e.g. `|---|---|`).
-pub fn is_table_separator(line: &str) -> bool {
-    let t = line.trim();
-    !t.is_empty()
-        && t.chars()
-            .all(|c| c == '-' || c == '|' || c == ':' || c == ' ')
-}
-
-/// Returns true for an ATX markdown heading line.
-pub fn is_markdown_heading_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
-    (1..=6).contains(&hashes)
-        && trimmed[hashes..]
-            .chars()
-            .next()
-            .is_none_or(char::is_whitespace)
-}
-
 /// Split a single markdown list-item line into its marker prefix and body.
 pub fn split_markdown_list_prefix(line: &str) -> (&str, &str) {
     let bytes = line.as_bytes();
@@ -144,14 +125,6 @@ pub fn markdown_closes_fence(opening_len: usize, line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn markdown_heading_line_requires_atx_marker() {
-        assert!(is_markdown_heading_line("# Title"));
-        assert!(is_markdown_heading_line("###"));
-        assert!(!is_markdown_heading_line("#not heading"));
-        assert!(!is_markdown_heading_line("####### too many"));
-    }
 
     #[test]
     fn markdown_list_prefix_matches_common_mark_markers() {

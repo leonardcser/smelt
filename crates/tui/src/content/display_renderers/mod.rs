@@ -14,8 +14,6 @@ pub(in crate::content) mod thinking;
 pub(in crate::content) mod tool_call;
 pub(in crate::content) mod user;
 
-#[cfg(test)]
-use markdown::is_horizontal_rule;
 pub(crate) use markdown::render_markdown_inner;
 pub(in crate::content) use tools::measure_tool_height;
 pub(crate) use tools::render_tool_body_into;
@@ -464,28 +462,6 @@ mod tests {
         assert!(!text.contains("Rebasing (1/1)"));
         assert!(!text.contains("[K"));
         assert!(!text.contains('\r'));
-    }
-
-    #[test]
-    fn horizontal_rule_detection() {
-        assert!(is_horizontal_rule("---"));
-        assert!(is_horizontal_rule("___"));
-        assert!(is_horizontal_rule("***"));
-        assert!(is_horizontal_rule("------"));
-        assert!(is_horizontal_rule("-----"));
-        assert!(is_horizontal_rule(" - - - "));
-        assert!(is_horizontal_rule(" * * * "));
-        assert!(is_horizontal_rule(" _ _ _ "));
-        assert!(is_horizontal_rule("  ---  "));
-
-        assert!(!is_horizontal_rule("--"));
-        assert!(!is_horizontal_rule("-"));
-        assert!(!is_horizontal_rule(""));
-        assert!(!is_horizontal_rule("text"));
-        assert!(!is_horizontal_rule("- -"));
-        assert!(!is_horizontal_rule("-*-*-*"));
-        assert!(!is_horizontal_rule("---a"));
-        assert!(!is_horizontal_rule("123"));
     }
 
     #[test]

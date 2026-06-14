@@ -4,10 +4,10 @@ use smelt_core::content::highlight::{
     emit_inline_spans, inline_spans_width, measure_markdown_table, parse_inline_spans,
     render_code_block, render_markdown_table, wrap_inline_spans, InlineSpan, InlineStyle,
 };
-use smelt_core::content::markdown_ir::{parse_markdown, MarkdownBlock, MarkdownNode};
-use smelt_core::content::{
-    is_markdown_heading_line, is_markdown_list_item, split_markdown_list_prefix,
+use smelt_core::content::markdown_ir::{
+    parse_markdown, MarkdownBlock, MarkdownNode, MarkdownTextKind,
 };
+use smelt_core::content::{is_markdown_list_item, split_markdown_list_prefix};
 use smelt_core::theme::intern;
 
 pub fn render_markdown_inner(
@@ -47,13 +47,23 @@ fn render_markdown_block(
     } else {
         width.saturating_sub(display_width(indent) + 1)
     };
+    let ctx = RenderTextCtx {
+        max_cols,
+        indent,
+        dim,
+        bctx,
+    };
     let mut state = RenderState::default();
 
     for node in &block.nodes {
         match node {
             MarkdownNode::Source { range } => {
                 let source = smelt_buffer::text::slice(block.source, range.clone());
-                render_source_lines(out, source, max_cols, indent, dim, bctx, &mut state);
+                render_text_lines(out, source, MarkdownTextKind::Paragraph, &ctx, &mut state);
+            }
+            MarkdownNode::Text { range, kind } => {
+                let source = smelt_buffer::text::slice(block.source, range.clone());
+                render_text_lines(out, source, *kind, &ctx, &mut state);
             }
             MarkdownNode::Code { lang, body, .. } => {
                 render_block_gap(out, &mut state);
@@ -113,7 +123,17 @@ fn measure_markdown_block(
         match node {
             MarkdownNode::Source { range } => {
                 let source = smelt_buffer::text::slice(block.source, range.clone());
-                measure_source_lines(source, max_cols, dim, &mut state);
+                measure_text_lines(
+                    source,
+                    MarkdownTextKind::Paragraph,
+                    max_cols,
+                    dim,
+                    &mut state,
+                );
+            }
+            MarkdownNode::Text { range, kind } => {
+                let source = smelt_buffer::text::slice(block.source, range.clone());
+                measure_text_lines(source, *kind, max_cols, dim, &mut state);
             }
             MarkdownNode::Code { lang, body, .. } => {
                 measure_block_gap(&mut state);
@@ -172,8 +192,29 @@ fn measure_block_gap(state: &mut MeasureState) {
     }
 }
 
-fn measure_source_lines(source: &str, max_cols: usize, dim: bool, state: &mut MeasureState) {
+fn measure_text_gap(state: &mut MeasureState, kind: MarkdownTextKind) -> bool {
+    if state.rows == 0 {
+        state.pending_blank = false;
+        return false;
+    }
+    if kind == MarkdownTextKind::List && !state.prev_was_block {
+        state.pending_blank = false;
+        return false;
+    }
+    let before = state.rows;
+    measure_block_gap(state);
+    state.rows != before
+}
+
+fn measure_text_lines(
+    source: &str,
+    kind: MarkdownTextKind,
+    max_cols: usize,
+    dim: bool,
+    state: &mut MeasureState,
+) {
     let lines: Vec<&str> = source.lines().collect();
+    let mut started = false;
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -194,6 +235,10 @@ fn measure_source_lines(source: &str, max_cols: usize, dim: bool, state: &mut Me
         }
 
         let mut gap_emitted = false;
+        if !started {
+            gap_emitted = measure_text_gap(state, kind);
+            started = true;
+        }
         if state.pending_blank {
             state.rows = state.rows.saturating_add(1);
             state.pending_blank = false;
@@ -204,15 +249,15 @@ fn measure_source_lines(source: &str, max_cols: usize, dim: bool, state: &mut Me
         }
         state.rows = state
             .rows
-            .saturating_add(measure_markdown_line(line, max_cols, dim));
-        state.last_content_was_heading = is_markdown_heading_line(line);
+            .saturating_add(measure_markdown_line(line, kind, max_cols, dim));
+        state.last_content_was_heading = kind == MarkdownTextKind::Heading;
         state.prev_was_block = false;
         i += 1;
     }
 }
 
-fn measure_markdown_line(line: &str, max_cols: usize, dim: bool) -> u16 {
-    wrap_inline_spans(&markdown_line_spans(line, dim), max_cols).len() as u16
+fn measure_markdown_line(line: &str, kind: MarkdownTextKind, max_cols: usize, dim: bool) -> u16 {
+    wrap_inline_spans(&markdown_line_spans(line, kind, dim), max_cols).len() as u16
 }
 
 #[derive(Default)]
@@ -237,16 +282,36 @@ fn render_block_gap(out: &mut LineBuilder, state: &mut RenderState) {
     }
 }
 
-fn render_source_lines(
+struct RenderTextCtx<'a> {
+    max_cols: usize,
+    indent: &'a str,
+    dim: bool,
+    bctx: Option<&'a smelt_core::content::BoxContext>,
+}
+
+fn render_text_gap(out: &mut LineBuilder, state: &mut RenderState, kind: MarkdownTextKind) -> bool {
+    if state.rows == 0 {
+        state.pending_blank = false;
+        return false;
+    }
+    if kind == MarkdownTextKind::List && !state.prev_was_block {
+        state.pending_blank = false;
+        return false;
+    }
+    let before = state.rows;
+    render_block_gap(out, state);
+    state.rows != before
+}
+
+fn render_text_lines(
     out: &mut LineBuilder,
     source: &str,
-    max_cols: usize,
-    indent: &str,
-    dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    kind: MarkdownTextKind,
+    ctx: &RenderTextCtx<'_>,
     state: &mut RenderState,
 ) {
     let lines: Vec<&str> = source.lines().collect();
+    let mut started = false;
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -267,6 +332,10 @@ fn render_source_lines(
         }
 
         let mut gap_emitted = false;
+        if !started {
+            gap_emitted = render_text_gap(out, state, kind);
+            started = true;
+        }
         if state.pending_blank {
             out.newline();
             state.rows += 1;
@@ -277,8 +346,8 @@ fn render_source_lines(
             out.newline();
             state.rows += 1;
         }
-        render_markdown_line(out, line, max_cols, indent, dim, bctx, state);
-        state.last_content_was_heading = is_markdown_heading_line(line);
+        render_markdown_line(out, line, kind, ctx, state);
+        state.last_content_was_heading = kind == MarkdownTextKind::Heading;
         state.prev_was_block = false;
         i += 1;
     }
@@ -287,13 +356,11 @@ fn render_source_lines(
 fn render_markdown_line(
     out: &mut LineBuilder,
     line: &str,
-    max_cols: usize,
-    indent: &str,
-    dim: bool,
-    bctx: Option<&smelt_core::content::BoxContext>,
+    kind: MarkdownTextKind,
+    ctx: &RenderTextCtx<'_>,
     state: &mut RenderState,
 ) {
-    let wrapped = wrap_inline_spans(&markdown_line_spans(line, dim), max_cols);
+    let wrapped = wrap_inline_spans(&markdown_line_spans(line, kind, ctx.dim), ctx.max_cols);
     if wrapped.len() > 1 {
         out.mark_wrapped();
     }
@@ -303,12 +370,12 @@ fn render_markdown_line(
         } else {
             out.mark_soft_wrap_continuation();
         }
-        if let Some(b) = bctx {
+        if let Some(b) = ctx.bctx {
             b.print_left(out);
             emit_inline_spans(out, row_spans);
             b.print_right(out, inline_spans_width(row_spans));
         } else {
-            out.print(indent);
+            out.print(ctx.indent);
             emit_inline_spans(out, row_spans);
         }
         out.newline();
@@ -316,12 +383,12 @@ fn render_markdown_line(
     state.rows += wrapped.len() as u16;
 }
 
-fn markdown_line_spans(line: &str, dim: bool) -> Vec<InlineSpan> {
+fn markdown_line_spans(line: &str, kind: MarkdownTextKind, dim: bool) -> Vec<InlineSpan> {
     let trimmed = line.trim_start();
     let leading_ws = &line[..line.len() - trimmed.len()];
     let mut line_spans = Vec::new();
 
-    if is_markdown_heading_line(trimmed) {
+    if kind == MarkdownTextKind::Heading {
         line_spans.push(InlineSpan {
             text: trimmed.to_string(),
             style: InlineStyle {
@@ -331,7 +398,7 @@ fn markdown_line_spans(line: &str, dim: bool) -> Vec<InlineSpan> {
                 ..Default::default()
             },
         });
-    } else if trimmed.starts_with('>') {
+    } else if kind == MarkdownTextKind::BlockQuote {
         line_spans.push(InlineSpan {
             text: trimmed.to_string(),
             style: InlineStyle {
@@ -341,7 +408,11 @@ fn markdown_line_spans(line: &str, dim: bool) -> Vec<InlineSpan> {
             },
         });
     } else {
-        let (prefix, body) = split_markdown_list_prefix(trimmed);
+        let (prefix, body) = if kind == MarkdownTextKind::List {
+            split_markdown_list_prefix(trimmed)
+        } else {
+            ("", trimmed)
+        };
         if !leading_ws.is_empty() {
             line_spans.push(InlineSpan {
                 text: leading_ws.to_string(),
@@ -364,33 +435,6 @@ fn markdown_line_spans(line: &str, dim: bool) -> Vec<InlineSpan> {
     }
 
     line_spans
-}
-
-#[cfg(test)]
-pub(super) fn is_horizontal_rule(line: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    let non_space_count = trimmed.chars().filter(|&c| !c.is_whitespace()).count();
-    if non_space_count < 3 {
-        return false;
-    }
-    let mut first_char: Option<char> = None;
-    for ch in trimmed.chars() {
-        if ch == ' ' || ch == '\t' {
-            continue;
-        }
-        if first_char.is_none() {
-            first_char = Some(ch);
-        } else if first_char != Some(ch) {
-            return false;
-        }
-        if !matches!(ch, '-' | '*' | '_') {
-            return false;
-        }
-    }
-    first_char.is_some()
 }
 
 fn render_horizontal_rule(
@@ -431,14 +475,14 @@ mod tests {
 
     #[test]
     fn markdown_line_spans_use_shared_block_markers() {
-        let heading = markdown_line_spans("#not heading", false);
+        let heading = markdown_line_spans("#not heading", MarkdownTextKind::Paragraph, false);
         assert_ne!(heading[0].style.group, Some(intern("SmeltHeading")));
 
-        let bullet = markdown_line_spans("+ item", false);
+        let bullet = markdown_line_spans("+ item", MarkdownTextKind::List, false);
         assert_eq!(bullet[0].text, "+ ");
         assert!(bullet[0].style.dim);
 
-        let ordered = markdown_line_spans("12) item", false);
+        let ordered = markdown_line_spans("12) item", MarkdownTextKind::List, false);
         assert_eq!(ordered[0].text, "12) ");
         assert!(ordered[0].style.dim);
     }

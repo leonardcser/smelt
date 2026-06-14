@@ -15,6 +15,10 @@ pub enum MarkdownNode {
     Source {
         range: Range<usize>,
     },
+    Text {
+        range: Range<usize>,
+        kind: MarkdownTextKind,
+    },
     Code {
         range: Range<usize>,
         lang: String,
@@ -30,8 +34,20 @@ pub enum MarkdownNode {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownTextKind {
+    Paragraph,
+    Heading,
+    BlockQuote,
+    List,
+}
+
 #[derive(Clone, Debug)]
 enum SpecialBlock {
+    Text {
+        range: Range<usize>,
+        kind: MarkdownTextKind,
+    },
     Code {
         range: Range<usize>,
         lang: String,
@@ -50,7 +66,8 @@ enum SpecialBlock {
 impl SpecialBlock {
     fn range(&self) -> Range<usize> {
         match self {
-            SpecialBlock::Code { range, .. }
+            SpecialBlock::Text { range, .. }
+            | SpecialBlock::Code { range, .. }
             | SpecialBlock::Table { range, .. }
             | SpecialBlock::Rule { range } => range.clone(),
         }
@@ -58,6 +75,7 @@ impl SpecialBlock {
 
     fn into_node(self) -> MarkdownNode {
         match self {
+            SpecialBlock::Text { range, kind } => MarkdownNode::Text { range, kind },
             SpecialBlock::Code { range, lang, body } => MarkdownNode::Code { range, lang, body },
             SpecialBlock::Table {
                 range,
@@ -109,11 +127,19 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
         | Options::ENABLE_HEADING_ATTRIBUTES;
     let parser = Parser::new_ext(source, options).into_offset_iter();
     let mut out = Vec::new();
+    let mut text_stack: Vec<OpenText> = Vec::new();
     let mut code: Option<(usize, String, Vec<Range<usize>>)> = None;
     let mut table: Option<TableBuild> = None;
 
     for (event, range) in parser {
         match event {
+            Event::Start(tag) if markdown_text_kind(&tag).is_some() => {
+                text_stack.push(OpenText {
+                    start: range.start,
+                    kind: markdown_text_kind(&tag).unwrap(),
+                    end: tag_end_for_text(&tag),
+                });
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
                 let lang = match kind {
                     CodeBlockKind::Fenced(info) => {
@@ -131,6 +157,13 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
                         body,
                     });
                 }
+            }
+            Event::End(end) if text_stack.last().is_some_and(|open| open.end == end) => {
+                let open = text_stack.pop().unwrap();
+                out.push(SpecialBlock::Text {
+                    range: open.start..range.end,
+                    kind: open.kind,
+                });
             }
             Event::Text(_) => {
                 if let Some((_, _, body)) = code.as_mut() {
@@ -186,6 +219,32 @@ struct TableBuild {
     alignments: Vec<ColumnAlignment>,
     rows: Vec<Vec<String>>,
     current_row: Option<Vec<String>>,
+}
+
+struct OpenText {
+    start: usize,
+    kind: MarkdownTextKind,
+    end: TagEnd,
+}
+
+fn markdown_text_kind(tag: &Tag<'_>) -> Option<MarkdownTextKind> {
+    match tag {
+        Tag::Paragraph => Some(MarkdownTextKind::Paragraph),
+        Tag::Heading { .. } => Some(MarkdownTextKind::Heading),
+        Tag::BlockQuote(_) => Some(MarkdownTextKind::BlockQuote),
+        Tag::List(_) => Some(MarkdownTextKind::List),
+        _ => None,
+    }
+}
+
+fn tag_end_for_text(tag: &Tag<'_>) -> TagEnd {
+    match tag {
+        Tag::Paragraph => TagEnd::Paragraph,
+        Tag::Heading { level, .. } => TagEnd::Heading(*level),
+        Tag::BlockQuote(kind) => TagEnd::BlockQuote(*kind),
+        Tag::List(start) => TagEnd::List(start.is_some()),
+        _ => unreachable!("only text container tags are converted"),
+    }
 }
 
 fn map_alignment(alignment: Alignment) -> ColumnAlignment {
@@ -248,6 +307,30 @@ mod tests {
                     "Second".into(),
                 ],
             ])
+        );
+    }
+
+    #[test]
+    fn parse_markdown_classifies_text_blocks_from_parser_events() {
+        let source = "# Title\n\nParagraph text.\n\n> quote\n\n- item\n";
+        let block = parse_markdown(source);
+        let kinds: Vec<MarkdownTextKind> = block
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                MarkdownNode::Text { kind, .. } => Some(*kind),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            kinds,
+            vec![
+                MarkdownTextKind::Heading,
+                MarkdownTextKind::Paragraph,
+                MarkdownTextKind::BlockQuote,
+                MarkdownTextKind::List,
+            ]
         );
     }
 
