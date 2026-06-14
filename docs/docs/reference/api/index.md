@@ -20,8 +20,6 @@ Available in every runtime, including headless mode.
 - [`smelt.cli`](cli.md) - 3 function(s)
 - [`smelt.clipboard`](clipboard.md) - 2 function(s)
 - [`smelt.clock`](clock.md) - 1 function(s)
-- [`smelt.cmd`](cmd.md) - 4 function(s)
-- [`smelt.dialog`](dialog.md) - 10 function(s)
 - [`smelt.frontend`](frontend.md) - 2 function(s)
 - [`smelt.fs`](fs.md) - 24 function(s)
 - [`smelt.fs.file_state`](fs_file_state.md) - 7 function(s)
@@ -33,18 +31,15 @@ Available in every runtime, including headless mode.
 - [`smelt.image`](image.md) - 4 function(s)
 - [`smelt.layout`](layout.md) - 8 function(s)
 - [`smelt.lifecycle`](lifecycle.md) - 4 function(s)
-- [`smelt.list`](list.md) - 1 function(s)
 - [`smelt.log`](log.md) - 3 function(s)
 - [`smelt.mcp`](mcp.md) - 4 function(s)
 - [`smelt.messages`](messages.md) - 6 function(s)
-- [`smelt.mode`](mode.md) - 10 function(s)
 - [`smelt.os`](os.md) - 12 function(s)
 - [`smelt.parse`](parse.md) - 2 function(s)
 - [`smelt.path`](path.md) - 12 function(s)
 - [`smelt.perf`](perf.md) - 1 function(s)
 - [`smelt.process`](process.md) - 10 function(s)
 - [`smelt.provider`](provider.md) - 3 function(s)
-- [`smelt.reasoning`](reasoning.md) - 2 function(s)
 - [`smelt.reg`](reg.md) - 2 function(s)
 - [`smelt.shell`](shell.md) - 6 function(s)
 - [`smelt.skills`](skills.md) - 3 function(s)
@@ -53,7 +48,6 @@ Available in every runtime, including headless mode.
 - [`smelt.tick`](tick.md) - 1 function(s)
 - [`smelt.timer`](timer.md) - 2 function(s)
 - [`smelt.tools`](tools.md) - 7 function(s)
-- [`smelt.transcript`](transcript.md) - 10 function(s)
 - [`smelt.transcript.defaults`](transcript_defaults.md) - 16 function(s)
 - [`smelt.trust`](trust.md) - 2 function(s)
 
@@ -61,14 +55,15 @@ Available in every runtime, including headless mode.
 
 Requires a terminal UI; calling these from headless mode raises.
 
-- [`smelt`](index_smelt.md) - 6 function(s)
 - [`smelt.buf`](buf.md) - 1 function(s)
 - [`smelt.config`](config.md) - 5 function(s)
 - [`smelt.confirm`](confirm.md) - 1 function(s)
+- [`smelt.dialog`](dialog.md) - 10 function(s)
 - [`smelt.engine`](engine.md) - 10 function(s)
 - [`smelt.history`](history.md) - 2 function(s)
 - [`smelt.input`](input.md) - 1 function(s)
 - [`smelt.keymap`](keymap.md) - 7 function(s)
+- [`smelt.list`](list.md) - 1 function(s)
 - [`smelt.metrics`](metrics.md) - 1 function(s)
 - [`smelt.metrics.perf`](metrics_perf.md) - 3 function(s)
 - [`smelt.model`](model.md) - 4 function(s)
@@ -89,6 +84,16 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.vim`](vim.md) - 2 function(s)
 - [`smelt.win`](win.md) - 2 function(s)
 - [`smelt.work`](work.md) - 4 function(s)
+
+## Mixed namespaces
+
+Contains both Host and UiHost functions; per-function pages list the exact tier.
+
+- [`smelt`](index_smelt.md) - 6 function(s)
+- [`smelt.cmd`](cmd.md) - 4 function(s)
+- [`smelt.mode`](mode.md) - 10 function(s)
+- [`smelt.reasoning`](reasoning.md) - 2 function(s)
+- [`smelt.transcript`](transcript.md) - 10 function(s)
 
 ## Types
 

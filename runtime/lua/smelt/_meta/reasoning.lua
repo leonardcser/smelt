@@ -7,6 +7,7 @@
 ---@class smelt.reasoning
 local reasoning = {}
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Advance the active reasoning effort to the next entry in
 --- `smelt.reasoning.cycle_list()`, wrapping at the end. No-op when the
 --- cycle is empty.

@@ -359,16 +359,14 @@ impl LuaRuntime {
             }
         }
         if core.load_error.is_none() {
-            if let Err(e) = smelt_core::lua::runtime::load_bootstrap_chunks(&core.lua) {
-                core.load_error = Some(e.to_string());
-            }
+            core.enable_ui_bootstrap();
         }
 
         Self { core, shared }
     }
 
-    /// Register the full API surface (host + UiHost) without loading
-    /// bootstrap chunks or spinning up the full runtime state.
+    /// Register the full API surface (host + UiHost) and bundled bootstrap
+    /// chunks without spinning up the full runtime state.
     /// Used by `gen-lua-docs` to harvest the doc registry.
     pub fn register_for_docs() -> mlua::Result<()> {
         let shared = Arc::new(LuaShared::default());

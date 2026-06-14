@@ -7,6 +7,7 @@
 ---@class smelt.mode
 local mode = {}
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`,
 --- wrapping at the end. No-op when the cycle is empty.
 ---@see smelt.mode.cycle_list
@@ -17,27 +18,35 @@ mode.cycle = nil
 ---@type fun(): string[]
 mode.cycle_list = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 ---@type fun(name: string): table|nil
 mode.get = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 ---@type fun(name: string): string
 mode.icon = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 ---@type fun(): table[]
 mode.list = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 ---@type fun(name: string): string
 mode.note = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 ---@type fun(): table<string, table>
 mode.permission_behaviors = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 ---@type fun(spec: table): nil
 mode.register = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 ---@type fun(name: string, icon: string): nil
 mode.set_icon = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 ---@type fun(name: string): table
 mode.style = nil
 

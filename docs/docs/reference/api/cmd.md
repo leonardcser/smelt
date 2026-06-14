@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+This namespace mixes Host and UiHost functions; each function below lists its exact tier.
+
 Register and list slash commands. `cmd.run` is injected by the TUI layer so it can access the live app state.
 
 ## `smelt.cmd.list`
@@ -12,6 +14,8 @@ Register and list slash commands. `cmd.run` is injected by the TUI layer so it c
 fun(): table
 ```
 
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
 Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows. Sorted by name.
 
 ## `smelt.cmd.picker`
@@ -19,6 +23,8 @@ Return every registered slash command as a Lua array of `{ name, desc, args, whi
 ```lua
 fun(name: string, opts: table?): nil
 ```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Register a slash command `name` that opens a prompt-docked picker when
 called without arguments, or invokes `opts.apply(arg)` directly when
@@ -35,6 +41,8 @@ fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): 
 
 Types: [`smelt.cmd.RegisterOpts`](types.md#smeltcmdregisteropts), [`smelt.Reg`](types.md#smeltreg)
 
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
 Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.
 
 ## `smelt.cmd.run`
@@ -42,6 +50,8 @@ Register a slash command `name` whose `handler` is invoked when the user runs it
 ```lua
 fun(line: string): nil
 ```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
 

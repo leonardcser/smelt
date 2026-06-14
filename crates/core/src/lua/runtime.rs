@@ -25,7 +25,31 @@ static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/l
 /// built-in skills have real on-disk locations for `/skills` and `load_skill`.
 static EMBEDDED_SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/skills");
 
-/// Lua chunks executed at `register_api` time, in order: primitives before consumers.
+/// Lua chunks that only depend on Host-tier APIs and are available in every runtime.
+pub const HOST_BOOTSTRAP_FILES: &[&str] = &[
+    "_bootstrap.lua",
+    "transcript/defaults.lua",
+    "transcript.lua",
+];
+
+/// Lua chunks that depend on UiHost APIs and are loaded when the TUI runtime is active.
+pub const UI_BOOTSTRAP_FILES: &[&str] = &[
+    "dialog.lua",
+    "list.lua",
+    "session.lua",
+    "widgets/picker.lua",
+    "widgets/completer.lua",
+    "widgets/prompt_picker.lua",
+    "cmd.lua",
+    "dialogs/confirm.lua",
+    "_bar.lua",
+    "prompt_bar.lua",
+    "statusline.lua",
+    "layout.lua",
+    "modes.lua",
+];
+
+/// Lua chunks executed at bootstrap time, in order: primitives before consumers.
 pub const BOOTSTRAP_FILES: &[&str] = &[
     "_bootstrap.lua",
     "transcript/defaults.lua",
@@ -122,12 +146,19 @@ pub struct TranscriptRenderCtx {
     pub show_thinking: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BootstrapMode {
+    Host,
+    Full,
+}
+
 /// Headless-safe Lua runtime.
 pub struct LuaRuntime {
     pub lua: Lua,
     pub load_error: Option<String>,
     shared: Arc<LuaShared>,
     init_lua_path: Option<PathBuf>,
+    bootstrap_mode: BootstrapMode,
 }
 
 impl Default for LuaRuntime {
@@ -153,6 +184,7 @@ impl LuaRuntime {
             load_error,
             shared,
             init_lua_path: None,
+            bootstrap_mode: BootstrapMode::Host,
         };
 
         if rt.load_error.is_none() {
@@ -161,6 +193,7 @@ impl LuaRuntime {
             }
         }
         rt.snapshot_native_modules();
+        rt.load_bootstrap();
 
         rt
     }
@@ -176,6 +209,7 @@ impl LuaRuntime {
             load_error,
             shared,
             init_lua_path: None,
+            bootstrap_mode: BootstrapMode::Host,
         };
 
         if rt.load_error.is_none() {
@@ -184,6 +218,7 @@ impl LuaRuntime {
             }
         }
         rt.snapshot_native_modules();
+        rt.load_bootstrap();
 
         rt
     }
@@ -194,6 +229,23 @@ impl LuaRuntime {
 
     pub fn set_init_lua_path(&mut self, path: PathBuf) {
         self.init_lua_path = Some(path);
+    }
+
+    pub fn enable_ui_bootstrap(&mut self) {
+        self.bootstrap_mode = BootstrapMode::Full;
+    }
+
+    fn load_bootstrap(&mut self) {
+        if self.load_error.is_some() {
+            return;
+        }
+        let result = match self.bootstrap_mode {
+            BootstrapMode::Host => load_host_bootstrap_chunks(&self.lua),
+            BootstrapMode::Full => load_bootstrap_chunks(&self.lua),
+        };
+        if let Err(e) = result {
+            self.load_error = Some(format!("bootstrap: {e}"));
+        }
     }
 
     pub fn load_user_config(&mut self) {
@@ -437,8 +489,8 @@ impl LuaRuntime {
     pub fn reload(&mut self, cwd: Option<&std::path::Path>) -> Option<String> {
         self.load_error = None;
         self.clear_for_reload();
-        if let Err(e) = load_bootstrap_chunks(&self.lua) {
-            self.load_error = Some(format!("bootstrap: {e}"));
+        self.load_bootstrap();
+        if self.load_error.is_some() {
             return self.load_error.clone();
         }
         self.load_autoload();
@@ -1566,13 +1618,7 @@ impl LuaRuntime {
         &self,
         args: &HashMap<String, serde_json::Value>,
     ) -> mlua::Result<mlua::Table> {
-        let t = self.lua.create_table()?;
-        for (k, v) in args {
-            if let Ok(lua_val) = json_to_lua(&self.lua, v) {
-                let _ = t.set(k.as_str(), lua_val);
-            }
-        }
-        Ok(t)
+        args_to_lua_table(&self.lua, args)
     }
 
     fn tool_timeout_ms(
@@ -1929,9 +1975,10 @@ fn transcript_render_ctx_to_lua_table(
     ctx.set("surface", "transcript")?;
 
     let limits = lua.create_table()?;
-    limits.set("tool_header_rows", 20u16)?;
-    limits.set("tool_body_rows", 20u16)?;
-    limits.set("tool_output_rows", 20u16)?;
+    let rows = crate::content::block_layout::DEFAULT_TOOL_BLOCK_ROWS;
+    limits.set("tool_header_rows", rows)?;
+    limits.set("tool_body_rows", rows)?;
+    limits.set("tool_output_rows", rows)?;
     ctx.set("limits", limits)?;
     Ok(ctx)
 }
@@ -1969,7 +2016,11 @@ fn transcript_block_to_lua_table(
         Block::ProcessStatus { text } => {
             t.set("text", text.as_str())?;
         }
-        Block::Thinking { content } | Block::Text { content } => {
+        Block::Thinking { content } => {
+            t.set("content", content.as_str())?;
+            t.set("thinking_summary", thinking_fallback_summary(content))?;
+        }
+        Block::Text { content } => {
             t.set("content", content.as_str())?;
         }
         Block::CodeLine { content, lang } => {
@@ -1989,8 +2040,13 @@ fn transcript_block_to_lua_table(
             t.set("args", args_to_lua_table(lua, args)?)?;
             let status = state.map(|s| s.status).unwrap_or(ToolStatus::Pending);
             t.set("status", tool_status_label(status))?;
+            t.set("status_hl", tool_status_hl(status))?;
             if let Some(elapsed) = state.and_then(|s| s.elapsed) {
-                t.set("elapsed_secs", elapsed.as_secs())?;
+                let secs = elapsed.as_secs();
+                t.set("elapsed_secs", secs)?;
+                if let Some(text) = tool_elapsed_text(status, secs) {
+                    t.set("elapsed_text", text)?;
+                }
             }
             if let Some(message) = state.and_then(|s| s.user_message.as_deref()) {
                 t.set("user_message", message)?;
@@ -2086,8 +2142,8 @@ fn fallback_transcript_layout(
                 header.push_str(&summary_text);
             }
             if let Some(elapsed) = state.and_then(|s| s.elapsed) {
-                if !matches!(status, ToolStatus::Confirm) {
-                    header.push_str(&format!(" ({})", format_elapsed_secs(elapsed.as_secs())));
+                if let Some(text) = tool_elapsed_text(status, elapsed.as_secs()) {
+                    header.push_str(&format!(" ({text})"));
                 }
             }
             items.push(layout_text(header, Some(tool_status_hl(status)), false));
@@ -2138,6 +2194,10 @@ fn tool_status_hl(status: ToolStatus) -> &'static str {
         ToolStatus::Err | ToolStatus::Denied => "ErrorMsg",
         ToolStatus::Confirm => "SmeltAccent",
     }
+}
+
+fn tool_elapsed_text(status: ToolStatus, secs: u64) -> Option<String> {
+    (!matches!(status, ToolStatus::Confirm)).then(|| format_elapsed_secs(secs))
 }
 
 fn format_elapsed_secs(secs: u64) -> String {
@@ -2258,8 +2318,20 @@ fn decode_styled_lines(value: mlua::Value) -> Result<protocol::StyledLines, Stri
     }
 }
 
+pub fn load_host_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
+    load_bootstrap_group(lua, HOST_BOOTSTRAP_FILES)
+}
+
+pub fn load_ui_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
+    load_bootstrap_group(lua, UI_BOOTSTRAP_FILES)
+}
+
 pub fn load_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
-    for rel in BOOTSTRAP_FILES {
+    load_bootstrap_group(lua, BOOTSTRAP_FILES)
+}
+
+fn load_bootstrap_group(lua: &Lua, files: &[&str]) -> mlua::Result<()> {
+    for rel in files {
         let (src, name) = read_bootstrap_source(rel)?;
         lua.load(&src).set_name(name).exec()?;
     }
@@ -2642,6 +2714,25 @@ mod tests {
             .unwrap();
         assert!(installed);
         assert!(rt.flush_persistent_state().is_none());
+    }
+
+    #[test]
+    fn host_runtime_installs_transcript_renderer_api() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load error: {:?}", rt.load_error);
+        let has_api: bool = rt
+            .lua
+            .load(
+                r#"
+                return type(smelt.transcript.set_renderer) == "function"
+                  and type(smelt.transcript.extend_renderer) == "function"
+                  and type(smelt.transcript.defaults.render) == "function"
+                  and smelt.transcript.get_renderer() ~= nil
+            "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(has_api);
     }
 
     #[test]

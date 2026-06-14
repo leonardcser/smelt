@@ -970,16 +970,19 @@ Exit criteria:
 
 Status after implementation:
 
-- `smelt.transcript` is now a host-tier namespace with one Rust-facing root renderer handle, plus Lua wrapper helpers in `runtime/lua/smelt/transcript.lua`: `set_renderer`, `get_renderer`, `extend_renderer`, and `invalidate_renderer`.
+- `smelt.transcript` is now a host-tier namespace with one Rust-facing root renderer handle, plus Lua wrapper helpers in `runtime/lua/smelt/transcript.lua`: `set_renderer`, `get_renderer`, `extend_renderer`, and `invalidate_renderer`. The host-tier transcript bootstrap now runs in core/headless runtimes; TUI bootstraps layer UiHost modules after replacing the `smelt` table with the full API surface.
 - Renderer generation lives in `LuaShared`; `set_renderer`, `extend_renderer`, extension removal, explicit invalidation, and reload all bump it. Transcript projections and resume previews observe that generation and clear derived display caches when it changes. Width/theme/scroll changes do not bump it.
 - The bundled default root renderer is installed during bootstrap through the same public `set_renderer` API and calls `smelt.transcript.defaults.render(block, ctx)`.
 - Rust can now invoke the root renderer with semantic block snapshots and a width/theme-independent context. Errors, `nil`, invalid return types, or missing renderers record an error and fall back to minimal Rust layout; `layout.empty()` remains the explicit zero-row/hide result.
+- Shared semantic annotations (`elapsed_text`, `status_hl`, `thinking_summary`) are computed in Rust and passed to Lua defaults so the emergency fallback and bundled policy do not maintain separate formatting rules.
 - `smelt.transcript.defaults` has default functions for every current block kind and keeps the raw tool-output helper as ordinary Lua composition over `layout.text`, `layout.gutter`, and `layout.cap`.
-- Unit coverage exercises default simple-block rendering, middleware composition/removal/generation behavior, explicit invalidation, renderer error fallback, `nil` fallback, and `layout.empty()` hiding.
+- Lua layout compilation now lives with the display-block layer instead of app transcript plumbing, so tool-body and root-rendered layouts share one conversion seam.
+- Generated API docs now mark mixed Host/UiHost namespaces and per-function tiers, avoiding the earlier flattening of `smelt.transcript` inspection APIs into the Host label.
+- Unit coverage exercises host-runtime transcript bootstrap, default simple-block rendering, middleware composition/removal/generation behavior, explicit invalidation, renderer error fallback, `nil` fallback, and `layout.empty()` hiding.
 
 Deferred debt:
 
-- The live transcript projection still uses the existing Rust block renderers until Phase 4/5 migrate tool and non-tool blocks to root-renderer-produced LayoutIR. This preserves visible output while the root API and default Lua policy become available.
+- The live transcript projection still uses the existing Rust block renderers until Phase 4/5 migrate tool and non-tool blocks to root-renderer-produced LayoutIR. The public renderer docs now describe root layout generation rather than promising that every live block path has already moved.
 - Because the current primitive slice lacks markdown, panel, runs/line, code, separator, style, source/copy/selectable, and elapsed primitives, Phase 3 defaults are fallback-safe and structurally complete but intentionally do not attempt to reproduce every product visual. The snapshot-preserving migrations land with the corresponding primitives in Phase 4/5.
 
 ### Phase 4 — Move tool rendering to full-block Lua layout

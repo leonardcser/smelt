@@ -5,7 +5,7 @@ use crate::content::prompt_parser::{build_prompt_display_lines, prompt_display_u
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 
-use smelt_core::content::block_layout::{BlockLayout, HboxItem, IrLeaf, LayoutIr, ToolBody};
+use smelt_core::content::block_layout::{BlockLayout, ToolBody};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::transcript_model::{
     Block, BlockHistory, BlockId, ToolOutput, ToolOutputRef, ToolStatus,
@@ -933,79 +933,7 @@ fn store_tool_body_results(
 }
 
 pub(crate) fn compile_tool_body(layout: &BlockLayout) -> Result<ToolBody, String> {
-    compile_layout_ir(layout).map(ToolBody::Layout)
-}
-
-fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
-    use smelt_core::content::block_layout::{LuaLeaf, SourceViewIr, TextSpec};
-    match layout {
-        BlockLayout::Empty => Ok(BlockLayout::Empty),
-        BlockLayout::Leaf(LuaLeaf::Buf(_)) => {
-            Err("buffer leaves are not supported in layout IR".into())
-        }
-        BlockLayout::Leaf(LuaLeaf::Text(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-            content: spec.content.clone(),
-            hl_group: spec.hl_group.clone(),
-            ansi: spec.ansi,
-        }))),
-        BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
-            let ext = spec
-                .lang
-                .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext);
-            let ir = smelt_core::content::highlight::build_diff_ir_ext(
-                &spec.old,
-                &spec.new,
-                &spec.path,
-                &spec.anchor,
-                ext,
-            );
-            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
-                ir,
-            ))))
-        }
-        BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
-            let ext = spec
-                .lang
-                .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext)
-                .or_else(|| {
-                    std::path::Path::new(&spec.path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                });
-            let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
-            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
-                ir,
-            ))))
-        }
-        BlockLayout::Leaf(LuaLeaf::SourceView(ir)) => {
-            Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir.clone())))
-        }
-        BlockLayout::Vbox(items) => items
-            .iter()
-            .map(compile_layout_ir)
-            .collect::<Result<Vec<_>, _>>()
-            .map(BlockLayout::Vbox),
-        BlockLayout::Hbox(items) => items
-            .iter()
-            .map(|item| {
-                Ok(HboxItem {
-                    constraint: item.constraint,
-                    layout: compile_layout_ir(&item.layout)?,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map(BlockLayout::Hbox),
-        BlockLayout::Gutter { child, spec } => Ok(BlockLayout::Gutter {
-            child: Box::new(compile_layout_ir(child)?),
-            spec: spec.clone(),
-        }),
-        BlockLayout::Cap { child, spec } => Ok(BlockLayout::Cap {
-            child: Box::new(compile_layout_ir(child)?),
-            spec: spec.clone(),
-        }),
-    }
+    crate::content::display_block::compile_layout_ir(layout).map(ToolBody::Layout)
 }
 
 #[cfg(test)]

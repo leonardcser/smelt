@@ -200,6 +200,10 @@ impl LuaRuntime {
 
         lua.globals().set("smelt", smelt)?;
 
+        // `smelt_core::LuaRuntime::with_shared` loaded the Host bootstrap on the
+        // initial Host-only table. This function replaces `smelt` with the full
+        // Host+UiHost table, so run the full bootstrap once against the table
+        // plugins will actually see.
         smelt_core::lua::runtime::load_bootstrap_chunks(lua)?;
 
         Ok(())

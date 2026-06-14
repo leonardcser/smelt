@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+This namespace mixes Host and UiHost functions; each function below lists its exact tier.
+
 Transcript display policy and rendered transcript inspection. Host-tier renderer hooks are layered with UiHost read APIs when a TUI is active.
 
 ## `smelt.transcript.block_at_row`
@@ -12,6 +14,8 @@ Transcript display policy and rendered transcript inspection. Host-tier renderer
 fun(row: integer): table?
 ```
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.
 
 ## `smelt.transcript.blocks`
@@ -19,6 +23,8 @@ Return the exact transcript block containing absolute display row `row`, or nil 
 ```lua
 fun(): table
 ```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.
 
@@ -29,6 +35,8 @@ fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: sm
 ```
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.Reg`](types.md#smeltreg)
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Add or replace named middleware around the root renderer. Later extensions
 run first. The callback receives `(next, block, ctx)` and may return its own
@@ -43,6 +51,8 @@ fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
 Return the current composed root transcript renderer, or nil before the
 default renderer has been installed.
 
@@ -51,6 +61,8 @@ default renderer has been installed.
 ```lua
 fun(): integer
 ```
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Bump the renderer generation after changing closed-over state that affects
 renderer output without calling `set_renderer`, `extend_renderer`, or a
@@ -62,6 +74,8 @@ registration's `:remove()`.
 fun(): boolean
 ```
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
 
 ## `smelt.transcript.rows`
@@ -69,6 +83,8 @@ Return `true` when the transcript history holds no blocks (user, assistant, thin
 ```lua
 fun(start: integer, count: integer): table
 ```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.
 
@@ -80,15 +96,20 @@ fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context):
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
-Replace the base transcript renderer. Existing middleware registered with
-`extend_renderer` remains wrapped around the new base. The renderer must
-return a `smelt.layout` value; return `smelt.layout.empty()` to hide a block.
+**Tier:** `Host` - Available in every runtime, including headless mode.
+
+Replace the base transcript renderer used when the host asks Lua for a
+transcript block layout. Existing middleware registered with `extend_renderer`
+remains wrapped around the new base. The renderer must return a `smelt.layout`
+value; return `smelt.layout.empty()` to hide a block.
 
 ## `smelt.transcript.text`
 
 ```lua
 fun(): string
 ```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 
@@ -97,6 +118,8 @@ Return the full transcript as a single newline-joined string (post-render displa
 ```lua
 fun(): table
 ```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this does not force full transcript materialization.
 

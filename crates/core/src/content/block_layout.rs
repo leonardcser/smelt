@@ -8,6 +8,8 @@ use crate::buffer::BufId;
 use crate::content::highlight::DiffIr;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_TOOL_BLOCK_ROWS: u16 = 20;
+
 /// Inline-diff render directive. The worker calls `print_inline_diff` directly,
 /// so width / indent / bg-fill / wrap math all live in one render path with no
 /// scratch-buffer seam.

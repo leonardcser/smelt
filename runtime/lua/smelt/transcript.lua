@@ -33,7 +33,10 @@ smelt.transcript = smelt.transcript or {}
 ---@field summary? any Tool styled summary lines or compacted summary text.
 ---@field summary_text? string Tool summary flattened to plain text.
 ---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
+---@field status_hl? string Tool status highlight group.
 ---@field elapsed_secs? integer Terminal/static tool elapsed seconds.
+---@field elapsed_text? string Terminal/static tool elapsed label.
+---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
 ---@field output? smelt.transcript.ToolOutput Tool output snapshot.
 ---@field command? string Exec command.
@@ -65,9 +68,10 @@ local function rebuild_renderer()
   if renderer then transcript.__set_renderer(renderer) end
 end
 
---- Replace the base transcript renderer. Existing middleware registered with
---- `extend_renderer` remains wrapped around the new base. The renderer must
---- return a `smelt.layout` value; return `smelt.layout.empty()` to hide a block.
+--- Replace the base transcript renderer used when the host asks Lua for a
+--- transcript block layout. Existing middleware registered with `extend_renderer`
+--- remains wrapped around the new base. The renderer must return a `smelt.layout`
+--- value; return `smelt.layout.empty()` to hide a block.
 ---@type fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil
 function smelt.transcript.set_renderer(renderer)
   require_function("set_renderer", renderer)

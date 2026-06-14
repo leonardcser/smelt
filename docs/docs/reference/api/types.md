@@ -671,7 +671,10 @@ Semantic transcript block snapshot passed to the root renderer.
 | `summary` | `any` |  | Tool styled summary lines or compacted summary text. |
 | `summary_text` | `string` |  | Tool summary flattened to plain text. |
 | `status` | `"pending"|"confirm"|"ok"|"err"|"denied"` |  | Tool status. |
+| `status_hl` | `string` |  | Tool status highlight group. |
 | `elapsed_secs` | `integer` |  | Terminal/static tool elapsed seconds. |
+| `elapsed_text` | `string` |  | Terminal/static tool elapsed label. |
+| `thinking_summary` | `string` |  | Folded thinking summary text. |
 | `user_message` | `string` |  | Tool user-facing status message. |
 | `output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Tool output snapshot. |
 | `command` | `string` |  | Exec command. |

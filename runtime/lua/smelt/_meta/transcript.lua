@@ -7,10 +7,12 @@
 ---@class smelt.transcript
 local transcript = {}
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.
 ---@type fun(row: integer): table?
 transcript.block_at_row = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.
 ---@type fun(): table
 transcript.blocks = nil
@@ -33,25 +35,30 @@ transcript.get_renderer = nil
 ---@type fun(): integer
 transcript.invalidate_renderer = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
 ---@type fun(): boolean
 transcript.is_empty = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.
 ---@type fun(start: integer, count: integer): table
 transcript.rows = nil
 
---- Replace the base transcript renderer. Existing middleware registered with
---- `extend_renderer` remains wrapped around the new base. The renderer must
---- return a `smelt.layout` value; return `smelt.layout.empty()` to hide a block.
+--- Replace the base transcript renderer used when the host asks Lua for a
+--- transcript block layout. Existing middleware registered with `extend_renderer`
+--- remains wrapped around the new base. The renderer must return a `smelt.layout`
+--- value; return `smelt.layout.empty()` to hide a block.
 ---@see smelt.layout.empty
 ---@type fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil
 transcript.set_renderer = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 ---@type fun(): string
 transcript.text = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries. Unlike `blocks()`, this does not force full transcript materialization.
 ---@type fun(): table
 transcript.visible_blocks = nil

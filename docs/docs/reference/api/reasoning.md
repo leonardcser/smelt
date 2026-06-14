@@ -4,6 +4,8 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
+This namespace mixes Host and UiHost functions; each function below lists its exact tier.
+
 Reasoning-effort selector. `smelt.reasoning()` reads the active effort; `smelt.reasoning(v)` sets it (overridden by the TUI to apply the change). `smelt.reasoning.cycle_list()` lists the configured cycle.
 
 ## `smelt.reasoning.cycle`
@@ -11,6 +13,8 @@ Reasoning-effort selector. `smelt.reasoning()` reads the active effort; `smelt.r
 ```lua
 fun(): nil
 ```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Advance the active reasoning effort to the next entry in
 `smelt.reasoning.cycle_list()`, wrapping at the end. No-op when the
@@ -23,6 +27,8 @@ fun(): smelt.reasoning.Effort[]
 ```
 
 Types: [`smelt.reasoning.Effort`](types.md#smeltreasoningeffort)
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Return the configured reasoning-effort cycle.
 

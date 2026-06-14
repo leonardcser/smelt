@@ -11,6 +11,7 @@ local cmd = {}
 ---@type fun(): table
 cmd.list = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Register a slash command `name` that opens a prompt-docked picker when
 --- called without arguments, or invokes `opts.apply(arg)` directly when
 --- given one. See the file header for every accepted `opts` field
@@ -24,6 +25,7 @@ cmd.picker = nil
 ---@type fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg
 cmd.register = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it. Errors are surfaced as in-app notifications.
 ---@type fun(line: string): nil
 cmd.run = nil

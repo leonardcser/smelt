@@ -811,13 +811,6 @@ Host-phase hooks keyed by event name.
 - `smelt.lifecycle.on_shutdown` :: `fun(fn: function): smelt.Reg`
   Shorthand for `lifecycle.on("shutdown", fn)`.
 
-#### `smelt.list`
-
-Picker-style virtual list widget.
-
-- `smelt.list.new` :: `fun(opts: smelt.list.Opts): table`
-  Build a structured list bound to the dialog-list `opts.leaf` and its backing `opts.buf`.
-
 #### `smelt.log`
 
 Structured JSONL log entries written to the engine log file.
@@ -858,31 +851,6 @@ Persistent message log with full bodies and tracebacks.
   Mark every message in the log as read so `unread_count` returns `0` until new errors arrive.
 - `smelt.messages.unread_count` :: `fun(): integer`
   Return the number of unread error messages in the log.
-
-#### `smelt.mode`
-
-Agent-mode selector.
-
-- `smelt.mode.cycle` :: `fun(): nil`
-  Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`, wrapping at the end.
-- `smelt.mode.cycle_list` :: `fun(): string[]`
-  Return the configured agent-mode cycle; falls back to the built-in default when the user has not customized one.
-- `smelt.mode.get` :: `fun(name: string): table|nil`
-  
-- `smelt.mode.icon` :: `fun(name: string): string`
-  
-- `smelt.mode.list` :: `fun(): table[]`
-  
-- `smelt.mode.note` :: `fun(name: string): string`
-  
-- `smelt.mode.permission_behaviors` :: `fun(): table<string, table>`
-  
-- `smelt.mode.register` :: `fun(spec: table): nil`
-  
-- `smelt.mode.set_icon` :: `fun(name: string, icon: string): nil`
-  
-- `smelt.mode.style` :: `fun(name: string): table`
-  
 
 #### `smelt.os`
 
@@ -994,15 +962,6 @@ List built-in model providers and register custom ones.
 - `smelt.provider.register` :: `fun(name: string, cfg: smelt.provider.Config): smelt.Reg`
   Declare a provider named `name`.
 
-#### `smelt.reasoning`
-
-Reasoning-effort selector.
-
-- `smelt.reasoning.cycle` :: `fun(): nil`
-  Advance the active reasoning effort to the next entry in `smelt.reasoning.cycle_list()`, wrapping at the end.
-- `smelt.reasoning.cycle_list` :: `fun(): smelt.reasoning.Effort[]`
-  Return the configured reasoning-effort cycle.
-
 #### `smelt.reg`
 
 Helpers for constructing `Reg` handles.
@@ -1045,7 +1004,6 @@ List and load skill content from the SkillLoader populated at startup.
 Per-plugin state.
 
 - `smelt.state.persistent` :: `fun(name: string, opts: { debounce_ms: integer? }?): table`
-  
 
 #### `smelt.task`
 
@@ -1103,31 +1061,6 @@ Register, unregister, and resolve plugin tools for the engine.
 - `smelt.tools.unregister` :: `fun(name: string): boolean`
   Unregister a previously-registered tool by `name`.
 
-#### `smelt.transcript`
-
-Transcript display policy and rendered transcript inspection.
-
-- `smelt.transcript.block_at_row` :: `fun(row: integer): table?`
-  Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block.
-- `smelt.transcript.blocks` :: `fun(): table`
-  Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
-- `smelt.transcript.extend_renderer` :: `fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): smelt.Reg`
-  Add or replace named middleware around the root renderer.
-- `smelt.transcript.get_renderer` :: `fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?`
-  Return the current composed root transcript renderer, or nil before the default renderer has been installed.
-- `smelt.transcript.invalidate_renderer` :: `fun(): integer`
-  Bump the renderer generation after changing closed-over state that affects renderer output without calling `set_renderer`, `extend_renderer`, or a registration's `:remove()`.
-- `smelt.transcript.is_empty` :: `fun(): boolean`
-  Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
-- `smelt.transcript.rows` :: `fun(start: integer, count: integer): table`
-  Return rendered transcript display rows in `[start, start + count)`.
-- `smelt.transcript.set_renderer` :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil`
-  Replace the base transcript renderer.
-- `smelt.transcript.text` :: `fun(): string`
-  Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
-- `smelt.transcript.visible_blocks` :: `fun(): table`
-  Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries.
-
 #### `smelt.transcript.defaults`
 
 Bundled default transcript renderers.
@@ -1178,23 +1111,6 @@ Query and mutate the per-project content trust store.
 
 Requires a terminal UI; calling these from headless mode raises.
 
-#### `smelt`
-
-Root smelt namespace.
-
-- `smelt.focus` :: `fun(): string`
-  Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
-- `smelt.ns` :: `fun(name: string): integer`
-  Look up or allocate a stable namespace id for `name`.
-- `smelt.plugin` :: `fun(name: any): any`
-  Promote the current loader frame to plugin scope `name` and return a small handle exposing the plugin's per-cycle state slot:
-- `smelt.quit` :: `fun(): nil`
-  Request a clean shutdown of the app.
-- `smelt.sleep` :: `fun(ms: integer): any`
-  Sleep for `ms` milliseconds.
-- `smelt.spawn` :: `fun(handler: fun()): smelt.Reg`
-  Run `handler` as a coroutine on the Lua task runtime.
-
 #### `smelt.buf`
 
 Buffer handle constructor.
@@ -1223,6 +1139,30 @@ Confirm dialog primitives - preview dispatch, back-tab cycling, and choice resol
 
 - `smelt.confirm.open` :: `fun(handle_id: string): nil`
   Drive the bundled tool-permission confirm dialog for `handle_id`.
+
+#### `smelt.dialog`
+
+Modal overlay builders.
+
+- `smelt.dialog.content` :: `fun(opts: table?): smelt.win.Win, smelt.buf.Buf`
+  General-purpose body leaf.
+- `smelt.dialog.current` :: `fun(): table | nil`
+  Return the topmost active dialog ctx (the same shape passed to `on_submit`/`keymap` handlers: `{ resolve, close, win, panels, focused_leaf }`), or `nil` if no dialog is open.
+- `smelt.dialog.input` :: `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf`
+  Build a single-line text-input leaf with a fresh buffer.
+- `smelt.dialog.list` :: `fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win`
+  Wrap an existing `buf` as a selectable list leaf.
+- `smelt.dialog.markdown` :: `fun(text: string): smelt.win.Win, smelt.buf.Buf`
+  Render `text` as a non-focusable markdown leaf.
+- `smelt.dialog.menu` :: `fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table`
+- `smelt.dialog.open` :: `fun(opts: smelt.dialog.Opts): any`
+  Coroutine-blocking dialog opener.
+- `smelt.dialog.open_handle` :: `fun(opts: smelt.dialog.Opts): table`
+  Non-coroutine open.
+- `smelt.dialog.picker` :: `fun(opts: smelt.dialog.PickerOpts): any`
+  Coroutine-blocking Telescope-style picker.
+- `smelt.dialog.viewer` :: `fun(opts: table): table, smelt.buf.Buf, smelt.win.Win`
+  Open a read-only content dialog.
 
 #### `smelt.engine`
 
@@ -1284,6 +1224,13 @@ Register chord→callback bindings and inspect the layered help index.
 - `smelt.keymap.unset` :: `fun(mode: string, chord: string): boolean`
   Drop the binding for `chord` in `mode`.
 
+#### `smelt.list`
+
+Picker-style virtual list widget.
+
+- `smelt.list.new` :: `fun(opts: smelt.list.Opts): table`
+  Build a structured list bound to the dialog-list `opts.leaf` and its backing `opts.buf`.
+
 #### `smelt.metrics`
 
 Metrics ledger access and live perf instrumentation.
@@ -1311,7 +1258,6 @@ Model selector.
 - `smelt.model.max_tokens` :: `fun(): integer?`
   Resolved maximum output tokens for the active model.
 - `smelt.model.preferred` :: `fun(name: any, value: any): any`
-  
 - `smelt.model.pricing` :: `fun(): table`
   Resolved pricing for the active model as `{ input, output, cache_read, cache_write, source }`.
 
@@ -1585,5 +1531,90 @@ Push background work-state tokens.
   Return whether a guard from `work.guard()` still matches the current turn and cancellation generation.
 - `smelt.work.is_busy` :: `fun(): boolean`
   Return `true` while at least one `smelt.work.busy` token is live.
+
+### Mixed tier
+
+Contains both Host and UiHost functions; each function below lists its exact tier.
+
+#### `smelt`
+
+Root smelt namespace.
+
+- `smelt.focus` (UiHost) :: `fun(): string`
+  Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
+- `smelt.ns` (UiHost) :: `fun(name: string): integer`
+  Look up or allocate a stable namespace id for `name`.
+- `smelt.plugin` (Host) :: `fun(name: any): any`
+  Promote the current loader frame to plugin scope `name` and return a small handle exposing the plugin's per-cycle state slot:
+- `smelt.quit` (UiHost) :: `fun(): nil`
+  Request a clean shutdown of the app.
+- `smelt.sleep` (Host) :: `fun(ms: integer): any`
+  Sleep for `ms` milliseconds.
+- `smelt.spawn` (Host) :: `fun(handler: fun()): smelt.Reg`
+  Run `handler` as a coroutine on the Lua task runtime.
+
+#### `smelt.cmd`
+
+Register and list slash commands.
+
+- `smelt.cmd.list` (Host) :: `fun(): table`
+  Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows.
+- `smelt.cmd.picker` (UiHost) :: `fun(name: string, opts: table?): nil`
+  Register a slash command `name` that opens a prompt-docked picker when called without arguments, or invokes `opts.apply(arg)` directly when given one.
+- `smelt.cmd.register` (Host) :: `fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg`
+  Register a slash command `name` whose `handler` is invoked when the user runs it.
+- `smelt.cmd.run` (UiHost) :: `fun(line: string): nil`
+  Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it.
+
+#### `smelt.mode`
+
+Agent-mode selector.
+
+- `smelt.mode.cycle` (UiHost) :: `fun(): nil`
+  Advance the active agent mode to the next entry in `smelt.mode.cycle_list()`, wrapping at the end.
+- `smelt.mode.cycle_list` (Host) :: `fun(): string[]`
+  Return the configured agent-mode cycle; falls back to the built-in default when the user has not customized one.
+- `smelt.mode.get` (UiHost) :: `fun(name: string): table|nil`
+- `smelt.mode.icon` (UiHost) :: `fun(name: string): string`
+- `smelt.mode.list` (UiHost) :: `fun(): table[]`
+- `smelt.mode.note` (UiHost) :: `fun(name: string): string`
+- `smelt.mode.permission_behaviors` (UiHost) :: `fun(): table<string, table>`
+- `smelt.mode.register` (UiHost) :: `fun(spec: table): nil`
+- `smelt.mode.set_icon` (UiHost) :: `fun(name: string, icon: string): nil`
+- `smelt.mode.style` (UiHost) :: `fun(name: string): table`
+
+#### `smelt.reasoning`
+
+Reasoning-effort selector.
+
+- `smelt.reasoning.cycle` (UiHost) :: `fun(): nil`
+  Advance the active reasoning effort to the next entry in `smelt.reasoning.cycle_list()`, wrapping at the end.
+- `smelt.reasoning.cycle_list` (Host) :: `fun(): smelt.reasoning.Effort[]`
+  Return the configured reasoning-effort cycle.
+
+#### `smelt.transcript`
+
+Transcript display policy and rendered transcript inspection.
+
+- `smelt.transcript.block_at_row` (UiHost) :: `fun(row: integer): table?`
+  Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block.
+- `smelt.transcript.blocks` (UiHost) :: `fun(): table`
+  Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
+- `smelt.transcript.extend_renderer` (Host) :: `fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): smelt.Reg`
+  Add or replace named middleware around the root renderer.
+- `smelt.transcript.get_renderer` (Host) :: `fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?`
+  Return the current composed root transcript renderer, or nil before the default renderer has been installed.
+- `smelt.transcript.invalidate_renderer` (Host) :: `fun(): integer`
+  Bump the renderer generation after changing closed-over state that affects renderer output without calling `set_renderer`, `extend_renderer`, or a registration's `:remove()`.
+- `smelt.transcript.is_empty` (UiHost) :: `fun(): boolean`
+  Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
+- `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`
+  Return rendered transcript display rows in `[start, start + count)`.
+- `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil`
+  Replace the base transcript renderer used when the host asks Lua for a transcript block layout.
+- `smelt.transcript.text` (UiHost) :: `fun(): string`
+  Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
+- `smelt.transcript.visible_blocks` (UiHost) :: `fun(): table`
+  Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries.
 
 <!-- API_INDEX_END -->

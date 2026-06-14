@@ -4,6 +4,8 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
+This namespace mixes Host and UiHost functions; each function below lists its exact tier.
+
 Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindings are injected when a TUI is active.
 
 ## `smelt.focus`
@@ -11,6 +13,8 @@ Root smelt namespace. Host-tier bindings are registered first; UiHost-tier bindi
 ```lua
 fun(): string
 ```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
 
@@ -20,6 +24,8 @@ Return which top-level pane currently has focus: `"transcript"` or `"prompt"`.
 fun(name: string): integer
 ```
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark` / `buf:clear_ns` calls so plugins can repaint their region without disturbing others.
 
 ## `smelt.plugin`
@@ -27,6 +33,8 @@ Look up or allocate a stable namespace id for `name`. Namespaces scope `buf:mark
 ```lua
 fun(name: any): any
 ```
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Promote the current loader frame to plugin scope `name` and return a
 small handle exposing the plugin's per-cycle state slot:
@@ -55,6 +63,8 @@ frame (e.g. from an event callback) it raises immediately.
 fun(): nil
 ```
 
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
 Request a clean shutdown of the app. The quit fires on the next tick after the current handler returns.
 
 ## `smelt.sleep`
@@ -62,6 +72,8 @@ Request a clean shutdown of the app. The quit fires on the next tick after the c
 ```lua
 fun(ms: integer): any
 ```
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Sleep for `ms` milliseconds. Must be called from inside `smelt.spawn(fn)`
 or a `tool.execute`. Raises `cancelled` if the task is cancelled while
@@ -74,6 +86,8 @@ fun(handler: fun()): smelt.Reg
 ```
 
 Types: [`smelt.Reg`](types.md#smeltreg)
+
+**Tier:** `Host` - Available in every runtime, including headless mode.
 
 Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task - any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds. Spawns inherit the current task lifecycle; top-level spawns are app-scoped and survive agent-turn interrupts.
 

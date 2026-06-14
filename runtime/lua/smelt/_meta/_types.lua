@@ -465,7 +465,10 @@
 ---@field summary? any Tool styled summary lines or compacted summary text.
 ---@field summary_text? string Tool summary flattened to plain text.
 ---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
+---@field status_hl? string Tool status highlight group.
 ---@field elapsed_secs? integer Terminal/static tool elapsed seconds.
+---@field elapsed_text? string Terminal/static tool elapsed label.
+---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
 ---@field output? smelt.transcript.ToolOutput Tool output snapshot.
 ---@field command? string Exec command.

@@ -12,34 +12,6 @@ local status_hl = {
   confirm = "SmeltAccent",
 }
 
-local function elapsed_suffix(secs)
-  if not secs then return nil end
-  if secs < 60 then
-    return string.format("%ds", secs)
-  elseif secs < 3600 then
-    return string.format("%dm %ds", secs // 60, secs % 60)
-  end
-  local h = secs // 3600
-  local rest = secs % 3600
-  return string.format("%dh %dm %ds", h, rest // 60, rest % 60)
-end
-
-local function first_non_empty_line(s)
-  s = s or ""
-  for line in (s .. "\n"):gmatch("([^\n]*)\n") do
-    if line:match("%S") then return (line:gsub("^%s+", ""):gsub("%s+$", "")) end
-  end
-  return ""
-end
-
-local function line_count(s)
-  local n = 0
-  for line in (s or ""):gmatch("[^\n]+") do
-    if line:match("%S") then n = n + 1 end
-  end
-  return n
-end
-
 --- Render any semantic transcript block with the bundled default policy.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render(block, ctx)
@@ -100,14 +72,14 @@ function smelt.transcript.defaults.render_tool_header(block, ctx, opts)
     parts[#parts + 1] = " "
     parts[#parts + 1] = summary
   end
-  local elapsed = block.status ~= "confirm" and elapsed_suffix(block.elapsed_secs) or nil
+  local elapsed = block.elapsed_text
   if elapsed then
     parts[#parts + 1] = " ("
     parts[#parts + 1] = elapsed
     parts[#parts + 1] = ")"
   end
   return layout.text(table.concat(parts), {
-    hl = opts.hl or opts.hl_group or status_hl[block.status or "pending"],
+    hl = opts.hl or opts.hl_group or block.status_hl or status_hl[block.status or "pending"],
   })
 end
 
@@ -184,12 +156,7 @@ end
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_thinking_summary(block, ctx)
   local _ = ctx
-  local content = block.content or ""
-  local first = first_non_empty_line(content)
-  local n = line_count(content)
-  if first == "" then return layout.text("thinking") end
-  if n <= 1 then return layout.text("thinking: " .. first) end
-  return layout.text(string.format("thinking: %s (+%d lines)", first, n - 1))
+  return layout.text(block.thinking_summary or "thinking")
 end
 
 --- Render an exec block.

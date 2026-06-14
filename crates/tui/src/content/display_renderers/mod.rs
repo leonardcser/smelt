@@ -19,7 +19,8 @@ pub(in crate::content) use tools::measure_tool_height;
 pub(crate) use tools::render_tool_body_into;
 
 /// Per-tool row cap (applied to command header and output body separately).
-const MAX_TOOL_BLOCK_ROWS: usize = 20;
+const MAX_TOOL_BLOCK_ROWS: usize =
+    smelt_core::content::block_layout::DEFAULT_TOOL_BLOCK_ROWS as usize;
 
 #[cfg(test)]
 mod tests {
