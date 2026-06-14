@@ -31,13 +31,9 @@ use smelt_core::ConfirmRequest;
 use smelt_core::FrontendKind;
 use std::sync::Arc;
 
-use crossterm::{
-    event::{self, EventStream},
-    terminal,
-};
+use crossterm::{event, terminal};
 use std::collections::{HashMap, VecDeque};
 
-use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -1458,7 +1454,14 @@ impl TuiApp {
             }
         }
 
-        let mut term_events = EventStream::new();
+        let mut term_events = match crate::term_input::TerminalInput::spawn() {
+            Ok(input) => input,
+            Err(e) => {
+                self.notify_error(format!("terminal input: {e}"));
+                self.terminal = None;
+                return;
+            }
+        };
         // Independent SIGWINCH listener: crossterm's signal source intermittently drops
         // resize events (signal-hook-mio counter / mio readiness race), so we keep our
         // own tokio-native handler. Both fire on resize; the duplicate just hits an
@@ -1647,7 +1650,7 @@ impl TuiApp {
             tokio::select! {
                 biased;
 
-                Some(Ok(ev)) = stream_next(&mut term_events) => {
+                Some(ev) = term_events.recv() => {
                     // Coalesce scroll: batch rapid wheel ticks into a single motion + one render.
                     // Disabled when an overlay is focused so wheel events route into it.
                     let coalesce_scroll = self.ui.focused_overlay().is_none();
@@ -1693,17 +1696,15 @@ impl TuiApp {
                         }
                     }
 
-                    while event::poll(Duration::ZERO).unwrap_or(false) {
-                        if let Ok(ev) = event::read() {
-                            if let Some(ev) = absorb(
-                                ev,
-                                &mut scroll_delta,
-                                &mut scroll_row,
-                                &mut scroll_col,
-                            ) {
-                                if self.dispatch_terminal_event(ev) {
-                                    break 'main;
-                                }
+                    while let Ok(ev) = term_events.try_recv() {
+                        if let Some(ev) = absorb(
+                            ev,
+                            &mut scroll_delta,
+                            &mut scroll_row,
+                            &mut scroll_col,
+                        ) {
+                            if self.dispatch_terminal_event(ev) {
+                                break 'main;
                             }
                         }
                     }
@@ -1820,17 +1821,13 @@ impl TuiApp {
             app.save_session();
         });
 
+        // Stop the stdin reader before releasing terminal modes so no background
+        // thread can keep consuming bytes after the TUI gives the terminal back.
+        drop(term_events);
+
         // Drop the terminal guard last so any rendering above stays in TUI mode.
         self.terminal = None;
     }
-}
-
-/// Poll one item from a `futures_core::Stream`, equivalent to `StreamExt::next`.
-async fn stream_next<S>(stream: &mut S) -> Option<S::Item>
-where
-    S: futures_core::Stream + Unpin,
-{
-    std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_next(cx)).await
 }
 
 #[cfg(test)]

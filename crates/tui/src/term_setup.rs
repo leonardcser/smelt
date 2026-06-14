@@ -45,9 +45,9 @@ impl TuiTerminal {
     /// `DECSET 1049` themselves; children that don't will write directly
     /// into our alt buffer, which the caller rebuilds with `force_redraw`.
     ///
-    /// This deliberately does **not** touch the crossterm `EventStream`.
-    /// Callers that own one must drop and recreate it so its background
-    /// reader does not race the child for stdin bytes.
+    /// This deliberately does **not** touch any active terminal input reader.
+    /// Callers must stop or recreate their reader around suspension so it does
+    /// not race the child process for stdin bytes.
     pub fn suspended<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R,
