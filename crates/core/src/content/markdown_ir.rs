@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::content::highlight::{parse_inline_spans, InlineSpan};
-use crate::content::{split_markdown_list_prefix, ColumnAlignment};
+use crate::content::highlight::{lower_inline_events, InlineSpan, InlineStyle};
+use crate::content::ColumnAlignment;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkdownBlock<'a> {
@@ -130,29 +130,42 @@ pub fn parse_markdown(source: &str) -> MarkdownBlock<'_> {
 }
 
 pub fn ends_with_heading(source: &str) -> bool {
-    parse_markdown(source)
-        .nodes
-        .iter()
-        .rev()
-        .find_map(|node| match node {
-            MarkdownNode::Text { kind, .. } => Some(*kind),
-            MarkdownNode::Source { range }
-                if smelt_buffer::text::slice(source, range.clone())
-                    .trim()
-                    .is_empty() =>
-            {
-                None
+    parse_last_markdown_block_kind(source) == Some(MarkdownTextKind::Heading)
+}
+
+fn parse_last_markdown_block_kind(source: &str) -> Option<MarkdownTextKind> {
+    let options = markdown_options();
+    let mut text_stack: Vec<TagEnd> = Vec::new();
+    let mut last = None;
+
+    for (event, _) in Parser::new_ext(source, options).into_offset_iter() {
+        match event {
+            Event::Start(tag) if markdown_text_kind(&tag).is_some() => {
+                text_stack.push(tag_end_for_text(&tag));
             }
-            _ => Some(MarkdownTextKind::Paragraph),
-        })
-        == Some(MarkdownTextKind::Heading)
+            Event::Start(Tag::CodeBlock(_) | Tag::Table(_)) | Event::Rule => {
+                last = Some(MarkdownTextKind::Paragraph);
+            }
+            Event::End(end) if text_stack.last().is_some_and(|open| *open == end) => {
+                text_stack.pop();
+                last = tag_end_markdown_text_kind(end).or(last);
+            }
+            _ => {}
+        }
+    }
+
+    last
+}
+
+fn markdown_options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_HEADING_ATTRIBUTES
 }
 
 fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_HEADING_ATTRIBUTES;
+    let options = markdown_options();
     let parser = Parser::new_ext(source, options).into_offset_iter();
     let mut out = Vec::new();
     let mut text_stack: Vec<OpenText> = Vec::new();
@@ -162,10 +175,12 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
     for (event, range) in parser {
         match event {
             Event::Start(tag) if markdown_text_kind(&tag).is_some() => {
+                push_open_text_event(&mut text_stack, Event::Start(tag.clone()), range.clone());
                 text_stack.push(OpenText {
                     start: range.start,
                     kind: markdown_text_kind(&tag).unwrap(),
                     end: tag_end_for_text(&tag),
+                    events: Vec::new(),
                 });
             }
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -188,16 +203,19 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
             }
             Event::End(end) if text_stack.last().is_some_and(|open| open.end == end) => {
                 let open = text_stack.pop().unwrap();
+                let text_range = open.start..range.end;
                 out.push(SpecialBlock::Text {
-                    range: open.start..range.end,
+                    range: text_range.clone(),
                     kind: open.kind,
-                    lines: markdown_lines(source, open.start..range.end, open.kind),
+                    lines: markdown_lines(source, text_range, open.kind, &open.events),
                 });
+                push_open_text_event(&mut text_stack, Event::End(end), range);
             }
             Event::Text(_) => {
                 if let Some((_, _, body)) = code.as_mut() {
-                    body.push(range);
+                    body.push(range.clone());
                 }
+                push_open_text_event(&mut text_stack, event, range);
             }
             Event::Start(Tag::Table(alignments)) => {
                 table = Some(TableBuild {
@@ -236,7 +254,7 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
                 }
             }
             Event::Rule => out.push(SpecialBlock::Rule { range }),
-            _ => {}
+            event => push_open_text_event(&mut text_stack, event, range),
         }
     }
 
@@ -250,10 +268,21 @@ struct TableBuild {
     current_row: Option<Vec<String>>,
 }
 
-struct OpenText {
+struct OpenText<'a> {
     start: usize,
     kind: MarkdownTextKind,
     end: TagEnd,
+    events: Vec<(Event<'a>, Range<usize>)>,
+}
+
+fn push_open_text_event<'a>(
+    text_stack: &mut [OpenText<'a>],
+    event: Event<'a>,
+    range: Range<usize>,
+) {
+    for open in text_stack {
+        open.events.push((event.clone(), range.clone()));
+    }
 }
 
 fn markdown_text_kind(tag: &Tag<'_>) -> Option<MarkdownTextKind> {
@@ -276,11 +305,26 @@ fn tag_end_for_text(tag: &Tag<'_>) -> TagEnd {
     }
 }
 
-fn markdown_lines(source: &str, range: Range<usize>, kind: MarkdownTextKind) -> Vec<MarkdownLine> {
+fn tag_end_markdown_text_kind(end: TagEnd) -> Option<MarkdownTextKind> {
+    match end {
+        TagEnd::Paragraph => Some(MarkdownTextKind::Paragraph),
+        TagEnd::Heading(_) => Some(MarkdownTextKind::Heading),
+        TagEnd::BlockQuote(_) => Some(MarkdownTextKind::BlockQuote),
+        TagEnd::List(_) => Some(MarkdownTextKind::List),
+        _ => None,
+    }
+}
+
+fn markdown_lines<'a>(
+    source: &str,
+    range: Range<usize>,
+    kind: MarkdownTextKind,
+    events: &[(Event<'a>, Range<usize>)],
+) -> Vec<MarkdownLine> {
     line_ranges(source, range)
         .into_iter()
         .map(|line_range| MarkdownLine {
-            spans: markdown_line_spans(source, line_range.clone(), kind),
+            spans: markdown_line_spans(source, line_range.clone(), kind, events),
             source: line_range,
         })
         .collect()
@@ -301,19 +345,66 @@ fn line_ranges(source: &str, range: Range<usize>) -> Vec<Range<usize>> {
     out
 }
 
-fn markdown_line_spans(
+fn markdown_line_spans<'a>(
     source: &str,
     line_range: Range<usize>,
     kind: MarkdownTextKind,
+    events: &[(Event<'a>, Range<usize>)],
 ) -> Vec<InlineSpan> {
-    let line = smelt_buffer::text::slice(source, line_range);
+    let line_events: Vec<(Event<'a>, Range<usize>)> = events
+        .iter()
+        .filter(|(_, range)| range.start >= line_range.start && range.start < line_range.end)
+        .cloned()
+        .collect();
+    let mut spans = structural_prefix_spans(source, line_range.clone(), kind, &line_events);
+    spans.extend(lower_inline_events(source, line_events, false));
+    spans
+}
+
+fn structural_prefix_spans<'a>(
+    source: &str,
+    line_range: Range<usize>,
+    kind: MarkdownTextKind,
+    events: &[(Event<'a>, Range<usize>)],
+) -> Vec<InlineSpan> {
+    if !matches!(
+        kind,
+        MarkdownTextKind::Heading | MarkdownTextKind::BlockQuote
+    ) {
+        return Vec::new();
+    }
+
+    let line = smelt_buffer::text::slice(source, line_range.clone());
     let trimmed = line.trim_start();
-    let body = if kind == MarkdownTextKind::List {
-        split_markdown_list_prefix(trimmed).1
+    let prefix_start = line_range.start + line.len() - trimmed.len();
+    let prefix_end = events
+        .iter()
+        .filter_map(|(event, range)| visible_event_start(event).then_some(range.start))
+        .filter(|&start| start >= prefix_start)
+        .min()
+        .unwrap_or(line_range.end);
+    let prefix = smelt_buffer::text::slice(source, prefix_start..prefix_end);
+    if prefix.is_empty() {
+        Vec::new()
     } else {
-        trimmed
-    };
-    parse_inline_spans(body, false)
+        vec![InlineSpan {
+            text: prefix.to_string(),
+            style: InlineStyle::default(),
+        }]
+    }
+}
+
+fn visible_event_start(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Text(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::Code(_)
+            | Event::TaskListMarker(_)
+            | Event::FootnoteReference(_)
+            | Event::Rule
+    )
 }
 
 fn map_alignment(alignment: Alignment) -> ColumnAlignment {
@@ -425,6 +516,34 @@ mod tests {
         assert_eq!(list_lines.len(), 1);
         assert_eq!(list_lines[0].spans[0].text, "item");
         assert!(list_lines[0].spans[0].style.bold);
+    }
+
+    #[test]
+    fn parse_markdown_preserves_nested_structural_prefixes() {
+        let source = "# Title\n\n> - item\n";
+        let block = parse_markdown(source);
+        let rendered_lines: Vec<(MarkdownTextKind, String)> = block
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                MarkdownNode::Text { kind, lines, .. } => Some((*kind, lines)),
+                _ => None,
+            })
+            .flat_map(|(kind, lines)| {
+                lines.iter().map(move |line| {
+                    let text = line.spans.iter().map(|span| span.text.as_str()).collect();
+                    (kind, text)
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            rendered_lines,
+            vec![
+                (MarkdownTextKind::Heading, "# Title".into()),
+                (MarkdownTextKind::BlockQuote, "> - item".into()),
+            ]
+        );
     }
 
     #[test]

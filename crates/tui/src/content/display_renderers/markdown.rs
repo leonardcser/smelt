@@ -215,47 +215,19 @@ fn measure_source_lines(
     state: &mut MeasureState,
 ) {
     let lines: Vec<&str> = source.lines().collect();
-    let mut started = false;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        if line.trim().is_empty() {
-            let mut next_i = i + 1;
-            while next_i < lines.len() && lines[next_i].trim().is_empty() {
-                next_i += 1;
-            }
-            if state.rows > 0
-                && !state.last_content_was_heading
-                && next_i < lines.len()
-                && !is_markdown_list_item(lines[next_i])
-            {
-                state.pending_blank = true;
-            }
-            i = next_i;
-            continue;
-        }
-
-        let mut gap_emitted = false;
-        if !started {
-            gap_emitted = measure_text_gap(state, kind);
-            started = true;
-        }
-        if state.pending_blank {
-            state.rows = state.rows.saturating_add(1);
-            state.pending_blank = false;
-            gap_emitted = true;
-        }
-        if state.prev_was_block && !gap_emitted {
-            state.rows = state.rows.saturating_add(1);
-        }
-        let spans = fallback_markdown_line_spans(line, kind, dim);
-        state.rows = state
-            .rows
-            .saturating_add(wrap_inline_spans(&spans, max_cols).len() as u16);
-        state.last_content_was_heading = kind == MarkdownTextKind::Heading;
-        state.prev_was_block = false;
-        i += 1;
-    }
+    let mut sink = MeasureSourceSink {
+        max_cols,
+        dim,
+        kind,
+    };
+    walk_text_lines(
+        lines.len(),
+        |i| lines[i],
+        |i| is_markdown_list_item(lines[i]),
+        kind,
+        state,
+        &mut sink,
+    );
 }
 
 fn measure_text_lines(
@@ -266,54 +238,20 @@ fn measure_text_lines(
     dim: bool,
     state: &mut MeasureState,
 ) {
-    let mut started = false;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = smelt_buffer::text::slice(source, lines[i].source.clone());
-        if line.trim().is_empty() {
-            let mut next_i = i + 1;
-            while next_i < lines.len()
-                && smelt_buffer::text::slice(source, lines[next_i].source.clone())
-                    .trim()
-                    .is_empty()
-            {
-                next_i += 1;
-            }
-            if state.rows > 0
-                && !state.last_content_was_heading
-                && next_i < lines.len()
-                && !is_markdown_list_item(smelt_buffer::text::slice(
-                    source,
-                    lines[next_i].source.clone(),
-                ))
-            {
-                state.pending_blank = true;
-            }
-            i = next_i;
-            continue;
-        }
-
-        let mut gap_emitted = false;
-        if !started {
-            gap_emitted = measure_text_gap(state, kind);
-            started = true;
-        }
-        if state.pending_blank {
-            state.rows = state.rows.saturating_add(1);
-            state.pending_blank = false;
-            gap_emitted = true;
-        }
-        if state.prev_was_block && !gap_emitted {
-            state.rows = state.rows.saturating_add(1);
-        }
-        let spans = markdown_line_spans(line, &lines[i].spans, kind, dim);
-        state.rows = state
-            .rows
-            .saturating_add(wrap_inline_spans(&spans, max_cols).len() as u16);
-        state.last_content_was_heading = kind == MarkdownTextKind::Heading;
-        state.prev_was_block = false;
-        i += 1;
-    }
+    let mut sink = MeasureIrSink {
+        lines,
+        max_cols,
+        dim,
+        kind,
+    };
+    walk_text_lines(
+        lines.len(),
+        |i| smelt_buffer::text::slice(source, lines[i].source.clone()),
+        |i| is_markdown_list_item(smelt_buffer::text::slice(source, lines[i].source.clone())),
+        kind,
+        state,
+        &mut sink,
+    );
 }
 
 fn render_block_gap(out: &mut LineBuilder, state: &mut RenderState) {
@@ -359,47 +297,15 @@ fn render_source_lines(
     state: &mut RenderState,
 ) {
     let lines: Vec<&str> = source.lines().collect();
-    let mut started = false;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        if line.trim().is_empty() {
-            let mut next_i = i + 1;
-            while next_i < lines.len() && lines[next_i].trim().is_empty() {
-                next_i += 1;
-            }
-            if state.rows > 0
-                && !state.last_content_was_heading
-                && next_i < lines.len()
-                && !is_markdown_list_item(lines[next_i])
-            {
-                state.pending_blank = true;
-            }
-            i = next_i;
-            continue;
-        }
-
-        let mut gap_emitted = false;
-        if !started {
-            gap_emitted = render_text_gap(out, state, kind);
-            started = true;
-        }
-        if state.pending_blank {
-            out.newline();
-            state.rows += 1;
-            state.pending_blank = false;
-            gap_emitted = true;
-        }
-        if state.prev_was_block && !gap_emitted {
-            out.newline();
-            state.rows += 1;
-        }
-        let spans = fallback_markdown_line_spans(line, kind, ctx.dim);
-        render_markdown_line(out, line, &spans, ctx, state);
-        state.last_content_was_heading = kind == MarkdownTextKind::Heading;
-        state.prev_was_block = false;
-        i += 1;
-    }
+    let mut sink = RenderSourceSink { out, ctx, kind };
+    walk_text_lines(
+        lines.len(),
+        |i| lines[i],
+        |i| is_markdown_list_item(lines[i]),
+        kind,
+        state,
+        &mut sink,
+    );
 }
 
 fn render_text_lines(
@@ -410,26 +316,49 @@ fn render_text_lines(
     ctx: &RenderTextCtx<'_>,
     state: &mut RenderState,
 ) {
+    let mut sink = RenderIrSink {
+        out,
+        ctx,
+        lines,
+        kind,
+    };
+    walk_text_lines(
+        lines.len(),
+        |i| smelt_buffer::text::slice(source, lines[i].source.clone()),
+        |i| is_markdown_list_item(smelt_buffer::text::slice(source, lines[i].source.clone())),
+        kind,
+        state,
+        &mut sink,
+    );
+}
+
+trait TextFlowSink {
+    fn text_gap(&mut self, state: &mut FlowState, kind: MarkdownTextKind) -> bool;
+    fn blank_line(&mut self, state: &mut FlowState);
+    fn emit_line(&mut self, index: usize, line: &str, state: &mut FlowState);
+}
+
+fn walk_text_lines<'a>(
+    len: usize,
+    mut line_at: impl FnMut(usize) -> &'a str,
+    mut is_list_item_at: impl FnMut(usize) -> bool,
+    kind: MarkdownTextKind,
+    state: &mut FlowState,
+    sink: &mut impl TextFlowSink,
+) {
     let mut started = false;
     let mut i = 0;
-    while i < lines.len() {
-        let line = smelt_buffer::text::slice(source, lines[i].source.clone());
+    while i < len {
+        let line = line_at(i);
         if line.trim().is_empty() {
             let mut next_i = i + 1;
-            while next_i < lines.len()
-                && smelt_buffer::text::slice(source, lines[next_i].source.clone())
-                    .trim()
-                    .is_empty()
-            {
+            while next_i < len && line_at(next_i).trim().is_empty() {
                 next_i += 1;
             }
             if state.rows > 0
                 && !state.last_content_was_heading
-                && next_i < lines.len()
-                && !is_markdown_list_item(smelt_buffer::text::slice(
-                    source,
-                    lines[next_i].source.clone(),
-                ))
+                && next_i < len
+                && !is_list_item_at(next_i)
             {
                 state.pending_blank = true;
             }
@@ -439,24 +368,116 @@ fn render_text_lines(
 
         let mut gap_emitted = false;
         if !started {
-            gap_emitted = render_text_gap(out, state, kind);
+            gap_emitted = sink.text_gap(state, kind);
             started = true;
         }
         if state.pending_blank {
-            out.newline();
-            state.rows += 1;
-            state.pending_blank = false;
+            sink.blank_line(state);
             gap_emitted = true;
         }
         if state.prev_was_block && !gap_emitted {
-            out.newline();
-            state.rows += 1;
+            sink.blank_line(state);
         }
-        let spans = markdown_line_spans(line, &lines[i].spans, kind, ctx.dim);
-        render_markdown_line(out, line, &spans, ctx, state);
+        sink.emit_line(i, line, state);
         state.last_content_was_heading = kind == MarkdownTextKind::Heading;
         state.prev_was_block = false;
         i += 1;
+    }
+}
+
+struct MeasureSourceSink {
+    max_cols: usize,
+    dim: bool,
+    kind: MarkdownTextKind,
+}
+
+impl TextFlowSink for MeasureSourceSink {
+    fn text_gap(&mut self, state: &mut FlowState, kind: MarkdownTextKind) -> bool {
+        measure_text_gap(state, kind)
+    }
+
+    fn blank_line(&mut self, state: &mut FlowState) {
+        state.rows = state.rows.saturating_add(1);
+        state.pending_blank = false;
+    }
+
+    fn emit_line(&mut self, _index: usize, line: &str, state: &mut FlowState) {
+        let spans = fallback_markdown_line_spans(line, self.kind, self.dim);
+        state.rows = state
+            .rows
+            .saturating_add(wrap_inline_spans(&spans, self.max_cols).len() as u16);
+    }
+}
+
+struct MeasureIrSink<'a> {
+    lines: &'a [MarkdownLine],
+    max_cols: usize,
+    dim: bool,
+    kind: MarkdownTextKind,
+}
+
+impl TextFlowSink for MeasureIrSink<'_> {
+    fn text_gap(&mut self, state: &mut FlowState, kind: MarkdownTextKind) -> bool {
+        measure_text_gap(state, kind)
+    }
+
+    fn blank_line(&mut self, state: &mut FlowState) {
+        state.rows = state.rows.saturating_add(1);
+        state.pending_blank = false;
+    }
+
+    fn emit_line(&mut self, index: usize, line: &str, state: &mut FlowState) {
+        let spans = markdown_line_spans(line, &self.lines[index].spans, self.kind, self.dim);
+        state.rows = state
+            .rows
+            .saturating_add(wrap_inline_spans(&spans, self.max_cols).len() as u16);
+    }
+}
+
+struct RenderSourceSink<'a, 'b, 'c> {
+    out: &'a mut LineBuilder<'b>,
+    ctx: &'a RenderTextCtx<'c>,
+    kind: MarkdownTextKind,
+}
+
+impl TextFlowSink for RenderSourceSink<'_, '_, '_> {
+    fn text_gap(&mut self, state: &mut FlowState, kind: MarkdownTextKind) -> bool {
+        render_text_gap(self.out, state, kind)
+    }
+
+    fn blank_line(&mut self, state: &mut FlowState) {
+        self.out.newline();
+        state.rows += 1;
+        state.pending_blank = false;
+    }
+
+    fn emit_line(&mut self, _index: usize, line: &str, state: &mut FlowState) {
+        let spans = fallback_markdown_line_spans(line, self.kind, self.ctx.dim);
+        render_markdown_line(self.out, line, &spans, self.ctx, state);
+    }
+}
+
+struct RenderIrSink<'a, 'b, 'c, 'd> {
+    out: &'a mut LineBuilder<'b>,
+    ctx: &'a RenderTextCtx<'c>,
+    lines: &'d [MarkdownLine],
+    kind: MarkdownTextKind,
+}
+
+impl TextFlowSink for RenderIrSink<'_, '_, '_, '_> {
+    fn text_gap(&mut self, state: &mut FlowState, kind: MarkdownTextKind) -> bool {
+        render_text_gap(self.out, state, kind)
+    }
+
+    fn blank_line(&mut self, state: &mut FlowState) {
+        self.out.newline();
+        state.rows += 1;
+        state.pending_blank = false;
+    }
+
+    fn emit_line(&mut self, index: usize, line: &str, state: &mut FlowState) {
+        let spans = markdown_line_spans(line, &self.lines[index].spans, self.kind, self.ctx.dim);
+        render_markdown_line(self.out, line, &spans, self.ctx, state);
     }
 }
 

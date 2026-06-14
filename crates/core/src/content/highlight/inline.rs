@@ -492,10 +492,34 @@ pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
     }
 
     let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    lower_inline_events(text, Parser::new_ext(text, options).into_offset_iter(), dim)
+    lower_inline_fragment_events(text, Parser::new_ext(text, options).into_offset_iter(), dim)
 }
 
 pub fn lower_inline_events<'a>(
+    _source: &str,
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    dim: bool,
+) -> Vec<InlineSpan> {
+    let mut styles = vec![InlineStyle {
+        dim,
+        ..Default::default()
+    }];
+    let mut out = Vec::new();
+
+    for (event, _) in events {
+        match event {
+            Event::Start(tag) => push_tag_style(&mut styles, tag),
+            Event::End(_) if styles.len() > 1 => {
+                styles.pop();
+            }
+            event => lower_inline_event(event, &mut out, &styles),
+        }
+    }
+
+    out
+}
+
+fn lower_inline_fragment_events<'a>(
     source: &str,
     events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
     dim: bool,
@@ -510,14 +534,14 @@ pub fn lower_inline_events<'a>(
     for (event, range) in events {
         match event {
             Event::Start(tag) => {
-                flush_pending_prefixes(
+                flush_fragment_prefixes(
                     source,
                     &mut pending_prefixes,
                     range.start,
                     &mut out,
                     *styles.last().unwrap(),
                 );
-                if tag_preserves_source_prefix(&tag) {
+                if fragment_tag_preserves_source_prefix(&tag) {
                     pending_prefixes.push(PendingPrefix {
                         start: range.start,
                         end: range.end,
@@ -526,7 +550,7 @@ pub fn lower_inline_events<'a>(
                 push_tag_style(&mut styles, tag);
             }
             Event::End(_) => {
-                flush_pending_prefixes(
+                flush_fragment_prefixes(
                     source,
                     &mut pending_prefixes,
                     range.end,
@@ -537,78 +561,16 @@ pub fn lower_inline_events<'a>(
                     styles.pop();
                 }
             }
-            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
-                flush_pending_prefixes(
+            event => {
+                flush_fragment_prefixes(
                     source,
                     &mut pending_prefixes,
                     range.start,
                     &mut out,
                     *styles.last().unwrap(),
                 );
-                push_inline_span(&mut out, text.as_ref(), *styles.last().unwrap());
+                lower_inline_event(event, &mut out, &styles);
             }
-            Event::Code(text) => {
-                flush_pending_prefixes(
-                    source,
-                    &mut pending_prefixes,
-                    range.start,
-                    &mut out,
-                    *styles.last().unwrap(),
-                );
-                push_inline_span(
-                    &mut out,
-                    text.as_ref(),
-                    InlineStyle {
-                        group: Some(intern("SmeltAccent")),
-                        ..*styles.last().unwrap()
-                    },
-                );
-            }
-            Event::SoftBreak | Event::HardBreak => {
-                flush_pending_prefixes(
-                    source,
-                    &mut pending_prefixes,
-                    range.start,
-                    &mut out,
-                    *styles.last().unwrap(),
-                );
-                push_inline_span(&mut out, " ", *styles.last().unwrap());
-            }
-            Event::TaskListMarker(checked) => {
-                flush_pending_prefixes(
-                    source,
-                    &mut pending_prefixes,
-                    range.start,
-                    &mut out,
-                    *styles.last().unwrap(),
-                );
-                push_inline_span(
-                    &mut out,
-                    if checked { "[x] " } else { "[ ] " },
-                    *styles.last().unwrap(),
-                );
-            }
-            Event::FootnoteReference(text) => {
-                flush_pending_prefixes(
-                    source,
-                    &mut pending_prefixes,
-                    range.start,
-                    &mut out,
-                    *styles.last().unwrap(),
-                );
-                push_inline_span(&mut out, text.as_ref(), *styles.last().unwrap());
-            }
-            Event::Rule => {
-                flush_pending_prefixes(
-                    source,
-                    &mut pending_prefixes,
-                    range.start,
-                    &mut out,
-                    *styles.last().unwrap(),
-                );
-                push_inline_span(&mut out, "---", *styles.last().unwrap());
-            }
-            _ => {}
         }
     }
 
@@ -621,7 +583,7 @@ struct PendingPrefix {
     end: usize,
 }
 
-fn flush_pending_prefixes(
+fn flush_fragment_prefixes(
     source: &str,
     pending: &mut Vec<PendingPrefix>,
     up_to: usize,
@@ -644,8 +606,43 @@ fn flush_pending_prefixes(
     }
 }
 
-fn tag_preserves_source_prefix(tag: &Tag<'_>) -> bool {
+fn fragment_tag_preserves_source_prefix(tag: &Tag<'_>) -> bool {
     matches!(tag, Tag::Heading { .. } | Tag::BlockQuote(_) | Tag::Item)
+}
+
+fn lower_inline_event(event: Event<'_>, out: &mut Vec<InlineSpan>, styles: &[InlineStyle]) {
+    match event {
+        Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+            push_inline_span(out, text.as_ref(), *styles.last().unwrap());
+        }
+        Event::Code(text) => {
+            push_inline_span(
+                out,
+                text.as_ref(),
+                InlineStyle {
+                    group: Some(intern("SmeltAccent")),
+                    ..*styles.last().unwrap()
+                },
+            );
+        }
+        Event::SoftBreak | Event::HardBreak => {
+            push_inline_span(out, " ", *styles.last().unwrap());
+        }
+        Event::TaskListMarker(checked) => {
+            push_inline_span(
+                out,
+                if checked { "[x] " } else { "[ ] " },
+                *styles.last().unwrap(),
+            );
+        }
+        Event::FootnoteReference(text) => {
+            push_inline_span(out, text.as_ref(), *styles.last().unwrap());
+        }
+        Event::Rule => {
+            push_inline_span(out, "---", *styles.last().unwrap());
+        }
+        _ => {}
+    }
 }
 
 fn push_tag_style(styles: &mut Vec<InlineStyle>, tag: Tag<'_>) {
