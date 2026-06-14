@@ -1,5 +1,6 @@
 mod agent;
 pub mod auth;
+pub mod browser;
 pub mod cancel;
 pub mod catalog;
 pub mod clock;
