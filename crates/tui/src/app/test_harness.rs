@@ -1739,9 +1739,9 @@ impl TestApp {
 
         // Notification overlay's WinId, when set, must still resolve.
         // `dismiss_notification` and `open_notification` always pair the
-        // `Option<WinId>` with the underlying overlay leaf; if they ever
+        // notification state with the underlying overlay leaf; if they ever
         // get out of sync, the next render walks a dead window.
-        if let Some(win) = self.app.notification {
+        if let Some(win) = self.app.notification_win() {
             assert!(
                 self.app.ui.win(win).is_some(),
                 "notification points at dead window {win:?}",
@@ -2154,7 +2154,7 @@ impl TestApp {
             agent_running: self.app.agent.is_some(),
             term_focused: self.app.term_focused,
             quit_requested: self.quit,
-            notification: self.app.notification,
+            notification: self.app.notification_win(),
             pending_quit: self.app.pending_quit,
         }
     }

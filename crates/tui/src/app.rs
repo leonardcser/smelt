@@ -69,7 +69,7 @@ pub struct TuiApp {
     pub(crate) task_label: Option<String>,
     pub(crate) pending_dialog: bool,
     pub(crate) pending_quit: bool,
-    pub(crate) notification: Option<crate::smelt_edit::WinId>,
+    pub(crate) notification: Option<Notification>,
     pub(crate) cmdline: crate::app::cmdline::CmdlineState,
     pub(crate) search: crate::app::search::SearchState,
     pub(crate) picker_state: HashMap<crate::smelt_edit::WinId, crate::picker::PickerState>,
@@ -145,6 +145,12 @@ pub struct TuiApp {
     /// accept/dismiss chord policy plugins configure when calling
     /// `Win:placeholder(text, opts)`.
     pub placeholder_opts: HashMap<crate::smelt_edit::WinId, PlaceholderOpts>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Notification {
+    pub(crate) win: crate::smelt_edit::WinId,
+    pub(crate) expires_at: Instant,
 }
 
 /// Per-window dispatch policy for a placeholder. Set via Lua's
@@ -316,6 +322,9 @@ pub(crate) const CHORD_TIMEOUT_MS: u64 = 500;
 
 /// Idle time after the last keypress before showing a deferred permission dialog.
 pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
+
+/// How long a notification toast stays visible without user interaction.
+pub(crate) const NOTIFICATION_TTL_MS: u64 = 5000;
 
 /// Hard cap on how many user submissions stack up while a background
 /// plugin holds the spinner busy. Sensible bursts are under 10; anything
@@ -1222,8 +1231,8 @@ impl TuiApp {
 
     fn open_notification(&mut self, kind: smelt_core::messages::MessageKind, body: &str) {
         use smelt_core::messages::MessageKind;
-        if let Some(win) = self.notification.take() {
-            self.close_overlay_leaf(win);
+        if let Some(notification) = self.notification.take() {
+            self.close_overlay_leaf(notification.win);
         }
 
         let label = match kind {
@@ -1313,13 +1322,39 @@ impl TuiApp {
                 // never obscures a modal asking for input.
                 .with_z(40),
         );
-        self.notification = Some(win);
+        self.notification = Some(Notification {
+            win,
+            expires_at: self.core.clock.instant_now() + Duration::from_millis(NOTIFICATION_TTL_MS),
+        });
     }
 
     pub(crate) fn dismiss_notification(&mut self) {
-        if let Some(win) = self.notification.take() {
-            self.close_overlay_leaf(win);
+        if let Some(notification) = self.notification.take() {
+            self.close_overlay_leaf(notification.win);
         }
+    }
+
+    pub(crate) fn dismiss_expired_notification(&mut self) -> bool {
+        if self
+            .notification
+            .is_some_and(|notification| notification.expires_at <= self.core.clock.instant_now())
+        {
+            self.dismiss_notification();
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn notification_expiry_delay(&self) -> Option<Duration> {
+        self.notification.map(|notification| {
+            notification
+                .expires_at
+                .saturating_duration_since(self.core.clock.instant_now())
+        })
+    }
+
+    pub(crate) fn notification_win(&self) -> Option<crate::smelt_edit::WinId> {
+        self.notification.map(|notification| notification.win)
     }
 
     pub(crate) fn set_task_label(&mut self, label: String) {
@@ -1599,6 +1634,12 @@ impl TuiApp {
                 .timers
                 .next_deadline()
                 .map(|deadline| deadline.saturating_duration_since(now));
+            let next_notification_delay = self.notification_expiry_delay();
+            let next_idle_delay = match (next_timer_delay, next_notification_delay) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(delay), None) | (None, Some(delay)) => Some(delay),
+                (None, None) => None,
+            };
 
             tokio::select! {
                 biased;
@@ -1746,9 +1787,10 @@ impl TuiApp {
                     self.render_normal(self.agent.is_some());
                 }
 
-                _ = tokio::time::sleep(next_timer_delay.unwrap_or(Duration::MAX)), if next_timer_delay.is_some() => {
+                _ = tokio::time::sleep(next_idle_delay.unwrap_or(Duration::MAX)), if next_idle_delay.is_some() => {
                     self.tick_timers();
                     self.drive_lua_tasks();
+                    self.dismiss_expired_notification();
                     self.render_normal(self.agent.is_some());
                 }
 

@@ -632,14 +632,7 @@ impl TuiApp {
     // ── Shared helpers ────────────────────────────────────────────────────
 
     fn handle_idle_prompt_esc(&mut self, ev: Event, modifiers: KeyModifiers) -> EventOutcome {
-        if self.input.vim_enabled(self.prompt_win())
-            && matches!(
-                self.prompt_win().vim_mode(),
-                crate::smelt_edit::VimMode::Insert
-                    | crate::smelt_edit::VimMode::Visual
-                    | crate::smelt_edit::VimMode::VisualLine
-            )
-        {
+        if self.prompt_escape_owned_by_vim() {
             let now = self.core.clock.instant_now();
             let action = {
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -668,14 +661,9 @@ impl TuiApp {
     }
 
     fn handle_running_prompt_esc(&mut self, ev: Event) -> EventOutcome {
-        let cur_mode = if self.input.vim_enabled(self.prompt_win()) {
-            Some(self.prompt_win().vim_mode())
-        } else {
-            None
-        };
         let now = self.core.clock.instant_now();
 
-        if cur_mode == Some(crate::smelt_edit::VimMode::Insert) {
+        if self.prompt_escape_owned_by_vim() {
             self.apply_prompt_escape_to_input(ev, now);
             return EventOutcome::Noop;
         }
@@ -698,14 +686,19 @@ impl TuiApp {
             return outcome;
         }
 
-        if matches!(
-            cur_mode,
-            Some(crate::smelt_edit::VimMode::Visual | crate::smelt_edit::VimMode::VisualLine)
-        ) {
-            self.apply_prompt_escape_to_input(ev, now);
-        }
-
         EventOutcome::Noop
+    }
+
+    fn prompt_escape_owned_by_vim(&self) -> bool {
+        if !self.input.vim_enabled(self.prompt_win()) {
+            return false;
+        }
+        match self.prompt_win().vim_mode() {
+            crate::smelt_edit::VimMode::Insert
+            | crate::smelt_edit::VimMode::Visual
+            | crate::smelt_edit::VimMode::VisualLine => true,
+            crate::smelt_edit::VimMode::Normal => !self.prompt_win().vim_state().is_idle(),
+        }
     }
 
     fn apply_prompt_escape_to_input(&mut self, ev: Event, now: std::time::Instant) {

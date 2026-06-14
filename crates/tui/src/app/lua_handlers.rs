@@ -53,7 +53,9 @@ impl TuiApp {
     }
 
     pub(crate) fn drain_idle_work(&mut self) -> bool {
-        self.try_perform_scheduled_lua_reload()
+        let mut did_work = self.dismiss_expired_notification();
+        did_work |= self.try_perform_scheduled_lua_reload();
+        did_work
     }
 
     fn try_perform_scheduled_lua_reload(&mut self) -> bool {
