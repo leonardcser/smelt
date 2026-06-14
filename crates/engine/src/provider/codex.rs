@@ -557,8 +557,14 @@ fn save_models_cache(models: &[CodexModel]) {
 pub(crate) async fn refresh_models_cache(client: &reqwest::Client) -> Vec<CodexModel> {
     let models = match fetch_models(client).await {
         Ok(m) => m,
-        Err(_) => return Vec::new(),
+        Err(_) => return load_cached_models(),
     };
+    if models.is_empty() {
+        // The server can return a 200 with an empty list during outages or
+        // account transitions. Keep the last known-good cache rather than
+        // wiping the model picker.
+        return load_cached_models();
+    }
     save_models_cache(&models);
     models
 }

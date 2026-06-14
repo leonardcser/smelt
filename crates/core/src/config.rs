@@ -466,24 +466,6 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| "openai-compatible".to_string());
 
-            // Codex and Copilot models are fetched dynamically - emit a
-            // placeholder so the provider is detected even when no models are
-            // listed in config.
-            if (provider_type == "codex" || provider_type == "copilot")
-                && provider.models.is_empty()
-            {
-                out.push(ResolvedModel {
-                    key: format!("{}/{}", provider_name, provider_type),
-                    provider_name: provider_name.clone(),
-                    model_name: String::new(),
-                    api_base: api_base.clone(),
-                    api_key_env: api_key_env.clone(),
-                    provider_type: provider_type.clone(),
-                    config: ModelConfig::default(),
-                });
-                continue;
-            }
-
             for model in &provider.models {
                 let model_name = model.name.clone().unwrap_or_default();
                 if model_name.is_empty() {
