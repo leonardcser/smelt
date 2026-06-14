@@ -964,12 +964,44 @@ Next measurements:
 
 **Goal:** finish the structural migration so transcript layout is a single IR-driven pipeline instead of a mix of `DisplayBlock` IR and legacy parser/render fallbacks.
 
-- Replace `DisplayBlock::Legacy` with explicit width-independent variants for text, markdown, user, thinking, compacted, mode, process-status, and exec blocks.
-- Move the remaining `transcript_parsers` responsibilities into `DisplayBlock`/display modules, then delete or rename `transcript_parsers` once it is no longer the shared legacy renderer.
-- Make measurement, row-range rendering, and copy/yank consume the same IR. `display_rows_for_range` and `copy_range` are already range-limited through `collect_blocks_range`; remove their scratch-buffer dependence only when equivalent source/copy metadata lives in IR.
-- Revisit `build_rows`: either keep it as an explicit full-transcript compatibility API or replace callers with row-range APIs if no caller truly needs all rows at once.
+Completed:
 
-**Deliverable:** `DisplayBlock::Legacy` is gone, `transcript_parsers` no longer owns transcript layout, and the remaining full-row paths are intentional API choices rather than hidden measurement dependencies.
+- `DisplayBlock::Legacy` is gone. Transcript display ownership is now structurally typed, and production measurement/rendering dispatches over explicit `DisplayBlock` variants.
+- Hydration validates cached display entries against the current `Block` shape before installing them, preventing stale cache entries from crossing variant boundaries.
+- Parser-level production measurement/render fallbacks were removed; parser tests now exercise the compiled display-block path through `compile_block` and `render_block_into`.
+- Parser renderer visibility was narrowed, and the unused test-only catch-all renderer/code-line shim was deleted.
+- `build_rows` remains as an explicit full-transcript compatibility API; range consumers use exact row indexes plus intersecting block materialization.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test -p smelt-tui display_cache`
+- `cargo test -p smelt-tui transcript_parsers`
+- `cargo test -p smelt-core transcript_model`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace` → `3059 passed, 1 leaky, 1 skipped`
+
+**Deliverable:** complete. `DisplayBlock::Legacy` is gone, `transcript_parsers` no longer owns transcript layout, and the remaining full-row paths are intentional API choices rather than hidden measurement dependencies.
+
+### Phase 11: Simplify transcript materialization windows
+
+**Goal:** remove leftover viewport/materialization magic numbers now that exact transcript row heights make the visible row window precise.
+
+Completed:
+
+- Removed fixed transcript head/tail overscan constants (`20` rows each) from projection planning.
+- Visible-row and tail projections now preload half a viewport around the exact visible window. This preserves nearby-scroll reuse without tying materialization to an arbitrary global constant.
+- Added regression coverage that small viewports materialize a viewport-relative bounded window rather than inheriting a fixed large cushion.
+- Picker overscan remains unchanged because it is independent list virtualization, not transcript exact-row planning.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test -p smelt-tui transcript_buf`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace` → `3060 passed, 1 skipped`
+
+**Deliverable:** complete. Transcript projection uses exact row heights plus viewport-relative preload; no transcript overscan constants remain.
 
 ---
 
