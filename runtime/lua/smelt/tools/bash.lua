@@ -161,6 +161,6 @@ smelt.tools.register(smelt.tools._with_watchdog({
     return smelt.layout.vbox(items)
   end,
   execute = M.execute,
-}, { default_ms = DEFAULT_TIMEOUT_MS, max_ms = MAX_TIMEOUT_MS, grace_ms = 5000 })
+}, { default_ms = DEFAULT_TIMEOUT_MS, max_ms = MAX_TIMEOUT_MS, grace_ms = 5000 }))
 
 return M

@@ -196,4 +196,4 @@ smelt.tools.register(smelt.tools._with_watchdog({
     end
     return slice(combined, offset, head_limit)
   end,
-}, { default_ms = 30000, max_ms = 120000, grace_ms = 5000 })
+}, { default_ms = 30000, max_ms = 120000, grace_ms = 5000 }))

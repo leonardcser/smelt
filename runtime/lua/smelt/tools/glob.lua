@@ -87,4 +87,4 @@ smelt.tools.register(smelt.tools._with_watchdog({
     end
     return table.concat(paths, "\n")
   end,
-}, { default_ms = 30000, max_ms = 120000, grace_ms = 5000 })
+}, { default_ms = 30000, max_ms = 120000, grace_ms = 5000 }))

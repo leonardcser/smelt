@@ -145,4 +145,4 @@ smelt.tools.register(smelt.tools._with_watchdog({
     end
     return formatted
   end,
-}, { default_ms = 15000, max_ms = 60000 })
+}, { default_ms = 15000, max_ms = 60000 }))

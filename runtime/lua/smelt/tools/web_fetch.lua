@@ -262,4 +262,4 @@ smelt.tools.register(smelt.tools._with_watchdog({
   arg = "timeout",
   arg_scale_ms = 1000,
   grace_ms = 5000,
-})
+}))
