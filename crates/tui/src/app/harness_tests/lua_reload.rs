@@ -36,6 +36,52 @@ fn lua_config_session_and_transcript_contracts_are_available() {
 }
 
 #[test]
+fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_baseline() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua("assert(smelt.session.context_tokens() == nil)"));
+
+    let completed_history = vec![
+        protocol::HistoryItem::user(protocol::Content::text("u1")),
+        protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+            Some(protocol::Content::text("a1")),
+            None,
+            vec![],
+        )),
+    ];
+
+    app.start_turn(1);
+    app.feed_one(SourceEvent::Engine(EngineEvent::TokenUsage {
+        usage: protocol::TokenUsage {
+            context_tokens: Some(123),
+            ..Default::default()
+        },
+        tokens_per_sec: None,
+        cost_usd: None,
+        background: false,
+    }));
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+        turn_id: 1,
+        history: completed_history.clone(),
+        meta: None,
+    }));
+    assert_eq!(app.app.core.session.current_context_tokens(), Some(123));
+    assert!(app.run_lua("assert(smelt.session.context_tokens() == 123)"));
+
+    let mut in_flight_history = completed_history;
+    in_flight_history.push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+    app.start_turn(2);
+    app.feed_one(SourceEvent::Engine(EngineEvent::HistoryUpdated {
+        turn_id: 2,
+        history: in_flight_history,
+    }));
+
+    assert_eq!(app.app.core.session.current_context_tokens(), None);
+    assert_eq!(app.app.core.session.display_context_tokens(), Some(123));
+    assert!(app.run_lua("assert(smelt.session.context_tokens() == 123)"));
+}
+
+#[test]
 fn lua_history_entries_and_search_return_sequences() {
     let mut app = TestApp::builder().build();
     app.app.input_history.push("first prompt".into());

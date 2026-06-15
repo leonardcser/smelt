@@ -12,7 +12,7 @@ local session = {}
 ---@type fun(spec: table): table?
 session.checkpoint = nil
 
---- Latest authoritative provider-reported active-context token count, or `nil` when Smelt does not currently have a valid reading for the model-visible history.
+--- Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update.
 ---@type fun(): integer?
 session.context_tokens = nil
 

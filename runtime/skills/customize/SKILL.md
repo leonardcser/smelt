@@ -1371,7 +1371,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 - `smelt.session.checkpoint` :: `fun(spec: table): table?`
   Install a model-context checkpoint without deleting transcript history.
 - `smelt.session.context_tokens` :: `fun(): integer?`
-  Latest authoritative provider-reported active-context token count, or `nil` when Smelt does not currently have a valid reading for the model-visible history.
+  Latest non-background provider-reported active-context token count, or `nil` before the first usage report.
 - `smelt.session.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model.
 - `smelt.session.conversation` :: `fun(): table`
