@@ -285,7 +285,7 @@ impl Window {
     }
 
     pub fn sync_row_render_state(&mut self, buf: &mut Buffer, viewport_rows: u16, now: Instant) {
-        self.sync_row_cursor_to_local(buf, viewport_rows);
+        self.resync_row_display_coords(buf);
         let text = buf.text();
         self.clamp_anchors_to_source(&text);
         self.clear_expired_row_yank_flash(now);
@@ -318,15 +318,31 @@ impl Window {
     }
 
     pub fn sync_row_cursor_to_local(&mut self, buf: &Buffer, viewport_rows: u16) {
+        self.reveal_row_cursor(buf, viewport_rows);
+    }
+
+    pub fn resync_row_display_coords(&mut self, buf: &Buffer) -> bool {
         if !self.row_text_state().active {
-            return;
+            return false;
         }
         let state = *self.row_text_state();
         if buf.lines().is_empty() {
             self.reset_cursor();
+            return false;
+        }
+        self.project_row_cursor_to_local(state, buf)
+    }
+
+    pub fn reveal_row_cursor(&mut self, buf: &Buffer, viewport_rows: u16) {
+        if !self.row_text_state().active {
             return;
         }
-        let local_cursor_synced = self.project_row_cursor_to_local(state, buf);
+        if buf.lines().is_empty() {
+            self.reset_cursor();
+            return;
+        }
+        let state = *self.row_text_state();
+        let local_cursor_synced = self.resync_row_display_coords(buf);
         if viewport_rows > 0 {
             let viewport_cols = if local_cursor_synced {
                 self.viewport.map(|v| v.content_width).unwrap_or(0)

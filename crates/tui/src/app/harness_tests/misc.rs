@@ -143,20 +143,7 @@ fn transcript_user_resize_keeps_viewport_top_content_stable() {
             });
     }
     app.render_silent();
-    for row in 0..transcript_total_rows(&app) {
-        execute_transcript_viewer_command(&mut app, crate::smelt_edit::ViewerCommand::GotoRow(row));
-        app.app.transcript_win_mut().pin_scroll(row);
-        app.render_silent();
-        if transcript_viewport_top_line(&app).contains("ANCHOR") {
-            break;
-        }
-    }
-    assert!(
-        transcript_viewport_top_line(&app).contains("ANCHOR"),
-        "initial viewport top moved to {:?}; lines: {:?}",
-        transcript_viewport_top_line(&app),
-        transcript_buffer_lines(&app, 12)
-    );
+    pin_transcript_top_to_line_containing(&mut app, "ANCHOR");
 
     app.set_terminal_size(96, 20);
     app.render_silent();
@@ -194,20 +181,7 @@ fn transcript_resize_keeps_wrapped_line_anchor_visible() {
             });
     }
     app.render_silent();
-    for row in 0..transcript_total_rows(&app) {
-        execute_transcript_viewer_command(&mut app, crate::smelt_edit::ViewerCommand::GotoRow(row));
-        app.app.transcript_win_mut().pin_scroll(row);
-        app.render_silent();
-        if transcript_viewport_top_line(&app).contains("ANCHOR") {
-            break;
-        }
-    }
-    assert!(
-        transcript_viewport_top_line(&app).contains("ANCHOR"),
-        "initial viewport top moved to {:?}; lines: {:?}",
-        transcript_viewport_top_line(&app),
-        transcript_buffer_lines(&app, 12)
-    );
+    pin_transcript_top_to_line_containing(&mut app, "ANCHOR");
 
     app.set_terminal_size(96, 20);
     app.render_silent();
@@ -252,24 +226,7 @@ fn transcript_resize_keeps_markdown_anchor_visible() {
             });
     }
     app.render_silent();
-    for row in 0..transcript_total_rows(&app) {
-        execute_transcript_viewer_command(&mut app, crate::smelt_edit::ViewerCommand::GotoRow(row));
-        app.app.transcript_win_mut().pin_scroll(row);
-        app.render_silent();
-        if transcript_viewport_lines(&app)
-            .iter()
-            .any(|line| line.contains("ANCHOR"))
-        {
-            break;
-        }
-    }
-    assert!(
-        transcript_viewport_lines(&app)
-            .iter()
-            .any(|line| line.contains("ANCHOR")),
-        "initial viewport moved to {:?}",
-        transcript_viewport_lines(&app)
-    );
+    pin_transcript_viewport_to_line_containing(&mut app, "ANCHOR");
 
     app.set_terminal_size(96, 20);
     app.render_silent();
@@ -288,6 +245,80 @@ fn transcript_resize_keeps_markdown_anchor_visible() {
             .iter()
             .any(|line| line.contains("ANCHOR")),
         "viewport moved to {:?}",
+        transcript_viewport_lines(&app)
+    );
+}
+
+#[test]
+fn transcript_height_resize_keeps_top_when_cursor_is_lower_in_viewport() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(64, 28);
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: "ANCHOR pinned top before height resize".into(),
+        });
+    for i in 0..160 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("tail {i}"),
+            });
+    }
+    app.render_silent();
+    let anchor_scroll = pin_transcript_top_to_line_containing(&mut app, "ANCHOR");
+    move_transcript_cursor_to_row(&mut app, anchor_scroll + 14);
+    assert!(
+        transcript_viewport_top_line(&app).contains("ANCHOR"),
+        "initial viewport top moved to {:?}; lines: {:?}",
+        transcript_viewport_top_line(&app),
+        transcript_viewport_lines(&app)
+    );
+
+    app.set_terminal_size(64, 12);
+    app.render_silent();
+
+    assert!(
+        transcript_viewport_top_line(&app).contains("ANCHOR"),
+        "height resize moved viewport top to {:?}; lines: {:?}",
+        transcript_viewport_top_line(&app),
+        transcript_viewport_lines(&app)
+    );
+}
+
+#[test]
+fn transcript_width_resize_keeps_top_when_cursor_is_lower_in_viewport() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 28);
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: format!(
+                "{} ANCHOR pinned top before width resize {}",
+                "leading wrapped text".repeat(4),
+                "trailing wrapped text".repeat(8),
+            ),
+        });
+    for i in 0..160 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("tail {i}"),
+            });
+    }
+    app.render_silent();
+    let anchor_scroll = pin_transcript_top_to_line_containing(&mut app, "ANCHOR");
+    move_transcript_cursor_to_row(&mut app, anchor_scroll + 16);
+    assert!(
+        transcript_viewport_top_line(&app).contains("ANCHOR"),
+        "initial viewport top moved to {:?}; lines: {:?}",
+        transcript_viewport_top_line(&app),
+        transcript_viewport_lines(&app)
+    );
+
+    app.set_terminal_size(44, 28);
+    app.render_silent();
+
+    assert!(
+        transcript_viewport_top_line(&app).contains("ANCHOR"),
+        "width resize moved viewport top to {:?}; lines: {:?}",
+        transcript_viewport_top_line(&app),
         transcript_viewport_lines(&app)
     );
 }

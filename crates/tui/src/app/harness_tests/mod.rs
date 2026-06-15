@@ -288,6 +288,47 @@ fn execute_transcript_viewer_command(app: &mut TestApp, command: crate::smelt_ed
     win.execute_row_viewer_command(buf, command, viewport_rows, now);
 }
 
+fn pin_transcript_top_to_line_containing(
+    app: &mut TestApp,
+    needle: &str,
+) -> crate::smelt_edit::RowIndex {
+    for row in 0..transcript_total_rows(app) {
+        execute_transcript_viewer_command(app, crate::smelt_edit::ViewerCommand::GotoRow(row));
+        app.app.transcript_win_mut().pin_scroll(row);
+        app.render_silent();
+        if transcript_viewport_top_line(app).contains(needle) {
+            return app.app.transcript_win().scroll_top();
+        }
+    }
+    panic!(
+        "viewport top never contained {needle:?}; lines: {:?}",
+        transcript_buffer_lines(app, 12)
+    );
+}
+
+fn pin_transcript_viewport_to_line_containing(app: &mut TestApp, needle: &str) {
+    for row in 0..transcript_total_rows(app) {
+        execute_transcript_viewer_command(app, crate::smelt_edit::ViewerCommand::GotoRow(row));
+        app.app.transcript_win_mut().pin_scroll(row);
+        app.render_silent();
+        if transcript_viewport_lines(app)
+            .iter()
+            .any(|line| line.contains(needle))
+        {
+            return;
+        }
+    }
+    panic!(
+        "viewport never contained {needle:?}; lines: {:?}",
+        transcript_buffer_lines(app, 12)
+    );
+}
+
+fn move_transcript_cursor_to_row(app: &mut TestApp, row: crate::smelt_edit::RowIndex) {
+    execute_transcript_viewer_command(app, crate::smelt_edit::ViewerCommand::GotoRow(row));
+    app.render_silent();
+}
+
 fn transcript_viewport_top_line(app: &TestApp) -> String {
     let win = app.app.transcript_win();
     let buf = app.app.ui.buf(win.buf).expect("transcript buffer");

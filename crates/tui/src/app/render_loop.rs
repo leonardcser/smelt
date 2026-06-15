@@ -43,7 +43,6 @@ impl TuiApp {
         let queued: &[String] = &queued_owned;
 
         let (has_prompt_cursor, has_transcript_cursor) = self.compute_cursor_ownership();
-        let transcript_should_follow_tail = self.ui.should_follow_tail(crate::app::TRANSCRIPT_WIN);
 
         // Hidden is the right baseline; sync paths below set Block when focus owns the caret.
         self.ui
@@ -149,7 +148,7 @@ impl TuiApp {
                     return;
                 }
                 let viewport_rows = request.rect.height;
-                let cursor_screen_row = if transcript_should_follow_tail {
+                let cursor_screen_row = if request.follow_tail {
                     ui.win(request.win)
                         .and_then(|win| win.cursor_screen_row(viewport_rows))
                 } else {
@@ -157,7 +156,7 @@ impl TuiApp {
                 };
                 {
                     let _p = smelt_perf::perf::begin("compositor:project_transcript");
-                    let scroll_target = if transcript_should_follow_tail {
+                    let scroll_target = if request.follow_tail {
                         crate::content::transcript_buf::ScrollTarget::visible_tail()
                     } else {
                         crate::content::transcript_buf::ScrollTarget::visible_row(
@@ -194,6 +193,9 @@ impl TuiApp {
                     }
                     if win.has_materialized_rows() {
                         win.sync_row_render_state(buf, viewport_rows, render_now);
+                        if request.follow_tail {
+                            win.reveal_row_cursor(buf, viewport_rows);
+                        }
                         win.scroll_left = 0;
                     } else {
                         let text = buf.text();
