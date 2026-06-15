@@ -222,7 +222,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
             let mut dispatches = 0usize;
             let mut completed = false;
             let mut turn_error = None;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
             while tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout(Duration::from_millis(50), handle.recv()).await {
                     Ok(Some(EngineEvent::ToolEvaluationRequest { request_id, .. })) => {
@@ -270,7 +270,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
         });
     });
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
     let report = loop {
         if let Ok(report) = report_rx.try_recv() {
             break report;

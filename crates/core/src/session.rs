@@ -539,7 +539,7 @@ impl From<&Session> for SessionJsonlMeta {
             checkpoint: s.checkpoint.clone(),
             context_tokens: s.context_tokens,
             context_tokens_history_len: s.context_tokens_history_len,
-            visible_context_tokens: s.visible_context_tokens,
+            visible_context_tokens: s.current_context_tokens(),
             turn_metas: s.turn_metas.clone(),
             accounting_snapshots: s.accounting_snapshots.clone(),
             session_cost_usd: s.session_cost_usd,
@@ -567,7 +567,6 @@ impl SessionJsonlMeta {
             checkpoint: self.checkpoint,
             context_tokens: self.context_tokens,
             context_tokens_history_len: self.context_tokens_history_len,
-            visible_context_tokens: self.visible_context_tokens.or(self.context_tokens),
             turn_metas: self.turn_metas,
             accounting_snapshots: self.accounting_snapshots,
             session_cost_usd: self.session_cost_usd,
@@ -1445,9 +1444,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut s = fixture_session();
         s.title = Some("JSONL".into());
-        s.context_tokens = Some(42);
         s.history.push(user_item("hello jsonl"));
         s.history.push(assistant_text_item("assistant jsonl"));
+        s.record_context_tokens(42);
 
         let meta = encode_session_jsonl_meta(&s).expect("encode meta");
         let history = encode_history_jsonl(&s.history).expect("encode history");
@@ -1457,7 +1456,7 @@ mod tests {
         let loaded = load_jsonl_session(dir.path()).expect("load jsonl session");
         assert_eq!(loaded.title.as_deref(), Some("JSONL"));
         assert_eq!(loaded.context_tokens, Some(42));
-        assert_eq!(loaded.visible_context_tokens, Some(42));
+        assert_eq!(loaded.current_context_tokens(), Some(42));
         assert_eq!(loaded.history.len(), 2);
         assert!(
             matches!(&loaded.history[0], HistoryItem::User { content, .. } if content.text_content() == "hello jsonl")

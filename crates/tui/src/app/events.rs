@@ -238,19 +238,20 @@ impl TuiApp {
     }
 
     fn dispatch_app_key_sequence(&mut self, key: KeyEvent) -> Option<EventOutcome> {
-        if self.agent.is_none() && !self.busy_stack.is_busy() {
-            self.timers.app_sequence.clear();
+        if !self.timers.app_sequence.has_pending() && !matches!(key.code, KeyCode::Esc) {
+            self.timers.app_sequence_vim_mode_at_start = None;
             return None;
         }
 
-        if !self.timers.app_sequence.has_pending() && !matches!(key.code, KeyCode::Esc) {
-            return None;
+        if !self.timers.app_sequence.has_pending() {
+            self.timers.app_sequence_vim_mode_at_start = self.focused_vim_mode();
         }
 
         let token = match crate::lua::chord_string(key) {
             Some(token) => token,
             None => {
                 self.timers.app_sequence.clear();
+                self.timers.app_sequence_vim_mode_at_start = None;
                 return None;
             }
         };
@@ -262,21 +263,42 @@ impl TuiApp {
             crate::app::APP_SEQUENCE_TIMEOUT_MS,
         ) {
             smelt_core::keymap::SequenceStep::Run(AppSequenceAction::HardEsc) => {
-                Some(self.handle_hard_escape_sequence())
+                let vim_mode_at_start = self.timers.app_sequence_vim_mode_at_start.take();
+                Some(self.handle_hard_escape_sequence(vim_mode_at_start))
             }
             smelt_core::keymap::SequenceStep::Run(AppSequenceAction::LocalEsc)
-            | smelt_core::keymap::SequenceStep::Pending
-            | smelt_core::keymap::SequenceStep::NoMatch => None,
+            | smelt_core::keymap::SequenceStep::Pending => None,
+            smelt_core::keymap::SequenceStep::NoMatch => {
+                self.timers.app_sequence_vim_mode_at_start = None;
+                None
+            }
         }
     }
 
-    fn handle_hard_escape_sequence(&mut self) -> EventOutcome {
+    fn handle_hard_escape_sequence(
+        &mut self,
+        vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
+    ) -> EventOutcome {
         self.timers.pending_chord = None;
         if !self.queued_inputs.is_empty() {
             self.drain_queued_inputs_into_prompt();
             return EventOutcome::Noop;
         }
-        EventOutcome::CancelAgent
+        if self.agent.is_some() || self.busy_stack.is_busy() {
+            return EventOutcome::CancelAgent;
+        }
+        if !self.user_turns().is_empty() {
+            let command = if vim_mode_at_start == Some(crate::smelt_edit::VimMode::Insert) {
+                "/rewind insert"
+            } else {
+                "/rewind"
+            };
+            return match crate::commands::run_command(self, command) {
+                CommandAction::Exec(handle) => EventOutcome::Exec(handle),
+                CommandAction::Continue => EventOutcome::Noop,
+            };
+        }
+        EventOutcome::Noop
     }
 
     fn handle_focused_search_key(&mut self, k: KeyEvent) -> bool {
@@ -524,6 +546,11 @@ impl TuiApp {
         if let Event::Key(k) = *ev {
             if self.prompt_vim_pending_input_owns_key(k) {
                 return Some(self.dispatch_prompt_event_to_input(Event::Key(k), running));
+            }
+            if matches!(self.app_focus, crate::app::AppFocus::Content)
+                && self.handle_focused_search_key(k)
+            {
+                return Some(EventOutcome::Noop);
             }
             if matches!(self.app_focus, crate::app::AppFocus::Content)
                 && self.handle_search_open_before_window_dispatch(k)
