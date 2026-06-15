@@ -28,6 +28,7 @@ pub(crate) struct Options {
     pub(crate) context: u32,
     pub(crate) glob: Option<String>,
     pub(crate) file_type: Option<String>,
+    pub(crate) include_ignored: bool,
     pub(crate) timeout: Option<Duration>,
 }
 
@@ -45,6 +46,16 @@ pub(crate) struct Output {
 pub(crate) enum RunOutcome {
     Done(Output),
     Cancelled,
+}
+
+fn append_hard_excludes(args: &mut Vec<String>) {
+    for dir in [".git", ".jj", ".hg", ".svn", ".sl", ".worktrees"] {
+        args.push(format!("--glob=!**/{dir}/**"));
+    }
+}
+
+fn is_noop_glob(glob: &str) -> bool {
+    matches!(glob.trim(), "" | "*" | "**" | "**/*" | "./*" | "./**/*")
 }
 
 /// Run `rg <pattern> <path>` with the given options, honoring a
@@ -68,9 +79,6 @@ pub(crate) async fn run_async(
 
     let mut args: Vec<String> = Vec::new();
     args.push("--max-columns=500".into());
-    for dir in [".git", ".jj", ".hg", ".svn", ".sl", ".worktrees"] {
-        args.push(format!("--glob=!**/{dir}/**"));
-    }
 
     match opts.mode {
         Mode::Content => {
@@ -98,12 +106,19 @@ pub(crate) async fn run_async(
         args.push("--multiline".into());
         args.push("--multiline-dotall".into());
     }
+    if opts.include_ignored {
+        args.push("--no-ignore".into());
+    }
     if let Some(g) = &opts.glob {
-        args.push(format!("--glob={g}"));
+        if !is_noop_glob(g) {
+            args.push(format!("--glob={g}"));
+        }
     }
     if let Some(t) = &opts.file_type {
         args.push(format!("--type={t}"));
     }
+
+    append_hard_excludes(&mut args);
 
     args.push("--".into());
     args.push(pattern.to_string());
@@ -231,6 +246,83 @@ mod tests {
         assert!(out.stdout.contains("a.txt"));
         assert!(out.stdout.contains("b.txt"));
         assert!(!out.stdout.contains("c.txt"));
+    }
+
+    #[tokio::test]
+    async fn glob_filters_do_not_search_ignored_dirs_by_default() {
+        if !rg_available() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".ignore"), "target/\n").unwrap();
+        std::fs::create_dir(tmp.path().join("src")).unwrap();
+        std::fs::create_dir(tmp.path().join("target")).unwrap();
+        std::fs::write(tmp.path().join("src").join("a.txt"), "needle\n").unwrap();
+        std::fs::write(tmp.path().join("src").join("a.rs"), "needle\n").unwrap();
+        std::fs::write(tmp.path().join("target").join("generated.txt"), "needle\n").unwrap();
+        std::fs::write(tmp.path().join("target").join("generated.rs"), "needle\n").unwrap();
+
+        let broad = Options {
+            mode: Mode::FilesWithMatches,
+            glob: Some("*".into()),
+            ..Default::default()
+        };
+        let rust = Options {
+            mode: Mode::FilesWithMatches,
+            glob: Some("*.rs".into()),
+            ..Default::default()
+        };
+
+        let (first, second) = tokio::join!(
+            run("needle", tmp.path(), &broad),
+            run("needle", tmp.path(), &broad)
+        );
+        for out in [first, second] {
+            assert!(out.stdout.contains("src/a.txt"), "stdout: {}", out.stdout);
+            assert!(
+                !out.stdout.contains("target/generated.txt"),
+                "glob=* must not re-include ignored build output: {}",
+                out.stdout
+            );
+            assert_eq!(out.exit_code, 0);
+            assert!(!out.timed_out);
+        }
+
+        let out = run("needle", tmp.path(), &rust).await;
+        assert!(out.stdout.contains("src/a.rs"), "stdout: {}", out.stdout);
+        assert!(
+            !out.stdout.contains("target/generated.rs"),
+            "glob=*.rs must not search ignored build output: {}",
+            out.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn include_ignored_searches_ignored_dirs() {
+        if !rg_available() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".ignore"), "target/\n").unwrap();
+        std::fs::create_dir(tmp.path().join("src")).unwrap();
+        std::fs::create_dir(tmp.path().join("target")).unwrap();
+        std::fs::write(tmp.path().join("src").join("a.txt"), "needle\n").unwrap();
+        std::fs::write(tmp.path().join("target").join("generated.txt"), "needle\n").unwrap();
+        let opts = Options {
+            mode: Mode::FilesWithMatches,
+            include_ignored: true,
+            ..Default::default()
+        };
+
+        let out = run("needle", tmp.path(), &opts).await;
+        assert!(out.stdout.contains("src/a.txt"), "stdout: {}", out.stdout);
+        assert!(
+            out.stdout.contains("target/generated.txt"),
+            "include_ignored=true should search ignored output: {}",
+            out.stdout
+        );
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.timed_out);
     }
 
     #[tokio::test]

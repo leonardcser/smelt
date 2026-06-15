@@ -10,6 +10,14 @@ local function pick_int(v, default)
   return default or 0
 end
 
+local function normalize_glob(v)
+  if type(v) ~= "string" then return nil end
+  if v == "" or v == "*" or v == "**" or v == "**/*" or v == "./*" or v == "./**/*" then
+    return nil
+  end
+  return v
+end
+
 local function as_lines(content)
   if not content or content == "" then return {} end
   local lines = {}
@@ -57,8 +65,7 @@ local function run_rg(args)
   local context = pick_int(args.context, 0)
   if context == 0 then context = pick_int(args["-C"], 0) end
 
-  local glob_filter = args.glob
-  if glob_filter == "" then glob_filter = nil end
+  local glob_filter = normalize_glob(args.glob)
   local file_type = args.type
   if file_type == "" then file_type = nil end
 
@@ -75,6 +82,7 @@ local function run_rg(args)
     context = context,
     glob = glob_filter,
     type = file_type,
+    include_ignored = pick_bool(args.include_ignored, false),
     timeout_secs = math.max(1, math.floor(timeout_ms / 1000)),
   }
   return smelt.grep.run(pattern, path, opts)
@@ -85,11 +93,16 @@ local function run_grep_fallback(args)
   local search_path = args.path or ""
   if search_path == "" then search_path = "." end
   local case_insensitive = pick_bool(args["-i"], false)
-  local glob_filter = args.glob
+  local glob_filter = normalize_glob(args.glob)
   local timeout_ms = pick_int(args.timeout_ms, 30000)
   if timeout_ms <= 0 then timeout_ms = 30000 end
 
   local cmd_args = { "-rn", "--max-count=200" }
+  if not pick_bool(args.include_ignored, false) then
+    for _, dir in ipairs({ ".git", ".jj", ".hg", ".svn", ".sl", ".worktrees", "target", "node_modules" }) do
+      table.insert(cmd_args, "--exclude-dir=" .. dir)
+    end
+  end
   if case_insensitive then table.insert(cmd_args, "-i") end
   if glob_filter and glob_filter ~= "" then
     table.insert(cmd_args, "--include=" .. glob_filter)
@@ -129,6 +142,7 @@ smelt.tools.register({
       multiline = { type = "boolean", description = "Enable multiline mode where . matches newlines and patterns can span lines." },
       head_limit = { type = "integer", description = "Limit output to first N lines/entries. Defaults to 250; 0 means unlimited." },
       offset = { type = "integer", description = "Skip first N lines/entries before applying head_limit." },
+      include_ignored = { type = "boolean", description = "Search ignored files and directories. Defaults to false." },
       timeout_ms = { type = "integer", description = "Timeout in milliseconds (default: 30000)" },
     },
     required = { "pattern" },

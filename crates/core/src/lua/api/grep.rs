@@ -76,6 +76,7 @@ fn parse_options(opts: Option<&mlua::Table>) -> LuaResult<grep::Options> {
         context: t.get::<Option<u32>>("context")?.unwrap_or(0),
         glob: t.get::<Option<String>>("glob")?,
         file_type: t.get::<Option<String>>("type")?,
+        include_ignored: t.get::<Option<bool>>("include_ignored")?.unwrap_or(false),
         timeout: t
             .get::<Option<u64>>("timeout_secs")?
             .map(Duration::from_secs),
