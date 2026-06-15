@@ -1,4 +1,5 @@
 const PS_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/ps.lua");
+const LABEL_VALUE_LUA: &str = include_str!("../../../runtime/lua/smelt/label_value.lua");
 const SESSION_LUA: &str = include_str!("../../../runtime/lua/smelt/session.lua");
 
 #[test]
@@ -55,11 +56,13 @@ fn ps_details_dialog_uses_list_dialog_height() {
 }
 
 #[test]
-fn ps_details_meta_values_are_left_aligned() {
-    assert!(PS_LUA.contains("local META_KEY_WIDTH = 10"));
+fn ps_details_meta_values_are_label_value_rows() {
     assert!(
-        PS_LUA.contains("string.format(\"%-\" .. tostring(META_KEY_WIDTH) .. \"s\", key .. \":\")")
+        PS_LUA.contains("local label_value = smelt.label_value or require(\"smelt.label_value\")")
     );
-    assert!(!PS_LUA.contains("{ text = \" \" .. format_duration"));
-    assert!(!PS_LUA.contains("{ text = \" \" .. output_state"));
+    assert!(PS_LUA.contains("append_label_value(lines, \"command\""));
+    assert!(LABEL_VALUE_LUA.contains("local separator = opts.separator or \"  \""));
+    assert!(!PS_LUA.contains("key .. \":\""));
+    assert!(!PS_LUA.contains("META_KEY_WIDTH"));
+    assert!(!PS_LUA.contains("styled_lines ="));
 }

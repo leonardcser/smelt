@@ -38,6 +38,19 @@ app_story!(bash_multiline_command_summary, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(bash_long_command_summary_wraps, |ctx| {
+    ctx.set_viewport(70, 22);
+    ctx.request_permission(
+        "bash",
+        args([(
+            "command",
+            json!("ls -ld /Users/leo/.dotfiles; realpath /Users/leo/.dotfiles 2>/dev/null || true; cd /Users/leo/dev/rust/smelt/.worktrees/fix-path-parsing && cargo test -p smelt-core permissions::tests"),
+        )]),
+        vec!["ls *".into()],
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(bash_outside_workspace_extra_options, |ctx| {
     ctx.set_viewport(80, 22);
     ctx.request_permission(

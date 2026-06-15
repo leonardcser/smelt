@@ -86,7 +86,7 @@ smelt.tools.register({
   end,
   paths_for_workspace = function(args)
     local p = args.notebook_path or ""
-    return p ~= "" and { p } or {}
+    return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
   preview = function(args)
     local meta = smelt.notebook.preview_data(args)

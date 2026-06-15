@@ -1,0 +1,26 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+─ ps ─────────────────────────────────────────────────────────────────
+ filter processes…
+   4242         2m 05s  ls -ld /Users/leo/.dotfiles; realpath /Users/
+
+
+
+
+
+
+
+
+
+
+ ○ normal                                                     1:1 100%

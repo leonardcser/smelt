@@ -36,6 +36,25 @@ app_story!(stats_dialog, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(ps_dialog_list_and_details_wrap_command, |ctx| {
+    ctx.set_viewport(70, 22);
+    ctx.run_lua(
+        r#"
+        local command = "ls -ld /Users/leo/.dotfiles; realpath /Users/leo/.dotfiles 2>/dev/null || true; cd /Users/leo/dev/rust/smelt && cargo test -p smelt-tui"
+        local row = { id = "proc-1", pid = 4242, command = command, elapsed_secs = 125 }
+        smelt.process.list = function() return { row } end
+        smelt.process.output = function()
+          return { text = "running tests...\n", running = true, pid = 4242, elapsed_secs = 125 }
+        end
+        smelt.process.kill = function() end
+        "#,
+    );
+    ctx.run_command("ps");
+    ctx.assert_snapshot();
+    ctx.press_enter();
+    ctx.assert_snapshot();
+});
+
 app_story!(messages_dialog_empty, |ctx| {
     // `/messages` with zero entries - the dialog shows the placeholder
     // body. Pins the empty-state branch in `format_lines`.

@@ -271,6 +271,16 @@ impl AppStoryCtx {
         );
     }
 
+    /// Press Enter and pump Lua tasks so dialog submit handlers that resolve a
+    /// coroutine can open their follow-up UI before the next snapshot.
+    pub fn press_enter(&mut self) {
+        self.app.press(crossterm::event::KeyCode::Enter);
+        for _ in 0..4 {
+            self.app
+                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
+        }
+    }
+
     /// Promote the oldest queued next-turn message into the next-request queue.
     pub fn promote_next_queued_message(&mut self) {
         self.app.press(crossterm::event::KeyCode::Enter);

@@ -11,6 +11,7 @@ use mlua::prelude::*;
 use crate::lua::{
     json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
 };
+use crate::permissions::{PathTargetKind, ToolPath};
 
 const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
 const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
@@ -32,6 +33,7 @@ pub const BOOTSTRAP_FILES: &[&str] = &[
     "widgets/completer.lua",
     "widgets/prompt_picker.lua",
     "cmd.lua",
+    "label_value.lua",
     "dialogs/confirm.lua",
     "_bar.lua",
     "prompt_bar.lua",
@@ -1139,12 +1141,40 @@ impl LuaRuntime {
         defs
     }
 
+    fn lua_value_to_tool_path(value: mlua::Value) -> Option<ToolPath> {
+        match value {
+            mlua::Value::String(s) => Some(ToolPath::unknown(s.to_string_lossy())),
+            mlua::Value::Table(t) => {
+                let path = t
+                    .get::<Option<String>>("path")
+                    .ok()
+                    .flatten()
+                    .or_else(|| t.get::<Option<String>>(1).ok().flatten())?;
+                let kind = t
+                    .get::<Option<String>>("kind")
+                    .ok()
+                    .flatten()
+                    .or_else(|| t.get::<Option<String>>("target_kind").ok().flatten())
+                    .unwrap_or_else(|| "unknown".to_string())
+                    .trim()
+                    .to_ascii_lowercase();
+                let target_kind = match kind.as_str() {
+                    "file" => PathTargetKind::File,
+                    "dir" | "directory" => PathTargetKind::Directory,
+                    _ => PathTargetKind::Unknown,
+                };
+                Some(ToolPath { path, target_kind })
+            }
+            _ => None,
+        }
+    }
+
     /// Call a tool's `paths_for_workspace(args)` callback; returns touched paths for boundary checks.
     pub fn tool_paths_for_workspace(
         &self,
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
-    ) -> Vec<String> {
+    ) -> Vec<ToolPath> {
         let func = {
             let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
             let Some(h) = handlers.get(tool_name) else {
@@ -1168,8 +1198,8 @@ impl LuaRuntime {
         let _perf = smelt_perf::perf::begin("lua:tool");
         match func.call::<Option<mlua::Table>>(args_table) {
             Ok(Some(t)) => t
-                .sequence_values::<String>()
-                .filter_map(|r| r.ok())
+                .sequence_values::<mlua::Value>()
+                .filter_map(|r| r.ok().and_then(Self::lua_value_to_tool_path))
                 .collect(),
             Ok(None) => Vec::new(),
             Err(e) => {

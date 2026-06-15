@@ -112,7 +112,7 @@ smelt.tools.register({
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
-    return p ~= "" and { p } or {}
+    return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
   preview = function(args)
     return planned_diff(args)

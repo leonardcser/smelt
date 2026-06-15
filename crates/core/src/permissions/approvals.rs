@@ -225,7 +225,9 @@ fn tool_command_text<'a>(tool_name: &str, args: &'a HashMap<String, Value>) -> O
 }
 
 fn normalize_approval_dir(dir: &Path) -> PathBuf {
-    workspace::normalize_path(&engine::paths::expand_tilde(dir))
+    workspace::canonicalize_path_or_parent(&workspace::normalize_path(
+        &engine::paths::expand_tilde(dir),
+    ))
 }
 
 fn add_tool_patterns(

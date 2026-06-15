@@ -44,7 +44,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
   end,
   paths_for_workspace = function(args)
     local p = args.path or ""
-    return p ~= "" and { p } or {}
+    return p ~= "" and { { path = p, kind = "directory" } } or {}
   end,
   execute = function(args)
     local pattern = args.pattern or ""

@@ -42,8 +42,38 @@ pub enum PathAccess {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathTargetKind {
+    File,
     Directory,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolPath {
+    pub path: String,
+    pub target_kind: PathTargetKind,
+}
+
+impl ToolPath {
+    pub fn unknown(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            target_kind: PathTargetKind::Unknown,
+        }
+    }
+
+    pub fn file(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            target_kind: PathTargetKind::File,
+        }
+    }
+
+    pub fn directory(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            target_kind: PathTargetKind::Directory,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +92,14 @@ impl PathEffect {
         access: PathAccess,
     ) -> Self {
         Self::from_raw_with_kind(raw_path, base_dir, access, PathTargetKind::Unknown)
+    }
+
+    pub(super) fn from_tool_path(
+        tool_path: ToolPath,
+        base_dir: &std::path::Path,
+        access: PathAccess,
+    ) -> Self {
+        Self::from_raw_with_kind(tool_path.path, base_dir, access, tool_path.target_kind)
     }
 
     pub(super) fn from_directory(
@@ -236,7 +274,7 @@ pub struct PermissionApprovalOptions {
 
 /// Maps `(tool_name, args)` to filesystem paths the call would touch.
 /// Tools that don't touch paths don't register one; the workspace check short-circuits.
-pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<String> + Send + Sync;
+pub type PathsFn = dyn Fn(&str, &HashMap<String, Value>) -> Vec<ToolPath> + Send + Sync;
 
 pub use rules::ModeBehavior;
 
@@ -397,7 +435,7 @@ impl Permissions {
         self
     }
 
-    fn paths_for_tool(&self, tool_name: &str, args: &HashMap<String, Value>) -> Vec<String> {
+    fn paths_for_tool(&self, tool_name: &str, args: &HashMap<String, Value>) -> Vec<ToolPath> {
         match self.paths_fn.as_ref() {
             Some(f) => f(tool_name, args),
             None => Vec::new(),
@@ -441,7 +479,13 @@ impl Permissions {
         let effects: Vec<_> = self
             .paths_for_tool(tool_name, args)
             .into_iter()
-            .map(|p| ToolEffect::Fs(PathEffect::from_raw(p, &self.workspace, access.clone())))
+            .map(|p| {
+                ToolEffect::Fs(PathEffect::from_tool_path(
+                    p,
+                    &self.workspace,
+                    access.clone(),
+                ))
+            })
             .collect();
         if effects.is_empty() {
             vec![ToolEffect::FsAccess(access)]
@@ -502,15 +546,12 @@ impl Permissions {
         if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
             return vec![];
         }
-        let workspace = self
-            .workspace
-            .canonicalize()
-            .unwrap_or_else(|_| workspace::normalize_path(&self.workspace));
+        let workspace = workspace::canonicalize_path_or_parent(&self.workspace);
         let mut paths = Vec::new();
         Self::effect_paths(effects, &mut paths);
         let mut out = Vec::new();
         for effect in paths {
-            if effect.path.starts_with(&workspace) {
+            if workspace::path_prefix_matches(&workspace, &effect.path) {
                 continue;
             }
             let dir = display_dir_for_effect(effect);
@@ -785,11 +826,7 @@ fn dedupe_requirements(requirements: &mut Vec<PermissionRequirement>) {
 fn display_dir_for_effect(effect: &PathEffect) -> PathBuf {
     let raw = std::path::Path::new(&effect.raw_path);
     if effect.target_kind == PathTargetKind::Directory {
-        return if effect.raw_path.starts_with('/') || effect.raw_path.starts_with("~/") {
-            workspace::normalize_path(&engine::paths::expand_tilde(raw))
-        } else {
-            effect.path.clone()
-        };
+        return effect.path.clone();
     }
     if !raw.is_absolute() && !effect.raw_path.starts_with("~/") {
         return effect.base_dir.clone();

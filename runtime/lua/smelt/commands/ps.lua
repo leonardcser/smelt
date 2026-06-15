@@ -1,7 +1,7 @@
 -- Built-in /ps command. Lists background shell commands and opens their logs.
 
 local DIALOG_HEIGHT = "60%"
-local META_KEY_WIDTH = 10
+local label_value = smelt.label_value or require("smelt.label_value")
 
 local function format_duration(secs)
   secs = math.max(0, tonumber(secs) or 0)
@@ -18,6 +18,16 @@ local function process_rows()
     p._hay = table.concat({ p.pid or "", p.id or "", p.command or "" }, " "):lower()
   end
   return rows
+end
+
+local META_LABEL_WIDTH = 8
+
+local function append_label_value(lines, label, value, width, opts)
+  opts = opts or {}
+  opts.label_width = opts.label_width or META_LABEL_WIDTH
+  for _, line in ipairs(label_value.styled_lines(label, value, width, opts)) do
+    lines[#lines + 1] = line
+  end
 end
 
 local function render_proc(p)
@@ -55,38 +65,12 @@ local function output_state(out)
   return "running"
 end
 
-local function meta_key(key)
-  return string.format("%-" .. tostring(META_KEY_WIDTH) .. "s", key .. ":")
-end
-
-local function meta_row(key, value, opts)
-  opts = opts or {}
-  return {
-    { text = meta_key(key), style = { dim = true } },
-    { text = tostring(value or ""), syntax = opts.syntax },
-  }
-end
-
-local function meta_lines(proc, out)
-  local command = proc.command or ""
-  local lines = {
-    meta_row("pid", proc.pid or proc.id or ""),
-    meta_row("status", output_state(out)),
-    meta_row("duration", format_duration(proc.elapsed_secs)),
-  }
-
-  local first = true
-  for line in (command .. "\n"):gmatch("([^\n]*)\n") do
-    if first then
-      lines[#lines + 1] = meta_row("command", line, { syntax = "bash" })
-      first = false
-    else
-      lines[#lines + 1] = {
-        { text = string.rep(" ", META_KEY_WIDTH), style = { dim = true } },
-        { text = line, syntax = "bash" },
-      }
-    end
-  end
+local function meta_lines(proc, out, width)
+  local lines = {}
+  append_label_value(lines, "pid", proc.pid or proc.id or "", width)
+  append_label_value(lines, "status", output_state(out), width)
+  append_label_value(lines, "duration", format_duration(proc.elapsed_secs), width)
+  append_label_value(lines, "command", proc.command or "", width, { syntax = "bash" })
   lines[#lines + 1] = { { text = "" } }
   return lines
 end
@@ -111,6 +95,7 @@ end
 local function show_logs(proc)
   local meta_buf = smelt.buf.new({ readonly = true })
   local log_buf = smelt.buf.new({ readonly = true })
+  local meta_width = label_value.initial_dialog_width()
 
   local function refresh()
     for _, p in ipairs(smelt.process.list()) do
@@ -128,12 +113,16 @@ local function show_logs(proc)
     if out.pid ~= nil then
       proc.pid = out.pid
     end
-    meta_buf:styled(meta_lines(proc, out))
+    meta_buf:styled(meta_lines(proc, out, meta_width))
     log_buf:lines(log_lines(proc, out))
   end
   refresh()
 
-  local meta_leaf = smelt.dialog.content({ buf = meta_buf, interactive = false })
+  local meta_leaf = smelt.dialog.content({ buf = meta_buf, interactive = false, wrap = false })
+  meta_leaf:on("resized", function(ctx)
+    meta_width = (ctx and ctx.content_width) or meta_leaf:content_width() or meta_width
+    refresh()
+  end)
   local log_leaf = smelt.dialog.content({ buf = log_buf, interactive = true })
   log_leaf:scroll("tail")
   local timer = smelt.timer.every(1000, refresh)

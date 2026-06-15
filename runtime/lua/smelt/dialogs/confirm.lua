@@ -1,6 +1,8 @@
 -- Built-in tool-approval dialog. Override `smelt.confirm.open` in init.lua to
 -- swap the default UI. Tool `preview` callbacks live in each tool's Lua definition.
 
+local label_value = smelt.label_value or require("smelt.label_value")
+
 -- Build option labels and decision strings from the request payload.
 local function build_options(req)
   local labels, decisions = {}, {}
@@ -21,12 +23,38 @@ local function build_options(req)
   return labels, decisions
 end
 
--- Compose the body header: `tool_name: ` (name in SmeltAccent) followed by
--- the tool's `summary(args)` output. Continuation lines of a multi-line
--- summary are indented to align under the first character after the colon.
--- An optional dim subtitle from `args.description` follows.
-local function render_header(buf, req)
+local NS_HEADER_TOOL = smelt.ns("smelt.confirm.header.tool")
+local NS_HEADER_DESC = smelt.ns("smelt.confirm.header.desc")
+
+local function render_bash_header(buf, tool_name, command, desc, width)
+  local plain = label_value.plain_lines(tool_name, command, width, { separator = ": " })
+  if type(desc) == "string" and desc ~= "" then
+    plain[#plain + 1] = desc
+  end
+
+  buf:lines(plain)
+     :clear_ns(NS_HEADER_TOOL)
+     :clear_ns(NS_HEADER_DESC)
+  buf:mark(NS_HEADER_TOOL, 1, 0, { end_col = #tool_name, hl_group = "SmeltAccent" })
+  if type(desc) == "string" and desc ~= "" then
+    buf:mark(NS_HEADER_DESC, #plain, 0, { end_col = #desc, dim = true })
+  end
+end
+
+-- Compose the body header: `tool_name: ` followed by the tool's
+-- `summary(args)` output. Continuation lines of a multi-line non-bash summary
+-- are indented to align under the first character after the colon. Bash command
+-- text wraps to the available dialog width, with continuation lines aligned to
+-- the command column. An optional dim subtitle from `args.description` follows.
+local function render_header(buf, req, width)
   local tool_name = req.tool_name or ""
+  local command = req.args and req.args.command
+  local desc = req.args and req.args.description
+  if tool_name == "bash" and type(command) == "string" then
+    render_bash_header(buf, tool_name, command, desc, width)
+    return
+  end
+
   local indent = string.rep(" ", #tool_name + 2)
 
   local lines = {}
@@ -56,7 +84,6 @@ local function render_header(buf, req)
     end
   end
 
-  local desc = req.args and req.args.description
   if type(desc) == "string" and desc ~= "" then
     lines[#lines + 1] = { { text = desc, style = { dim = true } } }
   end
@@ -79,14 +106,17 @@ function smelt.confirm.open(handle_id)
 
   local header_buf  = smelt.buf.new()
   local preview_buf = smelt.buf.new({ readonly = true })
-  render_header(header_buf, req)
+  render_header(header_buf, req, label_value.initial_dialog_width())
   smelt.confirm.__render_preview(preview_buf, handle_id)
   local first_preview = preview_buf:line(1)
   local has_preview = first_preview ~= nil and first_preview ~= ""
 
   local labels, decisions = build_options(req)
 
-  local header_leaf  = smelt.dialog.content({ buf = header_buf, wrap = false })
+  local header_leaf  = smelt.dialog.content({ buf = header_buf, wrap = true })
+  header_leaf:on("resized", function(ctx)
+    render_header(header_buf, req, (ctx and ctx.content_width) or header_leaf:content_width())
+  end)
   local preview_leaf = smelt.dialog.content({
     buf         = preview_buf,
     surface     = "selectable_text",

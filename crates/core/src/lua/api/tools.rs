@@ -113,7 +113,7 @@ pub struct LuaToolDef {
     pub preflight: Option<mlua::Function>,
     /// `render(buf, args, result)` - custom transcript render.
     pub render: Option<mlua::Function>,
-    /// `paths_for_workspace(args) -> string[]` - files this invocation will touch.
+    /// `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch.
     pub paths_for_workspace: Option<mlua::Function>,
     /// `preview(args) -> smelt.layout` - pre-execute preview render. Returns
     /// the same `smelt.layout` value the `render` callback returns; the confirm

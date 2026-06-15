@@ -27,11 +27,10 @@ pub(super) fn normalize_path(path: &Path) -> PathBuf {
 pub(super) fn path_candidates(path: &Path) -> Vec<PathBuf> {
     let expanded = engine::paths::expand_tilde(path);
     let normalized = normalize_path(&expanded);
-    let mut out = vec![normalized];
-    if let Ok(canonical) = expanded.canonicalize() {
-        if !out.iter().any(|p| p == &canonical) {
-            out.push(canonical);
-        }
+    let mut out = vec![normalized.clone()];
+    let canonical = canonicalize_path_or_ancestor(&normalized);
+    if !out.iter().any(|p| p == &canonical) {
+        out.push(canonical);
     }
     out
 }
@@ -55,28 +54,70 @@ pub(super) fn path_prefix_matches(prefix: &Path, path: &Path) -> bool {
 }
 
 pub(super) fn resolve_path(path_str: &str, workspace: &Path) -> PathBuf {
-    if let Some(rest) = path_str.strip_prefix("~/") {
-        let resolved = engine::paths::home_dir().join(rest);
-        resolved
-            .canonicalize()
-            .unwrap_or_else(|_| normalize_path(&resolved))
+    let resolved = if let Some(rest) = path_str.strip_prefix("~/") {
+        engine::paths::home_dir().join(rest)
     } else if path_str.starts_with('/') {
-        let p = PathBuf::from(path_str);
-        p.canonicalize().unwrap_or_else(|_| normalize_path(&p))
+        PathBuf::from(path_str)
     } else {
-        let resolved = workspace.join(path_str);
-        resolved
-            .canonicalize()
-            .unwrap_or_else(|_| normalize_path(&resolved))
+        workspace.join(path_str)
+    };
+    canonicalize_path_or_ancestor(&normalize_path(&resolved))
+}
+
+/// Canonicalize `path` when it exists; otherwise canonicalize its immediate
+/// parent and append the final component. This preserves the path the user is
+/// approving for newly-created files or directories.
+pub(super) fn canonicalize_path_or_parent(path: &Path) -> PathBuf {
+    if !path.is_absolute() {
+        return path.to_path_buf();
     }
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Ok(mut canonical) = parent.canonicalize() else {
+        return path.to_path_buf();
+    };
+    if let Some(name) = path.file_name() {
+        canonical.push(name);
+    }
+    normalize_path(&canonical)
+}
+
+/// Canonicalize `path` when it exists; otherwise canonicalize the nearest
+/// existing ancestor and append all missing components. This is for equivalence
+/// checks where symlink aliases should still match missing descendants.
+fn canonicalize_path_or_ancestor(path: &Path) -> PathBuf {
+    if !path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    let mut missing = Vec::new();
+    let mut prefix = path;
+    while let Some(parent) = prefix.parent() {
+        if let Some(name) = prefix.file_name() {
+            missing.push(name.to_os_string());
+        }
+        if let Ok(mut canonical) = parent.canonicalize() {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return normalize_path(&canonical);
+        }
+        prefix = parent;
+    }
+
+    path.to_path_buf()
 }
 
 #[cfg(test)]
 #[allow(dead_code)]
 pub(super) fn is_in_workspace(path_str: &str, workspace: &Path) -> bool {
     let resolved = resolve_path(path_str, workspace);
-    let ws = workspace
-        .canonicalize()
-        .unwrap_or_else(|_| workspace.to_path_buf());
-    resolved.starts_with(&ws)
+    path_prefix_matches(workspace, &resolved)
 }

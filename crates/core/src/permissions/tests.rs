@@ -134,7 +134,7 @@ fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
             if p.is_empty() {
                 vec![]
             } else {
-                vec![p.to_string()]
+                vec![ToolPath::file(p)]
             }
         }
         "edit_notebook" => {
@@ -145,7 +145,7 @@ fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
             if p.is_empty() {
                 vec![]
             } else {
-                vec![p.to_string()]
+                vec![ToolPath::file(p)]
             }
         }
         "glob" | "grep" => {
@@ -153,7 +153,7 @@ fn stub_paths_fn() -> std::sync::Arc<crate::permissions::PathsFn> {
             if p.is_empty() {
                 vec![]
             } else {
-                vec![p.to_string()]
+                vec![ToolPath::directory(p)]
             }
         }
         _ => vec![],
@@ -882,6 +882,10 @@ fn args_with(key: &str, val: &str) -> HashMap<String, Value> {
     m
 }
 
+fn canonical_abs(path: &str) -> PathBuf {
+    canonicalize_path_or_parent(Path::new(path))
+}
+
 fn decide(
     permissions: &Permissions,
     mode: AgentMode,
@@ -974,7 +978,10 @@ fn effects_for_file_tool_records_write_access_and_base() {
         ToolEffect::Fs(path) => {
             assert_eq!(path.raw_path, "src/main.rs");
             assert_eq!(path.base_dir, PathBuf::from("/home/user/project"));
-            assert_eq!(path.path, PathBuf::from("/home/user/project/src/main.rs"));
+            assert_eq!(
+                path.path,
+                resolve_path("src/main.rs", Path::new("/home/user/project"))
+            );
             assert_eq!(path.access, PathAccess::Write);
         }
         other => panic!("expected filesystem effect, got {other:?}"),
@@ -1077,7 +1084,7 @@ fn session_dir_approval_covers_resolved_bash_cd_paths() {
     assert_eq!(
         before.missing_requirements,
         vec![PermissionRequirement::PathPrefix {
-            dir: PathBuf::from("/tmp")
+            dir: canonical_abs("/tmp")
         }]
     );
 
@@ -1102,14 +1109,14 @@ fn yolo_outside_workspace_dialog_offers_dir_not_command_pattern() {
     assert_eq!(
         outcome.missing_requirements,
         vec![PermissionRequirement::PathPrefix {
-            dir: PathBuf::from("/tmp")
+            dir: canonical_abs("/tmp")
         }]
     );
     let options = p.approval_options("bash", &["rm *".to_string()], &outcome);
     assert_eq!(
         options.grant_sets,
         vec![vec![PermissionGrant::PathPrefix {
-            dir: PathBuf::from("/tmp")
+            dir: canonical_abs("/tmp")
         }]]
     );
 }
@@ -1159,7 +1166,7 @@ fn dialog_combines_dir_and_pattern_when_both_are_required() {
                 pattern: "python3 *".to_string()
             },
             PermissionGrant::PathPrefix {
-                dir: PathBuf::from("/tmp")
+                dir: canonical_abs("/tmp")
             }
         ]]
     );
@@ -1193,7 +1200,7 @@ fn dialog_combines_command_pattern_candidates() {
                 pattern: "python3 /tmp/*".to_string()
             },
             PermissionGrant::PathPrefix {
-                dir: PathBuf::from("/tmp")
+                dir: canonical_abs("/tmp")
             }
         ]]
     );
@@ -1212,10 +1219,10 @@ fn dialog_combines_path_grants_when_multiple_dirs_are_required() {
         options.grant_sets,
         vec![vec![
             PermissionGrant::PathPrefix {
-                dir: PathBuf::from("/tmp")
+                dir: canonical_abs("/tmp")
             },
             PermissionGrant::PathPrefix {
-                dir: PathBuf::from("/var")
+                dir: canonical_abs("/var")
             }
         ]]
     );
@@ -1253,6 +1260,59 @@ fn workspace_glob_outside_downgrades() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("path", "/tmp");
     assert_eq!(decide(&p, normal(), "glob", &args), Decision::Ask);
+}
+
+#[test]
+fn workspace_glob_directory_grant_uses_directory_itself() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let args = args_with("path", outside.to_str().unwrap());
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "glob", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    let outside = canonicalize_path_or_parent(&outside);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix { dir: outside }]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_resolves_symlink_prefix_for_missing_children() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target");
+    let alias = temp.path().join("alias");
+    std::fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+    assert_eq!(
+        resolve_path(
+            alias.join("missing/child.txt").to_str().unwrap(),
+            Path::new("/")
+        ),
+        canonicalize_path_or_parent(&target).join("missing/child.txt")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_allows_missing_children_under_symlinked_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("target");
+    let alias = temp.path().join("alias");
+    std::fs::create_dir_all(&target).unwrap();
+    std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+    let p = perms_with_workspace(alias.to_str().unwrap());
+    let args = args_with("file_path", "missing/child.txt");
+
+    assert_eq!(decide(&p, normal(), "write_file", &args), Decision::Allow);
 }
 
 #[test]
