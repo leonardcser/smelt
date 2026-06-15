@@ -234,6 +234,7 @@ Spec for `smelt.engine.ask`.
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
 | `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires. |
+| `visible_retries` | `boolean` |  | Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction. |
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.CommandOverrides`
@@ -266,6 +267,7 @@ Spec for `smelt.engine.ask_inherited`.
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
 | `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires. |
+| `visible_retries` | `boolean` |  | Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction. |
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.PrepareContextEstimate`
@@ -274,7 +276,7 @@ Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `source` | `string` | yes | One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "visible_fallback"`. |
+| `source` | `string` | yes | One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta"`. |
 | `total_context_tokens` | `integer` | yes | Total active-context estimate used by auto-compaction. |
 | `provider_context_tokens` | `integer` |  | Latest provider-reported active context, when available. |
 | `estimated_delta_tokens` | `integer` | yes | Locally estimated tokens added on top of provider usage. |

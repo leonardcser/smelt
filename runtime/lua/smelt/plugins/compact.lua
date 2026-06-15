@@ -61,6 +61,10 @@ local TOOL_DENIED_MESSAGE = "Tool use is not allowed during compaction. Respond 
 local MAX_CONSECUTIVE_FAILURES = 3
 local consecutive_failures = 0
 
+local function is_terminal_provider_error(err)
+	return err and (err.kind == "quota" or err.kind == "rate_limited")
+end
+
 -- ── helpers ────────────────────────────────────────────────────────────
 
 -- Compose the trailing user message. Folds optional per-call instructions
@@ -122,9 +126,15 @@ local function summarize_messages(history, instructions, done)
 		smelt.engine.ask_inherited({
 			messages = messages,
 			model = smelt.model.preferred("compact"),
+			visible_retries = true,
 			on_response = function(response, err)
 				if err then
 					if smelt.task.is_cancelled(err) then
+						finish(nil, err)
+						return
+					end
+					if is_terminal_provider_error(err) then
+						consecutive_failures = MAX_CONSECUTIVE_FAILURES
 						finish(nil, err)
 						return
 					end
@@ -339,6 +349,11 @@ local function run_compact(opts)
 		if smelt.task.is_cancelled(err) then
 			return
 		end
+		if is_terminal_provider_error(err) then
+			consecutive_failures = MAX_CONSECUTIVE_FAILURES
+			smelt.notify.error(err.message)
+			return
+		end
 		if not summary then
 			consecutive_failures = consecutive_failures + 1
 			return
@@ -389,16 +404,20 @@ local function compact_live_session(before_tokens, phase, opts, done)
 	end
 	summarize_by_group_boundary_quiet(history, nil, function(summary, err, first_live_message_index)
 		if opts and opts.guard and not smelt.work.guard_current(opts.guard) then
-			done(nil)
+			done(nil, nil)
 			return
 		end
 		if smelt.task.is_cancelled(err) then
-			done(nil)
+			done(nil, err)
 			return
 		end
 		if not summary then
-			consecutive_failures = consecutive_failures + 1
-			done(nil)
+			if is_terminal_provider_error(err) then
+				consecutive_failures = MAX_CONSECUTIVE_FAILURES
+			else
+				consecutive_failures = consecutive_failures + 1
+			end
+			done(nil, err)
 			return
 		end
 		consecutive_failures = 0
@@ -449,8 +468,12 @@ smelt.engine.on_prepare_request(function(request, reply)
 		current_history_len = estimate and estimate.current_history_len or nil,
 	})
 	local guard = smelt.work.guard()
-	compact_live_session(estimated_tokens, "summarize-pre-request", { guard = guard }, function(messages)
-		reply(messages)
+	compact_live_session(estimated_tokens, "summarize-pre-request", { guard = guard }, function(messages, err)
+		if is_terminal_provider_error(err) then
+			reply({ action = "abort", message = err.message })
+			return
+		end
+		reply({ action = "replace", messages = messages })
 	end)
 end)
 
@@ -479,6 +502,11 @@ smelt.engine.on_context_limit(function(messages, reply)
 			reply(nil)
 			return
 		end
+		if is_terminal_provider_error(err) then
+			consecutive_failures = MAX_CONSECUTIVE_FAILURES
+			reply({ action = "abort", message = err.message })
+			return
+		end
 		if not summary then
 			consecutive_failures = consecutive_failures + 1
 			reply(nil)
@@ -489,6 +517,6 @@ smelt.engine.on_context_limit(function(messages, reply)
 		emit_event("summarize-recovery", 0, 0, {
 			first_live_message_index = first_live_message_index,
 		})
-		reply(replacement)
+		reply({ action = "replace", messages = replacement })
 	end)
 end)

@@ -36,6 +36,16 @@ fn assistant_message(text: &str) -> protocol::Message {
     protocol::Message::assistant(Some(protocol::Content::text(text)), None, None)
 }
 
+fn replacement_from_decision(
+    decision: engine::HostRequestDecision,
+    context: &str,
+) -> Vec<protocol::Message> {
+    match decision {
+        engine::HostRequestDecision::Replace(messages) => messages,
+        other => panic!("{context}: expected replacement, got {other:?}"),
+    }
+}
+
 fn drive_lua_tasks(app: &mut TestApp) {
     for _ in 0..4 {
         app.feed_one(SourceEvent::LuaWakeup);
@@ -421,10 +431,8 @@ async fn compaction_prepare_request_preserves_session_prefix_and_appends_summary
     assert!(last_text.contains("# Goal"));
 
     respond_pending_ask_with_text(&mut app, "# Goal\nok");
-    let replacement = rx
-        .await
-        .expect("prepare_request reply")
-        .expect("replacement");
+    let replacement =
+        replacement_from_decision(rx.await.expect("prepare_request reply"), "prepare_request");
     let replacement_text = replacement
         .first()
         .and_then(|m| m.content.as_ref())
@@ -466,10 +474,10 @@ async fn compaction_prepare_request_keeps_active_turn_guard_current() {
     assert_eq!(ask_messages(app.drain_engine_sends()).len(), 1);
 
     respond_pending_ask_with_text(&mut app, "# Goal\nok");
-    let replacement = rx
-        .await
-        .expect("prepare_request reply")
-        .expect("active-turn guard should allow replacement");
+    let replacement = replacement_from_decision(
+        rx.await.expect("prepare_request reply"),
+        "active-turn guard",
+    );
     let replacement_text = replacement
         .first()
         .and_then(|m| m.content.as_ref())
@@ -532,7 +540,7 @@ async fn compaction_context_limit_moves_boundary_earlier_on_context_window() {
     );
 
     respond_pending_ask_with_text(&mut app, "# Goal\nok");
-    let replacement = rx.await.expect("recovery reply").expect("replacement");
+    let replacement = replacement_from_decision(rx.await.expect("recovery reply"), "recovery");
     assert_eq!(replacement.len(), 3);
     assert_eq!(replacement[1], messages[3]);
     assert_eq!(replacement[2], messages[4]);
@@ -581,7 +589,7 @@ async fn compaction_context_limit_denies_tool_calls_without_moving_boundary() {
     assert!(second_messages[first_messages.len() + 1].is_error);
 
     respond_pending_ask_with_text(&mut app, "# Goal\nok");
-    let replacement = rx.await.expect("recovery reply").expect("replacement");
+    let replacement = replacement_from_decision(rx.await.expect("recovery reply"), "recovery");
     assert_eq!(replacement.first().unwrap().role, protocol::Role::User);
 }
 
@@ -612,5 +620,8 @@ async fn compaction_context_limit_returns_none_when_no_earlier_boundary_fits() {
             });
     }
 
-    assert!(rx.await.expect("recovery reply").is_none());
+    assert!(matches!(
+        rx.await.expect("recovery reply"),
+        engine::HostRequestDecision::Continue
+    ));
 }

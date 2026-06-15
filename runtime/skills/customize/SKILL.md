@@ -1177,9 +1177,9 @@ LLM engine control - cancel, ask, inherited ask, submit commands, and request to
   Cancel the in-flight turn.
 - `smelt.engine.is_running` :: `fun(): boolean`
   Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).
-- `smelt.engine.on_context_limit` :: `fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg`
+- `smelt.engine.on_context_limit` :: `fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: any))): smelt.Reg`
   Register a recovery hook the engine calls when a provider returns a context-window error mid-turn.
-- `smelt.engine.on_prepare_request` :: `fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: smelt.engine.AskMessage[]?))): smelt.Reg`
+- `smelt.engine.on_prepare_request` :: `fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: any))): smelt.Reg`
   Register a hook the engine calls immediately before each provider request.
 - `smelt.engine.reload` :: `fun(): nil`
   Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`.

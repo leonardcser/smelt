@@ -1017,7 +1017,6 @@ mod checkpoint_tests {
         ));
         session.context_tokens = Some(100);
         session.context_tokens_history_len = Some(2);
-        session.visible_context_tokens = Some(100);
         session.session_usage.prompt_tokens = Some(10);
         session.snapshot_accounting();
 
@@ -1034,7 +1033,6 @@ mod checkpoint_tests {
         assert!(session.session_usage.prompt_tokens.is_none());
         assert!(session.context_tokens.is_none());
         assert!(session.context_tokens_history_len.is_none());
-        assert!(session.visible_context_tokens.is_none());
     }
 
     #[test]
@@ -1045,7 +1043,6 @@ mod checkpoint_tests {
         session.session_usage.completion_tokens = Some(1);
         session.context_tokens = Some(50);
         session.context_tokens_history_len = Some(2);
-        session.visible_context_tokens = Some(50);
         session.session_cost_usd = 0.5;
         session.snapshot_accounting();
 
@@ -1054,7 +1051,6 @@ mod checkpoint_tests {
         session.session_usage.completion_tokens = Some(3);
         session.context_tokens = Some(100);
         session.context_tokens_history_len = Some(4);
-        session.visible_context_tokens = Some(100);
         session.session_cost_usd = 1.0;
         session.snapshot_accounting();
 
@@ -1067,7 +1063,6 @@ mod checkpoint_tests {
         assert_eq!(session.session_usage.completion_tokens, Some(1));
         assert_eq!(session.context_tokens, Some(50));
         assert_eq!(session.context_tokens_history_len, Some(2));
-        assert_eq!(session.visible_context_tokens, Some(50));
         assert_eq!(session.session_cost_usd, 0.5);
     }
 
@@ -1079,7 +1074,6 @@ mod checkpoint_tests {
         app.app.core.session.session_usage.completion_tokens = Some(1);
         app.app.core.session.context_tokens = Some(50);
         app.app.core.session.context_tokens_history_len = Some(2);
-        app.app.core.session.visible_context_tokens = Some(50);
         app.app.core.session.session_cost_usd = 0.5;
         app.app.core.session.snapshot_accounting();
 
@@ -1092,7 +1086,6 @@ mod checkpoint_tests {
         app.app.core.session.session_usage.completion_tokens = Some(3);
         app.app.core.session.context_tokens = Some(100);
         app.app.core.session.context_tokens_history_len = Some(4);
-        app.app.core.session.visible_context_tokens = Some(100);
         app.app.core.session.session_cost_usd = 1.0;
         app.app.core.session.snapshot_accounting();
         app.app.restore_screen();
@@ -1109,7 +1102,6 @@ mod checkpoint_tests {
         );
         assert_eq!(app.app.core.session.context_tokens, Some(50));
         assert_eq!(app.app.core.session.context_tokens_history_len, Some(2));
-        assert_eq!(app.app.core.session.visible_context_tokens, Some(50));
         assert_eq!(app.app.core.session.accounting_snapshots.len(), 1);
     }
 
@@ -1120,7 +1112,6 @@ mod checkpoint_tests {
         session.session_usage.prompt_tokens = Some(10);
         session.context_tokens = Some(50);
         session.context_tokens_history_len = Some(2);
-        session.visible_context_tokens = Some(50);
         session.snapshot_accounting();
 
         session.history.truncate(0);
@@ -1129,7 +1120,6 @@ mod checkpoint_tests {
         assert!(session.session_usage.prompt_tokens.is_none());
         assert!(session.context_tokens.is_none());
         assert!(session.context_tokens_history_len.is_none());
-        assert!(session.visible_context_tokens.is_none());
     }
 
     #[test]
@@ -1139,7 +1129,6 @@ mod checkpoint_tests {
         session.session_usage.prompt_tokens = Some(10);
         session.context_tokens = Some(50);
         session.context_tokens_history_len = Some(2);
-        session.visible_context_tokens = Some(50);
         session.snapshot_accounting();
 
         session
@@ -1147,7 +1136,6 @@ mod checkpoint_tests {
             .extend([user("recent"), assistant("recent reply")]);
         session.context_tokens = Some(100);
         session.context_tokens_history_len = Some(4);
-        session.visible_context_tokens = Some(100);
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
             summary: "summary".to_string(),
@@ -1162,7 +1150,6 @@ mod checkpoint_tests {
         session.snapshot_accounting();
         session.context_tokens = Some(80);
         session.context_tokens_history_len = Some(4);
-        session.visible_context_tokens = Some(80);
         session.snapshot_accounting();
 
         let hist_idx = 2;
@@ -1173,11 +1160,10 @@ mod checkpoint_tests {
         assert_eq!(session.session_usage.prompt_tokens, Some(10));
         assert_eq!(session.context_tokens, Some(50));
         assert_eq!(session.context_tokens_history_len, Some(2));
-        assert_eq!(session.visible_context_tokens, Some(50));
     }
 
     #[test]
-    fn rewind_past_checkpoint_without_snapshot_uses_pre_checkpoint_baseline() {
+    fn rewind_past_checkpoint_without_snapshot_clears_context_tokens() {
         let mut session = smelt_core::session::Session::new(1, std::path::PathBuf::from("/tmp"));
         session.history = vec![
             user("old"),
@@ -1189,7 +1175,6 @@ mod checkpoint_tests {
         session.session_cost_usd = 1.0;
         session.context_tokens = None;
         session.context_tokens_history_len = None;
-        session.visible_context_tokens = Some(100);
         session.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
             summary: "summary".to_string(),
@@ -1209,9 +1194,8 @@ mod checkpoint_tests {
         assert!(session.accounting_snapshots.is_empty());
         assert!(session.session_usage.prompt_tokens.is_none());
         assert_eq!(session.session_cost_usd, 0.0);
-        assert_eq!(session.context_tokens, Some(100));
-        assert_eq!(session.context_tokens_history_len, Some(4));
-        assert_eq!(session.visible_context_tokens, Some(100));
+        assert!(session.context_tokens.is_none());
+        assert!(session.context_tokens_history_len.is_none());
     }
 
     #[test]
@@ -1236,7 +1220,6 @@ mod checkpoint_tests {
         });
         session.context_tokens = Some(80);
         session.context_tokens_history_len = Some(5);
-        session.visible_context_tokens = Some(80);
         session.snapshot_accounting();
 
         let hist_idx = 2;
@@ -1246,6 +1229,5 @@ mod checkpoint_tests {
         assert!(session.checkpoint.is_some());
         assert!(session.context_tokens.is_none());
         assert!(session.context_tokens_history_len.is_none());
-        assert!(session.visible_context_tokens.is_none());
     }
 }

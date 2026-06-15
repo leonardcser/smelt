@@ -171,6 +171,9 @@ pub(crate) struct AskTask {
     /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
     /// the EngineAsk hits the same cache shard as the main turn.
     pub session_id: String,
+    /// Whether provider retries for this auxiliary request should update the
+    /// visible work state.
+    pub visible_retries: bool,
 }
 
 /// Immutable refs out-of-band command dispatch needs. Bundling them lets
@@ -206,6 +209,7 @@ pub(crate) fn dispatch_background_cmd(
             reasoning_effort,
             tools,
             session_id,
+            visible_retries,
         } => {
             spawn_engine_ask(
                 ctx.config,
@@ -220,6 +224,7 @@ pub(crate) fn dispatch_background_cmd(
                     reasoning_effort,
                     tools,
                     session_id,
+                    visible_retries,
                 },
                 ctx.event_tx,
                 ctx.bg_cancel.clone(),
@@ -247,6 +252,7 @@ fn spawn_engine_ask(
         reasoning_effort,
         tools: supplied_tools,
         session_id,
+        visible_retries,
     } = task;
 
     // Inherit-session is signalled by a non-empty supplied tool list
@@ -303,9 +309,20 @@ fn spawn_engine_ask(
             .collect();
         crate::provider::sort_tools_for_cache_stability(&mut tool_defs);
 
-        let result = provider
-            .chat(&messages, &tool_defs, &model_name, reasoning_effort, &opts)
-            .await;
+        let result = {
+            let on_retry = |delay: std::time::Duration, attempt: u32| {
+                let _ = tx.send(EngineEvent::Retrying {
+                    delay_ms: delay.as_millis() as u64,
+                    attempt,
+                });
+            };
+            if visible_retries {
+                opts.on_retry = Some(&on_retry);
+            }
+            provider
+                .chat(&messages, &tool_defs, &model_name, reasoning_effort, &opts)
+                .await
+        };
 
         match result {
             Ok(resp) => {
@@ -594,33 +611,47 @@ struct Turn<'a> {
     tool_elapsed: HashMap<String, u64>,
 }
 
+enum HostCallResult<T> {
+    Replied(T),
+    Cancelled,
+    Dropped,
+}
+
+enum PrepareRequestOutcome {
+    Continue,
+    Restart,
+    Abort(String),
+    Cancelled,
+}
+
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
     }
 
-    /// Fire a `HostCall` and await its `oneshot::Sender<Reply>`. Returns
-    /// `None` if the host dropped the reply (channel closed) - callers
-    /// treat that as "no mutation, proceed with the original value".
-    async fn host_call<Reply, F>(&mut self, build: F) -> Option<Reply>
+    /// Fire a `HostCall` and await its `oneshot::Sender<Reply>`.
+    async fn host_call<Reply, F>(&mut self, build: F) -> HostCallResult<Reply>
     where
         F: FnOnce(tokio::sync::oneshot::Sender<Reply>) -> crate::host::HostCall,
     {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self.host_tx.send(build(tx)).is_err() {
-            return None;
+            return HostCallResult::Dropped;
         }
         tokio::pin!(rx);
         loop {
             tokio::select! {
-                res = &mut rx => return res.ok(),
+                res = &mut rx => return match res {
+                    Ok(reply) => HostCallResult::Replied(reply),
+                    Err(_) => HostCallResult::Dropped,
+                },
                 Some(cmd) = self.cmd_rx.recv() => {
                     self.handle_turn_cmd(cmd);
                     if self.cancel.is_cancelled() {
-                        return None;
+                        return HostCallResult::Cancelled;
                     }
                 }
-                else => return None,
+                else => return HostCallResult::Dropped,
             }
         }
     }
@@ -636,8 +667,10 @@ impl<'a> Turn<'a> {
             })
             .await
         {
-            Some(Some(replacement)) => replacement,
-            _ => message,
+            HostCallResult::Replied(Some(replacement)) => replacement,
+            HostCallResult::Replied(None) | HostCallResult::Dropped | HostCallResult::Cancelled => {
+                message
+            }
         }
     }
 
@@ -828,22 +861,32 @@ impl<'a> Turn<'a> {
         .with_model_config(self.config.api.model_config.clone());
     }
 
-    async fn prepare_request_with_host(&mut self, tool_defs: &[ToolDefinition]) -> bool {
+    async fn prepare_request_with_host(
+        &mut self,
+        tool_defs: &[ToolDefinition],
+    ) -> PrepareRequestOutcome {
         let history_without_system: Vec<HistoryItem> =
             self.history.iter().skip(1).cloned().collect();
         let request_view = protocol::history_to_messages(&history_without_system);
         let estimated_tokens =
             estimate_prompt_tokens(&self.system_prompt, &request_view, tool_defs);
-        let replacement = self
+        let decision = self
             .host_call(|reply| crate::host::HostCall::PrepareRequest {
                 messages: request_view,
                 estimated_tokens,
                 reply,
             })
-            .await
-            .flatten();
-        let Some(replacement) = replacement else {
-            return false;
+            .await;
+        let replacement = match decision {
+            HostCallResult::Replied(crate::host::HostRequestDecision::Continue)
+            | HostCallResult::Dropped => return PrepareRequestOutcome::Continue,
+            HostCallResult::Cancelled => return PrepareRequestOutcome::Cancelled,
+            HostCallResult::Replied(crate::host::HostRequestDecision::Abort(message)) => {
+                return PrepareRequestOutcome::Abort(message);
+            }
+            HostCallResult::Replied(crate::host::HostRequestDecision::Replace(messages)) => {
+                messages
+            }
         };
         if replacement.is_empty() {
             log::entry(
@@ -851,7 +894,7 @@ impl<'a> Turn<'a> {
                 "prepare_request_empty_replacement",
                 &serde_json::json!({}),
             );
-            return false;
+            return PrepareRequestOutcome::Continue;
         }
         warn_if_replacement_has_orphans(&replacement, "prepare_request");
         let new = protocol::history_from_messages(replacement);
@@ -866,7 +909,7 @@ impl<'a> Turn<'a> {
         self.history.truncate(1);
         self.history.extend(new);
         self.emit_messages_snapshot();
-        true
+        PrepareRequestOutcome::Restart
     }
 
     /// Bundle of refs that out-of-band command dispatch needs. Built on
@@ -1020,8 +1063,23 @@ impl<'a> Turn<'a> {
 
             self.apply_pending_history_items_for_request();
 
-            if self.prepare_request_with_host(&tool_defs).await {
-                continue;
+            match self.prepare_request_with_host(&tool_defs).await {
+                PrepareRequestOutcome::Restart => continue,
+                PrepareRequestOutcome::Continue => {}
+                PrepareRequestOutcome::Cancelled => {
+                    self.emit_turn_complete(true);
+                    return;
+                }
+                PrepareRequestOutcome::Abort(message) => {
+                    self.emit(EngineEvent::TurnError { message });
+                    self.emit_turn_complete(false);
+                    return;
+                }
+            }
+            self.drain_commands();
+            if self.cancel.is_cancelled() {
+                self.emit_turn_complete(true);
+                return;
             }
 
             let (result, partial_text, partial_reasoning) = self.call_llm(&tool_defs).await;
@@ -1039,8 +1097,7 @@ impl<'a> Turn<'a> {
                         &serde_json::json!({"reason": "quota_exceeded", "error": body}),
                     );
                     self.emit(EngineEvent::TurnError {
-                        message: "API quota exceeded; check your plan and billing details"
-                            .to_string(),
+                        message: provider::quota_exceeded_message().to_string(),
                     });
                     self.emit_turn_complete(false);
                     return;
@@ -1069,25 +1126,41 @@ impl<'a> Turn<'a> {
                         let recovery_view: Vec<Message> = protocol::history_to_messages(
                             &self.history.iter().skip(1).cloned().collect::<Vec<_>>(),
                         );
-                        let recovered = self
+                        let recovery_decision = self
                             .host_call(|reply| crate::host::HostCall::RecoverFromContextLimit {
                                 messages: recovery_view,
                                 reply,
                             })
-                            .await
-                            .flatten();
-                        if let Some(shorter) = recovered {
-                            warn_if_replacement_has_orphans(&shorter, "context_limit_recovery");
-                            let new = protocol::history_from_messages(shorter);
-                            log::entry(
-                                log::Level::Info,
-                                "context_limit_recovered",
-                                &serde_json::json!({"new_message_count": new.len() + 1}),
-                            );
-                            self.history.truncate(1);
-                            self.history.extend(new);
-                            self.emit_messages_snapshot();
-                            continue;
+                            .await;
+                        match recovery_decision {
+                            HostCallResult::Cancelled => {
+                                self.emit_turn_complete(true);
+                                return;
+                            }
+                            HostCallResult::Replied(crate::host::HostRequestDecision::Abort(
+                                message,
+                            )) => {
+                                self.emit(EngineEvent::TurnError { message });
+                                self.emit_turn_complete(false);
+                                return;
+                            }
+                            HostCallResult::Replied(crate::host::HostRequestDecision::Replace(
+                                shorter,
+                            )) => {
+                                warn_if_replacement_has_orphans(&shorter, "context_limit_recovery");
+                                let new = protocol::history_from_messages(shorter);
+                                log::entry(
+                                    log::Level::Info,
+                                    "context_limit_recovered",
+                                    &serde_json::json!({"new_message_count": new.len() + 1}),
+                                );
+                                self.history.truncate(1);
+                                self.history.extend(new);
+                                self.emit_messages_snapshot();
+                                continue;
+                            }
+                            HostCallResult::Replied(crate::host::HostRequestDecision::Continue)
+                            | HostCallResult::Dropped => {}
                         }
                     }
                     let message = if is_ctx {

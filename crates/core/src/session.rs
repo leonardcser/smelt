@@ -53,7 +53,6 @@ pub struct AccountingSnapshot {
     pub session_usage: TokenUsage,
     pub context_tokens: Option<u32>,
     pub context_tokens_history_len: Option<usize>,
-    pub visible_context_tokens: Option<u32>,
     pub checkpoint: Option<ContextSnapshotKey>,
 }
 
@@ -64,7 +63,6 @@ impl AccountingSnapshot {
             session_usage: session.session_usage.clone(),
             context_tokens: session.context_tokens,
             context_tokens_history_len: session.context_tokens_history_len,
-            visible_context_tokens: session.visible_context_tokens,
             checkpoint: session.checkpoint_snapshot_key(),
         }
     }
@@ -117,10 +115,6 @@ pub struct Session {
     /// decide whether the provider baseline exactly covers the current
     /// history or needs a delta estimate for appended messages.
     pub context_tokens_history_len: Option<usize>,
-    /// Last authoritative context-token count the UI should continue to
-    /// display, even if `context_tokens` has been invalidated for request
-    /// estimation while waiting for a fresh provider reading.
-    pub visible_context_tokens: Option<u32>,
     /// Per-turn metadata, keyed by `history.len()` at turn-complete time.
     pub turn_metas: Vec<(usize, TurnMeta)>,
     /// Cost and token accounting snapshots, keyed by `history.len()` at
@@ -172,10 +166,6 @@ struct SessionWire {
     #[serde(default)]
     pub context_tokens_history_len: Option<usize>,
     #[serde(default)]
-    // COMPAT(session-v1-messages): old sessions used this field name.
-    #[serde(alias = "display_context_tokens")]
-    pub visible_context_tokens: Option<u32>,
-    #[serde(default)]
     pub cost_snapshots: Vec<(usize, f64)>,
     #[serde(default)]
     pub turn_metas: Vec<(usize, TurnMeta)>,
@@ -219,10 +209,6 @@ struct SessionWireV2 {
     pub context_tokens: Option<u32>,
     #[serde(default)]
     pub context_tokens_history_len: Option<usize>,
-    #[serde(default)]
-    // COMPAT(session-v1-messages): old sessions used this field name.
-    #[serde(alias = "display_context_tokens")]
-    pub visible_context_tokens: Option<u32>,
     #[serde(default)]
     pub turn_metas: Vec<(usize, TurnMeta)>,
     #[serde(default)]
@@ -280,20 +266,15 @@ fn legacy_accounting_snapshots(
     cost_snapshots: Vec<(usize, f64)>,
     context_tokens: Option<u32>,
     context_tokens_history_len: Option<usize>,
-    visible_context_tokens: Option<u32>,
 ) -> Vec<(usize, AccountingSnapshot)> {
     cost_snapshots
         .into_iter()
         .map(|(len, cost_usd)| {
-            let (context_tokens, context_tokens_history_len, visible_context_tokens) =
+            let (context_tokens, context_tokens_history_len) =
                 if context_tokens_history_len == Some(len) {
-                    (
-                        context_tokens,
-                        context_tokens_history_len,
-                        visible_context_tokens,
-                    )
+                    (context_tokens, context_tokens_history_len)
                 } else {
-                    (None, None, None)
+                    (None, None)
                 };
             (
                 len,
@@ -302,7 +283,6 @@ fn legacy_accounting_snapshots(
                     session_usage: TokenUsage::default(),
                     context_tokens,
                     context_tokens_history_len,
-                    visible_context_tokens,
                     checkpoint: None,
                 },
             )
@@ -317,16 +297,10 @@ impl From<SessionWire> for Session {
         let hist_len = history.len();
         let context_tokens = w.context_tokens;
         let context_tokens_history_len = w.context_tokens_history_len;
-        let visible_context_tokens = w.visible_context_tokens.or(context_tokens);
         let cost_snapshots = remap_msg_to_hist(&w.cost_snapshots, &table, hist_len);
         let accounting_snapshots = remap_msg_to_hist(&w.accounting_snapshots, &table, hist_len);
         let accounting_snapshots = if accounting_snapshots.is_empty() {
-            legacy_accounting_snapshots(
-                cost_snapshots,
-                context_tokens,
-                context_tokens_history_len,
-                visible_context_tokens,
-            )
+            legacy_accounting_snapshots(cost_snapshots, context_tokens, context_tokens_history_len)
         } else {
             accounting_snapshots
         };
@@ -356,7 +330,6 @@ impl From<SessionWire> for Session {
             checkpoint: w.checkpoint,
             context_tokens,
             context_tokens_history_len,
-            visible_context_tokens,
             session_cost_usd,
             session_usage: w.session_usage,
         }
@@ -382,7 +355,6 @@ impl From<SessionWireV2> for Session {
             checkpoint: w.checkpoint,
             context_tokens,
             context_tokens_history_len: w.context_tokens_history_len,
-            visible_context_tokens: w.visible_context_tokens.or(context_tokens),
             turn_metas: w.turn_metas,
             accounting_snapshots: w.accounting_snapshots,
             session_cost_usd: w.session_cost_usd,
@@ -410,7 +382,6 @@ impl From<&Session> for SessionWireV2 {
             checkpoint: s.checkpoint.clone(),
             context_tokens: s.context_tokens,
             context_tokens_history_len: s.context_tokens_history_len,
-            visible_context_tokens: s.visible_context_tokens,
             turn_metas: s.turn_metas.clone(),
             accounting_snapshots: s.accounting_snapshots.clone(),
             session_cost_usd: s.session_cost_usd,
@@ -500,7 +471,6 @@ impl Session {
             checkpoint: None,
             context_tokens: None,
             context_tokens_history_len: None,
-            visible_context_tokens: None,
             turn_metas: Vec::new(),
             accounting_snapshots: Vec::new(),
             session_cost_usd: 0.0,
@@ -521,7 +491,7 @@ impl Session {
             model: self.model.clone(),
             cwd: self.cwd.clone(),
             parent_id: self.parent_id.clone(),
-            context_tokens: self.context_tokens,
+            context_tokens: self.current_context_tokens(),
             text_bytes: Some(compute_text_bytes(&self.history)),
         }
     }
@@ -529,23 +499,21 @@ impl Session {
     pub fn record_context_tokens(&mut self, tokens: u32) {
         self.context_tokens = Some(tokens);
         self.context_tokens_history_len = Some(self.history.len());
-        self.visible_context_tokens = Some(tokens);
-    }
-
-    pub fn invalidate_context_tokens(&mut self) {
-        self.context_tokens = None;
-        self.context_tokens_history_len = None;
     }
 
     pub fn clear_context_tokens(&mut self) {
         self.context_tokens = None;
         self.context_tokens_history_len = None;
-        self.visible_context_tokens = None;
     }
 
     pub fn clear_context_tokens_baseline(&mut self) {
-        self.context_tokens = None;
-        self.context_tokens_history_len = None;
+        self.clear_context_tokens();
+    }
+
+    pub fn current_context_tokens(&self) -> Option<u32> {
+        (self.context_tokens_history_len == Some(self.history.len()))
+            .then_some(self.context_tokens)
+            .flatten()
     }
 
     pub fn checkpoint_snapshot_key(&self) -> Option<ContextSnapshotKey> {
@@ -624,11 +592,13 @@ impl Session {
         if let Some(snapshot) = snapshot {
             self.context_tokens = snapshot.context_tokens;
             self.context_tokens_history_len = snapshot.context_tokens_history_len;
-            self.visible_context_tokens = snapshot.visible_context_tokens;
-        } else if let Some((tokens, history_len)) = checkpoint_fallback {
-            self.context_tokens = tokens;
-            self.context_tokens_history_len = history_len;
-            self.visible_context_tokens = tokens;
+        } else if let Some((tokens, Some(history_len))) = checkpoint_fallback {
+            if history_len <= hist_idx {
+                self.context_tokens = tokens;
+                self.context_tokens_history_len = Some(history_len);
+            } else {
+                self.clear_context_tokens();
+            }
         } else if self.accounting_snapshots.is_empty()
             && self
                 .context_tokens_history_len
@@ -662,18 +632,6 @@ impl Session {
                 cp.pre_checkpoint_context_history_len,
             )
         })
-    }
-
-    /// Internal heuristic used for compaction / prepare-request estimation.
-    /// This must not be treated as authoritative provider usage.
-    pub fn estimate_model_context_tokens(&self, summary_prefix: &str) -> u32 {
-        estimate_message_tokens(&history_to_messages(&self.model_history(summary_prefix)))
-    }
-
-    /// Legacy helper retained for internal callers that want to persist the
-    /// latest estimate separately from the authoritative provider reading.
-    pub fn recompute_visible_context_tokens(&mut self, summary_prefix: &str) {
-        self.visible_context_tokens = Some(self.estimate_model_context_tokens(summary_prefix));
     }
 
     pub fn model_history(&self, summary_prefix: &str) -> Vec<HistoryItem> {
@@ -717,8 +675,7 @@ impl Session {
             pre_checkpoint_context_history_len: self.context_tokens_history_len,
         });
         // The next provider response is the first authoritative baseline
-        // token reading for checkpointed model history, but we keep the
-        // last visible count as a display estimate (stale is better than nil).
+        // token reading for checkpointed model history.
         self.clear_context_tokens_baseline();
         self.snapshot_accounting();
         true
@@ -791,14 +748,12 @@ impl Session {
             .is_some_and(|cp| cp.first_live_index >= hist_idx)
         {
             if let Some(cp) = self.checkpoint.take() {
-                // Restore the token baseline that was active before the
-                // checkpoint was installed. The current history is a prefix
-                // of that pre-checkpoint history, so the old count is a
-                // conservative upper-bound.
-                self.context_tokens = cp.pre_checkpoint_context_tokens;
-                self.context_tokens_history_len = cp.pre_checkpoint_context_history_len;
-                if let Some(tokens) = self.context_tokens {
-                    self.visible_context_tokens = Some(tokens);
+                match cp.pre_checkpoint_context_history_len {
+                    Some(len) if len <= hist_idx => {
+                        self.context_tokens = cp.pre_checkpoint_context_tokens;
+                        self.context_tokens_history_len = Some(len);
+                    }
+                    _ => self.clear_context_tokens(),
                 }
             }
         }
@@ -822,7 +777,6 @@ impl Session {
             checkpoint: self.checkpoint.clone(),
             context_tokens: self.context_tokens,
             context_tokens_history_len: self.context_tokens_history_len,
-            visible_context_tokens: self.visible_context_tokens,
             turn_metas: self.turn_metas.clone(),
             accounting_snapshots: self.accounting_snapshots.clone(),
             session_cost_usd: self.session_cost_usd,
@@ -1419,7 +1373,6 @@ mod tests {
         let mut s = fixture_session();
         s.history = vec![user_item("only recent"), assistant_text_item("reply")];
         s.context_tokens = Some(100);
-        s.visible_context_tokens = Some(100);
 
         let installed =
             s.install_context_checkpoint("compaction".into(), "summary".into(), 0, Some(100));
@@ -1427,11 +1380,10 @@ mod tests {
         assert!(!installed);
         assert!(s.checkpoint.is_none());
         assert_eq!(s.context_tokens, Some(100));
-        assert_eq!(s.visible_context_tokens, Some(100));
     }
 
     #[test]
-    fn install_context_checkpoint_clears_baseline_keeps_visible() {
+    fn install_context_checkpoint_clears_authoritative_context_tokens() {
         let mut s = fixture_session();
         s.history = vec![
             user_item("old"),
@@ -1441,14 +1393,12 @@ mod tests {
         ];
         s.context_tokens = Some(500);
         s.context_tokens_history_len = Some(4);
-        s.visible_context_tokens = Some(500);
 
         let installed =
             s.install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(500));
 
         assert!(installed);
         assert!(s.context_tokens.is_none());
-        assert_eq!(s.visible_context_tokens, Some(500));
         assert_eq!(s.checkpoint.as_ref().unwrap().first_live_index, 2);
         assert_eq!(
             s.checkpoint.as_ref().unwrap().pre_checkpoint_context_tokens,
@@ -1464,40 +1414,23 @@ mod tests {
     }
 
     #[test]
-    fn invalidate_context_tokens_keeps_visible_snapshot() {
+    fn restore_accounting_after_rewind_restores_authoritative_context_snapshot() {
         let mut s = fixture_session();
-        s.record_context_tokens(321);
+        s.history = vec![user_item("a"), assistant_text_item("b")];
+        s.context_tokens = Some(710);
+        s.context_tokens_history_len = Some(2);
+        s.snapshot_accounting();
 
-        s.invalidate_context_tokens();
+        s.history.extend([user_item("c"), assistant_text_item("d")]);
+        s.context_tokens = Some(700);
+        s.context_tokens_history_len = Some(4);
+        s.snapshot_accounting();
 
-        assert!(s.context_tokens.is_none());
-        assert_eq!(s.visible_context_tokens, Some(321));
-    }
+        s.history.truncate(2);
+        s.restore_accounting_after_rewind(2, false);
 
-    #[test]
-    fn recompute_visible_context_tokens_uses_model_history_after_checkpoint() {
-        let mut s = fixture_session();
-        s.history = vec![
-            user_item("old"),
-            assistant_text_item(&"x".repeat(200)),
-            user_item("recent"),
-            assistant_text_item("recent reply"),
-        ];
-        s.checkpoint = Some(checkpoint("summary", 2));
-
-        s.recompute_visible_context_tokens("SUMMARY:");
-
-        let expected = history_to_messages(&s.model_history("SUMMARY:"))
-            .iter()
-            .map(|msg| {
-                msg.content
-                    .as_ref()
-                    .map(|c| c.text_content().len())
-                    .unwrap_or(0)
-            })
-            .sum::<usize>()
-            .div_ceil(4) as u32;
-        assert_eq!(s.visible_context_tokens, Some(expected));
+        assert_eq!(s.context_tokens, Some(710));
+        assert_eq!(s.context_tokens_history_len, Some(2));
     }
 
     #[test]
@@ -1571,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_checkpoint_if_rewound_to_restores_pre_checkpoint_baseline() {
+    fn clear_checkpoint_if_rewound_to_clears_pre_checkpoint_baseline_from_later_history() {
         let mut s = fixture_session();
         s.history = vec![
             user_item("old"),
@@ -1581,7 +1514,6 @@ mod tests {
         ];
         s.context_tokens = Some(100);
         s.context_tokens_history_len = Some(4);
-        s.visible_context_tokens = Some(100);
         s.checkpoint = Some(ContextCheckpoint {
             kind: "compaction".to_string(),
             summary: "summary".to_string(),
@@ -1597,9 +1529,8 @@ mod tests {
         s.clear_checkpoint_if_rewound_to(2);
 
         assert!(s.checkpoint.is_none());
-        assert_eq!(s.context_tokens, Some(100));
-        assert_eq!(s.context_tokens_history_len, Some(4));
-        assert_eq!(s.visible_context_tokens, Some(100));
+        assert!(s.context_tokens.is_none());
+        assert!(s.context_tokens_history_len.is_none());
     }
 
     #[test]
@@ -1658,8 +1589,8 @@ mod tests {
         s.cwd = Some("/work".into());
         s.parent_id = Some("p1".into());
         s.context_tokens = Some(1234);
-        s.visible_context_tokens = Some(5678);
         s.history.push(user_item("hi"));
+        s.context_tokens_history_len = Some(s.history.len());
 
         let m = s.meta();
         assert_eq!(m.id, s.id);
@@ -1672,6 +1603,18 @@ mod tests {
         assert_eq!(m.parent_id.as_deref(), Some("p1"));
         assert_eq!(m.context_tokens, Some(1234));
         assert_eq!(m.text_bytes, Some(2)); // "hi"
+    }
+
+    #[test]
+    fn current_context_tokens_requires_exact_history_length() {
+        let mut s = fixture_session();
+        s.history = vec![user_item("a"), assistant_text_item("b")];
+        s.context_tokens = Some(100);
+        s.context_tokens_history_len = Some(2);
+        assert_eq!(s.current_context_tokens(), Some(100));
+
+        s.history.push(user_item("c"));
+        assert_eq!(s.current_context_tokens(), None);
     }
 
     #[test]
@@ -1946,7 +1889,6 @@ mod tests {
             )));
         original.context_tokens = Some(200);
         original.context_tokens_history_len = Some(3);
-        original.visible_context_tokens = Some(250);
         original.session_cost_usd = 1.25;
         original.session_usage.prompt_tokens = Some(10);
         original.session_usage.completion_tokens = Some(2);
@@ -1964,10 +1906,6 @@ mod tests {
         assert_eq!(
             round.context_tokens_history_len,
             original.context_tokens_history_len
-        );
-        assert_eq!(
-            round.visible_context_tokens,
-            original.visible_context_tokens
         );
         assert_eq!(round.accounting_snapshots.len(), 1);
         assert_eq!(round.accounting_snapshots[0].0, 3);

@@ -359,7 +359,6 @@ impl TestApp {
         self.app.core.config.context_window = Some(100);
         self.app.core.session.context_tokens = None;
         self.app.core.session.context_tokens_history_len = None;
-        self.app.core.session.visible_context_tokens = None;
         self.app
             .core
             .session
@@ -426,10 +425,13 @@ impl TestApp {
             self.app.drive_lua_tasks();
         }
 
-        let replacement = rx
+        let replacement = match rx
             .try_recv()
             .expect("compaction prepare reply should be ready")
-            .expect("compaction prepare should produce replacement history");
+        {
+            engine::HostRequestDecision::Replace(messages) => messages,
+            decision => panic!("expected compaction replacement, got {decision:?}"),
+        };
         assert!(!replacement.is_empty(), "compaction replacement is empty");
         if should_preserve_turn {
             assert!(self.agent_running(), "compaction ended the active turn");

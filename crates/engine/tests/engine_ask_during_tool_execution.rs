@@ -240,6 +240,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                         reasoning_effort: ReasoningEffort::Off,
                         tools: Vec::new(),
                         session_id: "sess".into(),
+                        visible_retries: false,
                     });
                 }
             }

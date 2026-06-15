@@ -240,7 +240,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Latest authoritative provider-reported active-context token count, or `nil` when Smelt does not currently have a valid reading for the model-visible history.",
         &[],
         |_, ()| -> LuaResult<Option<u32>> {
-            Ok(crate::lua::try_with_app(|app| app.core.session.context_tokens)
+            Ok(crate::lua::try_with_app(|app| app.core.session.current_context_tokens())
                 .unwrap_or_default())
         },
     )?;

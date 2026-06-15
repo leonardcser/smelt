@@ -137,7 +137,7 @@ pub enum ProviderError {
     Cancelled,
     #[error("{}", format_rate_limit(resets_at))]
     RateLimited { resets_at: Option<u64> },
-    #[error("quota exceeded: {0}")]
+    #[error("{}", quota_exceeded_message())]
     QuotaExceeded(String),
     #[error("authentication failed: {0}")]
     Auth(String),
@@ -153,6 +153,60 @@ pub enum ProviderError {
     InvalidResponse(String),
     #[error("max retries exceeded")]
     MaxRetries,
+}
+
+pub fn quota_exceeded_message() -> &'static str {
+    "API quota exceeded; check your plan and billing details"
+}
+
+fn is_quota_error_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("insufficient_quota")
+        || lower.contains("billing_not_active")
+        || lower.contains("credit balance is too low")
+        || lower.contains("usage_limit_reached")
+        || lower.contains("usage limit")
+        || lower.contains("quota exceeded")
+        || lower.contains("quota exhausted")
+}
+
+const MAX_AUTO_RATE_LIMIT_DELAY: Duration = Duration::from_secs(10 * 60);
+
+fn rate_limit_error(
+    resets_at: Option<u64>,
+    retry_after: Option<Duration>,
+    now_secs: u64,
+) -> ProviderError {
+    ProviderError::RateLimited {
+        resets_at: resets_at.or_else(|| retry_after.map(|d| now_secs + d.as_secs())),
+    }
+}
+
+fn retry_delay_for(
+    err: &ProviderError,
+    attempt: usize,
+    retry_after: Option<Duration>,
+    now_secs: u64,
+) -> Option<Duration> {
+    let backoff = backoff_delay(attempt);
+    match err {
+        ProviderError::Network(_) | ProviderError::Server { .. } | ProviderError::Stream(_) => {
+            Some(retry_after.map_or(backoff, |delay| delay.max(backoff)))
+        }
+        ProviderError::RateLimited {
+            resets_at: Some(epoch),
+        } => {
+            let delay = Duration::from_secs(epoch.saturating_sub(now_secs));
+            (delay <= MAX_AUTO_RATE_LIMIT_DELAY).then_some(delay.max(backoff))
+        }
+        _ => None,
+    }
+}
+
+fn emit_retry(opts: &ChatOptions<'_>, delay: Duration, attempt: usize) {
+    if let Some(f) = opts.on_retry {
+        f(delay, (attempt + 1) as u32);
+    }
 }
 
 fn format_rate_limit(resets_at: &Option<u64>) -> String {
@@ -201,8 +255,11 @@ fn format_epoch_local(epoch_secs: u64) -> String {
 }
 
 pub(crate) fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    unix_secs(std::time::SystemTime::now())
+}
+
+fn unix_secs(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
@@ -258,30 +315,22 @@ pub(crate) mod test_http {
 }
 
 impl ProviderError {
-    fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            ProviderError::Server { .. } | ProviderError::Network(_) | ProviderError::Stream(_)
-        )
-    }
-
-    fn from_http(code: u16, body: String, retry_after: Option<Duration>) -> Self {
-        let is_quota = body.contains("insufficient_quota")
-            || body.contains("billing_not_active")
-            || body.contains("credit balance is too low")
-            || (code == 429 && body.contains("exceeded"));
+    fn from_http_at(code: u16, body: String, retry_after: Option<Duration>, now_secs: u64) -> Self {
+        let is_quota = is_quota_error_body(&body);
 
         match code {
             _ if is_quota => ProviderError::QuotaExceeded(body),
             400 => ProviderError::InvalidResponse(body),
             401 | 403 => ProviderError::Auth(body),
             404 => ProviderError::NotFound(body),
-            429 => ProviderError::RateLimited {
-                resets_at: parse_resets_at(&body)
-                    .or_else(|| retry_after.map(|d| unix_now() + d.as_secs())),
-            },
+            429 => rate_limit_error(parse_resets_at(&body), retry_after, now_secs),
             _ => ProviderError::Server { status: code, body },
         }
+    }
+
+    #[cfg(test)]
+    fn from_http(code: u16, body: String, retry_after: Option<Duration>) -> Self {
+        Self::from_http_at(code, body, retry_after, unix_now())
     }
 }
 
@@ -293,7 +342,8 @@ fn parse_resets_at(body: &str) -> Option<u64> {
 }
 
 pub(crate) fn json_as_u64(v: &serde_json::Value) -> Option<u64> {
-    v.as_u64().or_else(|| v.as_i64().map(|i| i as u64))
+    v.as_u64()
+        .or_else(|| v.as_i64().and_then(|i| u64::try_from(i).ok()))
 }
 
 pub(crate) fn parse_retry_from_body(body: &str) -> Option<Duration> {
@@ -579,10 +629,11 @@ impl WireApi {
         resp: reqwest::Response,
         cancel: &CancellationToken,
         on_delta: &(dyn Fn(StreamDelta<'_>) + Send + Sync),
+        now_secs: u64,
     ) -> Result<ParsedResponse, ProviderError> {
         match self {
             Self::ChatCompletions => chat_completions::read_stream(resp, cancel, on_delta).await,
-            Self::OpenAiResponses => openai::read_stream(resp, cancel, on_delta).await,
+            Self::OpenAiResponses => openai::read_stream(resp, cancel, on_delta, now_secs).await,
             Self::AnthropicMessages => anthropic::read_stream(resp, cancel, on_delta).await,
         }
     }
@@ -1080,9 +1131,7 @@ impl Provider {
                         }));
                         if attempt < max_retries {
                             let delay = backoff_delay(attempt);
-                            if attempt > 0 {
-                                if let Some(f) = opts.on_retry { f(delay, attempt as u32); }
-                            }
+                            emit_retry(opts, delay, attempt);
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -1096,7 +1145,12 @@ impl Provider {
                 let retry_after = parse_retry_after(&resp);
                 let text = resp.text().await.unwrap_or_default();
 
-                let err = ProviderError::from_http(code, text, retry_after);
+                let err = ProviderError::from_http_at(
+                    code,
+                    text,
+                    retry_after,
+                    unix_secs(self.clock.system_now()),
+                );
 
                 log::entry(
                     log::Level::Warn,
@@ -1148,16 +1202,17 @@ impl Provider {
                     }
                 }
 
-                if err.is_retryable() && attempt < max_retries {
-                    let backoff = backoff_delay(attempt);
-                    let delay = retry_after.map_or(backoff, |ra| ra.max(backoff));
-                    if attempt > 0 {
-                        if let Some(f) = opts.on_retry {
-                            f(delay, attempt as u32);
-                        }
+                if attempt < max_retries {
+                    if let Some(delay) = retry_delay_for(
+                        &err,
+                        attempt,
+                        retry_after,
+                        unix_secs(self.clock.system_now()),
+                    ) {
+                        emit_retry(opts, delay, attempt);
+                        tokio::time::sleep(delay).await;
+                        continue;
                     }
-                    tokio::time::sleep(delay).await;
-                    continue;
                 }
                 return Err(err);
             }
@@ -1174,7 +1229,14 @@ impl Provider {
             let on_delta = opts.on_delta.unwrap_or(noop_delta);
 
             let parsed_result = if use_stream {
-                request_wire.read_stream(resp, opts.cancel, on_delta).await
+                request_wire
+                    .read_stream(
+                        resp,
+                        opts.cancel,
+                        on_delta,
+                        unix_secs(self.clock.system_now()),
+                    )
+                    .await
             } else {
                 let data: serde_json::Value = resp
                     .json()
@@ -1199,7 +1261,12 @@ impl Provider {
 
             let parsed = match parsed_result {
                 Ok(parsed) => parsed,
-                Err(err) if err.is_retryable() && attempt < max_stream_retries => {
+                Err(err) if attempt < max_stream_retries => {
+                    let Some(delay) =
+                        retry_delay_for(&err, attempt, None, unix_secs(self.clock.system_now()))
+                    else {
+                        return Err(err);
+                    };
                     log::entry(
                         log::Level::Warn,
                         "request_error",
@@ -1208,12 +1275,7 @@ impl Provider {
                             "error": err.to_string(),
                         }),
                     );
-                    let delay = backoff_delay(attempt);
-                    if attempt > 0 {
-                        if let Some(f) = opts.on_retry {
-                            f(delay, attempt as u32);
-                        }
-                    }
+                    emit_retry(opts, delay, attempt);
                     tokio::time::sleep(delay).await;
                     continue;
                 }
@@ -1694,10 +1756,8 @@ mod tests {
     }
 
     #[test]
-    fn json_as_u64_handles_negative_i64_via_cast() {
-        let v = json!(-1);
-        // -1 as i64 cast to u64 wraps to u64::MAX.
-        assert_eq!(json_as_u64(&v), Some(u64::MAX));
+    fn json_as_u64_rejects_negative_i64() {
+        assert_eq!(json_as_u64(&json!(-1)), None);
     }
 
     #[test]
@@ -1759,29 +1819,6 @@ mod tests {
         assert_eq!(parse_resets_at(r#"{"error": {}}"#), None);
     }
 
-    // ---- ProviderError::is_retryable ----
-
-    #[test]
-    fn is_retryable_true_for_network_and_server_errors() {
-        assert!(ProviderError::Network("x".into()).is_retryable());
-        assert!(ProviderError::Server {
-            status: 500,
-            body: "".into()
-        }
-        .is_retryable());
-    }
-
-    #[test]
-    fn is_retryable_false_for_auth_quota_and_invalid_errors() {
-        assert!(!ProviderError::Auth("x".into()).is_retryable());
-        assert!(!ProviderError::QuotaExceeded("x".into()).is_retryable());
-        assert!(!ProviderError::InvalidResponse("x".into()).is_retryable());
-        assert!(!ProviderError::NotFound("x".into()).is_retryable());
-        assert!(!ProviderError::Cancelled.is_retryable());
-        assert!(!ProviderError::MaxRetries.is_retryable());
-        assert!(!ProviderError::RateLimited { resets_at: None }.is_retryable());
-    }
-
     // ---- ProviderError::from_http ----
 
     #[test]
@@ -1832,8 +1869,13 @@ mod tests {
 
     #[test]
     fn from_http_429_falls_back_to_retry_after_when_body_lacks_resets() {
-        match ProviderError::from_http(429, "no body".into(), Some(Duration::from_secs(10))) {
-            ProviderError::RateLimited { resets_at: Some(_) } => {}
+        match ProviderError::from_http_at(
+            429,
+            "no body".into(),
+            Some(Duration::from_secs(10)),
+            1_000,
+        ) {
+            ProviderError::RateLimited { resets_at } => assert_eq!(resets_at, Some(1_010)),
             e => panic!("expected RateLimited with resets_at, got {e:?}"),
         }
     }
@@ -1844,7 +1886,8 @@ mod tests {
             (500, "insufficient_quota"),
             (500, "billing_not_active"),
             (500, "your credit balance is too low"),
-            (429, "request rate exceeded"),
+            (429, "monthly quota exhausted"),
+            (429, "usage_limit_reached"),
         ];
         for (code, body) in cases {
             let err = ProviderError::from_http(code, body.into(), None);
@@ -1852,7 +1895,65 @@ mod tests {
                 matches!(err, ProviderError::QuotaExceeded(_)),
                 "expected QuotaExceeded for ({code}, {body:?})"
             );
+            assert_eq!(err.to_string(), quota_exceeded_message());
         }
+    }
+
+    #[test]
+    fn from_http_429_rate_exceeded_without_retry_time_is_rate_limited() {
+        let err = ProviderError::from_http(429, "request rate exceeded".into(), None);
+        assert!(matches!(
+            err,
+            ProviderError::RateLimited { resets_at: None }
+        ));
+        assert_eq!(err.to_string(), "rate limited");
+    }
+
+    #[test]
+    fn from_http_429_long_retry_after_stays_rate_limited() {
+        let err = ProviderError::from_http(
+            429,
+            "request rate exceeded".into(),
+            Some(Duration::from_secs(60 * 60)),
+        );
+        assert!(matches!(
+            err,
+            ProviderError::RateLimited { resets_at: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn retry_delay_for_rate_limit_requires_short_reset_time() {
+        let now = unix_now();
+        let short = ProviderError::RateLimited {
+            resets_at: Some(now + 60),
+        };
+        assert!(retry_delay_for(&short, 0, None, now).is_some());
+
+        let long = ProviderError::RateLimited {
+            resets_at: Some(now + 60 * 60),
+        };
+        assert_eq!(retry_delay_for(&long, 0, None, now), None);
+
+        let missing = ProviderError::RateLimited { resets_at: None };
+        assert_eq!(retry_delay_for(&missing, 0, None, now), None);
+    }
+
+    #[test]
+    fn emit_retry_reports_one_based_retry_count() {
+        let cancel = crate::cancel::CancellationToken::new();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let on_retry = |delay, attempt| seen.lock().unwrap().push((delay, attempt));
+        let mut opts = ChatOptions::new(&cancel);
+        opts.on_retry = Some(&on_retry);
+
+        emit_retry(&opts, Duration::from_secs(2), 0);
+        emit_retry(&opts, Duration::from_secs(4), 1);
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(Duration::from_secs(2), 1), (Duration::from_secs(4), 2)]
+        );
     }
 
     // ---- format_rate_limit ----

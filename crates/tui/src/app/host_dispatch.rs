@@ -3,14 +3,14 @@
 //! `oneshot::Sender` for the reply; we send back at most once.
 
 use crate::app::TuiApp;
-use engine::HostCall;
+use engine::{HostCall, HostRequestDecision};
 use protocol::Message;
 use smelt_core::lua::{HookRegistry, LuaShared};
 use smelt_core::working::TurnPhase;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
-type MessageReply = oneshot::Sender<Option<Vec<Message>>>;
+type MessageReply = oneshot::Sender<HostRequestDecision>;
 type MessageReplySlot = Arc<Mutex<Option<MessageReply>>>;
 
 fn restore_working_phase() {
@@ -58,10 +58,12 @@ impl TuiApp {
     /// Hand the first registered `smelt.engine.on_context_limit` hook the
     /// truncated history along with a Lua `reply` function whose body
     /// holds the engine's `oneshot::Sender`. The hook MUST call `reply`
-    /// exactly once with either a shorter messages array (engine swaps
-    /// and retries) or `nil` (engine aborts the turn). If the hook
-    /// vanishes without calling `reply`, the wrapping closure is GC'd,
-    /// the Sender drops, and the engine's `.await` resolves to `None`.
+    /// exactly once with `{ action = "replace", messages = ... }` (engine
+    /// swaps and retries), `{ action = "abort", message = ... }` (engine
+    /// aborts the turn), or `nil`/`{ action = "continue" }` (engine
+    /// continues with the original request). If the hook vanishes without
+    /// calling `reply`, the wrapping closure is GC'd, the Sender drops,
+    /// and the engine's `.await` resolves to `None`.
     fn dispatch_recover_from_context_limit(&mut self, messages: Vec<Message>, reply: MessageReply) {
         self.call_message_reply_hook(
             "on_context_limit",
@@ -76,7 +78,7 @@ impl TuiApp {
     /// Hand the first registered `smelt.engine.on_prepare_request`
     /// hook the exact non-system message slice the engine is about to
     /// send, plus a conservative token estimate for that slice. The
-    /// hook can return a replacement via `reply(messages)`;
+    /// hook can return a decision via `reply({ action = "replace", messages = messages })`;
     /// `nil` means "send the original request".
     fn dispatch_prepare_request(
         &mut self,
@@ -126,7 +128,7 @@ impl TuiApp {
         let lua = self.lua.lua();
         let funcs = registry(self.lua.core_shared()).snapshot_for(lua, "");
         let Some(func) = funcs.into_iter().next() else {
-            let _ = reply.send(None);
+            let _ = reply.send(HostRequestDecision::Continue);
             return;
         };
         let messages_table = match smelt_core::lua::serde_to_lua(lua, &messages) {
@@ -134,7 +136,7 @@ impl TuiApp {
             Err(e) => {
                 self.lua
                     .record_error(format!("{label}: serialize messages: {e}"));
-                let _ = reply.send(None);
+                let _ = reply.send(HostRequestDecision::Continue);
                 return;
             }
         };
@@ -152,11 +154,25 @@ impl TuiApp {
                 // hook authors aren't punished for defensive double-calls.
                 return Ok(());
             };
-            let shorter: Option<Vec<Message>> = match value {
-                mlua::Value::Nil => None,
-                v => smelt_core::lua::lua_to_serde::<Vec<Message>>(inner_lua, &v),
+            let decision = match value {
+                mlua::Value::Nil => HostRequestDecision::Continue,
+                mlua::Value::Table(t) => match t.get::<Option<String>>("action")?.as_deref() {
+                    Some("continue") | None => HostRequestDecision::Continue,
+                    Some("abort") => {
+                        let message = t.get::<String>("message")?;
+                        HostRequestDecision::Abort(message)
+                    }
+                    Some("replace") => t
+                        .get::<mlua::Value>("messages")
+                        .ok()
+                        .and_then(|v| smelt_core::lua::lua_to_serde::<Vec<Message>>(inner_lua, &v))
+                        .map(HostRequestDecision::Replace)
+                        .unwrap_or(HostRequestDecision::Continue),
+                    Some(_) => HostRequestDecision::Continue,
+                },
+                _ => HostRequestDecision::Continue,
             };
-            let _ = tx.send(shorter);
+            let _ = tx.send(decision);
             Ok(())
         }) {
             Ok(f) => f,
@@ -166,7 +182,7 @@ impl TuiApp {
                     restore_working_phase();
                 }
                 if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
-                    let _ = tx.send(None);
+                    let _ = tx.send(HostRequestDecision::Continue);
                 }
                 return;
             }
@@ -184,7 +200,7 @@ impl TuiApp {
                     restore_working_phase();
                 }
                 if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
-                    let _ = tx.send(None);
+                    let _ = tx.send(HostRequestDecision::Continue);
                 }
             }
         }

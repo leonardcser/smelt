@@ -112,10 +112,10 @@ impl TestApp {
         self.app.core.session.session_cost_usd
     }
 
-    /// Current context-tokens estimate, when a non-background usage report
-    /// has set it.
+    /// Current authoritative context-token snapshot for the live history, when
+    /// a non-background usage report has set one.
     pub fn context_tokens(&self) -> Option<u32> {
-        self.app.core.session.context_tokens
+        self.app.core.session.current_context_tokens()
     }
 
     /// Active context checkpoint prefix length, if compaction installed one.

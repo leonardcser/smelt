@@ -347,7 +347,7 @@ pub(super) fn parse_stream_events<'a>(
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
     for ev in events {
-        apply_sse_event(&mut state, ev, on_delta);
+        apply_sse_event(&mut state, ev, on_delta, super::unix_now());
     }
     state.finalize()
 }
@@ -357,6 +357,7 @@ pub(super) fn apply_sse_event(
     state: &mut StreamState,
     ev: &serde_json::Value,
     on_delta: &mut dyn FnMut(StreamDelta),
+    now_secs: u64,
 ) {
     let ev_type = ev["type"].as_str().unwrap_or("");
 
@@ -426,13 +427,13 @@ pub(super) fn apply_sse_event(
                 let err_type = error["type"].as_str().unwrap_or("");
                 let message = error["message"].as_str().unwrap_or("");
                 let resets_at = super::json_as_u64(&error["resets_at"]);
-                if code == "rate_limit_exceeded" || err_type == "usage_limit_reached" {
-                    let fallback = super::parse_retry_from_body(message)
-                        .map(|d| super::unix_now() + d.as_secs());
-                    state.error = Some(ProviderError::RateLimited {
-                        resets_at: resets_at.or(fallback),
-                    });
-                } else if code == "insufficient_quota" || code == "billing_not_active" {
+                if code == "rate_limit_exceeded" {
+                    let retry_after = super::parse_retry_from_body(message);
+                    state.error = Some(super::rate_limit_error(resets_at, retry_after, now_secs));
+                } else if code == "insufficient_quota"
+                    || code == "billing_not_active"
+                    || err_type == "usage_limit_reached"
+                {
                     state.error = Some(ProviderError::QuotaExceeded(message.to_string()));
                 } else if code == "context_length_exceeded" {
                     state.error = Some(ProviderError::InvalidResponse(message.to_string()));
@@ -463,11 +464,12 @@ pub(super) async fn read_stream(
     resp: reqwest::Response,
     cancel: &CancellationToken,
     on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
+    now_secs: u64,
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
 
     sse::read_events(resp, cancel, |ev| {
-        apply_sse_event(&mut state, ev, &mut |d| on_delta(d));
+        apply_sse_event(&mut state, ev, &mut |d| on_delta(d), now_secs);
     })
     .await?;
 
@@ -980,7 +982,7 @@ mod tests {
     // ---- apply_sse_event ----
 
     fn step(state: &mut StreamState, ev: serde_json::Value) {
-        apply_sse_event(state, &ev, &mut |_| {});
+        apply_sse_event(state, &ev, &mut |_| {}, 1_000);
     }
 
     #[test]
@@ -995,6 +997,7 @@ mod tests {
                     deltas.push(t.into())
                 }
             },
+            1_000,
         );
         assert_eq!(state.content, "hi");
         assert_eq!(deltas, vec!["hi".to_string()]);
@@ -1008,6 +1011,7 @@ mod tests {
             &mut state,
             &json!({"type": "response.output_text.delta", "delta": ""}),
             &mut |_| called = true,
+            1_000,
         );
         assert!(state.content.is_empty());
         assert!(!called);
@@ -1152,6 +1156,7 @@ mod tests {
                     thinking.push(t.into())
                 }
             },
+            1_000,
         );
         apply_sse_event(
             &mut state,
@@ -1161,6 +1166,7 @@ mod tests {
                     thinking.push(t.into())
                 }
             },
+            1_000,
         );
         assert_eq!(state.reasoning, "pondering");
         assert_eq!(thinking, vec!["ponder", "ing"]);
@@ -1196,21 +1202,54 @@ mod tests {
     #[test]
     fn sse_failed_rate_limit_sets_rate_limited_error() {
         let mut state = StreamState::default();
+        let resets_at = crate::provider::unix_now() + 30;
         step(
             &mut state,
             json!({
                 "type": "response.failed",
-                "response": {"error": {"code": "rate_limit_exceeded", "resets_at": 1234}}
+                "response": {"error": {"code": "rate_limit_exceeded", "resets_at": resets_at}}
             }),
         );
         match state.error.unwrap() {
-            ProviderError::RateLimited { resets_at } => assert_eq!(resets_at, Some(1234)),
+            ProviderError::RateLimited { resets_at: actual } => assert_eq!(actual, Some(resets_at)),
             e => panic!("expected RateLimited, got {e:?}"),
         }
     }
 
     #[test]
-    fn sse_failed_usage_limit_reached_also_rate_limited() {
+    fn sse_failed_rate_limit_without_retry_time_stays_rate_limited() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.failed",
+                "response": {"error": {"code": "rate_limit_exceeded", "message": "request rate exceeded"}}
+            }),
+        );
+        assert!(matches!(
+            state.error.unwrap(),
+            ProviderError::RateLimited { resets_at: None }
+        ));
+    }
+
+    #[test]
+    fn sse_failed_rate_limit_with_long_retry_window_stays_rate_limited() {
+        let mut state = StreamState::default();
+        step(
+            &mut state,
+            json!({
+                "type": "response.failed",
+                "response": {"error": {"code": "rate_limit_exceeded", "message": "try again in 3600s"}}
+            }),
+        );
+        assert!(matches!(
+            state.error.unwrap(),
+            ProviderError::RateLimited { resets_at: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn sse_failed_usage_limit_reached_sets_quota_exceeded() {
         let mut state = StreamState::default();
         step(
             &mut state,
@@ -1221,7 +1260,7 @@ mod tests {
         );
         assert!(matches!(
             state.error.unwrap(),
-            ProviderError::RateLimited { .. }
+            ProviderError::QuotaExceeded(_)
         ));
     }
 

@@ -14,6 +14,13 @@
 use protocol::Message;
 use tokio::sync::oneshot;
 
+#[derive(Debug)]
+pub enum HostRequestDecision {
+    Continue,
+    Replace(Vec<Message>),
+    Abort(String),
+}
+
 /// One synchronous request from the engine to the host (TUI / headless).
 /// The host must `reply.send(...)` exactly once or the engine's awaiting
 /// future will resolve with the channel's `Closed` error and fall back
@@ -31,13 +38,14 @@ pub enum HostCall {
     /// Engine hit a context-window error mid-turn. The host's registered
     /// recovery hook (`smelt.engine.on_context_limit`) is invoked with
     /// the conversation up to that point and returns a shorter
-    /// conversation to retry with. `Some(msgs)` swaps the engine's
+    /// conversation to retry with. `Replace(msgs)` swaps the engine's
     /// `messages` (excluding the system prompt at index 0) and re-runs
-    /// the loop; `None` (no hook registered, hook returned nil, or hook
-    /// failed) aborts the turn with the existing `TurnError`.
+    /// the loop; `Continue` (no hook registered, hook returned nil, or hook
+    /// failed) aborts the turn with the existing `TurnError`; `Abort(message)`
+    /// aborts with a host-provided terminal error.
     RecoverFromContextLimit {
         messages: Vec<Message>,
-        reply: oneshot::Sender<Option<Vec<Message>>>,
+        reply: oneshot::Sender<HostRequestDecision>,
     },
 
     /// Engine is about to send a model request. The host may replace
@@ -49,6 +57,6 @@ pub enum HostCall {
     PrepareRequest {
         messages: Vec<Message>,
         estimated_tokens: u32,
-        reply: oneshot::Sender<Option<Vec<Message>>>,
+        reply: oneshot::Sender<HostRequestDecision>,
     },
 }

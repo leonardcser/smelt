@@ -454,6 +454,10 @@ pub enum UiCommand {
         /// cache shard as the main turn.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         session_id: String,
+        /// Surface provider retry events on the main work indicator.
+        /// Intended for foreground auxiliary work such as compaction.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        visible_retries: bool,
     },
 
     /// Result of a tool execution (response to `ToolDispatch`).

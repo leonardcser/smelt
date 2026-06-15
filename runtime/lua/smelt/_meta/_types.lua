@@ -163,6 +163,7 @@
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
 ---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires.
+---@field visible_retries? boolean Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction.
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
@@ -187,11 +188,12 @@
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
 ---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires.
+---@field visible_retries? boolean Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction.
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
 ---@class smelt.engine.PrepareContextEstimate
----@field source string One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta" | "visible_fallback"`.
+---@field source string One of `"full_request_estimate" | "provider_snapshot" | "provider_snapshot_plus_history_delta"`.
 ---@field total_context_tokens integer Total active-context estimate used by auto-compaction.
 ---@field provider_context_tokens? integer Latest provider-reported active context, when available.
 ---@field estimated_delta_tokens integer Locally estimated tokens added on top of provider usage.

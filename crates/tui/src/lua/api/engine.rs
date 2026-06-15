@@ -198,8 +198,7 @@ pub struct LuaPrepareRequest {
 #[lua(name = "smelt.engine.PrepareContextEstimate")]
 pub struct LuaPrepareContextEstimate {
     /// One of `"full_request_estimate" | "provider_snapshot" |
-    /// "provider_snapshot_plus_history_delta" |
-    /// "visible_fallback"`.
+    /// "provider_snapshot_plus_history_delta"`.
     pub source: String,
     /// Total active-context estimate used by auto-compaction.
     pub total_context_tokens: u32,
@@ -238,6 +237,9 @@ pub struct LuaAskSpec {
     /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
     /// the Lua bootstrap suppresses `on_response` after the guard expires.
     pub guard: Option<mlua::Table>,
+    /// Surface provider retry events on the main work indicator. Intended
+    /// for foreground auxiliary work such as compaction.
+    pub visible_retries: Option<bool>,
     /// Fires once with `(response, err)`. On success `err` is `nil` and
     /// `response` is a full assistant message table;
     /// on failure `response` is `nil` and `err` is a
@@ -267,6 +269,9 @@ pub struct LuaInheritedAskSpec {
     /// Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided,
     /// the Lua bootstrap suppresses `on_response` after the guard expires.
     pub guard: Option<mlua::Table>,
+    /// Surface provider retry events on the main work indicator. Intended
+    /// for foreground auxiliary work such as compaction.
+    pub visible_retries: Option<bool>,
     /// Fires once with `(response, err)`. On success `err` is `nil` and
     /// `response` is a full assistant message table;
     /// on failure `response` is `nil` and `err` is a
@@ -307,11 +312,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     {
         let s = shared.clone();
-        type ReplyCb = LuaCallback<(Option<Vec<LuaAskMessage>>,), ()>;
+        type ReplyCb = LuaCallback<(mlua::Value,), ()>;
         type HookCb = LuaCallback<(Vec<LuaAskMessage>, ReplyCb), ()>;
         m.fn_(
             "on_context_limit",
-            "Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once - either with a shorter messages array (engine swaps it in and retries the turn) or `nil` (engine aborts with the existing TurnError). The first registered hook to call `reply` wins; later hooks are ignored. Returns a `Reg` whose `:remove()` drops the hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.",
+            "Register a recovery hook the engine calls when a provider returns a context-window error mid-turn. `hook` receives the conversation so far (excluding the system prompt) and a `reply` callback the hook MUST call exactly once - with `{ action = \"replace\", messages = messages }` (engine swaps it in and retries the turn), `{ action = \"abort\", message = message }` (engine aborts with that terminal error), or `nil` / `{ action = \"continue\" }` (engine continues without recovery). The first registered hook to call `reply` wins; later hooks are ignored. Returns a `Reg` whose `:remove()` drops the hook. Bundled `compact.lua` registers a hook that runs the standard summarization flow.",
             &["hook"],
             move |lua, hook: HookCb| -> LuaResult<smelt_core::lua::reg::LuaReg> {
                 let id = s.hooks.context_limit.register(lua, hook.into_inner(), "")?;
@@ -321,11 +326,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     }
     {
         let s = shared.clone();
-        type ReplyCb = LuaCallback<(Option<Vec<LuaAskMessage>>,), ()>;
+        type ReplyCb = LuaCallback<(mlua::Value,), ()>;
         type HookCb = LuaCallback<(LuaPrepareRequest, ReplyCb), ()>;
         m.fn_(
             "on_prepare_request",
-            "Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once - either with a replacement messages array (engine swaps it in before sampling) or `nil` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.",
+            "Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once - with `{ action = \"replace\", messages = messages }` (engine swaps it in before sampling), `{ action = \"abort\", message = message }` (engine aborts with that terminal error), or `nil` / `{ action = \"continue\" }` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.",
             &["hook"],
             move |lua, hook: HookCb| -> LuaResult<smelt_core::lua::reg::LuaReg> {
                 let id = s.hooks.prepare_request.register(lua, hook.into_inner(), "")?;
@@ -432,6 +437,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .unwrap_or(protocol::ReasoningEffort::Off);
                 let model_ref = spec.model;
                 let question = spec.question;
+                let visible_retries = spec.visible_retries.unwrap_or(false);
                 crate::lua::with_app(|app| {
                     if let Some(q) = question {
                         messages.push(protocol::Message::user(protocol::Content::text(&q)));
@@ -447,6 +453,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         reasoning_effort,
                         tools: Vec::new(),
                         session_id,
+                        visible_retries,
                     })
                 });
                 Ok(id)
@@ -488,6 +495,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     .unwrap_or(protocol::ReasoningEffort::Off);
                 let model_ref = spec.model;
                 let question = spec.question;
+                let visible_retries = spec.visible_retries.unwrap_or(false);
                 crate::lua::with_app(|app| {
                     let system = app.assemble_system_prompt();
                     if messages.is_empty() {
@@ -507,6 +515,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         reasoning_effort,
                         tools: app.lua.tool_defs(app.core.config.mode.clone()),
                         session_id,
+                        visible_retries,
                     })
                 });
                 Ok(id)
