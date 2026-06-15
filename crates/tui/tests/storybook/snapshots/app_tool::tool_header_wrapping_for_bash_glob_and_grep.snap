@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash cargo test -p smelt-tui content::display_renderers::la
+       yout_ir::tests::runs_continuation_indent_aligns_soft_w
+       rapped_rows
+  test result: ok
+
+* glob crates/tui/tests/storybook/snapshots/app_tool::*.snap
+       in /Users/leo/dev/rust/smelt/.worktrees/transcript-lay
+       out-rewrite
+  2 files
+
+* grep wrap_fragments_with_widths|continuation_indent|ToolSum
+       maryResolver in crates/tui/src crates/buffer/src
+  3 matches
+
+─ ✿ working… ─────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────
+ ○ normal                                             1:1 100%

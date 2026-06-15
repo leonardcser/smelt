@@ -1139,6 +1139,14 @@ impl LuaRuntime {
         forward
     }
 
+    pub fn has_tool(&self, tool_name: &str) -> bool {
+        self.shared
+            .tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(tool_name)
+    }
+
     pub fn tool_defs(&self, _mode: protocol::AgentMode) -> Vec<protocol::ToolDef> {
         let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
         let mut names: Vec<String> = handlers.keys().cloned().collect();

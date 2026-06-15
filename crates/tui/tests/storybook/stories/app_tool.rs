@@ -240,6 +240,67 @@ app_story!(grep_tool_block_error, |ctx| {
     ctx.assert_snapshot();
 });
 
+// ── Wrapping regressions ───────────────────────────────────────────
+
+app_story!(tool_header_wrapping_for_bash_glob_and_grep, |ctx| {
+    ctx.set_viewport(62, 18);
+    ctx.tool_call(
+        "bash",
+        &[
+            (
+                "command",
+                json!("cargo test -p smelt-tui content::display_renderers::layout_ir::tests::runs_continuation_indent_aligns_soft_wrapped_rows"),
+            ),
+            (
+                "description",
+                json!("Run the focused transcript layout wrapping regression"),
+            ),
+        ],
+        "test result: ok",
+        Some(6100),
+    );
+    ctx.tool_call(
+        "glob",
+        &[
+            ("pattern", json!("crates/tui/tests/storybook/snapshots/app_tool::*.snap")),
+            ("path", json!("/Users/leo/dev/rust/smelt/.worktrees/transcript-layout-rewrite")),
+        ],
+        "crates/tui/tests/storybook/snapshots/app_tool::grep_tool_block.snap\ncrates/tui/tests/storybook/snapshots/app_tool::glob_tool_block.snap",
+        Some(34),
+    );
+    ctx.tool_call(
+        "grep",
+        &[
+            ("pattern", json!("wrap_fragments_with_widths|continuation_indent|ToolSummaryResolver")),
+            ("path", json!("crates/tui/src crates/buffer/src")),
+            ("output_mode", json!("files_with_matches")),
+        ],
+        "crates/buffer/src/inline_line.rs\ncrates/tui/src/app/history.rs\ncrates/tui/src/content/display_renderers/layout_ir.rs",
+        Some(89),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(mcp_tool_json_args_wrap_in_header, |ctx| {
+    ctx.set_viewport(82, 10);
+    ctx.tool_call(
+        "nvim_lsp_read_lints",
+        &[
+            (
+                "files",
+                json!(["/Users/leo/dev/rust/smelt/.worktrees/transcript-layout-rewrite/PLAN-transcript-layout-rewrite.md"]),
+            ),
+            (
+                "workspace",
+                json!("/Users/leo/dev/rust/smelt/.worktrees/transcript-layout-rewrite"),
+            ),
+        ],
+        "[]",
+        Some(6000),
+    );
+    ctx.assert_snapshot();
+});
+
 // ── notebook_edit ─────────────────────────────────────────────────
 
 app_story!(notebook_edit_tool_block, |ctx| {

@@ -683,7 +683,7 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
             let key = crossterm::event::KeyEvent::new(*code, *mods);
             match crate::line_input::command_for_key(key) {
                 Some(command) => apply_edit(ctx, &placeholder_for_fallback, command),
-                None => CallbackResult::Consumed,
+                None => CallbackResult::Pass,
             }
         }
         Payload::Paste { content } => apply_edit(

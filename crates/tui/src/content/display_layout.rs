@@ -787,6 +787,7 @@ mod tests {
                     ..Default::default()
                 }]]),
                 hl_group: Some("SmeltToolPending".into()),
+                continuation_indent: 0,
             })),
             BlockLayout::Leaf(IrLeaf::Text(TextSpec {
                 content: "output line that wraps at narrow widths".into(),

@@ -45,6 +45,8 @@ pub struct TextSpec {
 pub struct RunsSpec {
     pub lines: protocol::StyledLines,
     pub hl_group: Option<String>,
+    #[serde(default)]
+    pub continuation_indent: u16,
 }
 
 /// One preformatted styled line. Unlike [`RunsSpec`], this leaf does not wrap.
@@ -174,10 +176,14 @@ pub struct GutterSpec {
     pub styled: bool,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Constraint {
     /// Fixed width in display columns.
     Length(u16),
+    /// Shrink to the child's renderer-defined intrinsic width, capped by the parent.
+    /// Intrinsic width means the unwrapped content width when it is cheap to measure;
+    /// renderers that are inherently width-dependent may use a conservative fallback.
+    Fit,
     /// Fill the remaining width proportionally to the weight.
     Fill(u16),
 }
@@ -248,17 +254,36 @@ impl<L> BlockLayout<L> {
 
 /// Allocate column widths from raw constraints (the leaf type is irrelevant). Returns
 /// one width per constraint, summing to at most `total`. `Length` is consumed first,
-/// remaining width is split among `Fill` columns by weight; rounding excess lands on
-/// the last fill column.
+/// then `Fit` takes the provided intrinsic width, and remaining width is split among
+/// `Fill` columns by weight; rounding excess lands on the last fill column.
 pub fn solve_hbox_widths_from_constraints(constraints: &[Constraint], total: u16) -> Vec<u16> {
+    let fit_widths = vec![0u16; constraints.len()];
+    solve_hbox_widths_with_fit(constraints, &fit_widths, total)
+}
+
+pub fn solve_hbox_widths_with_fit(
+    constraints: &[Constraint],
+    fit_widths: &[u16],
+    total: u16,
+) -> Vec<u16> {
     let mut widths = vec![0u16; constraints.len()];
     let mut used: u16 = 0;
     let mut total_fill: u32 = 0;
     let mut last_fill: Option<usize> = None;
+
+    for (i, c) in constraints.iter().enumerate() {
+        if let Constraint::Length(n) = *c {
+            let take = n.min(total.saturating_sub(used));
+            widths[i] = take;
+            used = used.saturating_add(take);
+        }
+    }
+
     for (i, c) in constraints.iter().enumerate() {
         match *c {
-            Constraint::Length(n) => {
-                let take = n.min(total.saturating_sub(used));
+            Constraint::Fit => {
+                let want = fit_widths.get(i).copied().unwrap_or(0);
+                let take = want.min(total.saturating_sub(used));
                 widths[i] = take;
                 used = used.saturating_add(take);
             }
@@ -266,8 +291,10 @@ pub fn solve_hbox_widths_from_constraints(constraints: &[Constraint], total: u16
                 total_fill += w as u32;
                 last_fill = Some(i);
             }
+            Constraint::Length(_) => {}
         }
     }
+
     let remaining = total.saturating_sub(used) as u32;
     if total_fill > 0 && remaining > 0 {
         let mut allocated: u32 = 0;
@@ -372,6 +399,26 @@ mod tests {
         assert_eq!(widths, vec![15]);
     }
 
+    #[test]
+    fn solve_hbox_widths_applies_fit_before_fill() {
+        let constraints = vec![Constraint::Fit, Constraint::Length(8), Constraint::Fill(1)];
+        let widths = solve_hbox_widths_with_fit(&constraints, &[12, 0, 0], 40);
+        assert_eq!(widths, vec![12, 8, 20]);
+    }
+
+    #[test]
+    fn solve_hbox_widths_clamps_fit_to_remaining_total() {
+        let constraints = vec![Constraint::Length(8), Constraint::Fit];
+        let widths = solve_hbox_widths_with_fit(&constraints, &[0, 20], 15);
+        assert_eq!(widths, vec![8, 7]);
+    }
+
+    #[test]
+    fn solve_hbox_widths_large_fit_starves_fill_by_design() {
+        let constraints = vec![Constraint::Fit, Constraint::Fill(1)];
+        let widths = solve_hbox_widths_with_fit(&constraints, &[20, 0], 10);
+        assert_eq!(widths, vec![10, 0]);
+    }
     #[test]
     fn solve_hbox_widths_distributes_fills_by_weight() {
         let items = vec![item(Constraint::Fill(1)), item(Constraint::Fill(3))];

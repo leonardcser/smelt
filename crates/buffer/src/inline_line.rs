@@ -97,7 +97,15 @@ impl<T: Clone> InlineLine<T> {
     }
 
     pub fn wrap_fragments(&self, max_cells: usize) -> Vec<Vec<WrappedRun<T>>> {
-        if max_cells == 0 {
+        self.wrap_fragments_with_widths(max_cells, max_cells)
+    }
+
+    pub fn wrap_fragments_with_widths(
+        &self,
+        first_cells: usize,
+        continuation_cells: usize,
+    ) -> Vec<Vec<WrappedRun<T>>> {
+        if first_cells == 0 || continuation_cells == 0 {
             let row: Vec<WrappedRun<T>> = self
                 .runs
                 .iter()
@@ -113,30 +121,21 @@ impl<T: Clone> InlineLine<T> {
             return vec![row];
         }
 
-        let mut rows: Vec<Vec<WrappedRun<T>>> = Vec::new();
-        let mut cur: Vec<WrappedRun<T>> = Vec::new();
-        let mut col = 0usize;
+        let mut state = WrapState::new(first_cells, continuation_cells);
         for (run_index, run) in self.runs.iter().enumerate() {
             match run.break_policy {
-                BreakPolicy::Normal => append_normal_fragments(
-                    run_index, run, max_cells, false, &mut rows, &mut cur, &mut col,
-                ),
-                BreakPolicy::BreakOnSpaces => append_normal_fragments(
-                    run_index, run, max_cells, true, &mut rows, &mut cur, &mut col,
-                ),
-                BreakPolicy::Unbreakable => append_unbreakable_fragment(
-                    run_index, run, max_cells, &mut rows, &mut cur, &mut col,
-                ),
-                BreakPolicy::PreserveSpaces => append_preserve_space_fragments(
-                    run_index, run, max_cells, &mut rows, &mut cur, &mut col,
-                ),
+                BreakPolicy::Normal => append_normal_fragments(run_index, run, false, &mut state),
+                BreakPolicy::BreakOnSpaces => {
+                    append_normal_fragments(run_index, run, true, &mut state)
+                }
+                BreakPolicy::Unbreakable => append_unbreakable_fragment(run_index, run, &mut state),
+                BreakPolicy::PreserveSpaces => {
+                    append_preserve_space_fragments(run_index, run, &mut state)
+                }
             }
         }
 
-        if !cur.is_empty() || rows.is_empty() {
-            rows.push(cur);
-        }
-        rows
+        state.finish()
     }
 }
 
@@ -167,14 +166,69 @@ impl<T: Clone + PartialEq> InlineLine<T> {
     }
 }
 
+struct WrapState<T> {
+    rows: Vec<Vec<WrappedRun<T>>>,
+    cur: Vec<WrappedRun<T>>,
+    col: usize,
+    first_cells: usize,
+    continuation_cells: usize,
+}
+
+impl<T: Clone> WrapState<T> {
+    fn new(first_cells: usize, continuation_cells: usize) -> Self {
+        Self {
+            rows: Vec::new(),
+            cur: Vec::new(),
+            col: 0,
+            first_cells,
+            continuation_cells,
+        }
+    }
+
+    fn max_cells(&self) -> usize {
+        if self.rows.is_empty() {
+            self.first_cells
+        } else {
+            self.continuation_cells
+        }
+    }
+
+    fn push_row(&mut self) {
+        self.rows.push(std::mem::take(&mut self.cur));
+        self.col = 0;
+    }
+
+    fn append_fragment(&mut self, run_index: usize, range: Range<usize>, run: &InlineRun<T>) {
+        if range.is_empty() {
+            return;
+        }
+        if let Some(last) = self.cur.last_mut() {
+            if last.run_index == run_index && last.range.end == range.start {
+                last.range.end = range.end;
+                return;
+            }
+        }
+        self.cur.push(WrappedRun {
+            run_index,
+            range,
+            meta: run.meta.clone(),
+            break_policy: run.break_policy,
+        });
+    }
+
+    fn finish(mut self) -> Vec<Vec<WrappedRun<T>>> {
+        if !self.cur.is_empty() || self.rows.is_empty() {
+            self.rows.push(self.cur);
+        }
+        self.rows
+    }
+}
+
 fn append_normal_fragments<T: Clone>(
     run_index: usize,
     run: &InlineRun<T>,
-    max_cells: usize,
     break_on_spaces: bool,
-    rows: &mut Vec<Vec<WrappedRun<T>>>,
-    cur: &mut Vec<WrappedRun<T>>,
-    col: &mut usize,
+    state: &mut WrapState<T>,
 ) {
     let mut offset = 0usize;
     let text = run.text.as_str();
@@ -187,38 +241,29 @@ fn append_normal_fragments<T: Clone>(
         let space_end = word_end + usize::from(has_space);
         let segment_width = text_width(&text[word_start..space_end]);
 
-        if *col + segment_width > max_cells && *col > 0 {
-            rows.push(std::mem::take(cur));
-            *col = 0;
+        let word_width = text_width(&text[word_start..word_end]);
+        let word_overflows_current_row =
+            state.col + segment_width > state.max_cells() && state.col > 0;
+        if word_overflows_current_row && word_width <= state.max_cells() {
+            state.push_row();
         }
 
-        let word_width = text_width(&text[word_start..word_end]);
-        if word_width > max_cells {
-            append_char_fragments(
-                run_index,
-                run,
-                word_start..word_end,
-                max_cells,
-                rows,
-                cur,
-                col,
-            );
+        if word_width > state.max_cells() {
+            append_char_fragments(run_index, run, word_start..word_end, state);
         } else {
-            append_fragment(cur, run_index, word_start..word_end, run);
-            *col += word_width;
+            state.append_fragment(run_index, word_start..word_end, run);
+            state.col += word_width;
         }
 
         if has_space {
-            if *col + 1 > max_cells && *col > 0 && break_on_spaces {
-                rows.push(std::mem::take(cur));
-                *col = 0;
+            if state.col + 1 > state.max_cells() && state.col > 0 && break_on_spaces {
+                state.push_row();
             } else {
-                if *col + 1 > max_cells && *col > 0 {
-                    rows.push(std::mem::take(cur));
-                    *col = 0;
+                if state.col + 1 > state.max_cells() && state.col > 0 {
+                    state.push_row();
                 }
-                append_fragment(cur, run_index, word_end..space_end, run);
-                *col += 1;
+                state.append_fragment(run_index, word_end..space_end, run);
+                state.col += 1;
             }
         }
         offset = space_end;
@@ -228,75 +273,41 @@ fn append_normal_fragments<T: Clone>(
 fn append_unbreakable_fragment<T: Clone>(
     run_index: usize,
     run: &InlineRun<T>,
-    max_cells: usize,
-    rows: &mut Vec<Vec<WrappedRun<T>>>,
-    cur: &mut Vec<WrappedRun<T>>,
-    col: &mut usize,
+    state: &mut WrapState<T>,
 ) {
     let width = text_width(&run.text);
-    if *col + width > max_cells && *col > 0 {
-        rows.push(std::mem::take(cur));
-        *col = 0;
+    if state.col + width > state.max_cells() && state.col > 0 {
+        state.push_row();
     }
-    append_fragment(cur, run_index, 0..run.text.len(), run);
-    *col += width;
+    state.append_fragment(run_index, 0..run.text.len(), run);
+    state.col += width;
 }
 
 fn append_preserve_space_fragments<T: Clone>(
     run_index: usize,
     run: &InlineRun<T>,
-    max_cells: usize,
-    rows: &mut Vec<Vec<WrappedRun<T>>>,
-    cur: &mut Vec<WrappedRun<T>>,
-    col: &mut usize,
+    state: &mut WrapState<T>,
 ) {
-    append_char_fragments(run_index, run, 0..run.text.len(), max_cells, rows, cur, col);
+    append_char_fragments(run_index, run, 0..run.text.len(), state);
 }
 
 fn append_char_fragments<T: Clone>(
     run_index: usize,
     run: &InlineRun<T>,
     range: Range<usize>,
-    max_cells: usize,
-    rows: &mut Vec<Vec<WrappedRun<T>>>,
-    cur: &mut Vec<WrappedRun<T>>,
-    col: &mut usize,
+    state: &mut WrapState<T>,
 ) {
     let mut idx = range.start;
     for ch in run.text[range].chars() {
         let next = idx + ch.len_utf8();
         let cw = char_width(ch);
-        if *col + cw > max_cells && *col > 0 {
-            rows.push(std::mem::take(cur));
-            *col = 0;
+        if state.col + cw > state.max_cells() && state.col > 0 {
+            state.push_row();
         }
-        append_fragment(cur, run_index, idx..next, run);
-        *col += cw;
+        state.append_fragment(run_index, idx..next, run);
+        state.col += cw;
         idx = next;
     }
-}
-
-fn append_fragment<T: Clone>(
-    row: &mut Vec<WrappedRun<T>>,
-    run_index: usize,
-    range: Range<usize>,
-    run: &InlineRun<T>,
-) {
-    if range.is_empty() {
-        return;
-    }
-    if let Some(last) = row.last_mut() {
-        if last.run_index == run_index && last.range.end == range.start {
-            last.range.end = range.end;
-            return;
-        }
-    }
-    row.push(WrappedRun {
-        run_index,
-        range,
-        meta: run.meta.clone(),
-        break_policy: run.break_policy,
-    });
 }
 
 fn append_text<T: Clone + PartialEq>(row: &mut Vec<InlineRun<T>>, text: &str, run: &InlineRun<T>) {
@@ -345,6 +356,19 @@ mod tests {
         assert_eq!(
             texts(line.wrap_ranges(3)),
             vec![vec![String::from("abc")], vec![String::from("def")]]
+        );
+    }
+
+    #[test]
+    fn oversized_word_uses_remaining_row_width() {
+        let line = InlineLine::plain("tool {\"files\":[\"long/path.rs\"]}", ());
+        assert_eq!(
+            texts(line.wrap_ranges(14)),
+            vec![
+                vec![String::from("tool {\"files\":")],
+                vec![String::from("[\"long/path.rs")],
+                vec![String::from("\"]}")]
+            ]
         );
     }
 
@@ -403,6 +427,22 @@ mod tests {
         let ranges = line.wrap_plain_ranges(3);
         let chunks: Vec<&str> = ranges.iter().map(|(s, e)| &"abc def"[*s..*e]).collect();
         assert_eq!(chunks, vec!["abc", "def"]);
+    }
+
+    #[test]
+    fn fragments_support_narrower_continuation_rows() {
+        let line = InlineLine::new(vec![
+            InlineRun::new("abc ", 1, BreakPolicy::BreakOnSpaces),
+            InlineRun::new("def ghi", 2, BreakPolicy::BreakOnSpaces),
+        ]);
+        let rows = line.wrap_fragments_with_widths(8, 3);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(line.fragment_text(&rows[0][0]), "abc ");
+        assert_eq!(line.fragment_text(&rows[0][1]), "def ");
+        assert_eq!(line.fragment_text(&rows[1][0]), "ghi");
+        assert_eq!(rows[0][0].meta, 1);
+        assert_eq!(rows[0][1].meta, 2);
+        assert_eq!(rows[1][0].meta, 2);
     }
 
     #[test]

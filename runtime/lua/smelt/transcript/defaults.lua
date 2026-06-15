@@ -63,6 +63,8 @@ function smelt.transcript.defaults.render_tool(block, ctx)
 end
 
 local tool_header_lines
+local tool_header_indent
+local tool_header_prefix
 
 --- Render the default one-line tool header.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table
@@ -72,13 +74,14 @@ function smelt.transcript.defaults.render_tool_header(block, ctx, opts)
   local status = block.status or "pending"
   local hl = opts.hl or opts.hl_group or block.status_hl or status_hl[status]
   local lines = tool_header_lines(block, status, hl)
-  local header = layout.runs(lines)
+  local header = layout.runs(lines, { continuation_indent = tool_header_indent(block) })
   local show_elapsed = block.elapsed
     and status ~= "confirm"
     and (status == "pending" or (block.elapsed_text and block.elapsed_text ~= ""))
   if show_elapsed then
     header = layout.hbox({
-      header,
+      { header, fit = true },
+      { layout.line({ { text = "  ", selectable = false, dim = true } }), cols = 2 },
       { layout.elapsed(block.elapsed, { dim = true, selectable = false }), cols = 8 },
     })
   end
@@ -147,6 +150,29 @@ local function summary_lines(summary)
   return out
 end
 
+local function display_width(s)
+  if smelt.text and smelt.text.width then
+    local ok, width = pcall(smelt.text.width, s)
+    if ok and type(width) == "number" then return width end
+  end
+  return #s
+end
+
+function tool_header_prefix(block, hl, tail, has_summary)
+  local tool_name = block.name or "tool"
+  local spans = {
+    { text = "*", hl = hl },
+    { text = " " .. tool_name, dim = true },
+  }
+  if tail then spans[#spans + 1] = { text = " ", selectable = has_summary } end
+  return spans, display_width("* " .. tool_name .. " ")
+end
+
+function tool_header_indent(block)
+  local _, width = tool_header_prefix(block, nil, true, false)
+  return width
+end
+
 function tool_header_lines(block, status, hl)
   local lines = summary_lines(block.summary)
   local suffix = {}
@@ -172,13 +198,16 @@ function tool_header_lines(block, status, hl)
   local first = lines[1]
   local has_summary = has_text(first)
   local tail = has_summary or #suffix > 0
-  local prefix = {
-    { text = "*", hl = hl },
-    { text = " " .. (block.name or "tool"), dim = true },
-  }
-  if tail then prefix[#prefix + 1] = { text = " ", selectable = has_summary } end
+  local prefix, prefix_width = tool_header_prefix(block, hl, tail, has_summary)
   for i = #prefix, 1, -1 do
     table.insert(first, 1, prefix[i])
+  end
+
+  if has_summary and #lines > 1 then
+    local indent = string.rep(" ", prefix_width)
+    for i = 2, #lines do
+      table.insert(lines[i], 1, { text = indent, selectable = false, dim = true })
+    end
   end
 
   if #suffix > 0 then

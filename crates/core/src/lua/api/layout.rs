@@ -50,9 +50,12 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
                 let layout_ud: mlua::AnyUserData = t.get(1)?;
                 let layout = layout_ud.borrow::<LuaBlockLayout>()?.0.clone();
                 let cols: Option<u16> = t.get("cols").ok();
+                let fit: bool = t.get("fit").unwrap_or(false);
                 let weight: Option<u16> = t.get("weight").ok();
                 let constraint = if let Some(n) = cols {
                     Constraint::Length(n)
+                } else if fit {
+                    Constraint::Fit
                 } else {
                     Constraint::Fill(weight.unwrap_or(1))
                 };
@@ -60,7 +63,7 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
             }
             other => {
                 return Err(mlua::Error::external(format!(
-                    "smelt.layout.hbox: expected layout userdata or {{ layout, weight=N | cols=N }} table, got {}",
+                    "smelt.layout.hbox: expected layout userdata or {{ layout, weight=N | cols=N | fit=true }} table, got {}",
                     other.type_name()
                 )));
             }
@@ -198,16 +201,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "runs",
-        "Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`). `opts.hl_group` / `opts.hl` supplies a default theme group for spans without `hl`.",
+        "Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`). `opts.hl_group` / `opts.hl` supplies a default theme group for spans without `hl`; `opts.continuation_indent` indents soft-wrapped continuation rows by display columns.",
         &["lines", "opts"],
         |_, (lines, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
             let hl_group = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten())
                 .or_else(|| opts.as_ref().and_then(|t| t.get::<Option<String>>("hl").ok().flatten()));
+            let continuation_indent = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<u16>>("continuation_indent").ok().flatten())
+                .unwrap_or(0);
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Runs(RunsSpec {
                 lines: crate::lua::styled_lines_from_lua(lines, "smelt.layout.runs")?,
                 hl_group,
+                continuation_indent,
             }))))
         },
     )?;
@@ -439,7 +447,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "hbox",
-        "Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` for a fixed-column or weighted slot.",
+        "Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` / `{ layout, fit=true }` for a fixed, weighted, or renderer-defined intrinsic-width slot. `fit=true` uses unwrapped content width when available, capped by the parent; fixed and fit slots are allocated before fill slots.",
         &["items"],
         |_, items: mlua::Table| -> LuaResult<LuaBlockLayout> {
             Ok(LuaBlockLayout(BlockLayout::Hbox(collect_hbox_items(

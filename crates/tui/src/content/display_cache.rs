@@ -332,6 +332,7 @@ mod tests {
                         ..Default::default()
                     }]]),
                     hl_group: None,
+                    continuation_indent: 0,
                 })),
             }],
         };

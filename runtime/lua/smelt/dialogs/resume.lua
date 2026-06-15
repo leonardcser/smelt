@@ -364,6 +364,19 @@ smelt.cmd.register("resume", function()
       refilter()
     end
 
+    input_leaf:key("up",     nav(-1))
+    input_leaf:key("down",   nav(1))
+    input_leaf:key("ctrl-k", nav(-1))
+    input_leaf:key("ctrl-j", nav(1))
+    input_leaf:key("ctrl-p", nav(-1))
+    input_leaf:key("ctrl-n", nav(1))
+    input_leaf:key("pgup",   nav(-10))
+    input_leaf:key("pgdn",   nav(10))
+    input_leaf:key("ctrl-u", nav(-5))
+    input_leaf:key("ctrl-d", nav(5))
+    input_leaf:key("ctrl-w", toggle_workspace)
+    input_leaf:key("alt-d",  delete_selected)
+
     local list_layout = smelt.ui.layout.leaf(list_leaf, {
       border = { all = "Comment" },
       title = " sessions ",

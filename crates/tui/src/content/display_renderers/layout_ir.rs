@@ -3,8 +3,8 @@ use crate::content::source_view::{render_source_view, SourceView, SourceViewTarg
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{
-    solve_hbox_widths, BlockLayout, CodeSpec, ElapsedSpec, GutterSpec, IrLeaf, LayoutIr, LineSpec,
-    MarkdownSpec, PanelSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
+    solve_hbox_widths_with_fit, BlockLayout, CodeSpec, ElapsedSpec, GutterSpec, IrLeaf, LayoutIr,
+    LineSpec, MarkdownSpec, PanelSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
 };
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
@@ -137,7 +137,7 @@ fn measure_layout_ir_full_with_gutter(layout: &LayoutIr, width: u16, gutter_cell
             .map(|child| measure_layout_ir_full_with_gutter(child, width, gutter_cells))
             .sum(),
         BlockLayout::Hbox(items) => {
-            let widths = solve_hbox_widths(items, width);
+            let widths = solve_ir_hbox_widths(items, width);
             items
                 .iter()
                 .zip(widths)
@@ -296,7 +296,11 @@ fn measure_text_spec(spec: &TextSpec, width: u16) -> u16 {
         .sum()
 }
 
-fn wrap_styled_runs(spans: &[protocol::StyledSpan], width: u16) -> Vec<Vec<WrappedRun<usize>>> {
+fn wrap_styled_runs(
+    spans: &[protocol::StyledSpan],
+    width: u16,
+    continuation_indent: u16,
+) -> Vec<Vec<WrappedRun<usize>>> {
     if spans.is_empty() {
         return vec![Vec::new()];
     }
@@ -307,7 +311,16 @@ fn wrap_styled_runs(spans: &[protocol::StyledSpan], width: u16) -> Vec<Vec<Wrapp
             .map(|(idx, span)| InlineRun::new(span.text.clone(), idx, BreakPolicy::BreakOnSpaces))
             .collect(),
     );
-    line.wrap_fragments(width.max(1) as usize)
+    let width = width.max(1) as usize;
+    let indent = continuation_indent as usize;
+    let continuation_width = width
+        .saturating_sub(indent.min(width.saturating_sub(1)))
+        .max(1);
+    line.wrap_fragments_with_widths(width, continuation_width)
+}
+
+fn runs_continuation_indent(spec: &RunsSpec, width: u16) -> u16 {
+    spec.continuation_indent.min(width.saturating_sub(1))
 }
 
 fn render_runs_spec(
@@ -319,10 +332,11 @@ fn render_runs_spec(
     gutter: Option<&GutterSpec>,
 ) -> u16 {
     let default_hl = spec.hl_group.as_deref();
+    let continuation_indent = runs_continuation_indent(spec, width);
     let mut seen = 0u16;
     let mut rows = 0u16;
     'outer: for spans in &spec.lines.0 {
-        let wrapped = wrap_styled_runs(spans, width);
+        let wrapped = wrap_styled_runs(spans, width, continuation_indent);
         if wrapped.len() > 1 {
             out.mark_wrapped();
         }
@@ -339,6 +353,15 @@ fn render_runs_spec(
             }
             if seg_idx > 0 {
                 out.mark_soft_wrap_continuation();
+                if continuation_indent > 0 {
+                    out.print_with_meta(
+                        &" ".repeat(continuation_indent as usize),
+                        SpanMeta {
+                            selectable: false,
+                            copy_as: None,
+                        },
+                    );
+                }
             }
             for fragment in row_fragments {
                 let Some(span) = spans.get(fragment.run_index) else {
@@ -355,10 +378,11 @@ fn render_runs_spec(
 }
 
 fn measure_runs_spec(spec: &RunsSpec, width: u16) -> u16 {
+    let continuation_indent = runs_continuation_indent(spec, width);
     spec.lines
         .0
         .iter()
-        .map(|spans| wrap_styled_runs(spans, width).len() as u16)
+        .map(|spans| wrap_styled_runs(spans, width, continuation_indent).len() as u16)
         .sum()
 }
 
@@ -913,6 +937,87 @@ fn render_cap_marker(
     out.newline();
 }
 
+fn solve_ir_hbox_widths(
+    items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
+    total_width: u16,
+) -> Vec<u16> {
+    let constraints: Vec<_> = items.iter().map(|item| item.constraint).collect();
+    let fit_widths: Vec<_> = items
+        .iter()
+        .map(|item| intrinsic_layout_width(&item.layout, total_width))
+        .collect();
+    solve_hbox_widths_with_fit(&constraints, &fit_widths, total_width)
+}
+
+// `Constraint::Fit` uses renderer-defined intrinsic widths. Most leaves can
+// report their unwrapped content width; width-dependent leaves fall back to a
+// safe cap so a fit column never asks for more than the parent can provide.
+fn intrinsic_layout_width(layout: &LayoutIr, total_width: u16) -> u16 {
+    match layout {
+        BlockLayout::Empty => 0,
+        BlockLayout::Leaf(leaf) => intrinsic_leaf_width(leaf, total_width),
+        BlockLayout::Vbox(items) => items
+            .iter()
+            .map(|child| intrinsic_layout_width(child, total_width))
+            .max()
+            .unwrap_or(0),
+        BlockLayout::Hbox(items) => items
+            .iter()
+            .map(|item| intrinsic_layout_width(&item.layout, total_width))
+            .fold(0u16, u16::saturating_add),
+        BlockLayout::Gutter { child, spec } => {
+            display_width_u16(&spec.text).saturating_add(intrinsic_layout_width(child, total_width))
+        }
+        BlockLayout::Panel { child, spec } => intrinsic_layout_width(child, total_width)
+            .saturating_add(spec.padding.saturating_mul(2)),
+        BlockLayout::Style { child, .. } | BlockLayout::Cap { child, .. } => {
+            intrinsic_layout_width(child, total_width)
+        }
+    }
+}
+
+fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
+    match leaf {
+        IrLeaf::Text(spec) => spec
+            .content
+            .lines()
+            .map(display_width_u16)
+            .max()
+            .unwrap_or(0),
+        IrLeaf::Runs(spec) => spec
+            .lines
+            .0
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| display_width_u16(&span.text))
+                    .fold(0u16, u16::saturating_add)
+            })
+            .max()
+            .unwrap_or(0),
+        IrLeaf::Line(spec) => spec
+            .spans
+            .iter()
+            .map(|span| display_width_u16(&span.text))
+            .fold(0u16, u16::saturating_add),
+        IrLeaf::Markdown(spec) => spec
+            .content
+            .lines()
+            .map(display_width_u16)
+            .max()
+            .unwrap_or(0),
+        IrLeaf::Code(spec) => spec
+            .content
+            .lines()
+            .map(display_width_u16)
+            .max()
+            .unwrap_or(0),
+        IrLeaf::Elapsed(_) => 8,
+        IrLeaf::Separator(spec) => display_width_u16(&spec.label),
+        IrLeaf::SourceView(_) => total_width,
+    }
+}
+
 fn render_ir_hbox(
     out: &mut LineBuilder,
     items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
@@ -922,7 +1027,7 @@ fn render_ir_hbox(
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
 ) -> u16 {
-    let widths = solve_hbox_widths(items, total_width);
+    let widths = solve_ir_hbox_widths(items, total_width);
     let total_rows = items
         .iter()
         .zip(widths.iter().copied())
@@ -1087,4 +1192,53 @@ fn emit_clipped(
         out.print(&acc);
     }
     acc_w
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
+    use smelt_core::content::block_layout::LayoutLeaf;
+
+    fn render_lines(layout: &LayoutIr, width: u16) -> Vec<String> {
+        let theme = Theme::default();
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        {
+            let mut out = LineBuilder::new(&mut buf, &theme, width);
+            render_layout_ir_into(&mut out, layout, width);
+            out.finish();
+        }
+        (0..buf.line_count())
+            .filter_map(|row| buf.get_line(row).map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn runs_continuation_indent_aligns_soft_wrapped_rows() {
+        let layout = BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
+            lines: protocol::StyledLines(vec![vec![
+                protocol::StyledSpan {
+                    text: "* grep ".into(),
+                    selectable: false,
+                    ..Default::default()
+                },
+                protocol::StyledSpan {
+                    text: "alpha beta gamma delta epsilon".into(),
+                    ..Default::default()
+                },
+            ]]),
+            hl_group: None,
+            continuation_indent: 7,
+        }));
+
+        assert_eq!(
+            render_lines(&layout, 20),
+            vec![
+                "* grep alpha beta ",
+                "       gamma delta ",
+                "       epsilon"
+            ]
+        );
+        assert_eq!(measure_layout_ir(&layout, 20), 3);
+    }
 }

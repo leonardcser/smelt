@@ -7,10 +7,33 @@ use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::HashMap;
 use std::time::Duration;
 
+pub(crate) struct ToolSummaryResolver<'a> {
+    lua: &'a crate::lua::LuaRuntime,
+}
+
+impl<'a> ToolSummaryResolver<'a> {
+    pub(crate) fn new(lua: &'a crate::lua::LuaRuntime) -> Self {
+        Self { lua }
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        name: &str,
+        args: &HashMap<String, serde_json::Value>,
+    ) -> protocol::StyledLines {
+        let summary = self.lua.tool_summary(name, args);
+        if !summary.is_empty() || self.lua.has_tool(name) {
+            return summary;
+        }
+        smelt_core::mcp::args_summary(args)
+    }
+}
+
 pub(crate) fn build_transcript_from_session(
     lua: &crate::lua::LuaRuntime,
     session: &session::Session,
 ) -> Transcript {
+    let summary_resolver = ToolSummaryResolver::new(lua);
     let _perf = smelt_perf::perf::begin("transcript:build_from_session");
     smelt_perf::perf::record_value(
         "transcript:build_from_session:history_items",
@@ -47,7 +70,7 @@ pub(crate) fn build_transcript_from_session(
                 push_user_block(&mut transcript, lua, idx, content, display.as_deref())
             }
             HistoryItem::Assistant(turn) => {
-                push_assistant_blocks(&mut transcript, lua, idx, turn, &tool_elapsed)
+                push_assistant_blocks(&mut transcript, &summary_resolver, idx, turn, &tool_elapsed)
             }
             HistoryItem::Note(note) => push_note_block(&mut transcript, lua, idx, note),
             HistoryItem::System { .. } => {}
@@ -183,7 +206,7 @@ fn push_user_block(
 
 fn push_assistant_blocks(
     transcript: &mut Transcript,
-    lua: &crate::lua::LuaRuntime,
+    summary_resolver: &ToolSummaryResolver<'_>,
     history_index: usize,
     turn: &AssistantStep,
     tool_elapsed: &HashMap<String, u64>,
@@ -226,7 +249,7 @@ fn push_assistant_blocks(
         let elapsed_ms = inv
             .elapsed_ms
             .or_else(|| tool_elapsed.get(&inv.call_id).copied());
-        let summary = lua.tool_summary(&inv.name, &args);
+        let summary = summary_resolver.resolve(&inv.name, &args);
         transcript.push_tool_call_with_origin(
             Block::ToolCall {
                 call_id: inv.call_id.clone(),
@@ -242,6 +265,70 @@ fn push_assistant_blocks(
             },
             smelt_core::BlockOrigin::History(history_index),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_uses_json_args_summary_for_resumed_mcp_tool_calls() {
+        let lua = crate::lua::LuaRuntime::new();
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session.history.push(HistoryItem::Assistant(
+            protocol::AssistantStep::with_invocations(
+                None,
+                None,
+                Vec::new(),
+                vec![protocol::ToolInvocation {
+                    call_id: "call-1".into(),
+                    name: "mcp_server_echo".into(),
+                    arguments: r#"{"label":"ok"}"#.into(),
+                    result: protocol::ToolOutcome {
+                        content: "done".into(),
+                        is_error: false,
+                        metadata: None,
+                    },
+                    elapsed_ms: None,
+                }],
+            ),
+        ));
+
+        let transcript = build_transcript_from_session(&lua, &session);
+        let id = transcript.history.order[0];
+        match transcript.history.blocks.get(&id) {
+            Some(Block::ToolCall { summary, args, .. }) => {
+                assert_eq!(args.get("label"), Some(&serde_json::json!("ok")));
+                assert_eq!(summary.as_plain_text(), r#"{"label":"ok"}"#);
+                assert_eq!(summary.0[0][0].syntax.as_deref(), Some("json"));
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn registered_lua_tool_can_intentionally_use_empty_summary() {
+        let lua = crate::lua::LuaRuntime::new();
+        lua.lua
+            .load(
+                r#"
+                smelt.tools.register({
+                  name = "quiet_tool",
+                  description = "",
+                  parameters = { type = "object", properties = {} },
+                  summary = function(args) return "" end,
+                  execute = function(args) return "" end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let mut args = HashMap::new();
+        args.insert("label".into(), serde_json::json!("ok"));
+
+        let summary = ToolSummaryResolver::new(&lua).resolve("quiet_tool", &args);
+        assert!(summary.is_empty());
     }
 }
 

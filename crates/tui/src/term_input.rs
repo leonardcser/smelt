@@ -644,12 +644,14 @@ fn parse_csi_u(params: &[u8], consumed: usize) -> ParseResult {
         Err(_) => return invalid(consumed),
     };
     let mut parts = s.split(';');
-    let Some(codepoint) = parts
+    let Some(codepoint_value) = parts
         .next()
         .and_then(|s| s.split(':').next())
         .and_then(|s| s.parse::<u32>().ok())
-        .and_then(char::from_u32)
     else {
+        return invalid(consumed);
+    };
+    let Some(codepoint) = char::from_u32(codepoint_value) else {
         return invalid(consumed);
     };
     let mods = parts
@@ -657,12 +659,19 @@ fn parse_csi_u(params: &[u8], consumed: usize) -> ParseResult {
         .and_then(|s| s.split(':').next())
         .and_then(parse_modifier)
         .unwrap_or_else(KeyModifiers::empty);
-    let code = match codepoint as u32 {
-        9 => KeyCode::Tab,
-        10 | 13 => KeyCode::Enter,
-        27 => KeyCode::Esc,
-        127 => KeyCode::Backspace,
-        _ => KeyCode::Char(codepoint),
+    let code = if mods.contains(KeyModifiers::CONTROL)
+        && (1..=26).contains(&codepoint_value)
+        && !matches!(codepoint_value, 9 | 13)
+    {
+        KeyCode::Char((b'a' + codepoint_value as u8 - 1) as char)
+    } else {
+        match codepoint_value {
+            9 => KeyCode::Tab,
+            10 | 13 => KeyCode::Enter,
+            27 => KeyCode::Esc,
+            127 => KeyCode::Backspace,
+            _ => KeyCode::Char(codepoint),
+        }
     };
     event(key(code, mods), consumed)
 }
@@ -867,6 +876,27 @@ mod tests {
                 modifiers,
                 ..
             })] if modifiers.contains(KeyModifiers::SHIFT)
+        ));
+    }
+
+    #[test]
+    fn csi_u_ctrl_j_and_k_are_parsed_as_control_letters() {
+        let mut p = Parser::new();
+        assert!(matches!(
+            p.advance(b"\x1b[10;5u").as_slice(),
+            [Event::Key(KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers,
+                ..
+            })] if modifiers.contains(KeyModifiers::CONTROL)
+        ));
+        assert!(matches!(
+            p.advance(b"\x1b[11;5u").as_slice(),
+            [Event::Key(KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers,
+                ..
+            })] if modifiers.contains(KeyModifiers::CONTROL)
         ));
     }
 

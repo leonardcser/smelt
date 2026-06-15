@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* nvim_lsp_read_lints {"files":["/Users/leo/dev/rust/smelt/.worktrees/transcript-
+                      layout-rewrite/PLAN-transcript-layout-rewrite.md"],"workspa
+                      ce":"/Users/leo/dev/rust/smelt/.worktrees/transcript-layout
+                      -rewrite"}
+  []
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                 1:1 100%

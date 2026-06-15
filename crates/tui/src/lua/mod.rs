@@ -619,7 +619,9 @@ impl Default for LuaRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::block_layout::{BlockLayout, CapKeep, CapMarker, LuaLeaf, TextSpec};
+    use smelt_core::content::block_layout::{
+        BlockLayout, CapKeep, CapMarker, Constraint, LuaLeaf, TextSpec,
+    };
     use smelt_core::lua::api::lua_table_to_json;
     use smelt_core::lua::runtime::TranscriptRenderCtx;
     use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
@@ -993,8 +995,16 @@ mod tests {
         let BlockLayout::Hbox(items) = child.as_ref() else {
             panic!("expected dynamic elapsed hbox header, got {child:?}");
         };
-        let BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) = &items[1].layout else {
-            panic!("expected elapsed header leaf, got {:?}", items[1].layout);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].constraint, Constraint::Fit);
+        assert_eq!(items[1].constraint, Constraint::Length(2));
+        assert_eq!(items[2].constraint, Constraint::Length(8));
+        let BlockLayout::Leaf(LuaLeaf::Runs(spec)) = &items[0].layout else {
+            panic!("expected runs header leaf, got {:?}", items[0].layout);
+        };
+        assert!(spec.continuation_indent > 0);
+        let BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) = &items[2].layout else {
+            panic!("expected elapsed header leaf, got {:?}", items[2].layout);
         };
         assert_eq!(spec.call_id, call_id);
         assert!(!spec.selectable);
