@@ -868,14 +868,27 @@ impl TuiApp {
         &self,
         edit_buf: &crate::smelt_edit::Buffer,
         width: usize,
+        placeholder: Option<&str>,
     ) -> u16 {
         let usable = width.saturating_sub(2).min(u16::MAX as usize) as u16;
-        let lines = build_prompt_display_lines(
-            edit_buf.source(),
-            &edit_buf.attachment_ids,
-            &self.input.store.lock().unwrap(),
-        );
-        let layout = WrappedLayout::from_lines_with_cursor_padding(&lines, usable, true);
+        let lines = if edit_buf.source().is_empty() {
+            placeholder
+                .filter(|text| !text.is_empty())
+                .map(|text| vec![text.to_string()])
+                .unwrap_or_else(|| vec![String::new()])
+        } else {
+            build_prompt_display_lines(
+                edit_buf.source(),
+                &edit_buf.attachment_ids,
+                &self.input.store.lock().unwrap(),
+            )
+        };
+        let layout =
+            if edit_buf.source().is_empty() && placeholder.is_some_and(|text| !text.is_empty()) {
+                WrappedLayout::from_lines(&lines, usable, true)
+            } else {
+                WrappedLayout::from_lines_with_cursor_padding(&lines, usable, true)
+            };
         layout.visual_count().max(1) as u16
     }
 }

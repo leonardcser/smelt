@@ -138,11 +138,27 @@ pub struct TuiApp {
     pub(crate) context_window_tx: Option<tokio::sync::mpsc::UnboundedSender<ContextWindowUpdate>>,
     /// Monotonic request id for context-window side fetches.
     pub(crate) context_window_request_id: u64,
-    /// Per-window placeholder dispatch options. `text` lives on the
-    /// buffer (extmark) for the prompt; this side-table holds the
-    /// accept/dismiss chord policy plugins configure when calling
-    /// `Win:placeholder(text, opts)`.
+    /// Current prompt input viewport height in rows after applying auto-wrap,
+    /// manual resize, and terminal clamps. Updated during layout each frame.
+    pub(crate) prompt_input_rows: u16,
+    /// User-resized prompt input height. `None` means follow the auto-measured
+    /// wrapped source/ghost-text height.
+    pub(crate) prompt_input_rows_override: Option<u16>,
+    /// In-flight drag from non-selectable prompt top chrome.
+    pub(crate) prompt_resize_drag: Option<PromptResizeDrag>,
+    /// Prompt placeholder text. The prompt renders this as wrapped ghost text
+    /// inside the input buffer instead of one clipped virtual-text row.
+    pub(crate) prompt_placeholder: Option<String>,
+    /// Per-window placeholder dispatch options. Non-prompt placeholder text lives
+    /// on the buffer as a virtual-text extmark; prompt text lives in
+    /// `prompt_placeholder` so the prompt renderer can wrap it.
     pub placeholder_opts: HashMap<crate::smelt_edit::WinId, PlaceholderOpts>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PromptResizeDrag {
+    pub(crate) start_row: u16,
+    pub(crate) start_input_rows: u16,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -843,6 +859,10 @@ impl TuiApp {
             project_trust: Some(project_trust),
             app_focus: AppFocus::Prompt,
             last_prompt_text: String::new(),
+            prompt_input_rows: 1,
+            prompt_input_rows_override: None,
+            prompt_resize_drag: None,
+            prompt_placeholder: None,
             prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
             auto_reload: None,
             pending_lua_reload: false,
@@ -1170,9 +1190,11 @@ impl TuiApp {
         }
     }
 
-    /// Returns the current placeholder text on `win`, if any. Stored as an
-    /// extmark on the window's buffer in the well-known placeholder namespace.
+    /// Returns the current placeholder text on `win`, if any.
     pub(crate) fn placeholder_text(&mut self, win: crate::smelt_edit::WinId) -> Option<String> {
+        if win == crate::app::PROMPT_WIN {
+            return self.prompt_placeholder.clone();
+        }
         let buf = self.ui.win_buf_mut(win)?;
         crate::content::prompt_buf::placeholder_text(buf)
     }
@@ -1183,6 +1205,10 @@ impl TuiApp {
             self.clear_placeholder(win);
             return;
         }
+        if win == crate::app::PROMPT_WIN {
+            self.prompt_placeholder = Some(text);
+            return;
+        }
         let Some(buf) = self.ui.win_buf_mut(win) else {
             return;
         };
@@ -1191,6 +1217,9 @@ impl TuiApp {
 
     /// Clear the placeholder on `win` (text + opts). Idempotent.
     pub fn clear_placeholder(&mut self, win: crate::smelt_edit::WinId) {
+        if win == crate::app::PROMPT_WIN {
+            self.prompt_placeholder = None;
+        }
         if let Some(buf) = self.ui.win_buf_mut(win) {
             crate::content::prompt_buf::set_placeholder_extmark(buf, None);
         }

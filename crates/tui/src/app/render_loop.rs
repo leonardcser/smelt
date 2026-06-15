@@ -12,6 +12,10 @@ impl TuiApp {
         self.save_session_if_pending();
     }
 
+    pub(crate) fn max_prompt_input_rows_for(term_h: u16) -> u16 {
+        (term_h / 2).max(1)
+    }
+
     /// Render variant parameterised by the output sink. Production passes
     /// `std::io::stdout()`; the fuzz harness passes `std::io::sink()` so
     /// every code path under `content/*` and `compositor:*` runs without
@@ -44,11 +48,16 @@ impl TuiApp {
         // ── Layout ──
         let (prompt_rect, _viewport_rows) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
-            let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width);
+            let ghost = self.prompt_placeholder.as_deref();
+            let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width, ghost);
             // Cap the prompt block at half the screen so a very long
             // composing message keeps the transcript usable.
-            let max_input_rows = (term_h / 2).max(1);
-            let input_rows = wrapped_rows.min(max_input_rows);
+            let max_input_rows = Self::max_prompt_input_rows_for(term_h);
+            let input_rows = self
+                .prompt_input_rows_override
+                .unwrap_or(wrapped_rows)
+                .clamp(1, max_input_rows);
+            self.prompt_input_rows = input_rows;
             let tree = self
                 .invoke_lua_layout_composer(term_w, term_h, input_rows)
                 .unwrap_or_else(|| layout::seed_layout_tree(input_rows));
@@ -256,28 +265,23 @@ impl TuiApp {
         let content_width = gutters.content_width(prompt_rect.width);
 
         {
+            let now = self.core.clock.instant_now();
+            let prompt_placeholder = self.prompt_placeholder.clone();
             let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
             pctx.buf.ensure_rendered_at(content_width);
+            let inp = prompt_buf::InputLeafInput {
+                input: &self.input,
+                win: pctx.win,
+                clipboard: &self.core.clipboard,
+                now,
+            };
+            prompt_buf::sync_prompt_overlays(&inp, pctx.buf, prompt_placeholder.as_deref());
             pctx.win.ensure_layout(pctx.buf, content_width);
             self.input
                 .sync_display_coords(&mut pctx, prompt_rect.height);
             pctx.win.scroll_left = 0;
             pctx.win.pending_recenter = false;
             pctx.win.set_last_render_cpos(Some(pctx.win.cpos()));
-        }
-
-        {
-            let now = self.core.clock.instant_now();
-            let (win, buf) = self
-                .ui
-                .win_and_buf_mut(crate::app::PROMPT_WIN, crate::app::PROMPT_EDIT_BUF);
-            let inp = prompt_buf::InputLeafInput {
-                input: &self.input,
-                win: win.expect("prompt window"),
-                clipboard: &self.core.clipboard,
-                now,
-            };
-            prompt_buf::sync_prompt_overlays(&inp, buf.expect("prompt edit buffer"));
         }
 
         if has_prompt_cursor {
