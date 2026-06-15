@@ -36,7 +36,9 @@ pub fn print_usage() {
     eprintln!("usage: cargo xtask fuzz <subcommand> [args]");
     eprintln!();
     eprintln!("subcommands:");
-    eprintln!("  run <target> [--fork N] [--cmin]   fuzz a target until crash or Ctrl-C");
+    eprintln!(
+        "  run <target> [--fork N] [--cmin]   fuzz a target until crash/OOM/timeout or Ctrl-C"
+    );
     eprintln!(
         "  status                              summarize corpora, seeds, artifacts, coverage"
     );

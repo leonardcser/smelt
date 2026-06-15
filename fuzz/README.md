@@ -35,7 +35,7 @@ cargo xtask fuzz build
 cargo xtask fuzz build smelt_loop ansi_parser
 ```
 
-Fuzz a single target until first crash or Ctrl-C:
+Fuzz a single target until first crash/OOM/timeout or Ctrl-C:
 
 ```sh
 cargo xtask fuzz run smelt_loop --fork 8
@@ -57,13 +57,13 @@ The intended shape for long-running fuzz sessions in an agent loop:
 1. Spawn each target with `run_in_background: true`, redirecting output to
    `/tmp/fuzz-loop/fuzz-<target>.log`.
 2. Don't poll - the harness fires a notification the moment any background
-   process exits, and `cargo xtask fuzz run` only exits on crash (or
-   Ctrl-C). An exit code 77 means libFuzzer caught a panic; the artifact
-   is under `fuzz/artifacts/<target>/`.
-3. On notification: read the log, locate the crash artifact, triage:
+   process exits, and `cargo xtask fuzz run` exits on crash, OOM, timeout,
+   corpus preflight failure, or Ctrl-C. An exit code 77 means libFuzzer caught
+   a panic; the artifact is under `fuzz/artifacts/<target>/`.
+3. On notification: read the log, locate the failure artifact, triage:
 
    ```sh
-   cargo xtask fuzz triage <target> fuzz/artifacts/<target>/crash-<hex>
+   cargo xtask fuzz triage <target> fuzz/artifacts/<target>/<artifact>
    ```
 
 4. Fix the bug, commit a regression seed under

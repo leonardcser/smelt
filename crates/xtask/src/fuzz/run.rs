@@ -4,7 +4,8 @@
 //! actually want:
 //!   - preflight corpus replay without `-fork`, so stale corpus crashes fail
 //!     before libFuzzer's fork-mode merge can keep going after writing artifacts.
-//!   - `-ignore_crashes=0` so the first new fork-worker crash drops an artifact and exits.
+//!   - `-ignore_crashes=0`, `-ignore_ooms=0`, and `-ignore_timeouts=0` so
+//!     the first new fork-worker hard failure drops an artifact and exits.
 //!   - `-fork=N` for parallel workers (default 1).
 //!   - optional `--cmin` runs `cargo fuzz cmin` first to sweep the
 //!     accumulated corpus for regressions and shrink it before fuzzing.
@@ -80,6 +81,8 @@ pub fn run(args: Vec<String>) {
         "--".into(),
         fork_flag,
         "-ignore_crashes=0".into(),
+        "-ignore_ooms=0".into(),
+        "-ignore_timeouts=0".into(),
     ];
     cargo_args.extend(extra);
 
@@ -96,9 +99,9 @@ pub fn run(args: Vec<String>) {
     if !status.success() {
         eprintln!();
         eprintln!(
-            ">>> fuzz exited {status} - check fuzz/artifacts/{target}/ for the crash artifact"
+            ">>> fuzz exited {status} - check fuzz/artifacts/{target}/ for the failure artifact"
         );
-        eprintln!(">>> next: cargo xtask fuzz triage {target} fuzz/artifacts/{target}/crash-<hex>");
+        eprintln!(">>> next: inspect fuzz/artifacts/{target}/ and replay the newest crash/oom/timeout artifact");
         std::process::exit(status.code().unwrap_or(1));
     }
 }
@@ -122,9 +125,9 @@ fn preflight_corpus(root: &std::path::Path, target: &str) {
     if !status.success() {
         eprintln!();
         eprintln!(
-            ">>> corpus preflight exited {status} — check fuzz/artifacts/{target}/ for the crash artifact"
+            ">>> corpus preflight exited {status} — check fuzz/artifacts/{target}/ for the failure artifact"
         );
-        eprintln!(">>> next: cargo xtask fuzz triage {target} fuzz/artifacts/{target}/crash-<hex>");
+        eprintln!(">>> next: inspect fuzz/artifacts/{target}/ and replay the newest crash/oom/timeout artifact");
         std::process::exit(status.code().unwrap_or(1));
     }
 }
@@ -139,5 +142,5 @@ fn print_help() {
     eprintln!("  --fork N    parallel workers (default 1)");
     eprintln!("  --cmin      run `cargo fuzz cmin <target>` first");
     eprintln!();
-    eprintln!("Stops on corpus preflight crash before forking, then on first fork-worker crash. To bound time, append `-max_total_time=<secs>`.");
+    eprintln!("Stops on corpus preflight crash before forking, then on first fork-worker crash, OOM, or timeout. To bound time, append `-max_total_time=<secs>`.");
 }
