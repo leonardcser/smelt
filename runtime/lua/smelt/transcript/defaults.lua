@@ -14,6 +14,23 @@ local status_hl = {
   confirm = "SmeltAccent",
 }
 
+function M.display_count_text(block, opts)
+  opts = opts or {}
+  local output = block and block.output or {}
+  local metadata = output.metadata or {}
+  local display_count = metadata.display_count
+  if type(display_count) ~= "table" then display_count = {} end
+  local count = tonumber(display_count.value)
+  if count == nil then count = tonumber(opts.count) or 0 end
+  local unit = display_count.unit or opts.unit or "item"
+  local plural = display_count.plural or opts.plural or (unit .. "s")
+  return count .. " " .. (count == 1 and unit or plural)
+end
+
+function M.render_display_count(block, opts)
+  return layout.text(M.display_count_text(block, opts))
+end
+
 --- Render any semantic transcript block with the bundled default policy.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render(block, ctx)

@@ -12,7 +12,7 @@ local function describe(args)
 end
 
 transcript_defaults.__tool_body_renderers.glob = function(block)
-  return smelt.layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " files")
+  return transcript_defaults.render_display_count(block, { unit = "file" })
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({
@@ -72,19 +72,32 @@ smelt.tools.register(smelt.tools._with_watchdog({
           #paths > 0 and ("\n" .. table.concat(paths, "\n")) or ""
         ),
         is_error = true,
+        metadata = { display_count = { value = #paths, unit = "file" } },
       }
     end
     if results and results.scan_limit_hit then
       local suffix = #paths > 0 and ("\n" .. table.concat(paths, "\n")) or ""
-      return string.format("search stopped after scanning %d files%s", results.scanned or 0, suffix)
+      return {
+        content = string.format("search stopped after scanning %d files%s", results.scanned or 0, suffix),
+        metadata = { display_count = { value = #paths, unit = "file" } },
+      }
     end
     if results and results.truncated then
       local suffix = #paths > 0 and ("\n" .. table.concat(paths, "\n")) or ""
-      return string.format("showing first %d matches%s", #paths, suffix)
+      return {
+        content = string.format("showing first %d matches%s", #paths, suffix),
+        metadata = { display_count = { value = #paths, unit = "file" } },
+      }
     end
     if #paths == 0 then
-      return "no matches found"
+      return {
+        content = "no matches found",
+        metadata = { display_count = { value = 0, unit = "file" } },
+      }
     end
-    return table.concat(paths, "\n")
+    return {
+      content = table.concat(paths, "\n"),
+      metadata = { display_count = { value = #paths, unit = "file" } },
+    }
   end,
 }, { default_ms = 30000, max_ms = 120000, grace_ms = 5000 }))

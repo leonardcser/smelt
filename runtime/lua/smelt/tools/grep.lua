@@ -58,6 +58,45 @@ local function combine_streams(stdout, stderr)
   return combined
 end
 
+local function requested_mode(args)
+  local mode = args.output_mode
+  if mode == nil or mode == "" then return "files_with_matches" end
+  return mode
+end
+
+local function count_unit_for_mode(mode)
+  if mode == "files_with_matches" then return "file" end
+  if mode == "content" then return "output line" end
+  return "match"
+end
+
+local function sum_count_output(lines)
+  local total = 0
+  for _, line in ipairs(lines) do
+    local n = line:match(":(%d+)$") or line:match("^(%d+)$")
+    if n then total = total + tonumber(n) end
+  end
+  return total
+end
+
+local function grep_result_metadata(content, mode)
+  local lines = as_lines(content)
+  local count = #lines
+  if mode == "count" then count = sum_count_output(lines) end
+  return { display_count = { value = count, unit = count_unit_for_mode(mode) } }
+end
+
+local function grep_result(content, source, mode)
+  return { content = content, metadata = grep_result_metadata(source, mode) }
+end
+
+local function no_matches_result(mode)
+  return {
+    content = "no matches found",
+    metadata = { display_count = { value = 0, unit = count_unit_for_mode(mode) } },
+  }
+end
+
 local function run_rg(args)
   local pattern = args.pattern or ""
   local path = args.path or ""
@@ -118,7 +157,7 @@ local function run_grep_fallback(args)
 end
 
 transcript_defaults.__tool_body_renderers.grep = function(block)
-  return smelt.layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " matches")
+  return transcript_defaults.render_display_count(block, { unit = "match" })
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({
@@ -166,19 +205,27 @@ smelt.tools.register(smelt.tools._with_watchdog({
   execute = function(args)
     local offset = pick_int(args.offset, 0)
     local head_limit = pick_int(args.head_limit, 250)
+    local mode = requested_mode(args)
+    local result_mode = mode
 
     local out, err = run_rg(args)
     if not out then
       out, err = run_grep_fallback(args)
+      result_mode = "content"
       if not out then
         return { content = err or "grep failed", is_error = true }
       end
     end
 
     local combined = combine_streams(out.stdout, out.stderr)
+    local count_source = out.stdout or combined
     if out.timed_out then
       local secs = math.floor(((args.timeout_ms or 30000) / 1000) + 0.5)
-      return { content = string.format("timed out after %ds", secs), is_error = true }
+      return {
+        content = string.format("timed out after %ds", secs),
+        is_error = true,
+        metadata = grep_result_metadata(count_source, result_mode),
+      }
     end
 
     local exit_code = out.exit_code or 0
@@ -186,14 +233,14 @@ smelt.tools.register(smelt.tools._with_watchdog({
 
     if is_error then
       if combined == "" then
-        return "no matches found"
+        return no_matches_result(result_mode)
       end
       return { content = slice(combined, offset, head_limit), is_error = true }
     end
 
     if combined == "" then
-      return "no matches found"
+      return no_matches_result(result_mode)
     end
-    return slice(combined, offset, head_limit)
+    return grep_result(slice(combined, offset, head_limit), count_source, result_mode)
   end,
 }, { default_ms = 30000, max_ms = 120000, grace_ms = 5000 }))

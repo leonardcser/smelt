@@ -31,6 +31,12 @@ fn lua_config_session_and_transcript_contracts_are_available() {
             assert(type(blocks[1].idx) == "number")
             assert(type(blocks[1].role) == "string")
             assert(type(smelt.transcript.rows(0, 2)) == "table")
+
+            local defaults = require("smelt.transcript.defaults")
+            assert(defaults.display_count_text({ output = { metadata = { display_count = { value = 0, unit = "file" } } } }) == "0 files")
+            assert(defaults.display_count_text({ output = { metadata = { display_count = { value = 1, unit = "match" } } } }) == "1 match")
+            assert(defaults.display_count_text({ output = { metadata = { display_count = { value = 2, unit = "output line" } } } }) == "2 output lines")
+            assert(defaults.display_count_text({}, { unit = "file" }) == "0 files")
         "#,
     ));
 }
