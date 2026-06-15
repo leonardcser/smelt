@@ -55,6 +55,7 @@ struct ExactRowIndex {
     prefix_rows: Vec<RowIndex>,
     prefix_dirty: bool,
     generation: u64,
+    renderer_generation: u64,
     width: u16,
     show_thinking: bool,
 }
@@ -73,8 +74,15 @@ impl ExactBlockRow {
 }
 
 impl ExactRowIndex {
-    fn is_current(&self, history: &BlockHistory, width: u16, show_thinking: bool) -> bool {
+    fn is_current(
+        &self,
+        history: &BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        renderer_generation: u64,
+    ) -> bool {
         self.generation == history.generation()
+            && self.renderer_generation == renderer_generation
             && self.width == width
             && self.show_thinking == show_thinking
             && self.nodes.len() == history.order.len()
@@ -85,14 +93,21 @@ impl ExactRowIndex {
         history: &BlockHistory,
         width: u16,
         show_thinking: bool,
+        renderer_generation: u64,
         base_key: LayoutKey,
     ) {
         let gen = history.generation();
-        if self.generation == gen && self.width == width && self.show_thinking == show_thinking {
+        if self.generation == gen
+            && self.renderer_generation == renderer_generation
+            && self.width == width
+            && self.show_thinking == show_thinking
+        {
             return;
         }
 
-        let keep_measurements = self.width == width && self.show_thinking == show_thinking;
+        let keep_measurements = self.renderer_generation == renderer_generation
+            && self.width == width
+            && self.show_thinking == show_thinking;
         let old_nodes = if keep_measurements {
             std::mem::take(&mut self.nodes)
         } else {
@@ -128,6 +143,7 @@ impl ExactRowIndex {
             });
         }
         self.generation = gen;
+        self.renderer_generation = renderer_generation;
         self.width = width;
         self.show_thinking = show_thinking;
         self.rebuild_prefix_rows();
@@ -147,13 +163,22 @@ impl ExactRowIndex {
 
     /// Sync the index when the current history keeps the old order as a prefix.
     /// Returns `false` when a deletion or reorder means the index must be rebuilt.
-    fn sync_stable_order_prefix(&mut self, history: &BlockHistory, base_key: LayoutKey) -> bool {
+    fn sync_stable_order_prefix(
+        &mut self,
+        history: &BlockHistory,
+        renderer_generation: u64,
+        base_key: LayoutKey,
+    ) -> bool {
         let old_len = self.nodes.len();
+        if self.renderer_generation != renderer_generation {
+            return false;
+        }
         if old_len > history.order.len() {
             return false;
         }
         if old_len == history.order.len()
             && self.generation == history.generation()
+            && self.renderer_generation == renderer_generation
             && self.width == base_key.width
             && self.show_thinking == base_key.show_thinking
         {
@@ -193,14 +218,21 @@ impl ExactRowIndex {
             });
         }
         self.generation = history.generation();
+        self.renderer_generation = renderer_generation;
         self.width = base_key.width;
         self.show_thinking = base_key.show_thinking;
         self.prefix_dirty |= prefix_dirty;
         true
     }
 
-    fn is_exact_for(&self, history: &BlockHistory, width: u16, show_thinking: bool) -> bool {
-        self.is_current(history, width, show_thinking)
+    fn is_exact_for(
+        &self,
+        history: &BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        renderer_generation: u64,
+    ) -> bool {
+        self.is_current(history, width, show_thinking, renderer_generation)
             && self.nodes.iter().all(|node| node.exact_height.is_some())
     }
 
@@ -246,9 +278,13 @@ impl ExactRowIndex {
         &mut self,
         history: &BlockHistory,
         entry: &DisplayRowIndexEntry,
+        renderer_generation: u64,
         base_key: LayoutKey,
     ) -> bool {
-        if entry.width != base_key.width || entry.show_thinking != base_key.show_thinking {
+        if entry.renderer_generation != renderer_generation
+            || entry.width != base_key.width
+            || entry.show_thinking != base_key.show_thinking
+        {
             return false;
         }
         if entry.nodes.len() != history.order.len() {
@@ -273,6 +309,7 @@ impl ExactRowIndex {
         }
         self.nodes = nodes;
         self.generation = history.generation();
+        self.renderer_generation = renderer_generation;
         self.width = base_key.width;
         self.show_thinking = base_key.show_thinking;
         self.rebuild_prefix_rows();
@@ -286,6 +323,7 @@ impl ExactRowIndex {
         Some(DisplayRowIndexEntry {
             width: self.width,
             show_thinking: self.show_thinking,
+            renderer_generation: self.renderer_generation,
             nodes: self
                 .nodes
                 .iter()
@@ -455,9 +493,18 @@ fn row_index_entry_matches(history: &BlockHistory, entry: &DisplayRowIndexEntry)
     })
 }
 
+fn row_index_entry_matches_generation(
+    entry: &DisplayRowIndexEntry,
+    generation: Option<u64>,
+) -> bool {
+    generation.is_none_or(|generation| entry.renderer_generation == generation)
+}
+
 fn upsert_row_index_entry(entries: &mut Vec<DisplayRowIndexEntry>, entry: DisplayRowIndexEntry) {
     if let Some(existing) = entries.iter_mut().find(|existing| {
-        existing.width == entry.width && existing.show_thinking == entry.show_thinking
+        existing.width == entry.width
+            && existing.show_thinking == entry.show_thinking
+            && existing.renderer_generation == entry.renderer_generation
     }) {
         *existing = entry;
     } else {
@@ -469,9 +516,10 @@ fn render_display_block_to_buffer(
     display_model: &DisplayModel,
     id: BlockId,
     key: LayoutKey,
+    renderer_generation: u64,
     theme: &Theme,
 ) -> Option<(Buffer, usize)> {
-    let display_block = display_model.get(id, key)?;
+    let display_block = display_model.get(id, key, renderer_generation)?;
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let outcome = render_block_into(
         &mut buf,
@@ -511,7 +559,18 @@ impl TranscriptProjection {
         history: &BlockHistory,
         data: crate::content::display_cache::DisplayCacheData,
     ) -> usize {
-        self.cached_row_indexes = data.row_indexes;
+        let crate::content::display_cache::DisplayCacheData {
+            row_indexes,
+            display_blocks,
+        } = data;
+        let hydrated_blocks = self
+            .display_model
+            .hydrate_from_cache(history, display_blocks);
+        self.cached_row_indexes = row_indexes;
+        smelt_perf::perf::record_value(
+            "transcript:display_model_cache:loaded",
+            hydrated_blocks as u64,
+        );
         smelt_perf::perf::record_value(
             "transcript:row_index_cache:loaded",
             self.cached_row_indexes.len() as u64,
@@ -525,6 +584,9 @@ impl TranscriptProjection {
     ) -> crate::content::display_cache::DisplayCacheData {
         crate::content::display_cache::DisplayCacheData {
             row_indexes: self.row_index_cache_entries(history),
+            display_blocks: self
+                .display_model
+                .cache_entries(history, self.renderer_generation),
         }
     }
 
@@ -550,14 +612,20 @@ impl TranscriptProjection {
     }
 
     fn row_index_cache_entries(&self, history: &BlockHistory) -> Vec<DisplayRowIndexEntry> {
+        let renderer_generation = self.renderer_generation;
         let mut entries: Vec<DisplayRowIndexEntry> = self
             .cached_row_indexes
             .iter()
-            .filter(|entry| row_index_entry_matches(history, entry))
+            .filter(|entry| {
+                row_index_entry_matches_generation(entry, renderer_generation)
+                    && row_index_entry_matches(history, entry)
+            })
             .cloned()
             .collect();
         if let Some(current) = self.exact_rows.cache_entry() {
-            if row_index_entry_matches(history, &current) {
+            if row_index_entry_matches_generation(&current, renderer_generation)
+                && row_index_entry_matches(history, &current)
+            {
                 upsert_row_index_entry(&mut entries, current);
             }
         }
@@ -613,7 +681,8 @@ impl TranscriptProjection {
             let blocks = indices
                 .into_iter()
                 .filter_map(|index| nodes.get(index).map(|node| (index, node.id, node.key)));
-            self.display_model.collect_compile_jobs(history, blocks)
+            self.display_model
+                .collect_compile_jobs(history, env.renderer_generation, blocks)
         };
         self.finish_compile_jobs(env, jobs);
     }
@@ -670,20 +739,26 @@ impl TranscriptProjection {
         history: &BlockHistory,
         width: u16,
         show_thinking: bool,
+        renderer_generation: u64,
         base_key: LayoutKey,
     ) -> bool {
-        if self.exact_rows.is_current(history, width, show_thinking) {
+        if self
+            .exact_rows
+            .is_current(history, width, show_thinking, renderer_generation)
+        {
             return true;
         }
-        let Some(entry) = self
-            .cached_row_indexes
-            .iter()
-            .find(|entry| entry.width == width && entry.show_thinking == show_thinking)
-        else {
+        let Some(entry) = self.cached_row_indexes.iter().find(|entry| {
+            entry.width == width
+                && entry.show_thinking == show_thinking
+                && entry.renderer_generation == renderer_generation
+        }) else {
             smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
             return false;
         };
-        let hydrated = self.exact_rows.hydrate_from_cache(history, entry, base_key);
+        let hydrated =
+            self.exact_rows
+                .hydrate_from_cache(history, entry, renderer_generation, base_key);
         smelt_perf::perf::record_value(
             if hydrated {
                 "transcript:row_index_cache:hydrated"
@@ -711,21 +786,40 @@ impl TranscriptProjection {
             "transcript:rebuild_row_index:generation",
             history.generation(),
         );
+        let env = TranscriptRenderEnv::new(lua, show_thinking);
+        let renderer_generation = env.renderer_generation;
+        self.invalidate_renderer_if_changed(renderer_generation);
         self.gc_if_stale(history, width);
         let base_key = base_layout_key(width, show_thinking);
-        let hydrated_index = self.try_hydrate_row_index(history, width, show_thinking, base_key);
-        let reused_index =
-            hydrated_index || self.exact_rows.sync_stable_order_prefix(history, base_key);
+        let hydrated_index = self.try_hydrate_row_index(
+            history,
+            width,
+            show_thinking,
+            renderer_generation,
+            base_key,
+        );
+        let reused_index = hydrated_index
+            || self
+                .exact_rows
+                .sync_stable_order_prefix(history, renderer_generation, base_key);
         smelt_perf::perf::record_value(
             "transcript:rebuild_row_index:reused_index",
             u64::from(reused_index),
         );
         if !reused_index {
             let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
-            self.exact_rows
-                .rebuild_if_stale(history, width, show_thinking, base_key);
+            self.exact_rows.rebuild_if_stale(
+                history,
+                width,
+                show_thinking,
+                renderer_generation,
+                base_key,
+            );
         }
-        if self.exact_rows.is_exact_for(history, width, show_thinking) {
+        if self
+            .exact_rows
+            .is_exact_for(history, width, show_thinking, renderer_generation)
+        {
             if reused_index {
                 self.exact_rows.refresh_prefix_rows();
             }
@@ -757,18 +851,19 @@ impl TranscriptProjection {
                 *last as u64,
             );
         }
-        self.ensure_block_indices(
-            TranscriptRenderEnv::new(lua, show_thinking),
-            history,
-            missing.iter().copied(),
-        );
+        self.ensure_block_indices(env, history, missing.iter().copied());
         for i in missing {
-            self.measure_display_block_height(history, i);
+            self.measure_display_block_height(history, i, renderer_generation);
         }
         self.exact_rows.refresh_prefix_rows();
     }
 
-    fn measure_display_block_height(&mut self, history: &BlockHistory, index: usize) -> bool {
+    fn measure_display_block_height(
+        &mut self,
+        history: &BlockHistory,
+        index: usize,
+        renderer_generation: u64,
+    ) -> bool {
         let Some(node) = self.exact_rows.nodes.get(index) else {
             return false;
         };
@@ -777,7 +872,7 @@ impl TranscriptProjection {
         }
         let id = node.id;
         let key = node.key;
-        let Some(block) = self.display_model.get(id, key) else {
+        let Some(block) = self.display_model.get(id, key, renderer_generation) else {
             return false;
         };
         let rows = measure_block(
@@ -1130,9 +1225,14 @@ impl TranscriptProjection {
         key: LayoutKey,
         rows: &mut ProjectRows<'_>,
     ) {
-        let Some((block_buf, block_rows)) =
-            render_display_block_to_buffer(&self.display_model, id, key, theme)
-        else {
+        let renderer_generation = self.exact_rows.renderer_generation;
+        let Some((block_buf, block_rows)) = render_display_block_to_buffer(
+            &self.display_model,
+            id,
+            key,
+            renderer_generation,
+            theme,
+        ) else {
             return;
         };
         let gap = history.rendered_block_gap(block_index, block_rows);
@@ -1219,6 +1319,9 @@ impl TranscriptProjection {
     ) -> Arc<Vec<String>> {
         let _perf = smelt_perf::perf::begin("transcript:build_rows");
         let gen = history.generation();
+        let env = TranscriptRenderEnv::new(lua, show_thinking);
+        let renderer_generation = env.renderer_generation;
+        self.invalidate_renderer_if_changed(renderer_generation);
         self.gc_if_stale(history, width);
         if let Some(c) = &self.cached_rows {
             if c.generation == gen && c.width == width && c.show_thinking == show_thinking {
@@ -1231,24 +1334,29 @@ impl TranscriptProjection {
         }
         smelt_perf::perf::record_value("transcript:build_rows:blocks", history.order.len() as u64);
         let base_key = base_layout_key(width, show_thinking);
-        self.exact_rows
-            .rebuild_if_stale(history, width, show_thinking, base_key);
+        self.exact_rows.rebuild_if_stale(
+            history,
+            width,
+            show_thinking,
+            renderer_generation,
+            base_key,
+        );
         let mut rows: Vec<String> = Vec::new();
         let block_indices = 0..self.exact_rows.nodes.len();
-        self.ensure_block_indices(
-            TranscriptRenderEnv::new(lua, show_thinking),
-            history,
-            block_indices.clone(),
-        );
+        self.ensure_block_indices(env, history, block_indices.clone());
         for i in block_indices {
             let Some(node) = self.exact_rows.nodes.get(i) else {
                 continue;
             };
             let id = node.id;
             let bkey = node.key;
-            let Some((block_buf, block_rows)) =
-                render_display_block_to_buffer(&self.display_model, id, bkey, theme)
-            else {
+            let Some((block_buf, block_rows)) = render_display_block_to_buffer(
+                &self.display_model,
+                id,
+                bkey,
+                renderer_generation,
+                theme,
+            ) else {
                 continue;
             };
             let gap = history.rendered_block_gap(i, block_rows);
@@ -1853,6 +1961,7 @@ mod tests {
         assert_eq!(total, 199);
         let cache = projection.display_cache_data(&transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
+        assert_eq!(cache.display_blocks.len(), 100);
 
         let mut hydrated = TranscriptProjection::new();
         hydrated.hydrate_display_cache(&transcript.history, cache);
@@ -1866,6 +1975,81 @@ mod tests {
             hydrated.counters(),
             TranscriptProjectionCounters::default(),
             "hydrated exact row index should avoid compiling or measuring blocks"
+        );
+    }
+
+    #[test]
+    fn display_blocks_round_trip_without_row_index_recompilation() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let mut projection = TranscriptProjection::new();
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
+        let mut cache = projection.display_cache_data(&transcript.history);
+        assert_eq!(cache.display_blocks.len(), 100);
+        cache.row_indexes.clear();
+
+        let mut hydrated = TranscriptProjection::new();
+        hydrated.hydrate_display_cache(&transcript.history, cache);
+        assert_eq!(hydrated.display_model_len(), 100);
+        hydrated.reset_counters();
+
+        assert_eq!(
+            hydrated.exact_total_rows(&lua, &mut transcript.history, 80, false),
+            total
+        );
+        let counters = hydrated.counters();
+        assert_eq!(
+            counters.display_blocks, 0,
+            "hydrated DisplayIR should avoid Lua recompilation"
+        );
+        assert_eq!(
+            counters.exact_height_measured_blocks, 100,
+            "without a row index, hydrated DisplayIR still needs exact measurement"
+        );
+    }
+
+    #[test]
+    fn renderer_generation_mismatch_rejects_display_cache_entries() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        for i in 0..20 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let mut projection = TranscriptProjection::new();
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
+        let mut cache = projection.display_cache_data(&transcript.history);
+        assert_eq!(cache.row_indexes.len(), 1);
+        assert_eq!(cache.display_blocks.len(), 20);
+        for entry in &mut cache.row_indexes {
+            entry.renderer_generation = entry.renderer_generation.wrapping_add(1);
+        }
+        for entry in &mut cache.display_blocks {
+            entry.key.renderer_generation = entry.key.renderer_generation.wrapping_add(1);
+        }
+
+        let mut hydrated = TranscriptProjection::new();
+        hydrated.hydrate_display_cache(&transcript.history, cache);
+        hydrated.reset_counters();
+
+        assert_eq!(
+            hydrated.exact_total_rows(&lua, &mut transcript.history, 80, false),
+            total
+        );
+        let counters = hydrated.counters();
+        assert_eq!(
+            counters.display_blocks, 20,
+            "renderer-generation mismatch must recompile persisted DisplayIR"
+        );
+        assert_eq!(
+            counters.exact_height_measured_blocks, 20,
+            "renderer-generation mismatch must reject persisted row indexes"
         );
     }
 

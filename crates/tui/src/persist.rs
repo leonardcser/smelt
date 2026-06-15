@@ -116,6 +116,10 @@ fn write(req: &PersistRequest) {
         "persist:write:display_cache_row_indexes",
         req.display_cache.row_indexes.len() as u64,
     );
+    smelt_perf::perf::record_value(
+        "persist:write:display_cache_display_blocks",
+        req.display_cache.display_blocks.len() as u64,
+    );
     smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
     let session_dir = session::dir_for(&req.session);
     let _ = std::fs::create_dir_all(&session_dir);

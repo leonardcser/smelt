@@ -1090,6 +1090,22 @@ Exit criteria:
 - large-session resume hydrates existing IR and measures cheaply;
 - cache is disposable and safe to rebuild.
 
+Status after implementation:
+
+- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_blocks }`; cache read/write and background persist metrics report both entry types.
+- `DisplayBlockCacheEntry` persists renderer-produced `DisplayBlock::Layout { LayoutIr }` entries keyed by semantic content hash, tool sidecar hash, display renderer version, renderer generation, and render-context hash. Old cache files are rejected by `DISPLAY_RENDERER_VERSION = 6`.
+- `TranscriptProjection` hydrates display blocks before first projection and exports only history-valid entries for the current renderer generation once it is known. Row-index entries also carry renderer generation, so renderer invalidation rejects persisted heights and materialized rows without hashing Lua closures.
+- Width/theme changes continue to discard only row/materialized state; display blocks remain width/theme-independent and theme-independent. Renderer generation changes clear display blocks, row indexes, and rendered rows.
+- Coverage includes DisplayIR cache round-tripping, cold hydration without a row index avoiding recompilation, and renderer-generation mismatch rejection for persisted display blocks and row indexes.
+
+Validation after implementation:
+
+- `cargo build`
+- `cargo nextest run --workspace`
+- `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings`
+- `git diff --check`
+- Lua API docs were not regenerated because Phase 6 changed only internal TUI persistence.
+
 ### Phase 7 — Remove obsolete Rust renderer modules and old APIs
 
 Goal: consolidate around the new architecture.

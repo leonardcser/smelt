@@ -8,30 +8,38 @@ use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 5;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
     pub(crate) content_hash: u64,
     pub(crate) sidecar_hash: u64,
     pub(crate) renderer_version: u64,
+    pub(crate) renderer_generation: u64,
     pub(crate) render_context_hash: u64,
 }
 
 impl DisplayCacheKey {
-    pub(crate) fn new(content_hash: u64, sidecar_hash: u64, render_context_hash: u64) -> Self {
+    pub(crate) fn new(
+        content_hash: u64,
+        sidecar_hash: u64,
+        renderer_generation: u64,
+        render_context_hash: u64,
+    ) -> Self {
         Self {
             content_hash,
             sidecar_hash,
             renderer_version: DISPLAY_RENDERER_VERSION,
+            renderer_generation,
             render_context_hash,
         }
     }
 
-    fn from_layout_key(key: LayoutKey) -> Self {
+    fn from_layout_key(key: LayoutKey, renderer_generation: u64) -> Self {
         Self::new(
             key.content_hash,
             key.sidecar_hash,
+            renderer_generation,
             u64::from(key.show_thinking),
         )
     }
@@ -41,11 +49,16 @@ impl DisplayCacheKey {
 pub(crate) struct TranscriptRenderEnv<'a> {
     pub(crate) lua: &'a LuaRuntime,
     pub(crate) show_thinking: bool,
+    pub(crate) renderer_generation: u64,
 }
 
 impl<'a> TranscriptRenderEnv<'a> {
     pub(crate) fn new(lua: &'a LuaRuntime, show_thinking: bool) -> Self {
-        Self { lua, show_thinking }
+        Self {
+            lua,
+            show_thinking,
+            renderer_generation: lua.transcript_renderer_generation(),
+        }
     }
 }
 
@@ -58,6 +71,7 @@ pub(crate) enum DisplayBlock {
 pub(crate) struct DisplayRowIndexEntry {
     pub(crate) width: u16,
     pub(crate) show_thinking: bool,
+    pub(crate) renderer_generation: u64,
     pub(crate) nodes: Vec<DisplayRowIndexNode>,
 }
 
@@ -66,6 +80,13 @@ pub(crate) struct DisplayRowIndexNode {
     pub(crate) id: BlockId,
     pub(crate) key: LayoutKey,
     pub(crate) exact_height: u64,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DisplayBlockCacheEntry {
+    pub(crate) id: BlockId,
+    pub(crate) key: DisplayCacheKey,
+    pub(crate) block: DisplayBlock,
 }
 
 pub(crate) struct CompileJob {
@@ -139,6 +160,7 @@ impl DisplayModel {
         ids: &[BlockId],
         keys: &[LayoutKey],
     ) -> usize {
+        let renderer_generation = env.renderer_generation;
         let blocks = ids
             .iter()
             .copied()
@@ -150,7 +172,7 @@ impl DisplayModel {
                     .position(|candidate| *candidate == id)
                     .map(|index| (index, id, key))
             });
-        let jobs = self.collect_compile_jobs(history, blocks);
+        let jobs = self.collect_compile_jobs(history, renderer_generation, blocks);
         let compiled = jobs.len();
         let blocks = jobs.into_iter().map(|job| job.compile(env)).collect();
         self.insert_compiled_blocks(blocks);
@@ -163,6 +185,7 @@ impl DisplayModel {
     pub(crate) fn collect_compile_jobs(
         &mut self,
         history: &BlockHistory,
+        renderer_generation: u64,
         blocks: impl IntoIterator<Item = (usize, BlockId, LayoutKey)>,
     ) -> Vec<CompileJob> {
         let _perf = smelt_perf::perf::begin("transcript:display_model:ensure_many");
@@ -171,7 +194,7 @@ impl DisplayModel {
         let mut requested = 0;
         for (index, id, key) in blocks {
             requested += 1;
-            let display_key = DisplayCacheKey::from_layout_key(key);
+            let display_key = DisplayCacheKey::from_layout_key(key, renderer_generation);
             if self
                 .blocks
                 .get(&id)
@@ -200,6 +223,56 @@ impl DisplayModel {
         jobs
     }
 
+    pub(crate) fn hydrate_from_cache(
+        &mut self,
+        history: &BlockHistory,
+        entries: Vec<DisplayBlockCacheEntry>,
+    ) -> usize {
+        let mut hydrated = 0usize;
+        for entry in entries {
+            if !display_block_entry_matches_history(history, &entry) {
+                continue;
+            }
+            self.blocks.insert(
+                entry.id,
+                CachedDisplayBlock {
+                    key: entry.key,
+                    block: entry.block,
+                },
+            );
+            hydrated += 1;
+        }
+        smelt_perf::perf::record_value("transcript:display_model:hydrated", hydrated as u64);
+        hydrated
+    }
+
+    pub(crate) fn cache_entries(
+        &self,
+        history: &BlockHistory,
+        renderer_generation: Option<u64>,
+    ) -> Vec<DisplayBlockCacheEntry> {
+        let mut entries = Vec::new();
+        for id in &history.order {
+            let Some(cached) = self.blocks.get(id) else {
+                continue;
+            };
+            if renderer_generation
+                .is_some_and(|generation| cached.key.renderer_generation != generation)
+            {
+                continue;
+            }
+            let entry = DisplayBlockCacheEntry {
+                id: *id,
+                key: cached.key,
+                block: cached.block.clone(),
+            };
+            if display_block_entry_matches_history(history, &entry) {
+                entries.push(entry);
+            }
+        }
+        entries
+    }
+
     pub(crate) fn insert_compiled_blocks(
         &mut self,
         blocks: Vec<(BlockId, DisplayCacheKey, DisplayBlock)>,
@@ -214,13 +287,41 @@ impl DisplayModel {
         self.blocks.retain(|id, _| live.contains(id));
     }
 
-    pub(crate) fn get(&self, id: BlockId, key: LayoutKey) -> Option<&DisplayBlock> {
-        let display_key = DisplayCacheKey::from_layout_key(key);
+    pub(crate) fn get(
+        &self,
+        id: BlockId,
+        key: LayoutKey,
+        renderer_generation: u64,
+    ) -> Option<&DisplayBlock> {
+        let display_key = DisplayCacheKey::from_layout_key(key, renderer_generation);
         self.blocks
             .get(&id)
             .filter(|cached| cached.key == display_key)
             .map(|cached| &cached.block)
     }
+}
+
+fn display_block_entry_matches_history(
+    history: &BlockHistory,
+    entry: &DisplayBlockCacheEntry,
+) -> bool {
+    if entry.key.renderer_version != DISPLAY_RENDERER_VERSION {
+        return false;
+    }
+    let Some(block) = history.blocks.get(&entry.id) else {
+        return false;
+    };
+    if history.content_hash(entry.id) != entry.key.content_hash {
+        return false;
+    }
+    let sidecar_hash = match block {
+        Block::ToolCall { call_id, .. } => history
+            .tool_state(call_id)
+            .map(ToolState::display_hash)
+            .unwrap_or(0),
+        _ => 0,
+    };
+    sidecar_hash == entry.key.sidecar_hash
 }
 
 #[cfg(test)]

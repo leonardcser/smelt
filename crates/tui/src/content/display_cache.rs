@@ -1,4 +1,6 @@
-use crate::content::display_block::{DisplayRowIndexEntry, DISPLAY_RENDERER_VERSION};
+use crate::content::display_block::{
+    DisplayBlockCacheEntry, DisplayRowIndexEntry, DISPLAY_RENDERER_VERSION,
+};
 use smelt_core::session::Session;
 use std::path::{Path, PathBuf};
 
@@ -11,11 +13,12 @@ const FIXED_HEADER_LEN: usize = MAGIC.len() + 4 + 8 + 2 + 8;
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheData {
     pub(crate) row_indexes: Vec<DisplayRowIndexEntry>,
+    pub(crate) display_blocks: Vec<DisplayBlockCacheEntry>,
 }
 
 impl DisplayCacheData {
     pub(crate) fn is_empty(&self) -> bool {
-        self.row_indexes.is_empty()
+        self.row_indexes.is_empty() && self.display_blocks.is_empty()
     }
 
     pub(crate) fn fingerprint(&self) -> Option<Vec<u8>> {
@@ -48,11 +51,16 @@ fn read_at_path(path: &Path) -> DisplayCacheData {
                 "session_ir:read:row_indexes",
                 data.row_indexes.len() as u64,
             );
+            smelt_perf::perf::record_value(
+                "session_ir:read:display_blocks",
+                data.display_blocks.len() as u64,
+            );
             data
         }
         Err(reason) => {
             reason.record();
             smelt_perf::perf::record_value("session_ir:read:row_indexes", 0);
+            smelt_perf::perf::record_value("session_ir:read:display_blocks", 0);
             DisplayCacheData::default()
         }
     }
@@ -69,6 +77,10 @@ fn write_at_path(path: &Path, data: &DisplayCacheData) {
     smelt_perf::perf::record_value(
         "session_ir:write:row_indexes",
         data.row_indexes.len() as u64,
+    );
+    smelt_perf::perf::record_value(
+        "session_ir:write:display_blocks",
+        data.display_blocks.len() as u64,
     );
     smelt_perf::perf::record_value("session_ir:write:bytes", bytes.len() as u64);
     smelt_core::session::atomic_write(path, &bytes, smelt_core::session::now_ms());
@@ -204,15 +216,20 @@ fn read_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::display_block::{DisplayRowIndexEntry, DisplayRowIndexNode};
-    use smelt_core::transcript_model::{LayoutKey, ViewState};
+    use crate::content::display_block::{
+        DisplayBlock, DisplayBlockCacheEntry, DisplayCacheKey, DisplayRowIndexEntry,
+        DisplayRowIndexNode,
+    };
+    use smelt_core::content::block_layout::BlockLayout;
+    use smelt_core::transcript_model::{BlockId, LayoutKey, ViewState};
 
     fn row_index() -> DisplayRowIndexEntry {
         DisplayRowIndexEntry {
             width: 80,
             show_thinking: false,
+            renderer_generation: 1,
             nodes: vec![DisplayRowIndexNode {
-                id: smelt_core::transcript_model::BlockId::new(7),
+                id: BlockId::new(7),
                 key: LayoutKey {
                     view_state: ViewState::Expanded,
                     width: 80,
@@ -225,21 +242,35 @@ mod tests {
         }
     }
 
+    fn display_block() -> DisplayBlockCacheEntry {
+        DisplayBlockCacheEntry {
+            id: BlockId::new(7),
+            key: DisplayCacheKey::new(1, 2, 1, 0),
+            block: DisplayBlock::Layout {
+                layout: BlockLayout::Empty,
+            },
+        }
+    }
+
     #[test]
     fn cache_round_trips_row_index_entries() {
         let data = DisplayCacheData {
             row_indexes: vec![row_index()],
+            display_blocks: vec![display_block()],
         };
         let encoded = encode(&data).expect("encode cache");
         let decoded = decode(&encoded).expect("decode cache");
         assert_eq!(decoded.row_indexes.len(), 1);
         assert_eq!(decoded.row_indexes[0].nodes[0].exact_height, 3);
+        assert_eq!(decoded.display_blocks.len(), 1);
+        assert_eq!(decoded.display_blocks[0].key.renderer_generation, 1);
     }
 
     #[test]
     fn corrupt_cache_is_a_miss() {
         let data = DisplayCacheData {
             row_indexes: vec![row_index()],
+            display_blocks: vec![display_block()],
         };
         let mut encoded = encode(&data).expect("encode cache");
         encoded[0] = b'X';
@@ -256,11 +287,13 @@ mod tests {
         let path = dir.path().join("session.ir.bin");
         let data = DisplayCacheData {
             row_indexes: vec![row_index()],
+            display_blocks: vec![display_block()],
         };
         write_at_path(&path, &data);
         let decoded = read_at_path(&path);
         assert_eq!(decoded.row_indexes.len(), 1);
         assert_eq!(decoded.row_indexes[0].nodes[0].exact_height, 3);
+        assert_eq!(decoded.display_blocks.len(), 1);
     }
 
     #[test]
