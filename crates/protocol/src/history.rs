@@ -56,6 +56,65 @@ pub enum HistoryNoteKind {
     ProcessStatus,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "policy", rename_all = "snake_case")]
+pub enum HistoryAppendPolicy {
+    Append,
+    ReplaceNoteKind { kind: HistoryNoteKind },
+    ModeChange { base: crate::mode::AgentMode },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryAppend {
+    pub item: HistoryItem,
+    pub policy: HistoryAppendPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryAppendResult {
+    Unchanged,
+    Pushed,
+    ReplacedLast,
+    RemovedLast,
+}
+
+impl HistoryAppendPolicy {
+    pub fn replacement_note_kind(&self) -> Option<HistoryNoteKind> {
+        match self {
+            Self::Append => None,
+            Self::ReplaceNoteKind { kind } => Some(*kind),
+            Self::ModeChange { .. } => Some(HistoryNoteKind::ModeChange),
+        }
+    }
+}
+
+impl HistoryAppend {
+    pub fn append(item: HistoryItem) -> Self {
+        Self {
+            item,
+            policy: HistoryAppendPolicy::Append,
+        }
+    }
+
+    pub fn replace_note_kind(item: HistoryItem, kind: HistoryNoteKind) -> Self {
+        Self {
+            item,
+            policy: HistoryAppendPolicy::ReplaceNoteKind { kind },
+        }
+    }
+
+    pub fn mode_change(item: HistoryItem, base: crate::mode::AgentMode) -> Self {
+        Self {
+            item,
+            policy: HistoryAppendPolicy::ModeChange { base },
+        }
+    }
+
+    pub fn replacement_note_kind(&self) -> Option<HistoryNoteKind> {
+        self.policy.replacement_note_kind()
+    }
+}
+
 impl HistoryNote {
     pub fn mode_change(text: impl Into<String>) -> Self {
         Self::ModeChange {
@@ -265,6 +324,82 @@ pub fn replace_last_note_kind(
     }
     *last = item.clone();
     true
+}
+
+pub fn apply_history_append(
+    items: &mut Vec<HistoryItem>,
+    append: &HistoryAppend,
+) -> HistoryAppendResult {
+    match &append.policy {
+        HistoryAppendPolicy::Append => {
+            items.push(append.item.clone());
+            HistoryAppendResult::Pushed
+        }
+        HistoryAppendPolicy::ReplaceNoteKind { kind } => {
+            if replace_last_note_kind(items, &append.item, *kind) {
+                HistoryAppendResult::ReplacedLast
+            } else {
+                items.push(append.item.clone());
+                HistoryAppendResult::Pushed
+            }
+        }
+        HistoryAppendPolicy::ModeChange { base } => {
+            append_mode_change(items, append.item.clone(), base)
+        }
+    }
+}
+
+fn append_mode_change(
+    items: &mut Vec<HistoryItem>,
+    item: HistoryItem,
+    mode_base: &crate::mode::AgentMode,
+) -> HistoryAppendResult {
+    let Some(new_mode) = item
+        .as_note()
+        .and_then(HistoryNote::mode)
+        .map(str::to_string)
+    else {
+        if replace_last_note_kind(items, &item, HistoryNoteKind::ModeChange) {
+            return HistoryAppendResult::ReplacedLast;
+        }
+        items.push(item);
+        return HistoryAppendResult::Pushed;
+    };
+
+    let fallback = mode_base.as_str();
+    let last_mode = items
+        .last()
+        .is_some_and(|last| last.note_kind() == Some(HistoryNoteKind::ModeChange));
+
+    if last_mode {
+        let last_has_mode = items
+            .last()
+            .and_then(HistoryItem::as_note)
+            .and_then(HistoryNote::mode)
+            .is_some();
+        if last_has_mode && new_mode == effective_mode_before(items, items.len() - 1, fallback) {
+            items.pop();
+            return HistoryAppendResult::RemovedLast;
+        }
+        *items.last_mut().expect("last mode note") = item;
+        return HistoryAppendResult::ReplacedLast;
+    }
+
+    if new_mode == effective_mode_before(items, items.len(), fallback) {
+        return HistoryAppendResult::Unchanged;
+    }
+
+    items.push(item);
+    HistoryAppendResult::Pushed
+}
+
+fn effective_mode_before<'a>(items: &'a [HistoryItem], end: usize, fallback: &'a str) -> &'a str {
+    items[..end]
+        .iter()
+        .rev()
+        .filter_map(HistoryItem::as_note)
+        .find_map(HistoryNote::mode)
+        .unwrap_or(fallback)
 }
 
 // Provider-wire `Vec<Message>` ↔ semantic `Vec<HistoryItem>` conversion.
@@ -520,6 +655,77 @@ mod tests {
                 arguments: "{}".into(),
             },
         )
+    }
+
+    fn mode_item(mode: &str) -> HistoryItem {
+        HistoryItem::note(HistoryNote::mode_change_for_mode(
+            mode,
+            format!("now in {mode} mode"),
+        ))
+    }
+
+    #[test]
+    fn mode_append_back_to_base_removes_pending_mode_note() {
+        let base = crate::mode::AgentMode::parse("normal").unwrap();
+        let mut history = vec![HistoryItem::user(Content::text("hello"))];
+
+        assert_eq!(
+            apply_history_append(
+                &mut history,
+                &HistoryAppend::mode_change(mode_item("apply"), base.clone()),
+            ),
+            HistoryAppendResult::Pushed
+        );
+        assert_eq!(
+            apply_history_append(
+                &mut history,
+                &HistoryAppend::mode_change(mode_item("normal"), base.clone()),
+            ),
+            HistoryAppendResult::RemovedLast
+        );
+
+        assert_eq!(history, vec![HistoryItem::user(Content::text("hello"))]);
+    }
+
+    #[test]
+    fn mode_append_replaces_with_distinct_mode() {
+        let base = crate::mode::AgentMode::parse("normal").unwrap();
+        let mut history = vec![
+            HistoryItem::user(Content::text("hello")),
+            mode_item("apply"),
+        ];
+
+        assert_eq!(
+            apply_history_append(
+                &mut history,
+                &HistoryAppend::mode_change(mode_item("yolo"), base.clone()),
+            ),
+            HistoryAppendResult::ReplacedLast
+        );
+
+        assert_eq!(
+            history
+                .last()
+                .and_then(HistoryItem::as_note)
+                .and_then(HistoryNote::mode),
+            Some("yolo")
+        );
+    }
+
+    #[test]
+    fn mode_append_matching_effective_mode_is_noop() {
+        let base = crate::mode::AgentMode::parse("normal").unwrap();
+        let mut history = vec![HistoryItem::user(Content::text("hello"))];
+
+        assert_eq!(
+            apply_history_append(
+                &mut history,
+                &HistoryAppend::mode_change(mode_item("normal"), base.clone()),
+            ),
+            HistoryAppendResult::Unchanged
+        );
+
+        assert_eq!(history, vec![HistoryItem::user(Content::text("hello"))]);
     }
 
     #[test]

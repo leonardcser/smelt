@@ -1,7 +1,6 @@
 //! Wire protocol between the engine and the UI.
 
 use crate::content::Content;
-use crate::history::HistoryItem;
 use crate::message::{Message, ToolOutcome};
 use crate::mode::{AgentMode, ReasoningEffort};
 use crate::style::StyledLines;
@@ -395,9 +394,7 @@ pub enum UiCommand {
 
     /// Append an item to the active turn's history before its next LLM request.
     AppendHistoryItem {
-        item: HistoryItem,
-        #[serde(skip_serializing_if = "Option::is_none", default)]
-        replace_note_kind: Option<crate::history::HistoryNoteKind>,
+        append: crate::history::HistoryAppend,
     },
 
     /// Change the active agent mode while the engine is running. This is

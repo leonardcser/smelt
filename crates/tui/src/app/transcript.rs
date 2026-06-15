@@ -573,10 +573,15 @@ impl TuiApp {
     pub(crate) fn apply_pending_history_appends_for_request(&mut self) {
         let appends = std::mem::take(&mut self.pending_history_appends);
         for append in appends {
-            let item = append.history_item();
-            let replace_note_kind = append.replacement_note_kind();
-            self.apply_history_append_to_history(item, replace_note_kind);
-            self.commit_history_append_block(append.transcript_block(&self.lua), replace_note_kind);
+            let mode_base = append.mode().map(|_| self.mode_history_base());
+            let history_append = append.history_append(mode_base);
+            let replace_note_kind = history_append.replacement_note_kind();
+            let result = self.apply_history_append_to_history(&history_append);
+            self.commit_history_append_block(
+                append.transcript_block(&self.lua),
+                replace_note_kind,
+                result,
+            );
         }
     }
 
@@ -589,9 +594,15 @@ impl TuiApp {
             return;
         };
         let append = self.pending_history_appends.remove(idx);
+        let result = if append.replacement_note_kind().is_some() {
+            protocol::HistoryAppendResult::ReplacedLast
+        } else {
+            protocol::HistoryAppendResult::Pushed
+        };
         self.commit_history_append_block(
             append.transcript_block(&self.lua),
             append.replacement_note_kind(),
+            result,
         );
     }
 
@@ -599,19 +610,50 @@ impl TuiApp {
         &mut self,
         block: Block,
         replace_note_kind: Option<protocol::HistoryNoteKind>,
+        result: protocol::HistoryAppendResult,
     ) {
-        let history = self.transcript.history();
-        if let Some(kind) = replace_note_kind {
-            if let Some(id) = history.order.last().copied() {
-                let replaces_mode_block = kind == protocol::HistoryNoteKind::ModeChange
-                    && matches!(history.blocks.get(&id), Some(Block::Mode { .. }));
-                if replaces_mode_block {
-                    self.transcript.history_mut().rewrite(id, block);
+        match result {
+            protocol::HistoryAppendResult::Unchanged => {}
+            protocol::HistoryAppendResult::RemovedLast => {
+                self.remove_last_mode_block();
+            }
+            protocol::HistoryAppendResult::ReplacedLast => {
+                if self.rewrite_last_mode_block(block.clone(), replace_note_kind) {
                     return;
                 }
+                self.push_block(block);
             }
+            protocol::HistoryAppendResult::Pushed => self.push_block(block),
         }
-        self.push_block(block);
+    }
+
+    fn rewrite_last_mode_block(
+        &mut self,
+        block: Block,
+        replace_note_kind: Option<protocol::HistoryNoteKind>,
+    ) -> bool {
+        if replace_note_kind != Some(protocol::HistoryNoteKind::ModeChange) {
+            return false;
+        }
+        let history = self.transcript.history();
+        let Some(id) = history.order.last().copied() else {
+            return false;
+        };
+        if !matches!(history.blocks.get(&id), Some(Block::Mode { .. })) {
+            return false;
+        }
+        self.transcript.history_mut().rewrite(id, block);
+        true
+    }
+
+    fn remove_last_mode_block(&mut self) {
+        let history = self.transcript.history();
+        let Some((idx, id)) = history.order.iter().copied().enumerate().next_back() else {
+            return;
+        };
+        if matches!(history.blocks.get(&id), Some(Block::Mode { .. })) {
+            self.truncate_to(idx);
+        }
     }
 
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {

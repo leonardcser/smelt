@@ -22,6 +22,21 @@ fn next_request_id() -> u64 {
     NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+fn last_note_kind(items: &[HistoryItem]) -> Option<protocol::HistoryNoteKind> {
+    items.last().and_then(HistoryItem::note_kind)
+}
+
+fn mode_append_returns_to_base(append: &protocol::HistoryAppend) -> bool {
+    let protocol::HistoryAppendPolicy::ModeChange { base } = &append.policy else {
+        return false;
+    };
+    append
+        .item
+        .as_note()
+        .and_then(protocol::HistoryNote::mode)
+        .is_some_and(|mode| mode == base.as_str())
+}
+
 /// Main engine task. Runs in a tokio::spawn and processes commands/events.
 pub(crate) async fn engine_task(
     mut config: EngineConfig,
@@ -765,21 +780,40 @@ impl<'a> Turn<'a> {
         });
     }
 
-    fn queue_history_item(
-        &mut self,
-        item: HistoryItem,
-        replace_note_kind: Option<protocol::HistoryNoteKind>,
-    ) {
-        if let Some(kind) = replace_note_kind {
-            if protocol::replace_last_note_kind(&mut self.pending_history_items, &item, kind) {
+    fn queue_history_item(&mut self, append: protocol::HistoryAppend) {
+        let replace_note_kind = append.replacement_note_kind();
+        if replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
+            if let Some(idx) = self
+                .pending_history_items
+                .iter()
+                .position(|item| item.note_kind() == Some(protocol::HistoryNoteKind::ModeChange))
+            {
+                if mode_append_returns_to_base(&append) {
+                    self.pending_history_items.remove(idx);
+                } else {
+                    self.pending_history_items[idx] = append.item;
+                }
                 return;
             }
-            if protocol::replace_last_note_kind(&mut self.history, &item, kind) {
+            if last_note_kind(&self.history) == Some(protocol::HistoryNoteKind::ModeChange) {
+                let result = protocol::apply_history_append(&mut self.history, &append);
+                if result != protocol::HistoryAppendResult::Unchanged {
+                    self.emit_messages_snapshot();
+                }
+                return;
+            }
+        } else if let Some(kind) = replace_note_kind {
+            if protocol::replace_last_note_kind(&mut self.pending_history_items, &append.item, kind)
+            {
+                return;
+            }
+            if protocol::replace_last_note_kind(&mut self.history, &append.item, kind) {
                 self.emit_messages_snapshot();
                 return;
             }
         }
-        self.pending_history_items.push(item);
+
+        protocol::apply_history_append(&mut self.pending_history_items, &append);
     }
 
     fn apply_pending_history_items_for_request(&mut self) {
@@ -960,11 +994,8 @@ impl<'a> Turn<'a> {
                 self.emit_messages_snapshot();
                 true
             }
-            UiCommand::AppendHistoryItem {
-                item,
-                replace_note_kind,
-            } => {
-                self.queue_history_item(item, replace_note_kind);
+            UiCommand::AppendHistoryItem { append } => {
+                self.queue_history_item(append);
                 true
             }
             UiCommand::SetReasoningEffort { effort } => {
@@ -2121,11 +2152,8 @@ impl<'a> Turn<'a> {
                     is_error,
                     metadata,
                 }) if id == request_id => return Some((content, is_error, metadata)),
-                Some(UiCommand::AppendHistoryItem {
-                    item,
-                    replace_note_kind,
-                }) => {
-                    self.queue_history_item(item, replace_note_kind);
+                Some(UiCommand::AppendHistoryItem { append }) => {
+                    self.queue_history_item(append);
                 }
                 Some(UiCommand::SetReasoningEffort { effort }) => {
                     self.apply_reasoning_effort(effort)

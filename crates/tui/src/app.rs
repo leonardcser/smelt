@@ -363,6 +363,7 @@ impl PendingHistoryAppend {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn history_item(&self) -> protocol::HistoryItem {
         self.item.clone()
     }
@@ -378,6 +379,24 @@ impl PendingHistoryAppend {
 
     pub(crate) fn replacement_note_kind(&self) -> Option<protocol::HistoryNoteKind> {
         self.replace_note_kind
+    }
+
+    pub(crate) fn mode(&self) -> Option<&str> {
+        self.item.as_note().and_then(protocol::HistoryNote::mode)
+    }
+
+    pub(crate) fn history_append(
+        &self,
+        mode_base: Option<protocol::AgentMode>,
+    ) -> protocol::HistoryAppend {
+        match self.replace_note_kind {
+            Some(protocol::HistoryNoteKind::ModeChange) => protocol::HistoryAppend::mode_change(
+                self.item.clone(),
+                mode_base.expect("mode history appends require a base mode"),
+            ),
+            Some(kind) => protocol::HistoryAppend::replace_note_kind(self.item.clone(), kind),
+            None => protocol::HistoryAppend::append(self.item.clone()),
+        }
     }
 
     pub(crate) fn matches_history_item(&self, item: &protocol::HistoryItem) -> bool {
@@ -476,34 +495,97 @@ impl TuiApp {
         self.core.cells.set_dyn(name, std::rc::Rc::new(next));
     }
 
-    pub(crate) fn queue_history_append(&mut self, append: PendingHistoryAppend) {
-        let item = append.history_item();
-        let replace_note_kind = append.replacement_note_kind();
+    pub(crate) fn mode_history_base(&self) -> protocol::AgentMode {
+        let fallback = self.core.session.mode.as_deref().unwrap_or("normal");
+        let history = &self.core.session.history;
+        let end = if history.last().is_some_and(|item| {
+            item.note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+                && item
+                    .as_note()
+                    .and_then(protocol::HistoryNote::mode)
+                    .is_some()
+        }) {
+            history.len() - 1
+        } else {
+            history.len()
+        };
+        let mode = history[..end]
+            .iter()
+            .rev()
+            .filter_map(protocol::HistoryItem::as_note)
+            .find_map(protocol::HistoryNote::mode)
+            .unwrap_or(fallback);
+        protocol::AgentMode::parse(mode).unwrap_or_else(protocol::AgentMode::normal)
+    }
 
-        if let Some(kind) = replace_note_kind {
+    fn queue_pending_history_append(
+        &mut self,
+        append: PendingHistoryAppend,
+        mode_base: Option<&protocol::AgentMode>,
+    ) {
+        let replace_note_kind = append.replacement_note_kind();
+        if replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
+            let Some(new_mode) = append.mode().map(str::to_string) else {
+                self.replace_or_push_pending_history_append(append);
+                return;
+            };
+            let existing_idx = self.pending_history_appends.iter().position(|pending| {
+                pending.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+            });
+            if let Some(idx) = existing_idx {
+                if mode_base.is_some_and(|base| base.as_str() == new_mode.as_str()) {
+                    self.pending_history_appends.remove(idx);
+                } else {
+                    self.pending_history_appends[idx] = append;
+                }
+            } else if mode_base.is_none_or(|base| base.as_str() != new_mode.as_str()) {
+                self.pending_history_appends.push(append);
+            }
+            return;
+        }
+
+        self.replace_or_push_pending_history_append(append);
+    }
+
+    fn replace_or_push_pending_history_append(&mut self, append: PendingHistoryAppend) {
+        if let Some(kind) = append.replacement_note_kind() {
             if let Some(existing) = self
                 .pending_history_appends
                 .iter_mut()
                 .find(|pending| pending.replacement_note_kind() == Some(kind))
             {
-                *existing = append.clone();
-            } else if self.agent_is_running() {
-                self.pending_history_appends.push(append.clone());
+                *existing = append;
+                return;
             }
-        } else if self.agent_is_running() {
-            self.pending_history_appends.push(append.clone());
         }
+        self.pending_history_appends.push(append);
+    }
+
+    pub(crate) fn queue_history_append(&mut self, append: PendingHistoryAppend) {
+        let mode_base = append.mode().map(|_| self.mode_history_base());
+        let history_append = append.history_append(mode_base);
+        let replace_note_kind = history_append.replacement_note_kind();
 
         if self.agent_is_running() {
+            self.queue_pending_history_append(
+                append.clone(),
+                match &history_append.policy {
+                    protocol::HistoryAppendPolicy::ModeChange { base } => Some(base),
+                    _ => None,
+                },
+            );
             self.core
                 .engine
                 .send(protocol::UiCommand::AppendHistoryItem {
-                    item,
-                    replace_note_kind,
+                    append: history_append,
                 });
         } else if !self.core.session.history.is_empty() {
-            self.apply_history_append_to_history(item, replace_note_kind);
-            self.commit_history_append_block(append.transcript_block(&self.lua), replace_note_kind);
+            let result = self.apply_history_append_to_history(&history_append);
+            self.commit_history_append_block(
+                append.transcript_block(&self.lua),
+                replace_note_kind,
+                result,
+            );
         } else if let Some(kind) = replace_note_kind {
             self.pending_history_appends
                 .retain(|pending| pending.replacement_note_kind() != Some(kind));

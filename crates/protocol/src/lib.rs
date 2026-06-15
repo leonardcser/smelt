@@ -23,9 +23,10 @@ pub use event::{
     UiCommand,
 };
 pub use history::{
-    history_from_messages, history_item_from_user_content, history_item_message_count,
-    history_to_message_positions, history_to_messages, message_to_history_positions,
-    replace_last_note_kind, AssistantStep, HistoryItem, HistoryNote, HistoryNoteKind,
+    apply_history_append, history_from_messages, history_item_from_user_content,
+    history_item_message_count, history_to_message_positions, history_to_messages,
+    message_to_history_positions, replace_last_note_kind, AssistantStep, HistoryAppend,
+    HistoryAppendPolicy, HistoryAppendResult, HistoryItem, HistoryNote, HistoryNoteKind,
     ToolInvocation,
 };
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};

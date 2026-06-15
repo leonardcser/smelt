@@ -288,15 +288,9 @@ impl TuiApp {
 
     pub(crate) fn apply_history_append_to_history(
         &mut self,
-        item: HistoryItem,
-        replace_note_kind: Option<protocol::HistoryNoteKind>,
-    ) {
-        if let Some(kind) = replace_note_kind {
-            if protocol::replace_last_note_kind(&mut self.core.session.history, &item, kind) {
-                return;
-            }
-        }
-        self.core.session.history.push(item);
+        append: &protocol::HistoryAppend,
+    ) -> protocol::HistoryAppendResult {
+        protocol::apply_history_append(&mut self.core.session.history, append)
     }
 
     pub(crate) fn sync_session_snapshot(&mut self) {

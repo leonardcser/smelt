@@ -463,6 +463,43 @@ mod tests {
     }
 
     #[test]
+    fn returning_to_history_mode_removes_mode_change_note() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.mode = Some("normal".into());
+        app.app.core.session.history = vec![protocol::HistoryItem::user(Content::text("hello"))];
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+
+        app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
+
+        assert!(mode_blocks(&app.app).is_empty());
+        assert!(app
+            .app
+            .core
+            .session
+            .history
+            .iter()
+            .all(|item| item.note_kind() != Some(protocol::HistoryNoteKind::ModeChange)));
+    }
+
+    #[test]
+    fn returning_to_history_mode_clears_pending_mode_change_during_turn() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.mode = Some("normal".into());
+        app.app.core.session.history = vec![protocol::HistoryItem::user(Content::text("hello"))];
+        app.start_turn(1);
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert_eq!(app.app.pending_history_appends.len(), 1);
+
+        app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
+
+        assert!(app.app.pending_history_appends.is_empty());
+        assert!(mode_blocks(&app.app).is_empty());
+    }
+
+    #[test]
     fn mode_change_without_another_turn_request_commits_at_turn_end() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(1);
