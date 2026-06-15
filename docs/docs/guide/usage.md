@@ -82,15 +82,16 @@ text is collapsed into a single attachment. Pasting images is handy for sharing
 screenshots of UI bugs, diagrams, or design mock-ups without leaving the
 terminal.
 
-## Message Queuing
+## Queuing and Steering
 
-While the agent is responding, keep typing. Messages queue up and are sent one
-at a time — each queued message becomes its own turn, in order. This lets you
-fire off follow-up questions or corrections as soon as you think of them,
-instead of waiting for the current response to finish.
+While the agent is responding, keep typing. Press `Enter` to queue a message for
+later, or use `Ctrl+Enter` / `Ctrl+Q` to steer the response currently in
+progress.
 
-- `Enter` on an empty prompt — pop and send the next queued message immediately
-- `Esc` — unqueue pending messages so you can edit them
+- `Enter` while busy — queue this message for later
+- `Ctrl+Enter` / `Ctrl+Q` while busy — steer the current response
+- `Enter` on an empty prompt — send the next queued message immediately
+- `Esc` — bring queued messages back into the prompt so you can edit them
 - `Esc Esc` — cancel the agent _and_ unqueue everything
 
 ## Sessions

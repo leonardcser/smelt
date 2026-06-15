@@ -13,7 +13,8 @@ use crossterm::{
     cursor,
     event::{
         DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     QueueableCommand,
@@ -77,6 +78,9 @@ fn enter_envelope() -> io::Result<()> {
         .queue(cursor::Hide)?
         .queue(EnableBracketedPaste)?
         .queue(EnableFocusChange)?
+        .queue(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?
         .queue(EnableMouseCapture)?;
     out.flush()
 }
@@ -96,6 +100,7 @@ fn leave_envelope() -> io::Result<()> {
 fn release_input_modes() -> io::Result<()> {
     let mut out = io::stdout();
     out.queue(DisableMouseCapture)?
+        .queue(PopKeyboardEnhancementFlags)?
         .queue(DisableFocusChange)?
         .queue(DisableBracketedPaste)?
         .queue(cursor::Show)?

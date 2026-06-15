@@ -6,8 +6,8 @@
 
 | Key                             | Action                                  |
 | ------------------------------- | --------------------------------------- |
-| `Enter`                         | Submit message; with queued work, escalate the next queued item; with an empty idle prompt, continue the turn when history exists |
-| `Ctrl+Enter`                    | While the agent is running, add the prompt directly to the current request queue |
+| `Enter`                         | Send message; while the agent is running, queue for later |
+| `Ctrl+Enter` / `Ctrl+Q`          | Steer the current response                 |
 | `Ctrl+J` / `Shift+Enter`        | Insert newline                          |
 | `Ctrl+R`                        | Fuzzy search input history              |
 | `Ctrl+S`                        | Stash / unstash input                   |
@@ -22,15 +22,30 @@
 | `F1`                            | Open help                               |
 | `Cmd+V`                         | Paste image from clipboard              |
 
-While the agent is running, pressing `Enter` queues your prompt for the next
-turn. `Ctrl+Enter` adds a non-empty prompt directly to the current turn's next
-request. Press `Enter` again on an empty prompt to promote the oldest queued
-message into the current turn's next request; press `Enter` once more to
-interrupt and run that item immediately. Slash commands that expand to a prompt
-are queued the same way; commands that open UI do not enter the queue. In the
-prompt bar, `›` marks next-turn items and `»` marks next-request items. `Esc`
-flushes queued items back into the prompt; a second `Esc` cancels the running
-turn.
+While the agent is responding, `Enter` queues your prompt to run next.
+`Ctrl+Enter` or `Ctrl+Q` steers the response currently in progress. Press
+`Enter` on an empty prompt to send the next queued message immediately, or `Esc`
+to bring queued messages back into the prompt for editing. A second `Esc` cancels
+the running turn.
+
+### Terminal setup
+
+Some terminals and multiplexers need a little configuration for modified Enter
+keys such as `Shift+Enter` and `Ctrl+Enter`.
+
+Ghostty:
+
+```conf
+keybind = shift+enter=csi:13;2u
+keybind = ctrl+enter=csi:13;5u
+```
+
+tmux:
+
+```tmux
+set -s extended-keys always
+set -s extended-keys-format csi-u
+```
 
 ### Cursor
 

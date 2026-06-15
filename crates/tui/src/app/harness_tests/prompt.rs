@@ -67,6 +67,30 @@ fn queued_turn_preserves_work_elapsed() {
 }
 
 #[test]
+fn request_queue_bindings_steer_running_turn() {
+    for code in [KeyCode::Enter, KeyCode::Char('q')] {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.drain_engine_sends();
+
+        app.type_text("steer this turn");
+        app.clear_actions();
+        app.press_mod(code, KeyModifiers::CONTROL);
+
+        assert_eq!(app.queued_message_count(), 1);
+        assert_eq!(app.state().prompt_text, "");
+        let steered = app.actions().iter().any(|action| match action {
+            Action::EngineSend(cmd) => matches!(
+                cmd.as_ref(),
+                protocol::UiCommand::Steer { text } if text == "steer this turn"
+            ),
+            _ => false,
+        });
+        assert!(steered);
+    }
+}
+
+#[test]
 fn stale_prompt_prediction_response_after_submit_is_ignored() {
     let mut app = TestApp::builder().build();
     app.app

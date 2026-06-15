@@ -670,7 +670,8 @@ impl TuiApp {
         if target == QueueStage::Request && content.image_count() > 0 {
             self.restore_submission_to_prompt(display, &content);
             self.notify_error(
-                "cannot queue image attachments to the current request; prompt restored".into(),
+                "cannot use image attachments to steer the current response; prompt restored"
+                    .into(),
             );
             return EventOutcome::Noop;
         }
