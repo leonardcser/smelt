@@ -185,7 +185,7 @@ impl TranscriptView {
         &mut self.transcript.history
     }
 
-    pub(crate) fn display_cache_data(&self) -> crate::content::display_cache::DisplayCacheData {
+    pub(crate) fn display_cache_data(&mut self) -> crate::content::display_cache::DisplayCacheData {
         self.projection.display_cache_data(&self.transcript.history)
     }
 

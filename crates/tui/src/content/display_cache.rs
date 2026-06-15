@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 const CACHE_FILE: &str = "session.ir.bin";
 const MAGIC: &[u8; 8] = b"SMELTIR\0";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIXED_HEADER_LEN: usize = MAGIC.len() + 4 + 8 + 2 + 8 + 8;
 
@@ -273,6 +273,7 @@ mod tests {
     use crate::content::display_layout::{
         DisplayCacheKey, DisplayLayoutCacheEntry, DisplayRowIndexEntry, DisplayRowIndexNode,
     };
+    use crate::content::render_plan::{NodeLayoutKey, RenderNodeId};
     use smelt_core::content::block_layout::{BlockLayout, LayoutLeaf, RunsSpec};
     use smelt_core::transcript_model::{BlockId, LayoutKey, ViewState};
 
@@ -283,14 +284,14 @@ mod tests {
             renderer_generation: 1,
             renderer_cache_key: Some(1),
             nodes: vec![DisplayRowIndexNode {
-                id: BlockId::new(7),
-                key: LayoutKey {
+                id: RenderNodeId::Block(BlockId::new(7)),
+                key: NodeLayoutKey::from_block_key(LayoutKey {
                     view_state: ViewState::Expanded,
                     width: 80,
                     show_thinking: false,
                     content_hash: 1,
                     sidecar_hash: 2,
-                },
+                }),
                 exact_height: 3,
             }],
         }
@@ -298,7 +299,7 @@ mod tests {
 
     fn display_layout() -> DisplayLayoutCacheEntry {
         DisplayLayoutCacheEntry {
-            id: BlockId::new(7),
+            id: RenderNodeId::Block(BlockId::new(7)),
             key: DisplayCacheKey::new(1, 2, 1, Some(1), 0),
             layout: BlockLayout::Empty,
         }
@@ -323,7 +324,7 @@ mod tests {
         let data = DisplayCacheData {
             row_indexes: Vec::new(),
             display_layouts: vec![DisplayLayoutCacheEntry {
-                id: BlockId::new(9),
+                id: RenderNodeId::Block(BlockId::new(9)),
                 key: DisplayCacheKey::new(1, 0, 1, Some(1), 0),
                 layout: BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
                     lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {

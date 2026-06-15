@@ -8,6 +8,7 @@ pub(crate) mod display_renderers;
 pub(crate) mod layout;
 pub(crate) mod prompt_buf;
 pub(crate) mod prompt_parser;
+pub(crate) mod render_plan;
 pub(crate) mod source_view;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;

@@ -2,6 +2,7 @@ use super::display_layout::{
     measure_block, render_block_into, CompileJob, DisplayModel, DisplayRowIndexEntry,
     DisplayRowIndexNode, MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
+use crate::content::render_plan::{NodeLayoutKey, RenderNodeId, RenderPlan};
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
@@ -13,6 +14,7 @@ use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
 pub(crate) struct TranscriptProjection {
+    render_plan: RenderPlan,
     display_layouts: DisplayModel,
     display_layouts_generation: u64,
     active_width: u16,
@@ -64,9 +66,35 @@ struct CachedRows {
     show_thinking: bool,
 }
 
+#[derive(Clone, Copy)]
+struct RowIndexKey {
+    width: u16,
+    show_thinking: bool,
+    renderer_generation: u64,
+    renderer_cache_key: Option<u64>,
+    base_key: LayoutKey,
+}
+
+impl RowIndexKey {
+    fn new(
+        width: u16,
+        show_thinking: bool,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+    ) -> Self {
+        Self {
+            width,
+            show_thinking,
+            renderer_generation,
+            renderer_cache_key,
+            base_key: base_layout_key(width, show_thinking),
+        }
+    }
+}
+
 #[derive(Default)]
 struct ExactRowIndex {
-    nodes: Vec<ExactBlockRow>,
+    nodes: Vec<ExactNodeRow>,
     prefix_rows: Vec<RowIndex>,
     prefix_dirty: bool,
     generation: u64,
@@ -76,76 +104,66 @@ struct ExactRowIndex {
     show_thinking: bool,
 }
 
-struct ExactBlockRow {
-    id: BlockId,
-    key: LayoutKey,
+struct ExactNodeRow {
+    id: RenderNodeId,
+    key: NodeLayoutKey,
     estimated_height: RowIndex,
     exact_height: Option<RowIndex>,
 }
 
-impl ExactBlockRow {
+impl ExactNodeRow {
     fn measured_or_estimated_height(&self) -> RowIndex {
         self.exact_height.unwrap_or(self.estimated_height)
     }
 }
 
 impl ExactRowIndex {
-    fn is_current(
-        &self,
-        history: &BlockHistory,
-        width: u16,
-        show_thinking: bool,
-        renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
-    ) -> bool {
-        self.generation == history.generation()
-            && self.renderer_generation == renderer_generation
-            && self.renderer_cache_key == renderer_cache_key
-            && self.width == width
-            && self.show_thinking == show_thinking
-            && self.nodes.len() == history.order.len()
+    fn is_current(&self, plan: &RenderPlan, key: RowIndexKey) -> bool {
+        self.generation == plan.fingerprint
+            && self.renderer_generation == key.renderer_generation
+            && self.renderer_cache_key == key.renderer_cache_key
+            && self.width == key.width
+            && self.show_thinking == key.show_thinking
+            && self.nodes.len() == plan.len()
     }
 
-    fn rebuild_if_stale(
-        &mut self,
-        history: &BlockHistory,
-        width: u16,
-        show_thinking: bool,
-        renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
-        base_key: LayoutKey,
-    ) {
-        let gen = history.generation();
+    fn rebuild_if_stale(&mut self, history: &BlockHistory, plan: &RenderPlan, key: RowIndexKey) {
+        let gen = plan.fingerprint;
         if self.generation == gen
-            && self.renderer_generation == renderer_generation
-            && self.renderer_cache_key == renderer_cache_key
-            && self.width == width
-            && self.show_thinking == show_thinking
+            && self.renderer_generation == key.renderer_generation
+            && self.renderer_cache_key == key.renderer_cache_key
+            && self.width == key.width
+            && self.show_thinking == key.show_thinking
         {
             return;
         }
 
-        let keep_measurements = self.renderer_generation == renderer_generation
-            && self.renderer_cache_key == renderer_cache_key
-            && self.width == width
-            && self.show_thinking == show_thinking;
+        let keep_measurements = self.renderer_generation == key.renderer_generation
+            && self.renderer_cache_key == key.renderer_cache_key
+            && self.width == key.width
+            && self.show_thinking == key.show_thinking;
         let old_nodes = if keep_measurements {
             std::mem::take(&mut self.nodes)
         } else {
             Vec::new()
         };
         self.nodes.clear();
-        self.nodes.reserve(history.order.len());
-        for (index, &id) in history.order.iter().enumerate() {
-            let key = history.resolve_key(id, base_key);
+        self.nodes.reserve(plan.len());
+        for index in 0..plan.len() {
+            let Some(id) = plan.node_id(index) else {
+                continue;
+            };
+            let Some(node_key) = plan.node_key(history, index, key.base_key) else {
+                continue;
+            };
             let old_same_index = old_nodes.get(index).filter(|node| node.id == id);
             let estimated_height = old_same_index
-                .map(ExactBlockRow::measured_or_estimated_height)
+                .map(ExactNodeRow::measured_or_estimated_height)
                 .or_else(|| {
                     old_nodes
                         .iter()
                         .find(|node| node.id == id)
-                        .map(ExactBlockRow::measured_or_estimated_height)
+                        .map(ExactNodeRow::measured_or_estimated_height)
                 })
                 .unwrap_or(1);
             let same_previous = index == 0
@@ -154,20 +172,20 @@ impl ExactRowIndex {
                     .zip(self.nodes.get(index.saturating_sub(1)))
                     .is_some_and(|(old, new)| old.id == new.id && old.key == new.key);
             let exact_height = old_same_index
-                .filter(|node| node.key == key && same_previous)
+                .filter(|node| node.key == node_key && same_previous)
                 .and_then(|node| node.exact_height);
-            self.nodes.push(ExactBlockRow {
+            self.nodes.push(ExactNodeRow {
                 id,
-                key,
+                key: node_key,
                 estimated_height,
                 exact_height,
             });
         }
         self.generation = gen;
-        self.renderer_generation = renderer_generation;
-        self.renderer_cache_key = renderer_cache_key;
-        self.width = width;
-        self.show_thinking = show_thinking;
+        self.renderer_generation = key.renderer_generation;
+        self.renderer_cache_key = key.renderer_cache_key;
+        self.width = key.width;
+        self.show_thinking = key.show_thinking;
         self.rebuild_prefix_rows();
     }
 
@@ -188,39 +206,42 @@ impl ExactRowIndex {
     fn sync_stable_order_prefix(
         &mut self,
         history: &BlockHistory,
-        renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
-        base_key: LayoutKey,
+        plan: &RenderPlan,
+        key: RowIndexKey,
     ) -> bool {
         let old_len = self.nodes.len();
-        if self.renderer_generation != renderer_generation
-            || self.renderer_cache_key != renderer_cache_key
+        if self.renderer_generation != key.renderer_generation
+            || self.renderer_cache_key != key.renderer_cache_key
         {
             return false;
         }
-        if old_len > history.order.len() {
+        if old_len > plan.len() {
             return false;
         }
-        if old_len == history.order.len()
-            && self.generation == history.generation()
-            && self.renderer_generation == renderer_generation
-            && self.renderer_cache_key == renderer_cache_key
-            && self.width == base_key.width
-            && self.show_thinking == base_key.show_thinking
+        if old_len == plan.len()
+            && self.generation == plan.fingerprint
+            && self.renderer_generation == key.renderer_generation
+            && self.renderer_cache_key == key.renderer_cache_key
+            && self.width == key.width
+            && self.show_thinking == key.show_thinking
         {
             return true;
         }
         let mut prev_key_changed = false;
         let mut prefix_dirty = false;
         for index in 0..old_len {
-            let id = history.order[index];
-            let key = history.resolve_key(id, base_key);
+            let Some(id) = plan.node_id(index) else {
+                return false;
+            };
+            let Some(node_key) = plan.node_key(history, index, key.base_key) else {
+                return false;
+            };
             let node = &mut self.nodes[index];
             if node.id != id {
                 return false;
             }
-            if node.key != key {
-                node.key = key;
+            if node.key != node_key {
+                node.key = node_key;
                 node.exact_height = None;
                 prev_key_changed = true;
                 prefix_dirty = true;
@@ -230,43 +251,34 @@ impl ExactRowIndex {
                 prefix_dirty = true;
             }
         }
-        if old_len < history.order.len() {
+        if old_len < plan.len() {
             prefix_dirty = true;
         }
-        for index in old_len..history.order.len() {
-            let id = history.order[index];
-            let key = history.resolve_key(id, base_key);
-            self.nodes.push(ExactBlockRow {
+        for index in old_len..plan.len() {
+            let Some(id) = plan.node_id(index) else {
+                return false;
+            };
+            let Some(node_key) = plan.node_key(history, index, key.base_key) else {
+                return false;
+            };
+            self.nodes.push(ExactNodeRow {
                 id,
-                key,
+                key: node_key,
                 estimated_height: 1,
                 exact_height: None,
             });
         }
-        self.generation = history.generation();
-        self.renderer_generation = renderer_generation;
-        self.renderer_cache_key = renderer_cache_key;
-        self.width = base_key.width;
-        self.show_thinking = base_key.show_thinking;
+        self.generation = plan.fingerprint;
+        self.renderer_generation = key.renderer_generation;
+        self.renderer_cache_key = key.renderer_cache_key;
+        self.width = key.width;
+        self.show_thinking = key.show_thinking;
         self.prefix_dirty |= prefix_dirty;
         true
     }
 
-    fn is_exact_for(
-        &self,
-        history: &BlockHistory,
-        width: u16,
-        show_thinking: bool,
-        renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
-    ) -> bool {
-        self.is_current(
-            history,
-            width,
-            show_thinking,
-            renderer_generation,
-            renderer_cache_key,
-        ) && self.nodes.iter().all(|node| node.exact_height.is_some())
+    fn is_exact_for(&self, plan: &RenderPlan, key: RowIndexKey) -> bool {
+        self.is_current(plan, key) && self.nodes.iter().all(|node| node.exact_height.is_some())
     }
 
     fn refresh_prefix_rows(&mut self) {
@@ -289,7 +301,9 @@ impl ExactRowIndex {
     }
 
     fn block_index(&self, id: BlockId) -> Option<usize> {
-        self.nodes.iter().position(|node| node.id == id)
+        self.nodes
+            .iter()
+            .position(|node| node.id.as_block_id() == Some(id))
     }
 
     fn end_index_for_row_end(&self, row_end: RowIndex) -> usize {
@@ -310,44 +324,47 @@ impl ExactRowIndex {
     fn hydrate_from_cache(
         &mut self,
         history: &BlockHistory,
+        plan: &RenderPlan,
         entry: &DisplayRowIndexEntry,
-        renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
-        base_key: LayoutKey,
+        key: RowIndexKey,
     ) -> bool {
-        if entry.renderer_generation != renderer_generation
-            || entry.renderer_cache_key != renderer_cache_key
-            || entry.width != base_key.width
-            || entry.show_thinking != base_key.show_thinking
+        if entry.renderer_generation != key.renderer_generation
+            || entry.renderer_cache_key != key.renderer_cache_key
+            || entry.width != key.width
+            || entry.show_thinking != key.show_thinking
         {
             return false;
         }
-        if entry.nodes.len() != history.order.len() {
+        if entry.nodes.len() != plan.len() {
             return false;
         }
         let mut nodes = Vec::with_capacity(entry.nodes.len());
         for (index, cached) in entry.nodes.iter().enumerate() {
-            let id = history.order[index];
+            let Some(id) = plan.node_id(index) else {
+                return false;
+            };
             if cached.id != id {
                 return false;
             }
-            let key = history.resolve_key(id, base_key);
-            if cached.key != key {
+            let Some(node_key) = plan.node_key(history, index, key.base_key) else {
+                return false;
+            };
+            if cached.key != node_key {
                 return false;
             }
-            nodes.push(ExactBlockRow {
+            nodes.push(ExactNodeRow {
                 id,
-                key,
+                key: node_key,
                 estimated_height: cached.exact_height,
                 exact_height: Some(cached.exact_height),
             });
         }
         self.nodes = nodes;
-        self.generation = history.generation();
-        self.renderer_generation = renderer_generation;
-        self.renderer_cache_key = renderer_cache_key;
-        self.width = base_key.width;
-        self.show_thinking = base_key.show_thinking;
+        self.generation = plan.fingerprint;
+        self.renderer_generation = key.renderer_generation;
+        self.renderer_cache_key = key.renderer_cache_key;
+        self.width = key.width;
+        self.show_thinking = key.show_thinking;
         self.rebuild_prefix_rows();
         true
     }
@@ -409,6 +426,7 @@ impl MeasurementIndexStore {
     fn export_entries(
         &self,
         history: &BlockHistory,
+        plan: &RenderPlan,
         renderer_generation: Option<u64>,
         renderer_cache_key: Option<u64>,
     ) -> Vec<DisplayRowIndexEntry> {
@@ -417,13 +435,13 @@ impl MeasurementIndexStore {
             .iter()
             .filter(|entry| {
                 row_index_entry_matches_renderer(entry, renderer_generation, renderer_cache_key)
-                    && row_index_entry_matches(history, entry)
+                    && row_index_entry_matches(history, plan, entry)
             })
             .cloned()
             .collect();
         if let Some(current) = self.active.cache_entry() {
             if row_index_entry_matches_renderer(&current, renderer_generation, renderer_cache_key)
-                && row_index_entry_matches(history, &current)
+                && row_index_entry_matches(history, plan, &current)
             {
                 upsert_row_index_entry(&mut entries, current);
             }
@@ -679,14 +697,18 @@ fn row_offset_for_display_offset(
     row as RowIndex
 }
 
-fn row_index_entry_matches(history: &BlockHistory, entry: &DisplayRowIndexEntry) -> bool {
-    if entry.nodes.len() != history.order.len() {
+fn row_index_entry_matches(
+    history: &BlockHistory,
+    plan: &RenderPlan,
+    entry: &DisplayRowIndexEntry,
+) -> bool {
+    if entry.nodes.len() != plan.len() {
         return false;
     }
     let base_key = base_layout_key(entry.width, entry.show_thinking);
     entry.nodes.iter().enumerate().all(|(index, node)| {
-        let id = history.order[index];
-        node.id == id && node.key == history.resolve_key(id, base_key)
+        plan.node_id(index) == Some(node.id)
+            && plan.node_key(history, index, base_key) == Some(node.key)
     })
 }
 
@@ -723,21 +745,22 @@ fn upsert_row_index_entry(entries: &mut Vec<DisplayRowIndexEntry>, entry: Displa
 
 fn render_cached_layout_to_buffer(
     display_model: &DisplayModel,
-    id: BlockId,
-    key: LayoutKey,
+    id: RenderNodeId,
+    key: NodeLayoutKey,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
     theme: &Theme,
     history: &BlockHistory,
 ) -> Option<(Buffer, usize)> {
     let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
+    let block_key = key.into_block_key();
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let outcome = render_block_into(
         &mut buf,
         layout,
         RenderCtx {
-            width: key.width,
-            view_state: key.view_state,
+            width: block_key.width,
+            view_state: block_key.view_state,
             theme,
             history: Some(history),
         },
@@ -748,6 +771,7 @@ fn render_cached_layout_to_buffer(
 impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
+            render_plan: RenderPlan::empty(),
             display_layouts: DisplayModel::new(),
             display_layouts_generation: u64::MAX,
             active_width: 0,
@@ -761,18 +785,25 @@ impl TranscriptProjection {
         }
     }
 
+    fn refresh_render_plan(&mut self, history: &BlockHistory) {
+        if self.render_plan.history_generation != history.generation() {
+            self.render_plan = RenderPlan::for_history(history);
+        }
+    }
+
     pub(crate) fn hydrate_display_cache(
         &mut self,
         history: &BlockHistory,
         data: crate::content::display_cache::DisplayCacheData,
     ) -> usize {
+        self.refresh_render_plan(history);
         let crate::content::display_cache::DisplayCacheData {
             row_indexes,
             display_layouts,
         } = data;
-        let hydrated_layouts = self
-            .display_layouts
-            .hydrate_from_cache(history, display_layouts);
+        let hydrated_layouts =
+            self.display_layouts
+                .hydrate_from_cache(history, &self.render_plan, display_layouts);
         self.measurements.hydrate(row_indexes);
         smelt_perf::perf::record_value(
             "transcript:display_model_cache:loaded",
@@ -786,13 +817,15 @@ impl TranscriptProjection {
     }
 
     pub(crate) fn display_cache_data(
-        &self,
+        &mut self,
         history: &BlockHistory,
     ) -> crate::content::display_cache::DisplayCacheData {
+        self.refresh_render_plan(history);
         crate::content::display_cache::DisplayCacheData {
             row_indexes: self.row_index_cache_entries(history),
             display_layouts: self.display_layouts.cache_entries(
                 history,
+                &self.render_plan,
                 self.renderer_generation,
                 self.renderer_cache_key,
             ),
@@ -826,9 +859,14 @@ impl TranscriptProjection {
         true
     }
 
-    fn row_index_cache_entries(&self, history: &BlockHistory) -> Vec<DisplayRowIndexEntry> {
-        self.measurements
-            .export_entries(history, self.renderer_generation, self.renderer_cache_key)
+    fn row_index_cache_entries(&mut self, history: &BlockHistory) -> Vec<DisplayRowIndexEntry> {
+        self.refresh_render_plan(history);
+        self.measurements.export_entries(
+            history,
+            &self.render_plan,
+            self.renderer_generation,
+            self.renderer_cache_key,
+        )
     }
 
     /// Snapshot of the visibly laid-out blocks: `(BlockId, first_row, rows)`.
@@ -909,10 +947,11 @@ impl TranscriptProjection {
     }
 
     fn gc_if_stale(&mut self, history: &BlockHistory, width: u16) {
-        let gen = history.generation();
-        if self.display_layouts_generation != gen {
-            self.display_layouts.retain_order(&history.order);
-            self.display_layouts_generation = gen;
+        self.refresh_render_plan(history);
+        let fingerprint = self.render_plan.fingerprint;
+        if self.display_layouts_generation != fingerprint {
+            self.display_layouts.retain_nodes(self.render_plan.ids());
+            self.display_layouts_generation = fingerprint;
         }
         if width != self.active_width {
             // Width changes invalidate row indexes and materialized rows, but
@@ -949,41 +988,29 @@ impl TranscriptProjection {
     fn try_hydrate_row_index(
         &mut self,
         history: &BlockHistory,
-        width: u16,
-        show_thinking: bool,
-        renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
-        base_key: LayoutKey,
+        plan: &RenderPlan,
+        key: RowIndexKey,
     ) -> bool {
-        if self.measurements.active.is_current(
-            history,
-            width,
-            show_thinking,
-            renderer_generation,
-            renderer_cache_key,
-        ) {
+        if self.measurements.active.is_current(plan, key) {
             return true;
         }
         let Some(entry) = self
             .measurements
             .find_entry(
-                width,
-                show_thinking,
-                renderer_generation,
-                renderer_cache_key,
+                key.width,
+                key.show_thinking,
+                key.renderer_generation,
+                key.renderer_cache_key,
             )
             .cloned()
         else {
             smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
             return false;
         };
-        let hydrated = self.measurements.active.hydrate_from_cache(
-            history,
-            &entry,
-            renderer_generation,
-            renderer_cache_key,
-            base_key,
-        );
+        let hydrated = self
+            .measurements
+            .active
+            .hydrate_from_cache(history, plan, &entry, key);
         smelt_perf::perf::record_value(
             if hydrated {
                 "transcript:row_index_cache:hydrated"
@@ -1026,44 +1053,30 @@ impl TranscriptProjection {
         let renderer_cache_key = env.renderer_cache_key;
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
         self.gc_if_stale(history, width);
-        let base_key = base_layout_key(width, show_thinking);
-        let hydrated_index = self.try_hydrate_row_index(
-            history,
+        let plan = self.render_plan.clone();
+        let row_key = RowIndexKey::new(
             width,
             show_thinking,
             renderer_generation,
             renderer_cache_key,
-            base_key,
         );
+        let hydrated_index = self.try_hydrate_row_index(history, &plan, row_key);
         let reused_index = hydrated_index
-            || self.measurements.active.sync_stable_order_prefix(
-                history,
-                renderer_generation,
-                renderer_cache_key,
-                base_key,
-            );
+            || self
+                .measurements
+                .active
+                .sync_stable_order_prefix(history, &plan, row_key);
         smelt_perf::perf::record_value(
             "transcript:rebuild_row_index:reused_index",
             u64::from(reused_index),
         );
         if !reused_index {
             let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
-            self.measurements.active.rebuild_if_stale(
-                history,
-                width,
-                show_thinking,
-                renderer_generation,
-                renderer_cache_key,
-                base_key,
-            );
+            self.measurements
+                .active
+                .rebuild_if_stale(history, &plan, row_key);
         }
-        if self.measurements.active.is_exact_for(
-            history,
-            width,
-            show_thinking,
-            renderer_generation,
-            renderer_cache_key,
-        ) {
+        if self.measurements.active.is_exact_for(&plan, row_key) {
             if reused_index {
                 self.measurements.active.refresh_prefix_rows();
             }
@@ -1166,8 +1179,11 @@ impl TranscriptProjection {
                 (history.block_gap(i) as RowIndex).min(exact_height)
             };
             running_total = running_total.saturating_add(gap);
+            let Some(block_id) = node.id.as_block_id() else {
+                continue;
+            };
             layout.push(LayoutEntry {
-                id: node.id,
+                id: block_id,
                 start: running_total,
                 rows: exact_height.saturating_sub(gap),
             });
@@ -1265,7 +1281,7 @@ impl TranscriptProjection {
             .and_then(|display_offset| {
                 let (block_buf, rendered_rows) = render_cached_layout_to_buffer(
                     &self.display_layouts,
-                    anchor.id,
+                    node.id,
                     node.key,
                     self.measurements.active.renderer_generation,
                     self.measurements.active.renderer_cache_key,
@@ -1549,8 +1565,8 @@ impl TranscriptProjection {
         history: &BlockHistory,
         theme: &Theme,
         block_index: usize,
-        id: BlockId,
-        key: LayoutKey,
+        id: RenderNodeId,
+        key: NodeLayoutKey,
         rows: &mut ProjectRows<'_>,
     ) {
         let renderer_generation = self.measurements.active.renderer_generation;
@@ -1575,7 +1591,10 @@ impl TranscriptProjection {
             rows.texts.push(String::new());
             rows.row_anchors.push(None);
         }
-        let block_anchors = rendered_row_anchors(&block_buf, id, block_rows);
+        let Some(block_id) = id.as_block_id() else {
+            return;
+        };
+        let block_anchors = rendered_row_anchors(&block_buf, block_id, block_rows);
         let local_start = rows.texts.len() as RowIndex;
         for (r, anchor) in block_anchors.iter().copied().enumerate() {
             let row_idx = rows.texts.len();
@@ -1593,7 +1612,7 @@ impl TranscriptProjection {
             rows.row_anchors.push(Some(anchor));
         }
         rows.layout.push(LayoutEntry {
-            id,
+            id: block_id,
             start: rows.row_base.saturating_add(local_start),
             rows: block_rows as RowIndex,
         });
@@ -1707,31 +1726,23 @@ impl TranscriptProjection {
             self.counters.full_row_builds += 1;
         }
         smelt_perf::perf::record_value("transcript:build_rows:blocks", history.order.len() as u64);
-        let base_key = base_layout_key(width, show_thinking);
-        let hydrated_index = self.try_hydrate_row_index(
-            history,
+        let plan = self.render_plan.clone();
+        let row_key = RowIndexKey::new(
             width,
             show_thinking,
             renderer_generation,
             renderer_cache_key,
-            base_key,
         );
+        let hydrated_index = self.try_hydrate_row_index(history, &plan, row_key);
         let reused_index = hydrated_index
-            || self.measurements.active.sync_stable_order_prefix(
-                history,
-                renderer_generation,
-                renderer_cache_key,
-                base_key,
-            );
+            || self
+                .measurements
+                .active
+                .sync_stable_order_prefix(history, &plan, row_key);
         if !reused_index {
-            self.measurements.active.rebuild_if_stale(
-                history,
-                width,
-                show_thinking,
-                renderer_generation,
-                renderer_cache_key,
-                base_key,
-            );
+            self.measurements
+                .active
+                .rebuild_if_stale(history, &plan, row_key);
         }
         let mut rows: Vec<String> = Vec::new();
         let block_indices = 0..self.measurements.active.nodes.len();
