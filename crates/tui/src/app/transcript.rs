@@ -112,6 +112,7 @@ impl TranscriptView {
         lua: &LuaRuntime,
         width: u16,
         show_thinking: bool,
+        theme: &Theme,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
     ) -> crate::content::transcript_buf::ProjectionPlan {
@@ -120,6 +121,7 @@ impl TranscriptView {
             &mut self.transcript.history,
             width,
             show_thinking,
+            theme,
             scroll_target,
             viewport_rows,
         )

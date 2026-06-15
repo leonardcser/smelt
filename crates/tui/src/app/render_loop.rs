@@ -169,6 +169,7 @@ impl TuiApp {
                         lua,
                         width,
                         show_thinking,
+                        &theme,
                         scroll_target,
                         viewport_rows,
                     );

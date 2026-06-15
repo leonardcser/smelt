@@ -584,6 +584,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     &app.lua,
                     width,
                     show_thinking,
+                    &theme,
                     scroll_target,
                     height,
                 );

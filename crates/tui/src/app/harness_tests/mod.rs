@@ -295,6 +295,16 @@ fn transcript_viewport_top_line(app: &TestApp) -> String {
     buf.get_line(local_row).unwrap_or_default().to_string()
 }
 
+fn transcript_viewport_lines(app: &TestApp) -> Vec<String> {
+    let win = app.app.transcript_win();
+    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+    let viewport_rows = win.viewport.map(|v| v.rect.height).unwrap_or(0) as usize;
+    let start = win.local_visual_row(win.scroll_top()) as usize;
+    (start..start.saturating_add(viewport_rows).min(buf.line_count()))
+        .map(|i| buf.get_line(i).unwrap_or_default().to_string())
+        .collect()
+}
+
 fn transcript_buffer_lines(app: &TestApp, count: usize) -> Vec<String> {
     let win = app.app.transcript_win();
     let buf = app.app.ui.buf(win.buf).expect("transcript buffer");

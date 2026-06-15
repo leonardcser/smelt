@@ -9,7 +9,7 @@ use crate::smelt_edit::{
 };
 use smelt_buffer::coords::copy_byte_range;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
 pub(crate) struct TranscriptProjection {
@@ -34,6 +34,8 @@ struct VisibleProjectionState {
     row_base: RowIndex,
     /// Total rows in the logical transcript represented by the visible projection.
     total_rows: RowIndex,
+    /// Rendered-row anchors for the materialized rows, parallel to the backing buffer lines.
+    row_anchors: Vec<Option<RenderedRowAnchor>>,
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     full_rows: Option<CachedRows>,
 }
@@ -446,10 +448,17 @@ impl MeasurementIndexStore {
 }
 
 #[derive(Clone, Copy)]
+struct RenderedRowAnchor {
+    id: BlockId,
+    row_offset: RowIndex,
+    display_offset: usize,
+}
+
+#[derive(Clone, Copy)]
 struct ResizeAnchor {
     id: BlockId,
     row_offset: RowIndex,
-    source_line: Option<usize>,
+    display_offset: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -567,6 +576,7 @@ struct ProjectRows<'a> {
     texts: &'a mut Vec<String>,
     pending: &'a mut Vec<PendingRow>,
     layout: &'a mut Vec<LayoutEntry>,
+    row_anchors: &'a mut Vec<Option<RenderedRowAnchor>>,
 }
 
 struct MaterializedTranscriptRange {
@@ -575,6 +585,7 @@ struct MaterializedTranscriptRange {
     texts: Vec<String>,
     pending: Vec<PendingRow>,
     layout: Vec<LayoutEntry>,
+    row_anchors: Vec<Option<RenderedRowAnchor>>,
 }
 
 fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
@@ -587,74 +598,85 @@ fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
     }
 }
 
-struct SourceLineText<'a> {
-    content: &'a str,
-    first_row: RowIndex,
-    line_prefix: &'static str,
-}
-
-fn source_line_text(history: &BlockHistory, id: BlockId) -> Option<SourceLineText<'_>> {
-    match history.blocks.get(&id)? {
-        Block::Text { content } => Some(SourceLineText {
-            content: content.as_str(),
-            first_row: 0,
-            line_prefix: "",
-        }),
-        Block::User { text, .. } => Some(SourceLineText {
-            content: text.as_str(),
-            first_row: 1,
-            line_prefix: " ",
-        }),
-        _ => None,
+fn subtract_byte_range(ranges: &mut Vec<std::ops::Range<usize>>, remove: std::ops::Range<usize>) {
+    if remove.start >= remove.end {
+        return;
     }
+    let mut out = Vec::with_capacity(ranges.len() + 1);
+    for range in ranges.drain(..) {
+        if remove.end <= range.start || remove.start >= range.end {
+            out.push(range);
+            continue;
+        }
+        if range.start < remove.start {
+            out.push(range.start..remove.start);
+        }
+        if remove.end < range.end {
+            out.push(remove.end..range.end);
+        }
+    }
+    *ranges = out;
 }
 
-fn wrapped_source_line_rows(line: &str, prefix: &str, width: u16) -> RowIndex {
-    let prefixed;
-    let line = if prefix.is_empty() {
-        line
-    } else {
-        prefixed = format!("{prefix}{line}");
-        prefixed.as_str()
+fn selectable_row_text(buf: &Buffer, row: usize) -> String {
+    let Some(line) = buf.get_line(row) else {
+        return String::new();
     };
-    smelt_buffer::wrap::wrap_line_ranges(line, width.max(1) as usize)
-        .len()
-        .max(1) as RowIndex
+    let mut ranges: Vec<std::ops::Range<usize>> = std::iter::once(0..line.len()).collect();
+    for span in buf
+        .highlights_at(row)
+        .into_iter()
+        .filter(|span| !span.meta.selectable)
+    {
+        let start = smelt_buffer::text::cell_to_byte(line, span.col_start as usize);
+        let end = smelt_buffer::text::cell_to_byte(line, span.col_end as usize);
+        subtract_byte_range(&mut ranges, start..end);
+    }
+    ranges
+        .into_iter()
+        .map(|range| smelt_buffer::text::slice(line, range))
+        .collect()
 }
 
-fn source_line_anchor_for_block(
-    history: &BlockHistory,
-    id: BlockId,
-    row_offset: RowIndex,
-    width: u16,
-) -> Option<usize> {
-    let source = source_line_text(history, id)?;
-    let mut row = source.first_row;
-    for (line_index, line) in source.content.lines().enumerate() {
-        let line_rows = wrapped_source_line_rows(line, source.line_prefix, width);
-        if row_offset < row.saturating_add(line_rows) {
-            return Some(line_index);
-        }
-        row = row.saturating_add(line_rows);
+fn rendered_row_anchors(buf: &Buffer, id: BlockId, rows: usize) -> Vec<RenderedRowAnchor> {
+    let mut anchors = Vec::with_capacity(rows);
+    let mut display_offset = 0usize;
+    for row in 0..rows {
+        anchors.push(RenderedRowAnchor {
+            id,
+            row_offset: row as RowIndex,
+            display_offset,
+        });
+        display_offset = display_offset.saturating_add(selectable_row_text(buf, row).len());
     }
-    None
+    anchors
 }
 
-fn source_line_start_row_for_block(
-    history: &BlockHistory,
-    id: BlockId,
-    source_line: usize,
-    width: u16,
-) -> Option<RowIndex> {
-    let source = source_line_text(history, id)?;
-    let mut row = source.first_row;
-    for (line_index, line) in source.content.lines().enumerate() {
-        if line_index == source_line {
-            return Some(row);
-        }
-        row = row.saturating_add(wrapped_source_line_rows(line, source.line_prefix, width));
+fn row_offset_for_display_offset(
+    buf: &Buffer,
+    rows: usize,
+    display_offset: usize,
+    fallback: RowIndex,
+) -> RowIndex {
+    if rows == 0 {
+        return 0;
     }
-    None
+    let offsets: Vec<usize> = (0..rows)
+        .scan(0usize, |offset, row| {
+            let current = *offset;
+            *offset = offset.saturating_add(selectable_row_text(buf, row).len());
+            Some(current)
+        })
+        .collect();
+    if offsets.iter().all(|offset| *offset == 0) {
+        return fallback.min(rows.saturating_sub(1) as RowIndex);
+    }
+    let mut row = offsets.partition_point(|offset| *offset <= display_offset);
+    row = row.saturating_sub(1).min(rows.saturating_sub(1));
+    while row > 0 && offsets[row - 1] == offsets[row] {
+        row -= 1;
+    }
+    row as RowIndex
 }
 
 fn row_index_entry_matches(history: &BlockHistory, entry: &DisplayRowIndexEntry) -> bool {
@@ -875,6 +897,7 @@ impl TranscriptProjection {
         self.visible.materialized = None;
         self.visible.block_layout.clear();
         self.visible.row_base = 0;
+        self.visible.row_anchors.clear();
         self.visible.total_rows = 0;
     }
 
@@ -1164,12 +1187,7 @@ impl TranscriptProjection {
         self.measurements.active.total_rows()
     }
 
-    fn resize_anchor_for(
-        &self,
-        history: &BlockHistory,
-        width: u16,
-        scroll_target: ScrollTarget,
-    ) -> Option<ResizeAnchor> {
+    fn resize_anchor_for(&self, width: u16, scroll_target: ScrollTarget) -> Option<ResizeAnchor> {
         let row = scroll_target.visible_row_anchor()?;
         let width_changed = self
             .last_project_key()
@@ -1178,26 +1196,38 @@ impl TranscriptProjection {
         if !width_changed {
             return None;
         }
+        let rendered = row
+            .checked_sub(self.visible.row_base)
+            .and_then(|local| self.visible.row_anchors.get(local as usize))
+            .and_then(|anchor| *anchor);
+        if let Some(anchor) = rendered {
+            return Some(ResizeAnchor {
+                id: anchor.id,
+                row_offset: anchor.row_offset,
+                display_offset: Some(anchor.display_offset),
+            });
+        }
         let (id, row_offset) = self.block_anchor_at(row)?;
-        let old_width = self.measurements.active.width;
         Some(ResizeAnchor {
             id,
             row_offset,
-            source_line: source_line_anchor_for_block(history, id, row_offset, old_width),
+            display_offset: None,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn plan_projection_measured(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
         show_thinking: bool,
+        theme: &Theme,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
     ) -> ProjectionPlan {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
-        let resize_anchor = self.resize_anchor_for(history, width, scroll_target);
+        let resize_anchor = self.resize_anchor_for(width, scroll_target);
         let env = TranscriptRenderEnv::new(lua, show_thinking);
         self.rebuild_row_index_with_env(env, history, width);
         let key = ProjectKey {
@@ -1213,6 +1243,7 @@ impl TranscriptProjection {
             key,
             scroll_target,
             viewport_rows,
+            theme,
             resize_anchor,
         )
     }
@@ -1220,21 +1251,33 @@ impl TranscriptProjection {
     fn scroll_top_for_resize_anchor(
         &self,
         history: &BlockHistory,
+        theme: &Theme,
         anchor: Option<ResizeAnchor>,
     ) -> Option<RowIndex> {
         let anchor = anchor?;
         let index = self.measurements.active.block_index(anchor.id)?;
-        let exact_height = self.measurements.active.nodes.get(index)?.exact_height?;
+        let node = self.measurements.active.nodes.get(index)?;
+        let exact_height = node.exact_height?;
         let gap = (history.block_gap(index) as RowIndex).min(exact_height);
+        let block_rows = exact_height.saturating_sub(gap);
         let offset = anchor
-            .source_line
-            .and_then(|line| {
-                source_line_start_row_for_block(
-                    history,
+            .display_offset
+            .and_then(|display_offset| {
+                let (block_buf, rendered_rows) = render_cached_layout_to_buffer(
+                    &self.display_layouts,
                     anchor.id,
-                    line,
-                    self.measurements.active.width,
-                )
+                    node.key,
+                    self.measurements.active.renderer_generation,
+                    self.measurements.active.renderer_cache_key,
+                    theme,
+                    history,
+                )?;
+                Some(row_offset_for_display_offset(
+                    &block_buf,
+                    rendered_rows,
+                    display_offset,
+                    anchor.row_offset,
+                ))
             })
             .unwrap_or(anchor.row_offset);
         Some(
@@ -1242,7 +1285,7 @@ impl TranscriptProjection {
                 .active
                 .prefix_row(index)
                 .saturating_add(gap)
-                .saturating_add(offset.min(exact_height.saturating_sub(gap))),
+                .saturating_add(offset.min(block_rows.saturating_sub(1))),
         )
     }
 
@@ -1252,11 +1295,12 @@ impl TranscriptProjection {
         key: ProjectKey,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
+        theme: &Theme,
         resize_anchor: Option<ResizeAnchor>,
     ) -> ProjectionPlan {
         let total_rows = self.measurements.active.total_rows();
         let requested_scroll_top = self
-            .scroll_top_for_resize_anchor(history, resize_anchor)
+            .scroll_top_for_resize_anchor(history, theme, resize_anchor)
             .unwrap_or_else(|| scroll_target.as_scroll_top());
         let scroll_top = clamp_scroll(requested_scroll_top, total_rows, viewport_rows);
         let visible_rows = viewport_rows.max(1) as RowIndex;
@@ -1304,6 +1348,7 @@ impl TranscriptProjection {
             history,
             width,
             show_thinking,
+            theme,
             scroll_target,
             viewport_rows,
         );
@@ -1339,6 +1384,7 @@ impl TranscriptProjection {
                 key,
                 plan.scroll_target,
                 plan.viewport_rows,
+                theme,
                 None,
             );
         }
@@ -1433,6 +1479,7 @@ impl TranscriptProjection {
             }
         }
         self.visible.block_layout = materialized.layout;
+        self.visible.row_anchors = materialized.row_anchors;
         self.visible.row_base = row_base;
         self.visible.total_rows = total_rows;
         self.mark_projected_into(plan.key, buf);
@@ -1469,11 +1516,13 @@ impl TranscriptProjection {
         let mut texts = Vec::new();
         let mut pending = Vec::new();
         let mut layout = Vec::with_capacity(end.saturating_sub(start));
+        let mut row_anchors = Vec::new();
         let mut rows = ProjectRows {
             row_base,
             texts: &mut texts,
             pending: &mut pending,
             layout: &mut layout,
+            row_anchors: &mut row_anchors,
         };
 
         let block_indices = start..end;
@@ -1491,6 +1540,7 @@ impl TranscriptProjection {
             texts,
             pending,
             layout,
+            row_anchors,
         }
     }
 
@@ -1523,9 +1573,11 @@ impl TranscriptProjection {
         );
         for _ in 0..gap {
             rows.texts.push(String::new());
+            rows.row_anchors.push(None);
         }
+        let block_anchors = rendered_row_anchors(&block_buf, id, block_rows);
         let local_start = rows.texts.len() as RowIndex;
-        for r in 0..block_rows {
+        for (r, anchor) in block_anchors.iter().copied().enumerate() {
             let row_idx = rows.texts.len();
             rows.texts
                 .push(block_buf.get_line(r).unwrap_or("").to_string());
@@ -1538,6 +1590,7 @@ impl TranscriptProjection {
                     decoration: dec,
                 });
             }
+            rows.row_anchors.push(Some(anchor));
         }
         rows.layout.push(LayoutEntry {
             id,
@@ -2036,6 +2089,7 @@ mod tests {
             &mut transcript.history,
             80,
             false,
+            &theme,
             ScrollTarget::visible_row(0),
             10,
         );
@@ -3313,7 +3367,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_projection_preserves_source_line_anchor_across_width_change() {
+    fn visible_projection_preserves_rendered_row_anchor_across_width_change() {
         let mut transcript = Transcript::new();
         transcript.push(Block::Text {
             content: format!(
@@ -3372,7 +3426,7 @@ mod tests {
         assert!(
             buf.get_line(after_local)
                 .is_some_and(|line| line.contains("ANCHOR")),
-            "width shrink should keep the same source line at viewport top; got {:?}",
+            "width shrink should keep the same rendered content at viewport top; got {:?}",
             buf.get_line(after_local)
         );
 
@@ -3390,7 +3444,7 @@ mod tests {
         assert!(
             buf.get_line(widened_local)
                 .is_some_and(|line| line.contains("ANCHOR")),
-            "width expansion should keep the same source line at viewport top; got {:?}",
+            "width expansion should keep the same rendered content at viewport top; got {:?}",
             buf.get_line(widened_local)
         );
     }
@@ -3663,6 +3717,7 @@ mod tests {
             history,
             width,
             show_thinking,
+            theme,
             scroll_target,
             viewport_rows,
         );
