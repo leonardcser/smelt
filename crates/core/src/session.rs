@@ -508,7 +508,7 @@ struct SessionJsonlMeta {
     #[serde(default)]
     pub context_tokens_history_len: Option<usize>,
     #[serde(default)]
-    pub visible_context_tokens: Option<u32>,
+    pub display_context_tokens: Option<u32>,
     #[serde(default)]
     pub turn_metas: Vec<(usize, TurnMeta)>,
     #[serde(default)]
@@ -539,7 +539,7 @@ impl From<&Session> for SessionJsonlMeta {
             checkpoint: s.checkpoint.clone(),
             context_tokens: s.context_tokens,
             context_tokens_history_len: s.context_tokens_history_len,
-            visible_context_tokens: s.current_context_tokens(),
+            display_context_tokens: s.display_context_tokens,
             turn_metas: s.turn_metas.clone(),
             accounting_snapshots: s.accounting_snapshots.clone(),
             session_cost_usd: s.session_cost_usd,
@@ -567,6 +567,7 @@ impl SessionJsonlMeta {
             checkpoint: self.checkpoint,
             context_tokens: self.context_tokens,
             context_tokens_history_len: self.context_tokens_history_len,
+            display_context_tokens: self.display_context_tokens.or(self.context_tokens),
             turn_metas: self.turn_metas,
             accounting_snapshots: self.accounting_snapshots,
             session_cost_usd: self.session_cost_usd,
