@@ -1,5 +1,6 @@
 //! Dev tooling. Invoke as `cargo xtask <command>` (see `.cargo/config.toml`).
 
+mod bench_transcript_layout;
 mod fuzz;
 mod gen_lua_docs;
 mod synth;
@@ -8,6 +9,7 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next();
     match cmd.as_deref() {
+        Some("bench-transcript-layout") => bench_transcript_layout::run(args.collect()),
         Some("gen-lua-docs") => gen_lua_docs::run(),
         Some("synth") => synth::run(),
         Some("fuzz") => fuzz::run(args.collect()),
@@ -27,6 +29,9 @@ fn print_usage() {
     eprintln!("usage: cargo xtask <command> [args]");
     eprintln!();
     eprintln!("commands:");
+    eprintln!(
+        "  bench-transcript-layout [--runs N] [--workloads CSV] run transcript layout benches"
+    );
     eprintln!("  gen-lua-docs                          regenerate Lua API stubs + reference docs");
     eprintln!(
         "  synth                                 generate a synthetic session for perf testing"

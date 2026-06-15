@@ -13,25 +13,35 @@ use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
 pub(crate) struct TranscriptProjection {
-    display_model: DisplayModel,
-    display_model_generation: u64,
-    layout_width: u16,
-    materialized: Option<MaterializedProjection>,
-    /// Block layout from the last visible `project()`. Surfaced to Lua via `visible_blocks`.
-    visible_layout: Vec<LayoutEntry>,
-    /// Absolute row represented by local row 0 in the backing buffer.
-    visible_row_base: RowIndex,
-    /// Total rows in the logical transcript represented by the visible projection.
-    visible_total_rows: RowIndex,
-    /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
-    cached_rows: Option<CachedRows>,
-    exact_rows: ExactRowIndex,
-    cached_row_indexes: Vec<DisplayRowIndexEntry>,
+    display_layouts: DisplayModel,
+    display_layouts_generation: u64,
+    active_width: u16,
+    visible: VisibleProjectionState,
+    measurements: MeasurementIndexStore,
     display_cache_generation: u64,
     renderer_generation: Option<u64>,
     renderer_cache_key: Option<u64>,
     #[cfg(test)]
     counters: TranscriptProjectionCounters,
+}
+
+#[derive(Default)]
+struct VisibleProjectionState {
+    materialized: Option<MaterializedProjection>,
+    /// Block layout from the last visible `project()`. Surfaced to Lua via `visible_blocks`.
+    block_layout: Vec<LayoutEntry>,
+    /// Absolute row represented by local row 0 in the backing buffer.
+    row_base: RowIndex,
+    /// Total rows in the logical transcript represented by the visible projection.
+    total_rows: RowIndex,
+    /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
+    full_rows: Option<CachedRows>,
+}
+
+#[derive(Default)]
+struct MeasurementIndexStore {
+    active: ExactRowIndex,
+    entries: Vec<DisplayRowIndexEntry>,
 }
 
 #[cfg(test)]
@@ -374,6 +384,67 @@ impl ExactRowIndex {
     }
 }
 
+impl MeasurementIndexStore {
+    fn clear(&mut self) {
+        self.active = ExactRowIndex::default();
+        self.entries.clear();
+    }
+
+    fn clear_active(&mut self) {
+        self.active = ExactRowIndex::default();
+    }
+
+    fn hydrate(&mut self, entries: Vec<DisplayRowIndexEntry>) {
+        self.entries = entries;
+    }
+
+    fn remember_active(&mut self) {
+        if let Some(entry) = self.active.cache_entry() {
+            upsert_row_index_entry(&mut self.entries, entry);
+        }
+    }
+
+    fn export_entries(
+        &self,
+        history: &BlockHistory,
+        renderer_generation: Option<u64>,
+        renderer_cache_key: Option<u64>,
+    ) -> Vec<DisplayRowIndexEntry> {
+        let mut entries: Vec<DisplayRowIndexEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                row_index_entry_matches_renderer(entry, renderer_generation, renderer_cache_key)
+                    && row_index_entry_matches(history, entry)
+            })
+            .cloned()
+            .collect();
+        if let Some(current) = self.active.cache_entry() {
+            if row_index_entry_matches_renderer(&current, renderer_generation, renderer_cache_key)
+                && row_index_entry_matches(history, &current)
+            {
+                upsert_row_index_entry(&mut entries, current);
+            }
+        }
+        entries
+    }
+
+    fn find_entry(
+        &self,
+        width: u16,
+        show_thinking: bool,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+    ) -> Option<&DisplayRowIndexEntry> {
+        self.entries.iter().find(|entry| {
+            entry.width == width
+                && entry.show_thinking == show_thinking
+                && entry.renderer_generation == renderer_generation
+                && entry.renderer_cache_key == renderer_cache_key
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LayoutEntry {
     id: BlockId,
@@ -576,16 +647,11 @@ fn render_cached_layout_to_buffer(
 impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
-            display_model: DisplayModel::new(),
-            display_model_generation: u64::MAX,
-            layout_width: 0,
-            materialized: None,
-            visible_layout: Vec::new(),
-            visible_row_base: 0,
-            visible_total_rows: 0,
-            cached_rows: None,
-            exact_rows: ExactRowIndex::default(),
-            cached_row_indexes: Vec::new(),
+            display_layouts: DisplayModel::new(),
+            display_layouts_generation: u64::MAX,
+            active_width: 0,
+            visible: VisibleProjectionState::default(),
+            measurements: MeasurementIndexStore::default(),
             display_cache_generation: 0,
             renderer_generation: None,
             renderer_cache_key: None,
@@ -604,16 +670,16 @@ impl TranscriptProjection {
             display_layouts,
         } = data;
         let hydrated_layouts = self
-            .display_model
+            .display_layouts
             .hydrate_from_cache(history, display_layouts);
-        self.cached_row_indexes = row_indexes;
+        self.measurements.hydrate(row_indexes);
         smelt_perf::perf::record_value(
             "transcript:display_model_cache:loaded",
             hydrated_layouts as u64,
         );
         smelt_perf::perf::record_value(
             "transcript:row_index_cache:loaded",
-            self.cached_row_indexes.len() as u64,
+            self.measurements.entries.len() as u64,
         );
         self.row_index_cache_entries(history).len()
     }
@@ -624,7 +690,7 @@ impl TranscriptProjection {
     ) -> crate::content::display_cache::DisplayCacheData {
         crate::content::display_cache::DisplayCacheData {
             row_indexes: self.row_index_cache_entries(history),
-            display_layouts: self.display_model.cache_entries(
+            display_layouts: self.display_layouts.cache_entries(
                 history,
                 self.renderer_generation,
                 self.renderer_cache_key,
@@ -650,34 +716,18 @@ impl TranscriptProjection {
         if !initialized {
             return false;
         }
-        self.display_model = DisplayModel::new();
-        self.display_model_generation = u64::MAX;
-        self.cached_row_indexes.clear();
-        self.clear_materialized_state();
+        self.display_layouts = DisplayModel::new();
+        self.display_layouts_generation = u64::MAX;
+        self.measurements.clear();
+        self.clear_visible_state();
+        self.visible.full_rows = None;
         self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
         true
     }
 
     fn row_index_cache_entries(&self, history: &BlockHistory) -> Vec<DisplayRowIndexEntry> {
-        let renderer_generation = self.renderer_generation;
-        let renderer_cache_key = self.renderer_cache_key;
-        let mut entries: Vec<DisplayRowIndexEntry> = self
-            .cached_row_indexes
-            .iter()
-            .filter(|entry| {
-                row_index_entry_matches_renderer(entry, renderer_generation, renderer_cache_key)
-                    && row_index_entry_matches(history, entry)
-            })
-            .cloned()
-            .collect();
-        if let Some(current) = self.exact_rows.cache_entry() {
-            if row_index_entry_matches_renderer(&current, renderer_generation, renderer_cache_key)
-                && row_index_entry_matches(history, &current)
-            {
-                upsert_row_index_entry(&mut entries, current);
-            }
-        }
-        entries
+        self.measurements
+            .export_entries(history, self.renderer_generation, self.renderer_cache_key)
     }
 
     /// Snapshot of the visibly laid-out blocks: `(BlockId, first_row, rows)`.
@@ -686,12 +736,15 @@ impl TranscriptProjection {
     pub(crate) fn visible_block_layout(
         &self,
     ) -> impl Iterator<Item = (BlockId, RowIndex, RowIndex)> + '_ {
-        self.visible_layout.iter().map(|e| (e.id, e.start, e.rows))
+        self.visible
+            .block_layout
+            .iter()
+            .map(|e| (e.id, e.start, e.rows))
     }
 
     #[cfg(test)]
-    pub(crate) fn display_model_len(&self) -> usize {
-        self.display_model.len()
+    pub(crate) fn display_layouts_len(&self) -> usize {
+        self.display_layouts.len()
     }
 
     #[cfg(test)]
@@ -707,7 +760,7 @@ impl TranscriptProjection {
     fn finish_compile_jobs(&mut self, env: TranscriptRenderEnv<'_>, jobs: Vec<CompileJob>) {
         let compiled = jobs.len();
         let blocks = jobs.into_iter().map(|job| job.compile(env)).collect();
-        self.display_model.insert_compiled_blocks(blocks);
+        self.display_layouts.insert_compiled_blocks(blocks);
         if compiled > 0 {
             self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
         }
@@ -725,11 +778,11 @@ impl TranscriptProjection {
         indices: impl IntoIterator<Item = usize>,
     ) {
         let jobs = {
-            let nodes = &self.exact_rows.nodes;
+            let nodes = &self.measurements.active.nodes;
             let blocks = indices
                 .into_iter()
                 .filter_map(|index| nodes.get(index).map(|node| (index, node.id, node.key)));
-            self.display_model.collect_compile_jobs(
+            self.display_layouts.collect_compile_jobs(
                 history,
                 env.renderer_generation,
                 env.renderer_cache_key,
@@ -739,47 +792,52 @@ impl TranscriptProjection {
         self.finish_compile_jobs(env, jobs);
     }
 
-    fn clear_materialized_state(&mut self) {
-        self.materialized = None;
-        self.visible_layout.clear();
-        self.visible_row_base = 0;
-        self.visible_total_rows = 0;
-        self.cached_rows = None;
-        self.exact_rows = ExactRowIndex::default();
+    fn clear_visible_state(&mut self) {
+        self.visible.materialized = None;
+        self.visible.block_layout.clear();
+        self.visible.row_base = 0;
+        self.visible.total_rows = 0;
+    }
+
+    fn clear_width_dependent_state(&mut self) {
+        self.measurements.remember_active();
+        self.measurements.clear_active();
+        self.clear_visible_state();
+        self.visible.full_rows = None;
     }
 
     fn gc_if_stale(&mut self, history: &BlockHistory, width: u16) {
         let gen = history.generation();
-        if self.display_model_generation != gen {
-            self.display_model.retain_order(&history.order);
-            self.display_model_generation = gen;
+        if self.display_layouts_generation != gen {
+            self.display_layouts.retain_order(&history.order);
+            self.display_layouts_generation = gen;
         }
-        if width != self.layout_width {
+        if width != self.active_width {
             // Width changes invalidate row indexes and materialized rows, but
             // display layouts are width-independent and stay reusable.
-            self.layout_width = width;
-            self.clear_materialized_state();
+            self.active_width = width;
+            self.clear_width_dependent_state();
         }
     }
 
-    /// Clear cached visible/layout state so the next projection rebuilds from scratch.
-    /// Display layouts are theme-independent; only rendered buffers/rows carry colors.
+    /// Clear rendered visible state so the next projection repaints with the current theme.
+    /// Display layouts and exact measurements are theme-independent.
     pub(crate) fn invalidate_theme(&mut self) {
-        self.clear_materialized_state();
+        self.clear_visible_state();
     }
 
     fn target_has_projection(&self, key: ProjectKey, buf: &Buffer) -> bool {
-        self.materialized.is_some_and(|m| {
+        self.visible.materialized.is_some_and(|m| {
             m.key == key && m.buf_id == buf.id() && m.changedtick == buf.changedtick()
         })
     }
 
     fn last_project_key(&self) -> Option<ProjectKey> {
-        self.materialized.map(|m| m.key)
+        self.visible.materialized.map(|m| m.key)
     }
 
     fn mark_projected_into(&mut self, key: ProjectKey, buf: &Buffer) {
-        self.materialized = Some(MaterializedProjection {
+        self.visible.materialized = Some(MaterializedProjection {
             key,
             buf_id: buf.id(),
             changedtick: buf.changedtick(),
@@ -795,7 +853,7 @@ impl TranscriptProjection {
         renderer_cache_key: Option<u64>,
         base_key: LayoutKey,
     ) -> bool {
-        if self.exact_rows.is_current(
+        if self.measurements.active.is_current(
             history,
             width,
             show_thinking,
@@ -804,22 +862,22 @@ impl TranscriptProjection {
         ) {
             return true;
         }
-        if renderer_cache_key.is_none() {
-            smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
-            return false;
-        }
-        let Some(entry) = self.cached_row_indexes.iter().find(|entry| {
-            entry.width == width
-                && entry.show_thinking == show_thinking
-                && entry.renderer_generation == renderer_generation
-                && entry.renderer_cache_key == renderer_cache_key
-        }) else {
+        let Some(entry) = self
+            .measurements
+            .find_entry(
+                width,
+                show_thinking,
+                renderer_generation,
+                renderer_cache_key,
+            )
+            .cloned()
+        else {
             smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
             return false;
         };
-        let hydrated = self.exact_rows.hydrate_from_cache(
+        let hydrated = self.measurements.active.hydrate_from_cache(
             history,
-            entry,
+            &entry,
             renderer_generation,
             renderer_cache_key,
             base_key,
@@ -876,7 +934,7 @@ impl TranscriptProjection {
             base_key,
         );
         let reused_index = hydrated_index
-            || self.exact_rows.sync_stable_order_prefix(
+            || self.measurements.active.sync_stable_order_prefix(
                 history,
                 renderer_generation,
                 renderer_cache_key,
@@ -888,7 +946,7 @@ impl TranscriptProjection {
         );
         if !reused_index {
             let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
-            self.exact_rows.rebuild_if_stale(
+            self.measurements.active.rebuild_if_stale(
                 history,
                 width,
                 show_thinking,
@@ -897,7 +955,7 @@ impl TranscriptProjection {
                 base_key,
             );
         }
-        if self.exact_rows.is_exact_for(
+        if self.measurements.active.is_exact_for(
             history,
             width,
             show_thinking,
@@ -905,16 +963,18 @@ impl TranscriptProjection {
             renderer_cache_key,
         ) {
             if reused_index {
-                self.exact_rows.refresh_prefix_rows();
+                self.measurements.active.refresh_prefix_rows();
             }
+            self.measurements.remember_active();
             return;
         }
 
         let missing: Vec<usize> = {
             let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:collect_missing");
-            (0..self.exact_rows.nodes.len())
+            (0..self.measurements.active.nodes.len())
                 .filter(|&i| {
-                    self.exact_rows
+                    self.measurements
+                        .active
                         .nodes
                         .get(i)
                         .is_some_and(|node| node.exact_height.is_none())
@@ -939,7 +999,8 @@ impl TranscriptProjection {
         for i in missing {
             self.measure_cached_layout_height(history, i, renderer_generation, renderer_cache_key);
         }
-        self.exact_rows.refresh_prefix_rows();
+        self.measurements.active.refresh_prefix_rows();
+        self.measurements.remember_active();
     }
 
     fn measure_cached_layout_height(
@@ -949,7 +1010,7 @@ impl TranscriptProjection {
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
     ) -> bool {
-        let Some(node) = self.exact_rows.nodes.get(index) else {
+        let Some(node) = self.measurements.active.nodes.get(index) else {
             return false;
         };
         if node.exact_height.is_some() {
@@ -957,9 +1018,9 @@ impl TranscriptProjection {
         }
         let id = node.id;
         let key = node.key;
-        let Some(block) = self
-            .display_model
-            .get(id, key, renderer_generation, renderer_cache_key)
+        let Some(block) =
+            self.display_layouts
+                .get(id, key, renderer_generation, renderer_cache_key)
         else {
             return false;
         };
@@ -976,7 +1037,7 @@ impl TranscriptProjection {
     }
 
     fn set_exact_height(&mut self, index: usize, rows: RowIndex) {
-        let measured = self.exact_rows.set_exact_height(index, rows);
+        let measured = self.measurements.active.set_exact_height(index, rows);
         if measured {
             self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
         }
@@ -987,9 +1048,9 @@ impl TranscriptProjection {
     }
 
     fn exact_block_layout(&self, history: &BlockHistory) -> Vec<LayoutEntry> {
-        let mut layout = Vec::with_capacity(self.exact_rows.nodes.len());
+        let mut layout = Vec::with_capacity(self.measurements.active.nodes.len());
         let mut running_total: RowIndex = 0;
-        for (i, node) in self.exact_rows.nodes.iter().enumerate() {
+        for (i, node) in self.measurements.active.nodes.iter().enumerate() {
             debug_assert!(
                 node.exact_height.is_some(),
                 "exact block layout requested before height measurement"
@@ -1021,7 +1082,7 @@ impl TranscriptProjection {
         show_thinking: bool,
     ) -> RowIndex {
         self.rebuild_row_index(lua, history, width, show_thinking);
-        self.exact_rows.total_rows()
+        self.measurements.active.total_rows()
     }
 
     fn resize_anchor_for(
@@ -1073,11 +1134,12 @@ impl TranscriptProjection {
         anchor: Option<(BlockId, RowIndex)>,
     ) -> Option<RowIndex> {
         let (id, offset) = anchor?;
-        let index = self.exact_rows.block_index(id)?;
-        let exact_height = self.exact_rows.nodes.get(index)?.exact_height?;
+        let index = self.measurements.active.block_index(id)?;
+        let exact_height = self.measurements.active.nodes.get(index)?.exact_height?;
         let gap = (history.block_gap(index) as RowIndex).min(exact_height);
         Some(
-            self.exact_rows
+            self.measurements
+                .active
                 .prefix_row(index)
                 .saturating_add(gap)
                 .saturating_add(offset),
@@ -1092,7 +1154,7 @@ impl TranscriptProjection {
         viewport_rows: u16,
         resize_anchor: Option<(BlockId, RowIndex)>,
     ) -> ProjectionPlan {
-        let total_rows = self.exact_rows.total_rows();
+        let total_rows = self.measurements.active.total_rows();
         let requested_scroll_top = self
             .scroll_top_for_resize_anchor(history, resize_anchor)
             .unwrap_or_else(|| scroll_target.as_scroll_top());
@@ -1113,7 +1175,7 @@ impl TranscriptProjection {
                 start..total_rows
             }
         };
-        let block_range = self.exact_rows.block_range_for_rows(row_window);
+        let block_range = self.measurements.active.block_range_for_rows(row_window);
         ProjectionPlan {
             key,
             scroll_target,
@@ -1218,16 +1280,17 @@ impl TranscriptProjection {
             return None;
         }
 
-        let total_rows = self.visible_total_rows;
+        let total_rows = self.visible.total_rows;
         let clamped_scroll = clamp_scroll(row, total_rows, viewport_rows);
         let materialized_end = self
-            .visible_row_base
+            .visible
+            .row_base
             .saturating_add(buf.line_count() as RowIndex);
         let viewport_end = clamped_scroll.saturating_add(viewport_rows as RowIndex);
-        if clamped_scroll >= self.visible_row_base && viewport_end <= materialized_end {
+        if clamped_scroll >= self.visible.row_base && viewport_end <= materialized_end {
             return Some(MaterializedRows {
                 clamped_scroll,
-                row_base: self.visible_row_base,
+                row_base: self.visible.row_base,
                 total_rows,
                 materialized_rows: buf.line_count() as RowIndex,
             });
@@ -1269,9 +1332,9 @@ impl TranscriptProjection {
                 buf.set_decoration(p.row, p.decoration);
             }
         }
-        self.visible_layout = materialized.layout;
-        self.visible_row_base = row_base;
-        self.visible_total_rows = total_rows;
+        self.visible.block_layout = materialized.layout;
+        self.visible.row_base = row_base;
+        self.visible.total_rows = total_rows;
         self.mark_projected_into(plan.key, buf);
         debug_assert!(total_rows >= row_base);
         debug_assert!(row_base.saturating_add(materialized_rows) <= total_rows);
@@ -1292,8 +1355,8 @@ impl TranscriptProjection {
         block_range: std::ops::Range<usize>,
     ) -> MaterializedTranscriptRange {
         let _perf = smelt_perf::perf::begin("transcript:collect_blocks_range");
-        let start = block_range.start.min(self.exact_rows.nodes.len());
-        let end = block_range.end.min(self.exact_rows.nodes.len());
+        let start = block_range.start.min(self.measurements.active.nodes.len());
+        let end = block_range.end.min(self.measurements.active.nodes.len());
         smelt_perf::perf::record_value(
             "transcript:collect_blocks_range:blocks",
             end.saturating_sub(start) as u64,
@@ -1302,7 +1365,7 @@ impl TranscriptProjection {
         {
             self.counters.range_materialized_blocks += end.saturating_sub(start);
         }
-        let row_base = self.exact_rows.prefix_row(start);
+        let row_base = self.measurements.active.prefix_row(start);
         let mut texts = Vec::new();
         let mut pending = Vec::new();
         let mut layout = Vec::with_capacity(end.saturating_sub(start));
@@ -1316,15 +1379,15 @@ impl TranscriptProjection {
         let block_indices = start..end;
         self.ensure_block_indices(env, history, block_indices.clone());
         for block_index in block_indices {
-            let id = self.exact_rows.nodes[block_index].id;
-            let key = self.exact_rows.nodes[block_index].key;
+            let id = self.measurements.active.nodes[block_index].id;
+            let key = self.measurements.active.nodes[block_index].key;
             self.append_projected_block(history, theme, block_index, id, key, &mut rows);
         }
 
-        self.exact_rows.refresh_prefix_rows();
+        self.measurements.active.refresh_prefix_rows();
         MaterializedTranscriptRange {
             row_base,
-            total_rows: self.exact_rows.total_rows(),
+            total_rows: self.measurements.active.total_rows(),
             texts,
             pending,
             layout,
@@ -1340,10 +1403,10 @@ impl TranscriptProjection {
         key: LayoutKey,
         rows: &mut ProjectRows<'_>,
     ) {
-        let renderer_generation = self.exact_rows.renderer_generation;
-        let renderer_cache_key = self.exact_rows.renderer_cache_key;
+        let renderer_generation = self.measurements.active.renderer_generation;
+        let renderer_cache_key = self.measurements.active.renderer_cache_key;
         let Some((block_buf, block_rows)) = render_cached_layout_to_buffer(
-            &self.display_model,
+            &self.display_layouts,
             id,
             key,
             renderer_generation,
@@ -1388,16 +1451,19 @@ impl TranscriptProjection {
     /// beyond the end of all blocks return `None` so the caller falls back to
     /// scroll_top and the natural clamp pins the viewport to the new bottom.
     fn block_anchor_at(&self, row: RowIndex) -> Option<(BlockId, RowIndex)> {
-        let last = self.visible_layout.last()?;
+        let last = self.visible.block_layout.last()?;
         let last_end = last.start.saturating_add(last.rows);
         if row >= last_end {
             return None;
         }
-        let idx = self.visible_layout.partition_point(|e| e.start <= row);
+        let idx = self
+            .visible
+            .block_layout
+            .partition_point(|e| e.start <= row);
         if idx == 0 {
             return None;
         }
-        let entry = self.visible_layout[idx - 1];
+        let entry = self.visible.block_layout[idx - 1];
         let end = entry.start.saturating_add(entry.rows);
         let offset = if row < end {
             row - entry.start
@@ -1441,7 +1507,7 @@ impl TranscriptProjection {
         let renderer_cache_key = env.renderer_cache_key;
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
         self.gc_if_stale(history, width);
-        if let Some(c) = &self.cached_rows {
+        if let Some(c) = &self.visible.full_rows {
             if c.generation == gen
                 && c.renderer_generation == renderer_generation
                 && c.renderer_cache_key == renderer_cache_key
@@ -1457,7 +1523,7 @@ impl TranscriptProjection {
         }
         smelt_perf::perf::record_value("transcript:build_rows:blocks", history.order.len() as u64);
         let base_key = base_layout_key(width, show_thinking);
-        self.exact_rows.rebuild_if_stale(
+        let hydrated_index = self.try_hydrate_row_index(
             history,
             width,
             show_thinking,
@@ -1465,17 +1531,34 @@ impl TranscriptProjection {
             renderer_cache_key,
             base_key,
         );
+        let reused_index = hydrated_index
+            || self.measurements.active.sync_stable_order_prefix(
+                history,
+                renderer_generation,
+                renderer_cache_key,
+                base_key,
+            );
+        if !reused_index {
+            self.measurements.active.rebuild_if_stale(
+                history,
+                width,
+                show_thinking,
+                renderer_generation,
+                renderer_cache_key,
+                base_key,
+            );
+        }
         let mut rows: Vec<String> = Vec::new();
-        let block_indices = 0..self.exact_rows.nodes.len();
+        let block_indices = 0..self.measurements.active.nodes.len();
         self.ensure_block_indices(env, history, block_indices.clone());
         for i in block_indices {
-            let Some(node) = self.exact_rows.nodes.get(i) else {
+            let Some(node) = self.measurements.active.nodes.get(i) else {
                 continue;
             };
             let id = node.id;
             let bkey = node.key;
             let Some((block_buf, block_rows)) = render_cached_layout_to_buffer(
-                &self.display_model,
+                &self.display_layouts,
                 id,
                 bkey,
                 renderer_generation,
@@ -1493,9 +1576,10 @@ impl TranscriptProjection {
                 rows.push(block_buf.get_line(r).unwrap_or("").to_string());
             }
         }
-        self.exact_rows.refresh_prefix_rows();
+        self.measurements.active.refresh_prefix_rows();
+        self.measurements.remember_active();
         let rows = Arc::new(rows);
-        self.cached_rows = Some(CachedRows {
+        self.visible.full_rows = Some(CachedRows {
             rows: Arc::clone(&rows),
             generation: gen,
             renderer_generation,
@@ -1525,12 +1609,12 @@ impl TranscriptProjection {
         }
 
         self.rebuild_row_index(lua, history, width, show_thinking);
-        let total_rows = self.exact_rows.total_rows();
+        let total_rows = self.measurements.active.total_rows();
         if total_rows == 0 || start >= total_rows {
             return DisplayRows::empty();
         }
         let end = end.min(total_rows);
-        let block_range = self.exact_rows.block_range_for_rows(start..end);
+        let block_range = self.measurements.active.block_range_for_rows(start..end);
         if block_range.start >= block_range.end {
             return DisplayRows::empty();
         }
@@ -1539,8 +1623,8 @@ impl TranscriptProjection {
             TranscriptRenderEnv::with_renderer(
                 lua,
                 show_thinking,
-                self.exact_rows.renderer_generation,
-                self.exact_rows.renderer_cache_key,
+                self.measurements.active.renderer_generation,
+                self.measurements.active.renderer_cache_key,
             ),
             history,
             theme,
@@ -1608,13 +1692,14 @@ impl TranscriptProjection {
             return CopyOutput::default();
         }
         self.rebuild_row_index(lua, history, width, show_thinking);
-        let total_rows = self.exact_rows.total_rows();
+        let total_rows = self.measurements.active.total_rows();
         if total_rows == 0 || range.start.row >= total_rows {
             return CopyOutput::default();
         }
         let end_row = range.end.row.min(total_rows.saturating_sub(1));
         let block_range = self
-            .exact_rows
+            .measurements
+            .active
             .block_range_for_rows(range.start.row..end_row.saturating_add(1));
         if block_range.start >= block_range.end {
             return CopyOutput::default();
@@ -1625,8 +1710,8 @@ impl TranscriptProjection {
             TranscriptRenderEnv::with_renderer(
                 lua,
                 show_thinking,
-                self.exact_rows.renderer_generation,
-                self.exact_rows.renderer_cache_key,
+                self.measurements.active.renderer_generation,
+                self.measurements.active.renderer_cache_key,
             ),
             history,
             theme,
@@ -2079,7 +2164,7 @@ mod tests {
         let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 10, false);
 
         assert_eq!(total, 12);
-        assert_eq!(projection.display_model_len(), 3);
+        assert_eq!(projection.display_layouts_len(), 3);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
         assert_eq!(counters.display_layouts, 3);
@@ -2100,7 +2185,7 @@ mod tests {
         let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
 
         assert_eq!(total, (block_count as RowIndex).saturating_mul(2) - 1);
-        assert_eq!(projection.display_model_len(), block_count);
+        assert_eq!(projection.display_layouts_len(), block_count);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
         assert_eq!(counters.display_layouts, block_count);
@@ -2119,6 +2204,60 @@ mod tests {
         assert_eq!(
             counters.exact_height_measured_blocks, block_count,
             "width change must remeasure all block heights"
+        );
+    }
+
+    #[test]
+    fn theme_invalidation_preserves_exact_measurements() {
+        let lua = test_lua();
+        let mut projection = TranscriptProjection::new();
+        let mut transcript = Transcript::new();
+        for i in 0..128 {
+            transcript.push(Block::Text {
+                content: format!("line {i} {}", "x".repeat(64)),
+            });
+        }
+
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 40, false);
+        assert!(total > 0);
+        projection.reset_counters();
+
+        projection.invalidate_theme();
+        assert_eq!(
+            projection.exact_total_rows(&lua, &mut transcript.history, 40, false),
+            total
+        );
+        assert_eq!(
+            projection.counters().exact_height_measured_blocks,
+            0,
+            "theme changes must not discard exact row measurements"
+        );
+    }
+
+    #[test]
+    fn width_revisit_reuses_cached_exact_measurements() {
+        let lua = test_lua();
+        let mut projection = TranscriptProjection::new();
+        let mut transcript = Transcript::new();
+        for i in 0..128 {
+            transcript.push(Block::Text {
+                content: format!("line {i} {}", "x".repeat(64)),
+            });
+        }
+
+        let wide_total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
+        let narrow_total = projection.exact_total_rows(&lua, &mut transcript.history, 40, false);
+        assert!(narrow_total >= wide_total);
+        projection.reset_counters();
+
+        assert_eq!(
+            projection.exact_total_rows(&lua, &mut transcript.history, 80, false),
+            wide_total
+        );
+        assert_eq!(
+            projection.counters().exact_height_measured_blocks,
+            0,
+            "revisiting a measured width should hydrate the exact row index from memory"
         );
     }
 
@@ -2177,7 +2316,7 @@ mod tests {
 
         let mut hydrated = TranscriptProjection::new();
         hydrated.hydrate_display_cache(&transcript.history, cache);
-        assert_eq!(hydrated.display_model_len(), 100);
+        assert_eq!(hydrated.display_layouts_len(), 100);
         hydrated.reset_counters();
 
         assert_eq!(
@@ -2220,7 +2359,7 @@ mod tests {
             projection.exact_total_rows(&lua, &mut transcript.history, 80, false),
             1
         );
-        assert_eq!(projection.display_model_len(), 1);
+        assert_eq!(projection.display_layouts_len(), 1);
 
         let cache = projection.display_cache_data(&transcript.history);
         assert!(cache.row_indexes.is_empty());
@@ -3322,27 +3461,304 @@ mod tests {
         bytes
     }
 
-    #[test]
-    #[ignore = "manual large-transcript baseline; run with --ignored --nocapture"]
-    fn mixed_large_transcript_projection_baseline() {
+    fn project_with_lua(
+        projection: &mut TranscriptProjection,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        buf: &mut Buffer,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+        scroll_target: ScrollTarget,
+        viewport_rows: u16,
+    ) -> MaterializedRows {
+        let plan = projection.plan_projection_measured(
+            lua,
+            history,
+            width,
+            show_thinking,
+            scroll_target,
+            viewport_rows,
+        );
+        projection.project_planned(lua, buf, history, theme, plan)
+    }
+
+    fn push_markdown_heavy_transcript_fixture(
+        transcript: &mut Transcript,
+        target_bytes: usize,
+    ) -> usize {
+        let mut approx_bytes = 0usize;
+        let mut i = 0usize;
+        while approx_bytes < target_bytes {
+            let content = format!(
+                "# Markdown-heavy document {i}\n\n{}\n\n## Table\n\n| column | value | notes |\n| --- | ---: | --- |\n| alpha | {} | {} |\n| beta | {} | {} |\n\n## Code\n\n```rust\nfn markdown_heavy_{i}() -> usize {{\n    let mut total = 0;\n    for n in 0..{} {{ total += n; }}\n    total\n}}\n```\n\n{}\n\n{}",
+                "Paragraph with links, `inline code`, emphasis, and wrap pressure. ".repeat(42),
+                i * 11 + 1,
+                "table cells intentionally contain enough content to wrap at narrow widths ".repeat(18),
+                i * 11 + 2,
+                "copy/search/source exactness must survive markdown measurement ".repeat(18),
+                i % 127 + 32,
+                "- bullet item with long content ".repeat(44),
+                "> quoted reasoning line ".repeat(36),
+            );
+            approx_bytes += content.len();
+            transcript.push(Block::Text { content });
+            i += 1;
+        }
+        approx_bytes
+    }
+
+    fn push_tool_output_heavy_transcript_fixture(
+        transcript: &mut Transcript,
+        target_bytes: usize,
+    ) -> usize {
+        let mut approx_bytes = 0usize;
+        let mut i = 0usize;
+        while approx_bytes < target_bytes {
+            let call_id = format!("tool-output-heavy-{i}");
+            let command = format!("cargo test package_{i} -- --nocapture");
+            let output = (0..160)
+                .map(|j| {
+                    format!(
+                        "tool output line {i}.{j}: {}",
+                        "ansi-free terminal output wraps exactly and keeps tail caps honest "
+                            .repeat(8)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            approx_bytes += command.len() + output.len();
+            transcript.push_tool_call(
+                Block::ToolCall {
+                    call_id: call_id.clone(),
+                    name: "bash".into(),
+                    summary: protocol::StyledLines::from_plain(command),
+                    args: std::collections::HashMap::new(),
+                },
+                ToolState {
+                    status: ToolStatus::Ok,
+                    elapsed: Some(std::time::Duration::from_millis(2_000 + i as u64)),
+                    output: Some(Box::new(ToolOutput {
+                        content: output,
+                        is_error: false,
+                        metadata: None,
+                    })),
+                    user_message: None,
+                },
+            );
+            i += 1;
+        }
+        approx_bytes
+    }
+
+    fn push_many_tiny_blocks_transcript_fixture(
+        transcript: &mut Transcript,
+        target_bytes: usize,
+    ) -> usize {
+        let mut approx_bytes = 0usize;
+        let mut i = 0usize;
+        while approx_bytes < target_bytes {
+            let text = format!("tiny block {i} alpha beta gamma");
+            approx_bytes += text.len();
+            match i % 6 {
+                0 => transcript.push(Block::User {
+                    text,
+                    image_labels: vec![],
+                }),
+                1 => transcript.push(Block::Text { content: text }),
+                2 => transcript.push(Block::CodeLine {
+                    content: format!("let tiny_{i} = {i};"),
+                    lang: "rust".into(),
+                }),
+                3 => transcript.push(Block::Thinking { content: text }),
+                4 => transcript.push(Block::Compacted { summary: text }),
+                _ => transcript.push(Block::ProcessStatus { text }),
+            }
+            i += 1;
+        }
+        approx_bytes
+    }
+
+    fn push_few_huge_blocks_transcript_fixture(
+        transcript: &mut Transcript,
+        target_bytes: usize,
+    ) -> usize {
+        let mut approx_bytes = 0usize;
+        let mut i = 0usize;
+        while approx_bytes < target_bytes {
+            let content = format!(
+                "# Huge block {i}\n\n{}\n\n```text\n{}\n```\n\n{}",
+                "large paragraph with wrapping pressure and markdown spans `code` **bold** ".repeat(900),
+                "preformatted output still contributes exact rows without visible materialization\n"
+                    .repeat(420),
+                "closing paragraph ".repeat(700),
+            );
+            approx_bytes += content.len();
+            transcript.push(Block::Text { content });
+            i += 1;
+        }
+        approx_bytes
+    }
+
+    #[derive(Clone, Copy)]
+    struct TranscriptBenchWorkload {
+        name: &'static str,
+        target_bytes: usize,
+        build: fn(&mut Transcript, usize) -> usize,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct TranscriptBenchSample {
+        input_bytes: usize,
+        generated_bytes: usize,
+        blocks: usize,
+        total_rows: RowIndex,
+        cache_row_indexes: usize,
+        cache_display_layouts: usize,
+        first_ms: f64,
+        resize_ms: f64,
+        theme_ms: f64,
+        scroll12_ms: f64,
+        visible_ms: f64,
+        hydrated_full_ms: f64,
+        hydrated_ir_only_ms: f64,
+        no_cache_ms: f64,
+        allocs: u64,
+        bytes_allocated: u64,
+        visible_rows: usize,
+        scroll_materialized_rows: u64,
+        first_counters: TranscriptProjectionCounters,
+        resize_counters: TranscriptProjectionCounters,
+        theme_counters: TranscriptProjectionCounters,
+        scroll_counters: TranscriptProjectionCounters,
+        visible_counters: TranscriptProjectionCounters,
+        hydrated_full_loaded_rows: usize,
+        hydrated_full_counters: TranscriptProjectionCounters,
+        hydrated_ir_loaded_rows: usize,
+        hydrated_ir_counters: TranscriptProjectionCounters,
+        no_cache_counters: TranscriptProjectionCounters,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct MetricStats {
+        mean: f64,
+        stddev: f64,
+        min: f64,
+        max: f64,
+    }
+
+    impl MetricStats {
+        fn from(values: &[f64]) -> Self {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance = if values.len() > 1 {
+                values
+                    .iter()
+                    .map(|value| {
+                        let delta = value - mean;
+                        delta * delta
+                    })
+                    .sum::<f64>()
+                    / (values.len() - 1) as f64
+            } else {
+                0.0
+            };
+            let min = values
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, |acc, value| acc.min(value));
+            let max = values
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, |acc, value| acc.max(value));
+            Self {
+                mean,
+                stddev: variance.sqrt(),
+                min,
+                max,
+            }
+        }
+
+        fn display(self) -> String {
+            format!("{:.1}±{:.1}", self.mean, self.stddev)
+        }
+    }
+
+    fn elapsed_ms(elapsed: std::time::Duration) -> f64 {
+        elapsed.as_secs_f64() * 1_000.0
+    }
+
+    fn transcript_bench_runs() -> usize {
+        std::env::var("SMELT_TRANSCRIPT_BENCH_RUNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|runs| *runs > 0)
+            .unwrap_or(3)
+    }
+
+    fn transcript_bench_workloads() -> Vec<TranscriptBenchWorkload> {
+        let all = vec![
+            TranscriptBenchWorkload {
+                name: "mixed_10mib",
+                target_bytes: 10 * 1024 * 1024,
+                build: push_large_mixed_transcript_fixture,
+            },
+            TranscriptBenchWorkload {
+                name: "markdown_4mib",
+                target_bytes: 4 * 1024 * 1024,
+                build: push_markdown_heavy_transcript_fixture,
+            },
+            TranscriptBenchWorkload {
+                name: "tool_output_4mib",
+                target_bytes: 4 * 1024 * 1024,
+                build: push_tool_output_heavy_transcript_fixture,
+            },
+            TranscriptBenchWorkload {
+                name: "tiny_blocks_1mib",
+                target_bytes: 1024 * 1024,
+                build: push_many_tiny_blocks_transcript_fixture,
+            },
+            TranscriptBenchWorkload {
+                name: "huge_blocks_4mib",
+                target_bytes: 4 * 1024 * 1024,
+                build: push_few_huge_blocks_transcript_fixture,
+            },
+        ];
+        let Some(filter) = std::env::var("SMELT_TRANSCRIPT_BENCH_WORKLOADS")
+            .ok()
+            .filter(|filter| !filter.trim().is_empty())
+        else {
+            return all;
+        };
+        let names: std::collections::HashSet<_> = filter
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        all.into_iter()
+            .filter(|workload| names.contains(workload.name))
+            .collect()
+    }
+
+    fn run_transcript_bench_sample(workload: TranscriptBenchWorkload) -> TranscriptBenchSample {
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         smelt_perf::alloc::set_enabled(true);
 
+        let lua = test_lua();
         let mut transcript = Transcript::new();
-        let generated_bytes =
-            push_large_mixed_transcript_fixture(&mut transcript, 10 * 1024 * 1024);
-        let approx_bytes = approx_history_bytes(&transcript.history);
-
+        let generated_bytes = (workload.build)(&mut transcript, workload.target_bytes);
+        let input_bytes = approx_history_bytes(&transcript.history);
+        let blocks = transcript.history.order.len();
         let theme = Theme::default();
-        let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(77), Default::default());
 
+        let mut cold = TranscriptProjection::new();
+        let mut cold_buf = Buffer::new(crate::smelt_edit::BufId(77), Default::default());
         let alloc_start = smelt_perf::alloc::snapshot();
-
         let first_start = std::time::Instant::now();
-        let first = projection.project(
-            &mut buf,
+        let first = project_with_lua(
+            &mut cold,
+            &lua,
+            &mut cold_buf,
             &mut transcript.history,
             100,
             false,
@@ -3350,12 +3766,17 @@ mod tests {
             ScrollTarget::visible_tail(),
             40,
         );
-        let first_elapsed = first_start.elapsed();
+        let first_ms = elapsed_ms(first_start.elapsed());
         let first_alloc = smelt_perf::alloc::delta(alloc_start, smelt_perf::alloc::snapshot());
+        let first_counters = cold.counters();
+        let cache = cold.display_cache_data(&transcript.history);
 
+        cold.reset_counters();
         let resize_start = std::time::Instant::now();
-        let resized = projection.project(
-            &mut buf,
+        let resized = project_with_lua(
+            &mut cold,
+            &lua,
+            &mut cold_buf,
             &mut transcript.history,
             72,
             false,
@@ -3363,41 +3784,386 @@ mod tests {
             ScrollTarget::visible_row(first.clamped_scroll),
             40,
         );
-        let resize_elapsed = resize_start.elapsed();
+        let resize_ms = elapsed_ms(resize_start.elapsed());
+        let resize_counters = cold.counters();
 
+        cold.invalidate_theme();
+        cold.reset_counters();
+        let theme_start = std::time::Instant::now();
+        let themed = project_with_lua(
+            &mut cold,
+            &lua,
+            &mut cold_buf,
+            &mut transcript.history,
+            72,
+            false,
+            &theme,
+            ScrollTarget::visible_row(resized.clamped_scroll),
+            40,
+        );
+        let theme_ms = elapsed_ms(theme_start.elapsed());
+        let theme_counters = cold.counters();
+
+        cold.reset_counters();
+        let scroll_start = std::time::Instant::now();
+        let mut scroll_materialized_rows = 0u64;
+        let max_scroll = resized.total_rows.saturating_sub(1);
+        let step = (resized.total_rows / 12).max(1);
+        for i in 0..12u64 {
+            let row = i.saturating_mul(step).min(max_scroll);
+            let rows = project_with_lua(
+                &mut cold,
+                &lua,
+                &mut cold_buf,
+                &mut transcript.history,
+                72,
+                false,
+                &theme,
+                ScrollTarget::visible_row(row),
+                40,
+            );
+            scroll_materialized_rows =
+                scroll_materialized_rows.saturating_add(rows.materialized_rows);
+        }
+        let scroll12_ms = elapsed_ms(scroll_start.elapsed());
+        let scroll_counters = cold.counters();
+
+        cold.reset_counters();
         let visible_start = std::time::Instant::now();
         let mid = resized.total_rows / 2;
-        let visible = projection.display_rows_for_range(
-            &test_lua(),
+        let visible = cold.display_rows_for_range(
+            &lua,
             &mut transcript.history,
             72,
             false,
             &theme,
             mid..mid + 80,
         );
-        let visible_elapsed = visible_start.elapsed();
+        let visible_ms = elapsed_ms(visible_start.elapsed());
+        let visible_counters = cold.counters();
 
-        eprintln!(
-            "TRANSCRIPT_LAYOUT_BASELINE input_bytes={approx_bytes} generated_bytes={generated_bytes} blocks={} total_rows={} first_ms={} resize_ms={} visible_ms={} allocs={} bytes_allocated={} visible_rows={}",
-            transcript.history.order.len(),
-            resized.total_rows,
-            first_elapsed.as_millis(),
-            resize_elapsed.as_millis(),
-            visible_elapsed.as_millis(),
-            first_alloc.allocs,
-            first_alloc.bytes_allocated,
-            visible.rows.len(),
+        let mut hydrated_full = TranscriptProjection::new();
+        let hydrated_full_loaded_rows =
+            hydrated_full.hydrate_display_cache(&transcript.history, cache.clone());
+        hydrated_full.reset_counters();
+        let mut hydrated_full_buf = Buffer::new(crate::smelt_edit::BufId(78), Default::default());
+        let hydrated_full_start = std::time::Instant::now();
+        let hydrated_full_projection = project_with_lua(
+            &mut hydrated_full,
+            &lua,
+            &mut hydrated_full_buf,
+            &mut transcript.history,
+            100,
+            false,
+            &theme,
+            ScrollTarget::visible_tail(),
+            40,
         );
-        eprintln!("perf snapshot: {:#?}", smelt_perf::perf::snapshot());
+        let hydrated_full_ms = elapsed_ms(hydrated_full_start.elapsed());
+        let hydrated_full_counters = hydrated_full.counters();
 
-        assert!(approx_bytes >= 10 * 1024 * 1024);
+        let mut ir_only_cache = cache.clone();
+        ir_only_cache.row_indexes.clear();
+        let mut hydrated_ir = TranscriptProjection::new();
+        let hydrated_ir_loaded_rows =
+            hydrated_ir.hydrate_display_cache(&transcript.history, ir_only_cache);
+        hydrated_ir.reset_counters();
+        let mut hydrated_ir_buf = Buffer::new(crate::smelt_edit::BufId(79), Default::default());
+        let hydrated_ir_start = std::time::Instant::now();
+        let hydrated_ir_projection = project_with_lua(
+            &mut hydrated_ir,
+            &lua,
+            &mut hydrated_ir_buf,
+            &mut transcript.history,
+            100,
+            false,
+            &theme,
+            ScrollTarget::visible_tail(),
+            40,
+        );
+        let hydrated_ir_only_ms = elapsed_ms(hydrated_ir_start.elapsed());
+        let hydrated_ir_counters = hydrated_ir.counters();
+
+        let mut no_cache = TranscriptProjection::new();
+        let mut no_cache_buf = Buffer::new(crate::smelt_edit::BufId(80), Default::default());
+        let no_cache_start = std::time::Instant::now();
+        let no_cache_projection = project_with_lua(
+            &mut no_cache,
+            &lua,
+            &mut no_cache_buf,
+            &mut transcript.history,
+            100,
+            false,
+            &theme,
+            ScrollTarget::visible_tail(),
+            40,
+        );
+        let no_cache_ms = elapsed_ms(no_cache_start.elapsed());
+        let no_cache_counters = no_cache.counters();
+
+        assert!(generated_bytes >= workload.target_bytes);
+        assert!(input_bytes > 0);
         assert!(first.total_rows > 0);
         assert!(resized.total_rows > 0);
+        assert_eq!(themed.total_rows, resized.total_rows);
         assert!(!visible.rows.is_empty());
+        assert_eq!(hydrated_full_projection.total_rows, first.total_rows);
+        assert_eq!(hydrated_ir_projection.total_rows, first.total_rows);
+        assert_eq!(no_cache_projection.total_rows, first.total_rows);
+        assert_eq!(first_counters.display_layouts, blocks);
+        assert_eq!(resize_counters.display_layouts, 0);
+        assert_eq!(theme_counters.display_layouts, 0);
+        assert_eq!(scroll_counters.display_layouts, 0);
+        assert_eq!(scroll_counters.exact_height_measured_blocks, 0);
+        assert_eq!(visible_counters.display_layouts, 0);
+        assert_eq!(visible_counters.exact_height_measured_blocks, 0);
+        assert_eq!(hydrated_full_counters.display_layouts, 0);
+        assert_eq!(hydrated_full_counters.exact_height_measured_blocks, 0);
+        assert_eq!(hydrated_ir_counters.display_layouts, 0);
+        assert_eq!(no_cache_counters.display_layouts, blocks);
 
         smelt_perf::alloc::set_enabled(false);
         smelt_perf::perf::set_enabled(false);
         smelt_perf::perf::clear();
+
+        TranscriptBenchSample {
+            input_bytes,
+            generated_bytes,
+            blocks,
+            total_rows: first.total_rows,
+            cache_row_indexes: cache.row_indexes.len(),
+            cache_display_layouts: cache.display_layouts.len(),
+            first_ms,
+            resize_ms,
+            theme_ms,
+            scroll12_ms,
+            visible_ms,
+            hydrated_full_ms,
+            hydrated_ir_only_ms,
+            no_cache_ms,
+            allocs: first_alloc.allocs,
+            bytes_allocated: first_alloc.bytes_allocated,
+            visible_rows: visible.rows.len(),
+            scroll_materialized_rows,
+            first_counters,
+            resize_counters,
+            theme_counters,
+            scroll_counters,
+            visible_counters,
+            hydrated_full_loaded_rows,
+            hydrated_full_counters,
+            hydrated_ir_loaded_rows,
+            hydrated_ir_counters,
+            no_cache_counters,
+        }
+    }
+
+    fn print_transcript_bench_summary(
+        workload: TranscriptBenchWorkload,
+        samples: &[TranscriptBenchSample],
+    ) {
+        let first = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.first_ms)
+                .collect::<Vec<_>>(),
+        );
+        let resize = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.resize_ms)
+                .collect::<Vec<_>>(),
+        );
+        let theme = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.theme_ms)
+                .collect::<Vec<_>>(),
+        );
+        let scroll = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.scroll12_ms)
+                .collect::<Vec<_>>(),
+        );
+        let visible = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.visible_ms)
+                .collect::<Vec<_>>(),
+        );
+        let hydrated_full = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.hydrated_full_ms)
+                .collect::<Vec<_>>(),
+        );
+        let hydrated_ir = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.hydrated_ir_only_ms)
+                .collect::<Vec<_>>(),
+        );
+        let no_cache = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.no_cache_ms)
+                .collect::<Vec<_>>(),
+        );
+        let sample = samples[0];
+        eprintln!(
+            "| {:<18} | {:>8.2} | {:>6} | {:>8} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} |",
+            workload.name,
+            sample.input_bytes as f64 / (1024.0 * 1024.0),
+            sample.blocks,
+            sample.total_rows,
+            first.display(),
+            resize.display(),
+            theme.display(),
+            scroll.display(),
+            visible.display(),
+            hydrated_full.display(),
+            hydrated_ir.display(),
+            no_cache.display(),
+        );
+        eprintln!(
+            "TRANSCRIPT_LAYOUT_BENCH_SUMMARY workload={} runs={} input_bytes={} generated_bytes={} blocks={} rows={} cache_row_indexes={} cache_display_layouts={} first_mean_ms={:.3} first_stddev_ms={:.3} resize_mean_ms={:.3} resize_stddev_ms={:.3} theme_mean_ms={:.3} theme_stddev_ms={:.3} scroll12_mean_ms={:.3} scroll12_stddev_ms={:.3} visible_mean_ms={:.3} visible_stddev_ms={:.3} hydrated_full_mean_ms={:.3} hydrated_full_stddev_ms={:.3} hydrated_ir_only_mean_ms={:.3} hydrated_ir_only_stddev_ms={:.3} no_cache_mean_ms={:.3} no_cache_stddev_ms={:.3} allocs={} bytes_allocated={} visible_rows={} scroll_materialized_rows={} first_min_ms={:.3} first_max_ms={:.3}",
+            workload.name,
+            samples.len(),
+            sample.input_bytes,
+            sample.generated_bytes,
+            sample.blocks,
+            sample.total_rows,
+            sample.cache_row_indexes,
+            sample.cache_display_layouts,
+            first.mean,
+            first.stddev,
+            resize.mean,
+            resize.stddev,
+            theme.mean,
+            theme.stddev,
+            scroll.mean,
+            scroll.stddev,
+            visible.mean,
+            visible.stddev,
+            hydrated_full.mean,
+            hydrated_full.stddev,
+            hydrated_ir.mean,
+            hydrated_ir.stddev,
+            no_cache.mean,
+            no_cache.stddev,
+            sample.allocs,
+            sample.bytes_allocated,
+            sample.visible_rows,
+            sample.scroll_materialized_rows,
+            first.min,
+            first.max,
+        );
+        eprintln!(
+            "TRANSCRIPT_LAYOUT_BENCH_COUNTERS workload={} first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} hydrated_full_loaded_rows={} hydrated_full={:?} hydrated_ir_loaded_rows={} hydrated_ir={:?} no_cache={:?}",
+            workload.name,
+            sample.first_counters,
+            sample.resize_counters,
+            sample.theme_counters,
+            sample.scroll_counters,
+            sample.visible_counters,
+            sample.hydrated_full_loaded_rows,
+            sample.hydrated_full_counters,
+            sample.hydrated_ir_loaded_rows,
+            sample.hydrated_ir_counters,
+            sample.no_cache_counters,
+        );
+    }
+
+    #[test]
+    #[ignore = "manual transcript layout benchmark suite; prefer `cargo xtask bench-transcript-layout`"]
+    fn transcript_layout_benchmark_suite() {
+        let runs = transcript_bench_runs();
+        let workloads = transcript_bench_workloads();
+        assert!(!workloads.is_empty(), "no benchmark workloads selected");
+        eprintln!(
+            "TRANSCRIPT_LAYOUT_BENCH runs={runs} workloads={}",
+            workloads.len()
+        );
+        eprintln!(
+            "| workload           |      MiB | blocks |     rows |     first ms |    resize ms |     theme ms |   scroll12 ms |   visible ms |  fullcache ms |    ironly ms |   nocache ms |"
+        );
+        eprintln!(
+            "|--------------------|----------|--------|----------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|"
+        );
+        for workload in workloads {
+            let _warmup = run_transcript_bench_sample(workload);
+            let mut samples = Vec::with_capacity(runs);
+            for run in 0..runs {
+                let sample = run_transcript_bench_sample(workload);
+                eprintln!(
+                    "TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload={} run={} input_bytes={} generated_bytes={} blocks={} rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} hydrated_full_ms={:.3} hydrated_ir_only_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={}",
+                    workload.name,
+                    run + 1,
+                    sample.input_bytes,
+                    sample.generated_bytes,
+                    sample.blocks,
+                    sample.total_rows,
+                    sample.first_ms,
+                    sample.resize_ms,
+                    sample.theme_ms,
+                    sample.scroll12_ms,
+                    sample.visible_ms,
+                    sample.hydrated_full_ms,
+                    sample.hydrated_ir_only_ms,
+                    sample.no_cache_ms,
+                    sample.allocs,
+                    sample.bytes_allocated,
+                );
+                samples.push(sample);
+            }
+            print_transcript_bench_summary(workload, &samples);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual large-transcript baseline; run with --ignored --nocapture"]
+    fn mixed_large_transcript_projection_baseline() {
+        let workload = TranscriptBenchWorkload {
+            name: "mixed_10mib",
+            target_bytes: 10 * 1024 * 1024,
+            build: push_large_mixed_transcript_fixture,
+        };
+        let sample = run_transcript_bench_sample(workload);
+        eprintln!(
+            "TRANSCRIPT_LAYOUT_BASELINE input_bytes={} generated_bytes={} blocks={} total_rows={} cache_row_indexes={} cache_display_layouts={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} hydrated_full_ms={:.3} hydrated_ir_only_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={} visible_rows={} scroll_materialized_rows={}",
+            sample.input_bytes,
+            sample.generated_bytes,
+            sample.blocks,
+            sample.total_rows,
+            sample.cache_row_indexes,
+            sample.cache_display_layouts,
+            sample.first_ms,
+            sample.resize_ms,
+            sample.theme_ms,
+            sample.scroll12_ms,
+            sample.visible_ms,
+            sample.hydrated_full_ms,
+            sample.hydrated_ir_only_ms,
+            sample.no_cache_ms,
+            sample.allocs,
+            sample.bytes_allocated,
+            sample.visible_rows,
+            sample.scroll_materialized_rows,
+        );
+        eprintln!(
+            "TRANSCRIPT_LAYOUT_COUNTERS first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} hydrated_full_loaded_rows={} hydrated_full={:?} hydrated_ir_loaded_rows={} hydrated_ir={:?} no_cache={:?}",
+            sample.first_counters,
+            sample.resize_counters,
+            sample.theme_counters,
+            sample.scroll_counters,
+            sample.visible_counters,
+            sample.hydrated_full_loaded_rows,
+            sample.hydrated_full_counters,
+            sample.hydrated_ir_loaded_rows,
+            sample.hydrated_ir_counters,
+            sample.no_cache_counters,
+        );
     }
 
     fn project_tool_title(name: &str, summary: protocol::StyledLines) -> Buffer {

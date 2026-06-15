@@ -945,6 +945,7 @@ Deferred debt:
 
 - `hbox` still uses a one-row scratch buffer for visible child-row span clipping. It no longer renders off-screen child columns, but a real row-span compositor should replace the bridge when hbox grows beyond current tool/preview usage.
 - Rust's emergency fallback now mirrors the Lua default at a minimal level so renderer failure remains safe; it is not a compatibility path for tool-specific rendering.
+- The earlier non-tool/default-primitive migration debt was completed in Phases 5-7. Remaining primitive/API cleanup is tracked with the Phase 8 follow-up candidates below, especially generic styling and dynamic elapsed text.
 
 ### Phase 3 — Add root transcript renderer and default Lua renderers
 
@@ -981,8 +982,8 @@ Status after implementation:
 
 Deferred debt:
 
-- The live transcript projection still uses the existing Rust block renderers for non-tool block types until Phase 5 migrates them to root-renderer-produced LayoutIR. Tool calls now use full-block Lua layout.
-- Because the current primitive slice lacks markdown, panel, line, code, separator, style, source/copy/selectable, and elapsed primitives, Phase 3/4 defaults are fallback-safe but intentionally do not attempt to reproduce every product visual for non-tool blocks. The remaining snapshot-preserving migrations land with the corresponding primitives in Phase 5.
+- Superseded by Phase 5: live transcript projection now routes every block kind through the root Lua renderer and stores renderer-produced `LayoutIr`.
+- Superseded by Phase 5: markdown, panel, line, code, and separator primitives exist and are consumed by defaults. Generic `layout.style`, copy/source/selectability wrappers, and dynamic `layout.elapsed` remain follow-up candidates after Phase 8 performance validation.
 
 ### Phase 4 — Move tool rendering to full-block Lua layout
 
@@ -1017,8 +1018,7 @@ Status after implementation:
 
 Deferred debt:
 
-- Pending elapsed still invalidates/recompiles the Lua-produced tool layout with semantic state; the lower-level dynamic `layout.elapsed` primitive remains a future optimization.
-- Non-tool block types still use existing Rust display policies until Phase 5 migrates them to root-renderer-produced `LayoutIr`.
+- Pending elapsed still invalidates/recompiles the Lua-produced tool layout with semantic state. Keep this simple path until Phase 8 results show whether a lower-level dynamic `layout.elapsed` primitive is worth implementing.
 - `hbox` still uses the one-row scratch-buffer compositor debt from Phase 1.
 
 ### Phase 5 — Route non-tool blocks through Lua defaults
@@ -1060,9 +1060,10 @@ Follow-up cleanup:
 
 Deferred architecture debt:
 
-- `GutterSpec.styled` preserves current snapshot parity between raw tool-output gutters and styled thinking/exec gutters, but it is a product-shaped flag. Replace it with explicit style/gutter composition before adding more gutter styling modes, including defined composition for nested gutters instead of the current replacement semantics.
+- Generic styling is the next layout-API cleanup candidate after Phase 8. Add a composable `layout.style(child, opts)` / `StyleSpec` wrapper before adding more per-primitive style fields, then migrate default Lua renderers away from product-shaped flags where practical.
+- `GutterSpec.styled` preserves current snapshot parity between raw tool-output gutters and styled thinking/exec gutters, but it is a product-shaped flag. Fold this into explicit style/gutter composition when `layout.style` lands, including defined composition for nested gutters instead of the current replacement semantics.
 - Markdown/code partial rendering, panel child rows, and hbox columns still use temporary buffers in places to preserve spans while rendering requested rows. Replace those bridges with a row-span compositor/direct row-range renderer before expanding primitive complexity.
-- Style options are still primitive-specific (`MarkdownSpec` dim/italic, `SeparatorSpec` dim, `GutterSpec` styled). Design and migrate to generic `layout.style` before adding more per-primitive style fields.
+- Copy/source/selectability wrappers (`layout.source`, `layout.copy_as`, `layout.selectable`) are still absent as generic layout nodes. Add them only with tests that lock copy/yank/search behavior through panels, gutters, caps, and hboxes.
 
 Validation after implementation:
 
@@ -1159,6 +1160,73 @@ Work:
   - resume preview.
 - Assert width/theme/scroll with valid IR does not call Lua.
 - Compare first/resume/resize latencies against the plan baseline.
+- Use these measurements to prioritize follow-up architecture work. In particular, do not implement generic `layout.style` or dynamic `layout.elapsed` until the performance results and API cleanup value justify their scope.
+
+Current validation notes:
+
+- Release benchmark harness is now `cargo xtask bench-transcript-layout --runs N`, documented in `docs/transcript-layout-benchmarks.md`. It runs the ignored projection and navigation/search benchmark suites in release mode with one warmup sample and `--test-threads=1`, then prints per-run samples, mean±stddev tables, and structural counters for layout compilation, exact height measurement, and visible materialization.
+- `cargo xtask bench-transcript-layout --runs 5` reported:
+  - navigation/search on a warmed 8,000-block / 16,000-row transcript: `/needle-target` search + redraw `42.6±1.1ms`, Ctrl-D ×20 + redraws `4.0±0.0ms`, Ctrl-U ×20 + redraws `4.5±0.0ms`, `gg` + redraw `0.23±0.00ms`, `G` + redraw `0.23±0.00ms`.
+  - `mixed_10mib`: `blocks=3404`, `rows=89587`, `first=188.0±0.9ms`, `resize=155.7±1.2ms`, `theme=156.2±1.0ms`, `scroll12=12.9±0.4ms`, `visible=0.6±0.0ms`, `fullcache=5.1±0.5ms`, `ironly=152.0±1.3ms`, `nocache=189.0±1.8ms`.
+  - `markdown_4mib`: `blocks=540`, `rows=56699`, `first=74.2±1.2ms`, `resize=72.5±0.4ms`, `theme=73.0±0.6ms`, `scroll12=21.1±0.5ms`, `visible=1.1±0.0ms`, `fullcache=0.8±0.0ms`, `ironly=71.2±1.2ms`, `nocache=74.7±1.1ms`.
+  - `tool_output_4mib`: `blocks=47`, `rows=1080`, `first=72.7±1.0ms`, `resize=70.3±0.5ms`, `theme=70.9±0.8ms`, `scroll12=712.6±2.8ms`, `visible=54.7±0.5ms`, `fullcache=41.2±1.5ms`, `ironly=69.3±0.1ms`, `nocache=72.5±0.4ms`.
+  - `tiny_blocks_1mib`: `blocks=32112`, `rows=80279`, `first=235.5±6.0ms`, `resize=65.5±1.7ms`, `theme=67.1±1.0ms`, `scroll12=4.3±0.1ms`, `visible=0.3±0.0ms`, `fullcache=5.3±1.3ms`, `ironly=68.0±2.2ms`, `nocache=235.2±6.5ms`.
+  - `huge_blocks_4mib`: `blocks=38`, `rows=45903`, `first=117.7±22.3ms`, `resize=141.3±45.3ms`, `theme=142.2±43.3ms`, `scroll12=429.0±203.5ms`, `visible=22.7±0.6ms`, `fullcache=13.8±0.3ms`, `ironly=92.4±0.7ms`, `nocache=102.0±15.0ms`.
+- Counters confirm the algorithmic split: cold/no-cache compiles and measures every block; resize/theme compile 0 layouts but remeasure all exact heights; scroll/direct-visible/full-cache compile 0 layouts and remeasure 0 heights; IR-only hydration compiles 0 layouts but remeasures all exact heights.
+- Hot-reload regression coverage now verifies a config-installed `smelt.transcript.extend_renderer` tool override changes after `reload_lua()`, rejects stale compiled IR/row indexes, and disappears when the config removes the extension.
+- Current conclusion: persisted row-index + display-layout cache is the right resume mechanism. DisplayIR-only persistence is useful but not sufficient for fast resume because exact row heights dominate once Lua compilation is skipped. Theme invalidation is architecturally too broad because exact measurements are theme-independent. Width changes legitimately need a width-specific exact measurement index unless that width has already been measured. App-level `gg`, `G`, Ctrl-D, and Ctrl-U are cheap on warmed transcripts; search is materially more expensive than navigation but still below cold/resize measurement on the large projection workloads. Tool-output-heavy and few-huge-block workloads expose a separate visible-row materialization/rendering bottleneck: scrolling inside very large capped/raw-output blocks spends time rendering large child ranges even with 0 height remeasurement.
+
+Recommended performance direction:
+
+1. Split the current projection state into explicit derived artifacts with dependency-based invalidation: `DisplayLayout` cache keyed by semantic block + renderer identity, `ExactRowIndex`/measurement cache keyed by display-layout identity + width + thinking visibility, and visible rendered rows keyed by measurement + theme + viewport. This is a three-tier model because those are the real dependency boundaries; adding more tiers now would increase complexity without evidence, while two tiers would keep conflating exact measurement with rendered rows.
+2. Preserve exactness by keeping measurement exact and cached. Do not estimate total rows. The architectural goal is to measure every block once per needed width/renderer identity, persist that exact index when safe, and never drop it on theme/scroll/viewport changes.
+3. After the cache split, optimize exact measurement internals where counters still show all-block remeasurement: parsed/owned markdown sub-IR so markdown measurement does not reparse source, and width-keyed row-index retention for common widths.
+4. Separately profile row-range materialization for large tool-output/huge-block workloads before adding a compositor abstraction. The release suite shows this is a different bottleneck from exact height measurement; fix it only with a direct row-range rendering/compositing design if profiling confirms the cost is in temp buffers/large child rendering.
+
+### Phase 9 — Derived artifact cache architecture
+
+Goal: make transcript projection state match the actual dependency graph instead of using one broad materialized-state invalidation path.
+
+Target architecture:
+
+- `DisplayLayout` / DisplayIR store: width-independent, theme-independent, viewport-independent `LayoutIr` compiled from semantic block data and renderer identity. Keyed by semantic block display key plus renderer generation/cache key. Lua renderer changes invalidate this tier; width, theme, and scroll do not.
+- `MeasurementIndexStore`: exact row-index cache over `ExactRowIndex`, keyed by renderer identity, width, `show_thinking`, block order, and per-block display keys. It keeps an active exact row index and width-keyed remembered entries so revisiting a measured width hydrates exact rows instead of remeasuring. Persist only entries with a stable renderer cache key.
+- `VisibleProjectionState`: rendered/materialized rows, visible block layout, backing-buffer projection marker, and full-text row cache. This tier depends on measurement, theme, viewport, and target buffer state. It is intentionally disposable.
+
+Invalidation rules:
+
+| Change | DisplayLayout store | Measurement indexes | Visible state |
+| --- | --- | --- | --- |
+| Scroll/viewport inside same measured width | keep | keep | rebuild or reuse only if previous materialized window covers the viewport |
+| Theme change | keep | keep | drop rendered/materialized visible state; full plain-text row cache may remain if it has no theme data |
+| Width change | keep | remember active exact index; hydrate target width if present, otherwise measure exactly | drop visible/full-row state for the old width |
+| Renderer generation/cache-key change | drop | drop active and remembered indexes | drop all visible/full-row state |
+| Semantic append with stable order prefix | retain unchanged block layouts | sync prefix and measure only appended/mutated affected suffix | existing projection key rejects stale visible rows |
+| Semantic deletion/reorder/rewrite | retain matching live block layouts by block id/key | rebuild/sync exact index and remeasure invalidated nodes only | existing projection key rejects stale visible rows |
+| Manual Lua reload / renderer extension update | renderer generation changes, so stale IR is rejected | stale row indexes rejected | stale visible rows rejected |
+
+Success criteria:
+
+- Theme invalidation causes `exact_height_measured_blocks = 0` for an already measured width.
+- Width sequence `W1 -> W2 -> W1` reuses the cached exact row index for `W1` without recompiling DisplayIR or remeasuring heights.
+- Existing row-index prefix/rewrite/order tests keep passing; exactness remains required for scrollbar, search, copy/yank, and vim navigation.
+- Renderer reload regression continues to prove stale DisplayIR and row indexes are rejected after config changes.
+- Benchmark suite is rerun and this plan is updated with before/after numbers, especially theme time and exact measurement counters.
+
+Implementation status:
+
+- `TranscriptProjection` now has explicit stores: `display_layouts`, `MeasurementIndexStore`, and `VisibleProjectionState`.
+- Theme invalidation targets visible rendered state instead of discarding exact measurements.
+- Width changes remember the active exact index before switching widths so warm width revisits can hydrate from memory.
+- Regression coverage includes `theme_invalidation_preserves_exact_measurements` and `width_revisit_reuses_cached_exact_measurements`.
+- Validation completed with `cargo check -p smelt-tui`, `cargo test -p smelt-tui transcript_buf`, `cargo test -p smelt-tui reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir`, `git diff --check`, and `cargo xtask bench-transcript-layout --runs 5`.
+
+Post-refactor benchmark notes:
+
+- Rerun `cargo xtask bench-transcript-layout --runs 5` under the normalized local performance conditions reports theme exact-height measurements as `0` for all workloads. Theme time changed from broad remeasurement to visible/materialized rendering cost: `mixed_10mib` `6.5±1.5ms`, `markdown_4mib` `1.7±0.1ms`, `tool_output_4mib` `70.8±11.1ms`, `tiny_blocks_1mib` `0.7±0.2ms`, `huge_blocks_4mib` `38.4±3.9ms`.
+- Current workload means: navigation/search on warmed 16,000 rows: search `78.52±15.90ms`, Ctrl-D ×20 `8.05±0.98ms`, Ctrl-U ×20 `9.48±2.00ms`, `gg` `0.49±0.16ms`, `G` `0.44±0.08ms`.
+- Projection workloads: `mixed_10mib` first `345.8±39.8ms`, resize `217.3±45.8ms`, theme `6.5±1.5ms`, scroll12 `19.6±6.2ms`, visible `1.0±0.3ms`, fullcache `7.3±1.3ms`, ironly `242.6±50.0ms`, nocache `310.2±22.8ms`; `markdown_4mib` first `117.9±17.6ms`, resize `121.1±17.1ms`, theme `1.7±0.1ms`, scroll12 `36.7±2.7ms`, visible `1.8±0.1ms`, fullcache `1.5±0.2ms`, ironly `116.7±11.0ms`, nocache `119.7±19.4ms`; `tool_output_4mib` first `114.2±6.7ms`, resize `111.9±20.3ms`, theme `70.8±11.1ms`, scroll12 `1302.8±273.2ms`, visible `87.0±11.6ms`, fullcache `67.9±7.9ms`, ironly `122.9±23.9ms`, nocache `125.8±24.1ms`; `tiny_blocks_1mib` first `434.0±94.8ms`, resize `110.8±10.2ms`, theme `0.7±0.2ms`, scroll12 `10.6±2.7ms`, visible `0.8±0.2ms`, fullcache `10.9±5.4ms`, ironly `121.0±11.2ms`, nocache `368.8±38.3ms`; `huge_blocks_4mib` first `161.7±23.5ms`, resize `174.7±18.4ms`, theme `38.4±3.9ms`, scroll12 `522.9±30.3ms`, visible `40.4±8.4ms`, fullcache `22.5±2.6ms`, ironly `157.4±15.6ms`, nocache `150.0±13.4ms`.
+- Theme is now fixed as a measurement-invalidation issue. The remaining expensive theme/visible/scroll cases are row-range materialization/rendering in tool-output-heavy and few-huge-block workloads, which is the separate direct row-range renderer/compositor follow-up described above.
 
 Exit criteria:
 
@@ -1177,7 +1245,7 @@ Exit criteria:
 - Bundle default renderers as normal Lua modules. The default root renderer calls `smelt.transcript.defaults.render(block, ctx)`; users can call, compose, copy, or ignore those helpers.
 - Keep per-block and per-tool dispatch in Lua. Built-in tool body functions may live in a Lua table inside the defaults module, but that table is implementation/composition code, not a Rust API.
 - Do not add `layout.tool_header(block)`. Tool headers are default Lua composition, exposed as `smelt.transcript.defaults.render_tool_header(block, ctx, opts?)` for reuse.
-- Keep pending elapsed render-dynamic through a lower-level primitive such as `layout.elapsed(block.elapsed)`, so Lua decides placement/chrome while Rust updates the displayed value without rerunning Lua.
+- Keep dynamic pending elapsed as a post-Phase-8 candidate rather than immediate work. The target remains a lower-level primitive such as `layout.elapsed(block.elapsed)`, where Lua decides placement/chrome while Rust updates the displayed value without rerunning Lua, but only implement it if measurements show the current semantic invalidation path is costly enough.
 - Preserve current mode one-row behavior with `layout.line` unless deliberately changed with snapshots.
 - Keep exact user-text highlighting via general span/text primitives plus Rust-provided semantic annotations or narrowly mechanical tokenization; do not hide user-message panel chrome in Rust.
 - Implement tail/head capping as generic `layout.cap` IR with numeric row counts from `ctx.limits`; do not keep `smelt.layout.tool_output`.
@@ -1187,4 +1255,5 @@ Exit criteria:
 
 1. Should mode blocks always clip to one row exactly, or should `layout.line` offer configurable clip/ellipsis behavior?
 2. What exact shape should Rust-provided user-text annotations take: precomputed spans on `block`, a general tokenizer primitive, or a helper in defaults that calls a mechanical tokenizer?
-3. Should `extend_renderer` support priority/load-order options beyond “later extensions run first,” or is named registration/removal enough for the first implementation?
+3. What are the precise `layout.style` inheritance and merge rules across text/runs/markdown/code, panels, gutters, caps, hboxes, and nested style wrappers?
+4. Should `extend_renderer` support priority/load-order options beyond “later extensions run first,” or is named registration/removal enough for the first implementation?

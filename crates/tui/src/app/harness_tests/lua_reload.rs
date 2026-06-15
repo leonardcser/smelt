@@ -415,6 +415,76 @@ fn reload_clears_surviving_prompt_keymaps() {
 }
 
 #[test]
+fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
+    fn write_renderer(path: &std::path::Path, marker: Option<&str>) {
+        let source = marker.map_or_else(
+            || "-- default transcript renderer only\n".to_string(),
+            |marker| {
+                format!(
+                    r#"
+                    smelt.transcript.extend_renderer("reload-tool-marker", function(next, block, ctx)
+                      if block.kind == "tool" then
+                        return smelt.layout.text("{marker} " .. (block.name or "tool"))
+                      end
+                      return next(block, ctx)
+                    end, {{ cache_key = "reload-tool-marker:{marker}" }})
+                    "#,
+                )
+            },
+        );
+        std::fs::write(path, source).expect("write init.lua");
+    }
+
+    fn transcript_rows(app: &mut TestApp) -> Vec<String> {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .full_transcript_display_text(false)
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    let tmp = tempfile::tempdir().expect("temp init dir");
+    let init = tmp.path().join("init.lua");
+    write_renderer(&init, Some("reload-marker-v1"));
+
+    let mut app = TestApp::builder().with_init_lua(&init).build();
+    app.app.handle_resize(100, 30);
+    app.app.start_tool(
+        "reload-call-1".into(),
+        "bash".into(),
+        protocol::StyledLines::from_plain("echo reload"),
+        std::collections::HashMap::new(),
+    );
+    app.app.finish_tool(
+        "reload-call-1",
+        smelt_core::transcript_model::ToolStatus::Ok,
+        Some(Box::new(smelt_core::transcript_model::ToolOutput {
+            content: "reload output".into(),
+            is_error: false,
+            metadata: None,
+        })),
+        Some(Duration::from_millis(1200)),
+    );
+
+    let first = transcript_rows(&mut app).join("\n");
+    assert!(first.contains("reload-marker-v1 bash"), "{first}");
+    assert!(!first.contains("reload-marker-v2"), "{first}");
+
+    write_renderer(&init, Some("reload-marker-v2"));
+    app.reload_lua();
+    let second = transcript_rows(&mut app).join("\n");
+    assert!(second.contains("reload-marker-v2 bash"), "{second}");
+    assert!(!second.contains("reload-marker-v1"), "{second}");
+
+    write_renderer(&init, None);
+    app.reload_lua();
+    let default = transcript_rows(&mut app).join("\n");
+    assert!(default.contains("* bash echo reload"), "{default}");
+    assert!(!default.contains("reload-marker-v2"), "{default}");
+}
+
+#[test]
 fn named_overlay_open_refreshes_title_in_place() {
     let mut app = TestApp::builder().build();
     let _guard = crate::lua::install_app_ptr(&mut app.app);
