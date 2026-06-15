@@ -30,6 +30,30 @@ fn question_keymap_after_prompt_attachment_is_not_plain_insertion() {
 }
 
 #[test]
+fn queued_turn_preserves_work_elapsed() {
+    let mut app = TestApp::builder().build();
+    app.start_turn(1);
+    app.feed_one(SourceEvent::Tick(3_000));
+    app.push_queued_message("follow up".to_string());
+
+    let before = app.app.working.elapsed().expect("live turn elapsed");
+    app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
+        turn_id: 1,
+        history: Vec::new(),
+        meta: None,
+    }));
+    let after = app.app.working.elapsed().expect("queued turn elapsed");
+
+    assert!(app.agent_running(), "queued turn should start immediately");
+    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.state().prompt_text, "");
+    assert!(
+        after >= before && after >= Duration::from_secs(3),
+        "queued turn reset elapsed time: before {before:?}, after {after:?}"
+    );
+}
+
+#[test]
 fn stale_prompt_prediction_response_after_submit_is_ignored() {
     let mut app = TestApp::builder().build();
     app.app

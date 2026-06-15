@@ -534,6 +534,19 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn start_next_queued_input_if_idle(&mut self) -> bool {
+        if self.agent.is_some() || self.queued_inputs.is_empty() || self.busy_stack.is_busy() {
+            return false;
+        }
+        let queued = self.queued_inputs.remove(0);
+        let was_animating = self.working.is_animating();
+        self.start_queued_input(queued);
+        if was_animating && self.agent.is_none() {
+            self.working.finish(smelt_core::working::TurnOutcome::Done);
+        }
+        true
+    }
+
     pub(crate) fn apply_context_window_update(&mut self, update: ContextWindowUpdate) {
         if update.request_id == self.context_window_request_id
             && update.model == self.core.config.model
@@ -1582,11 +1595,7 @@ impl TuiApp {
                 continue 'main;
             }
 
-            if self.agent.is_none() && !self.queued_inputs.is_empty() && !self.busy_stack.is_busy()
-            {
-                let queued = self.queued_inputs.remove(0);
-                self.start_queued_input(queued);
-            }
+            self.start_next_queued_input_if_idle();
 
             if self.agent.is_none() && !self.pending_dialogs.is_empty() {
                 self.pending_dialogs.clear();

@@ -98,10 +98,7 @@ impl WorkingState {
     /// running one (keeps elapsed time and accumulated `tps_samples`).
     pub fn begin(&mut self, phase: TurnPhase) {
         let now = self.clock.instant_now();
-        let retry_deadline = match phase {
-            TurnPhase::Retrying { delay, .. } => Some(now + delay),
-            _ => None,
-        };
+        let retry_deadline = retry_deadline_for(phase, now);
         match self.live.as_mut() {
             Some(live) => {
                 live.phase = phase;
@@ -132,6 +129,44 @@ impl WorkingState {
             elapsed,
             avg_tps,
         });
+    }
+
+    /// Archive the live turn's metadata and keep its elapsed timer running for
+    /// the next queued turn.
+    pub fn finish_and_continue(&mut self, outcome: TurnOutcome, phase: TurnPhase) {
+        let now = self.clock.instant_now();
+        let retry_deadline = retry_deadline_for(phase, now);
+        match self.live.as_mut() {
+            Some(live) => {
+                self.last = Some(LastTurn {
+                    outcome,
+                    elapsed: live.effective_elapsed(now),
+                    avg_tps: avg(&live.tps_samples),
+                });
+                live.phase = phase;
+                live.retry_deadline = retry_deadline;
+                live.tps_samples.clear();
+            }
+            None => {
+                let (elapsed, avg_tps) = self
+                    .last
+                    .as_ref()
+                    .map(|last| (last.elapsed, last.avg_tps))
+                    .unwrap_or((Duration::ZERO, None));
+                self.last = Some(LastTurn {
+                    outcome,
+                    elapsed,
+                    avg_tps,
+                });
+                self.live = Some(LiveTurn {
+                    phase,
+                    timer: PausedTimer::new(now.checked_sub(elapsed).unwrap_or(now)),
+                    retry_deadline,
+                    tps_samples: Vec::new(),
+                    last_spinner_frame: usize::MAX,
+                });
+            }
+        }
     }
 
     pub fn clear(&mut self) {
@@ -268,6 +303,13 @@ impl WorkingState {
             elapsed: Duration::from_millis(meta.elapsed_ms),
             avg_tps: meta.avg_tps,
         });
+    }
+}
+
+fn retry_deadline_for(phase: TurnPhase, now: Instant) -> Option<Instant> {
+    match phase {
+        TurnPhase::Retrying { delay, .. } => Some(now + delay),
+        _ => None,
     }
 }
 

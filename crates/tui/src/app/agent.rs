@@ -391,8 +391,11 @@ impl TuiApp {
 
     pub(crate) fn discard_turn(&mut self, cancelled: bool) {
         if self.agent.is_some() {
-            self.finish_turn(cancelled);
+            let start_queued = self.finish_turn(cancelled);
             self.agent = None;
+            if start_queued {
+                self.start_next_queued_input_if_idle();
+            }
         } else if cancelled {
             // No active turn but user requested cancel - still notify the
             // engine and kill any running Lua tasks (background tool calls,
@@ -407,7 +410,7 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn finish_turn(&mut self, cancelled: bool) {
+    pub(crate) fn finish_turn(&mut self, cancelled: bool) -> bool {
         self.sleep_inhibit.release();
         if cancelled {
             self.core.engine.send(UiCommand::Cancel);
@@ -426,19 +429,30 @@ impl TuiApp {
         if cancelled {
             self.pending_history_appends.clear();
         }
+        let start_queued =
+            !cancelled && !self.queued_inputs.is_empty() && !self.busy_stack.is_busy();
+        let fallback_meta = (!cancelled).then(|| self.working.turn_meta()).flatten();
         if cancelled {
             {
                 self.working.finish(TurnOutcome::Interrupted);
             };
             self.drain_queued_inputs_into_prompt();
         } else {
-            self.working.finish(TurnOutcome::Done);
+            if start_queued {
+                self.working
+                    .finish_and_continue(TurnOutcome::Done, TurnPhase::Working);
+            } else {
+                self.working.finish(TurnOutcome::Done);
+            }
             self.clear_prompt_prediction();
         }
-        let meta = self
-            .pending_turn_meta
-            .take()
-            .or_else(|| self.working.turn_meta());
+        let meta = self.pending_turn_meta.take().or_else(|| {
+            if cancelled {
+                self.working.turn_meta()
+            } else {
+                fallback_meta
+            }
+        });
         if let Some(meta) = meta {
             self.core
                 .session
@@ -450,6 +464,7 @@ impl TuiApp {
         }
         self.snapshot_accounting();
         self.save_session();
+        start_queued
     }
 
     /// Invokes the Lua handler for a plugin-defined tool; synchronous handlers resolve immediately, async ones park until `drive_tasks` completes them.
