@@ -544,7 +544,7 @@ fn read_process_output_tool_is_snapshot_only() {
     let mlua::Value::String(content) = result else {
         panic!("expected string result, got {result:?}");
     };
-    assert_eq!(content.to_string_lossy(), "partial\n[running]");
+    assert_eq!(content.to_string_lossy(), "partial");
     let output_id: String = get_global(&rt, "OUTPUT_ID");
     assert_eq!(output_id, "proc_1");
 }

@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 372
 expression: frame.text()
 ---
 ┌ help ────────────────────────────────────────────────────┐
@@ -7,9 +8,9 @@ expression: frame.text()
 │@<path>                        attach a file or URL       │
 │!<cmd>                         run a shell command        │
 │                                                          │
-│enter                          send message               │
-│ctrl+enter                     send to current request    │
-│ctrl+j  shift+enter            insert newline             │
+│enter                          send / queue for later     │
+│ctrl+enter / ctrl+q            steer current response     │
+│ctrl+j / shift+enter           insert newline             │
 │ctrl+c                         cancel / interrupt / quit  │
 │ctrl+r                         search input history       │
 │ctrl+t                         cycle reasoning effort     │

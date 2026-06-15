@@ -23,11 +23,11 @@ dim: 60 18
   4  58   1 bg=AnsiValue(243)
   4  59   1 fg=AnsiValue(244)
   5   0   1 fg=AnsiValue(244)
-  5  32  12 attrs=dim
+  5  32  22 attrs=dim
   5  58   1 bg=AnsiValue(243)
   5  59   1 fg=AnsiValue(244)
   6   0   1 fg=AnsiValue(244)
-  6  32  23 attrs=dim
+  6  32  22 attrs=dim
   6  58   1 bg=AnsiValue(243)
   6  59   1 fg=AnsiValue(244)
   7   0   1 fg=AnsiValue(244)
