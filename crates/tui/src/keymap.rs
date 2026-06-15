@@ -596,7 +596,7 @@ pub(crate) mod hints {
         ),
         ("tab", "autocomplete / accept ghost text"),
         ("esc", "dismiss / unqueue messages"),
-        ("esc esc", "cancel agent / compaction / rewind"),
+        ("esc esc", "cancel work / rewind"),
     ];
 
     const HELP_VIM_OVERRIDES: &[(&str, &str)] = &[

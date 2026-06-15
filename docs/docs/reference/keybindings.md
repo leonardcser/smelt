@@ -225,8 +225,8 @@ The completer pops up when typing `/` (commands) or `@` (file references).
 
 Bindings that start with `Esc` are treated as a chord: press `Esc`, then the
 next key within the chord window to complete it. The built-in `Esc Esc`
-either cancels the in-flight agent or rewinds the last turn when idle. Define
-your own chords (any length) with `smelt.keymap.set` — see the [Customization
+cancels active work or rewinds the last turn when idle. Define your own chords
+(any length) with `smelt.keymap.set` — see the [Customization
 guide](../guide/customization.md#keymaps).
 
 ## Custom Keybindings

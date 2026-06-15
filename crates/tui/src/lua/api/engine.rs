@@ -289,11 +289,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     )?;
     m.fn_(
         "cancel",
-        "Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.work.busy` tokens are responsible for releasing them.",
+        "Cancel the in-flight turn or foreground/background work. If queued prompt messages are waiting during a turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.",
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
-                app.core.engine.send(protocol::UiCommand::Cancel);
+                if app.queued_inputs.is_empty() {
+                    app.discard_turn(true);
+                } else {
+                    app.drain_queued_inputs_into_prompt();
+                }
             });
             Ok(())
         },

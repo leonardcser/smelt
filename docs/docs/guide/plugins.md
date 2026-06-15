@@ -120,7 +120,7 @@ deferred wiring). The hook fires with `ctx = { kind = "launch" |
 | Plugin | Autoloaded | What it does |
 | --- | --- | --- |
 | `compact` | yes | Owns `/compact` and post-turn auto-compaction (uses inherited-session compaction retries and drives the prompt top-bar working indicator via `smelt.work.busy`) |
-| `esc_chord` | yes | `<Esc><Esc>` to cancel `/compact` or rewind a turn |
+| `esc_chord` | yes | `<Esc><Esc>` to cancel active work or rewind a turn |
 | `debug_panel` | yes | F3 overlay with resolved model config, context tokens, and pricing |
 | `perf_panel` | yes | F12 overlay with live duration percentiles |
 | `predict` | yes | After each turn, predicts your next message and shows it as ghost text |

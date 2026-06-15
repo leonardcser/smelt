@@ -439,7 +439,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.banner` | Empty-state logo overlay + shutdown logo/resume-hint banner. |
 | `smelt.plugins.compact` | Compaction plugin. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
-| `smelt.plugins.esc_chord` | Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn. |
+| `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.predict` | Input prediction plugin. |
 | `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
@@ -1189,7 +1189,7 @@ LLM engine control - cancel, ask, inherited ask, submit commands, and request to
 - `smelt.engine.ask_inherited` :: `fun(spec: smelt.engine.InheritedAskSpec): integer`
   Run an auxiliary LLM request that inherits the current session's assembled system prompt and active tool list.
 - `smelt.engine.cancel` :: `fun(): nil`
-  Cancel the in-flight turn.
+  Cancel the in-flight turn or foreground/background work.
 - `smelt.engine.is_running` :: `fun(): boolean`
   Return `true` if an agent turn is currently in flight (a request is being streamed or a tool is executing).
 - `smelt.engine.on_context_limit` :: `fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: any))): smelt.Reg`

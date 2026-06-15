@@ -327,18 +327,8 @@ pub(crate) enum InputOutcome {
     Exec(crate::commands::ExecHandle),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AppSequenceAction {
-    LocalEsc,
-    HardEsc,
-}
-
 /// Mutable timer state shared across event handlers.
 pub(crate) struct Timers {
-    /// Active app-level key sequence. Escape uses eager-prefix routing so a
-    /// single Esc stays instant while a following Esc can still hard-cancel.
-    pub(crate) app_sequence: smelt_core::keymap::SequenceRouter<AppSequenceAction>,
-    pub(crate) app_sequence_vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
     pub(crate) last_ctrlc: Option<Instant>,
     pub(crate) last_keypress: Option<Instant>,
     /// Pending `Ctrl-W` pane chord; next key navigates panes instead of flowing to input.
@@ -370,8 +360,8 @@ impl PendingChordPolicy {
     }
 }
 
-/// Idle time after which an app-level sequence such as Esc Esc expires.
-pub(crate) const APP_SEQUENCE_TIMEOUT_MS: u64 = 500;
+/// Idle time after which a pending Esc-led Lua keymap chord expires.
+pub(crate) const ESC_CHORD_TIMEOUT_MS: u64 = 500;
 
 /// Idle time after the last keypress before showing a deferred permission dialog.
 pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
@@ -901,8 +891,6 @@ impl TuiApp {
             ui,
             well_known,
             timers: Timers {
-                app_sequence: smelt_core::keymap::SequenceRouter::new(),
-                app_sequence_vim_mode_at_start: None,
                 last_ctrlc: None,
                 last_keypress: None,
                 pending_pane_chord: None,

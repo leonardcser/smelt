@@ -32,7 +32,7 @@ Run an auxiliary LLM request that inherits the current session's assembled syste
 fun(): nil
 ```
 
-Cancel the in-flight turn. In-flight background `smelt.engine.ask` requests are unaffected and will still fire their callbacks; plugins owning `smelt.work.busy` tokens are responsible for releasing them.
+Cancel the in-flight turn or foreground/background work. If queued prompt messages are waiting during a turn, restores them to the prompt instead of cancelling. In-flight `smelt.engine.ask` requests are unaffected and may still fire callbacks unless their lifecycle guard expires.
 
 ## `smelt.engine.is_running`
 

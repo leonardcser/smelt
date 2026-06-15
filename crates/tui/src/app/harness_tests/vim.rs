@@ -35,7 +35,7 @@ fn vim_insert_double_esc_cancels_running_agent_on_second_press() {
     assert_eq!(app.state().vim_mode, VimMode::Normal);
 
     app.press(KeyCode::Esc);
-    assert!(!app.agent_running(), "second Esc hard-cancels the agent");
+    assert!(!app.agent_running(), "second Esc cancels the agent");
 }
 
 #[test]

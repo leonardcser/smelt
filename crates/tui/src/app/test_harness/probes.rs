@@ -99,7 +99,6 @@ impl TestApp {
         }
         self.app.timers.pending_chord = None;
         self.app.timers.pending_pane_chord = None;
-        self.app.timers.app_sequence.clear();
         self.app.ui.cancel_pointer_interaction();
         self.app.app_focus = AppFocus::Prompt;
         self.app.term_focused = true;
@@ -223,7 +222,7 @@ impl TestApp {
             assert_eq!(
                 actual_cpos,
                 idx + 1,
-                "prompt cursor did not advance after typing {ch:?} in probe variant {variant}; cpos_before_render {}, prompt_text {:?}, app_focus {:?}, overlay {:?}, cmdline {}, agent {}, pending_chord {}, pending_pane_chord {}, app_sequence {}, overlay_count {}, picker_count {}",
+                "prompt cursor did not advance after typing {ch:?} in probe variant {variant}; cpos_before_render {}, prompt_text {:?}, app_focus {:?}, overlay {:?}, cmdline {}, agent {}, pending_chord {}, pending_pane_chord {}, overlay_count {}, picker_count {}",
                 cpos_before_render,
                 state.prompt_text,
                 state.app_focus,
@@ -232,7 +231,6 @@ impl TestApp {
                 state.agent_running,
                 self.app.timers.pending_chord.is_some(),
                 self.app.timers.pending_pane_chord.is_some(),
-                self.app.timers.app_sequence.has_pending(),
                 self.app.ui.overlay_count(),
                 self.app.picker_state.len(),
             );

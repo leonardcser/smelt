@@ -1,6 +1,5 @@
 use crate::app::{
-    AppSequenceAction, CommandAction, EventOutcome, InputOutcome, PendingChordPolicy, QueueStage,
-    QueuedInput, TuiApp,
+    CommandAction, EventOutcome, InputOutcome, PendingChordPolicy, QueueStage, QueuedInput, TuiApp,
 };
 
 use crate::input::Action;
@@ -9,22 +8,6 @@ use crate::smelt_edit::UiHost;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 const ESC_TOKEN: &str = "<Esc>";
-const APP_ESC: &[&str] = &[ESC_TOKEN];
-const APP_ESC_ESC: &[&str] = &[ESC_TOKEN, ESC_TOKEN];
-const APP_SEQUENCE_BINDINGS: &[smelt_core::keymap::SequenceBinding<'static, AppSequenceAction>] = &[
-    smelt_core::keymap::SequenceBinding {
-        sequence: APP_ESC_ESC,
-        action: AppSequenceAction::HardEsc,
-        ambiguity: smelt_core::keymap::AmbiguityBehavior::RunAndClose,
-        priority: 100,
-    },
-    smelt_core::keymap::SequenceBinding {
-        sequence: APP_ESC,
-        action: AppSequenceAction::LocalEsc,
-        ambiguity: smelt_core::keymap::AmbiguityBehavior::RunAndKeepPrefix,
-        priority: 0,
-    },
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GlobalLuaKeymapRoute {
@@ -51,13 +34,6 @@ impl TuiApp {
 
         if matches!(ev, Event::Key(_) | Event::Paste(_)) {
             self.ui.finish_pointer_interaction_for_keyboard();
-        }
-
-        if let Event::Key(k) = ev {
-            if let Some(outcome) = self.dispatch_app_key_sequence(k) {
-                self.emit_prompt_text_changed_if_dirty();
-                return self.apply_event_outcome(outcome);
-            }
         }
 
         // Global chords fire before focus-specific routing so no handler can swallow them.
@@ -237,70 +213,6 @@ impl TuiApp {
         }
     }
 
-    fn dispatch_app_key_sequence(&mut self, key: KeyEvent) -> Option<EventOutcome> {
-        if !self.timers.app_sequence.has_pending() && !matches!(key.code, KeyCode::Esc) {
-            self.timers.app_sequence_vim_mode_at_start = None;
-            return None;
-        }
-
-        if !self.timers.app_sequence.has_pending() {
-            self.timers.app_sequence_vim_mode_at_start = self.focused_vim_mode();
-        }
-
-        let token = match crate::lua::chord_string(key) {
-            Some(token) => token,
-            None => {
-                self.timers.app_sequence.clear();
-                self.timers.app_sequence_vim_mode_at_start = None;
-                return None;
-            }
-        };
-        let now = self.core.clock.instant_now();
-        match self.timers.app_sequence.step(
-            token,
-            APP_SEQUENCE_BINDINGS,
-            now,
-            crate::app::APP_SEQUENCE_TIMEOUT_MS,
-        ) {
-            smelt_core::keymap::SequenceStep::Run(AppSequenceAction::HardEsc) => {
-                let vim_mode_at_start = self.timers.app_sequence_vim_mode_at_start.take();
-                Some(self.handle_hard_escape_sequence(vim_mode_at_start))
-            }
-            smelt_core::keymap::SequenceStep::Run(AppSequenceAction::LocalEsc)
-            | smelt_core::keymap::SequenceStep::Pending => None,
-            smelt_core::keymap::SequenceStep::NoMatch => {
-                self.timers.app_sequence_vim_mode_at_start = None;
-                None
-            }
-        }
-    }
-
-    fn handle_hard_escape_sequence(
-        &mut self,
-        vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
-    ) -> EventOutcome {
-        self.timers.pending_chord = None;
-        if !self.queued_inputs.is_empty() {
-            self.drain_queued_inputs_into_prompt();
-            return EventOutcome::Noop;
-        }
-        if self.agent.is_some() || self.busy_stack.is_busy() {
-            return EventOutcome::CancelAgent;
-        }
-        if !self.user_turns().is_empty() {
-            let command = if vim_mode_at_start == Some(crate::smelt_edit::VimMode::Insert) {
-                "/rewind insert"
-            } else {
-                "/rewind"
-            };
-            return match crate::commands::run_command(self, command) {
-                CommandAction::Exec(handle) => EventOutcome::Exec(handle),
-                CommandAction::Continue => EventOutcome::Noop,
-            };
-        }
-        EventOutcome::Noop
-    }
-
     fn handle_focused_search_key(&mut self, k: KeyEvent) -> bool {
         let Some(win) = self.ui.focus() else {
             return false;
@@ -429,7 +341,7 @@ impl TuiApp {
         match first_token {
             ESC_TOKEN => PendingChordPolicy::Timed {
                 expires_at: now
-                    + std::time::Duration::from_millis(crate::app::APP_SEQUENCE_TIMEOUT_MS),
+                    + std::time::Duration::from_millis(crate::app::ESC_CHORD_TIMEOUT_MS),
             },
             _ => PendingChordPolicy::Sticky,
         }
@@ -901,7 +813,6 @@ impl TuiApp {
 
         if !self.queued_inputs.is_empty() {
             self.drain_queued_inputs_into_prompt();
-            self.timers.app_sequence.clear();
             return EventOutcome::Noop;
         }
 
@@ -1831,13 +1742,13 @@ mod tests {
         app.press(KeyCode::Esc);
         assert!(
             app.agent_running(),
-            "first Esc should only arm the app-level Esc Esc sequence"
+            "first Esc should only arm the Lua Esc Esc sequence"
         );
 
         app.press(KeyCode::Esc);
         assert!(
             !app.agent_running(),
-            "second Esc should resolve the app-level hard-cancel sequence"
+            "second Esc should resolve the Lua cancel sequence"
         );
     }
 
@@ -2432,7 +2343,7 @@ mod tests {
         assert!(app.app.timers.pending_chord.is_some());
 
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(
-            crate::app::APP_SEQUENCE_TIMEOUT_MS + 1,
+            crate::app::ESC_CHORD_TIMEOUT_MS + 1,
         ));
         app.app.publish_diff_cells();
 
