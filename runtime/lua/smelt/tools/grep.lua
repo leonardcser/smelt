@@ -115,7 +115,7 @@ local function run_grep_fallback(args)
   return smelt.process.run("grep", cmd_args, { timeout_secs = timeout_secs })
 end
 
-smelt.tools.register({
+smelt.tools.register(smelt.tools._with_watchdog({
   name = "grep",
   description = "A powerful search tool built on ripgrep. Supports full regex syntax, file type filtering, glob filtering, and multiple output modes.",
   override = true,
@@ -196,4 +196,4 @@ smelt.tools.register({
     end
     return slice(combined, offset, head_limit)
   end,
-})
+}, { default_ms = 30000, max_ms = 120000, grace_ms = 5000 })

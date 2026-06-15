@@ -52,7 +52,7 @@ local function format_text_window(content, offset, limit)
   return table.concat(out, "\n")
 end
 
-smelt.tools.register({
+smelt.tools.register(smelt.tools._with_watchdog({
   name = "read_file",
   description = "Reads a file from the local filesystem. Supports text files and image files (png, jpg, gif, webp, bmp, tiff, svg).",
   override = true,
@@ -72,6 +72,10 @@ smelt.tools.register({
       limit = {
         type = "integer",
         description = "The number of lines to read. Only provide if the file is too large to read at once.",
+      },
+      timeout_ms = {
+        type = "integer",
+        description = "Timeout in milliseconds (default: 15000)",
       },
     },
     required = { "file_path" },
@@ -141,4 +145,4 @@ smelt.tools.register({
     end
     return formatted
   end,
-})
+}, { default_ms = 15000, max_ms = 60000 })

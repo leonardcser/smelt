@@ -17,7 +17,8 @@ calling coroutine until the child exits; must be called from inside
 `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts the same fields
 as the underlying `smelt.grep` namespace (`mode`,
 `case_insensitive`, `multiline`, `line_numbers`, `before_context`,
-`after_context`, `context`, `glob`, `type`, `timeout_secs`). Returns
+`after_context`, `context`, `glob`, `type`, `include_ignored`,
+`timeout_secs`). Returns
 `({ stdout, stderr, exit_code, timed_out }, nil)` on success or
 `(nil, err)` on spawn failure. Cancellation kills the child (SIGKILL)
 and `smelt.task.external` raises `cancelled`. Exit code 1 (no match)

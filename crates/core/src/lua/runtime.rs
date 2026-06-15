@@ -12,6 +12,9 @@ use crate::lua::{
     json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
 };
 
+const DEFAULT_TOOL_TIMEOUT_MS: u64 = 30_000;
+const MAX_TOOL_TIMEOUT_MS: u64 = 600_000;
+
 /// Embedded `runtime/lua/smelt/` tree; every `.lua` file is `require`-able as `smelt.<path>`.
 static EMBEDDED_LUA: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../runtime/lua/smelt");
 
@@ -1432,6 +1435,58 @@ impl LuaRuntime {
         Ok(t)
     }
 
+    fn tool_timeout_ms(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+    ) -> Option<u64> {
+        let meta = self
+            .lua
+            .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
+            .ok();
+        let default_ms = meta
+            .as_ref()
+            .and_then(|m| m.get::<Option<u64>>("watchdog_timeout_ms").ok().flatten())
+            .unwrap_or(DEFAULT_TOOL_TIMEOUT_MS);
+        let max_ms = meta
+            .as_ref()
+            .and_then(|m| {
+                m.get::<Option<u64>>("watchdog_max_timeout_ms")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(MAX_TOOL_TIMEOUT_MS)
+            .max(1);
+        let arg_name = meta
+            .as_ref()
+            .and_then(|m| {
+                m.get::<Option<String>>("watchdog_timeout_arg")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(|| "timeout_ms".to_string());
+        let arg_scale_ms = meta
+            .as_ref()
+            .and_then(|m| {
+                m.get::<Option<u64>>("watchdog_timeout_arg_scale_ms")
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(1)
+            .max(1);
+        let grace_ms = meta
+            .as_ref()
+            .and_then(|m| m.get::<Option<u64>>("watchdog_grace_ms").ok().flatten())
+            .unwrap_or(0);
+
+        let requested_ms = (!arg_name.is_empty())
+            .then(|| args.get(&arg_name).and_then(serde_json::Value::as_u64))
+            .flatten()
+            .map(|n| n.saturating_mul(arg_scale_ms).saturating_add(grace_ms));
+        let timeout_ms = requested_ms.unwrap_or(default_ms);
+        (timeout_ms > 0).then(|| timeout_ms.min(max_ms))
+    }
+
     /// Run all `tools.middleware{before=...}` hooks for `tool_name`, in
     /// registration order. Hooks registered with `name = ""` match every
     /// tool. Each handler receives `(args, ctx)`; returning a table
@@ -1597,6 +1652,11 @@ impl LuaRuntime {
         initial.push_back(mlua::Value::Table(args_table));
         initial.push_back(mlua::Value::Table(ctx_table));
 
+        let timeout_ms = self.tool_timeout_ms(tool_name, args);
+        let deadline = timeout_ms.map(|ms| super::task::TaskDeadline {
+            at: now + std::time::Duration::from_millis(ms),
+            label_ms: ms,
+        });
         let task_opt = {
             let mut rt = match self.shared.tasks.lock() {
                 Ok(g) => g,
@@ -1608,7 +1668,7 @@ impl LuaRuntime {
                     };
                 }
             };
-            if let Err(e) = rt.spawn(
+            let task_id = match rt.spawn_with_timeout(
                 &self.lua,
                 func,
                 initial,
@@ -1616,14 +1676,18 @@ impl LuaRuntime {
                     request_id,
                     call_id: call_id.to_string(),
                 },
+                deadline,
             ) {
-                return ToolExecResult::Immediate {
-                    content: format!("tool spawn: {e}"),
-                    is_error: true,
-                    metadata: None,
-                };
-            }
-            rt.take_next_ready(now)
+                Ok(id) => id,
+                Err(e) => {
+                    return ToolExecResult::Immediate {
+                        content: format!("tool spawn: {e}"),
+                        is_error: true,
+                        metadata: None,
+                    };
+                }
+            };
+            rt.take_task(task_id)
         };
         // Single-step the freshly-spawned task: if the handler yields, callers
         // get `Pending` and the task is parked for the next `drive_tasks` tick.

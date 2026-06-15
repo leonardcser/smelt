@@ -119,6 +119,18 @@ pub struct LuaToolDef {
     /// the same `smelt.layout` value the `render` callback returns; the confirm
     /// dialog renders it directly into the preview pane.
     pub preview: Option<mlua::Function>,
+    /// Outer watchdog deadline for this tool's coroutine, in milliseconds.
+    /// This is separate from any timeout the tool implements internally.
+    pub watchdog_timeout_ms: Option<u64>,
+    /// Maximum watchdog deadline accepted from tool arguments, in milliseconds.
+    pub watchdog_max_timeout_ms: Option<u64>,
+    /// Tool argument that controls the watchdog deadline. Defaults to `timeout_ms`.
+    pub watchdog_timeout_arg: Option<String>,
+    /// Multiplier that converts `watchdog_timeout_arg` values to milliseconds.
+    /// Use `1000` for second-based arguments.
+    pub watchdog_timeout_arg_scale_ms: Option<u64>,
+    /// Extra time added when a tool argument sets the watchdog deadline, in milliseconds.
+    pub watchdog_grace_ms: Option<u64>,
     /// Replace a core tool of the same name (advanced).
     #[lua(rename = "override", default)]
     pub override_core: bool,
@@ -198,6 +210,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 )?;
                 meta.set("hook_preview", preview_handle.is_some())?;
                 meta.set("override_core", def.override_core)?;
+                if let Some(watchdog_timeout_ms) = def.watchdog_timeout_ms {
+                    meta.set("watchdog_timeout_ms", watchdog_timeout_ms)?;
+                }
+                if let Some(watchdog_max_timeout_ms) = def.watchdog_max_timeout_ms {
+                    meta.set("watchdog_max_timeout_ms", watchdog_max_timeout_ms)?;
+                }
+                if let Some(watchdog_timeout_arg) = def.watchdog_timeout_arg {
+                    meta.set("watchdog_timeout_arg", watchdog_timeout_arg)?;
+                }
+                if let Some(watchdog_timeout_arg_scale_ms) = def.watchdog_timeout_arg_scale_ms {
+                    meta.set(
+                        "watchdog_timeout_arg_scale_ms",
+                        watchdog_timeout_arg_scale_ms,
+                    )?;
+                }
+                if let Some(watchdog_grace_ms) = def.watchdog_grace_ms {
+                    meta.set("watchdog_grace_ms", watchdog_grace_ms)?;
+                }
                 if let Some(summary) = def.summary {
                     meta.set("summary", summary)?;
                 }

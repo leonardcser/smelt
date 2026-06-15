@@ -606,6 +606,11 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `render` | `function` |  | `render(buf, args, result)` - custom transcript render. |
 | `paths_for_workspace` | `function` |  | `paths_for_workspace(args) -> string[]` - files this invocation will touch. |
 | `preview` | `function` |  | `preview(args) -> smelt.layout` - pre-execute preview render. Returns the same `smelt.layout` value the `render` callback returns; the confirm dialog renders it directly into the preview pane. |
+| `watchdog_timeout_ms` | `integer` |  | Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally. |
+| `watchdog_max_timeout_ms` | `integer` |  | Maximum watchdog deadline accepted from tool arguments, in milliseconds. |
+| `watchdog_timeout_arg` | `string` |  | Tool argument that controls the watchdog deadline. Defaults to `timeout_ms`. |
+| `watchdog_timeout_arg_scale_ms` | `integer` |  | Multiplier that converts `watchdog_timeout_arg` values to milliseconds. Use `1000` for second-based arguments. |
+| `watchdog_grace_ms` | `integer` |  | Extra time added when a tool argument sets the watchdog deadline, in milliseconds. |
 | `override` | `boolean` |  | Replace a core tool of the same name (advanced). |
 
 ### `smelt.win.Win`

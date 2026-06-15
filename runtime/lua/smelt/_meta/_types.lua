@@ -416,6 +416,11 @@
 ---@field render? function `render(buf, args, result)` - custom transcript render.
 ---@field paths_for_workspace? function `paths_for_workspace(args) -> string[]` - files this invocation will touch.
 ---@field preview? function `preview(args) -> smelt.layout` - pre-execute preview render. Returns the same `smelt.layout` value the `render` callback returns; the confirm dialog renders it directly into the preview pane.
+---@field watchdog_timeout_ms? integer Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally.
+---@field watchdog_max_timeout_ms? integer Maximum watchdog deadline accepted from tool arguments, in milliseconds.
+---@field watchdog_timeout_arg? string Tool argument that controls the watchdog deadline. Defaults to `timeout_ms`.
+---@field watchdog_timeout_arg_scale_ms? integer Multiplier that converts `watchdog_timeout_arg` values to milliseconds. Use `1000` for second-based arguments.
+---@field watchdog_grace_ms? integer Extra time added when a tool argument sets the watchdog deadline, in milliseconds.
 ---@field override? boolean Replace a core tool of the same name (advanced).
 
 --- Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.

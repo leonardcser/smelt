@@ -201,7 +201,7 @@ local function ask_extract(content, prompt)
   return result.content
 end
 
-smelt.tools.register({
+smelt.tools.register(smelt.tools._with_watchdog({
   name = "web_fetch",
   description = "Fetch a URL and extract relevant content using the given prompt. "
     .. "The page is fetched, converted to markdown, then an isolated LLM call "
@@ -256,4 +256,10 @@ smelt.tools.register({
     end
     return raw
   end,
+}, {
+  default_ms = DEFAULT_TIMEOUT * 1000,
+  max_ms = MAX_TIMEOUT * 1000,
+  arg = "timeout",
+  arg_scale_ms = 1000,
+  grace_ms = 5000,
 })

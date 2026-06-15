@@ -106,7 +106,7 @@ function M.execute(args, ctx)
   }
 end
 
-smelt.tools.register({
+smelt.tools.register(smelt.tools._with_watchdog({
   name = "bash",
   override = true,
   default_allow = DEFAULT_ALLOW,
@@ -161,6 +161,6 @@ smelt.tools.register({
     return smelt.layout.vbox(items)
   end,
   execute = M.execute,
-})
+}, { default_ms = DEFAULT_TIMEOUT_MS, max_ms = MAX_TIMEOUT_MS, grace_ms = 5000 })
 
 return M

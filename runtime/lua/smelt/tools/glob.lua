@@ -9,7 +9,7 @@ local function describe(args)
   return pattern .. " in " .. path
 end
 
-smelt.tools.register({
+smelt.tools.register(smelt.tools._with_watchdog({
   name = "glob",
   description = "Fast file pattern matching tool that works with any codebase size. Returns matching file paths sorted by modification time.",
   override = true,
@@ -25,6 +25,10 @@ smelt.tools.register({
       path = {
         type = "string",
         description = "The directory to search in. If not specified, the current working directory will be used.",
+      },
+      timeout_ms = {
+        type = "integer",
+        description = "Timeout in milliseconds (default: 30000)",
       },
     },
     required = { "pattern" },
@@ -83,4 +87,4 @@ smelt.tools.register({
     end
     return table.concat(paths, "\n")
   end,
-})
+}, { default_ms = 30000, max_ms = 120000, grace_ms = 5000 })

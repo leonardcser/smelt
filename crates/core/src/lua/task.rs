@@ -49,12 +49,19 @@ impl TaskCompletion {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct TaskDeadline {
+    pub at: Instant,
+    pub label_ms: u64,
+}
+
 pub(crate) struct LuaTask {
     id: u64,
     thread: mlua::Thread,
     wait: TaskWait,
     completion: TaskCompletion,
     cancel: CancellationToken,
+    deadline: Option<TaskDeadline>,
 }
 
 #[derive(Debug)]
@@ -118,6 +125,17 @@ impl LuaTaskRuntime {
         initial_args: LuaMultiValue,
         completion: TaskCompletion,
     ) -> LuaResult<u64> {
+        self.spawn_with_timeout(lua, func, initial_args, completion, None)
+    }
+
+    pub(crate) fn spawn_with_timeout(
+        &mut self,
+        lua: &Lua,
+        func: mlua::Function,
+        initial_args: LuaMultiValue,
+        completion: TaskCompletion,
+        deadline: Option<TaskDeadline>,
+    ) -> LuaResult<u64> {
         let thread = lua.create_thread(func)?;
         let id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
         self.tasks.push(LuaTask {
@@ -126,6 +144,7 @@ impl LuaTaskRuntime {
             wait: TaskWait::Ready(initial_args),
             completion,
             cancel: CancellationToken::new(),
+            deadline,
         });
         Ok(id)
     }
@@ -202,11 +221,19 @@ impl LuaTaskRuntime {
     /// that re-enters the runtime (e.g. `smelt.spawn` from inside a coroutine)
     /// can acquire the lock synchronously instead of deadlocking.
     pub(crate) fn take_next_ready(&mut self, now: Instant) -> Option<LuaTask> {
-        let idx = self.tasks.iter().position(|t| match &t.wait {
-            TaskWait::Ready(_) => true,
-            TaskWait::Sleep(deadline) => t.cancel.is_cancelled() || *deadline <= now,
-            TaskWait::External(_) => false,
+        let idx = self.tasks.iter().position(|t| {
+            t.timed_out(now)
+                || match &t.wait {
+                    TaskWait::Ready(_) => true,
+                    TaskWait::Sleep(deadline) => t.cancel.is_cancelled() || *deadline <= now,
+                    TaskWait::External(_) => false,
+                }
         })?;
+        Some(self.tasks.swap_remove(idx))
+    }
+
+    pub(crate) fn take_task(&mut self, id: u64) -> Option<LuaTask> {
+        let idx = self.tasks.iter().position(|t| t.id == id)?;
         Some(self.tasks.swap_remove(idx))
     }
 
@@ -228,6 +255,19 @@ impl LuaTaskRuntime {
     }
 }
 
+impl LuaTask {
+    fn timed_out(&self, now: Instant) -> bool {
+        self.deadline.is_some_and(|deadline| deadline.at <= now)
+    }
+
+    fn timeout_message(&self) -> String {
+        match self.deadline {
+            Some(deadline) => format!("timed out after {:.1}s", deadline.label_ms as f64 / 1000.0),
+            None => "timed out".to_string(),
+        }
+    }
+}
+
 /// Resume one task without holding the runtime. Returns the task if it parked
 /// again (sleep/external), `None` if it finished or errored.
 pub(crate) fn step_task_owned(
@@ -236,6 +276,12 @@ pub(crate) fn step_task_owned(
     now: Instant,
     outputs: &mut Vec<TaskDriveOutput>,
 ) -> Option<LuaTask> {
+    if task.timed_out(now) {
+        task.cancel.cancel();
+        emit_task_failure(&task, &task.timeout_message(), outputs);
+        return None;
+    }
+
     let resume_args = match std::mem::replace(&mut task.wait, TaskWait::Ready(LuaMultiValue::new()))
     {
         TaskWait::Ready(mv) => mv,

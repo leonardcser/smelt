@@ -73,6 +73,22 @@ function smelt.tools.call(name, args, parent_call_id)
   end)
 end
 
+-- Attach an outer watchdog to a tool definition. This is intentionally
+-- separate from the tool's own timeout handling: builtins use a small grace
+-- period so their domain-specific timeout result wins before the watchdog fires.
+function smelt.tools._with_watchdog(def, opts)
+  opts = opts or {}
+  local default_ms = opts.default_ms or 30000
+  local max_ms = opts.max_ms or 600000
+  local grace_ms = opts.grace_ms or 0
+  def.watchdog_timeout_ms = default_ms + grace_ms
+  def.watchdog_max_timeout_ms = max_ms + grace_ms
+  if opts.arg then def.watchdog_timeout_arg = opts.arg end
+  if opts.arg_scale_ms then def.watchdog_timeout_arg_scale_ms = opts.arg_scale_ms end
+  if grace_ms > 0 then def.watchdog_grace_ms = grace_ms end
+  return def
+end
+
 -- Combine variadic `Reg`s into one. `:remove()` on the result fires every
 -- inner `:remove()` in order, idempotent across repeat calls. Inputs may
 -- include `nil` (skipped) so call sites don't need to filter. Returns a

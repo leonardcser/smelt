@@ -203,6 +203,181 @@ fn execute_tool_does_not_hold_task_mutex_while_stepping_handler() {
     }
 }
 
+#[test]
+fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "yield_once",
+                execute = function(args)
+                    smelt.sleep(0)
+                    return args.value
+                end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("register yield_once");
+
+    let now = Instant::now();
+    let mut first_args = HashMap::new();
+    first_args.insert("value".into(), serde_json::json!("first"));
+    let first = rt.execute_tool(
+        "yield_once",
+        &first_args,
+        1,
+        "call-1",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        now,
+    );
+    assert!(matches!(first, ToolExecResult::Pending));
+
+    let mut second_args = HashMap::new();
+    second_args.insert("value".into(), serde_json::json!("second"));
+    let second = rt.execute_tool(
+        "yield_once",
+        &second_args,
+        2,
+        "call-2",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        now,
+    );
+    assert!(matches!(second, ToolExecResult::Pending));
+
+    let outs = rt.drive_tasks(now);
+    let completions: Vec<_> = outs
+        .into_iter()
+        .filter_map(|out| match out {
+            TaskDriveOutput::ToolComplete {
+                request_id,
+                call_id,
+                content,
+                is_error,
+                ..
+            } => Some((request_id, call_id, content, is_error)),
+            TaskDriveOutput::Error(_) => None,
+        })
+        .collect();
+
+    assert_eq!(
+        completions,
+        vec![
+            (1, "call-1".to_string(), "first".to_string(), false),
+            (2, "call-2".to_string(), "second".to_string(), false),
+        ]
+    );
+}
+
+#[test]
+fn tool_timeout_completes_a_parked_tool_with_error() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "slow_tool",
+                execute = function()
+                    smelt.sleep(1000)
+                    return "too late"
+                end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("register slow_tool");
+
+    let now = Instant::now();
+    let mut args = HashMap::new();
+    args.insert("timeout_ms".into(), serde_json::json!(5));
+    let result = rt.execute_tool(
+        "slow_tool",
+        &args,
+        9,
+        "call-timeout",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        now,
+    );
+    assert!(matches!(result, ToolExecResult::Pending));
+
+    let outs = rt.drive_tasks(now + Duration::from_millis(6));
+    assert!(outs.iter().any(|out| matches!(
+        out,
+        TaskDriveOutput::ToolComplete {
+            request_id: 9,
+            call_id,
+            content,
+            is_error: true,
+            ..
+        } if call_id == "call-timeout" && content.contains("timed out")
+    )));
+}
+
+#[test]
+fn tool_watchdog_uses_explicit_timeout_arg_metadata() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "seconds_timeout_tool",
+                watchdog_timeout_arg = "deadline",
+                watchdog_timeout_arg_scale_ms = 1000,
+                watchdog_grace_ms = 5,
+                watchdog_max_timeout_ms = 2000,
+                execute = function()
+                    smelt.sleep(5000)
+                    return "too late"
+                end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("register seconds_timeout_tool");
+
+    let now = Instant::now();
+    let mut args = HashMap::new();
+    args.insert("deadline".into(), serde_json::json!(1));
+    let result = rt.execute_tool(
+        "seconds_timeout_tool",
+        &args,
+        10,
+        "call-deadline",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        now,
+    );
+    assert!(matches!(result, ToolExecResult::Pending));
+
+    let outs = rt.drive_tasks(now + Duration::from_millis(1005));
+    assert!(outs.iter().any(|out| matches!(
+        out,
+        TaskDriveOutput::ToolComplete {
+            request_id: 10,
+            call_id,
+            content,
+            is_error: true,
+            ..
+        } if call_id == "call-deadline" && content.contains("timed out after 1.0s")
+    )));
+}
+
 // -- reg.compose / reg.new ----------------------------------------------
 
 #[test]
