@@ -1,12 +1,13 @@
 //! `smelt.layout` - declarative, width-independent content layout returned from Lua display callbacks.
 
 use crate::content::block_layout::{
-    BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, DiffSpec, FileViewSpec,
-    GutterSpec, HboxItem, LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RunsSpec, SeparatorSpec,
-    TextSpec,
+    BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, DiffSpec, ElapsedSpec,
+    FileViewSpec, GutterSpec, HboxItem, LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RunsSpec,
+    SeparatorSpec, StyleSpec, TextSpec,
 };
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
+use crate::transcript_model::ToolStatus;
 use mlua::prelude::*;
 
 pub struct LuaBlockLayout(pub BlockLayout);
@@ -67,6 +68,104 @@ fn collect_hbox_items(items: mlua::Table) -> LuaResult<Vec<HboxItem>> {
         out.push(item);
     }
     Ok(out)
+}
+
+fn style_spec_from_opts(opts: Option<&mlua::Table>) -> LuaResult<StyleSpec> {
+    let Some(opts) = opts else {
+        return Ok(StyleSpec::default());
+    };
+    Ok(StyleSpec {
+        hl_group: opts
+            .get::<Option<String>>("hl_group")?
+            .or(opts.get::<Option<String>>("hl")?),
+        fg: opts.get::<Option<String>>("fg")?,
+        bg: opts.get::<Option<String>>("bg")?,
+        dim: opts.get::<Option<bool>>("dim")?.unwrap_or(false),
+        bold: opts.get::<Option<bool>>("bold")?.unwrap_or(false),
+        italic: opts.get::<Option<bool>>("italic")?.unwrap_or(false),
+    })
+}
+
+fn tool_status_from_label(label: &str) -> LuaResult<ToolStatus> {
+    match label {
+        "pending" => Ok(ToolStatus::Pending),
+        "confirm" => Ok(ToolStatus::Confirm),
+        "ok" => Ok(ToolStatus::Ok),
+        "err" => Ok(ToolStatus::Err),
+        "denied" => Ok(ToolStatus::Denied),
+        other => Err(mlua::Error::external(format!(
+            "smelt.layout.elapsed: invalid status `{other}`"
+        ))),
+    }
+}
+
+fn elapsed_spec_from_value(
+    value: mlua::Value,
+    opts: Option<&mlua::Table>,
+) -> LuaResult<ElapsedSpec> {
+    let source = match value {
+        mlua::Value::Table(t) => t,
+        mlua::Value::String(call_id) => {
+            let lua = call_id.to_str().map_err(mlua::Error::external)?.to_string();
+            let table =
+                opts.and_then(|opts| opts.get::<Option<mlua::Table>>("state").ok().flatten());
+            if let Some(table) = table {
+                table.set("call_id", lua)?;
+                table
+            } else {
+                return Ok(ElapsedSpec {
+                    call_id: lua,
+                    status: opts
+                        .and_then(|opts| opts.get::<Option<String>>("status").ok().flatten())
+                        .as_deref()
+                        .map(tool_status_from_label)
+                        .transpose()?
+                        .unwrap_or(ToolStatus::Pending),
+                    fallback_secs: opts
+                        .and_then(|opts| opts.get::<Option<u64>>("secs").ok().flatten()),
+                    hl_group: opts
+                        .and_then(|opts| opts.get::<Option<String>>("hl_group").ok().flatten())
+                        .or_else(|| {
+                            opts.and_then(|opts| opts.get::<Option<String>>("hl").ok().flatten())
+                        }),
+                    dim: opts
+                        .and_then(|opts| opts.get::<Option<bool>>("dim").ok().flatten())
+                        .unwrap_or(true),
+                    selectable: opts
+                        .and_then(|opts| opts.get::<Option<bool>>("selectable").ok().flatten())
+                        .unwrap_or(false),
+                });
+            }
+        }
+        other => {
+            return Err(mlua::Error::external(format!(
+                "smelt.layout.elapsed: expected elapsed table or call_id string, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let status = source
+        .get::<Option<String>>("status")?
+        .as_deref()
+        .map(tool_status_from_label)
+        .transpose()?
+        .unwrap_or(ToolStatus::Pending);
+    Ok(ElapsedSpec {
+        call_id: source.get::<Option<String>>("call_id")?.unwrap_or_default(),
+        status,
+        fallback_secs: source
+            .get::<Option<u64>>("secs")?
+            .or(source.get::<Option<u64>>("elapsed_secs")?),
+        hl_group: opts
+            .and_then(|opts| opts.get::<Option<String>>("hl_group").ok().flatten())
+            .or_else(|| opts.and_then(|opts| opts.get::<Option<String>>("hl").ok().flatten())),
+        dim: opts
+            .and_then(|opts| opts.get::<Option<bool>>("dim").ok().flatten())
+            .unwrap_or(true),
+        selectable: opts
+            .and_then(|opts| opts.get::<Option<bool>>("selectable").ok().flatten())
+            .unwrap_or(false),
+    })
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
@@ -168,6 +267,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "elapsed",
+        "Dynamic elapsed-time text leaf. Pass `block.elapsed` from a transcript renderer, or a call-id string with `opts.status` / `opts.secs`. Rust resolves current tool elapsed at render time when possible.",
+        &["elapsed", "opts"],
+        |_, (elapsed, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Elapsed(
+                elapsed_spec_from_value(elapsed, opts.as_ref())?,
+            ))))
+        },
+    )?;
+    m.fn_(
         "separator",
         "Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.",
         &["opts"],
@@ -203,6 +312,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(LuaBlockLayout(BlockLayout::Panel {
                 child: Box::new(child),
                 spec: PanelSpec { hl_group, padding },
+            }))
+        },
+    )?;
+    m.fn_(
+        "style",
+        "Apply inherited style to a child layout. `opts.hl_group` / `opts.hl` names a theme group; `opts.fg` / `opts.bg` name theme colors; `opts.dim`, `opts.bold`, and `opts.italic` set text attributes. Child spans may override inherited fields.",
+        &["child", "opts"],
+        |_, (child, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let child = layout_from_value(child, "style")?;
+            Ok(LuaBlockLayout(BlockLayout::Style {
+                child: Box::new(child),
+                spec: style_spec_from_opts(opts.as_ref())?,
             }))
         },
     )?;

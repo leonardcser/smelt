@@ -5,6 +5,7 @@
 //! Width and theme are intentionally absent from these types.
 
 use crate::content::highlight::DiffIr;
+use crate::transcript_model::ToolStatus;
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_TOOL_BLOCK_ROWS: u16 = 20;
@@ -71,6 +72,18 @@ pub struct CodeSpec {
     pub lang: String,
 }
 
+/// Dynamic elapsed-time text. The cached IR stores the tool identity and style;
+/// the renderer resolves current seconds from `ToolState` when available.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ElapsedSpec {
+    pub call_id: String,
+    pub status: ToolStatus,
+    pub fallback_secs: Option<u64>,
+    pub hl_group: Option<String>,
+    pub dim: bool,
+    pub selectable: bool,
+}
+
 /// Width-dependent horizontal separator leaf.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SeparatorSpec {
@@ -83,6 +96,18 @@ pub struct SeparatorSpec {
 pub struct PanelSpec {
     pub hl_group: String,
     pub padding: u16,
+}
+
+/// Inherited style wrapper. Fields are merged into the current renderer style
+/// before rendering descendants; more specific child spans may override them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StyleSpec {
+    pub hl_group: Option<String>,
+    pub fg: Option<String>,
+    pub bg: Option<String>,
+    pub dim: bool,
+    pub bold: bool,
+    pub italic: bool,
 }
 
 /// Serializable source-view render directive.
@@ -99,6 +124,7 @@ pub enum LayoutLeaf {
     Line(LineSpec),
     Markdown(MarkdownSpec),
     Code(CodeSpec),
+    Elapsed(ElapsedSpec),
     Separator(SeparatorSpec),
     SourceView(SourceViewIr),
 }
@@ -112,6 +138,7 @@ pub enum LuaLeaf {
     Line(LineSpec),
     Markdown(MarkdownSpec),
     Code(CodeSpec),
+    Elapsed(ElapsedSpec),
     Separator(SeparatorSpec),
     Diff(DiffSpec),
     FileView(FileViewSpec),
@@ -175,6 +202,10 @@ pub enum BlockLayout<L = LuaLeaf> {
         child: Box<BlockLayout<L>>,
         spec: PanelSpec,
     },
+    Style {
+        child: Box<BlockLayout<L>>,
+        spec: StyleSpec,
+    },
     Cap {
         child: Box<BlockLayout<L>>,
         spec: CapSpec,
@@ -207,6 +238,7 @@ impl<L> BlockLayout<L> {
             }
             BlockLayout::Gutter { child, .. }
             | BlockLayout::Panel { child, .. }
+            | BlockLayout::Style { child, .. }
             | BlockLayout::Cap { child, .. } => {
                 child.collect_leaves(out);
             }

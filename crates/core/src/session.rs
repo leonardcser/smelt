@@ -6,6 +6,7 @@ use protocol::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -471,9 +472,108 @@ pub struct SessionMeta {
     #[serde(default)]
     pub context_tokens: Option<u32>,
     /// Approximate text byte size (message bodies, reasoning, tool-call args).
-    /// Populated in `meta.json` so the resume dialog avoids loading `session.json`.
+    /// Populated in `meta.json` so the resume dialog avoids loading session history.
     #[serde(default)]
     pub text_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionJsonlMeta {
+    pub schema_version: u32,
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub first_user_message: Option<String>,
+    #[serde(default)]
+    pub created_at_ms: u64,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub checkpoint: Option<ContextCheckpoint>,
+    #[serde(default)]
+    pub context_tokens: Option<u32>,
+    #[serde(default)]
+    pub context_tokens_history_len: Option<usize>,
+    #[serde(default)]
+    pub visible_context_tokens: Option<u32>,
+    #[serde(default)]
+    pub turn_metas: Vec<(usize, TurnMeta)>,
+    #[serde(default)]
+    pub accounting_snapshots: Vec<(usize, AccountingSnapshot)>,
+    #[serde(default)]
+    pub session_cost_usd: f64,
+    #[serde(default)]
+    pub session_usage: TokenUsage,
+    #[serde(default)]
+    pub text_bytes: Option<u64>,
+}
+
+impl From<&Session> for SessionJsonlMeta {
+    fn from(s: &Session) -> Self {
+        Self {
+            schema_version: CURRENT_SESSION_SCHEMA_VERSION,
+            id: s.id.clone(),
+            title: s.title.clone(),
+            slug: s.slug.clone(),
+            first_user_message: s.first_user_message.clone(),
+            created_at_ms: s.created_at_ms,
+            updated_at_ms: s.updated_at_ms,
+            mode: s.mode.clone(),
+            reasoning_effort: s.reasoning_effort,
+            model: s.model.clone(),
+            cwd: s.cwd.clone(),
+            parent_id: s.parent_id.clone(),
+            checkpoint: s.checkpoint.clone(),
+            context_tokens: s.context_tokens,
+            context_tokens_history_len: s.context_tokens_history_len,
+            visible_context_tokens: s.visible_context_tokens,
+            turn_metas: s.turn_metas.clone(),
+            accounting_snapshots: s.accounting_snapshots.clone(),
+            session_cost_usd: s.session_cost_usd,
+            session_usage: s.session_usage.clone(),
+            text_bytes: Some(compute_text_bytes(&s.history)),
+        }
+    }
+}
+
+impl SessionJsonlMeta {
+    fn into_session(self, history: Vec<HistoryItem>) -> Session {
+        Session {
+            id: self.id,
+            title: self.title,
+            slug: self.slug,
+            first_user_message: self.first_user_message,
+            created_at_ms: self.created_at_ms,
+            updated_at_ms: self.updated_at_ms,
+            mode: self.mode,
+            reasoning_effort: self.reasoning_effort,
+            model: self.model,
+            cwd: self.cwd,
+            parent_id: self.parent_id,
+            history,
+            checkpoint: self.checkpoint,
+            context_tokens: self.context_tokens,
+            context_tokens_history_len: self.context_tokens_history_len,
+            visible_context_tokens: self.visible_context_tokens.or(self.context_tokens),
+            turn_metas: self.turn_metas,
+            accounting_snapshots: self.accounting_snapshots,
+            session_cost_usd: self.session_cost_usd,
+            session_usage: self.session_usage,
+        }
+    }
 }
 
 impl Session {
@@ -873,7 +973,7 @@ pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
     save_with_blobs(session, &url_to_blob);
 }
 
-/// Write `session.json` + `meta.json`. Assumes blobs are already flushed.
+/// Write `meta.json` + `history.jsonl`. Assumes blobs are already flushed.
 /// Safe to call from a background thread.
 pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMap<String, String>) {
     let _perf = smelt_perf::perf::begin("session:write");
@@ -889,15 +989,33 @@ pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMa
         std::borrow::Cow::Owned(s)
     };
 
-    if let Ok(json) = serde_json::to_string(&*session_out) {
-        atomic_write(&session_dir.join("session.json"), json.as_bytes(), ts);
+    write_split_session_files(&session_dir, &session_out, ts);
+}
+
+fn write_split_session_files(session_dir: &std::path::Path, session: &Session, ts: u64) {
+    if let Some(meta_json) = encode_session_jsonl_meta(session) {
+        atomic_write(&session_dir.join("meta.json"), meta_json.as_bytes(), ts);
     }
-    let meta = session_out.meta();
-    if let Ok(json) = serde_json::to_string(&meta) {
-        atomic_write(&session_dir.join("meta.json"), json.as_bytes(), ts);
+    if let Some(history_jsonl) = encode_history_jsonl(&session.history) {
+        atomic_write(&session_dir.join("history.jsonl"), &history_jsonl, ts);
     }
-    let blob = build_search_blob(&session_out.history);
+    let blob = build_search_blob(&session.history);
     atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), ts);
+}
+
+fn encode_session_jsonl_meta(session: &Session) -> Option<String> {
+    let _perf = smelt_perf::perf::begin("session:write:encode_meta_json");
+    serde_json::to_string(&SessionJsonlMeta::from(session)).ok()
+}
+
+fn encode_history_jsonl(history: &[HistoryItem]) -> Option<Vec<u8>> {
+    let _perf = smelt_perf::perf::begin("session:write:encode_history_jsonl");
+    let mut out = Vec::new();
+    for item in history {
+        serde_json::to_writer(&mut out, item).ok()?;
+        out.write_all(b"\n").ok()?;
+    }
+    Some(out)
 }
 
 /// Write `contents` to `path` atomically via a tmp file + rename.
@@ -925,16 +1043,14 @@ pub fn load(id_or_prefix: &str) -> Option<Session> {
 fn load_exact(id: &str) -> Option<Session> {
     let _perf = smelt_perf::perf::begin("session:load:exact");
     let dir_path = sessions_dir().join(id);
-    let contents = {
-        let _perf = smelt_perf::perf::begin("session:load:read_json");
-        fs::read_to_string(dir_path.join("session.json")).ok()?
+    let (mut session, loaded_legacy_json) = if dir_path.join("history.jsonl").is_file() {
+        (load_jsonl_session(&dir_path)?, false)
+    } else {
+        (load_legacy_json_session(&dir_path)?, true)
     };
-    smelt_perf::perf::record_value("session:load:json_bytes", contents.len() as u64);
-    let mut session: Session = {
-        let _perf = smelt_perf::perf::begin("session:load:parse_json");
-        serde_json::from_str(&contents).ok()?
-    };
-    smelt_perf::perf::record_value("session:load:history_items", session.history.len() as u64);
+    if loaded_legacy_json {
+        migrate_legacy_json_session(&dir_path, &session);
+    }
 
     let blob_dir = dir_path.join("blobs");
     if blob_dir.is_dir() {
@@ -951,11 +1067,76 @@ fn load_exact(id: &str) -> Option<Session> {
     Some(session)
 }
 
+fn load_jsonl_session(dir_path: &std::path::Path) -> Option<Session> {
+    let meta_contents = {
+        let _perf = smelt_perf::perf::begin("session:load:read_meta_json");
+        fs::read_to_string(dir_path.join("meta.json")).ok()?
+    };
+    smelt_perf::perf::record_value("session:load:meta_json_bytes", meta_contents.len() as u64);
+    let meta: SessionJsonlMeta = {
+        let _perf = smelt_perf::perf::begin("session:load:parse_meta_json");
+        serde_json::from_str(&meta_contents).ok()?
+    };
+    if meta.schema_version != CURRENT_SESSION_SCHEMA_VERSION {
+        return None;
+    }
+
+    let history_file = {
+        let _perf = smelt_perf::perf::begin("session:load:open_history_jsonl");
+        fs::File::open(dir_path.join("history.jsonl")).ok()?
+    };
+    let history_len = history_file.metadata().ok().map(|m| m.len()).unwrap_or(0);
+    smelt_perf::perf::record_value("session:load:history_jsonl_bytes", history_len);
+    let history = {
+        let _perf = smelt_perf::perf::begin("session:load:parse_history_jsonl");
+        let reader = std::io::BufReader::new(history_file);
+        let mut history = Vec::new();
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            history.push(serde_json::from_str::<HistoryItem>(&line).ok()?);
+        }
+        history
+    };
+    smelt_perf::perf::record_value("session:load:history_items", history.len() as u64);
+    Some(meta.into_session(history))
+}
+
+// COMPAT(session-json-monolith): load old monolithic session.json files during
+// the alpha migration to meta.json + history.jsonl.
+fn load_legacy_json_session(dir_path: &std::path::Path) -> Option<Session> {
+    let contents = {
+        let _perf = smelt_perf::perf::begin("session:load:read_json");
+        fs::read_to_string(dir_path.join("session.json")).ok()?
+    };
+    smelt_perf::perf::record_value("session:load:json_bytes", contents.len() as u64);
+    let session: Session = {
+        let _perf = smelt_perf::perf::begin("session:load:parse_json");
+        serde_json::from_str(&contents).ok()?
+    };
+    smelt_perf::perf::record_value("session:load:history_items", session.history.len() as u64);
+    Some(session)
+}
+
+// COMPAT(session-json-monolith): rewrite old monolithic sessions to the
+// canonical split storage as soon as they are opened.
+fn migrate_legacy_json_session(dir_path: &std::path::Path, session: &Session) {
+    let _perf = smelt_perf::perf::begin("session:load:migrate_jsonl");
+    write_split_session_files(dir_path, session, now_ms());
+    if dir_path.join("meta.json").is_file() && dir_path.join("history.jsonl").is_file() {
+        let _ = fs::remove_file(dir_path.join("session.json"));
+    }
+}
+
 /// Returns `None` when no match or prefix is ambiguous.
 fn resolve_prefix(prefix: &str) -> Option<String> {
     let dir = sessions_dir();
 
-    if dir.join(prefix).join("session.json").is_file() {
+    if dir.join(prefix).join("history.jsonl").is_file()
+        || dir.join(prefix).join("session.json").is_file()
+    {
         return Some(prefix.to_string());
     }
 
@@ -1060,10 +1241,9 @@ fn compute_text_bytes(history: &[HistoryItem]) -> u64 {
 }
 
 fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
-    let Ok(contents) = fs::read_to_string(session_dir.join("session.json")) else {
-        return;
-    };
-    let Ok(session) = serde_json::from_str::<Session>(&contents) else {
+    let Some(session) =
+        load_jsonl_session(session_dir).or_else(|| load_legacy_json_session(session_dir))
+    else {
         return;
     };
     let bytes = compute_text_bytes(&session.history);
@@ -1093,15 +1273,15 @@ fn build_search_blob(history: &[HistoryItem]) -> String {
 /// Read the searchable text blob for `id`.
 ///
 /// COMPAT(session-search-sidecar-missing): falls back to regenerating from
-/// `session.json` and caching to disk when the `content.txt` sidecar is missing.
+/// session history and caching to disk when the `content.txt` sidecar is missing.
 pub fn load_search_blob(id: &str) -> Option<String> {
     let _perf = smelt_perf::perf::begin("session:load_search_blob");
     let session_dir = sessions_dir().join(id);
     if let Ok(contents) = fs::read_to_string(session_dir.join("content.txt")) {
         return Some(contents);
     }
-    let full = fs::read_to_string(session_dir.join("session.json")).ok()?;
-    let session: Session = serde_json::from_str(&full).ok()?;
+    let session =
+        load_jsonl_session(&session_dir).or_else(|| load_legacy_json_session(&session_dir))?;
     let blob = build_search_blob(&session.history);
     atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
     Some(blob)
@@ -1258,6 +1438,51 @@ mod tests {
             pre_checkpoint_context_tokens: None,
             pre_checkpoint_context_history_len: None,
         }
+    }
+
+    #[test]
+    fn jsonl_session_round_trips_native_history() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.title = Some("JSONL".into());
+        s.context_tokens = Some(42);
+        s.history.push(user_item("hello jsonl"));
+        s.history.push(assistant_text_item("assistant jsonl"));
+
+        let meta = encode_session_jsonl_meta(&s).expect("encode meta");
+        let history = encode_history_jsonl(&s.history).expect("encode history");
+        fs::write(dir.path().join("meta.json"), meta).expect("write meta");
+        fs::write(dir.path().join("history.jsonl"), history).expect("write history");
+
+        let loaded = load_jsonl_session(dir.path()).expect("load jsonl session");
+        assert_eq!(loaded.title.as_deref(), Some("JSONL"));
+        assert_eq!(loaded.context_tokens, Some(42));
+        assert_eq!(loaded.visible_context_tokens, Some(42));
+        assert_eq!(loaded.history.len(), 2);
+        assert!(
+            matches!(&loaded.history[0], HistoryItem::User { content, .. } if content.text_content() == "hello jsonl")
+        );
+    }
+
+    #[test]
+    fn legacy_json_session_migrates_to_split_storage() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.history.push(user_item("legacy prompt"));
+        fs::write(
+            dir.path().join("session.json"),
+            serde_json::to_string(&s).expect("encode legacy session"),
+        )
+        .expect("write legacy session");
+
+        let loaded = load_legacy_json_session(dir.path()).expect("load legacy session");
+        migrate_legacy_json_session(dir.path(), &loaded);
+
+        assert!(dir.path().join("meta.json").is_file());
+        assert!(dir.path().join("history.jsonl").is_file());
+        assert!(!dir.path().join("session.json").exists());
+        let migrated = load_jsonl_session(dir.path()).expect("load migrated session");
+        assert_eq!(migrated.history.len(), 1);
     }
 
     #[test]

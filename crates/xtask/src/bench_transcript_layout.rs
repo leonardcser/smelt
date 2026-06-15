@@ -4,6 +4,7 @@ pub fn run(args: Vec<String>) {
     let mut runs = String::from("5");
     let mut workloads: Option<String> = None;
     let mut release = true;
+    let mut skip_nav = false;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -26,6 +27,7 @@ pub fn run(args: Vec<String>) {
                     std::process::exit(2);
                 }));
             }
+            "--skip-nav" => skip_nav = true,
             "--debug" => release = false,
             "-h" | "--help" => {
                 print_usage();
@@ -55,6 +57,9 @@ pub fn run(args: Vec<String>) {
     if let Some(workloads) = workloads {
         cmd.env("SMELT_TRANSCRIPT_BENCH_WORKLOADS", workloads);
     }
+    if skip_nav {
+        cmd.env("SMELT_TRANSCRIPT_BENCH_SKIP_NAV", "1");
+    }
 
     eprintln!(
         "running transcript layout benchmark: profile={} runs={}",
@@ -71,10 +76,11 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--debug]");
     eprintln!();
     eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
     eprintln!();
-    eprintln!("workloads: mixed_10mib, markdown_4mib, tool_output_4mib, tiny_blocks_1mib, huge_blocks_4mib");
+    eprintln!("workloads: mixed_10mib, mixed_50mib, markdown_4mib, tool_output_4mib, tiny_blocks_1mib, huge_blocks_4mib");
+    eprintln!("--skip-nav omits the app-level navigation/search suite for projection-only runs.");
 }

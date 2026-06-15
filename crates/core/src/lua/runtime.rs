@@ -1954,6 +1954,13 @@ fn transcript_block_to_lua_table(
             let status = state.map(|s| s.status).unwrap_or(ToolStatus::Pending);
             t.set("status", tool_status_label(status))?;
             t.set("status_hl", tool_status_hl(status))?;
+            let elapsed_table = lua.create_table()?;
+            elapsed_table.set("call_id", call_id.as_str())?;
+            elapsed_table.set("status", tool_status_label(status))?;
+            if let Some(elapsed) = state.and_then(|s| s.elapsed) {
+                elapsed_table.set("secs", elapsed.as_secs())?;
+            }
+            t.set("elapsed", elapsed_table)?;
             if let Some(elapsed) = state.and_then(|s| s.elapsed) {
                 let secs = elapsed.as_secs();
                 t.set("elapsed_secs", secs)?;

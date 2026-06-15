@@ -19,6 +19,10 @@ layout.code = nil
 ---@type fun(opts: table): table
 layout.diff = nil
 
+--- Dynamic elapsed-time text leaf. Pass `block.elapsed` from a transcript renderer, or a call-id string with `opts.status` / `opts.secs`. Rust resolves current tool elapsed at render time when possible.
+---@type fun(elapsed: any, opts: table?): table
+layout.elapsed = nil
+
 --- Explicit zero-row layout node. Use this instead of returning nil when a renderer intentionally hides content.
 ---@type fun(): table
 layout.empty = nil
@@ -54,6 +58,10 @@ layout.runs = nil
 --- Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.
 ---@type fun(opts: table?): table
 layout.separator = nil
+
+--- Apply inherited style to a child layout. `opts.hl_group` / `opts.hl` names a theme group; `opts.fg` / `opts.bg` name theme colors; `opts.dim`, `opts.bold`, and `opts.italic` set text attributes. Child spans may override inherited fields.
+---@type fun(child: any, opts: table?): table
+layout.style = nil
 
 --- Plain text layout leaf. `opts.hl_group` / `opts.hl` may name a theme group; without it, text renders dimmed. `opts.ansi = true` enables ANSI parsing. Wrapping is computed by the transcript at the current width.
 ---@type fun(content: string, opts: table?): table

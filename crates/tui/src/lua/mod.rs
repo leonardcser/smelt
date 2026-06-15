@@ -847,6 +847,67 @@ mod tests {
         assert!(!target.is_empty(), "smelt.build.target should be non-empty");
     }
 
+    #[test]
+    fn layout_style_api_wraps_child() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let layout = rt
+            .lua
+            .load(
+                r#"
+                return smelt.layout.style(smelt.layout.text("styled"), {
+                  hl = "SmeltAccent",
+                  fg = "SmeltAccent",
+                  bg = "SmeltUserBg",
+                  dim = true,
+                  bold = true,
+                  italic = true,
+                })
+                "#,
+            )
+            .eval::<mlua::AnyUserData>()
+            .expect("eval style layout");
+        let layout = layout
+            .borrow::<smelt_core::lua::api::layout::LuaBlockLayout>()
+            .unwrap();
+        let BlockLayout::Style { child, spec } = &layout.0 else {
+            panic!("expected style layout, got {:?}", layout.0);
+        };
+        assert_eq!(spec.hl_group.as_deref(), Some("SmeltAccent"));
+        assert_eq!(spec.fg.as_deref(), Some("SmeltAccent"));
+        assert_eq!(spec.bg.as_deref(), Some("SmeltUserBg"));
+        assert!(spec.dim && spec.bold && spec.italic);
+        assert_text_layout(child, "styled");
+    }
+
+    #[test]
+    fn layout_elapsed_api_builds_dynamic_leaf() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        let layout = rt
+            .lua
+            .load(
+                r#"
+                return smelt.layout.elapsed({ call_id = "c1", status = "ok", secs = 65 }, {
+                  hl = "SmeltToolPending",
+                  selectable = false,
+                })
+                "#,
+            )
+            .eval::<mlua::AnyUserData>()
+            .expect("eval elapsed layout");
+        let layout = layout
+            .borrow::<smelt_core::lua::api::layout::LuaBlockLayout>()
+            .unwrap();
+        let BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) = &layout.0 else {
+            panic!("expected elapsed layout, got {:?}", layout.0);
+        };
+        assert_eq!(spec.call_id, "c1");
+        assert_eq!(spec.fallback_secs, Some(65));
+        assert_eq!(spec.hl_group.as_deref(), Some("SmeltToolPending"));
+        assert!(!spec.selectable);
+    }
+
     fn render_transcript_block(
         rt: &LuaRuntime,
         block: &Block,

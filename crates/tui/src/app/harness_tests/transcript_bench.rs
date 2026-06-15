@@ -138,6 +138,14 @@ fn run_navigation_sample() -> NavSample {
 #[test]
 #[ignore = "manual transcript navigation/search benchmark suite; prefer `cargo xtask bench-transcript-layout`"]
 fn transcript_layout_navigation_benchmark_suite() {
+    if std::env::var("SMELT_TRANSCRIPT_BENCH_SKIP_NAV")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        eprintln!("TRANSCRIPT_LAYOUT_NAV_SKIPPED");
+        return;
+    }
     let runs = navigation_bench_runs();
     let _warmup = run_navigation_sample();
     let mut samples = Vec::with_capacity(runs);

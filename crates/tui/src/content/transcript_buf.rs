@@ -629,6 +629,7 @@ fn render_cached_layout_to_buffer(
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
     theme: &Theme,
+    history: &BlockHistory,
 ) -> Option<(Buffer, usize)> {
     let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
@@ -639,6 +640,7 @@ fn render_cached_layout_to_buffer(
             width: key.width,
             view_state: key.view_state,
             theme,
+            history: Some(history),
         },
     );
     Some((buf, outcome.line_count))
@@ -1412,6 +1414,7 @@ impl TranscriptProjection {
             renderer_generation,
             renderer_cache_key,
             theme,
+            history,
         ) else {
             return;
         };
@@ -1564,6 +1567,7 @@ impl TranscriptProjection {
                 renderer_generation,
                 renderer_cache_key,
                 theme,
+                history,
             ) else {
                 continue;
             };
@@ -3461,6 +3465,7 @@ mod tests {
         bytes
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn project_with_lua(
         projection: &mut TranscriptProjection,
         lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -3703,6 +3708,11 @@ mod tests {
                 build: push_large_mixed_transcript_fixture,
             },
             TranscriptBenchWorkload {
+                name: "mixed_50mib",
+                target_bytes: 50 * 1024 * 1024,
+                build: push_large_mixed_transcript_fixture,
+            },
+            TranscriptBenchWorkload {
                 name: "markdown_4mib",
                 target_bytes: 4 * 1024 * 1024,
                 build: push_markdown_heavy_transcript_fixture,
@@ -3739,6 +3749,116 @@ mod tests {
             .collect()
     }
 
+    fn push_session_resume_fixture(
+        session: &mut smelt_core::session::Session,
+        target_bytes: usize,
+    ) {
+        let mut approx_bytes = 0usize;
+        let mut i = 0usize;
+        while approx_bytes < target_bytes {
+            let user = format!(
+                "resume benchmark prompt {i}: {}",
+                "please inspect the previous output and continue exactly ".repeat(8)
+            );
+            approx_bytes += user.len();
+            session
+                .history
+                .push(protocol::HistoryItem::user(protocol::Content::text(user)));
+
+            let assistant = format!(
+                "# Resume benchmark response {i}\n\n{}\n\n```rust\nfn resume_bench_{i}() -> usize {{ {} }}\n```\n\n{}",
+                "This paragraph has enough markdown and wrapping pressure to exercise transcript rebuild and layout measurement. ".repeat(18),
+                "1 + ".repeat(32) + "0",
+                "- exact rows must survive cache hydration\n".repeat(24),
+            );
+            approx_bytes += assistant.len();
+            session.history.push(protocol::HistoryItem::assistant(
+                protocol::AssistantStep::terminal(
+                    Some(protocol::Content::text(assistant)),
+                    None,
+                    Vec::new(),
+                ),
+            ));
+            i += 1;
+        }
+    }
+
+    fn run_true_resume_bench_sample(target_bytes: usize) {
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let lua = crate::lua::LuaRuntime::new();
+        let theme = Theme::default();
+        let mut session = smelt_core::session::Session::new(0, std::env::current_dir().unwrap());
+        session.id = format!("transcript-resume-bench-{}", smelt_core::session::now_ms());
+        push_session_resume_fixture(&mut session, target_bytes);
+        let history_items = session.history.len();
+
+        let build_start = std::time::Instant::now();
+        let mut transcript = crate::app::history::build_transcript_from_session(&lua, &session);
+        let build_ms = elapsed_ms(build_start.elapsed());
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(91), Default::default());
+        let first_start = std::time::Instant::now();
+        let first = project_with_lua(
+            &mut projection,
+            &lua,
+            &mut buf,
+            &mut transcript.history,
+            100,
+            false,
+            &theme,
+            ScrollTarget::visible_tail(),
+            40,
+        );
+        let first_ms = elapsed_ms(first_start.elapsed());
+        let cache = projection.display_cache_data(&transcript.history);
+        smelt_core::session::save_with_blobs(&session, &std::collections::HashMap::new());
+        crate::content::display_cache::write_for_session(&session, &cache);
+
+        let load_start = std::time::Instant::now();
+        let loaded = smelt_core::session::load(&session.id).expect("load benchmark session");
+        let load_ms = elapsed_ms(load_start.elapsed());
+        let cache_start = std::time::Instant::now();
+        let loaded_cache = crate::content::display_cache::read_for_session(&loaded);
+        let cache_read_ms = elapsed_ms(cache_start.elapsed());
+        let rebuild_start = std::time::Instant::now();
+        let mut resumed = crate::app::history::build_transcript_from_session(&lua, &loaded);
+        let rebuild_ms = elapsed_ms(rebuild_start.elapsed());
+        let mut resumed_projection = TranscriptProjection::new();
+        let hydrated_rows =
+            resumed_projection.hydrate_display_cache(&resumed.history, loaded_cache);
+        let mut resumed_buf = Buffer::new(crate::smelt_edit::BufId(92), Default::default());
+        let render_start = std::time::Instant::now();
+        let resumed_rows = project_with_lua(
+            &mut resumed_projection,
+            &lua,
+            &mut resumed_buf,
+            &mut resumed.history,
+            100,
+            false,
+            &theme,
+            ScrollTarget::visible_tail(),
+            40,
+        );
+        let render_ms = elapsed_ms(render_start.elapsed());
+        assert_eq!(resumed_rows.total_rows, first.total_rows);
+        assert_eq!(hydrated_rows, 1);
+        smelt_core::session::delete(&session.id);
+        smelt_perf::perf::set_enabled(false);
+        eprintln!(
+            "TRANSCRIPT_TRUE_RESUME_SAMPLE target_bytes={} history_items={} rows={} build_ms={:.3} first_ms={:.3} load_ms={:.3} cache_read_ms={:.3} rebuild_ms={:.3} hydrated_rows={} render_ms={:.3}",
+            target_bytes,
+            history_items,
+            first.total_rows,
+            build_ms,
+            first_ms,
+            load_ms,
+            cache_read_ms,
+            rebuild_ms,
+            hydrated_rows,
+            render_ms,
+        );
+    }
     fn run_transcript_bench_sample(workload: TranscriptBenchWorkload) -> TranscriptBenchSample {
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
@@ -4119,6 +4239,16 @@ mod tests {
             }
             print_transcript_bench_summary(workload, &samples);
         }
+    }
+
+    #[test]
+    #[ignore = "manual true session resume benchmark; run with --ignored --nocapture"]
+    fn transcript_true_resume_benchmark_suite() {
+        let target_bytes = std::env::var("SMELT_TRANSCRIPT_RESUME_BENCH_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(10 * 1024 * 1024);
+        run_true_resume_bench_sample(target_bytes);
     }
 
     #[test]

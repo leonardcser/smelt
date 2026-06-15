@@ -30,6 +30,14 @@ fun(opts: table): table
 
 Inline-diff render directive - the worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
 
+## `smelt.layout.elapsed`
+
+```lua
+fun(elapsed: any, opts: table?): table
+```
+
+Dynamic elapsed-time text leaf. Pass `block.elapsed` from a transcript renderer, or a call-id string with `opts.status` / `opts.secs`. Rust resolves current tool elapsed at render time when possible.
+
 ## `smelt.layout.empty`
 
 ```lua
@@ -101,6 +109,14 @@ fun(opts: table?): table
 ```
 
 Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.
+
+## `smelt.layout.style`
+
+```lua
+fun(child: any, opts: table?): table
+```
+
+Apply inherited style to a child layout. `opts.hl_group` / `opts.hl` names a theme group; `opts.fg` / `opts.bg` name theme colors; `opts.dim`, `opts.bold`, and `opts.italic` set text attributes. Child spans may override inherited fields.
 
 ## `smelt.layout.text`
 

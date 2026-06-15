@@ -8,7 +8,7 @@ use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 6;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
@@ -148,6 +148,7 @@ pub(crate) struct RenderCtx<'a> {
     pub width: u16,
     pub view_state: ViewState,
     pub theme: &'a Theme,
+    pub history: Option<&'a BlockHistory>,
 }
 
 struct CachedLayout {
@@ -435,6 +436,9 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
             Ok(BlockLayout::Leaf(IrLeaf::Markdown(spec.clone())))
         }
         BlockLayout::Leaf(LuaLeaf::Code(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Code(spec.clone()))),
+        BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) => {
+            Ok(BlockLayout::Leaf(IrLeaf::Elapsed(spec.clone())))
+        }
         BlockLayout::Leaf(LuaLeaf::Separator(spec)) => {
             Ok(BlockLayout::Leaf(IrLeaf::Separator(spec.clone())))
         }
@@ -495,6 +499,10 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
             child: Box::new(compile_layout_ir(child)?),
             spec: spec.clone(),
         }),
+        BlockLayout::Style { child, spec } => Ok(BlockLayout::Style {
+            child: Box::new(compile_layout_ir(child)?),
+            spec: spec.clone(),
+        }),
         BlockLayout::Cap { child, spec } => Ok(BlockLayout::Cap {
             child: Box::new(compile_layout_ir(child)?),
             spec: spec.clone(),
@@ -516,15 +524,29 @@ pub(crate) fn render_block_into(
 ) -> Outcome {
     let outcome = {
         let mut out = LineBuilder::new(buf, ctx.theme, ctx.width);
-        render_expanded_block(&mut out, layout, ctx.width as usize);
+        render_expanded_block(&mut out, layout, ctx.width as usize, ctx.history);
         out.finish()
     };
     apply_view_state(buf, ctx.theme, ctx.width, ctx.view_state, outcome)
 }
 
-fn render_expanded_block(out: &mut LineBuilder, layout: &LayoutIr, width: usize) -> u16 {
+fn render_expanded_block(
+    out: &mut LineBuilder,
+    layout: &LayoutIr,
+    width: usize,
+    history: Option<&BlockHistory>,
+) -> u16 {
     let _perf = smelt_perf::perf::begin("render:layout");
-    crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
+    if let Some(history) = history {
+        crate::content::display_renderers::render_layout_ir_into_with_history(
+            out,
+            layout,
+            width as u16,
+            history,
+        )
+    } else {
+        crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
+    }
 }
 
 fn apply_view_state(
@@ -695,6 +717,7 @@ mod tests {
                 width,
                 view_state: ViewState::Expanded,
                 theme: &theme,
+                history: None,
             },
         )
         .line_count as u64

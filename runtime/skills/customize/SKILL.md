@@ -787,6 +787,8 @@ Declarative, width-independent content layout primitives for transcript/tool dis
   Syntax-highlighted code layout leaf.
 - `smelt.layout.diff` :: `fun(opts: table): table`
   Inline-diff render directive - the worker renders the diff directly into the block buffer.
+- `smelt.layout.elapsed` :: `fun(elapsed: any, opts: table?): table`
+  Dynamic elapsed-time text leaf.
 - `smelt.layout.empty` :: `fun(): table`
   Explicit zero-row layout node.
 - `smelt.layout.file_view` :: `fun(opts: table): table`
@@ -805,6 +807,8 @@ Declarative, width-independent content layout primitives for transcript/tool dis
   Styled inline text layout leaf.
 - `smelt.layout.separator` :: `fun(opts: table?): table`
   Full-width horizontal separator.
+- `smelt.layout.style` :: `fun(child: any, opts: table?): table`
+  Apply inherited style to a child layout.
 - `smelt.layout.text` :: `fun(content: string, opts: table?): table`
   Plain text layout leaf.
 - `smelt.layout.vbox` :: `fun(items: table): table`

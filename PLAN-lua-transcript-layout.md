@@ -1093,7 +1093,7 @@ Exit criteria:
 
 Status after implementation:
 
-- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_layouts }`; cache read/write and background persist metrics report both entry types. The cache payload schema is separated from renderer semantics by `FORMAT_VERSION = 3`, while renderer-produced layout semantics remain gated by `DISPLAY_RENDERER_VERSION = 6`.
+- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_layouts }`; cache read/write and background persist metrics report both entry types. The cache payload schema is separated from renderer semantics by `FORMAT_VERSION`, while renderer-produced layout semantics remain gated by `DISPLAY_RENDERER_VERSION`. The current file format stores row indexes and DisplayIR in independently decoded payload sections so a corrupt/stale DisplayIR payload does not discard an otherwise valid exact row index.
 - `DisplayLayoutCacheEntry` persists renderer-produced `LayoutIr` entries keyed by semantic content hash, tool sidecar hash, display renderer version, runtime renderer generation, stable renderer cache key, and render-context hash.
 - Bundled transcript defaults install a stable renderer cache key. User renderers and renderer middleware opt into persisted DisplayIR with `opts.cache_key`; omitting a cache key keeps runtime caching but disables persisted DisplayIR and row-index export for that renderer chain.
 - `TranscriptProjection` hydrates display layouts before first projection and exports only history-valid entries for the current renderer generation/cache key once the renderer is known. Row-index entries carry the same renderer identity, so renderer invalidation rejects persisted heights and materialized rows without hashing Lua closures.
@@ -1228,6 +1228,27 @@ Post-refactor benchmark notes:
 - Projection workloads: `mixed_10mib` first `345.8±39.8ms`, resize `217.3±45.8ms`, theme `6.5±1.5ms`, scroll12 `19.6±6.2ms`, visible `1.0±0.3ms`, fullcache `7.3±1.3ms`, ironly `242.6±50.0ms`, nocache `310.2±22.8ms`; `markdown_4mib` first `117.9±17.6ms`, resize `121.1±17.1ms`, theme `1.7±0.1ms`, scroll12 `36.7±2.7ms`, visible `1.8±0.1ms`, fullcache `1.5±0.2ms`, ironly `116.7±11.0ms`, nocache `119.7±19.4ms`; `tool_output_4mib` first `114.2±6.7ms`, resize `111.9±20.3ms`, theme `70.8±11.1ms`, scroll12 `1302.8±273.2ms`, visible `87.0±11.6ms`, fullcache `67.9±7.9ms`, ironly `122.9±23.9ms`, nocache `125.8±24.1ms`; `tiny_blocks_1mib` first `434.0±94.8ms`, resize `110.8±10.2ms`, theme `0.7±0.2ms`, scroll12 `10.6±2.7ms`, visible `0.8±0.2ms`, fullcache `10.9±5.4ms`, ironly `121.0±11.2ms`, nocache `368.8±38.3ms`; `huge_blocks_4mib` first `161.7±23.5ms`, resize `174.7±18.4ms`, theme `38.4±3.9ms`, scroll12 `522.9±30.3ms`, visible `40.4±8.4ms`, fullcache `22.5±2.6ms`, ironly `157.4±15.6ms`, nocache `150.0±13.4ms`.
 - Theme is now fixed as a measurement-invalidation issue. The remaining expensive theme/visible/scroll cases are row-range materialization/rendering in tool-output-heavy and few-huge-block workloads, which is the separate direct row-range renderer/compositor follow-up described above.
 
+Large-resume implementation notes:
+
+- Added `mixed_50mib` to the projection workload set and `--skip-nav` to the xtask runner. Use `cargo xtask bench-transcript-layout --runs N --workloads mixed_50mib --skip-nav` for projection-only large-workload iteration.
+- Latest 50 MiB projection sample set: `blocks=17004`, `rows=447561`, `first=1036.5±196.3ms`, `resize=895.9±167.3ms`, `theme=5.4±1.0ms`, `scroll12=15.4±2.7ms`, `visible=2.2±0.4ms`, `fullcache=8.2±2.0ms`, `ironly=910.9±237.5ms`, `nocache=1103.5±228.5ms`, with `cache_row_indexes=1` and `cache_display_layouts=17004`.
+- Counters on that sample isolate the dominant projection dependency: full-cache hydration loads the exact row index and measures `0` blocks, while DisplayIR-only hydration measures all `17004` blocks. Exact row-index persistence is therefore the difference between ~8ms projection resume and ~0.9s exact measurement at 50 MiB. No-cache cold projection adds LayoutIR compilation and lands near ~1.1s.
+- `session.ir.bin` is now a disposable local cache with clean format version `1`: header + independently encoded row-index and DisplayIR payload sections. There is deliberately no compatibility path for older IR sidecars; stale/corrupt files miss and are recomputed.
+- Canonical sessions now write inspectable `meta.json` + `history.jsonl` + `content.txt`. Loading prefers JSONL and keeps short-lived `COMPAT(session-json-monolith)` support for old monolithic `session.json` sessions; opening a legacy session immediately rewrites it to the split format and removes `session.json` after the new files exist.
+- True-resume benchmark fixture (`transcript_true_resume_benchmark_suite`) now measures save/load/cache-read/rebuild/render through the real session path. 50 MiB release sample: `history_items=28206`, `rows=860272`, `build=79.7ms`, cold `first=985.6ms`, JSONL `load=57.2ms`, IR cache read `11.6ms`, rebuild `73.3ms`, hydrated render `3.5ms`.
+- `layout.style(child, opts)` is implemented as an inherited LayoutIR style wrapper for `hl`/`hl_group`, `fg`, `bg`, `dim`, `bold`, and `italic`. Panel remains the full-width background/chrome primitive; style is for inherited text styling.
+- `layout.elapsed(block.elapsed, opts?)` is implemented as a render-time LayoutIR leaf. Rust exposes `block.elapsed` on tool blocks and resolves the current tool elapsed from `ToolState` during render when available; custom Lua renderers can decide where to place that leaf.
+
+Resume architecture sequence, preserving exact row/search/scroll semantics:
+
+1. **Clean IR cache v1, no legacy.** Keep the current projection tiers; persist exact row indexes and DisplayIR as independently decodable cache sections, and treat all prior sidecars as disposable misses.
+2. **True resume benchmark + diagnostics.** Measure the real session path separately from projection-only fixtures so JSONL parse, transcript rebuild, IR read, and hydrated render costs stay visible.
+3. **Canonical session format.** Use `meta.json + history.jsonl` as the inspectable canonical storage. Keep only documented short-lived monolith compatibility.
+4. **Layout style semantics.** Use `layout.style` for inherited foreground/background/text attributes and `layout.panel` for full-width background panels.
+5. **Dynamic elapsed primitive.** `layout.elapsed(block.elapsed, opts?)` is available as a render-time leaf so Lua controls placement/chrome while Rust can resolve the displayed value from current tool state.
+
+Recommended next slice: discuss whether to wire `layout.elapsed` into the bundled default tool header and whether elapsed-only tool-state ticks should stop invalidating DisplayIR cache keys; then only consider deeper storage or compositor rewrites if measured bottlenecks remain.
+
 Exit criteria:
 
 - `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings` passes;
@@ -1245,7 +1266,7 @@ Exit criteria:
 - Bundle default renderers as normal Lua modules. The default root renderer calls `smelt.transcript.defaults.render(block, ctx)`; users can call, compose, copy, or ignore those helpers.
 - Keep per-block and per-tool dispatch in Lua. Built-in tool body functions may live in a Lua table inside the defaults module, but that table is implementation/composition code, not a Rust API.
 - Do not add `layout.tool_header(block)`. Tool headers are default Lua composition, exposed as `smelt.transcript.defaults.render_tool_header(block, ctx, opts?)` for reuse.
-- Keep dynamic pending elapsed as a post-Phase-8 candidate rather than immediate work. The target remains a lower-level primitive such as `layout.elapsed(block.elapsed)`, where Lua decides placement/chrome while Rust updates the displayed value without rerunning Lua, but only implement it if measurements show the current semantic invalidation path is costly enough.
+- Implement dynamic pending elapsed as a lower-level primitive: `layout.elapsed(block.elapsed, opts?)`. Lua decides placement/chrome; Rust resolves current tool state while rendering the leaf.
 - Preserve current mode one-row behavior with `layout.line` unless deliberately changed with snapshots.
 - Keep exact user-text highlighting via general span/text primitives plus Rust-provided semantic annotations or narrowly mechanical tokenization; do not hide user-message panel chrome in Rust.
 - Implement tail/head capping as generic `layout.cap` IR with numeric row counts from `ctx.limits`; do not keep `smelt.layout.tool_output`.

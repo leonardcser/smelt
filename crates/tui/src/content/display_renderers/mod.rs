@@ -3,7 +3,9 @@
 mod layout_ir;
 mod markdown;
 
-pub(crate) use layout_ir::{measure_layout_ir, render_layout_ir_into};
+pub(crate) use layout_ir::{
+    measure_layout_ir, render_layout_ir_into, render_layout_ir_into_with_history,
+};
 pub(crate) use markdown::render_markdown_inner;
 
 #[cfg(test)]
@@ -64,6 +66,7 @@ mod tests {
                 width: ctx.width,
                 view_state: ctx.view_state,
                 theme,
+                history: None,
             },
         )
         .line_count as u16

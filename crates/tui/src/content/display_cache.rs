@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 
 const CACHE_FILE: &str = "session.ir.bin";
 const MAGIC: &[u8; 8] = b"SMELTIR\0";
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 1;
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
-const FIXED_HEADER_LEN: usize = MAGIC.len() + 4 + 8 + 2 + 8;
+const FIXED_HEADER_LEN: usize = MAGIC.len() + 4 + 8 + 2 + 8 + 8;
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheData {
@@ -69,6 +69,7 @@ fn read_at_path(path: &Path) -> DisplayCacheData {
 fn write_at_path(path: &Path, data: &DisplayCacheData) {
     let _perf = smelt_perf::perf::begin("session_ir:write");
     if data.is_empty() {
+        let _ = std::fs::remove_file(path);
         return;
     }
     let Some(bytes) = encode(data) else {
@@ -90,25 +91,59 @@ fn encode_payload(data: &DisplayCacheData) -> Option<Vec<u8>> {
     bincode::serialize(data).ok()
 }
 
-fn decode_payload(payload: &[u8]) -> Result<DisplayCacheData, DecodeError> {
-    bincode::deserialize(payload).map_err(|_| DecodeError::Payload)
+fn encode_row_indexes(row_indexes: &[DisplayRowIndexEntry]) -> Option<Vec<u8>> {
+    bincode::serialize(row_indexes).ok()
+}
+
+fn encode_display_layouts(display_layouts: &[DisplayLayoutCacheEntry]) -> Option<Vec<u8>> {
+    bincode::serialize(display_layouts).ok()
+}
+
+fn decode_row_indexes(payload: &[u8]) -> Vec<DisplayRowIndexEntry> {
+    match bincode::deserialize(payload) {
+        Ok(row_indexes) => row_indexes,
+        Err(_) => {
+            smelt_perf::perf::record_value("session_ir:decode_fail:row_indexes_payload", 1);
+            Vec::new()
+        }
+    }
+}
+
+fn decode_display_layouts(payload: &[u8]) -> Vec<DisplayLayoutCacheEntry> {
+    match bincode::deserialize(payload) {
+        Ok(display_layouts) => display_layouts,
+        Err(_) => {
+            smelt_perf::perf::record_value("session_ir:decode_fail:display_layouts_payload", 1);
+            Vec::new()
+        }
+    }
 }
 
 fn encode(data: &DisplayCacheData) -> Option<Vec<u8>> {
     let _perf = smelt_perf::perf::begin("session_ir:encode");
-    let payload = encode_payload(data)?;
+    let row_payload = encode_row_indexes(&data.row_indexes)?;
+    let display_payload = encode_display_layouts(&data.display_layouts)?;
+    encode_with_payloads(&row_payload, &display_payload)
+}
+
+fn encode_with_payloads(row_payload: &[u8], display_payload: &[u8]) -> Option<Vec<u8>> {
     let build = BUILD_VERSION.as_bytes();
     let build_len = u16::try_from(build.len()).ok()?;
-    let payload_len = u64::try_from(payload.len()).ok()?;
+    let row_payload_len = u64::try_from(row_payload.len()).ok()?;
+    let display_payload_len = u64::try_from(display_payload.len()).ok()?;
 
-    let mut out = Vec::with_capacity(FIXED_HEADER_LEN + build.len() + payload.len());
+    let mut out = Vec::with_capacity(
+        FIXED_HEADER_LEN + build.len() + row_payload.len() + display_payload.len(),
+    );
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
     out.extend_from_slice(&DISPLAY_RENDERER_VERSION.to_le_bytes());
     out.extend_from_slice(&build_len.to_le_bytes());
-    out.extend_from_slice(&payload_len.to_le_bytes());
+    out.extend_from_slice(&row_payload_len.to_le_bytes());
+    out.extend_from_slice(&display_payload_len.to_le_bytes());
     out.extend_from_slice(build);
-    out.extend_from_slice(&payload);
+    out.extend_from_slice(row_payload);
+    out.extend_from_slice(display_payload);
     Some(out)
 }
 
@@ -122,7 +157,6 @@ enum DecodeError {
     BadBuildVersion,
     BadPayloadLength,
     TrailingBytes,
-    Payload,
 }
 
 impl DecodeError {
@@ -136,7 +170,6 @@ impl DecodeError {
             Self::BadBuildVersion => "session_ir:decode_fail:bad_build_version",
             Self::BadPayloadLength => "session_ir:decode_fail:bad_payload_length",
             Self::TrailingBytes => "session_ir:decode_fail:trailing_bytes",
-            Self::Payload => "session_ir:decode_fail:payload",
         };
         smelt_perf::perf::record_value(label, 1);
     }
@@ -144,7 +177,7 @@ impl DecodeError {
 
 fn decode(bytes: &[u8]) -> Result<DisplayCacheData, DecodeError> {
     let _perf = smelt_perf::perf::begin("session_ir:decode");
-    if bytes.len() < FIXED_HEADER_LEN {
+    if bytes.len() < MAGIC.len() + 4 {
         return Err(DecodeError::HeaderTooShort);
     }
     let mut pos = 0;
@@ -161,12 +194,21 @@ fn decode(bytes: &[u8]) -> Result<DisplayCacheData, DecodeError> {
     if format_version != FORMAT_VERSION {
         return Err(DecodeError::BadFormatVersion);
     }
+    decode_split_payload(bytes, pos)
+}
+
+fn decode_split_payload(bytes: &[u8], mut pos: usize) -> Result<DisplayCacheData, DecodeError> {
+    if bytes.len() < FIXED_HEADER_LEN {
+        return Err(DecodeError::HeaderTooShort);
+    }
     let renderer_version = read_u64(bytes, &mut pos).ok_or(DecodeError::BadRendererVersion)?;
     if renderer_version != DISPLAY_RENDERER_VERSION {
         return Err(DecodeError::BadRendererVersion);
     }
     let build_len = read_u16(bytes, &mut pos).ok_or(DecodeError::BadBuildLength)? as usize;
-    let payload_len = read_u64(bytes, &mut pos).ok_or(DecodeError::BadPayloadLength)? as usize;
+    let row_payload_len = read_u64(bytes, &mut pos).ok_or(DecodeError::BadPayloadLength)? as usize;
+    let display_payload_len =
+        read_u64(bytes, &mut pos).ok_or(DecodeError::BadPayloadLength)? as usize;
 
     let build_end = pos
         .checked_add(build_len)
@@ -179,17 +221,29 @@ fn decode(bytes: &[u8]) -> Result<DisplayCacheData, DecodeError> {
         return Err(DecodeError::BadBuildVersion);
     }
 
-    let payload_end = pos
-        .checked_add(payload_len)
+    let row_payload_end = pos
+        .checked_add(row_payload_len)
         .ok_or(DecodeError::BadPayloadLength)?;
-    let payload = bytes
-        .get(pos..payload_end)
+    let row_payload = bytes
+        .get(pos..row_payload_end)
         .ok_or(DecodeError::BadPayloadLength)?;
-    if payload_end != bytes.len() {
+    pos = row_payload_end;
+
+    let display_payload_end = pos
+        .checked_add(display_payload_len)
+        .ok_or(DecodeError::BadPayloadLength)?;
+    let display_payload = bytes
+        .get(pos..display_payload_end)
+        .ok_or(DecodeError::BadPayloadLength)?;
+    if display_payload_end != bytes.len() {
         return Err(DecodeError::TrailingBytes);
     }
+
     let _perf = smelt_perf::perf::begin("session_ir:decode:payload");
-    decode_payload(payload)
+    Ok(DisplayCacheData {
+        row_indexes: decode_row_indexes(row_payload),
+        display_layouts: decode_display_layouts(display_payload),
+    })
 }
 
 fn read_u16(bytes: &[u8], pos: &mut usize) -> Option<u16> {
@@ -262,6 +316,18 @@ mod tests {
         assert_eq!(decoded.row_indexes[0].nodes[0].exact_height, 3);
         assert_eq!(decoded.display_layouts.len(), 1);
         assert_eq!(decoded.display_layouts[0].key.renderer_generation, 1);
+    }
+
+    #[test]
+    fn split_payload_keeps_row_indexes_when_display_layouts_are_corrupt() {
+        let rows = [row_index()];
+        let row_payload = encode_row_indexes(&rows).expect("row payload");
+        let encoded = encode_with_payloads(&row_payload, b"not display layout bincode")
+            .expect("encode split payload");
+        let decoded = decode(&encoded).expect("decode cache");
+        assert_eq!(decoded.row_indexes.len(), 1);
+        assert_eq!(decoded.row_indexes[0].nodes[0].exact_height, 3);
+        assert!(decoded.display_layouts.is_empty());
     }
 
     #[test]
