@@ -215,6 +215,15 @@
 ---@field ask? string[] Patterns that always prompt.
 ---@field deny? string[] Patterns that auto-deny.
 
+--- Single-line input handle returned by `smelt.input.new(opts)`.
+---@class smelt.input.Input
+---@field win fun(): smelt.win.Win Return the underlying Win handle for layout, focus, and advanced event bindings.
+---@field buf fun(): smelt.buf.Buf? Return the backing buffer, or `nil` if the input window is gone.
+---@field text fun(): string Return the current input text.
+---@field set_text fun(text: string): nil Replace the current input text. Newlines are collapsed to spaces and the cursor moves to the end.
+---@field on fun(event: smelt.input.Event, func: fun(value: table)): smelt.Reg Subscribe to `change`, `submit`, or `cancel`. Callback payload carries `ctx.text`.
+---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on the underlying input window. Returns a Reg handle.
+
 ---@class smelt.lifecycle.Guard
 ---@field alive fun(self:smelt.lifecycle.Guard):boolean Return true while every captured epoch still matches and the guard was not cancelled or superseded.
 ---@field cancel fun(self:smelt.lifecycle.Guard) Mark the guard stale immediately.
@@ -464,6 +473,8 @@
 
 --- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
+
+---@alias smelt.input.Event "change"|"submit"|"cancel"
 
 --- Paint-leaf events accepted by `paint:on(event, fn)`.
 ---@alias smelt.paint.Event "press"|"release"|"drag"

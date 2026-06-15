@@ -17,6 +17,7 @@ pub(crate) mod format;
 pub use smelt_core::fuzzy;
 pub mod instructions;
 pub(crate) mod keymap;
+pub(crate) mod line_input;
 pub mod lua;
 pub use lua::DISPLAY;
 pub use smelt_core::mcp;

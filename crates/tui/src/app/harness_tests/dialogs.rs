@@ -145,6 +145,33 @@ fn cmdline_quit_command_requests_quit() {
 }
 
 #[test]
+fn cmdline_paste_inserts_single_line_payload() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.press(KeyCode::Esc);
+    app.type_char(':');
+
+    app.feed_one(SourceEvent::Term(Event::Paste("hello\nworld".into())));
+
+    let s = app.state();
+    assert!(s.cmdline_open);
+    assert_eq!(s.cmdline_text, "hello world");
+}
+
+#[test]
+fn cmdline_unicode_editing_uses_byte_safe_cursor() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.press(KeyCode::Esc);
+    app.type_char(':');
+    app.feed_one(SourceEvent::Term(Event::Paste("a日本b".into())));
+    app.press(KeyCode::Left);
+    app.press(KeyCode::Backspace);
+
+    let s = app.state();
+    assert_eq!(s.cmdline_text, "a日b");
+    app.assert_invariants();
+}
+
+#[test]
 fn cmdline_typed_payload_does_not_trip_cursor_invariant() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.press(KeyCode::Esc);

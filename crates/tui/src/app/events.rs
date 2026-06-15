@@ -94,21 +94,31 @@ impl TuiApp {
                 self.handle_resize(w, h);
                 return false;
             }
-            if let Event::Key(k) = ev {
-                // Cmdline owns its keystrokes end-to-end: text edit,
+            if matches!(&ev, Event::Key(_) | Event::Paste(_)) {
+                // Cmdline owns its input end-to-end: text edit,
                 // history nav, completer cycling, and command exec
                 // all need `&mut TuiApp`, so the overlay leaf has no
-                // recipe and `cmdline_handle_key` runs every key
+                // recipe and `cmdline_handle_event` runs every key/paste
                 // before the generic compositor dispatch. Returns
                 // `Some(true)` only when the run command resolved to
                 // Quit (propagated as the loop's quit signal).
                 if self.cmdline_is_focused() {
-                    if let Some(quit) = self.cmdline_handle_key(k) {
+                    if let Some(quit) = self.cmdline_handle_event(ev) {
                         return quit;
                     }
-                    // Swallow unclaimed keys so split keymaps don't fire over an open cmdline.
+                    // Swallow unclaimed input so split keymaps don't fire over an open cmdline.
                     return false;
                 }
+                if let Event::Paste(data) = ev {
+                    if matches!(
+                        self.run_paste_fallback(data),
+                        crate::smelt_edit::Status::Consumed
+                    ) {
+                        self.flush_lua_callbacks();
+                    }
+                    return false;
+                }
+                let Event::Key(k) = ev else { unreachable!() };
                 if self.handle_focused_search_key(k) {
                     return false;
                 }
@@ -1224,6 +1234,16 @@ impl TuiApp {
         };
         self.ui
             .try_dismiss_modal_for_chord(k.code, k.modifiers, &mut lua_invoke)
+    }
+
+    pub(crate) fn run_paste_fallback(&mut self, content: String) -> crate::smelt_edit::Status {
+        let lua = &self.lua;
+        let mut lua_invoke = |handle: crate::smelt_edit::LuaHandle,
+                              win: crate::smelt_edit::WinId,
+                              payload: &crate::smelt_edit::Payload| {
+            lua.queue_invocation(handle, win, payload);
+        };
+        self.ui.dispatch_paste_fallback(content, &mut lua_invoke)
     }
 
     /// Overlay-focus key cascade tier 4. Wraps the shared

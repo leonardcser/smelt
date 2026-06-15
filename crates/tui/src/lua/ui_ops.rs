@@ -549,58 +549,6 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         set_placeholder_mark(ctx, "");
     }
 
-    fn replace_line(
-        ctx: &mut crate::smelt_edit::CallbackCtx<'_>,
-        new: String,
-        new_cursor_col: u16,
-    ) {
-        let buf_id = match ctx.ui.win(ctx.win) {
-            Some(w) => w.buf,
-            None => return,
-        };
-        if let Some(buf) = ctx.ui.buf_mut(buf_id) {
-            buf.set_lines(0, 1, vec![new]);
-        }
-        if let Some(win) = ctx.ui.win_mut(ctx.win) {
-            win.set_cursor_col_single_line(new_cursor_col);
-        }
-    }
-
-    fn insert_char(
-        ctx: &mut crate::smelt_edit::CallbackCtx<'_>,
-        placeholder: &str,
-        c: char,
-    ) -> CallbackResult {
-        let placeholder_mode = is_placeholder(ctx, placeholder);
-        let cursor = if placeholder_mode {
-            0
-        } else {
-            ctx.ui
-                .win(ctx.win)
-                .map(|w| w.cursor_col() as usize)
-                .unwrap_or(0)
-        };
-        let base = if placeholder_mode {
-            String::new()
-        } else {
-            current_line(ctx)
-        };
-        let chars: Vec<char> = base.chars().collect();
-        let split = cursor.min(chars.len());
-        let new: String = chars[..split]
-            .iter()
-            .copied()
-            .chain(std::iter::once(c))
-            .chain(chars[split..].iter().copied())
-            .collect();
-        let new_cursor_col = (split + 1) as u16;
-        if placeholder_mode {
-            clear_placeholder_mark(ctx);
-        }
-        replace_line(ctx, new.clone(), new_cursor_col);
-        CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
-    }
-
     fn restore_placeholder(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, placeholder: &str) {
         let buf_id = match ctx.ui.win(ctx.win) {
             Some(w) => w.buf,
@@ -611,112 +559,91 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         }
         set_placeholder_mark(ctx, placeholder);
         if let Some(win) = ctx.ui.win_mut(ctx.win) {
-            win.set_cursor_col_single_line(0);
+            win.set_cursor_byte_single_line("", 0);
+            win.clear_selection_anchor();
         }
     }
 
-    let placeholder_for_backspace = placeholder.clone();
-    let backspace: Callback = Callback::Rust(Box::new(
-        move |ctx: &mut crate::smelt_edit::CallbackCtx<'_>| -> CallbackResult {
-            if is_placeholder(ctx, &placeholder_for_backspace) {
-                return CallbackResult::Consumed;
-            }
-            let text = current_line(ctx);
-            let cursor = ctx
-                .ui
-                .win(ctx.win)
-                .map(|w| w.cursor_col() as usize)
-                .unwrap_or(0);
-            if cursor == 0 {
-                return CallbackResult::Consumed;
-            }
-            let chars: Vec<char> = text.chars().collect();
-            let split = cursor.min(chars.len());
-            let new: String = chars[..split.saturating_sub(1)]
-                .iter()
-                .copied()
-                .chain(chars[split..].iter().copied())
-                .collect();
-            let new_cursor_col = (split.saturating_sub(1)) as u16;
-            replace_line(ctx, new.clone(), new_cursor_col);
-            // Re-seed the dim placeholder when backspacing empties the line, so
-            // the input doesn't sit blank - matches the "show on empty" pattern
-            // users expect from a filter input.
-            if new.is_empty() && !placeholder_for_backspace.is_empty() {
-                restore_placeholder(ctx, &placeholder_for_backspace);
-            }
-            CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
-        },
-    ));
-
-    enum HMove {
-        Left,
-        Right,
-        Home,
-        End,
+    fn replace_line(ctx: &mut crate::smelt_edit::CallbackCtx<'_>, new: String, cursor: usize) {
+        let buf_id = match ctx.ui.win(ctx.win) {
+            Some(w) => w.buf,
+            None => return,
+        };
+        if let Some(buf) = ctx.ui.buf_mut(buf_id) {
+            buf.set_lines(0, 1, vec![new.clone()]);
+        }
+        if let Some(win) = ctx.ui.win_mut(ctx.win) {
+            win.set_cursor_byte_single_line(&new, cursor);
+        }
     }
 
-    fn move_h(
+    fn line_edit(
+        ctx: &crate::smelt_edit::CallbackCtx<'_>,
+        placeholder: &str,
+    ) -> crate::line_input::LineEdit {
+        if is_placeholder(ctx, placeholder) {
+            return crate::line_input::LineEdit::new(String::new(), 0);
+        }
+        let text = current_line(ctx);
+        let (cursor, anchor) = ctx
+            .ui
+            .win(ctx.win)
+            .map(|w| (w.cpos(), w.selection_anchor()))
+            .unwrap_or((0, None));
+        crate::line_input::LineEdit::with_selection(text, cursor, anchor)
+    }
+
+    fn apply_edit(
         ctx: &mut crate::smelt_edit::CallbackCtx<'_>,
         placeholder: &str,
-        target: HMove,
+        command: crate::line_input::EditCommand,
     ) -> CallbackResult {
-        if is_placeholder(ctx, placeholder) {
-            return CallbackResult::Consumed;
+        let placeholder_mode = is_placeholder(ctx, placeholder);
+        let mut edit = line_edit(ctx, placeholder);
+        let old = edit.text().to_string();
+        let state_changed = edit.apply(command);
+        let text_changed = edit.text() != old;
+        if placeholder_mode && state_changed {
+            clear_placeholder_mark(ctx);
         }
-        let len = current_line(ctx).chars().count();
-        if let Some(win) = ctx.ui.win_mut(ctx.win) {
-            let cur = win.cursor_col() as usize;
-            let new = match target {
-                HMove::Left => cur.saturating_sub(1),
-                HMove::Right => (cur + 1).min(len),
-                HMove::Home => 0,
-                HMove::End => len,
-            };
-            win.set_cursor_col_single_line(new as u16);
+        let new = edit.text().to_string();
+        if new.is_empty() && !placeholder.is_empty() {
+            restore_placeholder(ctx, placeholder);
+        } else {
+            let cursor = edit.cursor();
+            let anchor = edit.selection_anchor();
+            replace_line(ctx, new.clone(), cursor);
+            if let Some(win) = ctx.ui.win_mut(ctx.win) {
+                win.set_selection_anchor(anchor);
+            }
         }
-        CallbackResult::Consumed
+        if text_changed {
+            CallbackResult::Event(WinEvent::TextChanged, Payload::Text { content: new })
+        } else {
+            CallbackResult::Consumed
+        }
     }
 
-    let _ = app.ui.win_set_keymap(
-        leaf,
-        KeyBind::new(KeyCode::Backspace, KeyModifiers::NONE),
-        backspace,
-    );
-    let placeholder_for_left = placeholder.clone();
-    let _ = app.ui.win_set_keymap(
-        leaf,
-        KeyBind::new(KeyCode::Left, KeyModifiers::NONE),
-        Callback::Rust(Box::new(move |ctx| {
-            move_h(ctx, &placeholder_for_left, HMove::Left)
-        })),
-    );
-    let placeholder_for_right = placeholder.clone();
-    let _ = app.ui.win_set_keymap(
-        leaf,
-        KeyBind::new(KeyCode::Right, KeyModifiers::NONE),
-        Callback::Rust(Box::new(move |ctx| {
-            move_h(ctx, &placeholder_for_right, HMove::Right)
-        })),
-    );
-    let placeholder_for_home = placeholder.clone();
-    let _ = app.ui.win_set_keymap(
-        leaf,
-        KeyBind::new(KeyCode::Home, KeyModifiers::NONE),
-        Callback::Rust(Box::new(move |ctx| {
-            move_h(ctx, &placeholder_for_home, HMove::Home)
-        })),
-    );
-    let placeholder_for_end = placeholder.clone();
-    let _ = app.ui.win_set_keymap(
-        leaf,
-        KeyBind::new(KeyCode::End, KeyModifiers::NONE),
-        Callback::Rust(Box::new(move |ctx| {
-            move_h(ctx, &placeholder_for_end, HMove::End)
-        })),
-    );
+    fn bind_edit_key(
+        app: &mut TuiApp,
+        leaf: WinId,
+        bind: KeyBind,
+        placeholder: String,
+        command: crate::line_input::EditCommand,
+    ) {
+        let _ = app.ui.win_set_keymap(
+            leaf,
+            bind,
+            Callback::Rust(Box::new(move |ctx| {
+                apply_edit(ctx, &placeholder, command.clone())
+            })),
+        );
+    }
 
-    // Enter fires Submit with line 0; placeholder counts as empty.
+    for entry in crate::line_input::default_key_bindings() {
+        bind_edit_key(app, leaf, entry.bind, placeholder.clone(), entry.command);
+    }
+
     let placeholder_for_submit = placeholder.clone();
     let submit: Callback = Callback::Rust(Box::new(move |ctx| {
         let content = if is_placeholder(ctx, &placeholder_for_submit) {
@@ -732,31 +659,39 @@ pub(crate) fn configure_input_leaf(app: &mut TuiApp, leaf: WinId, placeholder: S
         submit,
     );
 
-    // Catch-all: printable chars insert, non-printables are consumed, Esc/Ctrl-C pass through.
     let placeholder_for_fallback = placeholder.clone();
-    let fallback: Callback = Callback::Rust(Box::new(move |ctx| {
-        if let Payload::Key {
-            code: KeyCode::Char(c),
-            mods,
-        } = &ctx.payload
-        {
-            if mods.is_empty() || *mods == KeyModifiers::SHIFT {
-                return insert_char(ctx, &placeholder_for_fallback, *c);
+    let fallback: Callback = Callback::Rust(Box::new(move |ctx| match &ctx.payload {
+        Payload::Key {
+            code: KeyCode::Esc, ..
+        }
+        | Payload::Key {
+            code: KeyCode::Char('c'),
+            mods: KeyModifiers::CONTROL,
+        } => {
+            if ctx.ui.has_win_event(ctx.win, WinEvent::Dismiss) {
+                let content = if is_placeholder(ctx, &placeholder_for_fallback) {
+                    String::new()
+                } else {
+                    current_line(ctx)
+                };
+                CallbackResult::Event(WinEvent::Dismiss, Payload::Text { content })
+            } else {
+                CallbackResult::Pass
             }
         }
-        if matches!(
-            &ctx.payload,
-            Payload::Key {
-                code: KeyCode::Esc,
-                ..
-            } | Payload::Key {
-                code: KeyCode::Char('c'),
-                mods: KeyModifiers::CONTROL,
+        Payload::Key { code, mods } => {
+            let key = crossterm::event::KeyEvent::new(*code, *mods);
+            match crate::line_input::command_for_key(key) {
+                Some(command) => apply_edit(ctx, &placeholder_for_fallback, command),
+                None => CallbackResult::Consumed,
             }
-        ) {
-            return CallbackResult::Pass;
         }
-        CallbackResult::Consumed
+        Payload::Paste { content } => apply_edit(
+            ctx,
+            &placeholder_for_fallback,
+            crate::line_input::EditCommand::InsertText(content.clone()),
+        ),
+        _ => CallbackResult::Consumed,
     }));
     let _ = app.ui.win_set_key_fallback(leaf, fallback);
 }

@@ -25,7 +25,7 @@
 --     options leaf instead of dismissing the dialog).
 --
 -- Buffer helpers:
---   smelt.dialog.input(placeholder)         -> leaf, buf  (single-line input)
+--   smelt.dialog.input(placeholder)         -> leaf, buf, input  (single-line input)
 --   smelt.dialog.menu(items, opts)          -> leaf, ctrl (numbered selectable list)
 --   smelt.dialog.list(buf, opts)            -> leaf       (existing buffer as a list)
 --   smelt.dialog.markdown(text)             -> leaf, buf  (markdown-rendered content)
@@ -137,26 +137,20 @@ local GUTTER = 1
 
 -- Build a single-line text-input leaf with a fresh buffer. `placeholder`
 -- shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
--- override the dialog gutter. Returns `(leaf, buf)` so the caller can
--- read the entered text via `buf:source()` from the dialog keymaps.
----@type fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf
+-- override the dialog gutter. Returns `(leaf, buf, input)` so callers can
+-- keep using the buffer directly or opt into the first-class input handle.
+---@type fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.input.Input
 function smelt.dialog.input(placeholder, opts)
   opts = opts or {}
-  local buf = smelt.buf.new()
-  buf:lines({ "" })
-  -- Single-line input: wrap=false keeps long entries on one row so the caret
-  -- can scroll horizontally instead of jumping to a wrapped continuation.
-  -- `opts.pad_left` / `opts.pad_right` override the dialog gutter for callers
-  -- that want extra indent (e.g. nested inputs visually grouped under a list).
-  local leaf = smelt.win.new(buf, {
-    region = REGION, surface = "editable_text",
+  local input = smelt.input.new({
+    region = REGION,
+    placeholder = placeholder or "",
     pad_left = opts.pad_left or GUTTER,
     pad_right = opts.pad_right or GUTTER,
-    scrollbar = false, wrap = false,
-    kind = "input",
-    placeholder = placeholder or "",
+    scrollbar = false,
+    wrap = false,
   })
-  return leaf, buf
+  return input:win(), input:buf(), input
 end
 
 -- ── Menu primitive ─────────────────────────────────────────────────────

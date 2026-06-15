@@ -968,6 +968,10 @@ impl Ui {
         self.callbacks.on_event(win, ev, cb);
     }
 
+    pub fn has_win_event(&self, win: WinId, ev: WinEvent) -> bool {
+        self.callbacks.has_event(win, ev)
+    }
+
     /// Remove a specific event callback by Lua handle id.
     #[must_use]
     pub fn win_clear_event_by_id(&mut self, win: WinId, ev: WinEvent, id: u64) -> Option<Callback> {
@@ -1966,14 +1970,25 @@ impl Ui {
         )
     }
 
-    /// Shared shell for the tier-1 and tier-3 key dispatchers: look up the
-    /// callback on the focused window with `take`, invoke it (Rust or Lua),
-    /// hand it back via `restore`, and fan out any `CallbackResult::Event`
-    /// follow-up. Both tiers differ only in how they fetch the callback.
-    fn run_key_callback(
+    pub fn dispatch_paste_fallback(
         &mut self,
-        code: crossterm::event::KeyCode,
-        mods: crossterm::event::KeyModifiers,
+        content: String,
+        lua_invoke: &mut LuaInvoke,
+    ) -> Status {
+        self.run_focused_callback(
+            Payload::Paste { content },
+            lua_invoke,
+            |s, win| s.callbacks.take_key_fallback(win),
+            |s, win, cb| s.callbacks.restore_key_fallback(win, cb),
+        )
+    }
+
+    /// Shared shell for focused callback dispatch: look up the callback on
+    /// the focused window with `take`, invoke it (Rust or Lua), hand it back
+    /// via `restore`, and fan out any `CallbackResult::Event` follow-up.
+    fn run_focused_callback(
+        &mut self,
+        payload: Payload,
         lua_invoke: &mut LuaInvoke,
         take: impl FnOnce(&mut Self, WinId) -> Option<Callback>,
         restore: impl FnOnce(&mut Self, WinId, Callback),
@@ -1991,7 +2006,7 @@ impl Ui {
                 let mut ctx = CallbackCtx {
                     ui: self,
                     win,
-                    payload: Payload::Key { code, mods },
+                    payload,
                 };
                 match inner(&mut ctx) {
                     CallbackResult::Consumed => Status::Consumed,
@@ -2003,7 +2018,6 @@ impl Ui {
                 }
             }
             Callback::Lua(handle) => {
-                let payload = Payload::Key { code, mods };
                 lua_invoke(*handle, win, &payload);
                 Status::Consumed
             }
@@ -2017,6 +2031,21 @@ impl Ui {
         }
 
         result
+    }
+
+    /// Shared shell for the tier-1 and tier-3 key dispatchers: look up the
+    /// callback on the focused window with `take`, invoke it (Rust or Lua),
+    /// hand it back via `restore`, and fan out any `CallbackResult::Event`
+    /// follow-up. Both tiers differ only in how they fetch the callback.
+    fn run_key_callback(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+        lua_invoke: &mut LuaInvoke,
+        take: impl FnOnce(&mut Self, WinId) -> Option<Callback>,
+        restore: impl FnOnce(&mut Self, WinId, Callback),
+    ) -> Status {
+        self.run_focused_callback(Payload::Key { code, mods }, lua_invoke, take, restore)
     }
 
     /// Final tier of the key cascade: dismiss the active modal on a bare

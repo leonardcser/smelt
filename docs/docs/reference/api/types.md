@@ -306,6 +306,19 @@ Subcommand rule override accepted inside `CommandOverrides`. Mirrors the front-m
 | `ask` | `string[]` |  | Patterns that always prompt. |
 | `deny` | `string[]` |  | Patterns that auto-deny. |
 
+### `smelt.input.Input`
+
+Single-line input handle returned by `smelt.input.new(opts)`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `win` | `fun(): smelt.win.Win` | yes | Return the underlying Win handle for layout, focus, and advanced event bindings. |
+| `buf` | `fun(): smelt.buf.Buf?` | yes | Return the backing buffer, or `nil` if the input window is gone. |
+| `text` | `fun(): string` | yes | Return the current input text. |
+| `set_text` | `fun(text: string): nil` | yes | Replace the current input text. Newlines are collapsed to spaces and the cursor moves to the end. |
+| `on` | `fun(event: smelt.input.Event, func: fun(value: table)): smelt.Reg` | yes | Subscribe to `change`, `submit`, or `cancel`. Callback payload carries `ctx.text`. |
+| `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on the underlying input window. Returns a Reg handle. |
+
 ### `smelt.lifecycle.Guard`
 
 | Field | Type | Required | Description |
@@ -677,6 +690,10 @@ Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_d
 Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 
 Variants: `"boolean"` \| `"string"` \| `"integer"`
+
+### `smelt.input.Event`
+
+Variants: `"change"` \| `"submit"` \| `"cancel"`
 
 ### `smelt.paint.Event`
 

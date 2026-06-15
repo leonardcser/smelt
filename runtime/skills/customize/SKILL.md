@@ -615,7 +615,7 @@ Modal overlay builders.
   General-purpose body leaf.
 - `smelt.dialog.current` :: `fun(): table | nil`
   Return the topmost active dialog ctx (the same shape passed to `on_submit`/`keymap` handlers: `{ resolve, close, win, panels, focused_leaf }`), or `nil` if no dialog is open.
-- `smelt.dialog.input` :: `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf`
+- `smelt.dialog.input` :: `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.input.Input`
   Build a single-line text-input leaf with a fresh buffer.
 - `smelt.dialog.list` :: `fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win`
   Wrap an existing `buf` as a selectable list leaf.
@@ -1197,6 +1197,13 @@ Prompt history entries and search.
   Return the prompt history as an array of strings, oldest first.
 - `smelt.history.search` :: `fun(query: string): table`
   Rank prompt history against `query` using the history-specific scorer (word-match boost, recency bonus, dedupe).
+
+#### `smelt.input`
+
+Single-line input handle constructor.
+
+- `smelt.input.new` :: `fun(opts: table?): smelt.input.Input?`
+  Create a single-line input and return an `Input` handle.
 
 #### `smelt.keymap`
 

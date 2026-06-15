@@ -426,7 +426,7 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
 /// Implementation of `smelt.buf.new(opts?)`. If `opts.name` resolves to an
 /// existing buffer, returns its id with mutable opts re-applied (the
 /// hot-reload survival path); otherwise allocates a fresh one.
-fn create_or_open(
+pub(super) fn create_or_open(
     shared: &Arc<LuaShared>,
     opts: Option<&mlua::Table>,
 ) -> LuaResult<crate::smelt_edit::BufId> {

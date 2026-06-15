@@ -93,6 +93,9 @@ pub enum Payload {
         code: KeyCode,
         mods: KeyModifiers,
     },
+    Paste {
+        content: String,
+    },
     Selection {
         index: usize,
     },
@@ -223,6 +226,13 @@ impl Callbacks {
             .entry(ev)
             .or_default()
             .push(cb);
+    }
+
+    pub(crate) fn has_event(&self, win: WinId, ev: WinEvent) -> bool {
+        self.events
+            .get(&win)
+            .and_then(|events| events.get(&ev))
+            .is_some_and(|callbacks| !callbacks.is_empty())
     }
 
     /// Remove every binding for `win`. Returns Lua handle IDs for caller cleanup.

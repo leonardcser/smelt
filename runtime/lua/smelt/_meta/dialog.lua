@@ -26,9 +26,9 @@ dialog.current = nil
 
 --- Build a single-line text-input leaf with a fresh buffer. `placeholder`
 --- shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
---- override the dialog gutter. Returns `(leaf, buf)` so the caller can
---- read the entered text via `buf:source()` from the dialog keymaps.
----@type fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf
+--- override the dialog gutter. Returns `(leaf, buf, input)` so callers can
+--- keep using the buffer directly or opt into the first-class input handle.
+---@type fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.input.Input
 dialog.input = nil
 
 --- Wrap an existing `buf` as a selectable list leaf. Use when the buffer

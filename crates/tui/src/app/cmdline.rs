@@ -6,7 +6,7 @@ use crate::smelt_edit::layout::Anchor;
 use crate::smelt_edit::BufCreateOpts;
 use crate::smelt_edit::UiHost;
 use crate::smelt_edit::{Constraint, LayoutTree, Overlay, SplitConfig};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent};
 
 /// Prefix glyph; cursor and editing clamp past the one-cell prefix so it cannot be deleted.
 const PREFIX_LEN: u16 = 1;
@@ -58,6 +58,40 @@ pub(crate) struct CmdlineState {
 pub(crate) struct CmdlineCompleter {
     pub(crate) labels: Vec<String>,
     pub(crate) selected: usize,
+}
+
+enum CmdlineInputAction {
+    Cancel,
+    Submit,
+    CloseIfEmpty,
+    HistoryPrevious,
+    HistoryNext,
+    CompleteNext,
+    CompletePrevious,
+    Edit(crate::line_input::EditCommand),
+}
+
+impl CmdlineInputAction {
+    fn from_key(mode: CmdlineMode, key: KeyEvent) -> Option<Self> {
+        use crossterm::event::KeyModifiers as M;
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => Some(Self::Cancel),
+            (KeyCode::Enter, _) => Some(Self::Submit),
+            (KeyCode::Backspace, _) | (KeyCode::Char('w'), M::CONTROL) => Some(Self::CloseIfEmpty),
+            (KeyCode::Up, _) => Some(Self::HistoryPrevious),
+            (KeyCode::Down, _) => Some(Self::HistoryNext),
+            (KeyCode::Tab, _)
+            | (KeyCode::Char('j'), M::CONTROL)
+            | (KeyCode::Char('n'), M::CONTROL) => Some(Self::CompleteNext),
+            (KeyCode::BackTab, _) | (KeyCode::Char('p'), M::CONTROL) => {
+                Some(Self::CompletePrevious)
+            }
+            (KeyCode::Char('k'), M::CONTROL) if matches!(mode, CmdlineMode::Command) => {
+                Some(Self::CompletePrevious)
+            }
+            _ => crate::line_input::command_for_key(key).map(Self::Edit),
+        }
+    }
 }
 
 impl TuiApp {
@@ -168,175 +202,103 @@ impl TuiApp {
         let new_line = format!("{prefix}{payload}");
         if let Some(buf_id) = self.ui.win(win).map(|w| w.buf) {
             if let Some(b) = self.ui.buf_mut(buf_id) {
-                b.set_lines(0, 1, vec![new_line]);
+                b.set_lines(0, 1, vec![new_line.clone()]);
             }
         }
         if let Some(w) = self.ui.win_mut(win) {
-            w.set_cursor_col_single_line(PREFIX_LEN + cursor_in_payload as u16);
+            w.set_cursor_byte_single_line(&new_line, prefix.len() + cursor_in_payload);
         }
         self.cmdline_apply_status_bg();
     }
 
-    fn cmdline_cursor_in_payload(&self) -> usize {
-        let Some(win) = self.well_known.cmdline else {
-            return 0;
-        };
-        let cur = self
-            .ui
-            .win(win)
-            .map(|w| w.cursor_col())
-            .unwrap_or(PREFIX_LEN);
-        cur.saturating_sub(PREFIX_LEN) as usize
+    fn cmdline_edit(&self) -> crate::line_input::LineEdit {
+        let payload = self.cmdline_text();
+        let prefix_len = self.cmdline.mode.prefix().len();
+        let (cursor, anchor) = self
+            .well_known
+            .cmdline
+            .and_then(|win| self.ui.win(win))
+            .map(|w| {
+                (
+                    w.cpos().saturating_sub(prefix_len),
+                    w.selection_anchor().map(|a| a.saturating_sub(prefix_len)),
+                )
+            })
+            .unwrap_or((0, None));
+        crate::line_input::LineEdit::with_selection(payload, cursor, anchor)
     }
 
-    /// Handles a keystroke for a focused cmdline; `Some(true)` → quit, `Some(false)` → handled, `None` → unrecognised.
-    pub(crate) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
-        use crossterm::event::KeyModifiers as M;
-        match (k.code, k.modifiers) {
-            (KeyCode::Esc, _) | (KeyCode::Char('c'), M::CONTROL) => {
-                if matches!(self.cmdline.mode, CmdlineMode::Search { .. }) {
-                    self.clear_search();
-                    self.close_cmdline();
-                } else {
-                    self.close_cmdline();
-                }
+    /// Handles an event for a focused cmdline; `Some(true)` → quit, `Some(false)` → handled, `None` → unrecognised.
+    pub(crate) fn cmdline_handle_event(&mut self, ev: Event) -> Option<bool> {
+        match ev {
+            Event::Paste(data) => {
+                self.cmdline_apply_edit(crate::line_input::EditCommand::InsertText(data));
                 Some(false)
             }
-            (KeyCode::Enter, _) => Some(self.cmdline_submit()),
-            (KeyCode::Backspace, _) => self.cmdline_backspace(),
-            (KeyCode::Delete, _) => {
-                self.cmdline_delete_forward();
-                Some(false)
-            }
-            (KeyCode::Left, _) => {
-                self.cmdline_move(-1);
-                Some(false)
-            }
-            (KeyCode::Right, _) => {
-                self.cmdline_move(1);
-                Some(false)
-            }
-            (KeyCode::Home, _) | (KeyCode::Char('a'), M::CONTROL) => {
-                self.cmdline_move_home();
-                Some(false)
-            }
-            (KeyCode::End, _) | (KeyCode::Char('e'), M::CONTROL) => {
-                self.cmdline_move_end();
-                Some(false)
-            }
-            (KeyCode::Up, _) => {
-                self.cmdline_history_up();
-                Some(false)
-            }
-            (KeyCode::Down, _) => {
-                self.cmdline_history_down();
-                Some(false)
-            }
-            (KeyCode::Char('w'), M::CONTROL) => self.cmdline_delete_word_back(),
-            (KeyCode::Char('u'), M::CONTROL) => {
-                self.cmdline_clear();
-                Some(false)
-            }
-            (KeyCode::Tab, _)
-            | (KeyCode::Char('j'), M::CONTROL)
-            | (KeyCode::Char('n'), M::CONTROL) => {
-                self.cmdline_cycle_completer(true);
-                Some(false)
-            }
-            (KeyCode::BackTab, _)
-            | (KeyCode::Char('k'), M::CONTROL)
-            | (KeyCode::Char('p'), M::CONTROL) => {
-                self.cmdline_cycle_completer(false);
-                Some(false)
-            }
-            (KeyCode::Char(c), mods) if mods.is_empty() || mods == M::SHIFT => {
-                self.cmdline_insert_char(c);
-                Some(false)
-            }
+            Event::Key(k) => self.cmdline_handle_key(k),
             _ => None,
         }
     }
 
-    fn cmdline_insert_char(&mut self, c: char) {
-        let (new, cur) = super::cmdline_edit::insert_char(
-            &self.cmdline_text(),
-            self.cmdline_cursor_in_payload(),
-            c,
-        );
-        self.cmdline_set_payload(&new, cur);
-        self.cmdline.completer = None;
-    }
-
-    fn cmdline_backspace(&mut self) -> Option<bool> {
-        match super::cmdline_edit::backspace(&self.cmdline_text(), self.cmdline_cursor_in_payload())
-        {
-            None => {
+    /// Handles a keystroke for a focused cmdline; `Some(true)` → quit, `Some(false)` → handled, `None` → unrecognised.
+    pub(crate) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
+        match CmdlineInputAction::from_key(self.cmdline.mode, k)? {
+            CmdlineInputAction::Cancel => {
+                if matches!(self.cmdline.mode, CmdlineMode::Search { .. }) {
+                    self.clear_search();
+                }
                 self.close_cmdline();
                 Some(false)
             }
-            Some((new, cur)) => {
-                self.cmdline_set_payload(&new, cur);
-                self.cmdline.completer = None;
-                Some(false)
-            }
-        }
-    }
-
-    fn cmdline_delete_forward(&mut self) {
-        let (new, cur) = super::cmdline_edit::delete_forward(
-            &self.cmdline_text(),
-            self.cmdline_cursor_in_payload(),
-        );
-        self.cmdline_set_payload(&new, cur);
-        self.cmdline.completer = None;
-    }
-
-    fn cmdline_delete_word_back(&mut self) -> Option<bool> {
-        match super::cmdline_edit::delete_word_back(
-            &self.cmdline_text(),
-            self.cmdline_cursor_in_payload(),
-        ) {
-            None => {
+            CmdlineInputAction::Submit => Some(self.cmdline_submit()),
+            CmdlineInputAction::CloseIfEmpty if self.cmdline_text().is_empty() => {
                 self.close_cmdline();
                 Some(false)
             }
-            Some((new, cur)) => {
-                self.cmdline_set_payload(&new, cur);
-                self.cmdline.completer = None;
+            CmdlineInputAction::CloseIfEmpty => {
+                let command = crate::line_input::command_for_key(k)?;
+                self.cmdline_apply_edit(command);
+                Some(false)
+            }
+            CmdlineInputAction::HistoryPrevious => {
+                self.cmdline_history_up();
+                Some(false)
+            }
+            CmdlineInputAction::HistoryNext => {
+                self.cmdline_history_down();
+                Some(false)
+            }
+            CmdlineInputAction::CompleteNext => {
+                self.cmdline_cycle_completer(true);
+                Some(false)
+            }
+            CmdlineInputAction::CompletePrevious => {
+                self.cmdline_cycle_completer(false);
+                Some(false)
+            }
+            CmdlineInputAction::Edit(command) => {
+                self.cmdline_apply_edit(command);
                 Some(false)
             }
         }
     }
 
-    fn cmdline_clear(&mut self) {
-        self.cmdline_set_payload("", 0);
-        self.cmdline.completer = None;
-    }
-
-    fn cmdline_move(&mut self, delta: i32) {
-        let count = self.cmdline_text().chars().count();
-        let new = super::cmdline_edit::clamp_move(count, self.cmdline_cursor_in_payload(), delta);
+    fn cmdline_apply_edit(&mut self, command: crate::line_input::EditCommand) {
+        let mut edit = self.cmdline_edit();
+        let old_text = edit.text().to_string();
+        edit.apply(command);
+        let text = edit.text().to_string();
+        let cursor = edit.cursor();
+        let selection_anchor = edit.selection_anchor();
+        self.cmdline_set_payload(&text, cursor);
         if let Some(win) = self.well_known.cmdline {
             if let Some(w) = self.ui.win_mut(win) {
-                w.set_cursor_col_single_line(PREFIX_LEN + new as u16);
+                let prefix_len = self.cmdline.mode.prefix().len();
+                w.set_selection_anchor(selection_anchor.map(|a| prefix_len + a));
             }
         }
-    }
-
-    fn cmdline_move_home(&mut self) {
-        if let Some(win) = self.well_known.cmdline {
-            if let Some(w) = self.ui.win_mut(win) {
-                w.set_cursor_col_single_line(PREFIX_LEN);
-            }
-        }
-    }
-
-    fn cmdline_move_end(&mut self) {
-        let count = self.cmdline_text().chars().count() as u16;
-        if let Some(win) = self.well_known.cmdline {
-            if let Some(w) = self.ui.win_mut(win) {
-                w.set_cursor_col_single_line(PREFIX_LEN + count);
-            }
+        if text != old_text {
+            self.cmdline.completer = None;
         }
     }
 
@@ -384,14 +346,14 @@ impl TuiApp {
                     self.cmdline.history_stash = current_for_stash;
                 }
                 self.cmdline.history_browse = Some(idx);
-                let cursor = entry.chars().count();
+                let cursor = entry.len();
                 self.cmdline_set_payload(&entry, cursor);
                 self.cmdline.completer = None;
             }
             HistoryStepOwned::Restore { stash } => {
                 self.cmdline.history_browse = None;
                 self.cmdline.history_stash = String::new();
-                let cursor = stash.chars().count();
+                let cursor = stash.len();
                 self.cmdline_set_payload(&stash, cursor);
                 self.cmdline.completer = None;
             }
@@ -472,7 +434,7 @@ impl TuiApp {
             .as_ref()
             .and_then(|c| c.labels.get(c.selected).cloned());
         if let Some(label) = payload {
-            let cursor = label.chars().count();
+            let cursor = label.len();
             self.cmdline_set_payload(&label, cursor);
         }
     }

@@ -1425,6 +1425,17 @@ impl Window {
         text.cpos = col as usize;
     }
 
+    /// Set cursor from a byte offset in a single-line buffer. The byte offset is
+    /// snapped to a UTF-8 boundary and the displayed column is measured in cells.
+    pub fn set_cursor_byte_single_line(&mut self, line: &str, byte: usize) {
+        let byte = text::snap(line, byte);
+        let text_state = self.text_state_mut();
+        text_state.cursor_col = text::byte_to_cell(line, byte) as u16;
+        text_state.cursor_row = 0;
+        text_state.cpos = byte;
+        text_state.curswant = None;
+    }
+
     /// Reset cursor to the origin.
     pub fn reset_cursor(&mut self) {
         let text = self.text_state_mut();

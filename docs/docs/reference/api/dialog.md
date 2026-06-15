@@ -35,15 +35,15 @@ dialog's resolve handle.
 ## `smelt.dialog.input`
 
 ```lua
-fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf
+fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.input.Input
 ```
 
-Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smeltbufbuf)
+Types: [`smelt.win.Win`](types.md#smeltwinwin), [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.input.Input`](types.md#smeltinputinput)
 
 Build a single-line text-input leaf with a fresh buffer. `placeholder`
 shows when the buffer is empty; `opts.pad_left` / `opts.pad_right`
-override the dialog gutter. Returns `(leaf, buf)` so the caller can
-read the entered text via `buf:source()` from the dialog keymaps.
+override the dialog gutter. Returns `(leaf, buf, input)` so callers can
+keep using the buffer directly or opt into the first-class input handle.
 
 ## `smelt.dialog.list`
 

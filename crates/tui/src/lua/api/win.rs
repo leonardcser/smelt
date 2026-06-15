@@ -703,7 +703,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 /// Implementation of `smelt.win.new(buf, opts?)`. If `opts.name` matches an
 /// open window, refresh its mutable opts and return the existing id;
 /// otherwise open a fresh split.
-fn open_or_refresh(
+pub(super) fn open_or_refresh(
     buf_id: crate::smelt_edit::BufId,
     opts: Option<&mlua::Table>,
 ) -> LuaResult<Option<crate::smelt_edit::WinId>> {
