@@ -595,6 +595,16 @@ impl Window {
         &self.surface.text().vim_state
     }
 
+    pub fn vim_has_pending_input(&self) -> bool {
+        let text = self.surface.text();
+        text.vim_enabled
+            && !text.vim_state.is_idle()
+            && matches!(
+                text.vim_mode,
+                VimMode::Normal | VimMode::Visual | VimMode::VisualLine
+            )
+    }
+
     pub fn shift_vim_visual_anchor(&mut self, delta: usize) {
         self.surface.text_mut().vim_state.shift_visual_anchor(delta);
     }

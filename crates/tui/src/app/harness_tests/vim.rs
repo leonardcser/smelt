@@ -254,9 +254,69 @@ fn vim_dd_in_normal_deletes_line() {
 }
 
 #[test]
+fn vim_pending_replace_owns_colon_before_cmdline() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("abc");
+    app.press(KeyCode::Esc);
+
+    app.type_char('r');
+    app.type_char(':');
+
+    let state = app.state();
+    assert_eq!(state.prompt_text, "ab:");
+    assert!(!state.cmdline_open);
+    assert_eq!(state.vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn vim_pending_replace_owns_slash_before_search() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("abc");
+    app.press(KeyCode::Esc);
+
+    app.type_char('r');
+    app.type_char('/');
+
+    let state = app.state();
+    assert_eq!(state.prompt_text, "ab/");
+    assert!(!state.cmdline_open);
+    assert_eq!(state.vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn vim_pending_find_owns_slash_before_search() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("a/b");
+    app.press(KeyCode::Esc);
+    app.type_char('0');
+
+    app.type_char('f');
+    app.type_char('/');
+
+    let state = app.state();
+    assert_eq!(state.prompt_text, "a/b");
+    assert!(!state.cmdline_open);
+    assert_eq!(state.vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn vim_pending_replace_owns_lua_keymap() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(r#"smelt.keymap.set("", "?", function() end)"#));
+    app.type_text("abc");
+    app.press(KeyCode::Esc);
+
+    app.type_char('r');
+    app.type_char('?');
+
+    let state = app.state();
+    assert_eq!(state.prompt_text, "ab?");
+    assert_eq!(state.vim_mode, VimMode::Normal);
+}
+
+#[test]
 fn vim_yy_yank_flash_expires_after_tick() {
     let mut app = TestApp::builder().with_vim(true).build();
-    // Type a line in insert mode, return to normal, then yank-line with `yy`.
     app.type_char('i');
     app.type_text("hello");
     app.press(KeyCode::Esc);

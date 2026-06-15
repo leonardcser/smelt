@@ -510,9 +510,10 @@ impl TuiApp {
     ///
     /// Returns `Some(outcome)` when consumed; `None` to continue with path-specific logic.
     ///
-    /// Dispatch priority: resize/mouse → content search opener → window-local Lua
-    /// keymaps → global Lua keymaps → pane chords → cmdline `:` → content focus → overlay keys.
-    fn dispatch_common(&mut self, ev: &Event) -> Option<EventOutcome> {
+    /// Dispatch priority: resize/mouse → pending prompt Vim input → content search opener
+    /// → window-local Lua keymaps → global Lua keymaps → pane chords → cmdline `:`
+    /// → content focus → overlay keys.
+    fn dispatch_common(&mut self, ev: &Event, running: bool) -> Option<EventOutcome> {
         if let Event::Resize(w, h) = *ev {
             self.handle_resize(w, h);
             return Some(EventOutcome::Noop);
@@ -521,6 +522,9 @@ impl TuiApp {
             return Some(self.handle_mouse(me));
         }
         if let Event::Key(k) = *ev {
+            if self.prompt_vim_pending_input_owns_key(k) {
+                return Some(self.dispatch_prompt_event_to_input(Event::Key(k), running));
+            }
             if matches!(self.app_focus, crate::app::AppFocus::Content)
                 && self.handle_search_open_before_window_dispatch(k)
             {
@@ -576,7 +580,7 @@ impl TuiApp {
     }
 
     fn handle_event_idle(&mut self, ev: Event) -> EventOutcome {
-        if let Some(outcome) = self.dispatch_common(&ev) {
+        if let Some(outcome) = self.dispatch_common(&ev, false) {
             return outcome;
         }
 
@@ -634,7 +638,7 @@ impl TuiApp {
     // ── Running event handler ────────────────────────────────────────────
 
     fn handle_event_running(&mut self, ev: Event) -> EventOutcome {
-        if let Some(outcome) = self.dispatch_common(&ev) {
+        if let Some(outcome) = self.dispatch_common(&ev, true) {
             return outcome;
         }
 
@@ -684,6 +688,10 @@ impl TuiApp {
             &mut self.core.clipboard,
             now,
         );
+        self.dispatch_running_input_action(input_action)
+    }
+
+    fn dispatch_running_input_action(&mut self, input_action: Action) -> EventOutcome {
         match input_action {
             Action::Submit { content, display } => {
                 return self.handle_running_submit(content, display, QueueStage::Turn);
@@ -832,18 +840,7 @@ impl TuiApp {
 
     fn handle_idle_prompt_esc(&mut self, ev: Event, modifiers: KeyModifiers) -> EventOutcome {
         if self.prompt_escape_owned_by_vim() {
-            let now = self.core.clock.instant_now();
-            let action = {
-                let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                self.input.handle_event(
-                    &mut pctx,
-                    ev,
-                    Some(&mut self.input_history),
-                    &mut self.core.clipboard,
-                    now,
-                )
-            };
-            return self.dispatch_input_action(action);
+            return self.dispatch_prompt_event_to_input(ev, false);
         }
 
         if let Some(outcome) =
@@ -888,6 +885,42 @@ impl TuiApp {
         EventOutcome::Noop
     }
 
+    fn prompt_vim_pending_input_owns_key(&self, key: KeyEvent) -> bool {
+        if self.app_focus != crate::app::AppFocus::Prompt {
+            return false;
+        }
+        if key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+        {
+            return false;
+        }
+        self.prompt_vim_has_pending_input()
+    }
+
+    fn prompt_vim_has_pending_input(&self) -> bool {
+        self.prompt_win().vim_has_pending_input()
+    }
+
+    fn dispatch_prompt_event_to_input(&mut self, ev: Event, running: bool) -> EventOutcome {
+        let now = self.core.clock.instant_now();
+        let action = {
+            let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+            self.input.handle_event(
+                &mut pctx,
+                ev,
+                Some(&mut self.input_history),
+                &mut self.core.clipboard,
+                now,
+            )
+        };
+        if running {
+            self.dispatch_running_input_action(action)
+        } else {
+            self.dispatch_input_action(action)
+        }
+    }
+
     fn prompt_escape_owned_by_vim(&self) -> bool {
         if !self.input.vim_enabled(self.prompt_win()) {
             return false;
@@ -896,7 +929,7 @@ impl TuiApp {
             crate::smelt_edit::VimMode::Insert
             | crate::smelt_edit::VimMode::Visual
             | crate::smelt_edit::VimMode::VisualLine => true,
-            crate::smelt_edit::VimMode::Normal => !self.prompt_win().vim_state().is_idle(),
+            crate::smelt_edit::VimMode::Normal => self.prompt_vim_has_pending_input(),
         }
     }
 
