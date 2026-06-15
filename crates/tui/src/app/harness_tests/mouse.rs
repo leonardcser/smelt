@@ -11,6 +11,51 @@ fn generic_win_cursor_setter_cannot_repark_prompt_cursor() {
 }
 
 #[test]
+fn prompt_bottom_chrome_click_focuses_prompt() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: "transcript content".into(),
+        });
+    app.render_silent();
+
+    let transcript_rect = app
+        .app
+        .ui
+        .split_rect(crate::app::TRANSCRIPT_WIN)
+        .expect("transcript rect after render");
+    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: transcript_rect.top,
+        column: transcript_rect.left,
+        modifiers: KeyModifiers::empty(),
+    })));
+    assert_eq!(app.state().app_focus, AppFocus::Content);
+
+    let bottom_win = app
+        .app
+        .ui
+        .named_win("smelt.prompt_bar.bottom")
+        .expect("default prompt bottom bar window");
+    let bottom_rect = app
+        .app
+        .ui
+        .split_rect(bottom_win)
+        .expect("bottom prompt chrome rect after render");
+    app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        row: bottom_rect.top,
+        column: bottom_rect.left,
+        modifiers: KeyModifiers::empty(),
+    })));
+
+    assert_eq!(app.state().app_focus, AppFocus::Prompt);
+    assert_eq!(app.app.ui.focus(), Some(crate::app::PROMPT_WIN));
+}
+
+#[test]
 fn wheel_scroll_in_visual_mode_preserves_cursor_screen_row() {
     let mut app = row_document_transcript_app(100, true);
 

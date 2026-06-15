@@ -68,8 +68,8 @@ pub(crate) fn focus_for_region_click(
     }
 }
 
-fn is_prompt_top_bar_window(win: &crate::smelt_edit::Window) -> bool {
-    win.config.region == "prompt_above"
+fn is_prompt_chrome_window(win: &crate::smelt_edit::Window) -> bool {
+    matches!(win.config.region.as_str(), "prompt_above" | "prompt_below")
 }
 
 fn projected_buf_breaks(buf: &crate::smelt_edit::Buffer) -> (Vec<usize>, Vec<usize>) {
@@ -162,7 +162,7 @@ impl TuiApp {
                     if matches!(focus, AppFocus::Prompt)
                         && hit_target.is_some_and(|ht| match ht {
                             HitTarget::Window(w) => {
-                                self.ui.win(w).is_some_and(is_prompt_top_bar_window)
+                                self.ui.win(w).is_some_and(is_prompt_chrome_window)
                             }
                             _ => false,
                         })
@@ -222,7 +222,7 @@ impl TuiApp {
             {
                 if is_down
                     && self.ui.active_modal().is_none()
-                    && self.ui.win(win).is_some_and(is_prompt_top_bar_window)
+                    && self.ui.win(win).is_some_and(is_prompt_chrome_window)
                 {
                     self.app_focus = AppFocus::Prompt;
                     self.ui.set_focus(crate::app::PROMPT_WIN);
@@ -237,7 +237,7 @@ impl TuiApp {
                     if is_down {
                         self.ui.cancel_pointer_interaction();
                     }
-                    return if self.ui.win(win).is_some_and(is_prompt_top_bar_window) {
+                    return if self.ui.win(win).is_some_and(is_prompt_chrome_window) {
                         EventOutcome::Redraw
                     } else {
                         EventOutcome::Noop
@@ -247,7 +247,7 @@ impl TuiApp {
                     && self
                         .ui
                         .win(win)
-                        .is_some_and(|w| w.accepts_focus() && !is_prompt_top_bar_window(w))
+                        .is_some_and(|w| w.accepts_focus() && !is_prompt_chrome_window(w))
                 {
                     self.ui.set_focus(win);
                 }
@@ -257,7 +257,7 @@ impl TuiApp {
                     }
                 }
             } else if is_down {
-                if self.ui.win(win).is_some_and(is_prompt_top_bar_window)
+                if self.ui.win(win).is_some_and(is_prompt_chrome_window)
                     && self.ui.active_modal().is_none()
                 {
                     self.app_focus = AppFocus::Prompt;
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_bottom_bar_click_is_inert() {
+    fn prompt_bottom_bar_click_focuses_prompt() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         app.push_block(smelt_core::Block::Text {
             content: "content focus target".into(),
@@ -789,8 +789,8 @@ mod tests {
 
         app.handle_mouse(down);
 
-        assert_eq!(app.app_focus, AppFocus::Content);
-        assert_eq!(app.ui.focus(), Some(crate::app::TRANSCRIPT_WIN));
+        assert_eq!(app.app_focus, AppFocus::Prompt);
+        assert_eq!(app.ui.focus(), Some(crate::app::PROMPT_WIN));
         assert_eq!(app.ui.capture(), None);
         assert!(app.core.clipboard.kill_ring.current().is_empty());
     }
