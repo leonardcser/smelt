@@ -273,7 +273,7 @@ mod tests {
     use crate::content::display_layout::{
         DisplayCacheKey, DisplayLayoutCacheEntry, DisplayRowIndexEntry, DisplayRowIndexNode,
     };
-    use smelt_core::content::block_layout::BlockLayout;
+    use smelt_core::content::block_layout::{BlockLayout, LayoutLeaf, RunsSpec};
     use smelt_core::transcript_model::{BlockId, LayoutKey, ViewState};
 
     fn row_index() -> DisplayRowIndexEntry {
@@ -316,6 +316,35 @@ mod tests {
         assert_eq!(decoded.row_indexes[0].nodes[0].exact_height, 3);
         assert_eq!(decoded.display_layouts.len(), 1);
         assert_eq!(decoded.display_layouts[0].key.renderer_generation, 1);
+    }
+
+    #[test]
+    fn cache_round_trips_styled_lines_layouts() {
+        let data = DisplayCacheData {
+            row_indexes: Vec::new(),
+            display_layouts: vec![DisplayLayoutCacheEntry {
+                id: BlockId::new(9),
+                key: DisplayCacheKey::new(1, 0, 1, Some(1), 0),
+                layout: BlockLayout::Leaf(LayoutLeaf::Runs(RunsSpec {
+                    lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                        text: "styled".into(),
+                        hl: Some("Title".into()),
+                        ..Default::default()
+                    }]]),
+                    hl_group: None,
+                })),
+            }],
+        };
+
+        let payload =
+            encode_display_layouts(&data.display_layouts).expect("encode display layouts");
+        let decoded_layouts: Vec<DisplayLayoutCacheEntry> =
+            bincode::deserialize(&payload).expect("decode display layouts");
+        assert_eq!(decoded_layouts.len(), 1);
+
+        let decoded = decode(&encode(&data).expect("encode cache")).expect("decode cache");
+
+        assert_eq!(decoded.display_layouts.len(), 1);
     }
 
     #[test]

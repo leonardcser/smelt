@@ -26,26 +26,17 @@ fn is_true(v: &bool) -> bool {
 /// after the live tool timer rather than as part of the primary title. `hl` names
 /// a theme group whose style is composed before the per-span modifiers. `fg`/`bg`
 /// name theme groups whose fg/bg axis is extracted (matching `buf:mark` semantics).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StyledSpan {
     pub text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syntax: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hl: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fg: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bg: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dim: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bold: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub italic: bool,
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub selectable: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub title_suffix: bool,
 }
 
@@ -62,6 +53,154 @@ impl Default for StyledSpan {
             italic: false,
             selectable: true,
             title_suffix: false,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct StyledSpanHuman<'a> {
+    text: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    syntax: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hl: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fg: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bg: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    dim: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    bold: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    italic: bool,
+    #[serde(skip_serializing_if = "is_true")]
+    selectable: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    title_suffix: bool,
+}
+
+#[derive(Deserialize)]
+struct StyledSpanHumanOwned {
+    text: String,
+    #[serde(default)]
+    syntax: Option<String>,
+    #[serde(default)]
+    hl: Option<String>,
+    #[serde(default)]
+    fg: Option<String>,
+    #[serde(default)]
+    bg: Option<String>,
+    #[serde(default)]
+    dim: bool,
+    #[serde(default)]
+    bold: bool,
+    #[serde(default)]
+    italic: bool,
+    #[serde(default = "default_true")]
+    selectable: bool,
+    #[serde(default)]
+    title_suffix: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StyledSpanBinary {
+    text: String,
+    syntax: Option<String>,
+    hl: Option<String>,
+    fg: Option<String>,
+    bg: Option<String>,
+    dim: bool,
+    bold: bool,
+    italic: bool,
+    selectable: bool,
+    title_suffix: bool,
+}
+
+impl<'a> From<&'a StyledSpan> for StyledSpanHuman<'a> {
+    fn from(span: &'a StyledSpan) -> Self {
+        Self {
+            text: &span.text,
+            syntax: span.syntax.as_deref(),
+            hl: span.hl.as_deref(),
+            fg: span.fg.as_deref(),
+            bg: span.bg.as_deref(),
+            dim: span.dim,
+            bold: span.bold,
+            italic: span.italic,
+            selectable: span.selectable,
+            title_suffix: span.title_suffix,
+        }
+    }
+}
+
+impl From<StyledSpanHumanOwned> for StyledSpan {
+    fn from(span: StyledSpanHumanOwned) -> Self {
+        Self {
+            text: span.text,
+            syntax: span.syntax,
+            hl: span.hl,
+            fg: span.fg,
+            bg: span.bg,
+            dim: span.dim,
+            bold: span.bold,
+            italic: span.italic,
+            selectable: span.selectable,
+            title_suffix: span.title_suffix,
+        }
+    }
+}
+
+impl From<&StyledSpan> for StyledSpanBinary {
+    fn from(span: &StyledSpan) -> Self {
+        Self {
+            text: span.text.clone(),
+            syntax: span.syntax.clone(),
+            hl: span.hl.clone(),
+            fg: span.fg.clone(),
+            bg: span.bg.clone(),
+            dim: span.dim,
+            bold: span.bold,
+            italic: span.italic,
+            selectable: span.selectable,
+            title_suffix: span.title_suffix,
+        }
+    }
+}
+
+impl From<StyledSpanBinary> for StyledSpan {
+    fn from(span: StyledSpanBinary) -> Self {
+        Self {
+            text: span.text,
+            syntax: span.syntax,
+            hl: span.hl,
+            fg: span.fg,
+            bg: span.bg,
+            dim: span.dim,
+            bold: span.bold,
+            italic: span.italic,
+            selectable: span.selectable,
+            title_suffix: span.title_suffix,
+        }
+    }
+}
+
+impl Serialize for StyledSpan {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            StyledSpanHuman::from(self).serialize(s)
+        } else {
+            StyledSpanBinary::from(self).serialize(s)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StyledSpan {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if d.is_human_readable() {
+            StyledSpanHumanOwned::deserialize(d).map(StyledSpan::from)
+        } else {
+            StyledSpanBinary::deserialize(d).map(StyledSpan::from)
         }
     }
 }
@@ -144,6 +283,10 @@ impl Serialize for StyledLines {
 
 impl<'de> Deserialize<'de> for StyledLines {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if !d.is_human_readable() {
+            return Vec::<Vec<StyledSpan>>::deserialize(d).map(StyledLines);
+        }
+
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Form {
