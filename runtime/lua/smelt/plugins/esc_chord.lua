@@ -21,4 +21,4 @@ smelt.keymap.set("", "<Esc><Esc>", function(ctx)
   else
     smelt.cmd.run("rewind")
   end
-end)
+end, { desc = "cancel work / rewind" })
