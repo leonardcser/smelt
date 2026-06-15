@@ -27,21 +27,24 @@ pub(crate) fn build_transcript_from_session(
             .as_ref()
             .is_some_and(|cp| cp.first_live_index == idx)
         {
-            transcript.push(Block::Compacted {
-                summary: compaction
-                    .as_ref()
-                    .map(|cp| cp.summary.clone())
-                    .unwrap_or_default(),
-            });
+            transcript.insert_checkpoint_marker(
+                idx,
+                Block::Compacted {
+                    summary: compaction
+                        .as_ref()
+                        .map(|cp| cp.summary.clone())
+                        .unwrap_or_default(),
+                },
+            );
         }
         match item {
             HistoryItem::User { content, display } => {
-                push_user_block(&mut transcript, lua, content, display.as_deref())
+                push_user_block(&mut transcript, lua, idx, content, display.as_deref())
             }
             HistoryItem::Assistant(turn) => {
-                push_assistant_blocks(&mut transcript, lua, turn, &tool_elapsed)
+                push_assistant_blocks(&mut transcript, lua, idx, turn, &tool_elapsed)
             }
-            HistoryItem::Note(note) => push_note_block(&mut transcript, lua, note),
+            HistoryItem::Note(note) => push_note_block(&mut transcript, lua, idx, note),
             HistoryItem::System { .. } => {}
         }
     }
@@ -49,12 +52,44 @@ pub(crate) fn build_transcript_from_session(
         .as_ref()
         .is_some_and(|cp| cp.first_live_index >= session.history.len())
     {
-        transcript.push(Block::Compacted {
-            summary: compaction.map(|cp| cp.summary).unwrap_or_default(),
-        });
+        transcript.insert_checkpoint_marker(
+            session.history.len(),
+            Block::Compacted {
+                summary: compaction.map(|cp| cp.summary).unwrap_or_default(),
+            },
+        );
     }
 
     transcript
+}
+
+fn fallback_transcript_index_for_history_index(
+    history: &[HistoryItem],
+    history_index: usize,
+) -> usize {
+    history
+        .iter()
+        .take(history_index.min(history.len()))
+        .map(fallback_history_item_block_count)
+        .sum()
+}
+
+fn fallback_history_item_block_count(item: &HistoryItem) -> usize {
+    match item {
+        HistoryItem::User { .. } | HistoryItem::Note(_) => 1,
+        HistoryItem::System { .. } => 0,
+        HistoryItem::Assistant(turn) => {
+            let reasoning_blocks = turn
+                .reasoning
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty());
+            let content_blocks = turn
+                .content
+                .as_ref()
+                .is_some_and(|c| !c.text_content().trim().is_empty());
+            usize::from(reasoning_blocks) + usize::from(content_blocks) + turn.invocations.len()
+        }
+    }
 }
 
 pub(crate) fn history_note_to_block(
@@ -72,14 +107,19 @@ pub(crate) fn history_note_to_block(
 fn push_note_block(
     transcript: &mut Transcript,
     lua: &crate::lua::LuaRuntime,
+    history_index: usize,
     note: &protocol::HistoryNote,
 ) {
-    transcript.push(history_note_to_block(lua, note));
+    transcript.push_with_origin(
+        history_note_to_block(lua, note),
+        smelt_core::BlockOrigin::History(history_index),
+    );
 }
 
 fn push_user_block(
     transcript: &mut Transcript,
     lua: &crate::lua::LuaRuntime,
+    history_index: usize,
     content: &Content,
     display: Option<&str>,
 ) {
@@ -87,19 +127,28 @@ fn push_user_block(
     let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
     if let Some(rest) = text.strip_prefix(prefix_marker) {
         let summary = rest.trim_start_matches('\n');
-        transcript.push(Block::Compacted {
-            summary: summary.to_string(),
-        });
+        transcript.push_with_origin(
+            Block::Compacted {
+                summary: summary.to_string(),
+            },
+            smelt_core::BlockOrigin::History(history_index),
+        );
         return;
     }
     if let Some(note) = text.strip_prefix(protocol::MODE_NOTE_PREFIX) {
-        transcript.push(lua.mode_block(None, note.trim()));
+        transcript.push_with_origin(
+            lua.mode_block(None, note.trim()),
+            smelt_core::BlockOrigin::History(history_index),
+        );
         return;
     }
     if let Some(note) = text.strip_prefix(protocol::PROCESS_STATUS_NOTE_PREFIX) {
-        transcript.push(Block::ProcessStatus {
-            text: note.trim().to_string(),
-        });
+        transcript.push_with_origin(
+            Block::ProcessStatus {
+                text: note.trim().to_string(),
+            },
+            smelt_core::BlockOrigin::History(history_index),
+        );
         return;
     }
     let image_labels = content.image_labels();
@@ -114,29 +163,39 @@ fn push_user_block(
             format!("{display_source} {suffix}")
         }
     };
-    transcript.push(Block::User {
-        text: display_text,
-        image_labels,
-    });
+    transcript.push_with_origin(
+        Block::User {
+            text: display_text,
+            image_labels,
+        },
+        smelt_core::BlockOrigin::History(history_index),
+    );
 }
 
 fn push_assistant_blocks(
     transcript: &mut Transcript,
     lua: &crate::lua::LuaRuntime,
+    history_index: usize,
     turn: &AssistantStep,
     tool_elapsed: &HashMap<String, u64>,
 ) {
     if let Some(ref reasoning) = turn.reasoning {
         if !reasoning.is_empty() {
-            transcript.push(Block::Thinking {
-                content: reasoning.clone(),
-            });
+            transcript.push_with_origin(
+                Block::Thinking {
+                    content: reasoning.clone(),
+                },
+                smelt_core::BlockOrigin::History(history_index),
+            );
         }
     }
     if let Some(ref content) = turn.content {
-        transcript.push(Block::Text {
-            content: content.text_content().into_owned(),
-        });
+        transcript.push_with_origin(
+            Block::Text {
+                content: content.text_content().into_owned(),
+            },
+            smelt_core::BlockOrigin::History(history_index),
+        );
     }
     for inv in &turn.invocations {
         let args: HashMap<String, serde_json::Value> =
@@ -159,7 +218,7 @@ fn push_assistant_blocks(
             .elapsed_ms
             .or_else(|| tool_elapsed.get(&inv.call_id).copied());
         let summary = lua.tool_summary(&inv.name, &args);
-        transcript.push_tool_call(
+        transcript.push_tool_call_with_origin(
             Block::ToolCall {
                 call_id: inv.call_id.clone(),
                 name: inv.name.clone(),
@@ -174,6 +233,7 @@ fn push_assistant_blocks(
                 render_cache: None,
                 layout_revision: 0,
             },
+            smelt_core::BlockOrigin::History(history_index),
         );
     }
 }
@@ -433,11 +493,23 @@ impl TuiApp {
         }
     }
 
+    pub(crate) fn schedule_session_save(&mut self) {
+        self.session_save_pending = true;
+    }
+
+    pub(crate) fn save_session_if_pending(&mut self) {
+        if self.session_save_pending && self.agent.is_none() && !self.busy_stack.is_busy() {
+            self.save_session();
+        }
+    }
+
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
         if self.core.session.history.is_empty() {
+            self.session_save_pending = false;
             return;
         }
+        self.session_save_pending = false;
         self.sync_session_snapshot();
         let blobs = self
             .input
@@ -459,6 +531,28 @@ impl TuiApp {
         self.persister.flush();
     }
 
+    fn refresh_compaction_marker(&mut self) {
+        let Some(checkpoint) = self.core.session.checkpoint.as_ref() else {
+            return;
+        };
+        let block = Block::Compacted {
+            summary: checkpoint.summary.clone(),
+        };
+        if self
+            .transcript
+            .has_history_origin_at_or_after(checkpoint.first_live_index)
+        {
+            self.transcript
+                .insert_checkpoint_marker(checkpoint.first_live_index, block);
+        } else {
+            let index = fallback_transcript_index_for_history_index(
+                &self.core.session.history,
+                checkpoint.first_live_index,
+            );
+            self.transcript.insert_checkpoint_marker_at(index, block);
+        }
+    }
+
     pub(crate) fn install_context_checkpoint(
         &mut self,
         kind: String,
@@ -476,8 +570,9 @@ impl TuiApp {
             self.notify("nothing old enough to compact".to_string());
             return false;
         }
-        self.restore_screen();
-        self.save_session();
+        self.refresh_compaction_marker();
+        self.publish_history_delta("checkpoint");
+        self.schedule_session_save();
         self.transcript_win_mut().scroll_to_bottom();
         true
     }
@@ -658,6 +753,209 @@ mod checkpoint_tests {
         let history = app.app.transcript.history();
         let id = history.order[0];
         assert!(matches!(history.blocks.get(&id), Some(Block::Mode { .. })));
+    }
+
+    #[test]
+    fn checkpoint_commit_inserts_marker_without_rebuilding_transcript() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        app.app.restore_screen();
+        let before = app.app.transcript.history().order.clone();
+
+        let installed =
+            app.app
+                .install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(100));
+
+        assert!(installed);
+        let history = app.app.transcript.history();
+        assert_eq!(history.order.len(), before.len() + 1);
+        assert_eq!(history.order[0], before[0]);
+        assert_eq!(history.order[1], before[1]);
+        assert_eq!(history.order[3], before[2]);
+        assert_eq!(history.order[4], before[3]);
+        assert!(matches!(
+            history.blocks.get(&history.order[2]),
+            Some(Block::Compacted { summary }) if summary == "summary"
+        ));
+    }
+
+    #[test]
+    fn checkpoint_commit_moves_existing_marker() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("kept user"),
+            assistant("kept reply"),
+            user("newest"),
+        ];
+        app.app.core.session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "old summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+            ..Default::default()
+        });
+        app.app.restore_screen();
+
+        let installed = app.app.install_context_checkpoint(
+            "compaction".into(),
+            "new summary".into(),
+            2,
+            Some(100),
+        );
+
+        assert!(installed);
+        let history = app.app.transcript.history();
+        let markers: Vec<_> = history
+            .order
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, id)| match history.blocks.get(id) {
+                Some(Block::Compacted { summary }) => Some((idx, summary.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(markers, vec![(3, "new summary")]);
+        assert!(app.app.session_save_pending);
+    }
+
+    #[test]
+    fn checkpoint_commit_places_marker_without_existing_provenance() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![
+            user("old"),
+            assistant("old reply"),
+            user("recent"),
+            assistant("recent reply"),
+        ];
+        for block in [
+            Block::User {
+                text: "old".into(),
+                image_labels: vec![],
+            },
+            Block::Text {
+                content: "old reply".into(),
+            },
+            Block::User {
+                text: "recent".into(),
+                image_labels: vec![],
+            },
+            Block::Text {
+                content: "recent reply".into(),
+            },
+        ] {
+            app.app.push_block(block);
+        }
+
+        let installed =
+            app.app
+                .install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(100));
+
+        assert!(installed);
+        let history = app.app.transcript.history();
+        assert!(matches!(
+            history.blocks.get(&history.order[2]),
+            Some(Block::Compacted { summary }) if summary == "summary"
+        ));
+    }
+
+    #[test]
+    fn checkpoint_commit_falls_back_when_boundary_is_after_known_origins() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![user("restored"), assistant("restored reply")];
+        app.app.restore_screen();
+        app.app.core.session.history.extend([
+            user("live old"),
+            assistant("live old reply"),
+            user("live recent"),
+            assistant("live recent reply"),
+        ]);
+        for block in [
+            Block::User {
+                text: "live old".into(),
+                image_labels: vec![],
+            },
+            Block::Text {
+                content: "live old reply".into(),
+            },
+            Block::User {
+                text: "live recent".into(),
+                image_labels: vec![],
+            },
+            Block::Text {
+                content: "live recent reply".into(),
+            },
+        ] {
+            app.app.push_block(block);
+        }
+
+        let installed =
+            app.app
+                .install_context_checkpoint("compaction".into(), "summary".into(), 4, Some(100));
+
+        assert!(installed);
+        let history = app.app.transcript.history();
+        assert!(matches!(
+            history.blocks.get(&history.order[4]),
+            Some(Block::Compacted { summary }) if summary == "summary"
+        ));
+        assert!(matches!(
+            history.blocks.get(&history.order[5]),
+            Some(Block::User { text, .. }) if text == "live recent"
+        ));
+    }
+
+    #[test]
+    fn checkpoint_commit_keeps_history_compacted_blocks() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![
+            user(&format!(
+                "{}\nuser-written summary-looking block",
+                engine::SUMMARY_PREFIX.trim_end()
+            )),
+            assistant("reply"),
+            user("recent"),
+        ];
+        app.app.core.session.checkpoint = Some(ContextCheckpoint {
+            kind: "compaction".to_string(),
+            summary: "old summary".to_string(),
+            first_live_index: 2,
+            created_at_ms: 0,
+            tokens_before: None,
+            tokens_after_estimate: None,
+            ..Default::default()
+        });
+        app.app.restore_screen();
+
+        let installed = app.app.install_context_checkpoint(
+            "compaction".into(),
+            "new summary".into(),
+            2,
+            Some(100),
+        );
+
+        assert!(installed);
+        let history = app.app.transcript.history();
+        let summaries: Vec<_> = history
+            .order
+            .iter()
+            .filter_map(|id| match history.blocks.get(id) {
+                Some(Block::Compacted { summary }) => Some(summary.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            summaries,
+            vec!["user-written summary-looking block", "new summary"]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

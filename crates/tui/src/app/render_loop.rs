@@ -9,6 +9,7 @@ impl TuiApp {
     pub(crate) fn render_normal(&mut self, agent_running: bool) {
         let mut stdout = std::io::stdout();
         self.render_normal_to(agent_running, &mut stdout);
+        self.save_session_if_pending();
     }
 
     /// Render variant parameterised by the output sink. Production passes

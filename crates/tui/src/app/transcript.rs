@@ -167,6 +167,22 @@ impl TranscriptView {
         self.transcript.push(block);
     }
 
+    pub(crate) fn insert_checkpoint_marker(&mut self, history_index: usize, block: Block) {
+        self.transcript
+            .insert_checkpoint_marker(history_index, block);
+    }
+
+    pub(crate) fn insert_checkpoint_marker_at(&mut self, block_index: usize, block: Block) {
+        self.transcript
+            .insert_checkpoint_marker_at(block_index, block);
+    }
+
+    pub(crate) fn has_history_origin_at_or_after(&self, history_index: usize) -> bool {
+        self.transcript
+            .history
+            .has_history_origin_at_or_after(history_index)
+    }
+
     pub(crate) fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
         self.transcript.drain_finished_blocks()
     }

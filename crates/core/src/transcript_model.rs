@@ -228,6 +228,12 @@ impl BlockId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum BlockOrigin {
+    History(usize),
+    CheckpointMarker,
+}
+
 /// How the block is presented in the transcript. Independent of [`Status`] -
 /// a streaming block can be `Collapsed`. The layout cache keys on this, so
 /// flipping view state invalidates only that block.
@@ -277,6 +283,8 @@ pub struct BlockHistory {
     pub(crate) view_states: HashMap<BlockId, ViewState>,
     /// Absent entries default to `Status::Done`.
     pub(crate) statuses: HashMap<BlockId, Status>,
+    /// Optional provenance for blocks projected from durable history or session checkpoints.
+    origins: HashMap<BlockId, BlockOrigin>,
     /// Blocks that transitioned `Streaming` → `Done` since last drain;
     /// drained by the app loop to emit `block_done` autocmds.
     pub finished_blocks: Vec<BlockId>,
@@ -294,6 +302,7 @@ impl BlockHistory {
             tool_states: HashMap::new(),
             view_states: HashMap::new(),
             statuses: HashMap::new(),
+            origins: HashMap::new(),
             finished_blocks: Vec::new(),
             generation: 0,
         }
@@ -328,6 +337,12 @@ impl BlockHistory {
 
     pub fn block_at(&self, i: usize) -> &Block {
         &self.blocks[&self.order[i]]
+    }
+
+    pub fn has_history_origin_at_or_after(&self, before_history_index: usize) -> bool {
+        self.origins.values().any(|origin| {
+            matches!(origin, BlockOrigin::History(history_index) if *history_index >= before_history_index)
+        })
     }
 
     pub(crate) fn view_state(&self, id: BlockId) -> ViewState {
@@ -369,15 +384,87 @@ impl BlockHistory {
         self.bump_generation();
     }
 
-    pub(crate) fn push(&mut self, block: Block) -> BlockId {
+    fn add_block(
+        &mut self,
+        idx: Option<usize>,
+        block: Block,
+        origin: Option<BlockOrigin>,
+    ) -> BlockId {
         let hash = block.content_hash();
         let id = BlockId(self.next_id);
         self.next_id += 1;
-        self.order.push(id);
+        match idx {
+            Some(idx) => self.order.insert(idx.min(self.order.len()), id),
+            None => self.order.push(id),
+        }
         self.blocks.insert(id, block);
         self.content_hashes.insert(id, hash);
+        if let Some(origin) = origin {
+            self.origins.insert(id, origin);
+        }
         self.bump_generation();
         id
+    }
+
+    pub(crate) fn push(&mut self, block: Block) -> BlockId {
+        self.add_block(None, block, None)
+    }
+
+    pub(crate) fn push_with_origin(&mut self, block: Block, origin: BlockOrigin) -> BlockId {
+        self.add_block(None, block, Some(origin))
+    }
+
+    pub(crate) fn insert_checkpoint_marker(
+        &mut self,
+        before_history_index: usize,
+        block: Block,
+    ) -> BlockId {
+        self.remove_checkpoint_marker();
+        let idx = self
+            .order
+            .iter()
+            .position(|id| {
+                matches!(
+                    self.origins.get(id),
+                    Some(BlockOrigin::History(history_index)) if *history_index >= before_history_index
+                )
+            })
+            .unwrap_or(self.order.len());
+        self.add_block(Some(idx), block, Some(BlockOrigin::CheckpointMarker))
+    }
+
+    pub(crate) fn insert_checkpoint_marker_at(
+        &mut self,
+        block_index: usize,
+        block: Block,
+    ) -> BlockId {
+        self.remove_checkpoint_marker();
+        self.add_block(
+            Some(block_index),
+            block,
+            Some(BlockOrigin::CheckpointMarker),
+        )
+    }
+
+    fn remove_checkpoint_marker(&mut self) {
+        let removed: Vec<BlockId> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|id| matches!(self.origins.get(id), Some(BlockOrigin::CheckpointMarker)))
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        self.order.retain(|id| !removed.contains(id));
+        for id in removed {
+            self.blocks.remove(&id);
+            self.content_hashes.remove(&id);
+            self.view_states.remove(&id);
+            self.statuses.remove(&id);
+            self.origins.remove(&id);
+        }
+        self.bump_generation();
     }
 
     pub(crate) fn push_with_state(
@@ -388,6 +475,17 @@ impl BlockHistory {
     ) -> BlockId {
         self.tool_states.insert(call_id, state);
         self.push(block)
+    }
+
+    pub(crate) fn push_with_state_and_origin(
+        &mut self,
+        block: Block,
+        call_id: String,
+        state: ToolState,
+        origin: BlockOrigin,
+    ) -> BlockId {
+        self.tool_states.insert(call_id, state);
+        self.push_with_origin(block, origin)
     }
 
     /// Replace block content in place. Preserves `BlockId`, `Status`, and
@@ -415,6 +513,7 @@ impl BlockHistory {
         self.tool_states.clear();
         self.view_states.clear();
         self.statuses.clear();
+        self.origins.clear();
         self.bump_generation();
     }
 
@@ -463,6 +562,7 @@ impl BlockHistory {
             self.content_hashes.remove(&id);
             self.view_states.remove(&id);
             self.statuses.remove(&id);
+            self.origins.remove(&id);
         }
         self.bump_generation();
         self.gc_tool_states();

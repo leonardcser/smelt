@@ -1,7 +1,7 @@
 use crate::config;
 use protocol::{
-    history_from_messages, history_to_messages, message_to_history_positions, HistoryItem, Message,
-    ReasoningEffort, TokenUsage, TurnMeta,
+    history_from_messages, history_item_message_count, message_to_history_positions, HistoryItem,
+    Message, ReasoningEffort, TokenUsage, TurnMeta,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -685,40 +685,31 @@ impl Session {
         &self,
         first_live_message_index: usize,
     ) -> Option<usize> {
-        let model_history = self.model_history("");
-        if model_history.is_empty() {
-            return None;
-        }
-
-        let mut item_to_history_index: Vec<Option<usize>> = Vec::with_capacity(model_history.len());
-        if let Some(cp) = &self.checkpoint {
-            item_to_history_index.push(None);
-            item_to_history_index.extend((cp.first_live_index..self.history.len()).map(Some));
-        } else {
-            item_to_history_index.extend((0..self.history.len()).map(Some));
-        }
-
-        let model_messages = history_to_messages(&model_history);
-        if first_live_message_index > model_messages.len() {
-            return None;
-        }
         if first_live_message_index == 0 {
             return None;
         }
-        if first_live_message_index == model_messages.len() {
-            return Some(self.history.len());
+
+        let mut message_index = 0usize;
+        let first_history_index = if let Some(cp) = &self.checkpoint {
+            // The checkpoint summary is one synthetic model-visible user message.
+            message_index = 1;
+            cp.first_live_index
+        } else {
+            0
+        };
+
+        for (history_index, item) in self.history.iter().enumerate().skip(first_history_index) {
+            if first_live_message_index == message_index {
+                return Some(history_index);
+            }
+            let next_message_index = message_index.saturating_add(history_item_message_count(item));
+            if first_live_message_index < next_message_index {
+                return None;
+            }
+            message_index = next_message_index;
         }
 
-        let message_to_item = message_to_history_positions(&model_messages);
-        let item_index = *message_to_item.get(first_live_message_index)?;
-        if first_live_message_index > 0
-            && message_to_item
-                .get(first_live_message_index - 1)
-                .is_some_and(|prev| *prev == item_index)
-        {
-            return None;
-        }
-        item_to_history_index.get(item_index).and_then(|idx| *idx)
+        (first_live_message_index == message_index).then_some(self.history.len())
     }
 
     pub fn merge_model_history_snapshot(

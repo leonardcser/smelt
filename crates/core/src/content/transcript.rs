@@ -1,6 +1,6 @@
 //! `Transcript` owns the block history. Streaming parsing lives in `StreamParser`; display projection in `tui`.
 
-use crate::transcript_model::{Block, BlockHistory, BlockId, ToolState, ViewState};
+use crate::transcript_model::{Block, BlockHistory, BlockId, BlockOrigin, ToolState, ViewState};
 
 pub struct Transcript {
     pub history: BlockHistory,
@@ -39,12 +39,12 @@ impl Transcript {
 
     // ── Mutations ─────────────────────────────────────────────────────
 
-    pub fn push(&mut self, block: Block) {
-        let block = match block {
+    fn normalize_block(block: Block) -> Option<Block> {
+        Some(match block {
             Block::Text { content } => {
                 let t = content.trim();
                 if t.is_empty() {
-                    return;
+                    return None;
                 }
                 Block::Text {
                     content: t.to_string(),
@@ -53,7 +53,7 @@ impl Transcript {
             Block::Thinking { content } => {
                 let t = content.trim();
                 if t.is_empty() {
-                    return;
+                    return None;
                 }
                 Block::Thinking {
                     content: t.to_string(),
@@ -62,15 +62,42 @@ impl Transcript {
             Block::Compacted { summary } => {
                 let t = summary.trim();
                 if t.is_empty() {
-                    return;
+                    return None;
                 }
                 Block::Compacted {
                     summary: t.to_string(),
                 }
             }
             other => other,
+        })
+    }
+
+    pub fn push(&mut self, block: Block) {
+        let Some(block) = Self::normalize_block(block) else {
+            return;
         };
         self.history.push(block);
+    }
+
+    pub fn push_with_origin(&mut self, block: Block, origin: BlockOrigin) {
+        let Some(block) = Self::normalize_block(block) else {
+            return;
+        };
+        self.history.push_with_origin(block, origin);
+    }
+
+    pub fn insert_checkpoint_marker(&mut self, history_index: usize, block: Block) {
+        let Some(block) = Self::normalize_block(block) else {
+            return;
+        };
+        self.history.insert_checkpoint_marker(history_index, block);
+    }
+
+    pub fn insert_checkpoint_marker_at(&mut self, block_index: usize, block: Block) {
+        let Some(block) = Self::normalize_block(block) else {
+            return;
+        };
+        self.history.insert_checkpoint_marker_at(block_index, block);
     }
 
     pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
@@ -80,6 +107,21 @@ impl Transcript {
             _ => return,
         };
         self.history.push_with_state(block, call_id, state);
+    }
+
+    pub fn push_tool_call_with_origin(
+        &mut self,
+        block: Block,
+        state: ToolState,
+        origin: BlockOrigin,
+    ) {
+        debug_assert!(matches!(block, Block::ToolCall { .. }));
+        let call_id = match &block {
+            Block::ToolCall { call_id, .. } => call_id.clone(),
+            _ => return,
+        };
+        self.history
+            .push_with_state_and_origin(block, call_id, state, origin);
     }
 
     pub fn truncate_to(&mut self, block_idx: usize) {

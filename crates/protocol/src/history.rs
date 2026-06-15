@@ -436,6 +436,15 @@ pub fn history_to_messages(items: &[HistoryItem]) -> Vec<Message> {
     out
 }
 
+/// Number of provider-wire messages emitted for one semantic history item.
+/// Keep this in lockstep with [`history_to_messages`].
+pub fn history_item_message_count(item: &HistoryItem) -> usize {
+    match item {
+        HistoryItem::System { .. } | HistoryItem::User { .. } | HistoryItem::Note(_) => 1,
+        HistoryItem::Assistant(turn) => 1 + turn.invocations.len(),
+    }
+}
+
 /// For each input `Message` index, return the index into the produced
 /// `Vec<HistoryItem>`. Useful for remapping snapshot keys when loading an
 /// older session whose `token_snapshots` etc. were keyed by message

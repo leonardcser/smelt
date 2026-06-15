@@ -71,6 +71,6 @@ pub use session::{ContextCheckpoint, Session};
 pub use timers::Timers;
 
 pub use crate::transcript_model::{
-    ApprovalScope, Block, BlockId, ConfirmChoice, ConfirmRequest, PermissionEntry, ToolOutput,
-    ToolState, ToolStatus, ViewState,
+    ApprovalScope, Block, BlockId, BlockOrigin, ConfirmChoice, ConfirmRequest, PermissionEntry,
+    ToolOutput, ToolState, ToolStatus, ViewState,
 };
