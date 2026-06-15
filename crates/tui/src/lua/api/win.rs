@@ -194,18 +194,16 @@ impl mlua::UserData for LuaWin {
         });
 
         // Inner-content width in cells, with gutter and pad_left/pad_right
-        // already subtracted. Falls back to the layout-resolved rect minus
-        // gutters when the viewport hasn't been laid out yet - keeps bar
-        // renderers from picking the `or 80` cold-start width on the
-        // first frame after bootstrap.
+        // already subtracted. Prefer the layout-resolved rect so renderers see
+        // the current terminal size during the first frame of a resize, before
+        // the window viewport has been refreshed by painting.
         methods.add_method("content_width", |_, this, ()| -> LuaResult<mlua::Value> {
             let w = crate::lua::try_with_app(|app| {
                 let win = app.ui.win(this.id)?;
-                if let Some(vp) = win.viewport {
-                    return Some(vp.content_width);
+                if let Some(rect) = app.ui.split_rect(this.id) {
+                    return Some(win.config.gutters.content_width(rect.width));
                 }
-                let rect = app.ui.split_rect(this.id)?;
-                Some(win.config.gutters.content_width(rect.width))
+                win.viewport.map(|vp| vp.content_width)
             })
             .flatten();
             Ok(match w {

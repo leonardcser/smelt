@@ -101,6 +101,7 @@ local function core_compose()
       text = string.format(" %.1f tok/s", tps),
       style = { fg = "Comment" },
       priority = 4,
+      separated = true,
     }
   end
 

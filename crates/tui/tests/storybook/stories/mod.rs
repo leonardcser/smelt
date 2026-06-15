@@ -6,6 +6,7 @@ pub mod app_markdown;
 pub mod app_message;
 pub mod app_notify;
 pub mod app_prompt;
+pub mod app_status;
 pub mod app_tool;
 pub mod buffer;
 pub mod overlays;

@@ -97,6 +97,19 @@ app_story!(prompt_compacting_keeps_token_counter_visible, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_working_bar_width_ladder, |ctx| {
+    // The top prompt bar degrades in stages as the viewport shrinks: full
+    // label, compact spinner, then the token strip without orphan spacing.
+    ctx.set_context_window(Some(25_000));
+    ctx.set_context_tokens(19_500);
+    ctx.run_lua("_G._busy_handle = smelt.work.busy('compacting')");
+
+    for width in [48, 36, 28, 20, 16] {
+        ctx.set_viewport(width, 8);
+        ctx.assert_snapshot();
+    }
+});
+
 // ── Exec block (`!cmd` shell escape) ──────────────────────────────
 
 app_story!(exec_command_block_with_output, |ctx| {

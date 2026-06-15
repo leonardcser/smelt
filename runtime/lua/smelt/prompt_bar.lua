@@ -17,7 +17,7 @@ local M = {}
 local TOP_NS = smelt.ns("smelt.prompt_bar.top")
 local BOT_NS = smelt.ns("smelt.prompt_bar.bottom")
 local TOKEN_PRIORITY = 0
-local INDICATOR_PRIORITY = 0
+local INDICATOR_PRIORITY = 1
 local LABEL_PRIORITY = 2
 local SECONDARY_PRIORITY = 3
 local OPTIONAL_PRIORITY = 4
@@ -104,7 +104,24 @@ local function indicator_spans()
   end
 
   local spans = {}
-  -- Leading `─` so the indicator sits one cell in from the edge.
+  local wave_x = 0
+  local function add_wave_text(text, priority, selectable_start)
+    for _, codepoint in utf8.codes(text) do
+      local ch = utf8.char(codepoint)
+      local rgb = smelt.spinner.wave_color_at(wave_x)
+      spans[#spans + 1] = {
+        text = ch,
+        style = { fg = rgb, bold = true },
+        priority = priority,
+        selectable = selectable_start and wave_x >= selectable_start,
+      }
+      wave_x = wave_x + 1
+    end
+  end
+
+  -- Leading `─` so the indicator sits one cell in from the edge. It drops with
+  -- the compact spinner so narrow bars fall back to a clean rule instead of an
+  -- orphan edge cell.
   spans[#spans + 1] = {
     text = "\u{2500}",
     style = { fg = "SmeltBar" },
@@ -113,25 +130,8 @@ local function indicator_spans()
   }
 
   if active then
-    local text
-    if label == "" then
-      text = " " .. glyph
-    else
-      text = " " .. glyph .. " " .. label
-    end
-    -- One span per Unicode codepoint so the wave paints per cell.
-    local x = 0
-    for _, codepoint in utf8.codes(text) do
-      local ch = utf8.char(codepoint)
-      local rgb = smelt.spinner.wave_color_at(x)
-      spans[#spans + 1] = {
-        text = ch,
-        style = { fg = rgb, bold = true },
-        priority = codepoint == utf8.codepoint(" ", 1, 1) and LABEL_PRIORITY or INDICATOR_PRIORITY,
-        selectable = label ~= "" and x >= 3,
-      }
-      x = x + 1
-    end
+    if glyph ~= "" then add_wave_text(" " .. glyph, INDICATOR_PRIORITY, nil) end
+    if label ~= "" then add_wave_text(" " .. label, LABEL_PRIORITY, 3) end
   else
     local style
     if state == "paused" or state == "done" or state == "interrupted" then
@@ -215,7 +215,7 @@ local function right_spans()
         spans[#spans + 1] = {
           text = " ·",
           style = { fg = "SmeltBar" },
-          priority = TOKEN_PRIORITY,
+          priority = SECONDARY_PRIORITY,
           selectable = false,
         }
       end

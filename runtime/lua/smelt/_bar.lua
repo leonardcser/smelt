@@ -64,6 +64,7 @@ end
 -- ── priority-drop bar row (prompt top + bottom) ─────────────────────
 
 function M.compose(width, left, right)
+  width = math.max(width or 0, 0)
   local min_dashes = 4
 
   local function inner_width(spans, drop_above)
@@ -109,8 +110,21 @@ function M.compose(width, left, right)
     for _, s in ipairs(spans) do n = n + smelt.text.width(s.text) end
     return n
   end
-  local left_w = #left_kept > 0 and (sum_w(left_kept) + 1) or 0
-  local right_w = #right_kept > 0 and (sum_w(right_kept) + 2) or 0
+  local function side_widths()
+    local left_w = #left_kept > 0 and (sum_w(left_kept) + 1) or 0
+    local right_w = #right_kept > 0 and (sum_w(right_kept) + 2) or 0
+    return left_w, right_w
+  end
+
+  local left_w, right_w = side_widths()
+  if left_w + right_w > width and #left_kept > 0 then
+    left_kept = {}
+    left_w, right_w = side_widths()
+  end
+  if left_w + right_w > width and #right_kept > 0 then
+    right_kept = {}
+    left_w, right_w = side_widths()
+  end
   local bar_len = math.max(width - left_w - right_w, 0)
 
   local segs = {}
@@ -135,11 +149,13 @@ end
 -- ── statusline priority-drop layout (left + right strips) ───────────
 --
 -- Mirrors `status::spans_to_buffer_line`. Items split into left/right
--- strips, separated by `" · "` when `separated = true`, truncated
--- with `…` (priority-respecting), then dropped until the line fits.
--- Returns `{ text, highlights }`. `opts` accepts `width` (required),
--- `bg_group` (theme group used to fill empty space + as default span
--- bg), and `sep_group` (theme group used for separator dots).
+-- strips. Items with `separated = true` form an inline group: dots are
+-- inserted between group members, never before the first member after
+-- an unseparated pill. Text is truncated with `…` (priority-respecting),
+-- then dropped until the line fits. Returns `{ text, highlights }`. `opts`
+-- accepts `width` (required), `bg_group` (theme group used to fill empty
+-- space + as default span bg), and `sep_group` (theme group used for
+-- separator dots).
 
 function M.compose_status(items, opts)
   opts = opts or {}
@@ -160,12 +176,14 @@ function M.compose_status(items, opts)
   end
 
   local function span_cols(spans, right)
-    local w, first = 0, true
+    local w, separated_seen = 0, false
     for _, s in ipairs(spans) do
       if (s.align_right or false) == right then
-        if s.separated and not first then w = w + STATUS_SEP_LEN end
+        if s.separated then
+          if separated_seen then w = w + STATUS_SEP_LEN end
+          separated_seen = true
+        end
         w = w + smelt.text.width(s.text)
-        first = false
       end
     end
     return w
@@ -225,15 +243,17 @@ function M.compose_status(items, opts)
   local sep_style = with_default_bg({ fg = sep_group, dim = true })
 
   local left_runs, right_runs = {}, {}
-  local first_left, first_right = true, true
+  local left_separated_seen, right_separated_seen = false, false
   for _, s in ipairs(working) do
     local runs = s.align_right and right_runs or left_runs
-    local first = s.align_right and first_right or first_left
-    if s.separated and not first then
-      runs[#runs + 1] = { text = STATUS_SEP, style = sep_style, selectable = false }
+    local separated_seen = s.align_right and right_separated_seen or left_separated_seen
+    if s.separated then
+      if separated_seen then
+        runs[#runs + 1] = { text = STATUS_SEP, style = sep_style, selectable = false }
+      end
+      if s.align_right then right_separated_seen = true else left_separated_seen = true end
     end
     runs[#runs + 1] = { text = s.text, style = with_default_bg(s.style), selectable = s.selectable }
-    if s.align_right then first_right = false else first_left = false end
   end
 
   local right_w = 0
