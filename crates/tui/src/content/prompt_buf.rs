@@ -1,6 +1,5 @@
 use crate::input::PromptState;
 use crate::smelt_edit::{Buffer, ExtmarkOpts, ExtmarkPayload};
-use smelt_buffer::coords::ProjectionMaps;
 
 /// Extmark namespace for `Win:placeholder` text rendered as a dim
 /// suggestion when the buffer is empty.
@@ -38,57 +37,13 @@ pub(crate) struct InputLeafInput<'a> {
     pub(crate) now: std::time::Instant,
 }
 
-fn install_wrapped_placeholder(buf: &mut Buffer, text: &str) {
-    if buf.lines().len() != 1 || buf.lines()[0] != text {
-        buf.set_all_lines(vec![text.to_string()]);
-    }
-    buf.set_projection_maps(ProjectionMaps {
-        source_char_to_display_char: vec![0],
-        display_char_to_source_char: vec![0; text.chars().count() + 1],
-        row_offsets: vec![0],
-    });
-    buf.clear_highlights(0, usize::MAX);
-    let width = smelt_buffer::text::byte_to_cell(text, text.len()).min(u16::MAX as usize) as u16;
-    if width > 0 {
-        buf.add_highlight_group_with_meta(
-            0,
-            0,
-            width,
-            smelt_core::theme::intern("GhostText"),
-            smelt_core::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
-        );
-    }
-}
-
-fn clear_wrapped_placeholder(buf: &mut Buffer) {
-    if buf.source().is_empty() && (buf.lines().len() != 1 || !buf.lines()[0].is_empty()) {
-        buf.set_all_lines(vec![String::new()]);
-        buf.clear_projection_maps();
-    }
-}
-
-/// Write parser-derived prompt selection and ghost-text into `buf`.
+/// Write parser-derived prompt selection and yank-flash overlays into `buf`.
 /// Prompt text projection lives in `PromptBufferParser`; `Window::render` applies gutters and wrapping.
-pub(crate) fn sync_prompt_overlays(
-    inp: &InputLeafInput<'_>,
-    buf: &mut Buffer,
-    placeholder: Option<&str>,
-) {
+pub(crate) fn sync_prompt_overlays(inp: &InputLeafInput<'_>, buf: &mut Buffer) {
     assert!(
         buf.has_parser(),
         "prompt input buffer should be projected by PromptBufferParser"
     );
-
-    if buf.source().is_empty() {
-        if let Some(text) = placeholder.filter(|text| !text.is_empty()) {
-            install_wrapped_placeholder(buf, text);
-        } else {
-            clear_wrapped_placeholder(buf);
-        }
-    }
 
     if let Some((start, end)) = inp
         .input
@@ -141,80 +96,8 @@ mod tests {
             crate::content::prompt_parser::PromptBufferParser::new(input_state.store.clone()),
         ));
         input_buf.ensure_rendered_at(78);
-        sync_prompt_overlays(&inp, &mut input_buf, None);
+        sync_prompt_overlays(&inp, &mut input_buf);
         assert_eq!(input_buf.line_count(), 1);
-    }
-
-    #[test]
-    fn sync_prompt_overlays_installs_wrapped_ghost_text_as_buffer_content() {
-        let input_state = PromptState::default();
-        let test_clipboard = crate::smelt_edit::Clipboard::null();
-        let test_win = crate::smelt_edit::Window::new(
-            crate::app::PROMPT_WIN,
-            crate::app::PROMPT_EDIT_BUF,
-            crate::smelt_edit::SplitConfig {
-                region: "prompt".into(),
-                gutters: crate::smelt_edit::Gutters::default(),
-            },
-        );
-        let inp = InputLeafInput {
-            input: &input_state,
-            win: &test_win,
-            clipboard: &test_clipboard,
-            now: std::time::Instant::now(),
-        };
-        let mut input_buf = Buffer::new(
-            crate::app::PROMPT_EDIT_BUF,
-            crate::smelt_edit::BufCreateOpts::default(),
-        );
-        input_buf.set_parser(std::sync::Arc::new(
-            crate::content::prompt_parser::PromptBufferParser::new(input_state.store.clone()),
-        ));
-        input_buf.ensure_rendered_at(10);
-
-        sync_prompt_overlays(&inp, &mut input_buf, Some("ghost prediction wraps"));
-
-        assert_eq!(input_buf.get_line(0), Some("ghost prediction wraps"));
-        assert_eq!(input_buf.byte_at_display_pos(0, 10), 0);
-        assert!(input_buf
-            .highlights_at(0)
-            .iter()
-            .any(|span| !span.meta.selectable));
-    }
-
-    #[test]
-    fn sync_prompt_overlays_clears_stale_ghost_text_when_placeholder_disappears() {
-        let input_state = PromptState::default();
-        let test_clipboard = crate::smelt_edit::Clipboard::null();
-        let test_win = crate::smelt_edit::Window::new(
-            crate::app::PROMPT_WIN,
-            crate::app::PROMPT_EDIT_BUF,
-            crate::smelt_edit::SplitConfig {
-                region: "prompt".into(),
-                gutters: crate::smelt_edit::Gutters::default(),
-            },
-        );
-        let inp = InputLeafInput {
-            input: &input_state,
-            win: &test_win,
-            clipboard: &test_clipboard,
-            now: std::time::Instant::now(),
-        };
-        let mut input_buf = Buffer::new(
-            crate::app::PROMPT_EDIT_BUF,
-            crate::smelt_edit::BufCreateOpts::default(),
-        );
-        input_buf.set_parser(std::sync::Arc::new(
-            crate::content::prompt_parser::PromptBufferParser::new(input_state.store.clone()),
-        ));
-        input_buf.ensure_rendered_at(10);
-        sync_prompt_overlays(&inp, &mut input_buf, Some("ghost"));
-
-        sync_prompt_overlays(&inp, &mut input_buf, None);
-
-        assert_eq!(input_buf.lines().len(), 1);
-        assert!(input_buf.lines()[0].is_empty());
-        assert_eq!(input_buf.byte_at_display_pos(0, 10), 0);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! Transcript block history, streaming state, projection, and cursor glyph cache.
 
 use crate::app::TuiApp;
-use crate::content::prompt_parser::build_prompt_display_lines;
+use crate::content::prompt_parser::{
+    build_prompt_display_lines, prompt_display_uses_cursor_padding,
+};
 use crate::smelt_edit::{BufCreateOpts, Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 
@@ -871,24 +873,19 @@ impl TuiApp {
         placeholder: Option<&str>,
     ) -> u16 {
         let usable = width.saturating_sub(2).min(u16::MAX as usize) as u16;
-        let lines = if edit_buf.source().is_empty() {
-            placeholder
-                .filter(|text| !text.is_empty())
-                .map(|text| vec![text.to_string()])
-                .unwrap_or_else(|| vec![String::new()])
+        let store = self.input.store.lock().unwrap();
+        let lines = build_prompt_display_lines(
+            edit_buf.source(),
+            &edit_buf.attachment_ids,
+            &store,
+            placeholder,
+        );
+        let cursor_padding = prompt_display_uses_cursor_padding(edit_buf.source(), placeholder);
+        let layout = if cursor_padding {
+            WrappedLayout::from_lines_with_cursor_padding(&lines, usable, true)
         } else {
-            build_prompt_display_lines(
-                edit_buf.source(),
-                &edit_buf.attachment_ids,
-                &self.input.store.lock().unwrap(),
-            )
+            WrappedLayout::from_lines(&lines, usable, true)
         };
-        let layout =
-            if edit_buf.source().is_empty() && placeholder.is_some_and(|text| !text.is_empty()) {
-                WrappedLayout::from_lines(&lines, usable, true)
-            } else {
-                WrappedLayout::from_lines_with_cursor_padding(&lines, usable, true)
-            };
         layout.visual_count().max(1) as u16
     }
 }

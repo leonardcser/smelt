@@ -318,10 +318,10 @@ impl TestApp {
             );
         }
 
-        // Placeholder dispatch opts shadow the stored placeholder text. Static
-        // placeholders (input labels, predictions) may have stored text without
-        // dispatch opts; entries in `placeholder_opts` are the interactive subset
-        // and must point at a live window with exactly one placeholder source.
+        // Placeholder dispatch opts point at app-owned placeholder text. Static
+        // placeholders may have text without dispatch opts; entries in
+        // `placeholder_opts` are the interactive subset. Non-prompt placeholders
+        // also carry a rendering extmark.
         let placeholder_ns =
             smelt_buffer::buffer::create_namespace(crate::content::prompt_buf::PLACEHOLDER_NS);
         for win in self.app.placeholder_opts.keys() {
@@ -329,11 +329,11 @@ impl TestApp {
                 self.app.ui.win(*win).is_some(),
                 "placeholder_opts points at dead window {win:?}",
             );
+            assert!(
+                self.app.placeholders.contains_key(win),
+                "placeholder_opts[{win:?}] has no placeholder text",
+            );
             if *win == crate::app::PROMPT_WIN {
-                assert!(
-                    self.app.prompt_placeholder.is_some(),
-                    "placeholder_opts[{win:?}] has no prompt placeholder text",
-                );
                 continue;
             }
             let buf_id = self.app.ui.win(*win).map(|w| w.buf);

@@ -1040,6 +1040,7 @@ impl TuiApp {
     /// `Ui::win_close` cascades to overlay close when the leaf belongs to one.
     pub(crate) fn close_overlay_leaf(&mut self, win_id: crate::smelt_edit::WinId) {
         crate::picker::forget(self, win_id);
+        self.placeholders.remove(&win_id);
         self.placeholder_opts.remove(&win_id);
         for id in self.win_close(win_id) {
             self.lua.remove_callback(id);

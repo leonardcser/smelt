@@ -12,8 +12,12 @@ impl TuiApp {
         self.save_session_if_pending();
     }
 
-    pub(crate) fn max_prompt_input_rows_for(term_h: u16) -> u16 {
+    pub(crate) fn max_auto_prompt_input_rows_for(term_h: u16) -> u16 {
         (term_h / 2).max(1)
+    }
+
+    pub(crate) fn max_manual_prompt_input_rows_for(term_h: u16) -> u16 {
+        ((term_h as u32 * 7) / 10).max(1) as u16
     }
 
     /// Render variant parameterised by the output sink. Production passes
@@ -48,15 +52,17 @@ impl TuiApp {
         // ── Layout ──
         let (prompt_rect, _viewport_rows) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
-            let ghost = self.prompt_placeholder.as_deref();
+            let ghost = self
+                .placeholders
+                .get(&crate::app::PROMPT_WIN)
+                .map(String::as_str);
             let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width, ghost);
-            // Cap the prompt block at half the screen so a very long
-            // composing message keeps the transcript usable.
-            let max_input_rows = Self::max_prompt_input_rows_for(term_h);
-            let input_rows = self
-                .prompt_input_rows_override
-                .unwrap_or(wrapped_rows)
-                .clamp(1, max_input_rows);
+            // Auto-height keeps the transcript usable; a deliberate manual resize
+            // can claim more room for prompt review without taking the full screen.
+            let input_rows = match self.prompt_input_rows_override {
+                Some(rows) => rows.clamp(1, Self::max_manual_prompt_input_rows_for(term_h)),
+                None => wrapped_rows.clamp(1, Self::max_auto_prompt_input_rows_for(term_h)),
+            };
             self.prompt_input_rows = input_rows;
             let tree = self
                 .invoke_lua_layout_composer(term_w, term_h, input_rows)
@@ -266,7 +272,6 @@ impl TuiApp {
 
         {
             let now = self.core.clock.instant_now();
-            let prompt_placeholder = self.prompt_placeholder.clone();
             let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
             pctx.buf.ensure_rendered_at(content_width);
             let inp = prompt_buf::InputLeafInput {
@@ -275,7 +280,7 @@ impl TuiApp {
                 clipboard: &self.core.clipboard,
                 now,
             };
-            prompt_buf::sync_prompt_overlays(&inp, pctx.buf, prompt_placeholder.as_deref());
+            prompt_buf::sync_prompt_overlays(&inp, pctx.buf);
             pctx.win.ensure_layout(pctx.buf, content_width);
             self.input
                 .sync_display_coords(&mut pctx, prompt_rect.height);

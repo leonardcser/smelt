@@ -668,6 +668,11 @@ impl Buffer {
         self.last_render = None;
     }
 
+    /// Force the next [`Self::ensure_rendered_at`] call to re-run the parser.
+    pub fn invalidate_render_cache(&mut self) {
+        self.last_render = None;
+    }
+
     /// Builder form of `set_parser`.
     pub fn attach(mut self, parser: Arc<dyn BufferParser>) -> Self {
         self.set_parser(parser);

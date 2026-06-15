@@ -13,11 +13,20 @@ use std::sync::{Arc, Mutex};
 
 pub struct PromptBufferParser {
     store: Arc<Mutex<AttachmentStore>>,
+    placeholder: Arc<Mutex<Option<String>>>,
 }
 
 impl PromptBufferParser {
+    #[cfg(test)]
     pub fn new(store: Arc<Mutex<AttachmentStore>>) -> Self {
-        Self { store }
+        Self::with_placeholder(store, Arc::new(Mutex::new(None)))
+    }
+
+    pub fn with_placeholder(
+        store: Arc<Mutex<AttachmentStore>>,
+        placeholder: Arc<Mutex<Option<String>>>,
+    ) -> Self {
+        Self { store, placeholder }
     }
 }
 
@@ -147,30 +156,49 @@ fn display_rows_with_kinds_and_offsets(
     (rows, offsets)
 }
 
-fn display_lines(buf: &str) -> Vec<String> {
-    buf.split('\n').map(str::to_string).collect()
-}
-
 struct PromptDisplayRows {
     spans: Vec<Span>,
     visual_lines: Vec<(String, Vec<SpanKind>)>,
     row_offsets: Vec<usize>,
+    ghost: bool,
 }
 
 pub(crate) fn build_prompt_display_lines(
     source: &str,
     attachment_ids: &[AttachmentId],
     store: &AttachmentStore,
+    placeholder: Option<&str>,
 ) -> Vec<String> {
-    let spans = build_display_spans(source, attachment_ids, store);
-    display_lines(&spans_to_string(&spans))
+    build_prompt_display_rows(source, attachment_ids, store, placeholder)
+        .visual_lines
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+pub(crate) fn prompt_display_uses_cursor_padding(source: &str, placeholder: Option<&str>) -> bool {
+    !source.is_empty() || placeholder.is_none_or(str::is_empty)
 }
 
 fn build_prompt_display_rows(
     source: &str,
     attachment_ids: &[AttachmentId],
     store: &AttachmentStore,
+    placeholder: Option<&str>,
 ) -> PromptDisplayRows {
+    if source.is_empty() {
+        if let Some(text) = placeholder.filter(|text| !text.is_empty()) {
+            return PromptDisplayRows {
+                spans: Vec::new(),
+                visual_lines: vec![(
+                    text.to_string(),
+                    vec![SpanKind::Plain; text.chars().count()],
+                )],
+                row_offsets: vec![0],
+                ghost: true,
+            };
+        }
+    }
     let spans = build_display_spans(source, attachment_ids, store);
     let display_buf = spans_to_string(&spans);
     let char_kinds = build_char_kinds(&spans);
@@ -180,17 +208,20 @@ fn build_prompt_display_rows(
         spans,
         visual_lines,
         row_offsets,
+        ghost: false,
     }
 }
 
 impl BufferParser for PromptBufferParser {
     fn parse(&self, buf: &mut Buffer, source: &str, _width: u16) {
+        let placeholder = self.placeholder.lock().unwrap().clone();
         let store = self.store.lock().unwrap();
         let PromptDisplayRows {
             spans,
             visual_lines,
             row_offsets,
-        } = build_prompt_display_rows(source, &buf.attachment_ids, &store);
+            ghost,
+        } = build_prompt_display_rows(source, &buf.attachment_ids, &store, placeholder.as_deref());
         drop(store);
 
         let lines: Vec<String> = visual_lines.iter().map(|(l, _)| l.clone()).collect();
@@ -208,6 +239,36 @@ impl BufferParser for PromptBufferParser {
         buf.set_all_lines(lines);
         let line_count = buf.line_count();
         buf.clear_highlights(0, line_count.max(1));
+
+        if ghost {
+            let ghost_group = intern("GhostText");
+            for (li, (line, _)) in visual_lines.iter().enumerate() {
+                let width = smelt_buffer::text::byte_to_cell(line, line.len())
+                    .min(u16::MAX as usize) as u16;
+                if width > 0 {
+                    buf.add_highlight_group_with_meta(
+                        li,
+                        0,
+                        width,
+                        ghost_group,
+                        SpanMeta {
+                            selectable: false,
+                            copy_as: None,
+                        },
+                    );
+                }
+            }
+            let display_chars = visual_lines
+                .iter()
+                .map(|(line, _)| line.chars().count())
+                .sum::<usize>();
+            buf.set_projection_maps(ProjectionMaps {
+                source_char_to_display_char: vec![0],
+                display_char_to_source_char: vec![0; display_chars + 1],
+                row_offsets,
+            });
+            return;
+        }
 
         // Theme-group extmarks: the renderer resolves group → style at paint
         // time, so live theme updates flow through without re-parsing.
@@ -297,6 +358,57 @@ mod tests {
         assert_eq!(buf.line_count(), 2);
         assert_eq!(buf.get_line(0).unwrap(), "hello world");
         assert_eq!(buf.get_line(1).unwrap(), "second");
+    }
+
+    #[test]
+    fn parser_renders_empty_prompt_placeholder_as_ghost_display() {
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let placeholder = Arc::new(Mutex::new(Some("ghost prediction wraps".to_string())));
+        let parser = Arc::new(PromptBufferParser::with_placeholder(store, placeholder));
+        let mut buf = make_buf_with_parser(parser);
+
+        buf.ensure_rendered_at(10);
+
+        assert_eq!(buf.get_line(0), Some("ghost prediction wraps"));
+        assert_eq!(buf.byte_at_display_pos(0, 10), 0);
+        assert!(buf
+            .highlights_at(0)
+            .iter()
+            .any(|span| !span.meta.selectable));
+    }
+
+    #[test]
+    fn parser_clears_stale_placeholder_when_placeholder_disappears() {
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let placeholder = Arc::new(Mutex::new(Some("ghost".to_string())));
+        let parser = Arc::new(PromptBufferParser::with_placeholder(
+            store,
+            placeholder.clone(),
+        ));
+        let mut buf = make_buf_with_parser(parser);
+        buf.ensure_rendered_at(10);
+
+        *placeholder.lock().unwrap() = None;
+        buf.invalidate_render_cache();
+        buf.ensure_rendered_at(10);
+
+        assert_eq!(buf.lines().len(), 1);
+        assert!(buf.lines()[0].is_empty());
+        assert_eq!(buf.byte_at_display_pos(0, 10), 0);
+    }
+
+    #[test]
+    fn parser_ignores_placeholder_when_source_is_nonempty() {
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let placeholder = Arc::new(Mutex::new(Some("ghost".to_string())));
+        let parser = Arc::new(PromptBufferParser::with_placeholder(store, placeholder));
+        let mut buf = make_buf_with_parser(parser);
+        buf.set_source("real".into());
+
+        buf.ensure_rendered_at(10);
+
+        assert_eq!(buf.get_line(0), Some("real"));
+        assert!(buf.highlights_at(0).iter().all(|span| span.meta.selectable));
     }
 
     #[test]

@@ -146,12 +146,15 @@ pub struct TuiApp {
     pub(crate) prompt_input_rows_override: Option<u16>,
     /// In-flight drag from non-selectable prompt top chrome.
     pub(crate) prompt_resize_drag: Option<PromptResizeDrag>,
-    /// Prompt placeholder text. The prompt renders this as wrapped ghost text
-    /// inside the input buffer instead of one clipped virtual-text row.
-    pub(crate) prompt_placeholder: Option<String>,
-    /// Per-window placeholder dispatch options. Non-prompt placeholder text lives
-    /// on the buffer as a virtual-text extmark; prompt text lives in
-    /// `prompt_placeholder` so the prompt renderer can wrap it.
+    /// Last prompt resize-handle click, used to reset manual height on double-click.
+    pub(crate) prompt_resize_last_click: Option<PromptResizeClick>,
+    /// Parser-visible prompt placeholder. `placeholders` owns the app-level text;
+    /// this mirror lets the prompt parser render it as wrapped ghost text.
+    pub(crate) prompt_placeholder_display: Arc<Mutex<Option<String>>>,
+    /// Per-window placeholder text set through the app/Lua API.
+    pub(crate) placeholders: HashMap<crate::smelt_edit::WinId, String>,
+    /// Per-window placeholder dispatch options. Static placeholders may have text
+    /// without dispatch opts; entries here are the interactive subset.
     pub placeholder_opts: HashMap<crate::smelt_edit::WinId, PlaceholderOpts>,
 }
 
@@ -159,6 +162,14 @@ pub struct TuiApp {
 pub(crate) struct PromptResizeDrag {
     pub(crate) start_row: u16,
     pub(crate) start_input_rows: u16,
+    pub(crate) dragged: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PromptResizeClick {
+    pub(crate) row: u16,
+    pub(crate) col: u16,
+    pub(crate) at: Instant,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -696,6 +707,7 @@ impl TuiApp {
         let app_config = config;
 
         let (term_w, term_h) = terminal::size().unwrap_or((80, 24));
+        let prompt_placeholder_display = Arc::new(Mutex::new(None));
         let (ui, well_known) = {
             let mut ui = crate::smelt_edit::Ui::new();
             ui.set_terminal_size(term_w, term_h);
@@ -713,7 +725,10 @@ impl TuiApp {
                 )
                 .expect("PROMPT_EDIT_BUF slot is free");
             let parser: std::sync::Arc<dyn crate::smelt_edit::BufferParser> = std::sync::Arc::new(
-                crate::content::prompt_parser::PromptBufferParser::new(input.store.clone()),
+                crate::content::prompt_parser::PromptBufferParser::with_placeholder(
+                    input.store.clone(),
+                    prompt_placeholder_display.clone(),
+                ),
             );
             let copier: std::sync::Arc<dyn crate::smelt_edit::BufferCopy> = std::sync::Arc::new(
                 crate::content::prompt_parser::PromptCopier::new(input.store.clone()),
@@ -862,7 +877,9 @@ impl TuiApp {
             prompt_input_rows: 1,
             prompt_input_rows_override: None,
             prompt_resize_drag: None,
-            prompt_placeholder: None,
+            prompt_resize_last_click: None,
+            prompt_placeholder_display,
+            placeholders: HashMap::new(),
             prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
             auto_reload: None,
             pending_lua_reload: false,
@@ -1190,10 +1207,22 @@ impl TuiApp {
         }
     }
 
+    fn sync_prompt_placeholder_display(&mut self) {
+        let text = self.placeholders.get(&crate::app::PROMPT_WIN).cloned();
+        let mut guard = self.prompt_placeholder_display.lock().unwrap();
+        if *guard == text {
+            return;
+        }
+        *guard = text;
+        if let Some(buf) = self.ui.buf_mut(crate::app::PROMPT_EDIT_BUF) {
+            buf.invalidate_render_cache();
+        }
+    }
+
     /// Returns the current placeholder text on `win`, if any.
     pub(crate) fn placeholder_text(&mut self, win: crate::smelt_edit::WinId) -> Option<String> {
-        if win == crate::app::PROMPT_WIN {
-            return self.prompt_placeholder.clone();
+        if let Some(text) = self.placeholders.get(&win) {
+            return Some(text.clone());
         }
         let buf = self.ui.win_buf_mut(win)?;
         crate::content::prompt_buf::placeholder_text(buf)
@@ -1206,19 +1235,24 @@ impl TuiApp {
             return;
         }
         if win == crate::app::PROMPT_WIN {
-            self.prompt_placeholder = Some(text);
+            self.placeholders.insert(win, text);
+            self.sync_prompt_placeholder_display();
             return;
         }
-        let Some(buf) = self.ui.win_buf_mut(win) else {
+        if self.ui.win(win).is_none() {
             return;
-        };
-        crate::content::prompt_buf::set_placeholder_extmark(buf, Some(text));
+        }
+        self.placeholders.insert(win, text.clone());
+        if let Some(buf) = self.ui.win_buf_mut(win) {
+            crate::content::prompt_buf::set_placeholder_extmark(buf, Some(text));
+        }
     }
 
     /// Clear the placeholder on `win` (text + opts). Idempotent.
     pub fn clear_placeholder(&mut self, win: crate::smelt_edit::WinId) {
+        self.placeholders.remove(&win);
         if win == crate::app::PROMPT_WIN {
-            self.prompt_placeholder = None;
+            self.sync_prompt_placeholder_display();
         }
         if let Some(buf) = self.ui.win_buf_mut(win) {
             crate::content::prompt_buf::set_placeholder_extmark(buf, None);
