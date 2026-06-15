@@ -29,10 +29,10 @@ See the [Configuration Reference](../reference/configuration.md) for every
 provider/setting field, and the [Plugin Authoring](plugins.md) guide for
 writing larger extensions against the `smelt` Lua API.
 
-## Runtime Settings
+## Settings
 
-Toggle settings at runtime with `/settings`, set defaults in `init.lua` by
-assigning to `smelt.settings`, or override from the CLI with `--set key=value`:
+Set preferences in `init.lua` by assigning to `smelt.settings`, or override from
+an individual launch with `--set key=value`:
 
 ```lua
 smelt.settings.vim = true
@@ -62,16 +62,10 @@ like to expose the same override pattern to users.
 
 ## Themes
 
-Built-in accent presets:
-
-> `ember` · `coral` · `rose` · `gold` · `ice` · `sky` · `blue` · `lavender` ·
-> `lilac` · `mint` · `sage` · `silver`
-
-Change at runtime with `/theme`, or accept a raw ANSI value (0–255). The task
-slug color is separate — change it per-session with `/color`. This is useful
-when you have several smelt sessions open in parallel (e.g. one per project):
-give each session a distinct slug color and you can tell at a glance which
-terminal belongs to which codebase.
+Configure theme highlights from Lua. The task slug color is separate — change it
+per-session with `/color`. This is useful when you have several smelt sessions
+open in parallel (e.g. one per project): give each session a distinct slug color
+and you can tell at a glance which terminal belongs to which codebase.
 
 ### Custom Colorschemes
 

@@ -103,8 +103,7 @@ pub struct SettingDecl {
     pub kind: SettingKind,
     /// Concatenated doc lines from the `settings!` declaration. Empty
     /// when the macro entry had no `///` lines above it. Surfaced in
-    /// `/settings` help and the auto-generated table in the `customize`
-    /// skill.
+    /// generated config docs and the `customize` skill.
     pub doc: &'static str,
     /// Closed set of accepted values for `String` settings; `None`
     /// means free-form. Ignored for non-`String` kinds.

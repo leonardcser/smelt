@@ -1,14 +1,9 @@
--- `/vim` and `/thinking` toggles (quick aliases for the two most-used settings).
-
-smelt.cmd.register("vim", function()
-  smelt.settings.vim = not smelt.settings.vim
-  smelt.notify("vim mode: " .. (smelt.settings.vim and "on" or "off"))
-end, { desc = "toggle vim mode" })
+-- `/thinking` toggles thinking blocks for the current session.
 
 smelt.cmd.register("thinking", function()
   smelt.settings.show_thinking = not smelt.settings.show_thinking
   smelt.notify("thinking blocks: " .. (smelt.settings.show_thinking and "on" or "off"))
-end, { desc = "toggle thinking blocks" })
+end, { desc = "toggle thinking blocks for this session" })
 
 -- `/reasoning` - set explicitly or show current effort.
 smelt.cmd.register("reasoning", function(arg)

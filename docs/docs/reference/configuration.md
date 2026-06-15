@@ -189,17 +189,12 @@ smelt.remember({
 })
 ```
 
-### Settings and theme are session-only
+### Settings and theme changes
 
 `smelt.settings.*`, `smelt.theme.use(...)`, and `smelt.theme.apply(...)`
-apply only to the current session. They never write to disk. Edit
-`init.lua` to persist them.
-
-`/settings` toggles in the UI affect the running session and print the
-`smelt.settings.<key> = ...` snippet to paste into `init.lua`.
-`/settings-export` copies a snippet of every current setting (plus
-current model / mode / effort under `smelt.defaults{...}`) to the
-clipboard.
+apply to the running session and never write to disk themselves. Put them in
+`init.lua` to apply them on every launch, then run `/reload` after editing config
+to apply changes without restarting.
 
 ## Per-plugin Model Preferences
 
@@ -230,9 +225,8 @@ smelt.settings.compact_keep_recent_groups = 1
 smelt.settings.show_tps = true
 ```
 
-Boolean settings are toggleable at runtime via `/settings`. Numeric settings
-are set from `init.lua`, the `--set` CLI flag, or any Lua context. Unknown
-keys raise at the access site; type mismatches raise on assignment.
+Set settings from `init.lua`, the `--set` CLI flag, or any Lua context.
+Unknown keys raise at the access site; type mismatches raise on assignment.
 
 | Key                     | Type      | Default | Description                                                                       |
 | ----------------------- | --------- | ------- | --------------------------------------------------------------------------------- |
@@ -261,11 +255,7 @@ allowed-choice list (if any).
 
 ## Theme
 
-Change accent color at runtime with `/theme`. Presets: `ember`, `coral`,
-`rose`, `gold`, `ice`, `sky`, `blue`, `lavender`, `lilac`, `mint`, `sage`,
-`silver`. Or a raw ANSI value (0–255).
-
-The task slug color is separate — change it per-session with `/color`.
+The task slug color is session-specific — change it with `/color`.
 
 A full colorscheme is a `ThemeSpec`: a flat Lua table keyed by
 highlight-group name (`SmeltAccent`, `Comment`, `SmeltDiffAddBg`, …)

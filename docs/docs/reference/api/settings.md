@@ -12,5 +12,5 @@ Metatable-backed proxy table for preferences. Read and write keys directly (`set
 fun(): table
 ```
 
-Return the settings schema as an array of `{ key, kind, choices? }` rows. `kind` is `"bool"`, `"number"`, or `"string"`. `choices` is present for `"string"` keys with a closed value set. UIs use this to render every known setting without hand-maintaining a list.
+Return the settings schema as an array of `{ key, kind, choices? }` rows. `kind` is `"bool"`, `"number"`, or `"string"`. `choices` is present for `"string"` keys with a closed value set. Useful for config tooling and introspection.
 

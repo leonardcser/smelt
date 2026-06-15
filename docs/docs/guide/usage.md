@@ -130,7 +130,7 @@ with its tool outputs. The postponed suffix is then reattached unchanged after
 the new summary. By default Smelt always postpones the latest group first;
 adjust that minimum with `smelt.settings.compact_keep_recent_groups`.
 
-When `auto_compact` is enabled (via `/settings`), compaction triggers
+When `auto_compact` is enabled, compaction triggers
 automatically before a model request whose active context would cross
 `compact_threshold` of the configured context window. After the first provider
 usage report, Smelt anchors this check to the provider-reported context size
@@ -140,7 +140,7 @@ trigger matches the prompt bar rather than a full-history byte estimate. Press
 
 ## Vim Mode
 
-Toggle with `/vim` or set `smelt.settings.vim = true` in `init.lua`. Supports
+Set `smelt.settings.vim = true` in `init.lua` to enable vim mode. Supports
 insert, normal, and visual modes. If you already live in Vim, this keeps your
 muscle memory intact — navigate the transcript, edit the prompt, and select
 text with the same chords you use in your editor. See the
@@ -157,5 +157,5 @@ a long prompt and need to ask a quick side question without losing your draft.
 After each turn, the agent may suggest your next message as dim **ghost text**.
 Press `Tab` to accept it, or just start typing to dismiss. Prediction saves
 keystrokes on repetitive follow-ups — "also add tests", "fix the lint errors",
-and so on. Toggle in `/settings` → `input prediction` or set
-`smelt.settings.show_prediction = false` in `init.lua`.
+and so on. Set `smelt.settings.show_prediction = false` in `init.lua` to
+disable prediction.

@@ -13,14 +13,10 @@ Type `/` to open the command picker with fuzzy search.
 | `/fork`, `/branch`        | Fork the current session                                   |
 | `/export`                 | Export conversation; prompts for clipboard or file         |
 | `/model [provider/model]` | Switch model (opens picker if no name given)               |
-| `/settings`               | Toggle runtime settings                                    |
-| `/settings-export`        | Copy current settings + defaults as a Lua snippet          |
-| `/theme [name]`           | Change accent color                                        |
-| `/color [name]`           | Set task slug color                                        |
+| `/color [name]`           | Set session color                                          |
 | `/stats`                  | Show token usage statistics                                |
 | `/usage`, `/cost`         | Show session cost and active-provider usage limits         |
-| `/vim`                    | Toggle vim mode                                            |
-| `/thinking`               | Toggle display of thinking blocks                          |
+| `/thinking`               | Toggle display of thinking blocks for this session         |
 | `/reasoning [off|low|medium|high|max]` | Set or show reasoning effort                    |
 | `/permissions`            | Manage saved permissions                                   |
 | `/ps`                     | Manage background processes                                |

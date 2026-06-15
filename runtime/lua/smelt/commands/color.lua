@@ -1,4 +1,4 @@
--- `/color` - change the task-slug label color (same shape as /theme).
+-- `/color` - set the current session's task-slug color.
 
 local presets = smelt.theme.presets
 local preset_names, items = {}, {}
@@ -35,7 +35,7 @@ end
 
 local original
 smelt.cmd.picker("color", {
-  desc       = "set task slug color",
+  desc       = "set session color",
   args       = preset_names,
   items      = items,
   apply      = function(arg)

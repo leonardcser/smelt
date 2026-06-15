@@ -150,7 +150,7 @@ pub(super) fn register(
 
     settings_tbl.fn_(
         "schema",
-        "Return the settings schema as an array of `{ key, kind, choices? }` rows. `kind` is `\"bool\"`, `\"number\"`, or `\"string\"`. `choices` is present for `\"string\"` keys with a closed value set. UIs use this to render every known setting without hand-maintaining a list.",
+        "Return the settings schema as an array of `{ key, kind, choices? }` rows. `kind` is `\"bool\"`, `\"number\"`, or `\"string\"`. `choices` is present for `\"string\"` keys with a closed value set. Useful for config tooling and introspection.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;

@@ -785,8 +785,8 @@ fn render_skill_api_index(
 /// Render the Settings region: every `smelt.settings.<key>` slot with
 /// type, default value, and a one-line description, all derived from the
 /// canonical [`smelt_core::config::SETTINGS`] schema. The table is the
-/// single source of truth shared with the Lua `__pairs` iterator, the
-/// `/settings` command, and the `customize` skill.
+/// single source of truth shared with the Lua `__pairs` iterator and the
+/// `customize` skill.
 fn render_skill_settings() -> String {
     use smelt_core::config::{ResolvedSettings, SettingKind, SettingValue, SETTINGS};
 
@@ -794,7 +794,7 @@ fn render_skill_settings() -> String {
 
     let mut s = String::new();
     s.push_str("Read or write via `smelt.settings.<key>` from `init.lua`. ");
-    s.push_str("Booleans also toggle at runtime via `/settings`. ");
+    s.push_str("Run `/reload` after editing config to apply changes without restarting. ");
     s.push_str("Override from the CLI with `--set KEY=VALUE`. ");
     s.push_str("Assigning an unknown key or wrong type raises at the call site.\n\n");
 

@@ -640,7 +640,7 @@ if smelt.theme then
     smelt.theme.apply(spec)
   end
 
-  -- Built-in accent presets. Used by `/theme` and `/color`; user
+  -- Built-in session-color presets. Used by `/color`; user
   -- colorschemes can extend this list. Each entry is
   -- `{ name = string, detail = string, ansi = integer }`.
   smelt.theme.presets = smelt.theme.presets or {

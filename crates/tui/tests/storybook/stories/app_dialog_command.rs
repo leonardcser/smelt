@@ -60,25 +60,6 @@ app_story!(messages_dialog_with_entries, |ctx| {
     ctx.assert_snapshot();
 });
 
-app_story!(settings_picker, |ctx| {
-    // `/settings` opens a prompt-docked picker. The picker is the same
-    // code path as `/model` and `/theme`. Pins the picker chrome
-    // (prompt-anchored list, on/off descriptions) for every entry in
-    // `SETTINGS_META`.
-    ctx.set_viewport(70, 16);
-    ctx.run_command("settings");
-    ctx.assert_snapshot();
-});
-
-app_story!(theme_picker, |ctx| {
-    // `/theme` opens a prompt-docked picker over `smelt.theme.presets`.
-    // The story also exercises the `ansi_color` swatch column (`● ` in
-    // each preset's accent) and the live-preview `on_select` hook.
-    ctx.set_viewport(70, 16);
-    ctx.run_command("theme");
-    ctx.assert_snapshot();
-});
-
 app_story!(rewind_dialog, |ctx| {
     ctx.set_viewport(60, 16);
     // /rewind reads `smelt.session.turns()`. Seed three user turns so

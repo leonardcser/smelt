@@ -551,7 +551,7 @@ pub(crate) mod hints {
     const HELP_PREFIXES: &[(&str, &str)] = &[
         (
             "/command",
-            "commands  (try /resume, /compact, /fork, /ps, /vim\u{2026})",
+            "commands  (try /resume, /compact, /fork, /ps, /color\u{2026})",
         ),
         ("@<path>", "attach a file or URL"),
         ("!<cmd>", "run a shell command"),
