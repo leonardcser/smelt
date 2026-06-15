@@ -44,7 +44,7 @@ return {
   SmeltCodeBlockBg    = bg(dl(233, 253)),
   SmeltBar            = fg(dl(237, 250)),
   SmeltSelection      = bg(dl(238, 153)),
-  SmeltSearch         = bg(accent),
+  SmeltSearch         = { fg = { ansi = 0 }, bg = accent },
   SmeltYankFlash      = bg(dl(240, 195)),
   SmeltCursorLineBg   = bg(dl(237, 251)),
   SmeltScrollbarTrack = bg(dl(235, 253)),

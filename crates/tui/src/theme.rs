@@ -642,6 +642,7 @@ mod tests {
         assert_eq!(theme.get("SmeltSlug").bg, None);
         assert_eq!(theme.get("SmeltAccent").fg, Some(Color::AnsiValue(208)));
         assert_eq!(theme.get("Search").bg, theme.get("SmeltAccent").fg);
+        assert_eq!(theme.get("Search").fg, Some(Color::AnsiValue(0)));
     }
 
     #[test]
