@@ -793,6 +793,8 @@ Declarative, width-independent content layout primitives for transcript/tool dis
   Render `child` with an explicit non-selectable gutter prefix on each emitted row.
 - `smelt.layout.hbox` :: `fun(items: table): table`
   Lay `items` out horizontally.
+- `smelt.layout.runs` :: `fun(lines: any, opts: table?): table`
+  Styled inline text layout leaf.
 - `smelt.layout.text` :: `fun(content: string, opts: table?): table`
   Plain text layout leaf.
 - `smelt.layout.vbox` :: `fun(items: table): table`

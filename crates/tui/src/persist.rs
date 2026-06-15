@@ -113,10 +113,6 @@ fn write(req: &PersistRequest) {
         req.session.history.len() as u64,
     );
     smelt_perf::perf::record_value(
-        "persist:write:display_cache_tool_bodies",
-        req.display_cache.tool_bodies.len() as u64,
-    );
-    smelt_perf::perf::record_value(
         "persist:write:display_cache_row_indexes",
         req.display_cache.row_indexes.len() as u64,
     );

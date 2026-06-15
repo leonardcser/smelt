@@ -54,6 +54,14 @@ fun(items: table): table
 
 Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` for a fixed-column or weighted slot.
 
+## `smelt.layout.runs`
+
+```lua
+fun(lines: any, opts: table?): table
+```
+
+Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`). `opts.hl_group` / `opts.hl` supplies a default theme group for spans without `hl`.
+
 ## `smelt.layout.text`
 
 ```lua
@@ -68,5 +76,5 @@ Plain text layout leaf. `opts.hl_group` / `opts.hl` may name a theme group; with
 fun(items: table): table
 ```
 
-Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.empty`/`layout.text`/`layout.vbox`/`layout.hbox`/`layout.gutter`/`layout.cap`/`layout.diff`/`layout.file_view`.
+Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.empty`/`layout.text`/`layout.runs`/`layout.vbox`/`layout.hbox`/`layout.gutter`/`layout.cap`/`layout.diff`/`layout.file_view`.
 

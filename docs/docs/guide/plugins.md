@@ -495,7 +495,9 @@ end)
 
 `smelt.tools.register({ name, execute, ... })` exposes a tool to the model.
 Only `name` and `execute` are required; the rest of `smelt.tools.ToolDef` is
-optional metadata that controls rendering, approvals, and per-mode behaviour.
+optional metadata that controls summaries, approvals, and per-mode behaviour.
+Tool transcript rendering is handled by the root transcript renderer; customize
+it with `smelt.transcript.extend_renderer` when a plugin needs custom display.
 
 ```lua
 smelt.tools.register({
@@ -511,9 +513,6 @@ smelt.tools.register({
   },
   permission_defaults = { normal = "allow", plan = "allow" },
   summary  = function(_args) return "plan ready" end,
-  render   = function(args, output, width, buf)
-    smelt.render.markdown(buf, args.plan_summary or "")
-  end,
   execute  = function(args)
     local result = smelt.dialog.open({ ... }) -- yields, allowed inside execute
     if result.action ~= "approve" then
@@ -534,6 +533,10 @@ Return either a plain string (success) or `{ content, is_error }`. From inside
 
 Set `override = true` to replace a built-in tool of the same name. Use
 `smelt.tools.unregister(name)` to take it back out.
+
+To customize how a tool appears in the transcript, extend the transcript
+renderer and dispatch on `block.kind == "tool"` / `block.name`; return any
+`smelt.layout` tree.
 
 For tool-authoring conventions (parameter shape, `summary`,
 `approval_patterns`, `preflight`, `paths_for_workspace`), the implementations

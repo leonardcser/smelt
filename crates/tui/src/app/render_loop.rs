@@ -165,30 +165,17 @@ impl TuiApp {
                         )
                     };
                     let width = request.content_width.max(1);
-                    let mut plan = transcript.plan_projection_measured(
+                    let plan = transcript.plan_projection_measured(
+                        lua,
                         width,
                         show_thinking,
                         scroll_target,
                         viewport_rows,
                     );
-                    let tool_bodies_changed =
-                        crate::app::transcript::prerender_tool_bodies_for_range(
-                            lua,
-                            transcript,
-                            plan.block_range(),
-                        );
-                    if tool_bodies_changed {
-                        plan = transcript.plan_projection_measured(
-                            width,
-                            show_thinking,
-                            scroll_target,
-                            viewport_rows,
-                        );
-                    }
                     let Some(buf) = ui.buf_mut(request.buf) else {
                         return;
                     };
-                    let tdata = transcript.project_planned(buf, &theme, plan);
+                    let tdata = transcript.project_planned(lua, buf, &theme, plan);
                     if let Some(win) = ui.win_mut(request.win) {
                         debug_assert!(tdata.total_rows >= tdata.row_base);
                         debug_assert!(

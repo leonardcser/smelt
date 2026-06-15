@@ -1,9 +1,9 @@
 use crate::content::display_renderers::{
-    compacted, exec, mode, process_status, text, thinking, tool_call, user,
+    compacted, exec, mode, process_status, text, thinking, user,
 };
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_core::content::block_layout::{
-    BlockLayout, HboxItem, IrLeaf, LayoutIr, LuaLeaf, SourceViewIr, TextSpec, ToolBody,
+    BlockLayout, HboxItem, IrLeaf, LayoutIr, LuaLeaf, SourceViewIr, TextSpec,
 };
 use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block, CodeBlock};
@@ -12,7 +12,7 @@ use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 3;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
@@ -61,12 +61,7 @@ pub(crate) enum DisplayBlock {
         code: CodeBlock,
     },
     ToolCall {
-        call_id: String,
-        name: String,
-        summary: protocol::StyledLines,
-        args: HashMap<String, serde_json::Value>,
-        state: ToolState,
-        body: Option<ToolBody>,
+        layout: LayoutIr,
     },
     Exec {
         command: String,
@@ -75,14 +70,6 @@ pub(crate) enum DisplayBlock {
     Compacted {
         summary: String,
     },
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ToolBodyCacheEntry {
-    pub(crate) id: BlockId,
-    pub(crate) call_id: String,
-    pub(crate) key: DisplayCacheKey,
-    pub(crate) body: ToolBody,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -101,22 +88,31 @@ pub(crate) struct DisplayRowIndexNode {
 
 pub(crate) struct CompileJob {
     id: BlockId,
+    index: usize,
+    show_thinking: bool,
     key: DisplayCacheKey,
     block: Block,
     state: Option<ToolState>,
-    body: Option<ToolBody>,
 }
 
 impl CompileJob {
-    pub(crate) fn compile(self) -> (BlockId, DisplayCacheKey, DisplayBlock) {
+    pub(crate) fn compile(
+        self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+    ) -> (BlockId, DisplayCacheKey, DisplayBlock) {
         let Self {
             id,
+            index,
+            show_thinking,
             key,
             block,
             state,
-            body,
         } = self;
-        (id, key, compile_block(&block, state.as_ref(), body))
+        (
+            id,
+            key,
+            compile_block_with_lua(lua, id, index, &block, state.as_ref(), show_thinking),
+        )
     }
 }
 
@@ -140,17 +136,9 @@ struct CachedDisplayBlock {
     block: DisplayBlock,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CachedToolBody {
-    id: BlockId,
-    key: DisplayCacheKey,
-    body: ToolBody,
-}
-
 #[derive(Default)]
 pub(crate) struct DisplayModel {
     blocks: HashMap<BlockId, CachedDisplayBlock>,
-    tool_bodies: HashMap<String, CachedToolBody>,
 }
 
 impl DisplayModel {
@@ -163,141 +151,28 @@ impl DisplayModel {
         self.blocks.len()
     }
 
-    pub(crate) fn hydrate_tool_bodies(
-        &mut self,
-        history: &BlockHistory,
-        entries: Vec<ToolBodyCacheEntry>,
-    ) -> usize {
-        smelt_perf::perf::record_value(
-            "transcript:display_model:hydrate_tool_bodies_requested",
-            entries.len() as u64,
-        );
-        let mut hydrated = 0;
-        for entry in entries {
-            if self.hydrate_tool_body(history, entry) {
-                hydrated += 1;
-            }
-        }
-        hydrated
-    }
-
-    fn hydrate_tool_body(&mut self, history: &BlockHistory, entry: ToolBodyCacheEntry) -> bool {
-        smelt_perf::perf::record_value("transcript:display_model:hydrate_tool_body_attempt", 1);
-        let Some(Block::ToolCall { call_id, .. }) = history.blocks.get(&entry.id) else {
-            smelt_perf::perf::record_value(
-                "transcript:display_model:hydrate_reject:missing_tool_block",
-                1,
-            );
-            return false;
-        };
-        if call_id != &entry.call_id {
-            smelt_perf::perf::record_value(
-                "transcript:display_model:hydrate_reject:tool_call_id_mismatch",
-                1,
-            );
-            return false;
-        }
-        let Some(current_state) = history.tool_state(&entry.call_id) else {
-            smelt_perf::perf::record_value(
-                "transcript:display_model:hydrate_reject:missing_tool_state",
-                1,
-            );
-            return false;
-        };
-        let expected_key =
-            DisplayCacheKey::new(history.content_hash(entry.id), current_state.display_hash());
-        if expected_key != entry.key {
-            smelt_perf::perf::record_value(
-                "transcript:display_model:hydrate_reject:tool_body_key",
-                1,
-            );
-            return false;
-        }
-        self.tool_bodies.insert(
-            entry.call_id,
-            CachedToolBody {
-                id: entry.id,
-                key: entry.key,
-                body: entry.body,
-            },
-        );
-        smelt_perf::perf::record_value("transcript:display_model:hydrate_tool_body_ok", 1);
-        true
-    }
-
-    pub(crate) fn tool_body_cache_entries(
-        &self,
-        history: &BlockHistory,
-        order: &[BlockId],
-    ) -> Vec<ToolBodyCacheEntry> {
-        order
-            .iter()
-            .filter_map(|id| {
-                let Block::ToolCall { call_id, .. } = history.blocks.get(id)? else {
-                    return None;
-                };
-                let cached = self.tool_bodies.get(call_id)?;
-                if cached.id != *id {
-                    return None;
-                }
-                let state = history.tool_state(call_id)?;
-                let key = DisplayCacheKey::new(history.content_hash(*id), state.display_hash());
-                if cached.key != key {
-                    return None;
-                }
-                Some(ToolBodyCacheEntry {
-                    id: *id,
-                    call_id: call_id.clone(),
-                    key,
-                    body: cached.body.clone(),
-                })
-            })
-            .collect()
-    }
-
-    pub(crate) fn has_tool_body(&self, history: &BlockHistory, id: BlockId, call_id: &str) -> bool {
-        let Some(state) = history.tool_state(call_id) else {
-            return false;
-        };
-        let key = DisplayCacheKey::new(history.content_hash(id), state.display_hash());
-        self.tool_bodies
-            .get(call_id)
-            .is_some_and(|cached| cached.id == id && cached.key == key)
-    }
-
-    pub(crate) fn install_tool_body(
-        &mut self,
-        id: BlockId,
-        call_id: String,
-        key: DisplayCacheKey,
-        body: ToolBody,
-    ) -> bool {
-        let hash = smelt_core::utils::hash_serializable(&body);
-        let changed = self.tool_bodies.get(&call_id).is_none_or(|cached| {
-            cached.id != id
-                || cached.key != key
-                || smelt_core::utils::hash_serializable(&cached.body) != hash
-        });
-        if !changed {
-            return false;
-        }
-        self.tool_bodies
-            .insert(call_id, CachedToolBody { id, key, body });
-        self.blocks.remove(&id);
-        true
-    }
-
     #[cfg(test)]
     pub(crate) fn ensure_many(
         &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &BlockHistory,
         ids: &[BlockId],
         keys: &[LayoutKey],
     ) -> usize {
-        let jobs =
-            self.collect_compile_jobs(history, ids.iter().copied().zip(keys.iter().copied()));
+        let blocks = ids
+            .iter()
+            .copied()
+            .zip(keys.iter().copied())
+            .filter_map(|(id, key)| {
+                history
+                    .order
+                    .iter()
+                    .position(|candidate| *candidate == id)
+                    .map(|index| (index, id, key))
+            });
+        let jobs = self.collect_compile_jobs(history, blocks);
         let compiled = jobs.len();
-        let blocks = jobs.into_iter().map(CompileJob::compile).collect();
+        let blocks = jobs.into_iter().map(|job| job.compile(lua)).collect();
         self.insert_compiled_blocks(blocks);
         compiled
     }
@@ -308,13 +183,13 @@ impl DisplayModel {
     pub(crate) fn collect_compile_jobs(
         &mut self,
         history: &BlockHistory,
-        blocks: impl IntoIterator<Item = (BlockId, LayoutKey)>,
+        blocks: impl IntoIterator<Item = (usize, BlockId, LayoutKey)>,
     ) -> Vec<CompileJob> {
         let _perf = smelt_perf::perf::begin("transcript:display_model:ensure_many");
 
         let mut jobs = Vec::new();
         let mut requested = 0;
-        for (id, key) in blocks {
+        for (index, id, key) in blocks {
             requested += 1;
             let display_key = DisplayCacheKey::from_layout_key(key);
             if self
@@ -328,24 +203,17 @@ impl DisplayModel {
                 self.blocks.remove(&id);
                 continue;
             };
-            let (state, body) = match &block {
-                Block::ToolCall { call_id, .. } => {
-                    let state = history.tool_state(call_id).cloned();
-                    let body = self
-                        .tool_bodies
-                        .get(call_id)
-                        .filter(|cached| cached.id == id && cached.key == display_key)
-                        .map(|cached| cached.body.clone());
-                    (state, body)
-                }
-                _ => (None, None),
+            let state = match &block {
+                Block::ToolCall { call_id, .. } => history.tool_state(call_id).cloned(),
+                _ => None,
             };
             jobs.push(CompileJob {
                 id,
+                index,
+                show_thinking: key.show_thinking,
                 key: display_key,
                 block,
                 state,
-                body,
             });
         }
         smelt_perf::perf::record_value("transcript:display_model:requested", requested);
@@ -376,11 +244,47 @@ impl DisplayModel {
     }
 }
 
-pub(crate) fn compile_block(
+#[cfg(test)]
+pub(crate) fn compile_block(block: &Block) -> DisplayBlock {
+    compile_static_block(block)
+}
+
+fn compile_block_with_lua(
+    lua: &smelt_core::lua::runtime::LuaRuntime,
+    id: BlockId,
+    index: usize,
     block: &Block,
     state: Option<&ToolState>,
-    body: Option<ToolBody>,
+    show_thinking: bool,
 ) -> DisplayBlock {
+    if matches!(block, Block::ToolCall { .. }) {
+        let layout = lua.render_transcript_layout(
+            id,
+            index,
+            block,
+            state,
+            smelt_core::lua::runtime::TranscriptRenderCtx { show_thinking },
+        );
+        let layout = match compile_layout_ir(&layout) {
+            Ok(layout) => layout,
+            Err(e) => {
+                lua.record_error(format!(
+                    "transcript render `tool` #{index}: compile layout IR: {e}"
+                ));
+                BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                    content: "tool render error".into(),
+                    hl_group: Some("ErrorMsg".into()),
+                    ansi: false,
+                }))
+            }
+        };
+        return DisplayBlock::ToolCall { layout };
+    }
+
+    compile_static_block(block)
+}
+
+fn compile_static_block(block: &Block) -> DisplayBlock {
     match block {
         Block::User { text, image_labels } => DisplayBlock::User {
             text: text.clone(),
@@ -407,20 +311,8 @@ pub(crate) fn compile_block(
             lang: lang.clone(),
             code: parse_code_block(&[content.as_str()], lang),
         },
-        Block::ToolCall {
-            call_id,
-            name,
-            summary,
-            args,
-        } => DisplayBlock::ToolCall {
-            call_id: call_id.clone(),
-            name: name.clone(),
-            summary: summary.clone(),
-            args: args.clone(),
-            state: state
-                .cloned()
-                .unwrap_or_else(|| panic!("missing ToolState for tool call `{call_id}`")),
-            body,
+        Block::ToolCall { .. } => DisplayBlock::ToolCall {
+            layout: BlockLayout::Empty,
         },
         Block::Exec { command, output } => DisplayBlock::Exec {
             command: command.clone(),
@@ -443,6 +335,7 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
             hl_group: spec.hl_group.clone(),
             ansi: spec.ansi,
         }))),
+        BlockLayout::Leaf(LuaLeaf::Runs(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Runs(spec.clone()))),
         BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
             let ext = spec
                 .lang
@@ -515,22 +408,9 @@ pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
         }
         DisplayBlock::Text { content } => text::measure(content, width) as u64,
         DisplayBlock::CodeLine { code, .. } => measure_code_block(code, width) as u64,
-        DisplayBlock::ToolCall {
-            name,
-            summary,
-            state,
-            body,
-            ..
-        } => crate::content::display_renderers::measure_tool_height(
-            name,
-            summary,
-            state.status,
-            state.elapsed,
-            state.output.as_deref(),
-            state.user_message.as_deref(),
-            body.as_ref(),
-            width,
-        ) as u64,
+        DisplayBlock::ToolCall { layout } => {
+            crate::content::display_renderers::measure_layout_ir(layout, ctx.width) as u64
+        }
         DisplayBlock::Exec { command, output } => exec::measure(command, output, width) as u64,
         DisplayBlock::Compacted { summary } => compacted::measure(summary, width) as u64,
     };
@@ -584,25 +464,9 @@ fn render_expanded_block(
         DisplayBlock::CodeLine { code, .. } => {
             render_code_block(out, code, width, false, None, false)
         }
-        DisplayBlock::ToolCall {
-            call_id,
-            name,
-            summary,
-            args,
-            state,
-            body,
-        } => tool_call::render(
-            out,
-            call_id,
-            name,
-            summary,
-            args,
-            state.status,
-            state.elapsed,
-            state,
-            body.as_ref(),
-            width,
-        ),
+        DisplayBlock::ToolCall { layout } => {
+            crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
+        }
         DisplayBlock::Exec { command, output } => exec::render(out, command, output, width),
         DisplayBlock::Compacted { summary } => compacted::render(out, summary, width),
     }
@@ -764,9 +628,8 @@ fn append_ellipsis(
 mod tests {
     use super::*;
     use crate::smelt_edit::{BufCreateOpts, BufId};
-    use smelt_core::content::block_layout::{BlockLayout, IrLeaf, TextSpec, ToolBody};
+    use smelt_core::content::block_layout::RunsSpec;
     use smelt_core::content::transcript::Transcript;
-    use smelt_core::transcript_model::{ToolOutput, ToolStatus};
 
     fn base_key(history: &BlockHistory, id: BlockId) -> LayoutKey {
         history.resolve_key(
@@ -809,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_measurement_matches_rendered_rows() {
+    fn static_block_measurement_matches_rendered_rows() {
         let blocks = [
             Block::Text {
                 content: "# Heading\n\nParagraph with **bold** text that wraps across several rows at narrow widths.\n\n```rust\nfn main() { println!(\"hello\"); }\n```\n\n| col | val |\n| --- | --- |\n| a | table cell that wraps |"
@@ -841,7 +704,7 @@ mod tests {
         ];
 
         for block in blocks {
-            let display = compile_block(&block, None, None);
+            let display = compile_block(&block);
             for show_thinking in [false, true] {
                 assert_eq!(
                     measured_rows(&display, 36, show_thinking),
@@ -853,7 +716,33 @@ mod tests {
     }
 
     #[test]
-    fn non_tool_blocks_are_not_cached_in_session_ir() {
+    fn layout_ir_measurement_matches_rendered_rows() {
+        let display = DisplayBlock::ToolCall {
+            layout: BlockLayout::Vbox(vec![
+                BlockLayout::Leaf(IrLeaf::Runs(RunsSpec {
+                    lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                        text: "echo hello && echo world && echo done".into(),
+                        syntax: Some("bash".into()),
+                        ..Default::default()
+                    }]]),
+                    hl_group: Some("SmeltToolPending".into()),
+                })),
+                BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                    content: "output line that wraps at narrow widths".into(),
+                    hl_group: None,
+                    ansi: false,
+                })),
+            ]),
+        };
+
+        assert_eq!(
+            measured_rows(&display, 24, true),
+            rendered_rows(&display, 24, true)
+        );
+    }
+
+    #[test]
+    fn display_model_caches_width_independent_blocks() {
         let mut transcript = Transcript::new();
         transcript.push(Block::CodeLine {
             content: "fn main() {}".into(),
@@ -861,130 +750,18 @@ mod tests {
         });
         let id = transcript.history.order[0];
         let key = base_key(&transcript.history, id);
+        let mut narrow = key;
+        narrow.width = 40;
 
+        let lua = smelt_core::lua::runtime::LuaRuntime::new();
         let mut model = DisplayModel::new();
-        assert_eq!(model.ensure_many(&transcript.history, &[id], &[key]), 1);
-        assert!(model
-            .tool_body_cache_entries(&transcript.history, &transcript.history.order)
-            .is_empty());
-
-        let mut hydrated = DisplayModel::new();
         assert_eq!(
-            hydrated.hydrate_tool_bodies(&transcript.history, Vec::new()),
+            model.ensure_many(&lua, &transcript.history, &[id], &[key]),
+            1
+        );
+        assert_eq!(
+            model.ensure_many(&lua, &transcript.history, &[id], &[narrow]),
             0
         );
-        assert_eq!(hydrated.ensure_many(&transcript.history, &[id], &[key]), 1);
-    }
-
-    #[test]
-    fn hydrated_tool_body_rejects_mismatched_key() {
-        let block = Block::ToolCall {
-            call_id: "call-1".into(),
-            name: "write_file".into(),
-            summary: "write file".into(),
-            args: Default::default(),
-        };
-        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-            content: "cached body".into(),
-            hl_group: None,
-            ansi: false,
-        })));
-
-        let mut transcript = Transcript::new();
-        transcript.push_tool_call(
-            block,
-            ToolState {
-                status: ToolStatus::Ok,
-                elapsed: None,
-                output: Some(Box::new(ToolOutput {
-                    content: "ok".into(),
-                    is_error: false,
-                    metadata: None,
-                })),
-                user_message: None,
-            },
-        );
-        let id = transcript.history.order[0];
-        let entry = ToolBodyCacheEntry {
-            id,
-            call_id: "call-1".into(),
-            key: DisplayCacheKey::new(transcript.history.content_hash(id), 999),
-            body,
-        };
-
-        let mut hydrated = DisplayModel::new();
-        assert_eq!(
-            hydrated.hydrate_tool_bodies(&transcript.history, vec![entry]),
-            0
-        );
-        assert!(hydrated
-            .tool_body_cache_entries(&transcript.history, &transcript.history.order)
-            .is_empty());
-        let key = base_key(&transcript.history, id);
-        assert_eq!(hydrated.ensure_many(&transcript.history, &[id], &[key]), 1);
-    }
-
-    #[test]
-    fn hydrated_tool_body_installs_cached_body() {
-        let block = Block::ToolCall {
-            call_id: "call-1".into(),
-            name: "write_file".into(),
-            summary: "write file".into(),
-            args: Default::default(),
-        };
-        let body = ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-            content: "cached body".into(),
-            hl_group: None,
-            ansi: false,
-        })));
-
-        let mut warm = Transcript::new();
-        warm.push_tool_call(
-            block.clone(),
-            ToolState {
-                status: ToolStatus::Ok,
-                elapsed: None,
-                output: Some(Box::new(ToolOutput {
-                    content: "ok".into(),
-                    is_error: false,
-                    metadata: None,
-                })),
-                user_message: None,
-            },
-        );
-        let warm_id = warm.history.order[0];
-        let warm_state = warm.history.tool_state("call-1").unwrap();
-        let warm_key = DisplayCacheKey::new(
-            warm.history.content_hash(warm_id),
-            warm_state.display_hash(),
-        );
-        let mut warm_model = DisplayModel::new();
-        assert!(warm_model.install_tool_body(warm_id, "call-1".into(), warm_key, body));
-        let entries = warm_model.tool_body_cache_entries(&warm.history, &warm.history.order);
-
-        let mut cold = Transcript::new();
-        cold.push_tool_call(
-            block,
-            ToolState {
-                status: ToolStatus::Ok,
-                elapsed: None,
-                output: Some(Box::new(ToolOutput {
-                    content: "ok".into(),
-                    is_error: false,
-                    metadata: None,
-                })),
-                user_message: None,
-            },
-        );
-        let id = cold.history.order[0];
-        let mut hydrated = DisplayModel::new();
-        assert_eq!(hydrated.hydrate_tool_bodies(&cold.history, entries), 1);
-        let cold_key = base_key(&cold.history, id);
-        assert_eq!(hydrated.ensure_many(&cold.history, &[id], &[cold_key]), 1);
-        let display = hydrated.get(id, cold_key).expect("compiled display block");
-        let DisplayBlock::ToolCall { body, .. } = display else {
-            panic!("expected tool call display block");
-        };
-        assert!(body.is_some());
     }
 }

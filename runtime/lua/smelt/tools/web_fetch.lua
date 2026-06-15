@@ -237,14 +237,6 @@ smelt.tools.register(smelt.tools._with_watchdog({
     if pat then return { pat } end
     return {}
   end,
-  render = function(args, output, ctx)
-    local items = {}
-    if args.prompt and args.prompt ~= "" then
-      table.insert(items, smelt.layout.text(args.prompt))
-    end
-    table.insert(items, require("smelt.transcript.defaults").render_tool_output(output, ctx))
-    return smelt.layout.vbox(items)
-  end,
   execute = function(args)
     local raw = fetch_raw(args)
     if type(raw) == "table" and raw.is_error then return raw end

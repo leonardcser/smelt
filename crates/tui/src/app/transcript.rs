@@ -5,11 +5,9 @@ use crate::content::prompt_parser::{build_prompt_display_lines, prompt_display_u
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 
-use smelt_core::content::block_layout::{BlockLayout, ToolBody};
 use smelt_core::content::transcript::Transcript;
-use smelt_core::transcript_model::{
-    Block, BlockHistory, BlockId, ToolOutput, ToolOutputRef, ToolStatus,
-};
+use smelt_core::lua::runtime::LuaRuntime;
+use smelt_core::transcript_model::{Block, BlockHistory, BlockId, ToolOutputRef, ToolStatus};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,25 +53,33 @@ impl TranscriptView {
 
     pub(crate) fn build_rows(
         &mut self,
+        lua: &LuaRuntime,
         width: u16,
         show_thinking: bool,
         theme: &Theme,
     ) -> Arc<Vec<String>> {
-        self.projection
-            .build_rows(&mut self.transcript.history, width, show_thinking, theme)
+        self.projection.build_rows(
+            lua,
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+            theme,
+        )
     }
 
     pub(crate) fn exact_total_rows(
         &mut self,
+        lua: &LuaRuntime,
         width: u16,
         show_thinking: bool,
     ) -> crate::smelt_edit::RowIndex {
         self.projection
-            .exact_total_rows(&mut self.transcript.history, width, show_thinking)
+            .exact_total_rows(lua, &mut self.transcript.history, width, show_thinking)
     }
 
     pub(crate) fn materialize_block_layout(
         &mut self,
+        lua: &LuaRuntime,
         width: u16,
         show_thinking: bool,
     ) -> Vec<(
@@ -81,8 +87,12 @@ impl TranscriptView {
         crate::smelt_edit::RowIndex,
         crate::smelt_edit::RowIndex,
     )> {
-        self.projection
-            .materialize_block_layout(&mut self.transcript.history, width, show_thinking)
+        self.projection.materialize_block_layout(
+            lua,
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+        )
     }
 
     pub(crate) fn visible_block_layout(
@@ -99,12 +109,14 @@ impl TranscriptView {
 
     pub(crate) fn plan_projection_measured(
         &mut self,
+        lua: &LuaRuntime,
         width: u16,
         show_thinking: bool,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
     ) -> crate::content::transcript_buf::ProjectionPlan {
         self.projection.plan_projection_measured(
+            lua,
             &mut self.transcript.history,
             width,
             show_thinking,
@@ -115,16 +127,18 @@ impl TranscriptView {
 
     pub(crate) fn project_planned(
         &mut self,
+        lua: &LuaRuntime,
         buf: &mut Buffer,
         theme: &Theme,
         plan: crate::content::transcript_buf::ProjectionPlan,
     ) -> crate::smelt_edit::MaterializedRows {
         self.projection
-            .project_planned(buf, &mut self.transcript.history, theme, plan)
+            .project_planned(lua, buf, &mut self.transcript.history, theme, plan)
     }
 
     pub(crate) fn display_rows_for_range(
         &mut self,
+        lua: &LuaRuntime,
         width: u16,
         show_thinking: bool,
         theme: &Theme,
@@ -132,23 +146,25 @@ impl TranscriptView {
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
         self.projection.display_rows_for_range(
+            lua,
             &mut self.transcript.history,
             width,
             show_thinking,
             theme,
-            start,
-            count,
+            start..start.saturating_add(count),
         )
     }
 
     pub(crate) fn copy_range(
         &mut self,
+        lua: &LuaRuntime,
         width: u16,
         show_thinking: bool,
         theme: &Theme,
         range: crate::smelt_edit::DocRange,
     ) -> crate::smelt_edit::CopyOutput {
         self.projection.copy_range(
+            lua,
             &mut self.transcript.history,
             width,
             show_thinking,
@@ -175,14 +191,6 @@ impl TranscriptView {
 
     pub(crate) fn invalidate_renderer_if_changed(&mut self, generation: u64) -> bool {
         self.projection.invalidate_renderer_if_changed(generation)
-    }
-
-    pub(crate) fn prerender_tool_bodies_for_range(
-        &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        range: std::ops::Range<usize>,
-    ) -> bool {
-        prerender_tool_bodies_for_range(lua, self, range)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -273,59 +281,6 @@ impl ResumePreviewCache {
             view.invalidate_renderer_if_changed(generation);
         }
     }
-}
-
-struct ToolRenderJob {
-    id: BlockId,
-    call_id: String,
-    name: String,
-    args: HashMap<String, serde_json::Value>,
-    output: Option<ToolOutput>,
-    status: ToolStatus,
-    elapsed_secs: Option<u64>,
-}
-
-fn collect_tool_render_jobs(
-    history: &BlockHistory,
-    ids: impl Iterator<Item = BlockId>,
-    has_body: impl Fn(BlockId, &str) -> bool,
-) -> (Vec<ToolRenderJob>, usize) {
-    let mut jobs = Vec::new();
-    let mut requested = 0;
-    for id in ids {
-        requested += 1;
-        let Some(block) = history.blocks.get(&id) else {
-            continue;
-        };
-        let Block::ToolCall {
-            call_id,
-            name,
-            args,
-            ..
-        } = block
-        else {
-            continue;
-        };
-        let Some(state) = history.tool_state(call_id) else {
-            continue;
-        };
-        if matches!(state.status, ToolStatus::Denied) {
-            continue;
-        }
-        if has_body(id, call_id) {
-            continue;
-        }
-        jobs.push(ToolRenderJob {
-            id,
-            call_id: call_id.clone(),
-            name: name.clone(),
-            args: args.clone(),
-            output: state.output.as_deref().cloned(),
-            status: state.status,
-            elapsed_secs: state.elapsed.map(|d| d.as_secs()),
-        });
-    }
-    (jobs, requested)
 }
 
 type TranscriptBlockSnapshot = (
@@ -472,7 +427,8 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        self.transcript.build_rows(tw, show_thinking, &theme)
+        self.transcript
+            .build_rows(&self.lua, tw, show_thinking, &theme)
     }
 
     pub(crate) fn transcript_total_rows(
@@ -482,7 +438,8 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("transcript:measure_rows_exact");
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
-        self.transcript.exact_total_rows(tw, show_thinking)
+        self.transcript
+            .exact_total_rows(&self.lua, tw, show_thinking)
     }
 
     pub(crate) fn transcript_rows_and_breaks_range(
@@ -496,7 +453,7 @@ impl TuiApp {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         self.transcript
-            .display_rows_for_range(tw, show_thinking, &theme, start, count)
+            .display_rows_for_range(&self.lua, tw, show_thinking, &theme, start, count)
     }
 
     pub(crate) fn transcript_visible_rows(
@@ -549,9 +506,11 @@ impl TuiApp {
     pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
-        let layout = self
-            .transcript
-            .materialize_block_layout(tw, self.core.config.settings.show_thinking);
+        let layout = self.transcript.materialize_block_layout(
+            &self.lua,
+            tw,
+            self.core.config.settings.show_thinking,
+        );
         self.transcript_block_snapshots_from_layout(layout.into_iter())
     }
 
@@ -861,79 +820,6 @@ impl TuiApp {
         };
         layout.visual_count().max(1) as u16
     }
-}
-
-pub(crate) fn prerender_tool_bodies_for_range(
-    lua: &smelt_core::lua::runtime::LuaRuntime,
-    view: &mut TranscriptView,
-    range: std::ops::Range<usize>,
-) -> bool {
-    let _perf = smelt_perf::perf::begin("tool:prerender_bodies");
-    let history = view.history();
-    let start = range.start.min(history.order.len());
-    let end = range.end.min(history.order.len()).max(start);
-    let (jobs, requested) = collect_tool_render_jobs(
-        history,
-        history.order[start..end].iter().copied(),
-        |id, call_id| view.projection.has_tool_body(history, id, call_id),
-    );
-    smelt_perf::perf::record_value("tool:prerender_bodies:requested", requested as u64);
-    smelt_perf::perf::record_value("tool:prerender_bodies:jobs", jobs.len() as u64);
-    let bodies = render_tool_body_jobs(lua, jobs);
-    smelt_perf::perf::record_value("tool:prerender_bodies:rendered", bodies.len() as u64);
-    store_tool_body_results(view, bodies)
-}
-
-fn render_tool_body_jobs(
-    lua: &smelt_core::lua::runtime::LuaRuntime,
-    jobs: Vec<ToolRenderJob>,
-) -> Vec<(BlockId, String, ToolBody)> {
-    let _perf = smelt_perf::perf::begin("tool:render_body_jobs");
-    smelt_perf::perf::record_value("tool:render_body_jobs:jobs", jobs.len() as u64);
-    let mut rendered_jobs = Vec::new();
-    for job in jobs {
-        let status_label = match job.status {
-            ToolStatus::Pending => "pending",
-            ToolStatus::Ok => "ok",
-            ToolStatus::Err => "err",
-            ToolStatus::Denied => "denied",
-            ToolStatus::Confirm => "confirm",
-        };
-        let ctx = smelt_core::lua::runtime::ToolRenderCtx {
-            summary: "",
-            status: status_label,
-            elapsed_secs: job.elapsed_secs,
-            call_id: Some(&job.call_id),
-        };
-        let Some(layout) = ({
-            let _perf = smelt_perf::perf::begin("tool:render_body_job");
-            lua.render_tool_layout(&job.name, &job.args, job.output.as_ref(), ctx)
-        }) else {
-            continue;
-        };
-        match compile_tool_body(&layout) {
-            Ok(body) => rendered_jobs.push((job.id, job.call_id, body)),
-            Err(err) => lua.record_error(format!("tool render `{}`: {err}", job.name)),
-        }
-    }
-    rendered_jobs
-}
-
-fn store_tool_body_results(
-    view: &mut TranscriptView,
-    bodies: Vec<(BlockId, String, ToolBody)>,
-) -> bool {
-    let mut changed = false;
-    for (id, call_id, body) in bodies {
-        changed |= view
-            .projection
-            .install_tool_body(&view.transcript.history, id, call_id, body);
-    }
-    changed
-}
-
-pub(crate) fn compile_tool_body(layout: &BlockLayout) -> Result<ToolBody, String> {
-    crate::content::display_block::compile_layout_ir(layout).map(ToolBody::Layout)
 }
 
 #[cfg(test)]

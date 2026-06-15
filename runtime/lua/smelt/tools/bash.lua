@@ -149,17 +149,6 @@ smelt.tools.register(smelt.tools._with_watchdog({
     end
     return lines
   end,
-  render = function(_, output, ctx)
-    local items = {}
-    local content = (output.content or ""):gsub("%s+$", "")
-    if content:match("%S") then
-      table.insert(items, require("smelt.transcript.defaults").render_tool_output({
-        content = content,
-        is_error = output.is_error,
-      }, ctx))
-    end
-    return smelt.layout.vbox(items)
-  end,
   execute = M.execute,
 }, { default_ms = DEFAULT_TIMEOUT_MS, max_ms = MAX_TIMEOUT_MS, grace_ms = 5000 }))
 

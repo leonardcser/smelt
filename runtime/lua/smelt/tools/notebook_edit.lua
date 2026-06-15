@@ -75,13 +75,6 @@ smelt.tools.register({
     end
     return "Use read_file on this notebook before editing it."
   end,
-  render = function(_, output, ctx)
-    if output.is_error then
-      return require("smelt.transcript.defaults").render_tool_output(output, ctx)
-    end
-    local meta = output.metadata or {}
-    return preview_layout(meta)
-  end,
   paths_for_workspace = function(args)
     local p = args.notebook_path or ""
     return p ~= "" and { { path = p, kind = "file" } } or {}

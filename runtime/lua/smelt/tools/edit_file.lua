@@ -95,21 +95,6 @@ smelt.tools.register({
     end
     return "You must use read_file before editing. Read the file first."
   end,
-  render = function(args, output, ctx)
-    if output.is_error then
-      return require("smelt.transcript.defaults").render_tool_output(output, ctx)
-    end
-    local meta = output.metadata
-    if meta then
-      return smelt.layout.diff({
-        old = meta.old_content or args.old_string or "",
-        new = meta.new_content or args.new_string or "",
-        path = meta.path or args.file_path or "",
-        anchor = args.old_string or "",
-      })
-    end
-    return planned_diff(args)
-  end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
     return p ~= "" and { { path = p, kind = "file" } } or {}

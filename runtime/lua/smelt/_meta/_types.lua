@@ -438,9 +438,8 @@
 ---@field summary? function `summary(args) -> string | styled_lines | nil` - styled label rendered in the transcript header AND confirm dialog body header. Plain string is auto-wrapped as one plain span; the styled-lines form is `{ { { text, syntax?, selectable?, title_suffix?, style? }, ... }, ... }` - same span shape as `buf:styled` plus optional `selectable = false` for chrome text and `title_suffix = true` for metadata rendered after the live tool timer.
 ---@field approval_patterns? function `approval_patterns(args, ctx) -> string[]` - patterns offered as one-click approvals.
 ---@field preflight? function `preflight(args, ctx) -> table?` - validation hook; nil result skips.
----@field render? function `render(buf, args, result)` - custom transcript render.
 ---@field paths_for_workspace? function `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch.
----@field preview? function `preview(args) -> smelt.layout` - pre-execute preview render. Returns the same `smelt.layout` value the `render` callback returns; the confirm dialog renders it directly into the preview pane.
+---@field preview? function `preview(args) -> smelt.layout` - pre-execute preview render. Returns the same `smelt.layout` value the confirm dialog renders directly into the preview pane.
 ---@field watchdog_timeout_ms? integer Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally.
 ---@field watchdog_max_timeout_ms? integer Maximum watchdog deadline accepted from tool arguments, in milliseconds.
 ---@field watchdog_timeout_arg? string Tool argument that controls the watchdog deadline. Defaults to `timeout_ms`.

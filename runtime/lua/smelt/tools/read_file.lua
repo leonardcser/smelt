@@ -83,12 +83,6 @@ smelt.tools.register(smelt.tools._with_watchdog({
   summary = function(args)
     return smelt.path.display(args.file_path or "")
   end,
-  render = function(_, output, ctx)
-    if output.is_error then
-      return require("smelt.transcript.defaults").render_tool_output(output, ctx)
-    end
-    return smelt.layout.text(smelt.text.line_count(output.content or "") .. " lines")
-  end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
     return p ~= "" and { { path = p, kind = "file" } } or {}

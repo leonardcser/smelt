@@ -79,6 +79,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
             let tw = self.transcript_width() as u16;
             let theme = self.ui.theme().clone();
             Some(self.transcript.copy_range(
+                &self.lua,
                 tw,
                 self.core.config.settings.show_thinking,
                 &theme,

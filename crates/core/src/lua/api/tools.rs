@@ -111,13 +111,10 @@ pub struct LuaToolDef {
     pub approval_patterns: Option<mlua::Function>,
     /// `preflight(args, ctx) -> table?` - validation hook; nil result skips.
     pub preflight: Option<mlua::Function>,
-    /// `render(buf, args, result)` - custom transcript render.
-    pub render: Option<mlua::Function>,
     /// `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch.
     pub paths_for_workspace: Option<mlua::Function>,
-    /// `preview(args) -> smelt.layout` - pre-execute preview render. Returns
-    /// the same `smelt.layout` value the `render` callback returns; the confirm
-    /// dialog renders it directly into the preview pane.
+    /// `preview(args) -> smelt.layout` - pre-execute preview render. The
+    /// confirm dialog renders it directly into the preview pane.
     pub preview: Option<mlua::Function>,
     /// Outer watchdog deadline for this tool's coroutine, in milliseconds.
     /// This is separate from any timeout the tool implements internally.
@@ -184,7 +181,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 };
                 let approval_patterns_handle = def.approval_patterns.map(stash).transpose()?;
                 let preflight_handle = def.preflight.map(stash).transpose()?;
-                let render_handle = def.render.map(stash).transpose()?;
                 let paths_for_workspace_handle = def.paths_for_workspace.map(stash).transpose()?;
                 let preview_handle = def.preview.map(stash).transpose()?;
 
@@ -203,7 +199,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 }
                 meta.set("hook_approval_patterns", approval_patterns_handle.is_some())?;
                 meta.set("hook_preflight", preflight_handle.is_some())?;
-                meta.set("hook_render", render_handle.is_some())?;
                 meta.set(
                     "hook_paths_for_workspace",
                     paths_for_workspace_handle.is_some(),
@@ -240,7 +235,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             execute: execute_handle,
                             approval_patterns: approval_patterns_handle,
                             preflight: preflight_handle,
-                            render: render_handle,
                             paths_for_workspace: paths_for_workspace_handle,
                             preview: preview_handle,
                         },

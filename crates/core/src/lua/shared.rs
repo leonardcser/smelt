@@ -68,7 +68,6 @@ pub struct ToolHandles {
     pub execute: LuaHandle,
     pub approval_patterns: Option<LuaHandle>,
     pub preflight: Option<LuaHandle>,
-    pub render: Option<LuaHandle>,
     pub paths_for_workspace: Option<LuaHandle>,
     pub preview: Option<LuaHandle>,
 }

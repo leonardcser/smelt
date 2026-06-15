@@ -23,15 +23,6 @@ smelt.tools.register({
   summary = function(args)
     return smelt.path.display(args.file_path or "")
   end,
-  render = function(args, output, ctx)
-    if output.is_error then
-      return require("smelt.transcript.defaults").render_tool_output(output, ctx)
-    end
-    return smelt.layout.file_view({
-      content = args.content or "",
-      path    = args.file_path or "",
-    })
-  end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
     return p ~= "" and { { path = p, kind = "file" } } or {}

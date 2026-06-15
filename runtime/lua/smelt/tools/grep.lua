@@ -153,12 +153,6 @@ smelt.tools.register(smelt.tools._with_watchdog({
     if path == "" then return pattern end
     return pattern .. " in " .. path
   end,
-  render = function(_, output, ctx)
-    if output.is_error then
-      return require("smelt.transcript.defaults").render_tool_output(output, ctx)
-    end
-    return smelt.layout.text(smelt.text.line_count(output.content or "") .. " matches")
-  end,
   paths_for_workspace = function(args)
     local p = args.path or ""
     return p ~= "" and { { path = p, kind = "directory" } } or {}

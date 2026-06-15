@@ -195,8 +195,8 @@ fn render_preview_into(
     let Some(layout) = app.lua.render_tool_preview(tool_name, args) else {
         return false;
     };
-    let body = match crate::app::transcript::compile_tool_body(&layout) {
-        Ok(body) => body,
+    let preview = match crate::content::display_block::compile_layout_ir(&layout) {
+        Ok(preview) => preview,
         Err(err) => {
             app.lua
                 .record_error(format!("tool preview `{tool_name}`: {err}"));
@@ -209,7 +209,7 @@ fn render_preview_into(
         return false;
     };
     crate::content::to_buffer::render_into_buffer(buf, width, &theme, |sink| {
-        crate::content::display_renderers::render_tool_body_into(sink, &body, width);
+        crate::content::display_renderers::render_layout_ir_into(sink, &preview, width);
     });
     true
 }

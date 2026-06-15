@@ -39,6 +39,14 @@ pub struct TextSpec {
     pub ansi: bool,
 }
 
+/// Styled inline text leaf. Each line is wrapped at measurement/render time,
+/// preserving span-level syntax, theme, and selectability metadata.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RunsSpec {
+    pub lines: protocol::StyledLines,
+    pub hl_group: Option<String>,
+}
+
 /// Serializable source-view render directive.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SourceViewIr {
@@ -49,6 +57,7 @@ pub enum SourceViewIr {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LayoutLeaf {
     Text(TextSpec),
+    Runs(RunsSpec),
     SourceView(SourceViewIr),
 }
 
@@ -58,6 +67,7 @@ pub enum LayoutLeaf {
 pub enum Leaf<B> {
     Buf(B),
     Text(TextSpec),
+    Runs(RunsSpec),
     Diff(DiffSpec),
     FileView(FileViewSpec),
     SourceView(SourceViewIr),
@@ -66,11 +76,6 @@ pub enum Leaf<B> {
 pub type LuaLeaf = Leaf<BufId>;
 pub type IrLeaf = LayoutLeaf;
 pub type LayoutIr = BlockLayout<LayoutLeaf>;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ToolBody {
-    Layout(LayoutIr),
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapKeep {

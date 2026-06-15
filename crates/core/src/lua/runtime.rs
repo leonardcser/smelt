@@ -130,17 +130,6 @@ fn keymap_mode_matches(binding_mode: &str, active_mode: &str) -> bool {
     binding_mode.is_empty() || binding_mode == active_mode
 }
 
-/// Context passed to a tool's `render(args, output, ctx)` hook.
-pub struct ToolRenderCtx<'a> {
-    pub summary: &'a str,
-    /// `"pending" | "ok" | "err" | "denied" | "confirm"`
-    pub status: &'a str,
-    /// `None` while the call is still running.
-    pub elapsed_secs: Option<u64>,
-    /// `None` for synthetic renders (preview / dialog title).
-    pub call_id: Option<&'a str>,
-}
-
 /// Context passed to the root transcript renderer.
 pub struct TranscriptRenderCtx {
     pub show_thinking: bool,
@@ -1525,95 +1514,6 @@ impl LuaRuntime {
         }
     }
 
-    /// Call a tool's `render(args, output, ctx)` hook and return the composed `BlockLayout` tree.
-    pub fn render_tool_layout(
-        &self,
-        tool_name: &str,
-        args: &HashMap<String, serde_json::Value>,
-        output: Option<&crate::transcript_model::ToolOutput>,
-        ctx: ToolRenderCtx<'_>,
-    ) -> Option<crate::content::block_layout::BlockLayout> {
-        let render_fn = {
-            let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
-            let h = handlers.get(tool_name)?;
-            let rh = h.render.as_ref()?;
-            self.lua.registry_value::<mlua::Function>(&rh.key).ok()?
-        };
-
-        let args_table = match self.args_to_lua_table(args) {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool render: build args: {e}"));
-                return None;
-            }
-        };
-
-        let output_table = match self.lua.create_table() {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool render: build output table: {e}"));
-                return None;
-            }
-        };
-        if let Some(out) = output {
-            let _ = output_table.set("content", out.content.clone());
-            let _ = output_table.set("is_error", out.is_error);
-            if let Some(meta) = &out.metadata {
-                match json_to_lua(&self.lua, meta) {
-                    Ok(v) => {
-                        let _ = output_table.set("metadata", v);
-                    }
-                    Err(e) => self.record_error(format!("tool render: metadata: {e}")),
-                }
-            }
-        }
-
-        let ctx_table = match self.lua.create_table() {
-            Ok(t) => t,
-            Err(e) => {
-                self.record_error(format!("tool render: build ctx: {e}"));
-                return None;
-            }
-        };
-        let _ = ctx_table.set("summary", ctx.summary);
-        let _ = ctx_table.set("status", ctx.status);
-        if let Some(secs) = ctx.elapsed_secs {
-            let _ = ctx_table.set("elapsed_secs", secs);
-        }
-        if let Some(cid) = ctx.call_id {
-            let _ = ctx_table.set("call_id", cid);
-        }
-
-        let result: mlua::Value = match render_fn.call((args_table, output_table, ctx_table)) {
-            Ok(v) => v,
-            Err(e) => {
-                self.record_error(format!("tool render `{tool_name}`: {e}"));
-                return None;
-            }
-        };
-
-        match result {
-            mlua::Value::Nil => None,
-            mlua::Value::UserData(ud) => {
-                match ud.borrow::<crate::lua::api::layout::LuaBlockLayout>() {
-                    Ok(layout) => Some(layout.0.clone()),
-                    Err(e) => {
-                        self.record_error(format!(
-                            "tool render `{tool_name}`: expected smelt.layout value: {e}"
-                        ));
-                        None
-                    }
-                }
-            }
-            _ => {
-                self.record_error(format!(
-                    "tool render `{tool_name}`: expected smelt.layout value or nil"
-                ));
-                None
-            }
-        }
-    }
-
     fn args_to_lua_table(
         &self,
         args: &HashMap<String, serde_json::Value>,
@@ -2197,18 +2097,16 @@ fn tool_status_hl(status: ToolStatus) -> &'static str {
 }
 
 fn tool_elapsed_text(status: ToolStatus, secs: u64) -> Option<String> {
-    (!matches!(status, ToolStatus::Confirm)).then(|| format_elapsed_secs(secs))
+    (!matches!(status, ToolStatus::Confirm) && secs >= 1).then(|| format_elapsed_secs(secs))
 }
 
 fn format_elapsed_secs(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
+        format!("{}m{}s", secs / 60, secs % 60)
     } else {
-        let h = secs / 3600;
-        let rest = secs % 3600;
-        format!("{}h {}m {}s", h, rest / 60, rest % 60)
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 

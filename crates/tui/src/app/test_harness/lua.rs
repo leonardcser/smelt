@@ -128,9 +128,6 @@ impl TestApp {
                 if let Some(h) = &t.preflight {
                     check(&format!("tools[{name}].preflight"), h);
                 }
-                if let Some(h) = &t.render {
-                    check(&format!("tools[{name}].render"), h);
-                }
                 if let Some(h) = &t.paths_for_workspace {
                     check(&format!("tools[{name}].paths_for_workspace"), h);
                 }

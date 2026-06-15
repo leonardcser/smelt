@@ -1,442 +1,22 @@
 use super::metrics::{block_inner_width, BLOCK_GUTTER_SPACE};
 use super::MAX_TOOL_BLOCK_ROWS;
 use crate::content::source_view::{render_source_view, SourceView, SourceViewTarget};
-use protocol::{StyledLines, StyledSpan};
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{
-    solve_hbox_widths, BlockLayout, IrLeaf, LayoutIr, TextSpec, ToolBody,
+    solve_hbox_widths, BlockLayout, IrLeaf, LayoutIr, RunsSpec, TextSpec,
 };
 use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::InlineSyntax;
 use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
-use smelt_core::theme::{intern, HlGroup};
-use smelt_core::transcript_model::{ToolOutput, ToolStatus};
-use std::collections::HashMap;
-use std::time::Duration;
+use smelt_core::theme::intern;
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_tool(
-    out: &mut LineBuilder,
-    name: &str,
-    summary: &StyledLines,
-    args: &HashMap<String, serde_json::Value>,
-    status: ToolStatus,
-    elapsed: Option<Duration>,
-    output: Option<&ToolOutput>,
-    user_message: Option<&str>,
-    body: Option<&ToolBody>,
-    width: usize,
-) -> u16 {
-    let color: HlGroup = match status {
-        ToolStatus::Ok => intern("SmeltSuccess"),
-        ToolStatus::Err | ToolStatus::Denied => intern("ErrorMsg"),
-        ToolStatus::Confirm => intern("SmeltAccent"),
-        ToolStatus::Pending => intern("SmeltToolPending"),
-    };
-    let time = if status == ToolStatus::Confirm {
-        None
-    } else {
-        elapsed
-    };
-    let mut rows = print_tool_line(out, name, summary, color, status, time, width);
-    if let Some(msg) = user_message {
-        print_dim(out, &format!("{BLOCK_GUTTER_SPACE}{msg}"));
-        out.newline();
-        rows += 1;
-    }
-    if status != ToolStatus::Denied {
-        if let Some(body) = body {
-            let inner_width = block_inner_width(width) as u16;
-            rows += render_tool_body(out, body, inner_width);
-        } else if let Some(out_data) = output {
-            if !out_data.content.trim().is_empty() {
-                rows += print_tool_output(out, name, out_data, args, width);
-            }
-        }
-    }
-    rows
+pub(crate) fn render_layout_ir_into(out: &mut LineBuilder, layout: &LayoutIr, width: u16) -> u16 {
+    render_layout_ir_range(out, layout, width, 0, u16::MAX, None)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn measure_tool_height(
-    name: &str,
-    summary: &StyledLines,
-    status: ToolStatus,
-    elapsed: Option<Duration>,
-    output: Option<&ToolOutput>,
-    user_message: Option<&str>,
-    body: Option<&ToolBody>,
-    width: usize,
-) -> u16 {
-    let time = if status == ToolStatus::Confirm {
-        None
-    } else {
-        elapsed
-    };
-    let mut rows = measure_tool_line(name, summary, status, time, width);
-    if user_message.is_some() {
-        rows = rows.saturating_add(1);
-    }
-    if status != ToolStatus::Denied {
-        if let Some(body) = body {
-            rows = rows.saturating_add(measure_tool_body(body, block_inner_width(width) as u16));
-        } else if let Some(out_data) = output {
-            if !out_data.content.trim().is_empty() {
-                rows = rows.saturating_add(measure_tool_output(&out_data.content, width));
-            }
-        }
-    }
-    rows
-}
-
-struct ToolLineLayout {
-    prefix_len: usize,
-    max_summary: usize,
-}
-
-fn tool_line_layout(
-    name: &str,
-    suffix_len: usize,
-    has_title_tail: bool,
-    width: usize,
-) -> ToolLineLayout {
-    let prefix_len = 2 + name.len() + usize::from(has_title_tail); // "⏺ name" + optional separator
-    let max_summary = width.saturating_sub(prefix_len + suffix_len + 1);
-    ToolLineLayout {
-        prefix_len,
-        max_summary,
-    }
-}
-
-fn tool_title_suffix(elapsed: Option<Duration>) -> String {
-    elapsed.and_then(format_tool_duration).unwrap_or_default()
-}
-
-fn format_tool_duration(duration: Duration) -> Option<String> {
-    let secs = duration.as_secs();
-    if secs < 1 {
-        None
-    } else if secs < 60 {
-        Some(format!("{secs}s"))
-    } else if secs < 60 * 60 {
-        Some(format!("{}m{}s", secs / 60, secs % 60))
-    } else {
-        Some(format!("{}h{}m", secs / 3600, (secs % 3600) / 60))
-    }
-}
-
-fn print_tool_line(
-    out: &mut LineBuilder,
-    name: &str,
-    summary: &StyledLines,
-    pill_color: HlGroup,
-    status: ToolStatus,
-    elapsed: Option<Duration>,
-    width: usize,
-) -> u16 {
-    out.push_hl(pill_color);
-    out.print("*");
-    out.pop_style();
-    let timer = tool_title_suffix(elapsed);
-    let (summary, suffix_spans) = split_title_summary(summary, &timer, status);
-    let has_summary = !summary.as_plain_text().is_empty();
-    let suffix_text_len: usize = suffix_spans.iter().map(|s| s.text.len()).sum();
-    let suffix_len = suffix_text_len
-        + suffix_spans.len().saturating_sub(1)
-        + 2 * usize::from(has_summary && !suffix_spans.is_empty());
-    let has_title_tail = has_summary || !suffix_spans.is_empty();
-    let ly = tool_line_layout(name, suffix_len, has_title_tail, width);
-
-    print_dim(out, &format!(" {name}"));
-    if has_title_tail {
-        out.print(" ");
-    }
-
-    let max_seg = ly.max_summary.max(1);
-
-    struct Wrapped {
-        rows: Vec<Vec<WrappedRun<()>>>,
-    }
-
-    let mut wlines: Vec<Wrapped> = summary
-        .0
-        .iter()
-        .map(|spans| {
-            let line = InlineLine::new(
-                spans
-                    .iter()
-                    .map(|s| InlineRun::new(s.text.clone(), (), BreakPolicy::BreakOnSpaces))
-                    .collect(),
-            );
-            Wrapped {
-                rows: line.wrap_fragments(max_seg),
-            }
-        })
-        .collect();
-    if wlines.is_empty() {
-        wlines.push(Wrapped {
-            rows: vec![Vec::new()],
-        });
-    }
-
-    if wlines.iter().any(|w| w.rows.len() > 1) {
-        out.mark_wrapped();
-    }
-
-    let total: usize = wlines.iter().map(|w| w.rows.len()).sum();
-    let show = total.min(MAX_TOOL_BLOCK_ROWS);
-    let mut rows = 0u16;
-    let mut emitted = 0usize;
-
-    'outer: for (li, w) in wlines.iter().enumerate() {
-        let spans: &[StyledSpan] = summary
-            .0
-            .get(li)
-            .map(Vec::as_slice)
-            .unwrap_or(&[] as &[StyledSpan]);
-        let line_source = selectable_line_text(spans);
-        for (seg_idx, row_fragments) in w.rows.iter().enumerate() {
-            if emitted >= show {
-                break 'outer;
-            }
-            let is_first = emitted == 0;
-            if !is_first {
-                out.print_gutter(&" ".repeat(ly.prefix_len));
-                if seg_idx > 0 {
-                    out.mark_soft_wrap_continuation();
-                }
-            }
-            if seg_idx == 0 {
-                out.set_source_text(&tool_title_source_text(name, &line_source, is_first));
-            }
-
-            for fragment in row_fragments {
-                let Some(span) = spans.get(fragment.run_index) else {
-                    continue;
-                };
-                let start = fragment.range.start;
-                let end = fragment.range.end;
-                let piece = smelt_buffer::text::slice(&span.text, start..end);
-
-                let fg_color = span.fg.as_deref().and_then(|name| out.theme().get(name).fg);
-                let bg_color = span.bg.as_deref().and_then(|name| out.theme().get(name).bg);
-                out.save_style();
-                if let Some(group) = span.hl.as_deref() {
-                    out.set_hl(intern(group));
-                }
-                if let Some(c) = fg_color {
-                    out.set_fg(c);
-                }
-                if let Some(c) = bg_color {
-                    out.set_bg(c);
-                }
-                if span.dim {
-                    out.set_dim();
-                }
-                if span.bold {
-                    out.set_bold();
-                }
-                if span.italic {
-                    out.set_italic();
-                }
-                match span.syntax.as_deref() {
-                    Some(lang) => {
-                        let mut h = InlineSyntax::new(lang);
-                        h.print_line_range(out, &span.text, start..end);
-                    }
-                    None if span.selectable => out.print(piece),
-                    None => out.print_with_meta(
-                        piece,
-                        SpanMeta {
-                            selectable: false,
-                            copy_as: None,
-                        },
-                    ),
-                }
-                out.pop_style();
-            }
-
-            if is_first && !suffix_spans.is_empty() {
-                if has_summary {
-                    print_dim_non_selectable(out, "  ");
-                }
-                for (idx, span) in suffix_spans.iter().enumerate() {
-                    if idx > 0 {
-                        print_dim_non_selectable(out, " ");
-                    }
-                    print_nonselectable_styled_span(out, span);
-                }
-            }
-            out.newline();
-            rows += 1;
-            emitted += 1;
-        }
-    }
-
-    if total > MAX_TOOL_BLOCK_ROWS {
-        let skipped = total - MAX_TOOL_BLOCK_ROWS;
-        out.print_gutter(&" ".repeat(ly.prefix_len));
-        print_dim(
-            out,
-            &format!("... {} below", pluralize(skipped, "line", "lines")),
-        );
-        out.newline();
-        rows += 1;
-    }
-
-    rows
-}
-
-fn measure_tool_line(
-    name: &str,
-    summary: &StyledLines,
-    status: ToolStatus,
-    elapsed: Option<Duration>,
-    width: usize,
-) -> u16 {
-    let timer = tool_title_suffix(elapsed);
-    let (summary, suffix_spans) = split_title_summary(summary, &timer, status);
-    let has_summary = !summary.as_plain_text().is_empty();
-    let suffix_text_len: usize = suffix_spans.iter().map(|s| s.text.len()).sum();
-    let suffix_len = suffix_text_len
-        + suffix_spans.len().saturating_sub(1)
-        + 2 * usize::from(has_summary && !suffix_spans.is_empty());
-    let has_title_tail = has_summary || !suffix_spans.is_empty();
-    let ly = tool_line_layout(name, suffix_len, has_title_tail, width);
-    let max_seg = ly.max_summary.max(1);
-    let total: usize = summary
-        .0
-        .iter()
-        .map(|spans| {
-            let line = InlineLine::new(
-                spans
-                    .iter()
-                    .map(|s| InlineRun::new(s.text.clone(), (), BreakPolicy::BreakOnSpaces))
-                    .collect(),
-            );
-            line.wrap_fragments(max_seg).len()
-        })
-        .sum::<usize>()
-        .max(1);
-    let shown = total.min(MAX_TOOL_BLOCK_ROWS);
-    (shown + usize::from(total > MAX_TOOL_BLOCK_ROWS)) as u16
-}
-
-fn split_title_summary(
-    summary: &StyledLines,
-    timer: &str,
-    status: ToolStatus,
-) -> (StyledLines, Vec<StyledSpan>) {
-    let mut body = summary.clone();
-    let mut suffix = Vec::new();
-    if !timer.is_empty() {
-        suffix.push(StyledSpan {
-            text: timer.to_string(),
-            dim: true,
-            selectable: false,
-            ..Default::default()
-        });
-    }
-
-    let Some(first_line) = body.0.first_mut() else {
-        return (body, suffix);
-    };
-    let mut trailing = Vec::new();
-    while first_line.last().is_some_and(|span| span.title_suffix) {
-        let mut span = first_line.pop().unwrap();
-        span.text = span.text.trim().to_string();
-        if status == ToolStatus::Pending && !span.text.is_empty() {
-            trailing.push(span);
-        }
-    }
-    trailing.reverse();
-    suffix.extend(trailing);
-    (body, suffix)
-}
-
-fn print_nonselectable_styled_span(out: &mut LineBuilder, span: &StyledSpan) {
-    let fg_color = span.fg.as_deref().and_then(|name| out.theme().get(name).fg);
-    let bg_color = span.bg.as_deref().and_then(|name| out.theme().get(name).bg);
-    out.save_style();
-    if let Some(group) = span.hl.as_deref() {
-        out.set_hl(intern(group));
-    }
-    if let Some(c) = fg_color {
-        out.set_fg(c);
-    }
-    if let Some(c) = bg_color {
-        out.set_bg(c);
-    }
-    if span.dim {
-        out.set_dim();
-    }
-    if span.bold {
-        out.set_bold();
-    }
-    if span.italic {
-        out.set_italic();
-    }
-    out.print_with_meta(
-        &span.text,
-        SpanMeta {
-            selectable: false,
-            copy_as: None,
-        },
-    );
-    out.pop_style();
-}
-
-fn selectable_line_text(spans: &[StyledSpan]) -> String {
-    let mut out = String::new();
-    for span in spans {
-        if span.selectable {
-            out.push_str(&span.text);
-        }
-    }
-    out
-}
-
-fn tool_title_source_text(name: &str, line_source: &str, include_title: bool) -> String {
-    if include_title {
-        if line_source.is_empty() {
-            format!("* {name}")
-        } else {
-            format!("* {name} {line_source}")
-        }
-    } else {
-        line_source.to_string()
-    }
-}
-
-fn render_tool_body(out: &mut LineBuilder, body: &ToolBody, inner_width: u16) -> u16 {
-    match body {
-        ToolBody::Layout(layout) => render_layout_ir_node(
-            out,
-            layout,
-            MAX_TOOL_BLOCK_ROWS as u16,
-            inner_width,
-            Some(BLOCK_GUTTER_SPACE),
-        ),
-    }
-}
-
-pub(crate) fn measure_tool_body(body: &ToolBody, inner_width: u16) -> u16 {
-    match body {
-        ToolBody::Layout(layout) => {
-            measure_layout_ir_node(layout, MAX_TOOL_BLOCK_ROWS as u16, inner_width)
-        }
-    }
-}
-
-fn render_layout_ir_node(
-    out: &mut LineBuilder,
-    layout: &LayoutIr,
-    rows_cap: u16,
-    width: u16,
-    gutter: Option<&str>,
-) -> u16 {
-    render_layout_ir_range(out, layout, width, 0, rows_cap, gutter)
+pub(crate) fn measure_layout_ir(layout: &LayoutIr, width: u16) -> u16 {
+    measure_layout_ir_full(layout, width)
 }
 
 fn render_layout_ir_range(
@@ -506,10 +86,6 @@ fn render_ir_vbox(
     written
 }
 
-fn measure_layout_ir_node(layout: &LayoutIr, rows_cap: u16, width: u16) -> u16 {
-    measure_layout_ir_full(layout, width).min(rows_cap)
-}
-
 fn measure_layout_ir_full(layout: &LayoutIr, width: u16) -> u16 {
     measure_layout_ir_full_with_gutter(layout, width, 0)
 }
@@ -555,6 +131,7 @@ fn render_ir_leaf(
 ) -> u16 {
     match leaf {
         IrLeaf::Text(spec) => render_text_spec(out, spec, width, row_start, row_count, gutter),
+        IrLeaf::Runs(spec) => render_runs_spec(out, spec, width, row_start, row_count, gutter),
         IrLeaf::SourceView(smelt_core::content::block_layout::SourceViewIr::Diff(cache)) => {
             let indent = gutter_width(gutter);
             let target =
@@ -567,6 +144,7 @@ fn render_ir_leaf(
 fn measure_ir_leaf(leaf: &IrLeaf, width: u16, gutter_cells: u16) -> u16 {
     match leaf {
         IrLeaf::Text(spec) => measure_text_spec(spec, width),
+        IrLeaf::Runs(spec) => measure_runs_spec(spec, width),
         IrLeaf::SourceView(smelt_core::content::block_layout::SourceViewIr::Diff(cache)) => {
             smelt_core::content::highlight::measure_diff_ir(
                 cache,
@@ -654,6 +232,120 @@ fn measure_text_spec(spec: &TextSpec, width: u16) -> u16 {
             }
         })
         .sum()
+}
+
+fn wrap_styled_runs(spans: &[protocol::StyledSpan], width: u16) -> Vec<Vec<WrappedRun<usize>>> {
+    if spans.is_empty() {
+        return vec![Vec::new()];
+    }
+    let line = InlineLine::new(
+        spans
+            .iter()
+            .enumerate()
+            .map(|(idx, span)| InlineRun::new(span.text.clone(), idx, BreakPolicy::BreakOnSpaces))
+            .collect(),
+    );
+    line.wrap_fragments(width.max(1) as usize)
+}
+
+fn render_runs_spec(
+    out: &mut LineBuilder,
+    spec: &RunsSpec,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    gutter: Option<&str>,
+) -> u16 {
+    let default_hl = spec.hl_group.as_deref();
+    let mut seen = 0u16;
+    let mut rows = 0u16;
+    'outer: for spans in &spec.lines.0 {
+        let wrapped = wrap_styled_runs(spans, width);
+        if wrapped.len() > 1 {
+            out.mark_wrapped();
+        }
+        for (seg_idx, row_fragments) in wrapped.iter().enumerate() {
+            if seen < row_start {
+                seen = seen.saturating_add(1);
+                continue;
+            }
+            if rows >= row_count {
+                break 'outer;
+            }
+            if let Some(gutter) = gutter {
+                out.print_gutter(gutter);
+            }
+            if seg_idx > 0 {
+                out.mark_soft_wrap_continuation();
+            }
+            for fragment in row_fragments {
+                let Some(span) = spans.get(fragment.run_index) else {
+                    continue;
+                };
+                print_styled_span_range(out, span, default_hl, fragment.range.clone());
+            }
+            out.newline();
+            rows = rows.saturating_add(1);
+            seen = seen.saturating_add(1);
+        }
+    }
+    rows
+}
+
+fn measure_runs_spec(spec: &RunsSpec, width: u16) -> u16 {
+    spec.lines
+        .0
+        .iter()
+        .map(|spans| wrap_styled_runs(spans, width).len() as u16)
+        .sum()
+}
+
+fn print_styled_span_range(
+    out: &mut LineBuilder,
+    span: &protocol::StyledSpan,
+    default_hl: Option<&str>,
+    range: std::ops::Range<usize>,
+) {
+    let piece = smelt_buffer::text::slice(&span.text, range.clone());
+    if piece.is_empty() {
+        return;
+    }
+    let fg_color = span.fg.as_deref().and_then(|name| out.theme().get(name).fg);
+    let bg_color = span.bg.as_deref().and_then(|name| out.theme().get(name).bg);
+    out.save_style();
+    if let Some(group) = span.hl.as_deref().or(default_hl) {
+        out.set_hl(intern(group));
+    }
+    if let Some(c) = fg_color {
+        out.set_fg(c);
+    }
+    if let Some(c) = bg_color {
+        out.set_bg(c);
+    }
+    if span.dim {
+        out.set_dim();
+    }
+    if span.bold {
+        out.set_bold();
+    }
+    if span.italic {
+        out.set_italic();
+    }
+    match span.syntax.as_deref() {
+        Some(lang) if span.selectable => {
+            let mut h = InlineSyntax::new(lang);
+            h.print_line_range(out, &span.text, range);
+        }
+        _ if span.selectable => out.print(piece),
+        _ => out.print_with_meta(
+            piece,
+            SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        ),
+    }
+    out.pop_style();
 }
 
 fn render_ir_cap(
@@ -889,36 +581,14 @@ fn emit_clipped(
     acc_w
 }
 
-pub(super) fn print_tool_output(
-    out: &mut LineBuilder,
-    _name: &str,
-    output: &ToolOutput,
-    _args: &HashMap<String, serde_json::Value>,
-    width: usize,
-) -> u16 {
-    render_wrapped_output(out, &output.content, output.is_error, width)
-}
-
-pub(super) fn print_dim(out: &mut LineBuilder, text: &str) {
+fn print_dim(out: &mut LineBuilder, text: &str) {
     out.push_dim();
     out.print(text);
     out.pop_style();
 }
 
-fn print_dim_non_selectable(out: &mut LineBuilder, time_str: &str) {
-    let meta = SpanMeta {
-        selectable: false,
-        copy_as: None,
-    };
-    if !time_str.is_empty() {
-        out.push_dim();
-        out.print_with_meta(time_str, meta);
-        out.pop_style();
-    }
-}
-
 pub(super) fn measure_wrapped_output(content: &str, width: usize) -> u16 {
-    let max_cols = super::metrics::block_inner_width(width);
+    let max_cols = block_inner_width(width);
     let total_rows: usize = content
         .lines()
         .map(|line| {
@@ -928,16 +598,6 @@ pub(super) fn measure_wrapped_output(content: &str, width: usize) -> u16 {
         })
         .sum();
     (total_rows.min(MAX_TOOL_BLOCK_ROWS) + usize::from(total_rows > MAX_TOOL_BLOCK_ROWS)) as u16
-}
-
-fn measure_tool_output(content: &str, width: usize) -> u16 {
-    measure_wrapped_output(content, width)
-}
-
-pub fn render_tool_body_into(out: &mut LineBuilder, body: &ToolBody, width: u16) -> u16 {
-    match body {
-        ToolBody::Layout(layout) => render_layout_ir_node(out, layout, u16::MAX, width, None),
-    }
 }
 
 pub fn render_wrapped_output(

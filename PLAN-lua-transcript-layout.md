@@ -105,9 +105,9 @@ The naming is still a pressure point because `smelt.layout` and `smelt.ui.layout
 The current branch is not a blank slate. These are the concrete seams the migration must remove or preserve deliberately:
 
 - `DisplayBlock` still hardcodes every block variant and dispatches to per-block Rust renderers. The target should replace `DisplayBlock::{User, Text, ToolCall, ...}` with cached `LayoutIr` plus minimal semantic fallback constructors.
-- Renderer-produced `ToolBody` is no longer stored on canonical `ToolState` / `BlockHistory`. Semantic tool state remains status, terminal elapsed, output, and user message; derived bodies live in `DisplayModel` and the `session.ir.bin` display cache.
-- `ToolBody` is still the body-only bridge name until Phase 4 deletes that contract. `BlockLayout` now has display-oriented aliases (`LayoutIr`, `LayoutNode`, `LayoutLeaf`) and compiled source leaves use `SourceViewIr` instead of `IrLeaf::DiffIr`.
-- Tool custom render is currently body-only: Rust still owns the `* name summary elapsed` chrome and denied/user-message behavior. Phase 3 must switch to full-block Lua defaults in one direction, then delete the body-only compatibility path.
+- Renderer-produced tool layouts are no longer stored on canonical `ToolState` / `BlockHistory`. Semantic tool state remains status, terminal elapsed, output, and user message; tool calls compile full-block `LayoutIr` through the root Lua transcript renderer.
+- The body-only `ToolBody` bridge and tool `render(args, output, ctx)` contract have been deleted. `BlockLayout` now has display-oriented aliases (`LayoutIr`, `LayoutNode`, `LayoutLeaf`) and compiled source leaves use `SourceViewIr` instead of `IrLeaf::DiffIr`.
+- Tool chrome policy (`* name summary elapsed`, status color, denied/user-message behavior, and built-in tool bodies) now lives in bundled Lua defaults. Rust keeps only primitive mechanics plus emergency fallback layouts for renderer failure.
 - Tool preview and transcript body currently share `BlockLayout` values but differ through implicit Rust render context such as the tool-block base gutter. Replace this with explicit Lua chrome/gutter composition when full-block tool rendering lands.
 - `smelt.layout.tool_output` has been deleted from the `smelt.layout` API. Raw tool output is now bundled Lua composition in `smelt.transcript.defaults.render_tool_output`, implemented as `layout.cap(layout.gutter(layout.text(..., { ansi = true })), { keep = "tail", marker = "above" })`.
 - Compiled source-view leaves now use `SourceViewIr`. File views still reuse the diff/file-view renderer mechanics internally, but the public/display IR no longer stores them as `IrLeaf::DiffIr`.
@@ -937,15 +937,14 @@ Exit criteria:
 Status after implementation:
 
 - `ToolState` now contains only semantic fields: status, elapsed, output, and user message. `BlockHistory` no longer has `install_tool_body`, `hydrate_tool_body_cache`, or body-cache mutation helpers.
-- `DisplayModel` owns derived tool bodies, serializes them as `ToolBodyCacheEntry` in `session.ir.bin`, and compiles `DisplayBlock::ToolCall` with an optional cached body without changing canonical history.
-- Tool-body cache hydration validates block id, call id, content hash, semantic sidecar hash, and display renderer version before installing into `DisplayModel`; deleting `session.ir.bin` falls back to semantic output without changing transcript state.
-- Installing a newly rendered tool body invalidates compiled display rows, exact row indexes, materialized rows, and persisted row-index entries, then replans with the derived body. Hydration and width/theme changes do not bump `BlockHistory` generation.
+- Display cache persistence now stores disposable row-index entries only. Tool layouts are derived by compiling full-block Lua transcript layout and are invalidated through display keys rather than persisted as body-cache records.
+- Renderer generation and semantic layout keys invalidate compiled display rows, exact row indexes, materialized rows, and persisted row-index entries. Hydration and width/theme changes do not bump `BlockHistory` generation.
 - Generated Lua docs now derive the `smelt.ui.layout.Measure` type from Rust metadata instead of hand-patching generated stubs.
 
 Deferred debt:
 
 - `hbox` still uses a one-row scratch buffer for visible child-row span clipping. It no longer renders off-screen child columns, but a real row-span compositor should replace the bridge when hbox grows beyond current tool/preview usage.
-- Rust's emergency raw-output fallback intentionally mirrors the Lua default helper so renderer failure remains safe. Phase 4 should delete the body-only fallback path when full-block Lua tool rendering owns all tool chrome.
+- Rust's emergency fallback now mirrors the Lua default at a minimal level so renderer failure remains safe; it is not a compatibility path for tool-specific rendering.
 
 ### Phase 3 — Add root transcript renderer and default Lua renderers
 
@@ -982,8 +981,8 @@ Status after implementation:
 
 Deferred debt:
 
-- The live transcript projection still uses the existing Rust block renderers until Phase 4/5 migrate tool and non-tool blocks to root-renderer-produced LayoutIR. The public renderer docs now describe root layout generation rather than promising that every live block path has already moved.
-- Because the current primitive slice lacks markdown, panel, runs/line, code, separator, style, source/copy/selectable, and elapsed primitives, Phase 3 defaults are fallback-safe and structurally complete but intentionally do not attempt to reproduce every product visual. The snapshot-preserving migrations land with the corresponding primitives in Phase 4/5.
+- The live transcript projection still uses the existing Rust block renderers for non-tool block types until Phase 5 migrates them to root-renderer-produced LayoutIR. Tool calls now use full-block Lua layout.
+- Because the current primitive slice lacks markdown, panel, line, code, separator, style, source/copy/selectable, and elapsed primitives, Phase 3/4 defaults are fallback-safe but intentionally do not attempt to reproduce every product visual for non-tool blocks. The remaining snapshot-preserving migrations land with the corresponding primitives in Phase 5.
 
 ### Phase 4 — Move tool rendering to full-block Lua layout
 
@@ -1006,6 +1005,21 @@ Exit criteria:
 - no Rust hardcoded `* name elapsed` tool title policy remains;
 - tool IR cache is width-independent;
 - denied/confirm/pending/ok/err behavior is covered by tests.
+
+Status after implementation:
+
+- The old tool `render(args, output, ctx)` hook is removed from `smelt.tools.ToolDef`, `ToolHandles`, docs, generated stubs, and all bundled tool registrations.
+- Tool calls now compile full-block `LayoutIr` by invoking the root transcript renderer. `DisplayBlock::ToolCall` stores the resulting layout tree; Rust no longer pre-renders or caches a body-only `ToolBody`.
+- `runtime/lua/smelt/transcript/defaults.lua` owns the default tool block: styled `layout.runs` header, status colors, elapsed/title suffix placement, user messages, denied body suppression, raw-output tail caps, and built-in structured bodies for edit/write/notebook/web-fetch/read/search/process tools.
+- `layout.runs` preserves styled summary spans, syntax highlighting, selectability, and `title_suffix` metadata so Lua-rendered headers keep the old copy/yank behavior.
+- The display cache was simplified to disposable row-index entries only; derived tool bodies are no longer serialized in `session.ir.bin`.
+- Confirm previews render generic compiled layout IR, sharing the same primitive renderer path as transcript tool layouts.
+
+Deferred debt:
+
+- Pending elapsed still invalidates/recompiles the Lua-produced tool layout with semantic state; the lower-level dynamic `layout.elapsed` primitive remains a future optimization.
+- Non-tool block types still use existing Rust display policies until Phase 5 migrates them to root-renderer-produced `LayoutIr`.
+- `hbox` still uses the one-row scratch-buffer compositor debt from Phase 1.
 
 ### Phase 5 — Route non-tool blocks through Lua defaults
 
@@ -1038,7 +1052,7 @@ Goal: make cold resume/preview scale with large sessions.
 
 Work:
 
-- Extend `session.ir.bin` to store general DisplayIR, not only tool bodies and row indexes.
+- Extend `session.ir.bin` to store general DisplayIR alongside row indexes.
 - Include renderer generation and layout primitive version in cache keys; do not hash Lua closures or pretend to detect hidden closed-over state automatically.
 - Key DisplayIR from semantic block/sidecar hashes only; never include cached DisplayIR in the hash input.
 - Hydrate DisplayIR before first projection.

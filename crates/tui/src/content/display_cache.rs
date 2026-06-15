@@ -1,6 +1,4 @@
-use crate::content::display_block::{
-    DisplayRowIndexEntry, ToolBodyCacheEntry, DISPLAY_RENDERER_VERSION,
-};
+use crate::content::display_block::{DisplayRowIndexEntry, DISPLAY_RENDERER_VERSION};
 use smelt_core::session::Session;
 use std::path::{Path, PathBuf};
 
@@ -12,13 +10,12 @@ const FIXED_HEADER_LEN: usize = MAGIC.len() + 4 + 8 + 2 + 8;
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheData {
-    pub(crate) tool_bodies: Vec<ToolBodyCacheEntry>,
     pub(crate) row_indexes: Vec<DisplayRowIndexEntry>,
 }
 
 impl DisplayCacheData {
     pub(crate) fn is_empty(&self) -> bool {
-        self.tool_bodies.is_empty() && self.row_indexes.is_empty()
+        self.row_indexes.is_empty()
     }
 
     pub(crate) fn fingerprint(&self) -> Option<Vec<u8>> {
@@ -48,10 +45,6 @@ fn read_at_path(path: &Path) -> DisplayCacheData {
     match decode(&bytes) {
         Ok(data) => {
             smelt_perf::perf::record_value(
-                "session_ir:read:tool_bodies",
-                data.tool_bodies.len() as u64,
-            );
-            smelt_perf::perf::record_value(
                 "session_ir:read:row_indexes",
                 data.row_indexes.len() as u64,
             );
@@ -59,7 +52,6 @@ fn read_at_path(path: &Path) -> DisplayCacheData {
         }
         Err(reason) => {
             reason.record();
-            smelt_perf::perf::record_value("session_ir:read:tool_bodies", 0);
             smelt_perf::perf::record_value("session_ir:read:row_indexes", 0);
             DisplayCacheData::default()
         }
@@ -74,10 +66,6 @@ fn write_at_path(path: &Path, data: &DisplayCacheData) {
     let Some(bytes) = encode(data) else {
         return;
     };
-    smelt_perf::perf::record_value(
-        "session_ir:write:tool_bodies",
-        data.tool_bodies.len() as u64,
-    );
     smelt_perf::perf::record_value(
         "session_ir:write:row_indexes",
         data.row_indexes.len() as u64,
@@ -216,41 +204,8 @@ fn read_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::display_block::{
-        DisplayCacheKey, DisplayRowIndexEntry, DisplayRowIndexNode,
-    };
-    use smelt_core::content::block_layout::{BlockLayout, IrLeaf, TextSpec, ToolBody};
-    use smelt_core::transcript_model::{Block, LayoutKey, ToolState, ToolStatus, ViewState};
-
-    fn tool_body(content: &str) -> ToolBody {
-        ToolBody::Layout(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-            content: content.into(),
-            hl_group: None,
-            ansi: false,
-        })))
-    }
-
-    fn tool_body_entry() -> ToolBodyCacheEntry {
-        let block = Block::ToolCall {
-            call_id: "call-1".into(),
-            name: "web_fetch".into(),
-            summary: protocol::StyledLines::from_plain("fetch https://example.test"),
-            args: serde_json::Map::new().into_iter().collect(),
-        };
-        let body = tool_body("cached body");
-        let state = ToolState {
-            status: ToolStatus::Ok,
-            elapsed: Some(std::time::Duration::from_millis(12)),
-            output: None,
-            user_message: Some("done".into()),
-        };
-        ToolBodyCacheEntry {
-            id: smelt_core::transcript_model::BlockId::new(8),
-            call_id: "call-1".into(),
-            key: DisplayCacheKey::new(block.content_hash(), state.display_hash()),
-            body,
-        }
-    }
+    use crate::content::display_block::{DisplayRowIndexEntry, DisplayRowIndexNode};
+    use smelt_core::transcript_model::{LayoutKey, ViewState};
 
     fn row_index() -> DisplayRowIndexEntry {
         DisplayRowIndexEntry {
@@ -271,42 +226,20 @@ mod tests {
     }
 
     #[test]
-    fn cache_round_trips_tool_body_entries() {
+    fn cache_round_trips_row_index_entries() {
         let data = DisplayCacheData {
-            tool_bodies: vec![tool_body_entry()],
             row_indexes: vec![row_index()],
         };
         let encoded = encode(&data).expect("encode cache");
         let decoded = decode(&encoded).expect("decode cache");
-        assert_eq!(decoded.tool_bodies.len(), 1);
-        assert_eq!(decoded.tool_bodies[0].id, data.tool_bodies[0].id);
-        assert_eq!(decoded.tool_bodies[0].call_id, data.tool_bodies[0].call_id);
-        assert_eq!(decoded.tool_bodies[0].key, data.tool_bodies[0].key);
         assert_eq!(decoded.row_indexes.len(), 1);
         assert_eq!(decoded.row_indexes[0].nodes[0].exact_height, 3);
     }
 
     #[test]
-    fn cache_round_trips_binary_tool_body_payload() {
-        let data = DisplayCacheData {
-            tool_bodies: vec![tool_body_entry()],
-            row_indexes: Vec::new(),
-        };
-        let encoded = encode(&data).expect("encode cache");
-        let decoded = decode(&encoded).expect("decode cache");
-        assert_eq!(decoded.tool_bodies.len(), 1);
-        let ToolBody::Layout(layout) = &decoded.tool_bodies[0].body;
-        let BlockLayout::Leaf(IrLeaf::Text(text)) = layout else {
-            panic!("expected text tool body");
-        };
-        assert_eq!(text.content, "cached body");
-    }
-
-    #[test]
     fn corrupt_cache_is_a_miss() {
         let data = DisplayCacheData {
-            tool_bodies: vec![tool_body_entry()],
-            row_indexes: Vec::new(),
+            row_indexes: vec![row_index()],
         };
         let mut encoded = encode(&data).expect("encode cache");
         encoded[0] = b'X';
@@ -318,19 +251,16 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_round_trip_persists_tool_bodies() {
+    fn filesystem_round_trip_persists_row_indexes() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("session.ir.bin");
         let data = DisplayCacheData {
-            tool_bodies: vec![tool_body_entry()],
-            row_indexes: Vec::new(),
+            row_indexes: vec![row_index()],
         };
         write_at_path(&path, &data);
         let decoded = read_at_path(&path);
-        assert_eq!(decoded.tool_bodies.len(), 1);
-        assert_eq!(decoded.tool_bodies[0].id, data.tool_bodies[0].id);
-        assert_eq!(decoded.tool_bodies[0].call_id, data.tool_bodies[0].call_id);
-        assert_eq!(decoded.tool_bodies[0].key, data.tool_bodies[0].key);
+        assert_eq!(decoded.row_indexes.len(), 1);
+        assert_eq!(decoded.row_indexes[0].nodes[0].exact_height, 3);
     }
 
     #[test]

@@ -580,18 +580,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     .map(crate::content::transcript_buf::ScrollTarget::visible_row)
                     .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail);
                 let theme = app.ui.theme().clone();
-                let mut plan =
-                    view.plan_projection_measured(width, show_thinking, scroll_target, height);
-                let tool_bodies_changed = view.prerender_tool_bodies_for_range(
+                let plan = view.plan_projection_measured(
                     &app.lua,
-                    plan.block_range(),
+                    width,
+                    show_thinking,
+                    scroll_target,
+                    height,
                 );
-                if tool_bodies_changed {
-                    plan = view.plan_projection_measured(width, show_thinking, scroll_target, height);
-                }
                 let out = {
                     let target = app.ui.buf_mut(buf.id)?;
-                    view.project_planned(target, &theme, plan)
+                    view.project_planned(&app.lua, target, &theme, plan)
                 };
                 if let Some(win) = win.and_then(|w| app.ui.win_mut(w.id)) {
                     win.apply_materialized_rows(out);
