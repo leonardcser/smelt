@@ -594,44 +594,6 @@ Wall-clock time primitives.
 - `smelt.clock.unix_ms` :: `fun(): integer`
   Return the current Unix timestamp in milliseconds.
 
-#### `smelt.cmd`
-
-Register and list slash commands.
-
-- `smelt.cmd.list` :: `fun(): table`
-  Return every registered slash command as a Lua array of `{ name, desc, args, while_busy, queue_when_busy, startup_ok, hidden }` rows.
-- `smelt.cmd.picker` :: `fun(name: string, opts: table?): nil`
-  Register a slash command `name` that opens a prompt-docked picker when called without arguments, or invokes `opts.apply(arg)` directly when given one.
-- `smelt.cmd.register` :: `fun(name: string, handler: fun(value: string?), opts: smelt.cmd.RegisterOpts?): smelt.Reg`
-  Register a slash command `name` whose `handler` is invoked when the user runs it.
-- `smelt.cmd.run` :: `fun(line: string): nil`
-  Execute the slash-command line `line` (with or without leading `/`) as if the user had typed it.
-
-#### `smelt.dialog`
-
-Modal overlay builders.
-
-- `smelt.dialog.content` :: `fun(opts: table?): smelt.win.Win, smelt.buf.Buf`
-  General-purpose body leaf.
-- `smelt.dialog.current` :: `fun(): table | nil`
-  Return the topmost active dialog ctx (the same shape passed to `on_submit`/`keymap` handlers: `{ resolve, close, win, panels, focused_leaf }`), or `nil` if no dialog is open.
-- `smelt.dialog.input` :: `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.input.Input`
-  Build a single-line text-input leaf with a fresh buffer.
-- `smelt.dialog.list` :: `fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win`
-  Wrap an existing `buf` as a selectable list leaf.
-- `smelt.dialog.markdown` :: `fun(text: string): smelt.win.Win, smelt.buf.Buf`
-  Render `text` as a non-focusable markdown leaf.
-- `smelt.dialog.menu` :: `fun(items: (string|smelt.dialog.MenuItem)[], opts: smelt.dialog.MenuOpts?): smelt.win.Win, table`
-  
-- `smelt.dialog.open` :: `fun(opts: smelt.dialog.Opts): any`
-  Coroutine-blocking dialog opener.
-- `smelt.dialog.open_handle` :: `fun(opts: smelt.dialog.Opts): table`
-  Non-coroutine open.
-- `smelt.dialog.picker` :: `fun(opts: smelt.dialog.PickerOpts): any`
-  Coroutine-blocking Telescope-style picker.
-- `smelt.dialog.viewer` :: `fun(opts: table): table, smelt.buf.Buf, smelt.win.Win`
-  Open a read-only content dialog.
-
 #### `smelt.frontend`
 
 Query which frontend is active (TUI vs headless).
@@ -1164,7 +1126,7 @@ Modal overlay builders.
   General-purpose body leaf.
 - `smelt.dialog.current` :: `fun(): table | nil`
   Return the topmost active dialog ctx (the same shape passed to `on_submit`/`keymap` handlers: `{ resolve, close, win, panels, focused_leaf }`), or `nil` if no dialog is open.
-- `smelt.dialog.input` :: `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf`
+- `smelt.dialog.input` :: `fun(placeholder: string?, opts: table?): smelt.win.Win, smelt.buf.Buf, smelt.input.Input`
   Build a single-line text-input leaf with a fresh buffer.
 - `smelt.dialog.list` :: `fun(buf: smelt.buf.Buf, opts: table?): smelt.win.Win`
   Wrap an existing `buf` as a selectable list leaf.

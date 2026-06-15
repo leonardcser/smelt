@@ -1,7 +1,9 @@
 //! Transcript block history, streaming state, projection, and cursor glyph cache.
 
 use crate::app::TuiApp;
-use crate::content::prompt_parser::{build_prompt_display_lines, prompt_display_uses_cursor_padding};
+use crate::content::prompt_parser::{
+    build_prompt_display_lines, prompt_display_uses_cursor_padding,
+};
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 

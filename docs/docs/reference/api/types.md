@@ -641,7 +641,7 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `approval_patterns` | `function` |  | `approval_patterns(args, ctx) -> string[]` - patterns offered as one-click approvals. |
 | `preflight` | `function` |  | `preflight(args, ctx) -> table?` - validation hook; nil result skips. |
 | `paths_for_workspace` | `function` |  | `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch. |
-| `preview` | `function` |  | `preview(args) -> smelt.layout` - pre-execute preview render. Returns the same `smelt.layout` value the confirm dialog renders directly into the preview pane. |
+| `preview` | `function` |  | `preview(args) -> smelt.layout` - pre-execute preview render. The confirm dialog renders it directly into the preview pane. |
 | `watchdog_timeout_ms` | `integer` |  | Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally. |
 | `watchdog_max_timeout_ms` | `integer` |  | Maximum watchdog deadline accepted from tool arguments, in milliseconds. |
 | `watchdog_timeout_arg` | `string` |  | Tool argument that controls the watchdog deadline. Defaults to `timeout_ms`. |
