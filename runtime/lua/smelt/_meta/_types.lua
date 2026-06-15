@@ -108,6 +108,7 @@
 ---@field max_height? any Shrink-to-content cap that pairs with `min_height`.
 ---@field min_height? any Floor for the body size (defaults to `"30%"` in fit mode).
 ---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
+---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
 ---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
 ---@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
@@ -250,10 +251,23 @@
 ---@field warn fun(msg: string) Raise a warning toast tagged with the bound source.
 ---@field [string] any Callable: `handle(msg)` -> info toast tagged with the bound source.
 
+--- Overlay drag configuration table. Use `true` for the floating default: title chrome plus inert-body drag.
+---@class smelt.overlay.DragConfig
+---@field title? boolean When true, the overlay chrome moves the overlay unless a resize handle owns the cell.
+---@field body? boolean | "inert" `true` moves from any body leaf; `"inert"` moves only from non-focusable, non-selectable leaves.
+
 --- Overlay handle returned by `smelt.overlay.new(opts)`.
 ---@class smelt.overlay.Overlay
 ---@field close fun(): nil Close the overlay. No-op if already closed.
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding.
+
+--- Overlay resize configuration table. Use `true` for the floating default: left/right/bottom edges and corners, leaving the top chrome for drag.
+---@class smelt.overlay.ResizeConfig
+---@field top? boolean Enable top-edge resize.
+---@field right? boolean Enable right-edge resize.
+---@field bottom? boolean Enable bottom-edge resize.
+---@field left? boolean Enable left-edge resize.
+---@field corners? boolean Upgrade cells where two enabled edges meet into diagonal resize handles.
 
 --- Opaque handle returned by `smelt.paint.register`. Usable directly in `smelt.ui.layout.leaf(handle, opts)` (it stands in for a Win in layout leaves).
 ---@class smelt.paint.Paint

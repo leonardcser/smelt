@@ -63,7 +63,9 @@ pub use callback::{
 };
 pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
-pub use overlay::{HitTarget, Overlay, OverlayId};
+pub use overlay::{
+    BodyDrag, ChromeAction, DragConfig, HitTarget, Overlay, OverlayId, ResizeConfig, ResizeEdges,
+};
 pub use row::{
     row_to_usize, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition, DocRange,
     MaterializeRequest, MaterializedRows, RowBreak, RowIndex, TextRange,
@@ -196,7 +198,7 @@ struct ScrollGroup {
 #[derive(Clone, Copy, Debug)]
 struct ChromeDrag {
     overlay: OverlayId,
-    zone: overlay::ChromeZone,
+    action: overlay::ChromeAction,
     start_rect: Rect,
     origin_row: u16,
     origin_col: u16,
@@ -749,7 +751,7 @@ impl Ui {
             return Some(match target {
                 OverlayHitTarget::Window(w) => HitTarget::Window(w),
                 OverlayHitTarget::Scrollbar(w) => HitTarget::Scrollbar { owner: w },
-                OverlayHitTarget::Chrome(zone) => HitTarget::Chrome { owner: id, zone },
+                OverlayHitTarget::Chrome(action) => HitTarget::Chrome { owner: id, action },
             });
         }
         let split_rects = self.resolve_splits();
@@ -826,7 +828,7 @@ impl Ui {
             }
             return Some((
                 id,
-                OverlayHitTarget::Chrome(chrome_zone(rect, ov, row, col)),
+                OverlayHitTarget::Chrome(chrome_action(rect, ov, row, col)),
             ));
         }
         None
@@ -1644,40 +1646,39 @@ impl Ui {
                         if let Some(owner) = raise {
                             self.raise_overlay_to_front(owner);
                         }
-                        // Non-focusable leaf of a draggable overlay is treated as Body chrome
-                        // so the user can grab anywhere on it to move the panel. A `selectable`
-                        // leaf opts out: drag inside it produces a text selection instead.
-                        let drag_target: Option<(OverlayId, overlay::ChromeZone)> = match hit {
-                            Some(HitTarget::Chrome { owner, zone }) => Some((owner, zone)),
+                        // Inert leaf bodies can opt into the same move action as chrome.
+                        // Selectable leaves opt out: dragging inside them starts text selection.
+                        let drag_target: Option<(OverlayId, overlay::ChromeAction)> = match hit {
+                            Some(HitTarget::Chrome { owner, action }) => Some((owner, action)),
                             Some(HitTarget::Window(w)) => {
                                 let leaf = self.wins.get(&w);
                                 let leaf_focusable = leaf.is_some_and(|win| win.accepts_focus());
                                 let leaf_selectable =
                                     leaf.is_some_and(|win| win.supports_text_selection());
                                 self.overlay_for_leaf(w).and_then(|owner| {
-                                    let ov_draggable =
-                                        self.overlay(owner).map(|o| o.draggable).unwrap_or(false);
-                                    (!leaf_focusable && ov_draggable && !leaf_selectable)
-                                        .then_some((owner, overlay::ChromeZone::Body))
+                                    let body_drag = self
+                                        .overlay(owner)
+                                        .map(|o| o.draggable.body)
+                                        .unwrap_or(overlay::BodyDrag::Never);
+                                    let can_drag = match body_drag {
+                                        overlay::BodyDrag::Never => false,
+                                        overlay::BodyDrag::Always => true,
+                                        overlay::BodyDrag::Inert => {
+                                            !leaf_focusable && !leaf_selectable
+                                        }
+                                    };
+                                    can_drag.then_some((owner, overlay::ChromeAction::Move))
                                 })
                             }
                             _ => None,
                         };
-                        if let Some((owner, zone)) = drag_target {
-                            let drag_kind = match zone {
-                                overlay::ChromeZone::Title | overlay::ChromeZone::Body => {
-                                    self.overlay(owner).map(|ov| ov.draggable).unwrap_or(false)
-                                }
-                                overlay::ChromeZone::Resize => {
-                                    self.overlay(owner).map(|ov| ov.resizable).unwrap_or(false)
-                                }
-                            };
-                            if drag_kind {
+                        if let Some((owner, action)) = drag_target {
+                            if action != overlay::ChromeAction::None {
                                 if let Some(rect) = self.resolved_overlay_rect(owner) {
-                                    self.set_capture(HitTarget::Chrome { owner, zone });
+                                    self.set_capture(HitTarget::Chrome { owner, action });
                                     self.chrome_drag = Some(ChromeDrag {
                                         overlay: owner,
-                                        zone,
+                                        action,
                                         start_rect: rect,
                                         origin_row: me.row,
                                         origin_col: me.column,
@@ -1770,32 +1771,42 @@ impl Ui {
             .find_map(|(oid, rect, _)| if oid == id { Some(rect) } else { None })
     }
 
-    /// Apply a chrome-drag delta. Title/Body move the overlay via `ScreenAt`; Resize grows it.
+    /// Apply a chrome-drag delta. Title/Body move the overlay via `ScreenAt`; Resize changes its rect.
     fn apply_chrome_drag(&mut self, drag: ChromeDrag, row: u16, col: u16) {
         let dy = row as i32 - drag.origin_row as i32;
         let dx = col as i32 - drag.origin_col as i32;
-        let Some((_, ov)) = self
+        let Some(index) = self
             .overlays
-            .iter_mut()
-            .find(|(oid, _)| *oid == drag.overlay)
+            .iter()
+            .position(|(oid, _)| *oid == drag.overlay)
         else {
             return;
         };
-        match drag.zone {
-            overlay::ChromeZone::Title | overlay::ChromeZone::Body => {
+        match drag.action {
+            overlay::ChromeAction::None => {}
+            overlay::ChromeAction::Move => {
                 let new_top = drag.start_rect.top as i32 + dy;
                 let new_left = drag.start_rect.left as i32 + dx;
-                ov.anchor = layout::Anchor::ScreenAt {
+                self.overlays[index].1.anchor = layout::Anchor::ScreenAt {
                     row: new_top,
                     col: new_left,
                     corner: Corner::NW,
                 };
             }
-            overlay::ChromeZone::Resize => {
-                let (min_w, min_h) = MIN_OVERLAY_SIZE;
-                let new_w = (drag.start_rect.width as i32 + dx).max(min_w as i32) as u16;
-                let new_h = (drag.start_rect.height as i32 + dy).max(min_h as i32) as u16;
+            overlay::ChromeAction::Resize(edges) => {
+                let (term_w, term_h) = self.surface.terminal_size();
+                let sizer = UiLeafSizer {
+                    wins: &self.wins,
+                    bufs: &self.bufs,
+                };
+                let bounds =
+                    overlay_resize_bounds(&self.overlays[index].1, (term_w, term_h), &sizer);
+                let (top, left, new_w, new_h) =
+                    resize_overlay_geometry(drag.start_rect, edges, dx, dy, bounds);
+
+                let ov = &mut self.overlays[index].1;
                 ov.size_override = Some((new_w, new_h));
+                ov.anchor = anchor_after_resize(ov.anchor.clone(), edges, top, left);
             }
         }
     }
@@ -2266,20 +2277,163 @@ const AUTOSCROLL_START_MS: u64 = 30;
 const AUTOSCROLL_MIN_MS: u64 = 5;
 const AUTOSCROLL_RAMP_DIVISOR_MS: u64 = 120;
 
-/// Classify a chrome hit inside an overlay rect: top row → Title, bottom-right cell → Resize, else Body.
-fn chrome_zone(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeZone {
-    if ov.resizable
-        && rect.height >= 1
-        && rect.width >= 1
-        && row + 1 == rect.bottom()
-        && col + 1 == rect.right()
-    {
-        return overlay::ChromeZone::Resize;
+/// Resolve the concrete action for a chrome cell. Resize handles win over drag
+/// handles, but top-row drag remains intact unless top resizing is explicitly enabled.
+fn chrome_action(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeAction {
+    let top = row == rect.top;
+    let bottom = row + 1 == rect.bottom();
+    let left = col == rect.left;
+    let right = col + 1 == rect.right();
+    let resize = ov.resizable;
+
+    if resize.corners {
+        if top && left && resize.top && resize.left {
+            return overlay::ChromeAction::Resize(overlay::ResizeEdges::corner(
+                true, false, false, true,
+            ));
+        }
+        if top && right && resize.top && resize.right {
+            return overlay::ChromeAction::Resize(overlay::ResizeEdges::corner(
+                true, true, false, false,
+            ));
+        }
+        if bottom && left && resize.bottom && resize.left {
+            return overlay::ChromeAction::Resize(overlay::ResizeEdges::corner(
+                false, false, true, true,
+            ));
+        }
+        if bottom && right && resize.bottom && resize.right {
+            return overlay::ChromeAction::Resize(overlay::ResizeEdges::corner(
+                false, true, true, false,
+            ));
+        }
     }
-    if row == rect.top {
-        return overlay::ChromeZone::Title;
+    if top && resize.top {
+        return overlay::ChromeAction::Resize(overlay::ResizeEdges::north());
     }
-    overlay::ChromeZone::Body
+    if bottom && resize.bottom {
+        return overlay::ChromeAction::Resize(overlay::ResizeEdges::south());
+    }
+    if left && resize.left && !top {
+        return overlay::ChromeAction::Resize(overlay::ResizeEdges::west());
+    }
+    if right && resize.right && !top {
+        return overlay::ChromeAction::Resize(overlay::ResizeEdges::east());
+    }
+    if ov.draggable.title {
+        overlay::ChromeAction::Move
+    } else {
+        overlay::ChromeAction::None
+    }
+}
+
+fn resize_overlay_geometry(
+    start: Rect,
+    edges: overlay::ResizeEdges,
+    dx: i32,
+    dy: i32,
+    bounds: (u16, u16, u16, u16),
+) -> (i32, i32, u16, u16) {
+    let (min_w, max_w, min_h, max_h) = bounds;
+    let mut top = start.top as i32;
+    let mut left = start.left as i32;
+    let mut width = start.width as i32;
+    let mut height = start.height as i32;
+
+    if edges.east {
+        width += dx;
+    }
+    if edges.south {
+        height += dy;
+    }
+    if edges.west {
+        width -= dx;
+    }
+    if edges.north {
+        height -= dy;
+    }
+
+    let new_w = width.clamp(min_w as i32, max_w as i32) as u16;
+    let new_h = height.clamp(min_h as i32, max_h as i32) as u16;
+    if edges.west {
+        left = start.left as i32 + (start.width as i32 - new_w as i32);
+    }
+    if edges.north {
+        top = start.top as i32 + (start.height as i32 - new_h as i32);
+    }
+    (top, left, new_w, new_h)
+}
+
+fn anchor_after_resize(
+    anchor: layout::Anchor,
+    edges: overlay::ResizeEdges,
+    top: i32,
+    left: i32,
+) -> layout::Anchor {
+    match anchor {
+        layout::Anchor::ScreenBottom { .. }
+            if edges.north && !edges.east && !edges.south && !edges.west =>
+        {
+            anchor
+        }
+        _ => layout::Anchor::ScreenAt {
+            row: top,
+            col: left,
+            corner: Corner::NW,
+        },
+    }
+}
+
+fn overlay_resize_bounds(
+    overlay: &Overlay,
+    term: (u16, u16),
+    sizer: &dyn layout::LeafSizer,
+) -> (u16, u16, u16, u16) {
+    let natural = overlay.layout.natural_size_with(term, sizer);
+    let min_w = overlay
+        .min_width
+        .map(|c| resolve_overlay_constraint_value(c, term.0, natural.0))
+        .unwrap_or(MIN_OVERLAY_SIZE.0)
+        .max(MIN_OVERLAY_SIZE.0)
+        .min(term.0);
+    let min_h = overlay
+        .min_height
+        .map(|c| resolve_overlay_constraint_value(c, term.1, natural.1))
+        .unwrap_or(MIN_OVERLAY_SIZE.1)
+        .max(MIN_OVERLAY_SIZE.1)
+        .min(term.1);
+    let max_w = overlay
+        .max_width
+        .map(|c| resolve_overlay_constraint_value(c, term.0, natural.0))
+        .unwrap_or(term.0)
+        .max(min_w)
+        .min(term.0);
+    let max_h = overlay
+        .max_height
+        .map(|c| resolve_overlay_constraint_value(c, term.1, natural.1))
+        .unwrap_or(term.1)
+        .max(min_h)
+        .min(term.1);
+    (min_w, max_w, min_h, max_h)
+}
+
+fn resolve_overlay_constraint_value(
+    constraint: layout::Constraint,
+    term_axis: u16,
+    natural_axis: u16,
+) -> u16 {
+    use layout::Constraint::*;
+    match constraint {
+        Length(n) => n.min(term_axis),
+        Percentage(p) => ((term_axis as u32 * p as u32) / 100) as u16,
+        Ratio(num, denom) if denom != 0 => {
+            ((term_axis as u32 * num as u32) / denom as u32).min(term_axis as u32) as u16
+        }
+        Max(n) => natural_axis.min(n).min(term_axis),
+        Min(n) => natural_axis.max(n).min(term_axis),
+        Fill => term_axis,
+        Fit | Ratio(_, _) => natural_axis.min(term_axis),
+    }
 }
 
 /// Resolve an overlay's rect size from its `width`/`height` `Constraint`
@@ -2302,32 +2456,19 @@ fn resolve_overlay_size(
     } else {
         (0, 0)
     };
-    let resolve = |c: layout::Constraint, term_axis: u16, natural_axis: u16| -> u16 {
-        match c {
-            Length(n) => n.min(term_axis),
-            Percentage(p) => ((term_axis as u32 * p as u32) / 100) as u16,
-            Ratio(num, denom) if denom != 0 => {
-                ((term_axis as u32 * num as u32) / denom as u32).min(term_axis as u32) as u16
-            }
-            Max(n) => natural_axis.min(n).min(term_axis),
-            Min(n) => natural_axis.max(n).min(term_axis),
-            Fill => term_axis,
-            Fit | Ratio(_, _) => natural_axis.min(term_axis),
-        }
-    };
-    let mut w = resolve(overlay.width, term.0, natural.0);
-    let mut h = resolve(overlay.height, term.1, natural.1);
+    let mut w = resolve_overlay_constraint_value(overlay.width, term.0, natural.0);
+    let mut h = resolve_overlay_constraint_value(overlay.height, term.1, natural.1);
     if let Some(cap) = overlay.max_width {
-        w = w.min(resolve(cap, term.0, natural.0));
+        w = w.min(resolve_overlay_constraint_value(cap, term.0, natural.0));
     }
     if let Some(cap) = overlay.max_height {
-        h = h.min(resolve(cap, term.1, natural.1));
+        h = h.min(resolve_overlay_constraint_value(cap, term.1, natural.1));
     }
     if let Some(floor) = overlay.min_width {
-        w = w.max(resolve(floor, term.0, natural.0));
+        w = w.max(resolve_overlay_constraint_value(floor, term.0, natural.0));
     }
     if let Some(floor) = overlay.min_height {
-        h = h.max(resolve(floor, term.1, natural.1));
+        h = h.max(resolve_overlay_constraint_value(floor, term.1, natural.1));
     }
     // Floors can't push past the terminal extent.
     w = w.min(term.0);
@@ -2575,6 +2716,20 @@ mod tests {
                 LayoutTree::leaf(WinId(99)),
             )]),
         )]);
+        Overlay::new(layout, anchor)
+    }
+
+    fn bordered_overlay(width: u16, height: u16, anchor: layout::Anchor) -> Overlay {
+        let inner_w = width.saturating_sub(2);
+        let inner_h = height.saturating_sub(2);
+        let layout = LayoutTree::hbox(vec![(
+            Constraint::Length(inner_w),
+            LayoutTree::vbox(vec![(
+                Constraint::Length(inner_h),
+                LayoutTree::leaf(WinId(99)),
+            )]),
+        )])
+        .with_border(layout::Border::SINGLE);
         Overlay::new(layout, anchor)
     }
 
@@ -2850,22 +3005,211 @@ mod tests {
         // gives the overlay a concrete (42, 10) natural size centered
         // at (7, 19). Border consumes the top/bottom row + left/right
         // col; leaf occupies rows 8..16, cols 20..60.
-        let bordered = Overlay::new(
-            LayoutTree::vbox(vec![(
-                Constraint::Length(8),
-                LayoutTree::hbox(vec![(Constraint::Length(40), LayoutTree::leaf(WinId(99)))]),
-            )])
-            .with_border(layout::Border::SINGLE),
-            layout::Anchor::ScreenCenter,
-        );
-        let id = ui.overlay_open(bordered);
+        let id = ui.overlay_open(bordered_overlay(42, 10, layout::Anchor::ScreenCenter));
         // Inside overlay rect (row 7 = top border), outside the leaf.
         let hit = ui.overlay_hit_test(7, 30, None).unwrap();
         assert_eq!(hit.0, id);
-        assert_eq!(hit.1, OverlayHitTarget::Chrome(overlay::ChromeZone::Title));
+        assert_eq!(hit.1, OverlayHitTarget::Chrome(overlay::ChromeAction::None));
         // Inside the leaf → Window.
         let hit = ui.overlay_hit_test(10, 30, None).unwrap();
         assert!(matches!(hit.1, OverlayHitTarget::Window(WinId(99))));
+    }
+
+    #[test]
+    fn resizable_true_keeps_title_drag_on_top_chrome() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(
+            bordered_overlay(42, 10, layout::Anchor::ScreenCenter)
+                .draggable(true)
+                .resizable(true),
+        );
+        let down = mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            7,
+            30,
+        );
+        assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
+        let drag = ui.chrome_drag.expect("title row should start drag");
+        assert_eq!(drag.overlay, id);
+        assert_eq!(drag.action, overlay::ChromeAction::Move);
+    }
+
+    #[test]
+    fn resizable_true_bottom_right_corner_resizes_southeast() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(
+            bordered_overlay(42, 10, layout::Anchor::ScreenCenter)
+                .draggable(true)
+                .resizable(true),
+        );
+        let down = mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            16,
+            60,
+        );
+        assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
+        assert_eq!(
+            ui.chrome_drag.unwrap().action,
+            overlay::ChromeAction::Resize(overlay::ResizeEdges::corner(false, true, true, false))
+        );
+
+        let drag = mouse_event(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            18,
+            63,
+        );
+        assert_eq!(ui.dispatch_event(drag, &mut |_, _, _| {}), Status::Consumed);
+        assert_eq!(ui.overlay(id).unwrap().size_override, Some((45, 12)));
+    }
+
+    #[test]
+    fn top_resize_config_makes_top_chrome_resize_north() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(
+            bordered_overlay(42, 10, layout::Anchor::ScreenCenter).resize_config(
+                overlay::ResizeConfig {
+                    top: true,
+                    right: false,
+                    bottom: false,
+                    left: false,
+                    corners: false,
+                },
+            ),
+        );
+        let down = mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            7,
+            30,
+        );
+        assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
+        let drag = ui.chrome_drag.expect("top row should start resize");
+        assert_eq!(drag.overlay, id);
+        assert_eq!(
+            drag.action,
+            overlay::ChromeAction::Resize(overlay::ResizeEdges::north())
+        );
+    }
+
+    #[test]
+    fn top_resizing_bottom_docked_overlay_preserves_bottom_anchor() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(
+            sized_overlay(20, 6, layout::Anchor::ScreenBottom { above_rows: 0 }).resize_config(
+                overlay::ResizeConfig {
+                    top: true,
+                    right: false,
+                    bottom: false,
+                    left: false,
+                    corners: false,
+                },
+            ),
+        );
+        let start_rect = ui.resolved_overlay_rect(id).unwrap();
+        assert_eq!(start_rect, Rect::new(18, 30, 20, 6));
+
+        ui.apply_chrome_drag(
+            ChromeDrag {
+                overlay: id,
+                action: overlay::ChromeAction::Resize(overlay::ResizeEdges::north()),
+                start_rect,
+                origin_row: 18,
+                origin_col: 30,
+            },
+            15,
+            30,
+        );
+
+        let ov = ui.overlay(id).unwrap();
+        assert_eq!(ov.size_override, Some((20, 9)));
+        assert!(matches!(
+            ov.anchor,
+            layout::Anchor::ScreenBottom { above_rows: 0 }
+        ));
+        assert_eq!(
+            ui.resolved_overlay_rect(id).unwrap(),
+            Rect::new(15, 30, 20, 9)
+        );
+    }
+
+    #[test]
+    fn resize_from_left_keeps_right_edge_fixed() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(sized_overlay(
+            20,
+            6,
+            layout::Anchor::ScreenAt {
+                row: 5,
+                col: 10,
+                corner: Corner::NW,
+            },
+        ));
+        let start_rect = ui.resolved_overlay_rect(id).unwrap();
+        ui.apply_chrome_drag(
+            ChromeDrag {
+                overlay: id,
+                action: overlay::ChromeAction::Resize(overlay::ResizeEdges::west()),
+                start_rect,
+                origin_row: 5,
+                origin_col: 10,
+            },
+            5,
+            14,
+        );
+
+        let ov = ui.overlay(id).unwrap();
+        assert_eq!(ov.size_override, Some((16, 6)));
+        assert!(matches!(
+            ov.anchor,
+            layout::Anchor::ScreenAt {
+                row: 5,
+                col: 14,
+                corner: Corner::NW,
+            }
+        ));
+    }
+
+    #[test]
+    fn manual_resize_respects_min_and_max_constraints() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(
+            sized_overlay(
+                20,
+                6,
+                layout::Anchor::ScreenAt {
+                    row: 5,
+                    col: 10,
+                    corner: Corner::NW,
+                },
+            )
+            .with_min_width(Some(Constraint::Length(15)))
+            .with_max_height(Some(Constraint::Length(7))),
+        );
+        let start_rect = ui.resolved_overlay_rect(id).unwrap();
+        ui.apply_chrome_drag(
+            ChromeDrag {
+                overlay: id,
+                action: overlay::ChromeAction::Resize(overlay::ResizeEdges::east()),
+                start_rect,
+                origin_row: 5,
+                origin_col: 29,
+            },
+            5,
+            0,
+        );
+        assert_eq!(ui.overlay(id).unwrap().size_override, Some((15, 6)));
+
+        ui.apply_chrome_drag(
+            ChromeDrag {
+                overlay: id,
+                action: overlay::ChromeAction::Resize(overlay::ResizeEdges::south()),
+                start_rect,
+                origin_row: 10,
+                origin_col: 29,
+            },
+            20,
+            29,
+        );
+        assert_eq!(ui.overlay(id).unwrap().size_override, Some((20, 7)));
     }
 
     #[test]
@@ -3156,7 +3500,7 @@ mod tests {
             hit,
             HitTarget::Chrome {
                 owner: id,
-                zone: overlay::ChromeZone::Title
+                action: overlay::ChromeAction::None
             }
         );
     }
@@ -3357,7 +3701,7 @@ mod tests {
         let id = ui.overlay_open(stub_overlay());
         ui.set_capture(HitTarget::Chrome {
             owner: id,
-            zone: overlay::ChromeZone::Body,
+            action: overlay::ChromeAction::Move,
         });
         ui.overlay_close(id);
         assert_eq!(ui.capture(), None);

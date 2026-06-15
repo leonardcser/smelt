@@ -8,14 +8,133 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OverlayId(pub u32);
 
-/// Sub-region of an overlay's chrome that a mouse hit landed on.
+/// Edges affected by a resize drag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResizeEdges {
+    pub north: bool,
+    pub east: bool,
+    pub south: bool,
+    pub west: bool,
+}
+
+impl ResizeEdges {
+    pub const fn north() -> Self {
+        Self {
+            north: true,
+            east: false,
+            south: false,
+            west: false,
+        }
+    }
+
+    pub const fn east() -> Self {
+        Self {
+            north: false,
+            east: true,
+            south: false,
+            west: false,
+        }
+    }
+
+    pub const fn south() -> Self {
+        Self {
+            north: false,
+            east: false,
+            south: true,
+            west: false,
+        }
+    }
+
+    pub const fn west() -> Self {
+        Self {
+            north: false,
+            east: false,
+            south: false,
+            west: true,
+        }
+    }
+
+    pub const fn corner(north: bool, east: bool, south: bool, west: bool) -> Self {
+        Self {
+            north,
+            east,
+            south,
+            west,
+        }
+    }
+}
+
+/// Body-drag policy for an overlay's leaf area.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChromeZone {
-    /// Top border row; canonical drag handle when `draggable`.
-    Title,
-    Body,
-    /// Bottom-right corner cell; resize handle when `resizable`.
-    Resize,
+pub enum BodyDrag {
+    Never,
+    /// Drag only when the hit leaf is inert/non-focusable and non-selectable.
+    Inert,
+    Always,
+}
+
+/// Regions that can move an overlay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DragConfig {
+    pub title: bool,
+    pub body: BodyDrag,
+}
+
+impl DragConfig {
+    pub const fn none() -> Self {
+        Self {
+            title: false,
+            body: BodyDrag::Never,
+        }
+    }
+
+    pub const fn floating() -> Self {
+        Self {
+            title: true,
+            body: BodyDrag::Inert,
+        }
+    }
+}
+
+/// Chrome edges that can resize an overlay. `corners` upgrades cells where two
+/// enabled edges meet into diagonal handles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResizeConfig {
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+    pub left: bool,
+    pub corners: bool,
+}
+
+impl ResizeConfig {
+    pub const fn none() -> Self {
+        Self {
+            top: false,
+            right: false,
+            bottom: false,
+            left: false,
+            corners: false,
+        }
+    }
+
+    pub const fn floating() -> Self {
+        Self {
+            top: false,
+            right: true,
+            bottom: true,
+            left: true,
+            corners: true,
+        }
+    }
+}
+
+/// Concrete action assigned to an overlay chrome cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChromeAction {
+    None,
+    Move,
+    Resize(ResizeEdges),
 }
 
 /// Hit target inside an overlay: a specific leaf `WinId` or its chrome.
@@ -23,15 +142,20 @@ pub enum ChromeZone {
 pub enum OverlayHitTarget {
     Window(super::WinId),
     Scrollbar(super::WinId),
-    Chrome(ChromeZone),
+    Chrome(ChromeAction),
 }
 
 /// Global mouse hit-test result covering both overlays and splits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HitTarget {
     Window(super::WinId),
-    Scrollbar { owner: super::WinId },
-    Chrome { owner: OverlayId, zone: ChromeZone },
+    Scrollbar {
+        owner: super::WinId,
+    },
+    Chrome {
+        owner: OverlayId,
+        action: ChromeAction,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -65,10 +189,10 @@ pub struct Overlay {
     pub modal: bool,
     /// When true, the host pauses engine-event drain while focus is here.
     pub blocks_agent: bool,
-    /// When true, a Down on the title row starts a drag gesture.
-    pub draggable: bool,
-    /// When true, the bottom-right border cell is a resize handle.
-    pub resizable: bool,
+    /// Regions that can move this overlay.
+    pub draggable: DragConfig,
+    /// Chrome edges that can resize this overlay.
+    pub resizable: ResizeConfig,
     /// Explicit size override; set by resize gesture, preserved across frames.
     /// Wins over [`Self::width`]/[`Self::height`] when set.
     pub size_override: Option<(u16, u16)>,
@@ -88,8 +212,8 @@ impl Overlay {
             z: 50,
             modal: false,
             blocks_agent: false,
-            draggable: false,
-            resizable: false,
+            draggable: DragConfig::none(),
+            resizable: ResizeConfig::none(),
             size_override: None,
         }
     }
@@ -110,12 +234,30 @@ impl Overlay {
     }
 
     pub fn draggable(mut self, b: bool) -> Self {
-        self.draggable = b;
+        self.draggable = if b {
+            DragConfig::floating()
+        } else {
+            DragConfig::none()
+        };
+        self
+    }
+
+    pub fn drag_config(mut self, config: DragConfig) -> Self {
+        self.draggable = config;
         self
     }
 
     pub fn resizable(mut self, b: bool) -> Self {
-        self.resizable = b;
+        self.resizable = if b {
+            ResizeConfig::floating()
+        } else {
+            ResizeConfig::none()
+        };
+        self
+    }
+
+    pub fn resize_config(mut self, config: ResizeConfig) -> Self {
+        self.resizable = config;
         self
     }
 

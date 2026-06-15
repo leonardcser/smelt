@@ -12,7 +12,8 @@
 use crate::app::TuiApp;
 use crate::smelt_edit::layout::{Align, Anchor, Corner, PaintId};
 use crate::smelt_edit::{
-    Callback, CallbackResult, KeyBind, Overlay, Payload, RowIndex, WinEvent, WinId,
+    BodyDrag, Callback, CallbackResult, DragConfig, KeyBind, Overlay, Payload, ResizeConfig,
+    RowIndex, WinEvent, WinId,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -39,8 +40,8 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     let blocks_agent: bool = opts.get("blocks_agent").unwrap_or(false);
     let modal: bool = opts.get("modal").unwrap_or(true);
     let z: u16 = opts.get("z").unwrap_or(50);
-    let draggable: bool = opts.get("draggable").unwrap_or(false);
-    let resizable: bool = opts.get("resizable").unwrap_or(false);
+    let draggable = parse_drag_config(opts.get::<mlua::Value>("draggable").ok())?;
+    let resizable = parse_resize_config(opts.get::<mlua::Value>("resizable").ok())?;
     // `width`/`height` resolve the overlay rect per-frame against the
     // terminal extent. Reuse the same constraint parser as `layout.vbox`
     // items so `"70%"`, `"max:60"`, `"fit"`, integer cells, etc. all work.
@@ -108,8 +109,8 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
         .with_z(z)
         .modal(modal)
         .blocks_agent(blocks_agent)
-        .draggable(draggable)
-        .resizable(resizable)
+        .drag_config(draggable)
+        .resize_config(resizable)
         .with_width(width)
         .with_height(height)
         .with_max_width(max_width)
@@ -122,6 +123,54 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     }
     app.ui.prime_overlay_viewports();
     Ok(id.0 as u64)
+}
+
+fn parse_drag_config(raw: Option<mlua::Value>) -> Result<DragConfig, String> {
+    match raw.unwrap_or(mlua::Value::Nil) {
+        mlua::Value::Nil => Ok(DragConfig::none()),
+        mlua::Value::Boolean(true) => Ok(DragConfig::floating()),
+        mlua::Value::Boolean(false) => Ok(DragConfig::none()),
+        mlua::Value::Table(t) => {
+            let title = t.get("title").unwrap_or(false);
+            let body = match t.get::<mlua::Value>("body").unwrap_or(mlua::Value::Nil) {
+                mlua::Value::Nil | mlua::Value::Boolean(false) => BodyDrag::Never,
+                mlua::Value::Boolean(true) => BodyDrag::Always,
+                mlua::Value::String(s) if s.to_str().ok().as_deref() == Some("inert") => {
+                    BodyDrag::Inert
+                }
+                other => {
+                    return Err(format!(
+                        "overlay.draggable.body must be boolean or 'inert', got {}",
+                        other.type_name()
+                    ));
+                }
+            };
+            Ok(DragConfig { title, body })
+        }
+        other => Err(format!(
+            "overlay.draggable must be boolean or table, got {}",
+            other.type_name()
+        )),
+    }
+}
+
+fn parse_resize_config(raw: Option<mlua::Value>) -> Result<ResizeConfig, String> {
+    match raw.unwrap_or(mlua::Value::Nil) {
+        mlua::Value::Nil => Ok(ResizeConfig::none()),
+        mlua::Value::Boolean(true) => Ok(ResizeConfig::floating()),
+        mlua::Value::Boolean(false) => Ok(ResizeConfig::none()),
+        mlua::Value::Table(t) => Ok(ResizeConfig {
+            top: t.get("top").unwrap_or(false),
+            right: t.get("right").unwrap_or(false),
+            bottom: t.get("bottom").unwrap_or(false),
+            left: t.get("left").unwrap_or(false),
+            corners: t.get("corners").unwrap_or(false),
+        }),
+        other => Err(format!(
+            "overlay.resizable must be boolean or table, got {}",
+            other.type_name()
+        )),
+    }
 }
 
 /// Read `opts[key]` as a `Constraint` for the overlay's width or height.

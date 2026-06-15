@@ -8,7 +8,7 @@
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, Tier};
-use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaType};
+use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
 use std::sync::Arc;
@@ -99,9 +99,65 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         smelt,
         "overlay",
         "Overlay handle constructor. `smelt.overlay.new(opts)` opens an overlay from `opts.layout` (a `smelt.ui.layout` userdata) and returns an `Overlay` userdata. \
-`opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings. UiHost-only.",
+`opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `true` enables title drag plus inert-body drag. `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`; `true` enables floating-safe left/right/bottom handles without stealing the title row. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings. UiHost-only.",
         Tier::UiHost,
     )?;
+
+    record_class(LuaClassDecl {
+        name: "smelt.overlay.DragConfig",
+        doc: "Overlay drag configuration table. Use `true` for the floating default: title chrome plus inert-body drag.",
+        fields: vec![
+            LuaClassField {
+                name: "title",
+                ty: "boolean".into(),
+                optional: true,
+                doc: "When true, the overlay chrome moves the overlay unless a resize handle owns the cell.",
+            },
+            LuaClassField {
+                name: "body",
+                ty: "boolean | \"inert\"".into(),
+                optional: true,
+                doc: "`true` moves from any body leaf; `\"inert\"` moves only from non-focusable, non-selectable leaves.",
+            },
+        ],
+    });
+
+    record_class(LuaClassDecl {
+        name: "smelt.overlay.ResizeConfig",
+        doc: "Overlay resize configuration table. Use `true` for the floating default: left/right/bottom edges and corners, leaving the top chrome for drag.",
+        fields: vec![
+            LuaClassField {
+                name: "top",
+                ty: "boolean".into(),
+                optional: true,
+                doc: "Enable top-edge resize.",
+            },
+            LuaClassField {
+                name: "right",
+                ty: "boolean".into(),
+                optional: true,
+                doc: "Enable right-edge resize.",
+            },
+            LuaClassField {
+                name: "bottom",
+                ty: "boolean".into(),
+                optional: true,
+                doc: "Enable bottom-edge resize.",
+            },
+            LuaClassField {
+                name: "left",
+                ty: "boolean".into(),
+                optional: true,
+                doc: "Enable left-edge resize.",
+            },
+            LuaClassField {
+                name: "corners",
+                ty: "boolean".into(),
+                optional: true,
+                doc: "Upgrade cells where two enabled edges meet into diagonal resize handles.",
+            },
+        ],
+    });
 
     record_class(LuaClassDecl {
         name: "smelt.overlay.Overlay",
@@ -114,7 +170,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "new",
-        "Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings.",
+        "Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings.",
         &["opts"],
         |lua, opts: mlua::Table| -> LuaResult<LuaOverlay> {
             let keymaps: Option<mlua::Table> = opts.get("keymaps").ok().flatten();

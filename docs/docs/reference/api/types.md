@@ -155,6 +155,7 @@ and `"fit"` pass through verbatim. Pick one of `height` or
 | `max_height` | `any` |  | Shrink-to-content cap that pairs with `min_height`. |
 | `min_height` | `any` |  | Floor for the body size (defaults to `"30%"` in fit mode). |
 | `blocks_agent` | `boolean` |  | Block the agent loop while the dialog is open. Defaults to `false`. |
+| `resizable` | `boolean` |  | Set `false` to disable the default top-edge resize handle. |
 | `keymaps` | [smelt.dialog.Keymap[]](types.md#smeltdialogkeymap) |  | Dialog-level key bindings (merged with built-ins). |
 | `on_submit` | `fun(ctx: any):` |  | any Handler invoked on Enter; default resolves with the focused leaf. |
 | `on_dismiss` | `fun():` |  | nil Handler invoked when the dialog is dismissed. |
@@ -356,6 +357,15 @@ factory time.
 | `warn` | `fun(msg: string)` | yes | Raise a warning toast tagged with the bound source. |
 | `[string]` | `any` | yes | Callable: `handle(msg)` -> info toast tagged with the bound source. |
 
+### `smelt.overlay.DragConfig`
+
+Overlay drag configuration table. Use `true` for the floating default: title chrome plus inert-body drag.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `title` | `boolean` |  | When true, the overlay chrome moves the overlay unless a resize handle owns the cell. |
+| `body` | `boolean | "inert"` |  | `true` moves from any body leaf; `"inert"` moves only from non-focusable, non-selectable leaves. |
+
 ### `smelt.overlay.Overlay`
 
 Overlay handle returned by `smelt.overlay.new(opts)`.
@@ -364,6 +374,18 @@ Overlay handle returned by `smelt.overlay.new(opts)`.
 | --- | --- | --- | --- |
 | `close` | `fun(): nil` | yes | Close the overlay. No-op if already closed. |
 | `key` | `fun(chord: string, func: fun(value: table)): smelt.Reg` | yes | Bind `func` to `chord` on this overlay. Fires when any leaf of the overlay holds focus, after a per-window keymap miss but before global Lua keymaps. Returns a Reg whose `:remove()` undoes the binding. |
+
+### `smelt.overlay.ResizeConfig`
+
+Overlay resize configuration table. Use `true` for the floating default: left/right/bottom edges and corners, leaving the top chrome for drag.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `top` | `boolean` |  | Enable top-edge resize. |
+| `right` | `boolean` |  | Enable right-edge resize. |
+| `bottom` | `boolean` |  | Enable bottom-edge resize. |
+| `left` | `boolean` |  | Enable left-edge resize. |
+| `corners` | `boolean` |  | Upgrade cells where two enabled edges meet into diagonal resize handles. |
 
 ### `smelt.paint.Paint`
 

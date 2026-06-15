@@ -110,6 +110,7 @@ local GUTTER = 1
 ---@field max_height? any Shrink-to-content cap that pairs with `min_height`.
 ---@field min_height? any Floor for the body size (defaults to `"30%"` in fit mode).
 ---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
+---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
 ---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
 ---@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
 ---@field on_dismiss? fun(): nil Handler invoked when the dialog is dismissed.
@@ -648,6 +649,8 @@ local function open_overlay(opts)
     border       = { top = "SmeltAccent" },
     modal        = true,
     blocks_agent = opts.blocks_agent or false,
+    draggable    = false,
+    resizable    = opts.resizable == false and false or { top = true },
     layout       = panel_vbox,
     width        = "100%",
     height       = with_chrome(height_spec),
