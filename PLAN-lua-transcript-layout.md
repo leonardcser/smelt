@@ -37,6 +37,41 @@ These carry forward from the transcript layout rewrite and apply to this Lua-lay
 8. **Production names describe enduring behavior, not migration bookkeeping.** Phase labels belong in this plan and task notes, not in production identifiers, comments, committed test names, or public APIs.
 9. **Keep this plan current as work lands.** Mark completed slices with code references, baseline numbers, and changed conclusions so later phases start from current truth rather than stale intent.
 
+## Current status (post-rebase)
+
+Rebased onto current `origin/main` and validated with:
+
+- `cargo xtask gen-lua-docs`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace --no-fail-fast`
+
+Fresh release-profile transcript-layout benchmark (`cargo xtask bench-transcript-layout --runs 5`) after the rebase:
+
+| workload | MiB | blocks | rows | first | resize | theme | scroll×12 | visible | hydrated full | hydrated IR-only | no cache |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mixed_10mib | 10.01 | 3,404 | 89,587 | 202.8±26.3ms | 161.7±12.8ms | 4.8±0.0ms | 13.3±0.7ms | 0.8±0.3ms | 5.1±0.1ms | 153.4±3.6ms | 190.7±2.1ms |
+| mixed_50mib | 50.01 | 17,004 | 447,561 | 929.9±3.0ms | 769.0±4.3ms | 5.0±0.1ms | 13.6±0.0ms | 2.0±0.1ms | 7.1±0.2ms | 748.3±3.3ms | 949.8±32.5ms |
+| markdown_4mib | 4.00 | 540 | 56,699 | 73.4±1.0ms | 73.6±1.6ms | 1.0±0.0ms | 21.1±0.3ms | 1.1±0.0ms | 0.9±0.0ms | 71.0±1.0ms | 74.9±1.6ms |
+| tool_output_4mib | 4.02 | 47 | 1,080 | 75.6±2.6ms | 74.8±1.2ms | 43.0±1.8ms | 738.3±10.4ms | 56.8±2.0ms | 42.6±1.7ms | 75.3±1.5ms | 75.8±3.4ms |
+| tiny_blocks_1mib | 0.95 | 32,112 | 80,279 | 232.9±2.8ms | 65.6±2.4ms | 0.4±0.0ms | 5.6±0.3ms | 0.5±0.2ms | 5.4±1.0ms | 65.9±1.4ms | 233.3±4.0ms |
+| huge_blocks_4mib | 4.10 | 38 | 45,903 | 105.2±36.2ms | 116.8±33.4ms | 24.4±1.7ms | 310.3±10.8ms | 23.1±1.5ms | 13.8±0.3ms | 90.4±1.9ms | 96.0±12.3ms |
+
+Navigation/search benchmark:
+
+| rows | search | ctrl-d×20 | ctrl-u×20 | gg | G |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 16,000 | 43.42±0.26ms | 4.50±0.02ms | 5.11±0.15ms | 0.26±0.00ms | 0.25±0.00ms |
+
+A focused 50 MiB rerun had one warmup/outlier sample but otherwise matched the full benchmark: `first` 920-943ms for stable samples, `resize` 763-770ms, `hydrated_full` 6.7-8.2ms. An earlier focused rerun was dominated by system noise and should not be used for planning.
+
+True resume benchmark (`cargo test -p smelt-tui transcript_true_resume_benchmark_suite -- --ignored --nocapture`): 10 MiB JSONL-style session, 5,644 history items, 172,131 rows: build 877.0ms, first render 4,304.7ms, load 213.7ms, persistent cache read 11.3ms, rebuild 905.4ms, hydrated rows 1, render 30.6ms.
+
+Conclusions from these numbers:
+
+- Persistent full layout cache is effective once present: hydrated full resumes stay single-digit milliseconds for 10-50 MiB synthetic workloads.
+- Cold first render and resize still scale with block count because exact row measurement walks every block. This is acceptable for correctness but remains the main cold-path cost.
+- The largest remaining interactive rendering problem is row-range materialization inside large rendered blocks/tool output (`tool_output_4mib` scroll×12 ≈738ms, `huge_blocks_4mib` scroll×12 ≈310ms, visible ≈23-57ms). The next architecture slice should prioritize direct row-range compositing for large leaves/hbox/gutter/cap paths before adding more policy surface.
+- True resume is still dominated by session/load/rebuild/first-render pipeline, not cache read. If product priority is startup latency for huge JSONL sessions, pursue lazy/block-streaming session load after the row-range compositor work.
 ## Design principles
 
 1. **One canonical source state.** `Session` / `BlockHistory` remain the canonical transcript state. LayoutIR/DisplayIR is derived display data, not a replacement for semantic history.

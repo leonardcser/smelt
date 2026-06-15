@@ -1,5 +1,7 @@
 # Transcript Layout Rewrite — Architectural Plan
 
+> Historical baseline. The active post-rebase status, current benchmark data, and next recommendations now live in `PLAN-lua-transcript-layout.md`. Keep this document for original architecture rationale and broader backlog only.
+
 **Goal:** make transcript projection (resume, preview, resize, first render) scale from 10 MB to 100 MB sessions while keeping exact scrollbar, exact vim navigation, and real rendering semantics. End state: simpler, more composable, more robust code with the right abstractions and no leftover scaffolding.
 
 **Planning principles:**
