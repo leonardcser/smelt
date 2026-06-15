@@ -72,7 +72,7 @@ fn keymap_prefix_rows(shared: &Arc<LuaShared>, pending: &str, mode: &str) -> Vec
                 .filter_map(|((row_mode, chord), entry)| {
                     if !mode_matches(row_mode, mode)
                         || chord.len() <= pending.len()
-                        || !chord.starts_with(pending)
+                        || !smelt_core::keymap::chord_sequence_starts_with(chord, pending)
                     {
                         return None;
                     }

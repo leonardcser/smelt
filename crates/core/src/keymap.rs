@@ -83,6 +83,47 @@ pub fn match_chord(mut tokens: Vec<String>, oracle: &mut impl ChordOracle) -> Ch
     }
 }
 
+/// Return true when `prefix` matches the start of `sequence` on canonical chord
+/// token boundaries.
+///
+/// Canonical Lua keymap strings concatenate tokens: printable characters are
+/// single character tokens (`a`, `<`, `é`) while named keys are bracket tokens
+/// (`<Esc>`, `<F1>`). A raw string prefix check would treat printable `<` as a
+/// prefix of every named key. This keeps those token forms distinct.
+pub fn chord_sequence_starts_with(sequence: &str, prefix: &str) -> bool {
+    let mut seq_at = 0;
+    let mut prefix_at = 0;
+
+    while prefix_at < prefix.len() {
+        let Some(seq_len) = next_chord_token_len(sequence, seq_at) else {
+            return false;
+        };
+        let Some(prefix_len) = next_chord_token_len(prefix, prefix_at) else {
+            return false;
+        };
+        let seq_end = seq_at + seq_len;
+        let prefix_end = prefix_at + prefix_len;
+        if sequence[seq_at..seq_end] != prefix[prefix_at..prefix_end] {
+            return false;
+        }
+        seq_at = seq_end;
+        prefix_at = prefix_end;
+    }
+
+    true
+}
+
+fn next_chord_token_len(s: &str, at: usize) -> Option<usize> {
+    let rest = s.get(at..)?;
+    let first = rest.chars().next()?;
+    if first == '<' {
+        if let Some(end) = rest.find('>') {
+            return Some(end + 1);
+        }
+    }
+    Some(first.len_utf8())
+}
+
 /// `true` when a chord started at `started` has been idle longer than the
 /// configured timeout and the dispatcher should treat the next key as a
 /// fresh chord.
@@ -464,6 +505,15 @@ mod tests {
                 tokens: toks(["x", "y", "z"])
             }
         );
+    }
+
+    #[test]
+    fn chord_sequence_prefix_respects_named_key_boundaries() {
+        assert!(chord_sequence_starts_with("<Esc><Esc>", "<Esc>"));
+        assert!(!chord_sequence_starts_with("<Esc><Esc>", "<"));
+        assert!(chord_sequence_starts_with("abc", "a"));
+        assert!(chord_sequence_starts_with("é<Esc>", "é"));
+        assert!(!chord_sequence_starts_with("é<Esc>", "é<"));
     }
 
     // ── chord_expired ────────────────────────────────────────────────────

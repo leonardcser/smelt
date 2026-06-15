@@ -2321,6 +2321,20 @@ mod tests {
     }
 
     #[test]
+    fn vim_insert_plain_less_than_inserts_despite_named_key_prefixes() {
+        let mut app = TestApp::builder()
+            .with_vim(true)
+            .with_mode(AgentMode::parse("apply").unwrap())
+            .build();
+
+        app.press(KeyCode::Char('<'));
+
+        assert!(app.app.timers.pending_chord.is_none());
+        assert_eq!(app.state().prompt_text, "<");
+        assert_eq!(app.prompt_cpos(), 1);
+    }
+
+    #[test]
     fn transient_escape_prefix_expires() {
         let mut app = TestApp::builder().build();
         assert!(app.run_lua(

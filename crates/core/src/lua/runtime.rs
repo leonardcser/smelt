@@ -748,7 +748,7 @@ impl LuaRuntime {
         for (m, chord) in map.keys() {
             if keymap_mode_matches(m, mode_char)
                 && chord.len() > sequence.len()
-                && chord.starts_with(sequence)
+                && crate::keymap::chord_sequence_starts_with(chord, sequence)
             {
                 return true;
             }
@@ -767,7 +767,7 @@ impl LuaRuntime {
             .filter_map(|((mode, chord), entry)| {
                 if !keymap_mode_matches(mode, mode_char)
                     || chord.len() <= sequence.len()
-                    || !chord.starts_with(sequence)
+                    || !crate::keymap::chord_sequence_starts_with(chord, sequence)
                 {
                     return None;
                 }

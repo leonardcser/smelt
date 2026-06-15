@@ -1,0 +1,12 @@
+{
+  "_about": "Plain printable '<' in Vim insert mode must edit the prompt even though named Lua keymap tokens also begin with '<'.",
+  "_fix": "Make Lua chord prefix checks token-boundary aware so '<' is not treated as a prefix of '<Esc>' or other named key tokens.",
+  "mode": "apply",
+  "ops": [
+    {
+      "kind": "key_unicode",
+      "data": 60
+    }
+  ],
+  "vim": true
+}
