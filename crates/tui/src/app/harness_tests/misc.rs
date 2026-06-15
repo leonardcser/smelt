@@ -127,6 +127,57 @@ fn transcript_vim_gg_g_and_count_g_use_row_document() {
 }
 
 #[test]
+fn transcript_user_resize_keeps_viewport_top_content_stable() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(56, 20);
+    let before = "before wrapping content ".repeat(6);
+    app.app
+        .push_block(smelt_core::transcript_model::Block::User {
+            text: format!("{before}\nANCHOR stay at viewport top\nafter"),
+            image_labels: vec![],
+        });
+    for i in 0..120 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("tail {i}"),
+            });
+    }
+    app.render_silent();
+    for row in 0..transcript_total_rows(&app) {
+        execute_transcript_viewer_command(&mut app, crate::smelt_edit::ViewerCommand::GotoRow(row));
+        app.app.transcript_win_mut().pin_scroll(row);
+        app.render_silent();
+        if transcript_viewport_top_line(&app).contains("ANCHOR") {
+            break;
+        }
+    }
+    assert!(
+        transcript_viewport_top_line(&app).contains("ANCHOR"),
+        "initial viewport top moved to {:?}; lines: {:?}",
+        transcript_viewport_top_line(&app),
+        transcript_buffer_lines(&app, 12)
+    );
+
+    app.set_terminal_size(96, 20);
+    app.render_silent();
+
+    assert!(
+        transcript_viewport_top_line(&app).contains("ANCHOR"),
+        "viewport top moved to {:?}",
+        transcript_viewport_top_line(&app)
+    );
+
+    app.set_terminal_size(56, 20);
+    app.render_silent();
+
+    assert!(
+        transcript_viewport_top_line(&app).contains("ANCHOR"),
+        "viewport top moved to {:?}",
+        transcript_viewport_top_line(&app)
+    );
+}
+
+#[test]
 fn transcript_tail_follow_keeps_cursor_fixed_relative_to_viewport() {
     let mut app = row_document_transcript_app(100, true);
 

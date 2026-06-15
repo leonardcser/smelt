@@ -587,14 +587,36 @@ fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
     }
 }
 
-fn text_block_content(history: &BlockHistory, id: BlockId) -> Option<&str> {
+struct SourceLineText<'a> {
+    content: &'a str,
+    first_row: RowIndex,
+    line_prefix: &'static str,
+}
+
+fn source_line_text(history: &BlockHistory, id: BlockId) -> Option<SourceLineText<'_>> {
     match history.blocks.get(&id)? {
-        Block::Text { content } => Some(content.as_str()),
+        Block::Text { content } => Some(SourceLineText {
+            content: content.as_str(),
+            first_row: 0,
+            line_prefix: "",
+        }),
+        Block::User { text, .. } => Some(SourceLineText {
+            content: text.as_str(),
+            first_row: 1,
+            line_prefix: " ",
+        }),
         _ => None,
     }
 }
 
-fn wrapped_source_line_rows(line: &str, width: u16) -> RowIndex {
+fn wrapped_source_line_rows(line: &str, prefix: &str, width: u16) -> RowIndex {
+    let prefixed;
+    let line = if prefix.is_empty() {
+        line
+    } else {
+        prefixed = format!("{prefix}{line}");
+        prefixed.as_str()
+    };
     smelt_buffer::wrap::wrap_line_ranges(line, width.max(1) as usize)
         .len()
         .max(1) as RowIndex
@@ -606,10 +628,10 @@ fn source_line_anchor_for_block(
     row_offset: RowIndex,
     width: u16,
 ) -> Option<usize> {
-    let content = text_block_content(history, id)?;
-    let mut row: RowIndex = 0;
-    for (line_index, line) in content.lines().enumerate() {
-        let line_rows = wrapped_source_line_rows(line, width);
+    let source = source_line_text(history, id)?;
+    let mut row = source.first_row;
+    for (line_index, line) in source.content.lines().enumerate() {
+        let line_rows = wrapped_source_line_rows(line, source.line_prefix, width);
         if row_offset < row.saturating_add(line_rows) {
             return Some(line_index);
         }
@@ -624,13 +646,13 @@ fn source_line_start_row_for_block(
     source_line: usize,
     width: u16,
 ) -> Option<RowIndex> {
-    let content = text_block_content(history, id)?;
-    let mut row: RowIndex = 0;
-    for (line_index, line) in content.lines().enumerate() {
+    let source = source_line_text(history, id)?;
+    let mut row = source.first_row;
+    for (line_index, line) in source.content.lines().enumerate() {
         if line_index == source_line {
             return Some(row);
         }
-        row = row.saturating_add(wrapped_source_line_rows(line, width));
+        row = row.saturating_add(wrapped_source_line_rows(line, source.line_prefix, width));
     }
     None
 }

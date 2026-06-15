@@ -271,6 +271,38 @@ fn transcript_total_rows(app: &TestApp) -> crate::smelt_edit::RowIndex {
     win.scroll_row_total(buf)
 }
 
+fn execute_transcript_viewer_command(app: &mut TestApp, command: crate::smelt_edit::ViewerCommand) {
+    let win = app.app.transcript_win();
+    let buf_id = win.buf;
+    let viewport_rows = win
+        .viewport
+        .map(|v| v.rect.height)
+        .expect("transcript viewport");
+    let now = app.app.core.clock.instant_now();
+    let (win, buf) = app
+        .app
+        .ui
+        .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
+    let win = win.expect("transcript window");
+    let buf = buf.expect("transcript buffer");
+    win.execute_row_viewer_command(buf, command, viewport_rows, now);
+}
+
+fn transcript_viewport_top_line(app: &TestApp) -> String {
+    let win = app.app.transcript_win();
+    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+    let local_row = win.local_visual_row(win.scroll_top()) as usize;
+    buf.get_line(local_row).unwrap_or_default().to_string()
+}
+
+fn transcript_buffer_lines(app: &TestApp, count: usize) -> Vec<String> {
+    let win = app.app.transcript_win();
+    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+    (0..count.min(buf.line_count()))
+        .map(|i| buf.get_line(i).unwrap_or_default().to_string())
+        .collect()
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_prepare_probe_completes_and_preserves_turn() {
     let mut app = TestApp::builder().with_vim(false).build();
