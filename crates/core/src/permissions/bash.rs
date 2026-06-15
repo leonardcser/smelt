@@ -327,9 +327,7 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
             b'$' if i + 1 < len && bytes[i + 1] == b'(' => {
                 i += 2;
                 if let Some((inner, end)) = find_matching_paren(cmd, i) {
-                    for sub in split_shell_commands(inner) {
-                        extra.push(sub);
-                    }
+                    extra.extend(split_impl(inner).0);
                     i = end + 1;
                 }
             }
@@ -344,18 +342,14 @@ fn extract_embedded_commands(raw_cmd: &str) -> Vec<String> {
                 }
                 if i < len {
                     let inner = slice(cmd, start..i);
-                    for sub in split_shell_commands(inner) {
-                        extra.push(sub);
-                    }
+                    extra.extend(split_impl(inner).0);
                     i += 1;
                 }
             }
             b'(' if !in_dquote => {
                 i += 1;
                 if let Some((inner, end)) = find_matching_paren(cmd, i) {
-                    for sub in split_shell_commands(inner) {
-                        extra.push(sub);
-                    }
+                    extra.extend(split_impl(inner).0);
                     i = end + 1;
                 }
             }

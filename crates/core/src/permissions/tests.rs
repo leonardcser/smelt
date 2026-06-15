@@ -494,6 +494,15 @@ fn single_ampersand_background() {
 // --- subshell / substitution ---
 
 #[test]
+fn split_shell_commands_nested_subshells_once_per_level() {
+    let command = format!("{}rm foo{}", "(".repeat(12), ")".repeat(12));
+    let commands = split_shell_commands(&command);
+    assert_eq!(commands.len(), 13);
+    assert_eq!(commands[0], command);
+    assert_eq!(commands.last().map(String::as_str), Some("rm foo"));
+}
+
+#[test]
 fn command_substitution() {
     let p = perms_with_bash(&["echo *"], &[], &["rm *"]);
     assert_eq!(
