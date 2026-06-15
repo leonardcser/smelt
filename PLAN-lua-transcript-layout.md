@@ -225,7 +225,6 @@ layout.cap(child, {
 `rows` is numeric. Product budgets come from `ctx.limits`:
 
 ```lua
-layout.cap(child, { rows = ctx.limits.tool_body_rows, keep = "head" })
 layout.cap(child, { rows = ctx.limits.tool_output_rows, keep = "tail", marker = "above" })
 ```
 
@@ -234,7 +233,7 @@ layout.cap(child, { rows = ctx.limits.tool_output_rows, keep = "tail", marker = 
 ```lua
 ctx.limits = {
   tool_header_rows = 20, -- kept rows; marker `... N below` is extra
-  tool_body_rows = 20,   -- structured bodies such as diffs/file views; no marker by default
+  tool_body_rows = 20,   -- legacy/default budget available to custom renderers
   tool_output_rows = 20, -- raw output kept rows; marker `... N above` is extra
 }
 ```
@@ -256,18 +255,21 @@ local function render_tool_output(output, ctx, opts)
   local content = output and output.content or ""
   local rows = opts.rows or ctx.limits.tool_output_rows
   local hl = opts.hl or (output and output.is_error and "ErrorMsg" or nil)
-  return layout.cap(
-    layout.gutter(layout.text(content, { hl = hl, dim = hl == nil, ansi = true }), { text = "  " }),
-    { rows = rows, keep = "tail", marker = "above" }
+  return layout.gutter(
+    layout.cap(
+      layout.text(content, { hl = hl, dim = hl == nil, ansi = true }),
+      { rows = rows, keep = "tail", marker = "above" }
+    ),
+    { text = "  " }
   )
 end
 ```
 
 Do not expose this as `smelt.layout.tool_output`. Keeping it in `smelt.transcript.defaults` makes it reusable by user-overridden renderers without polluting the primitive layout namespace.
 
-So the answer to “overflow by how many lines?” is: by `ctx.limits.tool_output_rows`, currently 20 kept rendered rows plus one marker row when truncated. Individual composite renderers may pass a smaller numeric `rows` when they intentionally reserve space for nearby body content.
+So the answer to “overflow by how many lines?” is: by `ctx.limits.tool_output_rows`, currently 20 kept rendered rows plus one marker row when truncated. Composite renderers should call `render_tool_output` or add their own explicit `layout.cap` only for raw output that can explode.
 
-Plain `layout.text` remains uncapped unless composed with `layout.cap`; file views, diffs, and arbitrary custom layouts must not start tailing by accident. This fixes the current bash symptom where a command such as `cargo test ... 2>&1 | tail -120` returns the right final lines, but the transcript cap shows the first rows of that returned tail. The command string should not be special-cased; the semantic is that tool output tails when capped.
+Plain `layout.text` remains uncapped unless composed with `layout.cap`; file views, diffs, plan summaries, and arbitrary structured custom layouts must not start tailing by accident. This fixes the bash/read-process symptom where a command such as `cargo test ... 2>&1 | tail -120` returns the right final lines, but the transcript cap shows the first rows of that returned tail. The command string should not be special-cased; the semantic is that raw process output tails when capped.
 
 ### Transcript renderer
 
@@ -1237,7 +1239,9 @@ Large-resume implementation notes:
 - Canonical sessions now write inspectable `meta.json` + `history.jsonl` + `content.txt`. Loading prefers JSONL and keeps short-lived `COMPAT(session-json-monolith)` support for old monolithic `session.json` sessions; opening a legacy session immediately rewrites it to the split format and removes `session.json` after the new files exist.
 - True-resume benchmark fixture (`transcript_true_resume_benchmark_suite`) now measures save/load/cache-read/rebuild/render through the real session path. 50 MiB release sample: `history_items=28206`, `rows=860272`, `build=79.7ms`, cold `first=985.6ms`, JSONL `load=57.2ms`, IR cache read `11.6ms`, rebuild `73.3ms`, hydrated render `3.5ms`.
 - `layout.style(child, opts)` is implemented as an inherited LayoutIR style wrapper for `hl`/`hl_group`, `fg`, `bg`, `dim`, `bold`, and `italic`. Panel remains the full-width background/chrome primitive; style is for inherited text styling.
-- `layout.elapsed(block.elapsed, opts?)` is implemented as a render-time LayoutIR leaf. Rust exposes `block.elapsed` on tool blocks and resolves the current tool elapsed from `ToolState` during render when available; custom Lua renderers can decide where to place that leaf.
+- `layout.elapsed(block.elapsed, opts?)` is implemented as a render-time LayoutIR leaf. Rust exposes `block.elapsed` on tool blocks and resolves the current tool elapsed from `ToolState` during render when available. The bundled default tool header now places this leaf in the header so elapsed ticks update dynamically.
+- Elapsed-only tool-state ticks no longer affect `ToolState::display_hash()`, so pending elapsed updates can reuse cached DisplayIR instead of recompiling block layouts.
+- Default tool-body policy now caps only raw output via `render_tool_output` (`keep="tail"`, marker above). Structured tool renderers such as diffs, file views, notebook previews, and plan summaries are guttered but not capped by the default wrapper; custom renderers opt into caps explicitly when their own body can explode.
 
 Resume architecture sequence, preserving exact row/search/scroll semantics:
 
@@ -1245,9 +1249,9 @@ Resume architecture sequence, preserving exact row/search/scroll semantics:
 2. **True resume benchmark + diagnostics.** Measure the real session path separately from projection-only fixtures so JSONL parse, transcript rebuild, IR read, and hydrated render costs stay visible.
 3. **Canonical session format.** Use `meta.json + history.jsonl` as the inspectable canonical storage. Keep only documented short-lived monolith compatibility.
 4. **Layout style semantics.** Use `layout.style` for inherited foreground/background/text attributes and `layout.panel` for full-width background panels.
-5. **Dynamic elapsed primitive.** `layout.elapsed(block.elapsed, opts?)` is available as a render-time leaf so Lua controls placement/chrome while Rust can resolve the displayed value from current tool state.
+5. **Dynamic elapsed primitive and cache-stable ticks.** `layout.elapsed(block.elapsed, opts?)` is available as a render-time leaf; the bundled header uses it, and elapsed-only updates do not change DisplayIR cache keys.
 
-Recommended next slice: discuss whether to wire `layout.elapsed` into the bundled default tool header and whether elapsed-only tool-state ticks should stop invalidating DisplayIR cache keys; then only consider deeper storage or compositor rewrites if measured bottlenecks remain.
+Recommended next slice: run the focused validation/benchmark pass for the elapsed/header and raw-output policy changes, then only consider deeper storage or compositor rewrites if measured bottlenecks remain.
 
 Exit criteria:
 

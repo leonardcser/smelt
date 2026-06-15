@@ -619,7 +619,7 @@ impl Default for LuaRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
+    use smelt_core::content::block_layout::{BlockLayout, CapKeep, CapMarker, LuaLeaf, TextSpec};
     use smelt_core::lua::api::lua_table_to_json;
     use smelt_core::lua::runtime::TranscriptRenderCtx;
     use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
@@ -944,6 +944,100 @@ mod tests {
         };
         let text: String = spec.spans.iter().map(|span| span.text.as_str()).collect();
         assert_eq!(text, expected);
+    }
+
+    fn tool_block(name: &str, output: &str) -> (Block, ToolState) {
+        (
+            Block::ToolCall {
+                call_id: format!("{name}-call"),
+                name: name.into(),
+                summary: protocol::StyledLines::from_plain(name),
+                args: std::collections::HashMap::new(),
+            },
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: Some(std::time::Duration::from_secs(65)),
+                output: Some(Box::new(ToolOutput {
+                    content: output.into(),
+                    is_error: false,
+                    metadata: None,
+                })),
+                user_message: None,
+            },
+        )
+    }
+
+    fn assert_tool_body_is_raw_tail(layout: &BlockLayout, expected: &str) {
+        let BlockLayout::Vbox(items) = layout else {
+            panic!("expected tool vbox, got {layout:?}");
+        };
+        assert_eq!(items.len(), 2);
+        let BlockLayout::Gutter { child, .. } = &items[1] else {
+            panic!("expected body gutter, got {:?}", items[1]);
+        };
+        let BlockLayout::Cap { child, spec } = child.as_ref() else {
+            panic!("expected raw output cap, got {child:?}");
+        };
+        assert_eq!(spec.keep, CapKeep::Tail);
+        assert_eq!(spec.marker, Some(CapMarker::Above));
+        assert_text_layout(child, expected);
+    }
+
+    fn assert_tool_header_has_dynamic_elapsed(layout: &BlockLayout, call_id: &str) {
+        let BlockLayout::Vbox(items) = layout else {
+            panic!("expected tool vbox, got {layout:?}");
+        };
+        let BlockLayout::Cap { child, .. } = &items[0] else {
+            panic!("expected capped header, got {:?}", items[0]);
+        };
+        let BlockLayout::Hbox(items) = child.as_ref() else {
+            panic!("expected dynamic elapsed hbox header, got {child:?}");
+        };
+        let BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) = &items[1].layout else {
+            panic!("expected elapsed header leaf, got {:?}", items[1].layout);
+        };
+        assert_eq!(spec.call_id, call_id);
+        assert!(!spec.selectable);
+    }
+
+    #[test]
+    fn raw_process_outputs_use_tail_cap_once() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+
+        for name in ["bash", "read_process_output"] {
+            let (block, state) = tool_block(name, "one\ntwo\nthree");
+            let layout = render_transcript_block(&rt, &block, Some(&state));
+            assert_tool_body_is_raw_tail(&layout, "one\ntwo\nthree");
+            assert_tool_header_has_dynamic_elapsed(&layout, &format!("{name}-call"));
+        }
+    }
+
+    #[test]
+    fn structured_tool_bodies_are_not_capped_by_default() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+        rt.lua
+            .load(
+                r#"
+                local defaults = require("smelt.transcript.defaults")
+                defaults.__tool_body_renderers.no_cap_probe = function()
+                  return smelt.layout.text("structured body")
+                end
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let (block, state) = tool_block("no_cap_probe", "ignored");
+        let layout = render_transcript_block(&rt, &block, Some(&state));
+        let BlockLayout::Vbox(items) = layout else {
+            panic!("expected tool vbox");
+        };
+        let BlockLayout::Gutter { child, .. } = &items[1] else {
+            panic!("expected body gutter, got {:?}", items[1]);
+        };
+        assert_text_layout(child, "structured body");
     }
 
     #[test]

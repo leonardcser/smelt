@@ -116,8 +116,8 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?):
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
-Render a tool body. Raw output is the safe default when no tool-specific
-structured renderer is available.
+Render a tool body. Raw output is capped by the safe tail-output helper;
+structured renderers are guttered but otherwise left uncapped.
 
 ## `smelt.transcript.defaults.render_tool_header`
 

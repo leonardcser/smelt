@@ -87,7 +87,18 @@ impl ToolState {
     }
 
     pub fn display_hash(&self) -> u64 {
-        crate::utils::hash_serializable(self)
+        #[derive(serde::Serialize)]
+        struct DisplayState<'a> {
+            status: ToolStatus,
+            output: &'a Option<ToolOutputRef>,
+            user_message: &'a Option<String>,
+        }
+
+        crate::utils::hash_serializable(&DisplayState {
+            status: self.status,
+            output: &self.output,
+            user_message: &self.user_message,
+        })
     }
 }
 
@@ -807,6 +818,18 @@ mod tests {
             assert!(s.is_terminal());
         }
         assert!(!pending_state().is_terminal());
+    }
+
+    #[test]
+    fn tool_display_hash_ignores_elapsed_ticks() {
+        let mut a = pending_state();
+        a.elapsed = Some(std::time::Duration::from_secs(1));
+        let mut b = pending_state();
+        b.elapsed = Some(std::time::Duration::from_secs(2));
+        assert_eq!(a.display_hash(), b.display_hash());
+
+        b.status = ToolStatus::Ok;
+        assert_ne!(a.display_hash(), b.display_hash());
     }
 
     #[test]

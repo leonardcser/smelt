@@ -466,6 +466,7 @@
 ---@field summary_text? string Tool summary flattened to plain text.
 ---@field status? "pending"|"confirm"|"ok"|"err"|"denied" Tool status.
 ---@field status_hl? string Tool status highlight group.
+---@field elapsed? table Dynamic elapsed descriptor for `smelt.layout.elapsed`.
 ---@field elapsed_secs? integer Terminal/static tool elapsed seconds.
 ---@field elapsed_text? string Terminal/static tool elapsed label.
 ---@field thinking_summary? string Folded thinking summary text.

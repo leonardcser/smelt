@@ -672,6 +672,7 @@ Semantic transcript block snapshot passed to the root renderer.
 | `summary_text` | `string` |  | Tool summary flattened to plain text. |
 | `status` | `"pending"|"confirm"|"ok"|"err"|"denied"` |  | Tool status. |
 | `status_hl` | `string` |  | Tool status highlight group. |
+| `elapsed` | `table` |  | Dynamic elapsed descriptor for `smelt.layout.elapsed`. |
 | `elapsed_secs` | `integer` |  | Terminal/static tool elapsed seconds. |
 | `elapsed_text` | `string` |  | Terminal/static tool elapsed label. |
 | `thinking_summary` | `string` |  | Folded thinking summary text. |

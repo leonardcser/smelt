@@ -952,7 +952,13 @@ fn render_ir_hbox(
             }
             let emitted = emit_buffer_row_clipped(&buf, 0, col_w, out);
             if emitted < col_w {
-                out.print(&" ".repeat((col_w - emitted) as usize));
+                out.print_with_meta(
+                    &" ".repeat((col_w - emitted) as usize),
+                    SpanMeta {
+                        selectable: false,
+                        copy_as: None,
+                    },
+                );
             }
         }
         out.newline();

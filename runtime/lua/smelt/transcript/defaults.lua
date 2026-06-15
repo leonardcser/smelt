@@ -72,7 +72,17 @@ function smelt.transcript.defaults.render_tool_header(block, ctx, opts)
   local status = block.status or "pending"
   local hl = opts.hl or opts.hl_group or block.status_hl or status_hl[status]
   local lines = tool_header_lines(block, status, hl)
-  return layout.cap(layout.runs(lines), {
+  local header = layout.runs(lines)
+  local show_elapsed = block.elapsed
+    and status ~= "confirm"
+    and (status == "pending" or (block.elapsed_text and block.elapsed_text ~= ""))
+  if show_elapsed then
+    header = layout.hbox({
+      header,
+      { layout.elapsed(block.elapsed, { dim = true, selectable = false }), cols = 8 },
+    })
+  end
+  return layout.cap(header, {
     rows = (ctx and ctx.limits and ctx.limits.tool_header_rows) or 20,
     keep = "head",
     marker = "below",
@@ -140,10 +150,6 @@ end
 function tool_header_lines(block, status, hl)
   local lines = summary_lines(block.summary)
   local suffix = {}
-  local elapsed = block.elapsed_text
-  if elapsed and elapsed ~= "" then
-    suffix[#suffix + 1] = { text = elapsed, selectable = false, dim = true }
-  end
 
   if lines[1] then
     local first = lines[1]
@@ -191,8 +197,8 @@ function tool_header_lines(block, status, hl)
   return lines
 end
 
---- Render a tool body. Raw output is the safe default when no tool-specific
---- structured renderer is available.
+--- Render a tool body. Raw output is capped by the safe tail-output helper;
+--- structured renderers are guttered but otherwise left uncapped.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table?
 function smelt.transcript.defaults.render_tool_body(block, ctx, opts)
   opts = opts or {}
@@ -209,15 +215,7 @@ function smelt.transcript.defaults.render_tool_body(block, ctx, opts)
     end
     local body = renderer(render_block, ctx, opts)
     if not body then return nil end
-    local limits = (ctx and ctx.limits) or {}
-    return layout.cap(
-      layout.gutter(body, { text = opts.gutter or "  " }),
-      {
-        rows = opts.rows or limits.tool_body_rows or 20,
-        keep = opts.keep or "head",
-        marker = opts.marker,
-      }
-    )
+    return layout.gutter(body, { text = opts.gutter or "  " })
   end
   return M.render_tool_output(block.output, ctx, opts)
 end
