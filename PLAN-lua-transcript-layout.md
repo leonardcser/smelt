@@ -104,7 +104,7 @@ The naming is still a pressure point because `smelt.layout` and `smelt.ui.layout
 
 The current branch is not a blank slate. These are the concrete seams the migration must remove or preserve deliberately:
 
-- `DisplayBlock` still hardcodes every block variant and dispatches to per-block Rust renderers. The target should replace `DisplayBlock::{User, Text, ToolCall, ...}` with cached `LayoutIr` plus minimal semantic fallback constructors.
+- TUI transcript caching now stores renderer-produced `LayoutIr` directly; the old `DisplayBlock::{User, Text, ToolCall, ...}` enum dispatch and single-variant wrapper are gone.
 - Renderer-produced tool layouts are no longer stored on canonical `ToolState` / `BlockHistory`. Semantic tool state remains status, terminal elapsed, output, and user message; tool calls compile full-block `LayoutIr` through the root Lua transcript renderer.
 - The body-only `ToolBody` bridge and tool `render(args, output, ctx)` contract have been deleted. `BlockLayout` now has display-oriented aliases (`LayoutIr`, `LayoutNode`, `LayoutLeaf`) and compiled source leaves use `SourceViewIr` instead of `IrLeaf::DiffIr`.
 - Tool chrome policy (`* name summary elapsed`, status color, denied/user-message behavior, and built-in tool bodies) now lives in bundled Lua defaults. Rust keeps only primitive mechanics plus emergency fallback layouts for renderer failure.
@@ -1009,7 +1009,7 @@ Exit criteria:
 Status after implementation:
 
 - The old tool `render(args, output, ctx)` hook is removed from `smelt.tools.ToolDef`, `ToolHandles`, docs, generated stubs, and all bundled tool registrations.
-- Tool calls now compile full-block `LayoutIr` by invoking the root transcript renderer. `DisplayBlock::ToolCall` stores the resulting layout tree; Rust no longer pre-renders or caches a body-only `ToolBody`.
+- Tool calls now compile full-block `LayoutIr` by invoking the root transcript renderer. Rust no longer pre-renders or caches a body-only `ToolBody`, and the old `DisplayBlock::ToolCall` branch is gone.
 - `runtime/lua/smelt/transcript/defaults.lua` owns the default tool block: styled `layout.runs` header, status colors, elapsed/title suffix placement, user messages, denied body suppression, and raw-output tail caps. Built-in structured body functions live next to their tools and populate the defaults' private dispatch table.
 - `layout.runs` preserves styled summary spans, syntax highlighting, selectability, and `title_suffix` metadata so Lua-rendered headers keep the old copy/yank behavior. Tool summaries and `layout.runs` now share the same Rust styled-lines decoder.
 - The display cache was simplified to disposable row-index entries only; derived tool bodies are no longer serialized in `session.ir.bin`. Compiled display-block keys include the renderer context bit used by Lua so toggling `show_thinking` cannot reuse stale Lua-produced tool layout.
@@ -1048,7 +1048,7 @@ Exit criteria:
 
 Status after implementation:
 
-- `DisplayBlock` now stores a single compiled `LayoutIr` variant for every transcript block kind. The compile path invokes the root Lua transcript renderer for tools and non-tools alike, then Rust only validates, measures, and renders the resulting IR.
+- Transcript display now compiles one `LayoutIr` for every block kind. The compile path invokes the root Lua transcript renderer for tools and non-tools alike, then Rust only validates, measures, and renders the resulting IR.
 - Added the full-block primitives consumed by defaults: `layout.line`, `layout.markdown`, `layout.code`, `layout.separator`, and `layout.panel`. `layout.gutter` now has an explicit `styled` option so Lua chooses whether row styling includes the prefix.
 - Bundled Lua defaults now render user, assistant, thinking, exec, mode, process-status, compacted, and code blocks with generic primitives. Rust-provided semantic annotations expose user styled lines, exec command spans, and folded thinking summaries without hiding block chrome in Rust.
 - The TUI renderer tree now keeps only primitive mechanics (`layout_ir` plus markdown internals). Obsolete per-block renderer modules for user/thinking/exec/mode/process-status/compacted/text/tool-output chrome were deleted.
@@ -1092,8 +1092,8 @@ Exit criteria:
 
 Status after implementation:
 
-- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_blocks }`; cache read/write and background persist metrics report both entry types. The cache payload schema is separated from renderer semantics by `FORMAT_VERSION = 2`, while renderer-produced layout semantics remain gated by `DISPLAY_RENDERER_VERSION = 6`.
-- `DisplayBlockCacheEntry` persists renderer-produced `DisplayBlock::Layout { LayoutIr }` entries keyed by semantic content hash, tool sidecar hash, display renderer version, runtime renderer generation, stable renderer cache key, and render-context hash.
+- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_blocks }`; cache read/write and background persist metrics report both entry types. The cache payload schema is separated from renderer semantics by `FORMAT_VERSION = 3`, while renderer-produced layout semantics remain gated by `DISPLAY_RENDERER_VERSION = 6`.
+- `DisplayBlockCacheEntry` persists renderer-produced `LayoutIr` entries keyed by semantic content hash, tool sidecar hash, display renderer version, runtime renderer generation, stable renderer cache key, and render-context hash.
 - Bundled transcript defaults install a stable renderer cache key. User renderers and renderer middleware opt into persisted DisplayIR with `opts.cache_key`; omitting a cache key keeps runtime caching but disables persisted DisplayIR and row-index export for that renderer chain.
 - `TranscriptProjection` hydrates display blocks before first projection and exports only history-valid entries for the current renderer generation/cache key once the renderer is known. Row-index entries carry the same renderer identity, so renderer invalidation rejects persisted heights and materialized rows without hashing Lua closures.
 - Projection plans carry renderer generation/cache key, and `project_planned` rechecks the current Lua renderer identity before materializing a saved plan. If the renderer changed after planning, the row index and visible range are rebuilt under the current renderer before rendering.
@@ -1127,6 +1127,21 @@ Exit criteria:
 - no buffer-leaf transcript API;
 - no compatibility shims;
 - code reads as if Lua-defined transcript layout was always the design.
+
+Status after implementation:
+
+- Audited transcript/content/runtime docs and code for `DisplayBlock::...`, `LuaLeaf::Buf`, `layout.leaf(buf)`, `smelt.layout.tool_output`, `set_tool_renderer`, tool-body-only APIs, and compatibility/shim markers; no transcript display leftovers remain.
+- Removed the single-variant `DisplayBlock` wrapper. `DisplayModel` and persisted display-block cache entries now store `LayoutIr` directly, with `session.ir.bin` payload format bumped to `FORMAT_VERSION = 3` for the serialized shape change.
+- Removed the obsolete buffer-leaf carrier from content layout (`LuaLeaf::Buf` and generic `Leaf<B>`). Lua-returned layout leaves are now declarative primitives/source directives only, and traversal tests use generic leaf payloads instead of buffer IDs.
+- The remaining TUI content renderer modules are primitive mechanics: generic `layout_ir`, markdown internals, source-view/diff/file rendering, wrapping, panel/gutter/cap/hbox composition.
+
+Validation after implementation:
+
+- `cargo build`
+- `cargo xtask gen-lua-docs`
+- `cargo nextest run --workspace`
+- `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings`
+- `git diff --check`
 
 ### Phase 8 — Performance and regression validation
 

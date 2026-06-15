@@ -62,7 +62,6 @@ mod tests {
             &display,
             RenderCtx {
                 width: ctx.width,
-                show_thinking: ctx.show_thinking,
                 view_state: ctx.view_state,
                 theme,
             },

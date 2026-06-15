@@ -87,11 +87,6 @@ impl<'a> TranscriptRenderEnv<'a> {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) enum DisplayBlock {
-    Layout { layout: LayoutIr },
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayRowIndexEntry {
     pub(crate) width: u16,
     pub(crate) show_thinking: bool,
@@ -111,7 +106,7 @@ pub(crate) struct DisplayRowIndexNode {
 pub(crate) struct DisplayBlockCacheEntry {
     pub(crate) id: BlockId,
     pub(crate) key: DisplayCacheKey,
-    pub(crate) block: DisplayBlock,
+    pub(crate) block: LayoutIr,
 }
 
 pub(crate) struct CompileJob {
@@ -126,7 +121,7 @@ impl CompileJob {
     pub(crate) fn compile(
         self,
         env: TranscriptRenderEnv<'_>,
-    ) -> (BlockId, DisplayCacheKey, DisplayBlock) {
+    ) -> (BlockId, DisplayCacheKey, LayoutIr) {
         let Self {
             id,
             index,
@@ -145,21 +140,19 @@ impl CompileJob {
 #[derive(Clone, Copy)]
 pub(crate) struct MeasureCtx {
     pub width: u16,
-    pub show_thinking: bool,
     pub view_state: ViewState,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct RenderCtx<'a> {
     pub width: u16,
-    pub show_thinking: bool,
     pub view_state: ViewState,
     pub theme: &'a Theme,
 }
 
 struct CachedDisplayBlock {
     key: DisplayCacheKey,
-    block: DisplayBlock,
+    block: LayoutIr,
 }
 
 #[derive(Default)]
@@ -316,7 +309,7 @@ impl DisplayModel {
 
     pub(crate) fn insert_compiled_blocks(
         &mut self,
-        blocks: Vec<(BlockId, DisplayCacheKey, DisplayBlock)>,
+        blocks: Vec<(BlockId, DisplayCacheKey, LayoutIr)>,
     ) {
         for (id, key, block) in blocks {
             self.blocks.insert(id, CachedDisplayBlock { key, block });
@@ -334,7 +327,7 @@ impl DisplayModel {
         key: LayoutKey,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
-    ) -> Option<&DisplayBlock> {
+    ) -> Option<&LayoutIr> {
         let display_key =
             DisplayCacheKey::from_layout_key(key, renderer_generation, renderer_cache_key);
         self.blocks
@@ -371,7 +364,7 @@ fn display_block_entry_matches_history(
 }
 
 #[cfg(test)]
-pub(crate) fn compile_block_with_show(block: &Block, show_thinking: bool) -> DisplayBlock {
+pub(crate) fn compile_block_with_show(block: &Block, show_thinking: bool) -> LayoutIr {
     let lua = LuaRuntime::new();
     compile_block_with_lua(
         TranscriptRenderEnv::new(&lua, show_thinking),
@@ -388,7 +381,7 @@ fn compile_block_with_lua(
     index: usize,
     block: &Block,
     state: Option<&ToolState>,
-) -> DisplayBlock {
+) -> LayoutIr {
     let kind = block_kind(block);
     let layout = env.lua.render_transcript_layout(
         id,
@@ -399,7 +392,7 @@ fn compile_block_with_lua(
             show_thinking: env.show_thinking,
         },
     );
-    let layout = match compile_layout_ir(&layout) {
+    match compile_layout_ir(&layout) {
         Ok(layout) => layout,
         Err(e) => {
             env.lua.record_error(format!(
@@ -411,8 +404,7 @@ fn compile_block_with_lua(
                 ansi: false,
             }))
         }
-    };
-    DisplayBlock::Layout { layout }
+    }
 }
 
 fn block_kind(block: &Block) -> &'static str {
@@ -432,9 +424,6 @@ fn block_kind(block: &Block) -> &'static str {
 pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
     match layout {
         BlockLayout::Empty => Ok(BlockLayout::Empty),
-        BlockLayout::Leaf(LuaLeaf::Buf(_)) => {
-            Err("buffer leaves are not supported in layout IR".into())
-        }
         BlockLayout::Leaf(LuaLeaf::Text(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
             content: spec.content.clone(),
             hl_group: spec.hl_group.clone(),
@@ -513,45 +502,29 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
     }
 }
 
-pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
-    let _perf = smelt_perf::perf::begin(measure_block_label(block));
-    let _ = ctx.show_thinking;
-    let DisplayBlock::Layout { layout } = block;
+pub(crate) fn measure_block(layout: &LayoutIr, ctx: MeasureCtx) -> u64 {
+    let _perf = smelt_perf::perf::begin("transcript:measure_block:layout");
     let expanded_rows =
         crate::content::display_renderers::measure_layout_ir(layout, ctx.width) as u64;
     ctx.view_state.measured_height(expanded_rows)
 }
 
-fn measure_block_label(_block: &DisplayBlock) -> &'static str {
-    "transcript:measure_block:layout"
-}
-
 pub(crate) fn render_block_into(
     buf: &mut Buffer,
-    block: &DisplayBlock,
+    layout: &LayoutIr,
     ctx: RenderCtx<'_>,
 ) -> Outcome {
     let outcome = {
         let mut out = LineBuilder::new(buf, ctx.theme, ctx.width);
-        render_expanded_block(&mut out, block, ctx.width as usize, ctx.show_thinking);
+        render_expanded_block(&mut out, layout, ctx.width as usize);
         out.finish()
     };
     apply_view_state(buf, ctx.theme, ctx.width, ctx.view_state, outcome)
 }
 
-fn render_expanded_block(
-    out: &mut LineBuilder,
-    block: &DisplayBlock,
-    width: usize,
-    _show_thinking: bool,
-) -> u16 {
-    let _perf = smelt_perf::perf::begin(render_block_label(block));
-    let DisplayBlock::Layout { layout } = block;
+fn render_expanded_block(out: &mut LineBuilder, layout: &LayoutIr, width: usize) -> u16 {
+    let _perf = smelt_perf::perf::begin("render:layout");
     crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
-}
-
-fn render_block_label(_block: &DisplayBlock) -> &'static str {
-    "render:layout"
 }
 
 fn apply_view_state(
@@ -712,7 +685,7 @@ mod tests {
         )
     }
 
-    fn rendered_rows(block: &DisplayBlock, width: u16, show_thinking: bool) -> u64 {
+    fn rendered_rows(block: &LayoutIr, width: u16) -> u64 {
         let theme = Theme::default();
         let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
         render_block_into(
@@ -720,7 +693,6 @@ mod tests {
             block,
             RenderCtx {
                 width,
-                show_thinking,
                 view_state: ViewState::Expanded,
                 theme: &theme,
             },
@@ -728,12 +700,11 @@ mod tests {
         .line_count as u64
     }
 
-    fn measured_rows(block: &DisplayBlock, width: u16, show_thinking: bool) -> u64 {
+    fn measured_rows(block: &LayoutIr, width: u16) -> u64 {
         measure_block(
             block,
             MeasureCtx {
                 width,
-                show_thinking,
                 view_state: ViewState::Expanded,
             },
         )
@@ -775,8 +746,8 @@ mod tests {
             for show_thinking in [false, true] {
                 let display = compile_block_with_show(&block, show_thinking);
                 assert_eq!(
-                    measured_rows(&display, 36, show_thinking),
-                    rendered_rows(&display, 36, show_thinking),
+                    measured_rows(&display, 36),
+                    rendered_rows(&display, 36),
                     "measurement mismatch for {block:?}, show_thinking={show_thinking}"
                 );
             }
@@ -785,28 +756,23 @@ mod tests {
 
     #[test]
     fn layout_ir_measurement_matches_rendered_rows() {
-        let display = DisplayBlock::Layout {
-            layout: BlockLayout::Vbox(vec![
-                BlockLayout::Leaf(IrLeaf::Runs(RunsSpec {
-                    lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
-                        text: "echo hello && echo world && echo done".into(),
-                        syntax: Some("bash".into()),
-                        ..Default::default()
-                    }]]),
-                    hl_group: Some("SmeltToolPending".into()),
-                })),
-                BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-                    content: "output line that wraps at narrow widths".into(),
-                    hl_group: None,
-                    ansi: false,
-                })),
-            ]),
-        };
+        let display = BlockLayout::Vbox(vec![
+            BlockLayout::Leaf(IrLeaf::Runs(RunsSpec {
+                lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {
+                    text: "echo hello && echo world && echo done".into(),
+                    syntax: Some("bash".into()),
+                    ..Default::default()
+                }]]),
+                hl_group: Some("SmeltToolPending".into()),
+            })),
+            BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                content: "output line that wraps at narrow widths".into(),
+                hl_group: None,
+                ansi: false,
+            })),
+        ]);
 
-        assert_eq!(
-            measured_rows(&display, 24, true),
-            rendered_rows(&display, 24, true)
-        );
+        assert_eq!(measured_rows(&display, 24), rendered_rows(&display, 24));
     }
 
     #[test]

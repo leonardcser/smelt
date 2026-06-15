@@ -4,7 +4,6 @@
 //! such as source diffs into serializable `LayoutIr` before caching/rendering.
 //! Width and theme are intentionally absent from these types.
 
-use crate::buffer::BufId;
 use crate::content::highlight::DiffIr;
 use serde::{Deserialize, Serialize};
 
@@ -104,11 +103,10 @@ pub enum LayoutLeaf {
     SourceView(SourceViewIr),
 }
 
-/// A leaf parameterised on the buffer payload `B`. With `B = BufId` this is the
-/// raw Lua-returned shape; compiled layout IR uses `LayoutLeaf` instead.
+/// Width-independent leaf returned by Lua before transient source directives are
+/// compiled into serializable display IR.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Leaf<B> {
-    Buf(B),
+pub enum LuaLeaf {
     Text(TextSpec),
     Runs(RunsSpec),
     Line(LineSpec),
@@ -120,7 +118,6 @@ pub enum Leaf<B> {
     SourceView(SourceViewIr),
 }
 
-pub type LuaLeaf = Leaf<BufId>;
 pub type IrLeaf = LayoutLeaf;
 pub type LayoutIr = BlockLayout<LayoutLeaf>;
 
@@ -267,37 +264,30 @@ pub fn solve_hbox_widths<L>(items: &[HboxItem<L>], total: u16) -> Vec<u16> {
 mod tests {
     use super::*;
 
-    fn item(constraint: Constraint) -> HboxItem {
+    fn item(constraint: Constraint) -> HboxItem<()> {
         HboxItem {
             constraint,
-            layout: BlockLayout::Leaf(LuaLeaf::Buf(BufId(0))),
+            layout: BlockLayout::Leaf(()),
         }
     }
 
-    fn leaf(n: u64) -> BlockLayout {
-        BlockLayout::Leaf(LuaLeaf::Buf(BufId(n)))
-    }
-
-    fn extract_buf(l: &LuaLeaf) -> BufId {
-        match l {
-            LuaLeaf::Buf(id) => *id,
-            _ => panic!("expected Buf"),
-        }
+    fn leaf(n: u64) -> BlockLayout<u64> {
+        BlockLayout::Leaf(n)
     }
 
     #[test]
-    fn leaves_returns_single_buf_id_for_leaf() {
+    fn leaves_returns_single_leaf_for_leaf() {
         let layout = leaf(7);
         let leaves = layout.leaves();
         assert_eq!(leaves.len(), 1);
-        assert_eq!(extract_buf(leaves[0]), BufId(7));
+        assert_eq!(leaves[0], &7);
     }
 
     #[test]
     fn leaves_visits_vbox_children_in_order() {
         let layout = BlockLayout::Vbox(vec![leaf(1), leaf(2), leaf(3)]);
-        let ids: Vec<BufId> = layout.leaves().iter().map(|l| extract_buf(l)).collect();
-        assert_eq!(ids, vec![BufId(1), BufId(2), BufId(3)]);
+        let ids: Vec<u64> = layout.leaves().into_iter().copied().collect();
+        assert_eq!(ids, vec![1, 2, 3]);
     }
 
     #[test]
@@ -312,8 +302,8 @@ mod tests {
                 layout: leaf(6),
             },
         ]);
-        let ids: Vec<BufId> = layout.leaves().iter().map(|l| extract_buf(l)).collect();
-        assert_eq!(ids, vec![BufId(5), BufId(6)]);
+        let ids: Vec<u64> = layout.leaves().into_iter().copied().collect();
+        assert_eq!(ids, vec![5, 6]);
     }
 
     #[test]
@@ -332,8 +322,8 @@ mod tests {
             ]),
             leaf(5),
         ]);
-        let ids: Vec<BufId> = layout.leaves().iter().map(|l| extract_buf(l)).collect();
-        assert_eq!(ids, vec![BufId(1), BufId(2), BufId(3), BufId(4), BufId(5)]);
+        let ids: Vec<u64> = layout.leaves().into_iter().copied().collect();
+        assert_eq!(ids, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -392,6 +382,6 @@ mod tests {
 
     #[test]
     fn solve_hbox_widths_empty_input_returns_empty_vec() {
-        assert!(solve_hbox_widths::<LuaLeaf>(&[], 80).is_empty());
+        assert!(solve_hbox_widths::<()>(&[], 80).is_empty());
     }
 }

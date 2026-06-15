@@ -136,7 +136,7 @@ pub enum Block {
 
 impl Block {
     /// Stable content hash of this block. Two blocks with the same
-    /// content hash produce identical `DisplayBlock`s for the same
+    /// content hash produce identical `LayoutIr` for the same
     /// `LayoutKey` and `ToolState`. For `ToolCall`, `ToolState` (status
     /// / output / elapsed) is deliberately *not* hashed - mutable tool
     /// state lives separately and is invalidated via

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 const CACHE_FILE: &str = "session.ir.bin";
 const MAGIC: &[u8; 8] = b"SMELTIR\0";
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIXED_HEADER_LEN: usize = MAGIC.len() + 4 + 8 + 2 + 8;
 
@@ -217,8 +217,7 @@ fn read_u64(bytes: &[u8], pos: &mut usize) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::content::display_block::{
-        DisplayBlock, DisplayBlockCacheEntry, DisplayCacheKey, DisplayRowIndexEntry,
-        DisplayRowIndexNode,
+        DisplayBlockCacheEntry, DisplayCacheKey, DisplayRowIndexEntry, DisplayRowIndexNode,
     };
     use smelt_core::content::block_layout::BlockLayout;
     use smelt_core::transcript_model::{BlockId, LayoutKey, ViewState};
@@ -247,9 +246,7 @@ mod tests {
         DisplayBlockCacheEntry {
             id: BlockId::new(7),
             key: DisplayCacheKey::new(1, 2, 1, Some(1), 0),
-            block: DisplayBlock::Layout {
-                layout: BlockLayout::Empty,
-            },
+            block: BlockLayout::Empty,
         }
     }
 

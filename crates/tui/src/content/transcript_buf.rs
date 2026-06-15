@@ -566,7 +566,6 @@ fn render_display_block_to_buffer(
         display_block,
         RenderCtx {
             width: key.width,
-            show_thinking: key.show_thinking,
             view_state: key.view_state,
             theme,
         },
@@ -968,7 +967,6 @@ impl TranscriptProjection {
             block,
             MeasureCtx {
                 width: key.width,
-                show_thinking: key.show_thinking,
                 view_state: key.view_state,
             },
         ) as RowIndex;
@@ -1409,7 +1407,7 @@ impl TranscriptProjection {
         Some((entry.id, offset))
     }
 
-    /// Exact full block layout for compatibility APIs. This may measure every
+    /// Exact full block layout for snapshot/navigation APIs. This may measure every
     /// transcript block, but it does not concatenate display rows and does not
     /// re-render blocks when the exact height index is already current.
     pub(crate) fn materialize_block_layout(
@@ -3025,7 +3023,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_tail_uses_exact_total_after_full_compat_materialization() {
+    fn visible_tail_uses_exact_total_after_full_row_materialization() {
         let mut transcript = Transcript::new();
         for i in 0..40 {
             let lines = (0..10)
