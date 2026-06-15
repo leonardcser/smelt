@@ -5,25 +5,27 @@ local function is_empty(t)
 end
 
 local function format_result(r)
-  local status
+  local text = r.text or ""
   if r.running then
-    status = "running"
-  elseif r.exit_code ~= nil then
-    status = "exited (code " .. tostring(r.exit_code) .. ")"
-  else
-    status = "exited"
+    return text
   end
 
-  local text = r.text or ""
-  if text == "" then
-    return "[" .. status .. "]"
+  local status
+  if r.exit_code ~= nil then
+    status = "process exited with code " .. tostring(r.exit_code)
+  else
+    status = "process exited"
   end
-  return text .. "\n[" .. status .. "]"
+
+  if text == "" then
+    return status
+  end
+  return text .. "\n\n" .. status
 end
 
 smelt.tools.register({
   name = "read_process_output",
-  description = "Read the current buffered output from a background bash process by id without draining or waiting.",
+  description = "Read the captured output snapshot from a background bash process by id without draining or waiting. Running processes return only buffered stdout/stderr, which may be empty; exited processes append the exit status.",
   override = true,
   elapsed_visible = true,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },

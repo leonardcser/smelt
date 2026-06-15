@@ -137,14 +137,13 @@ Use `read_process_output` and `stop_process` with the returned process id. `/ps`
 
 ### `read_process_output`
 
-Reads buffered output from a background bash process without draining it. Set
-`wait=true` to wait for the process to finish before returning.
+Reads the captured output snapshot from a background bash process without draining it
+or waiting. Running processes return only buffered stdout/stderr, which may be empty;
+exited processes append a final status line such as `process exited with code 1`.
 
-| Parameter     | Description                                                            |
-| ------------- | ---------------------------------------------------------------------- |
-| `id`          | Background process id (usually the child pid), e.g. `12345` (required)  |
-| `wait`        | Wait for the process to finish (default: false)                        |
-| `timeout_ms`  | Max wait time in ms when waiting (default: 30000, max: 600000)         |
+| Parameter | Description                                                           |
+| --------- | --------------------------------------------------------------------- |
+| `id`      | Background process id (usually the child pid), e.g. `12345` (required) |
 
 ### `stop_process`
 
