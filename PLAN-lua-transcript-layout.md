@@ -1054,6 +1054,16 @@ Status after implementation:
 - The TUI renderer tree now keeps only primitive mechanics (`layout_ir` plus markdown internals). Obsolete per-block renderer modules for user/thinking/exec/mode/process-status/compacted/text/tool-output chrome were deleted.
 - Existing storybook snapshots are preserved, including unstyled raw tool-output gutters and styled thinking/exec gutters, via explicit Lua/default gutter composition.
 
+Follow-up cleanup:
+
+- Display-safe control-character sanitization is centralized in `smelt_core::content`; the TUI content module re-exports the shared helpers instead of carrying a second implementation.
+
+Deferred architecture debt:
+
+- `GutterSpec.styled` preserves current snapshot parity between raw tool-output gutters and styled thinking/exec gutters, but it is a product-shaped flag. Replace it with explicit style/gutter composition before adding more gutter styling modes, including defined composition for nested gutters instead of the current replacement semantics.
+- Markdown/code partial rendering, panel child rows, and hbox columns still use temporary buffers in places to preserve spans while rendering requested rows. Replace those bridges with a row-span compositor/direct row-range renderer before expanding primitive complexity.
+- Style options are still primitive-specific (`MarkdownSpec` dim/italic, `SeparatorSpec` dim, `GutterSpec` styled). Design and migrate to generic `layout.style` before adding more per-primitive style fields.
+
 Validation after implementation:
 
 - `cargo build`

@@ -12,17 +12,7 @@ pub(crate) mod source_view;
 pub(crate) mod to_buffer;
 pub(crate) mod transcript_buf;
 
-pub(crate) fn display_safe_char(ch: char) -> char {
-    if ch != '\n' && ch.is_control() {
-        '\u{FFFD}'
-    } else {
-        ch
-    }
-}
-
-pub(crate) fn display_safe_text(text: &str) -> String {
-    text.chars().map(display_safe_char).collect()
-}
+pub(crate) use smelt_core::content::{display_safe_char, display_safe_text};
 
 use crossterm::terminal;
 
