@@ -1042,14 +1042,25 @@ pub fn load(id_or_prefix: &str) -> Option<Session> {
 
 fn load_exact(id: &str) -> Option<Session> {
     let _perf = smelt_perf::perf::begin("session:load:exact");
-    let dir_path = sessions_dir().join(id);
-    let (mut session, loaded_legacy_json) = if dir_path.join("history.jsonl").is_file() {
-        (load_jsonl_session(&dir_path)?, false)
+    load_session_files(&sessions_dir().join(id))
+}
+
+fn load_session_files(dir_path: &std::path::Path) -> Option<Session> {
+    let has_split = dir_path.join("history.jsonl").is_file();
+    let has_legacy = dir_path.join("session.json").is_file();
+    let (mut session, loaded_legacy_json) = if has_split {
+        match load_jsonl_session(dir_path) {
+            Some(session) => (session, false),
+            // COMPAT(session-json-monolith): pre-release split sidecars may be
+            // stale while a valid monolithic session.json is still present.
+            None if has_legacy => (load_legacy_json_session(dir_path)?, true),
+            None => return None,
+        }
     } else {
-        (load_legacy_json_session(&dir_path)?, true)
+        (load_legacy_json_session(dir_path)?, true)
     };
     if loaded_legacy_json {
-        migrate_legacy_json_session(&dir_path, &session);
+        migrate_legacy_json_session(dir_path, &session);
     }
 
     let blob_dir = dir_path.join("blobs");
@@ -1482,6 +1493,41 @@ mod tests {
         assert!(dir.path().join("history.jsonl").is_file());
         assert!(!dir.path().join("session.json").exists());
         let migrated = load_jsonl_session(dir.path()).expect("load migrated session");
+        assert_eq!(migrated.history.len(), 1);
+    }
+
+    #[test]
+    fn stale_split_session_falls_back_to_legacy_json_and_migrates() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "stale-split".into();
+        s.title = Some("legacy title".into());
+        s.history.push(user_item("legacy prompt"));
+        fs::write(
+            dir.path().join("session.json"),
+            serde_json::to_string(&s).expect("encode legacy session"),
+        )
+        .expect("write legacy session");
+        fs::write(
+            dir.path().join("meta.json"),
+            serde_json::json!({
+                "id": s.id,
+                "title": "stale split missing schema_version",
+            })
+            .to_string(),
+        )
+        .expect("write stale meta");
+        fs::write(dir.path().join("history.jsonl"), b"\n").expect("write stale history");
+
+        let loaded = load_session_files(dir.path()).expect("load via legacy fallback");
+
+        assert_eq!(loaded.title.as_deref(), Some("legacy title"));
+        assert_eq!(loaded.history.len(), 1);
+        assert!(dir.path().join("meta.json").is_file());
+        assert!(dir.path().join("history.jsonl").is_file());
+        assert!(!dir.path().join("session.json").exists());
+        let migrated = load_jsonl_session(dir.path()).expect("load migrated split session");
+        assert_eq!(migrated.title.as_deref(), Some("legacy title"));
         assert_eq!(migrated.history.len(), 1);
     }
 

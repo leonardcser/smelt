@@ -19,7 +19,7 @@ Compatibility code we intend to remove while Smelt is alpha. Mark matching code 
 - Remove after: two alpha releases after `meta.json` + `history.jsonl` session storage ships
 - Why: load old monolithic `session.json` files, migrate them to split JSONL storage on open, then remove the monolith
 - Code:
-  - `crates/core/src/session.rs` — `load_legacy_json_session`, `migrate_legacy_json_session`
+  - `crates/core/src/session.rs` — `load_session_files`, `load_legacy_json_session`, `migrate_legacy_json_session`
 
 ## session-search-sidecar-missing
 
