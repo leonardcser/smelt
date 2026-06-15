@@ -28,10 +28,7 @@ impl TuiApp {
         self.ui.sync_scroll_links();
 
         let queued_owned: Vec<String> = if show_queued {
-            self.queued_inputs
-                .iter()
-                .map(crate::app::QueuedInput::display)
-                .collect::<Vec<_>>()
+            self.queued_inputs.display_texts()
         } else {
             Vec::new()
         };

@@ -43,7 +43,7 @@ app_story!(prompt_shell_escape_prefix, |ctx| {
 
 app_story!(prompt_stash_row, |ctx| {
     // Ctrl+S stashes the current buffer. The top bar grows by one row
-    // with the `» Stashed (ctrl+s to unstash)` cue.
+    // with the `◌ Stashed (ctrl+s to unstash)` cue.
     ctx.set_viewport(50, 8);
     ctx.type_prompt("draft note");
     ctx.stash_prompt();
@@ -51,12 +51,13 @@ app_story!(prompt_stash_row, |ctx| {
 });
 
 app_story!(prompt_queued_messages, |ctx| {
-    // While a turn is active, Enter-on-prompt enqueues the message
-    // instead of submitting. The top bar surfaces each queued entry on
-    // its own row, prefixed with the `↪ ` glyph.
+    // While a turn is active, Enter-on-prompt queues the message for the
+    // next turn. Empty Enter promotes the oldest item into the next-request
+    // queue, giving request and turn rows different markers.
     ctx.set_viewport(50, 10);
     ctx.push_queued_message("first follow-up");
     ctx.push_queued_message("second follow-up");
+    ctx.promote_next_queued_message();
     ctx.assert_snapshot();
 });
 

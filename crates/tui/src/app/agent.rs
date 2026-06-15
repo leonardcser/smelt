@@ -99,18 +99,19 @@ impl TuiApp {
         };
         self.publish_turn_input(submitted);
         self.prepare_user_visible_turn();
+        if content.is_empty() {
+            return self.dispatch_turn(content);
+        }
         self.show_user_message(display, content.image_labels());
         if self.core.session.first_user_message.is_none() {
             self.core.session.first_user_message = Some(text.clone().into_owned());
         }
-        if !content.is_empty() {
-            self.core
-                .session
-                .history
-                .push(protocol::history_item_from_user_content(content.clone()));
-            self.sync_session_snapshot();
-            self.core.session.history.pop();
-        }
+        self.core
+            .session
+            .history
+            .push(protocol::history_item_from_user_content(content.clone()));
+        self.sync_session_snapshot();
+        self.core.session.history.pop();
         self.dispatch_turn(content)
     }
 
@@ -215,6 +216,15 @@ impl TuiApp {
         } else {
             format!("/{}", cmd.display)
         };
+        self.begin_command_request_turn(display, evaluated, cmd.overrides)
+    }
+
+    pub(crate) fn begin_command_request_turn(
+        &mut self,
+        display: String,
+        evaluated: String,
+        overrides: smelt_core::custom_commands::CommandOverrides,
+    ) -> TurnState {
         let submitted = match evaluated.trim() {
             "" => None,
             trimmed => Some(trimmed.to_string()),
@@ -237,8 +247,8 @@ impl TuiApp {
         }
 
         let (model, api_base, api_key) = {
-            let target_model = cmd.overrides.model.as_deref();
-            let target_provider = cmd.overrides.provider.as_deref();
+            let target_model = overrides.model.as_deref();
+            let target_provider = overrides.provider.as_deref();
             let resolved = match (target_model, target_provider) {
                 (Some(reference), provider) => {
                     match smelt_core::config::resolve_model_ref_with_provider(
@@ -289,8 +299,7 @@ impl TuiApp {
             }
         };
 
-        let reasoning = cmd
-            .overrides
+        let reasoning = overrides
             .reasoning_effort
             .as_deref()
             .map(|s| match s.to_lowercase().as_str() {
@@ -302,7 +311,7 @@ impl TuiApp {
             .unwrap_or(self.core.config.reasoning_effort);
 
         let model_config_overrides = {
-            let o = &cmd.overrides;
+            let o = &overrides;
             if o.temperature.is_some()
                 || o.top_p.is_some()
                 || o.top_k.is_some()
@@ -324,7 +333,7 @@ impl TuiApp {
         };
 
         let permission_overrides = {
-            let o = &cmd.overrides;
+            let o = &overrides;
             if o.tools.is_some() || !o.subcommands.is_empty() {
                 let to_override =
                     |r: &smelt_core::custom_commands::RuleOverride| protocol::RuleSetOverride {
@@ -524,10 +533,8 @@ impl TuiApp {
         if self.agent_is_running() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
         } else if self.busy_stack.is_busy() {
-            if self.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
-                self.queued_inputs
-                    .push(crate::app::QueuedInput::ProcessStatus(note));
-            }
+            self.queued_inputs
+                .try_push_turn(crate::app::QueuedInput::ProcessStatus(note));
         } else {
             self.agent = Some(self.begin_process_status_turn(note));
         }

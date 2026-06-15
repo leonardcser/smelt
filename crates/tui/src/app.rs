@@ -12,6 +12,7 @@ pub(crate) mod lua_bridge;
 pub(crate) mod lua_handlers;
 pub(crate) mod mouse;
 pub(crate) mod pane_focus;
+pub(crate) mod queue;
 pub(crate) mod render_loop;
 pub(crate) mod search;
 #[cfg(any(test, feature = "harness"))]
@@ -32,7 +33,6 @@ use std::sync::Arc;
 
 use crossterm::{event, terminal};
 use std::collections::{HashMap, VecDeque};
-
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -59,7 +59,7 @@ pub struct TuiApp {
     /// engine's event receiver but is moved out at construction time so
     /// the two can be polled in the same `tokio::select!`.
     pub(crate) host_rx: tokio::sync::mpsc::UnboundedReceiver<engine::HostCall>,
-    pub(crate) queued_inputs: Vec<QueuedInput>,
+    pub(crate) queued_inputs: InputQueues,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
     pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
@@ -159,6 +159,9 @@ pub struct PlaceholderOpts {
     pub dismiss_keys: Vec<crate::smelt_edit::KeyBind>,
 }
 
+pub(crate) use queue::{
+    InputQueues, QueueStage, QueuedInput, QueuedTurnOptions, MAX_QUEUED_MESSAGES,
+};
 pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
 
 /// Stack of live `smelt.work.busy` tokens. Each `push` returns a
@@ -265,7 +268,7 @@ pub(crate) enum EventOutcome {
     Redraw,
     Quit,
     CancelAgent,
-    /// Cancel the running agent and immediately start a new turn with the oldest queued message.
+    /// Cancel the running agent and immediately start a new turn with the next queued item.
     InterruptWithQueued,
     /// Start a new turn without adding prompt text.
     ContinueTurn,
@@ -321,32 +324,6 @@ pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
 
 /// How long a notification toast stays visible without user interaction.
 pub(crate) const NOTIFICATION_TTL_MS: u64 = 5000;
-
-/// Hard cap on how many user submissions stack up while a background
-/// plugin holds the spinner busy. Sensible bursts are under 10; anything
-/// past this is almost certainly a hung plugin, and silently dropping
-/// the overflow is preferable to unbounded memory growth.
-pub(crate) const MAX_QUEUED_MESSAGES: usize = 64;
-
-#[derive(Clone)]
-pub(crate) enum QueuedInput {
-    Message(String),
-    ProcessStatus(String),
-    CustomCommand(Box<smelt_core::custom_commands::CustomCommand>),
-}
-
-impl QueuedInput {
-    pub(crate) fn display(&self) -> String {
-        match self {
-            QueuedInput::Message(text) | QueuedInput::ProcessStatus(text) => text.clone(),
-            QueuedInput::CustomCommand(cmd) => format!("/{}", cmd.display),
-        }
-    }
-
-    pub(crate) fn prompt_replay_text(&self) -> String {
-        PromptState::strip_attachment_markers(&self.display())
-    }
-}
 
 pub(crate) enum DeferredDialog {
     Confirm(Box<ConfirmRequest>),
@@ -433,8 +410,27 @@ impl TuiApp {
         !self.core.session.history.is_empty()
     }
 
+    pub(crate) fn queue_input_for_request(&mut self, queued: QueuedInput) -> bool {
+        if !self.agent_is_running() {
+            return self.queued_inputs.try_push_turn(queued);
+        }
+        let text = queued.request_text().map(str::to_string);
+        if !self.queued_inputs.try_push_request(queued) {
+            return false;
+        }
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            self.core.engine.send(protocol::UiCommand::Steer { text });
+        }
+        true
+    }
+
     pub(crate) fn drain_queued_inputs_into_prompt(&mut self) {
-        let queued = std::mem::take(&mut self.queued_inputs);
+        let (request_count, queued) = self.queued_inputs.drain_for_prompt();
+        if request_count > 0 {
+            self.core.engine.send(protocol::UiCommand::Unsteer {
+                count: request_count,
+            });
+        }
         if queued.is_empty() {
             return;
         }
@@ -517,20 +513,26 @@ impl TuiApp {
     pub(crate) fn start_queued_input(&mut self, queued: QueuedInput) {
         self.clear_prompt_prediction();
         match queued {
-            QueuedInput::Message(text) if !text.is_empty() => {
-                let outcome = self.process_input(&text);
-                let content = Content::text(text.clone());
-                self.apply_input_outcome(outcome, content, &text);
+            QueuedInput::Request(req) => {
+                let req = *req;
+                match req.turn_options {
+                    QueuedTurnOptions::CustomCommand { overrides } => {
+                        let text = req.content.text_content().into_owned();
+                        let turn = self.begin_command_request_turn(req.display, text, *overrides);
+                        self.agent = Some(turn);
+                    }
+                    QueuedTurnOptions::Default if !req.content.is_empty() => {
+                        let turn = self.begin_agent_turn(&req.display, req.content);
+                        self.agent = Some(turn);
+                    }
+                    QueuedTurnOptions::Default => {}
+                }
             }
             QueuedInput::ProcessStatus(text) if !text.is_empty() => {
                 let turn = self.begin_process_status_turn(text);
                 self.agent = Some(turn);
             }
-            QueuedInput::CustomCommand(cmd) => {
-                let turn = self.begin_custom_command_turn(*cmd);
-                self.agent = Some(turn);
-            }
-            QueuedInput::Message(_) | QueuedInput::ProcessStatus(_) => {}
+            QueuedInput::ProcessStatus(_) => {}
         }
     }
 
@@ -538,7 +540,9 @@ impl TuiApp {
         if self.agent.is_some() || self.queued_inputs.is_empty() || self.busy_stack.is_busy() {
             return false;
         }
-        let queued = self.queued_inputs.remove(0);
+        let Some(queued) = self.queued_inputs.pop_next_for_turn() else {
+            return false;
+        };
         let was_animating = self.working.is_animating();
         self.start_queued_input(queued);
         if was_animating && self.agent.is_none() {
@@ -709,7 +713,7 @@ impl TuiApp {
             exec: None,
             lua_wakeup_rx,
             host_rx,
-            queued_inputs: Vec::new(),
+            queued_inputs: InputQueues::default(),
             cwd,
             shared_session,
             task_label: None,

@@ -77,10 +77,10 @@ impl TestApp {
         self.app.active_agent_turn_id()
     }
 
-    /// Number of user messages waiting to be sent on the next turn. Used
-    /// by `Steered` invariants that assert the drain semantics.
+    /// Number of messages already promoted into the active turn's request
+    /// queue. Used by `Steered` invariants that assert ack drain semantics.
     pub fn queued_message_count(&self) -> usize {
-        self.app.queued_inputs.len()
+        self.app.queued_inputs.request_len()
     }
 
     /// Side-channel: push a synthetic queued message. In production
@@ -89,11 +89,12 @@ impl TestApp {
     /// the same `MAX_QUEUED_MESSAGES` cap so the fuzz observes the real
     /// drop-on-overflow behavior instead of unbounded growth.
     pub fn push_queued_message(&mut self, text: String) {
-        if self.app.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
-            self.app
-                .queued_inputs
-                .push(crate::app::QueuedInput::Message(text));
-        }
+        self.app
+            .queued_inputs
+            .try_push_turn(crate::app::QueuedInput::request_from_text(
+                text.clone(),
+                text,
+            ));
     }
 
     /// Snapshot of the working-status bar's live state. Used by fuzz

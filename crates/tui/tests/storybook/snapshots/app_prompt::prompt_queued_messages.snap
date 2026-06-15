@@ -1,14 +1,13 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 363
 expression: frame.text()
 ---
 
 
 
 
-  ↪ first follow-up
-  ↪ second follow-up
+  » first follow-up
+  › second follow-up
 ─ ✿ working… ─────────────────────────────────────
 
 ──────────────────────────────────────────────────

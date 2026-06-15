@@ -159,19 +159,21 @@ impl TestApp {
         self.drain_cmd();
     }
 
-    /// Push a steer text onto the queued-messages stack.
+    /// Push text that has already been promoted into the active turn's request queue.
     pub fn steer(&mut self, text: &str) {
-        if !text.is_empty() && self.app.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
+        if !text.is_empty() {
             self.app
                 .queued_inputs
-                .push(crate::app::QueuedInput::Message(text.to_string()));
+                .try_push_request(crate::app::QueuedInput::request_from_text(
+                    text.to_string(),
+                    text.to_string(),
+                ));
         }
     }
 
-    /// Remove up to `count` queued messages from the front.
+    /// Remove up to `count` request-queued messages from the front.
     pub fn unsteer(&mut self, count: usize) {
-        let n = count.min(self.app.queued_inputs.len());
-        self.app.queued_inputs.drain(..n);
+        self.app.queued_inputs.drain_request_ack(count);
     }
 
     /// Send a `CallCoreTool` UiCommand to the engine channel.

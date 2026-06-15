@@ -26,11 +26,11 @@ local OPTIONAL_PRIORITY = 4
 
 local function queued_message_rows(queued)
   local rows = {}
-  local prefix = "  \u{21AA} "
-  for _, msg in ipairs(queued) do
-    -- Leading "↪ " glyph mirrors the user-block continuation cue; the
-    -- rest renders verbatim, trimmed by the bar's available width.
-    local text = prefix .. msg
+  for _, row in ipairs(queued) do
+    local kind = row.kind or "turn"
+    local marker = kind == "request" and "»" or "›"
+    local prefix = "  " .. marker .. " "
+    local text = prefix .. (row.text or "")
     rows[#rows + 1] = {
       text = text,
       highlights = {
@@ -53,7 +53,7 @@ end
 
 local function stash_row()
   local indent = "  "
-  local label = "» Stashed (ctrl+s to unstash)"
+  local label = "◌ Stashed (ctrl+s to unstash)"
   local text = indent .. label
   return {
     text = text,
@@ -261,7 +261,7 @@ local function render_top(win)
   if not buf then return end
   local width = win:content_width() or 80
   local rows = {}
-  local queued = smelt.prompt.queued()
+  local queued = smelt.prompt.queued_rows()
   for _, row in ipairs(queued_message_rows(queued)) do
     rows[#rows + 1] = row
   end

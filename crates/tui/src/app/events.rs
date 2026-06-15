@@ -1,5 +1,5 @@
 use crate::app::{
-    AppSequenceAction, CommandAction, EventOutcome, InputOutcome, QueuedInput, TuiApp,
+    AppSequenceAction, CommandAction, EventOutcome, InputOutcome, QueueStage, QueuedInput, TuiApp,
 };
 
 use crate::input::Action;
@@ -167,10 +167,7 @@ impl TuiApp {
                 false
             }
             EventOutcome::InterruptWithQueued => {
-                // Save queued messages before cancel - the cancel path dumps them into the input buffer.
-                let remaining = std::mem::take(&mut self.queued_inputs);
-                self.discard_turn(true);
-                self.queued_inputs = remaining;
+                self.interrupt_with_next_queued();
                 false
             }
             EventOutcome::ContinueTurn => {
@@ -192,12 +189,9 @@ impl TuiApp {
                 // taken a `smelt.work.busy` token so messages run
                 // against the post-busy state.
                 if self.busy_stack.is_busy() {
-                    let text = content.text_content();
-                    if !text.is_empty()
-                        && self.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES
-                    {
+                    if !content.is_empty() {
                         self.queued_inputs
-                            .push(QueuedInput::Message(text.into_owned()));
+                            .try_push_turn(QueuedInput::request(display.clone(), content));
                     }
                 } else {
                     let text = content.text_content();
@@ -209,10 +203,9 @@ impl TuiApp {
                             self.process_input(&text)
                         };
                         self.apply_input_outcome(outcome, content, &display);
-                    } else if !self.queued_inputs.is_empty() {
-                        // Empty submit: send the oldest queued message immediately.
-                        let queued = self.queued_inputs.remove(0);
-                        self.start_queued_input(queued);
+                    } else {
+                        let outcome = self.handle_empty_submit();
+                        return self.apply_event_outcome(outcome);
                     }
                 }
                 // Don't restore stash if a dialog opened - it restores on close.
@@ -618,26 +611,14 @@ impl TuiApp {
             now,
         );
         match input_action {
-            Action::Submit {
-                mut content,
-                mut display,
-            } => {
-                self.clear_prompt_prediction();
-                self.redact_user_submission(&mut content, &mut display);
-                let text = content.text_content();
-                if let Some(outcome) = self.try_command_while_running(text.trim()) {
-                    return outcome;
-                }
-                if !text.is_empty() && self.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
-                    self.queued_inputs
-                        .push(QueuedInput::Message(text.into_owned()));
-                }
+            Action::Submit { content, display } => {
+                return self.handle_running_submit(content, display, QueueStage::Turn);
+            }
+            Action::SubmitToRequestQueue { content, display } => {
+                return self.handle_running_submit(content, display, QueueStage::Request);
             }
             Action::SubmitEmpty => {
-                if !self.queued_inputs.is_empty() {
-                    self.clear_prompt_prediction();
-                    return EventOutcome::InterruptWithQueued;
-                }
+                return self.handle_empty_submit();
             }
             Action::Redraw => {}
             Action::EditInEditor => {
@@ -655,6 +636,121 @@ impl TuiApp {
             Action::Noop => {}
         }
         EventOutcome::Noop
+    }
+
+    fn handle_running_submit(
+        &mut self,
+        mut content: protocol::Content,
+        mut display: String,
+        target: QueueStage,
+    ) -> EventOutcome {
+        self.clear_prompt_prediction();
+        self.redact_user_submission(&mut content, &mut display);
+        let text = content.text_content();
+        if content.image_count() == 0 {
+            if let Some(outcome) = self.try_command_while_running(text.trim(), target) {
+                return outcome;
+            }
+        }
+        if content.is_empty() {
+            return EventOutcome::Noop;
+        }
+        if target == QueueStage::Request && content.image_count() > 0 {
+            self.restore_submission_to_prompt(display, &content);
+            self.notify_error(
+                "cannot queue image attachments to the current request; prompt restored".into(),
+            );
+            return EventOutcome::Noop;
+        }
+        let queued = QueuedInput::request(display, content);
+        match target {
+            QueueStage::Turn => {
+                self.queued_inputs.try_push_turn(queued);
+            }
+            QueueStage::Request => {
+                self.queue_input_for_request(queued);
+            }
+        }
+        EventOutcome::Noop
+    }
+
+    fn restore_submission_to_prompt(&mut self, display: String, content: &protocol::Content) {
+        let images = match content {
+            protocol::Content::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    protocol::ContentPart::ImageUrl { url, label } => Some((
+                        label.clone().unwrap_or_else(|| "image".to_string()),
+                        url.clone(),
+                    )),
+                    protocol::ContentPart::Text { .. } => None,
+                })
+                .collect(),
+            protocol::Content::Text(_) => Vec::new(),
+        };
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        if images.is_empty() {
+            self.input.replace_text(&mut pctx, display);
+        } else {
+            self.input.restore_from_rewind(&mut pctx, display, images);
+        }
+    }
+
+    fn handle_empty_submit(&mut self) -> EventOutcome {
+        if self.agent.is_some() {
+            self.clear_prompt_prediction();
+            if self.queued_inputs.has_request() {
+                return EventOutcome::InterruptWithQueued;
+            }
+            if self.queued_inputs.front_turn_is_request() {
+                self.promote_next_queued_turn_to_request();
+            }
+            return EventOutcome::Noop;
+        }
+
+        if self.busy_stack.is_busy() {
+            self.clear_prompt_prediction();
+            return EventOutcome::Noop;
+        }
+
+        if !self.queued_inputs.is_empty() {
+            if let Some(queued) = self.queued_inputs.pop_next_for_turn() {
+                self.start_queued_input(queued);
+            }
+            return EventOutcome::Noop;
+        }
+
+        if self.can_continue_turn() {
+            EventOutcome::ContinueTurn
+        } else {
+            EventOutcome::Noop
+        }
+    }
+
+    fn promote_next_queued_turn_to_request(&mut self) {
+        let Some(queued) = self.queued_inputs.promote_turn_to_request() else {
+            return;
+        };
+        let Some(text) = queued.request_text().map(str::to_string) else {
+            return;
+        };
+        if !text.is_empty() {
+            self.core.engine.send(protocol::UiCommand::Steer { text });
+        }
+    }
+
+    fn interrupt_with_next_queued(&mut self) {
+        let (unsteer_count, next, remaining) = self.queued_inputs.take_for_interrupt();
+        if unsteer_count > 0 {
+            self.core.engine.send(protocol::UiCommand::Unsteer {
+                count: unsteer_count,
+            });
+        }
+        self.discard_turn(true);
+        self.queued_inputs = remaining;
+        if let Some(queued) = next {
+            self.start_queued_input(queued);
+        }
     }
 
     // ── Shared helpers ────────────────────────────────────────────────────
@@ -745,14 +841,11 @@ impl TuiApp {
 
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
-            Action::Submit { content, display } => EventOutcome::Submit { content, display },
-            Action::SubmitEmpty => {
-                if self.can_continue_turn() {
-                    EventOutcome::ContinueTurn
-                } else {
-                    EventOutcome::Noop
-                }
+            Action::Submit { content, display }
+            | Action::SubmitToRequestQueue { content, display } => {
+                EventOutcome::Submit { content, display }
             }
+            Action::SubmitEmpty => self.handle_empty_submit(),
             Action::EditInEditor => {
                 self.edit_in_editor();
                 EventOutcome::Noop
@@ -1579,9 +1672,10 @@ impl smelt_core::keymap::ChordOracle for LuaChordOracle<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::app::test_harness::TestApp;
+    use crate::app::test_harness::{Action, TestApp};
     use crossterm::event::{KeyCode, KeyModifiers};
     use protocol::AgentMode;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
     fn running_esc_esc_cancels_but_single_esc_does_not() {
@@ -1620,6 +1714,428 @@ mod tests {
             "queued input should be drained instead of left pending"
         );
         assert_eq!(state.prompt_text, "queued steer");
+    }
+
+    fn queue_stages(app: &TestApp) -> Vec<String> {
+        app.app.queued_inputs.display_kinds()
+    }
+
+    fn insert_prompt_image(app: &mut TestApp, label: &str) {
+        let mut pctx = crate::input::prompt_ctx_mut(&mut app.app.ui);
+        app.app.input.insert_image(
+            &mut pctx,
+            label.to_string(),
+            "data:image/png;base64,AAAA".to_string(),
+        );
+    }
+
+    fn lua_command_queue_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn empty_enter_promotes_turn_queue_to_request_queue() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.type_text("check this first");
+        app.press(KeyCode::Enter);
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["check this first".to_string()]
+        );
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert!(app.agent_running());
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["check this first".to_string()]
+        );
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "check this first")
+        )));
+    }
+
+    #[test]
+    fn enter_queues_image_prompt_for_next_turn_without_dropping_attachment() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.type_text("see ");
+        insert_prompt_image(&mut app, "pic.png");
+
+        app.press(KeyCode::Enter);
+
+        assert_eq!(app.state().queued_inputs, vec!["see [pic.png]".to_string()]);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+        assert!(!app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { .. })
+        )));
+    }
+
+    #[test]
+    fn request_queue_with_image_restores_prompt_instead_of_dropping_attachment() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.type_text("see ");
+        insert_prompt_image(&mut app, "pic.png");
+
+        app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+
+        let state = app.state();
+        assert!(state.queued_inputs.is_empty());
+        assert_eq!(
+            state.prompt_text,
+            format!("see {}", crate::input::ATTACHMENT_MARKER)
+        );
+        assert!(app.app.notification.is_some());
+        assert!(!app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { .. })
+        )));
+    }
+
+    #[test]
+    fn ctrl_enter_queues_prompt_to_current_request() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.push_queued_message("next turn".to_string());
+        app.type_text("right now");
+
+        app.clear_actions();
+        app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+
+        assert!(app.agent_running());
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["right now".to_string(), "next turn".to_string()]
+        );
+        assert_eq!(
+            queue_stages(&app),
+            vec!["request".to_string(), "turn".to_string()]
+        );
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "right now")
+        )));
+    }
+
+    #[test]
+    fn ctrl_enter_slash_command_queues_expansion_to_current_request() {
+        let _guard = lua_command_queue_guard();
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua(
+            r#"
+                smelt.cmd.register("request-body", function(arg)
+                    smelt.engine.submit_command(
+                        "request-body",
+                        "expanded " .. (arg or ""),
+                        nil,
+                        "request-body " .. (arg or "")
+                    )
+                end, { while_busy = false, queue_when_busy = true })
+            "#
+        ));
+        app.start_turn(1);
+        app.push_queued_message("next turn".to_string());
+        app.type_text("/request-body now");
+
+        app.clear_actions();
+        app.press_mod(KeyCode::Enter, KeyModifiers::CONTROL);
+
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["/request-body now".to_string(), "next turn".to_string()]
+        );
+        assert_eq!(
+            queue_stages(&app),
+            vec!["request".to_string(), "turn".to_string()]
+        );
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "expanded now")
+        )));
+    }
+
+    #[test]
+    fn empty_enter_interrupts_promoted_request_queue() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.type_text("run now");
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Enter);
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert!(app.agent_running());
+        assert!(app.state().queued_inputs.is_empty());
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Unsteer { count } if *count == 1)
+        )));
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Cancel)
+        )));
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.content.text_content() == "run now")
+        )));
+    }
+
+    #[test]
+    fn empty_enter_promotes_queued_custom_command_expansion() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        assert!(app.run_lua(
+            r#"smelt.engine.submit_command("queued-custom", "custom body", nil, "queued-custom")"#
+        ));
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["/queued-custom".to_string()]
+        );
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert!(app.agent_running());
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["/queued-custom".to_string()]
+        );
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "custom body")
+        )));
+    }
+
+    #[test]
+    fn queue_when_busy_slash_command_enqueues_expanded_request() {
+        let _guard = lua_command_queue_guard();
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua(
+            r#"
+                smelt.cmd.register("qbody", function(arg)
+                    smelt.engine.submit_command(
+                        "qbody",
+                        "expanded " .. (arg or ""),
+                        nil,
+                        "qbody " .. (arg or "")
+                    )
+                end, { while_busy = false, queue_when_busy = true })
+            "#
+        ));
+        app.start_turn(1);
+        app.type_text("/qbody arg");
+        app.press(KeyCode::Enter);
+
+        assert_eq!(app.state().queued_inputs, vec!["/qbody arg".to_string()]);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "expanded arg")
+        )));
+    }
+
+    #[test]
+    fn queue_when_busy_command_overrides_survive_interrupt_start() {
+        let _guard = lua_command_queue_guard();
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua(
+            r#"
+                smelt.cmd.register("qoverride", function(_)
+                    smelt.engine.submit_command(
+                        "qoverride",
+                        "override body",
+                        { reasoning_effort = "high" },
+                        "qoverride"
+                    )
+                end, { while_busy = false, queue_when_busy = true })
+            "#
+        ));
+        app.start_turn(1);
+        app.type_text("/qoverride");
+        app.press(KeyCode::Enter);
+        app.press(KeyCode::Enter);
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
+                if payload.content.text_content() == "override body"
+                    && payload.reasoning_effort == protocol::ReasoningEffort::High)
+        )));
+    }
+
+    #[test]
+    fn blocked_slash_command_does_not_enqueue_while_running() {
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua(
+            r#"
+                smelt.cmd.register("blocked", function(_)
+                    _G.blocked_ran = 1
+                    smelt.engine.submit_command("blocked", "should not run", nil, "blocked")
+                end, { while_busy = false })
+            "#
+        ));
+        app.start_turn(1);
+        app.type_text("/blocked arg");
+        app.press(KeyCode::Enter);
+
+        assert!(app.state().queued_inputs.is_empty());
+        assert_eq!(app.lua_int_global("blocked_ran"), None);
+    }
+
+    #[test]
+    fn empty_enter_does_not_interrupt_for_turn_only_status_item() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        let note = "Background process 42 exited.".to_string();
+        app.app
+            .queued_inputs
+            .try_push_turn(crate::app::QueuedInput::ProcessStatus(note.clone()));
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert!(app.agent_running());
+        assert_eq!(app.state().queued_inputs, vec![note]);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+        assert!(!app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Cancel | protocol::UiCommand::Steer { .. } | protocol::UiCommand::StartTurn(_))
+        )));
+    }
+
+    #[test]
+    fn empty_enter_while_busy_without_agent_does_not_promote_to_request() {
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua("_G._busy_handle = smelt.work.busy('busy')"));
+        app.type_text("wait for busy");
+        app.press(KeyCode::Enter);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert!(!app.agent_running());
+        assert_eq!(app.state().queued_inputs, vec!["wait for busy".to_string()]);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+        assert!(!app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { .. })
+        )));
+    }
+
+    #[test]
+    fn steered_ack_drains_only_request_queue() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.push_queued_message("request now".to_string());
+        app.push_queued_message("next turn".to_string());
+        app.press(KeyCode::Enter);
+        assert_eq!(
+            queue_stages(&app),
+            vec!["request".to_string(), "turn".to_string()]
+        );
+
+        app.feed_one(crate::app::test_harness::SourceEvent::Engine(
+            protocol::EngineEvent::Steered {
+                text: "request now".to_string(),
+                count: 1,
+            },
+        ));
+
+        assert_eq!(app.state().queued_inputs, vec!["next turn".to_string()]);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert_eq!(app.state().queued_inputs, vec!["next turn".to_string()]);
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "next turn")
+        )));
+    }
+
+    #[test]
+    fn interrupt_starts_request_queue_before_turn_queue() {
+        let mut app = TestApp::builder().build();
+        app.start_turn(1);
+        app.push_queued_message("run first".to_string());
+        app.push_queued_message("run second".to_string());
+        app.press(KeyCode::Enter);
+        assert_eq!(
+            queue_stages(&app),
+            vec!["request".to_string(), "turn".to_string()]
+        );
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert!(app.agent_running());
+        assert_eq!(app.state().queued_inputs, vec!["run second".to_string()]);
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.content.text_content() == "run first")
+        )));
+    }
+
+    #[test]
+    fn empty_enter_continue_does_not_add_user_block() {
+        let mut app = TestApp::builder().build();
+        app.app
+            .core
+            .session
+            .history
+            .push(protocol::HistoryItem::user(protocol::Content::text(
+                "before",
+            )));
+        app.push_assistant_text("done");
+
+        app.press(KeyCode::Enter);
+
+        assert!(app.agent_running());
+        let history = app.app.transcript.history();
+        let users = history
+            .order
+            .iter()
+            .filter_map(|id| history.blocks.get(id))
+            .filter_map(|block| match block {
+                smelt_core::Block::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(users.is_empty());
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.content.is_empty())
+        )));
     }
 
     #[test]

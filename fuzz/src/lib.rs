@@ -227,7 +227,7 @@ pub enum FuzzOp {
     /// surfaces a notification.
     EngineTurnError(String),
     /// Emit `Steered { text, count }`. Active-turn dispatch flushes both
-    /// streams and drains up to `count` queued messages.
+    /// streams and drains up to `count` request-queued messages.
     EngineSteered {
         text: String,
         count: u8,
@@ -247,8 +247,8 @@ pub enum FuzzOp {
         cost_cents: u8,
         background: bool,
     },
-    /// Side channel: push a synthetic entry onto `queued_messages` so
-    /// `Steered` has something to drain.
+    /// Side channel: push a synthetic request-queued entry so `Steered`
+    /// has something to drain.
     PushQueuedMessage(String),
     /// Emit `ProcessCompleted { id, exit_code }`. Pushes a transcript
     /// block describing the exit.
@@ -1258,7 +1258,7 @@ enum PostCheck {
     /// `TurnError`. When an active turn was running, it ends.
     TurnErrored,
     /// `Steered`. Active-turn dispatch flushes streams and drains up to
-    /// `count` queued messages.
+    /// `count` request-queued messages.
     Steered {
         count: usize,
     },

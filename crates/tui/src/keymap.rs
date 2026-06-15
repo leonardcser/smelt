@@ -19,6 +19,7 @@ pub(crate) enum KeyAction {
 
     // Submit
     Submit,
+    SubmitToRequestQueue,
     InsertNewline,
 
     // Navigation
@@ -243,6 +244,12 @@ static BINDINGS: &[Binding] = &[
     bind(KeyCode::Char('t'), CTRL, when(), KeyAction::CycleReasoning),
     bind(KeyCode::Char('l'), CTRL, when(), KeyAction::Redraw),
     // ── Submit / newline ────────────────────────────────────────────────
+    bind(
+        KeyCode::Enter,
+        CTRL,
+        when().buf_not_empty(),
+        KeyAction::SubmitToRequestQueue,
+    ),
     bind_exclude(KeyCode::Enter, NONE, SHIFT, when(), KeyAction::Submit),
     bind(KeyCode::Enter, SHIFT, when(), KeyAction::InsertNewline),
     // Ctrl+J / Ctrl+K: navigate in vim normal mode, newline/kill otherwise.
@@ -552,6 +559,7 @@ pub(crate) mod hints {
 
     const HELP_KEYS: &[(&str, &str)] = &[
         ("enter", "send message"),
+        ("ctrl+enter", "send to current request"),
         ("ctrl+j  shift+enter", "insert newline"),
         ("ctrl+c", "cancel / interrupt / quit"),
         ("ctrl+r", "search input history"),

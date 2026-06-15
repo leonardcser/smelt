@@ -384,8 +384,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     overrides: parsed,
                 };
                 if app.agent_is_running() || app.busy_stack.is_busy() {
-                    if app.queued_inputs.len() < crate::app::MAX_QUEUED_MESSAGES {
-                        app.queued_inputs.push(QueuedInput::CustomCommand(Box::new(cmd)));
+                    let text = if app.core.config.settings.redact_secrets {
+                        engine::redact::redact(&cmd.body)
+                    } else {
+                        cmd.body.clone()
+                    };
+                    let display = if app.core.config.settings.redact_secrets {
+                        engine::redact::redact(&format!("/{}", cmd.display))
+                    } else {
+                        format!("/{}", cmd.display)
+                    };
+                    let queued = QueuedInput::custom_command_request(display, text, cmd.overrides);
+                    let target = smelt_core::lua::current_command_queue_target()
+                        .map(crate::app::QueueStage::from_command_target)
+                        .unwrap_or(crate::app::QueueStage::Turn);
+                    match target {
+                        crate::app::QueueStage::Turn => {
+                            app.queued_inputs.try_push_turn(queued);
+                        }
+                        crate::app::QueueStage::Request => {
+                            app.queue_input_for_request(queued);
+                        }
                     }
                     return;
                 }

@@ -605,6 +605,15 @@ impl LuaRuntime {
     }
 
     pub fn run_command(&self, name: &str, arg: Option<String>) -> bool {
+        self.run_command_with_queue_target(name, arg, crate::lua::CommandQueueTarget::Turn)
+    }
+
+    pub fn run_command_with_queue_target(
+        &self,
+        name: &str,
+        arg: Option<String>,
+        queue_target: crate::lua::CommandQueueTarget,
+    ) -> bool {
         let func = {
             let Ok(map) = self.shared.commands.lock() else {
                 return false;
@@ -647,6 +656,7 @@ impl LuaRuntime {
                 initial_args,
                 TaskCompletion::Command {
                     name: name.to_string(),
+                    queue_target,
                 },
             )
         };

@@ -45,7 +45,7 @@ Read or write the prompt cursor as a byte offset into `text()`. Without an argum
 fun(): boolean
 ```
 
-Return whether the prompt currently holds a stashed input snapshot (Ctrl+S). The top-bar renderer uses this to surface a `» Stashed (ctrl+s to unstash)` row.
+Return whether the prompt currently holds a stashed input snapshot (Ctrl+S). The top-bar renderer uses this to surface a `◌ Stashed (ctrl+s to unstash)` row.
 
 ## `smelt.prompt.is_modal`
 
@@ -78,7 +78,15 @@ dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
 fun(): string[]
 ```
 
-Return the array of messages currently queued behind the active turn. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.
+Return the queued prompt text rows. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.
+
+## `smelt.prompt.queued_rows`
+
+```lua
+fun(): table[]
+```
+
+Return queued prompt rows as `{ text, kind }` tables. `kind` is `request` for rows added to the current turn's next request, or `turn` for rows waiting for the next turn.
 
 ## `smelt.prompt.remove_section`
 

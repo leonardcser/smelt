@@ -263,12 +263,17 @@ impl AppStoryCtx {
     }
 
     /// Press `ctrl+s` to toggle the prompt stash. Use this to drive the
-    /// stash chrome (the `» Stashed` row) from a story.
+    /// stash chrome (the `◌ Stashed` row) from a story.
     pub fn stash_prompt(&mut self) {
         self.app.press_mod(
             crossterm::event::KeyCode::Char('s'),
             crossterm::event::KeyModifiers::CONTROL,
         );
+    }
+
+    /// Promote the oldest queued next-turn message into the next-request queue.
+    pub fn promote_next_queued_message(&mut self) {
+        self.app.press(crossterm::event::KeyCode::Enter);
     }
 
     /// Push a synthetic queued user message. In production these arrive

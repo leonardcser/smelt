@@ -1336,7 +1336,9 @@ The main editable input surface: win handle, text get/set, and cursor control.
 - `smelt.prompt.open_picker` :: `fun(opts: smelt.prompt.PickerOpts): table?`
   Prompt-docked picker.
 - `smelt.prompt.queued` :: `fun(): string[]`
-  Return the array of messages currently queued behind the active turn.
+  Return the queued prompt text rows.
+- `smelt.prompt.queued_rows` :: `fun(): table[]`
+  Return queued prompt rows as `{ text, kind }` tables.
 - `smelt.prompt.remove_section` :: `fun(name: string): nil`
   Remove the named prompt section.
 - `smelt.prompt.replace_range` :: `fun(start: integer, end: integer, text: string): integer`

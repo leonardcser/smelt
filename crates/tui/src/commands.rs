@@ -1,4 +1,6 @@
-use crate::app::{CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, TuiApp};
+use crate::app::{
+    CommandAction, ContextWindowUpdate, EventOutcome, InputOutcome, QueueStage, TuiApp,
+};
 use crate::state;
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
 
@@ -68,6 +70,14 @@ pub(crate) fn parse_command_line(line: &str) -> ParsedCommand<'_> {
 /// dispatch to a Lua-registered handler. Bare text (no sigil) is never
 /// dispatched - it is left for the caller to forward to the agent.
 pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
+    run_command_for_queue_target(app, line, QueueStage::Turn)
+}
+
+fn run_command_for_queue_target(
+    app: &mut TuiApp,
+    line: &str,
+    queue_target: QueueStage,
+) -> CommandAction {
     let _perf = smelt_perf::perf::begin("cmd:dispatch");
     let (name, arg) = match parse_command_line(line) {
         ParsedCommand::Shell { script } => {
@@ -88,7 +98,8 @@ pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
         .set_dyn("cmd_pre", std::rc::Rc::new(name.clone()));
     app.drain_cells_pending();
     if !name.is_empty() && app.lua.has_command(&name) {
-        app.lua.run_command(&name, arg);
+        app.lua
+            .run_command_with_queue_target(&name, arg, queue_target.into());
     }
     app.core.cells.set_dyn("cmd_post", std::rc::Rc::new(name));
     app.drain_cells_pending();
@@ -121,14 +132,26 @@ impl TuiApp {
         }
     }
 
+    fn run_command_with_queue_target(
+        &mut self,
+        input: &str,
+        queue_target: QueueStage,
+    ) -> CommandAction {
+        run_command_for_queue_target(self, input, queue_target)
+    }
+
     /// Attempt to execute a command mid-run. Returns the outcome, or `None`
     /// to queue the input as a regular user message.
-    pub(crate) fn try_command_while_running(&mut self, input: &str) -> Option<EventOutcome> {
+    pub(crate) fn try_command_while_running(
+        &mut self,
+        input: &str,
+        queue_target: QueueStage,
+    ) -> Option<EventOutcome> {
         let is_from_paste = self.input.skip_shell_escape();
 
         // Shell escape - `! cmd` (skipped while pasting).
         if input.starts_with('!') && !is_from_paste {
-            return match run_command(self, input) {
+            return match self.run_command_with_queue_target(input, queue_target) {
                 CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
                 CommandAction::Continue => Some(EventOutcome::Noop),
             };
@@ -149,7 +172,7 @@ impl TuiApp {
         // handlers that build a custom-command turn can capture their evaluated
         // body and enqueue it via `smelt.engine.submit_command`.
         if self.lua.command_queues_when_busy(name) {
-            return match run_command(self, &normalized) {
+            return match self.run_command_with_queue_target(&normalized, queue_target) {
                 CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
                 CommandAction::Continue => Some(EventOutcome::Noop),
             };
@@ -160,7 +183,7 @@ impl TuiApp {
             return Some(EventOutcome::Noop);
         }
 
-        match run_command(self, &normalized) {
+        match self.run_command_with_queue_target(&normalized, queue_target) {
             CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
             CommandAction::Continue => Some(EventOutcome::Noop),
         }

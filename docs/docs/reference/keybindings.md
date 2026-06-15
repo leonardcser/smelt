@@ -6,7 +6,8 @@
 
 | Key                             | Action                                  |
 | ------------------------------- | --------------------------------------- |
-| `Enter`                         | Submit message; with an empty prompt, continue the turn when history exists |
+| `Enter`                         | Submit message; with queued work, escalate the next queued item; with an empty idle prompt, continue the turn when history exists |
+| `Ctrl+Enter`                    | While the agent is running, add the prompt directly to the current request queue |
 | `Ctrl+J` / `Shift+Enter`        | Insert newline                          |
 | `Ctrl+R`                        | Fuzzy search input history              |
 | `Ctrl+S`                        | Stash / unstash input                   |
@@ -21,8 +22,15 @@
 | `F1`                            | Open help                               |
 | `Cmd+V`                         | Paste image from clipboard              |
 
-While the agent is running, queued messages stack up. `Esc` flushes them back
-into the prompt; a second `Esc` cancels the running turn.
+While the agent is running, pressing `Enter` queues your prompt for the next
+turn. `Ctrl+Enter` adds a non-empty prompt directly to the current turn's next
+request. Press `Enter` again on an empty prompt to promote the oldest queued
+message into the current turn's next request; press `Enter` once more to
+interrupt and run that item immediately. Slash commands that expand to a prompt
+are queued the same way; commands that open UI do not enter the queue. In the
+prompt bar, `›` marks next-turn items and `»` marks next-request items. `Esc`
+flushes queued items back into the prompt; a second `Esc` cancels the running
+turn.
 
 ### Cursor
 

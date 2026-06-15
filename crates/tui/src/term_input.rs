@@ -657,10 +657,12 @@ fn parse_csi_u(params: &[u8], consumed: usize) -> ParseResult {
         .and_then(|s| s.split(':').next())
         .and_then(parse_modifier)
         .unwrap_or_else(KeyModifiers::empty);
-    let code = if codepoint as u32 == 27 {
-        KeyCode::Esc
-    } else {
-        KeyCode::Char(codepoint)
+    let code = match codepoint as u32 {
+        9 => KeyCode::Tab,
+        10 | 13 => KeyCode::Enter,
+        27 => KeyCode::Esc,
+        127 => KeyCode::Backspace,
+        _ => KeyCode::Char(codepoint),
     };
     event(key(code, mods), consumed)
 }
@@ -852,6 +854,32 @@ mod tests {
                 code: KeyCode::F(1),
                 ..
             })]
+        ));
+    }
+
+    #[test]
+    fn csi_u_shift_enter_is_parsed_as_enter() {
+        let mut p = Parser::new();
+        assert!(matches!(
+            p.advance(b"\x1b[13;2u").as_slice(),
+            [Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                modifiers,
+                ..
+            })] if modifiers.contains(KeyModifiers::SHIFT)
+        ));
+    }
+
+    #[test]
+    fn csi_u_ctrl_enter_is_parsed_as_enter() {
+        let mut p = Parser::new();
+        assert!(matches!(
+            p.advance(b"\x1b[13;5u").as_slice(),
+            [Event::Key(KeyEvent {
+                code: KeyCode::Enter,
+                modifiers,
+                ..
+            })] if modifiers.contains(KeyModifiers::CONTROL)
         ));
     }
 

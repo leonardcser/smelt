@@ -233,12 +233,7 @@ impl TestApp {
             active_modal: self.app.ui.active_modal(),
             picker_count: self.app.picker_state.len(),
             prompt_text,
-            queued_inputs: self
-                .app
-                .queued_inputs
-                .iter()
-                .map(crate::app::QueuedInput::display)
-                .collect(),
+            queued_inputs: self.app.queued_inputs.display_texts(),
             agent_running: self.app.agent.is_some(),
             term_focused: self.app.term_focused,
             quit_requested: self.quit,

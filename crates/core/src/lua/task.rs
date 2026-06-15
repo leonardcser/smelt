@@ -13,12 +13,19 @@ enum TaskWait {
     External(u64),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandQueueTarget {
+    Turn,
+    Request,
+}
+
 pub enum TaskCompletion {
     FireAndForget,
     /// Slash-command dispatch. `name` carries the cmd name so an error
     /// surfaces as `cmd `<name>`: …` instead of the opaque `task <id>: …`.
     Command {
         name: String,
+        queue_target: CommandQueueTarget,
     },
     ToolResult {
         request_id: u64,
@@ -29,8 +36,15 @@ pub enum TaskCompletion {
 impl TaskCompletion {
     fn error_label(&self, task_id: u64) -> String {
         match self {
-            TaskCompletion::Command { name } => format!("cmd `{name}`"),
+            TaskCompletion::Command { name, .. } => format!("cmd `{name}`"),
             _ => format!("task {task_id}"),
+        }
+    }
+
+    fn command_queue_target(&self) -> Option<CommandQueueTarget> {
+        match self {
+            TaskCompletion::Command { queue_target, .. } => Some(*queue_target),
+            _ => None,
         }
     }
 }
@@ -229,7 +243,9 @@ pub(crate) fn step_task_owned(
         TaskWait::External(_) => LuaMultiValue::new(),
     };
     let cancel = task.cancel.clone();
-    let result: LuaResult<LuaValue> = with_task_cancel(cancel, || task.thread.resume(resume_args));
+    let queue_target = task.completion.command_queue_target();
+    let result: LuaResult<LuaValue> =
+        with_task_context(cancel, queue_target, || task.thread.resume(resume_args));
 
     match result {
         Ok(v) => {
@@ -293,22 +309,39 @@ pub(crate) fn step_task_owned(
     }
 }
 
-// Thread-local cancellation token for the executing coroutine; read by async Lua bindings.
+// Thread-local context for the executing coroutine; read by async Lua bindings.
 thread_local! {
     static CURRENT_TASK_CANCEL: RefCell<Option<CancellationToken>> = const { RefCell::new(None) };
+    static CURRENT_COMMAND_QUEUE_TARGET: RefCell<Option<CommandQueueTarget>> = const { RefCell::new(None) };
+}
+
+/// Install task context for the closure's duration.
+fn with_task_context<R>(
+    cancel: CancellationToken,
+    queue_target: Option<CommandQueueTarget>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let previous_cancel = CURRENT_TASK_CANCEL.with(|c| c.replace(Some(cancel)));
+    let previous_target = CURRENT_COMMAND_QUEUE_TARGET.with(|c| c.replace(queue_target));
+    let r = f();
+    CURRENT_COMMAND_QUEUE_TARGET.with(|c| c.replace(previous_target));
+    CURRENT_TASK_CANCEL.with(|c| c.replace(previous_cancel));
+    r
 }
 
 /// Install the task's cancellation token for the closure's duration.
 pub fn with_task_cancel<R>(cancel: CancellationToken, f: impl FnOnce() -> R) -> R {
-    CURRENT_TASK_CANCEL.with(|c| *c.borrow_mut() = Some(cancel));
-    let r = f();
-    CURRENT_TASK_CANCEL.with(|c| *c.borrow_mut() = None);
-    r
+    with_task_context(cancel, None, f)
 }
 
 /// Current task's cancellation token; `None` when called outside `step_task`.
 pub fn current_task_cancel() -> Option<CancellationToken> {
     CURRENT_TASK_CANCEL.with(|c| c.borrow().clone())
+}
+
+/// Current slash-command queue target; `None` outside slash-command tasks.
+pub fn current_command_queue_target() -> Option<CommandQueueTarget> {
+    CURRENT_COMMAND_QUEUE_TARGET.with(|c| *c.borrow())
 }
 
 fn cancelled_marker(lua: &Lua) -> LuaValue {

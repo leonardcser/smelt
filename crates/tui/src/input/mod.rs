@@ -92,6 +92,7 @@ pub(crate) struct PromptState {
 pub(crate) enum Action {
     Redraw,
     Submit { content: Content, display: String },
+    SubmitToRequestQueue { content: Content, display: String },
     SubmitEmpty,
     EditInEditor,
     CenterScroll,
@@ -553,7 +554,7 @@ impl PromptState {
             KeyAction::Redraw => Action::Redraw,
 
             // ── Submit / newline ─────────────────────────────────────────
-            KeyAction::Submit => {
+            KeyAction::Submit | KeyAction::SubmitToRequestQueue => {
                 let source_empty = ctx.buf.source().is_empty();
                 let no_attachments = ctx.buf.attachment_ids.is_empty();
                 if source_empty && no_attachments {
@@ -562,7 +563,13 @@ impl PromptState {
                     let display = self.message_display_text(ctx.buf);
                     let content = self.build_content(ctx.buf);
                     self.clear(ctx);
-                    Action::Submit { content, display }
+                    match action {
+                        KeyAction::Submit => Action::Submit { content, display },
+                        KeyAction::SubmitToRequestQueue => {
+                            Action::SubmitToRequestQueue { content, display }
+                        }
+                        _ => unreachable!(),
+                    }
                 }
             }
             KeyAction::InsertNewline => {

@@ -110,17 +110,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "queued",
-        "Return the array of messages currently queued behind the active turn. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.",
+        "Return the queued prompt text rows. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.",
         &[],
         |_, ()| -> LuaResult<Vec<String>> {
             Ok(crate::lua::try_with_app(|app| {
                 let agent_running = app.agent_is_running();
                 let show_queued = agent_running || app.busy_stack.is_busy();
                 if show_queued {
-                    app.queued_inputs
-                        .iter()
-                        .map(crate::app::QueuedInput::display)
-                        .collect::<Vec<_>>()
+                    app.queued_inputs.display_texts()
                 } else {
                     Vec::new()
                 }
@@ -129,8 +126,33 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "queued_rows",
+        "Return queued prompt rows as `{ text, kind }` tables. `kind` is `request` for rows added to the current turn's next request, or `turn` for rows waiting for the next turn.",
+        &[],
+        |lua, ()| -> LuaResult<Vec<mlua::Table>> {
+            let rows = crate::lua::try_with_app(|app| {
+                let agent_running = app.agent_is_running();
+                let show_queued = agent_running || app.busy_stack.is_busy();
+                if show_queued {
+                    app.queued_inputs.display_rows()
+                } else {
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default();
+            rows.into_iter()
+                .map(|row| {
+                    let t = lua.create_table()?;
+                    t.set("text", row.text)?;
+                    t.set("kind", row.stage.as_str())?;
+                    Ok(t)
+                })
+                .collect()
+        },
+    )?;
+    m.fn_(
         "has_stash",
-        "Return whether the prompt currently holds a stashed input snapshot (Ctrl+S). The top-bar renderer uses this to surface a `» Stashed (ctrl+s to unstash)` row.",
+        "Return whether the prompt currently holds a stashed input snapshot (Ctrl+S). The top-bar renderer uses this to surface a `◌ Stashed (ctrl+s to unstash)` row.",
         &[],
         |_, ()| -> LuaResult<bool> {
             Ok(crate::lua::try_with_app(|app| app.input.stash.is_some()).unwrap_or(false))
