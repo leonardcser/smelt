@@ -20,7 +20,8 @@ pub use runtime::{
 };
 pub use shared::{
     AskCallbacks, CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink,
-    LuaShared, Phase, RegisteredCommand, RegisteredKeymap, ToolHandles, LUA_BUF_ID_BASE,
+    LuaShared, Phase, RegisteredCommand, RegisteredKeymap, ToolHandles, TranscriptGroupBucket,
+    TranscriptGroupSelector, TranscriptGroupSpec, LUA_BUF_ID_BASE,
 };
 pub(crate) use task::step_task_owned;
 pub use task::{

@@ -44,6 +44,24 @@ smelt.transcript = smelt.transcript or {}
 ---@field command? string Exec command.
 ---@field command_spans? table Exec command as one styled span line, including the `!` accent.
 
+--- Group selector declared through `smelt.transcript.groups.register`.
+---@class smelt.transcript.GroupSelector
+---@field kind? string Match block kind.
+---@field name? string Match tool name for tool blocks.
+---@field terminal? boolean Match terminal/non-terminal blocks.
+
+--- Declarative transcript group registration. The host owns planning; Lua owns
+--- the selector metadata and the virtual-node renderer.
+---@class smelt.transcript.GroupSpec
+---@field name string Unique group name. Registering the same name replaces it.
+---@field cache_key? string Persisted layout cache key; omit to opt out while active.
+---@field priority? integer Higher priority plans first. Defaults to 0.
+---@field min? integer Minimum adjacent matching blocks required. Defaults to 2.
+---@field default_view? "collapsed"|"expanded" Initial presentation when the group first appears.
+---@field selector smelt.transcript.GroupSelector Declarative block matcher.
+---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
+---@field render fun(group: table, ctx: smelt.transcript.Context): table Virtual group renderer.
+
 local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v6"
 local transcript = smelt.transcript
 local base_renderer = transcript.__get_renderer and transcript.__get_renderer() or nil
@@ -165,6 +183,55 @@ end
 ---@type fun(): integer
 function smelt.transcript.invalidate_renderer()
   return transcript.__invalidate_renderer()
+end
+
+smelt.transcript.groups = smelt.transcript.groups or {}
+
+local function require_table(name, value)
+  if type(value) ~= "table" then
+    error("smelt.transcript." .. name .. ": expected table", 3)
+  end
+end
+
+--- Register or replace a declarative transcript group type. This only declares
+--- planning metadata and a renderer for future virtual group nodes; Rust owns
+--- deterministic adjacent-run planning.
+---@type fun(spec: smelt.transcript.GroupSpec): smelt.Reg
+function smelt.transcript.groups.register(spec)
+  require_table("groups.register", spec)
+  if type(spec.name) ~= "string" or spec.name == "" then
+    error("smelt.transcript.groups.register: spec.name must be a non-empty string", 2)
+  end
+  if type(spec.selector) ~= "table" then
+    error("smelt.transcript.groups.register: spec.selector must be a table", 2)
+  end
+  require_function("groups.register", spec.render)
+
+  local token = transcript.__register_group(spec)
+  local name = spec.name
+  return smelt.reg.new(function()
+    transcript.__unregister_group(name, token)
+  end)
+end
+
+--- Return group specs in planner order: higher priority first, then registration order.
+---@type fun(): smelt.transcript.GroupSpec[]
+function smelt.transcript.groups.list()
+  return transcript.__groups()
+end
+
+--- Current group-registry generation. Rust render planning uses this to invalidate
+--- plan/cache state once group planning is enabled.
+---@type fun(): integer
+function smelt.transcript.groups.generation()
+  return transcript.__groups_generation()
+end
+
+--- Current group-registry cache key, or nil when any active group opted out of
+--- persisted planning/layout caches.
+---@type fun(): integer?
+function smelt.transcript.groups.cache_key()
+  return transcript.__groups_cache_key()
 end
 
 local defaults = require("smelt.transcript.defaults")

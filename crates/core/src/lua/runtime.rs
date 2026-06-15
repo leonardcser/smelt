@@ -12,6 +12,7 @@ use crate::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
 use crate::content::display_safe_text;
 use crate::lua::{
     json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
+    TranscriptGroupSpec,
 };
 use crate::permissions::{PathTargetKind, ToolPath};
 use crate::transcript_model::{Block, BlockId, ToolState, ToolStatus};
@@ -1443,6 +1444,28 @@ impl LuaRuntime {
         (key != 0).then_some(key)
     }
 
+    pub fn transcript_group_generation(&self) -> u64 {
+        self.shared
+            .transcript_groups_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn transcript_group_cache_key(&self) -> Option<u64> {
+        let key = self
+            .shared
+            .transcript_groups_cache_key
+            .load(std::sync::atomic::Ordering::Acquire);
+        (key != 0).then_some(key)
+    }
+
+    pub fn transcript_group_specs(&self) -> Vec<TranscriptGroupSpec> {
+        self.shared
+            .transcript_groups
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .specs()
+    }
+
     /// Call the root transcript renderer and return its layout tree. Renderer
     /// errors, nil returns, invalid return types, or missing renderers use a
     /// small Rust fallback layout so transcript projection stays usable.
@@ -2713,6 +2736,7 @@ mod tests {
                 r#"
                 return type(smelt.transcript.set_renderer) == "function"
                   and type(smelt.transcript.extend_renderer) == "function"
+                  and type(smelt.transcript.groups.register) == "function"
                   and type(smelt.transcript.defaults.render) == "function"
                   and smelt.transcript.get_renderer() ~= nil
             "#,
@@ -2720,6 +2744,100 @@ mod tests {
             .eval()
             .unwrap();
         assert!(has_api);
+    }
+
+    #[test]
+    fn transcript_group_registry_orders_and_replaces_specs() {
+        let rt = LuaRuntime::new();
+        assert!(rt.load_error.is_none(), "load error: {:?}", rt.load_error);
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.groups.register({
+                  name = "tool_batch",
+                  cache_key = "v1",
+                  priority = 5,
+                  min = 3,
+                  default_view = "collapsed",
+                  selector = { kind = "tool", name = "read_file", terminal = true },
+                  bucket = { "name" },
+                  render = function(group, ctx) return smelt.layout.empty() end,
+                })
+                smelt.transcript.groups.register({
+                  name = "low",
+                  cache_key = "v1",
+                  selector = { kind = "tool" },
+                  render = function(group, ctx) return smelt.layout.empty() end,
+                })
+                smelt.transcript.groups.register({
+                  name = "tool_batch",
+                  cache_key = "v2",
+                  priority = 10,
+                  selector = { kind = "tool", terminal = true },
+                  render = function(group, ctx) return smelt.layout.empty() end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let specs = rt.transcript_group_specs();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name, "tool_batch");
+        assert_eq!(specs[0].cache_key.as_deref(), Some("v2"));
+        assert_eq!(specs[0].priority, 10);
+        assert_eq!(specs[0].min, 2);
+        assert_eq!(specs[0].selector.kind.as_deref(), Some("tool"));
+        assert_eq!(specs[0].selector.terminal, Some(true));
+        assert_eq!(specs[1].name, "low");
+        assert!(rt.transcript_group_generation() >= 3);
+        assert!(rt.transcript_group_cache_key().is_some());
+    }
+
+    #[test]
+    fn transcript_group_registration_remove_is_token_scoped() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                local first = smelt.transcript.groups.register({
+                  name = "batch",
+                  cache_key = "v1",
+                  selector = { kind = "tool" },
+                  render = function(group, ctx) return smelt.layout.empty() end,
+                })
+                smelt.transcript.groups.register({
+                  name = "batch",
+                  cache_key = "v2",
+                  selector = { kind = "tool" },
+                  render = function(group, ctx) return smelt.layout.empty() end,
+                })
+                first:remove()
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let specs = rt.transcript_group_specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].cache_key.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn transcript_group_without_cache_key_opts_out_of_cache() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.groups.register({
+                  name = "uncached",
+                  selector = { kind = "tool" },
+                  render = function(group, ctx) return smelt.layout.empty() end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        assert_eq!(rt.transcript_group_cache_key(), None);
     }
 
     #[test]
@@ -2773,6 +2891,11 @@ mod tests {
                 smelt.cmd.register("plug_cmd", function() end)
                 smelt.tools.middleware("bash", { before = function(ctx) return ctx end })
                 smelt.lifecycle.on_ready(function() end)
+                smelt.transcript.groups.register({
+                  name = "batch",
+                  selector = { kind = "tool" },
+                  render = function(group, ctx) return smelt.layout.empty() end,
+                })
                 "#,
             )
             .exec()
@@ -2780,11 +2903,13 @@ mod tests {
         assert!(rt.shared.commands.lock().unwrap().contains_key("plug_cmd"));
         assert!(!rt.shared.hooks.tool_before.is_empty());
         assert!(!rt.shared.hooks.lifecycle.is_empty());
+        assert_eq!(rt.transcript_group_specs().len(), 1);
 
         rt.shared.clear_lua_handles();
         assert!(rt.shared.commands.lock().unwrap().is_empty());
         assert!(rt.shared.hooks.tool_before.is_empty());
         assert!(rt.shared.hooks.lifecycle.is_empty());
+        assert!(rt.transcript_group_specs().is_empty());
     }
 
     #[test]

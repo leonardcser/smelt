@@ -72,6 +72,59 @@ pub struct ToolHandles {
     pub preview: Option<LuaHandle>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptGroupSpec {
+    pub name: String,
+    pub cache_key: Option<String>,
+    pub priority: i64,
+    pub registration_order: u64,
+    pub min: usize,
+    pub default_view: Option<String>,
+    pub selector: TranscriptGroupSelector,
+    pub bucket: Option<TranscriptGroupBucket>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptGroupSelector {
+    pub kind: Option<String>,
+    pub name: Option<String>,
+    pub terminal: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptGroupBucket {
+    pub fields: Vec<String>,
+}
+
+pub struct RegisteredTranscriptGroup {
+    pub spec: TranscriptGroupSpec,
+    pub render: LuaHandle,
+    pub token: u64,
+}
+
+#[derive(Default)]
+pub struct TranscriptGroupRegistry {
+    pub entries: HashMap<String, RegisteredTranscriptGroup>,
+    pub next_order: u64,
+}
+
+impl TranscriptGroupRegistry {
+    pub fn specs(&self) -> Vec<TranscriptGroupSpec> {
+        let mut specs: Vec<_> = self
+            .entries
+            .values()
+            .map(|entry| entry.spec.clone())
+            .collect();
+        specs.sort_by(|a, b| {
+            b.priority
+                .cmp(&a.priority)
+                .then_with(|| a.registration_order.cmp(&b.registration_order))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        specs
+    }
+}
+
 /// All shared state between Lua closures and the app loop.
 pub struct LuaShared {
     pub commands: Mutex<HashMap<String, RegisteredCommand>>,
@@ -100,6 +153,9 @@ pub struct LuaShared {
     pub transcript_renderer: Mutex<Option<LuaHandle>>,
     pub transcript_renderer_generation: AtomicU64,
     pub transcript_renderer_cache_key: AtomicU64,
+    pub transcript_groups: Mutex<TranscriptGroupRegistry>,
+    pub transcript_groups_generation: AtomicU64,
+    pub transcript_groups_cache_key: AtomicU64,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     /// Callbacks registered for `smelt.engine.ask`. Separate from
     /// `callbacks` so `fire_ask_callback` can't accidentally fire a
@@ -258,6 +314,9 @@ impl Default for LuaShared {
             transcript_renderer: Mutex::new(None),
             transcript_renderer_generation: AtomicU64::new(0),
             transcript_renderer_cache_key: AtomicU64::new(0),
+            transcript_groups: Mutex::new(TranscriptGroupRegistry::default()),
+            transcript_groups_generation: AtomicU64::new(0),
+            transcript_groups_cache_key: AtomicU64::new(0),
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -323,6 +382,13 @@ impl LuaShared {
             .fetch_add(1, Ordering::AcqRel);
         self.transcript_renderer_cache_key
             .store(0, Ordering::Release);
+        if let Ok(mut groups) = self.transcript_groups.lock() {
+            groups.entries.clear();
+            groups.next_order = 0;
+        }
+        self.transcript_groups_generation
+            .fetch_add(1, Ordering::AcqRel);
+        self.transcript_groups_cache_key.store(0, Ordering::Release);
         if let Ok(mut m) = self.callbacks.lock() {
             m.clear();
         }
