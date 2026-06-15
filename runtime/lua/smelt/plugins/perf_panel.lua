@@ -72,25 +72,47 @@ local function panel_title()
 	}
 end
 
-local function current_label_width(win)
+local function current_layout(win)
 	local rect = win:rect()
 	if not rect then
-		return MIN_LABEL_W
+		return MIN_LABEL_W, PANEL_H - 1
 	end
 	local inner_w = math.max(rect.width - 2, 0)
 	local lw = inner_w - STATS_W
 	if lw < MIN_LABEL_W then
-		return MIN_LABEL_W
+		lw = MIN_LABEL_W
 	end
-	return lw
+	return lw, math.max((rect.height or PANEL_H) - 1, 1)
 end
 
-local function compose_lines(snap, label_w)
-	local lines = { header_for(label_w) }
-	local color_spans = {}
-	local rows = snap.durations or {}
-	local max_rows = PANEL_H - 3
-	local n = math.min(#rows, max_rows)
+local function ordered_rows(rows)
+	state.row_order = state.row_order or {}
+	state.row_seen = state.row_seen or {}
+	local by_label = {}
+	for _, r in ipairs(rows or {}) do
+		by_label[r.label] = r
+		if not state.row_seen[r.label] then
+			state.row_seen[r.label] = true
+			state.row_order[#state.row_order + 1] = r.label
+		end
+	end
+	local out = {}
+	for _, label in ipairs(state.row_order) do
+		if by_label[label] then
+			out[#out + 1] = by_label[label]
+		end
+	end
+	return out
+end
+
+local function compose_lines(snap, label_w, max_rows)
+	local header = header_for(label_w)
+	local lines = { header }
+	local color_spans = {
+		{ row = 1, col = 0, end_col = #header, role = "Comment" },
+	}
+	local rows = ordered_rows(snap.durations or {})
+	local n = math.min(#rows, math.max(max_rows - 1, 0))
 	for i = 1, n do
 		local r = rows[i]
 		local last_s = fmt_us(r.last_us)
@@ -113,7 +135,7 @@ local function compose_lines(snap, label_w)
 			{ row = i + 1, col = p99_col, end_col = p99_col + #p99_s, role = severity_role(r.p99_us) }
 		)
 	end
-	if n == 0 then
+	if #rows == 0 then
 		lines[#lines + 1] = "  (no samples yet)"
 	end
 	return lines, color_spans
@@ -131,8 +153,8 @@ local function paint()
 	if not ok then
 		return
 	end
-	local label_w = current_label_width(win)
-	local lines, spans = compose_lines(snap, label_w)
+	local label_w, max_rows = current_layout(win)
+	local lines, spans = compose_lines(snap, label_w, max_rows)
 	buf:lines(lines):clear_ns(NS_HL)
 	for _, sp in ipairs(spans) do
 		buf:mark(NS_HL, sp.row, sp.col, { end_col = sp.end_col, fg = sp.role })
@@ -163,6 +185,7 @@ local function attach()
 	state.win = smelt.win.new(state.buf, {
 		name = "perf_panel.win",
 		surface = "readonly_text",
+		hide_cursor = true,
 		vim_enabled = smelt.settings.vim and true or false,
 	})
 	state.win:key("esc", close)
@@ -191,6 +214,8 @@ end
 
 local function open()
 	state.open = true
+	state.row_order = {}
+	state.row_seen = {}
 	-- If perf is already on (e.g. `--bench`), leave its samples and enabled
 	-- flag alone so the end-of-run summary still has data to print.
 	state.owns_perf = not smelt.metrics.perf.snapshot().enabled

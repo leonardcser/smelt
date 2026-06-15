@@ -40,21 +40,40 @@ local function fmt_pct(num, denom)
 	return string.format("%.1f%%", num / denom * 100)
 end
 
-local function pad_kv(key, val, width)
-	local key_str = tostring(key)
-	local val_str = tostring(val)
-	local sep = " "
-	local avail = math.max(width - #key_str - #sep, 0)
-	if #val_str > avail then
-		val_str = val_str:sub(1, avail - 1) .. "…"
-	end
-	return key_str .. sep .. string.rep(".", avail - #val_str) .. val_str
+local KEY_W = 14
+
+local function fit_value(value, width)
+	return smelt.text.fit(tostring(value or "nil"), math.max(width, 0))
 end
 
-local function compose_lines()
+local function add_kv(lines, spans, key, val, width)
+	local key_str = smelt.text.fit(tostring(key), KEY_W, { suffix = "…" })
+	local val_str = fit_value(val, math.max(width - KEY_W, 0))
+	local line = key_str .. val_str
+	lines[#lines + 1] = line
+	table.insert(spans, { row = #lines, col = 0, end_col = #key_str, fg = "Comment" })
+end
+
+local function compact_stats()
+	local compact = smelt.state("compact")
+	local total = compact.total or 0
+	local auto = compact.auto or 0
+	local manual = compact.manual or 0
+	local recovery = compact.recovery or 0
+	local parts = { tostring(total) }
+	if auto > 0 then parts[#parts + 1] = "auto=" .. auto end
+	if manual > 0 then parts[#parts + 1] = "manual=" .. manual end
+	if recovery > 0 then parts[#parts + 1] = "recovery=" .. recovery end
+	return table.concat(parts, "  ")
+end
+
+local function compose_lines(win)
 	local lines = {}
 	local spans = {}
 	local width = PANEL_W - 2
+	if win then
+		width = math.max(win:content_width() or width, KEY_W + 8)
+	end
 
 	local model = smelt.model() or ""
 	local provider = smelt.config.provider_type()
@@ -69,17 +88,16 @@ local function compose_lines()
 	local turns = smelt.session.turns()
 	local messages = smelt.session.messages()
 	local work_state = smelt.cell("work_state"):get() or "idle"
+	local compact = smelt.state("compact")
 
 	local pricing = smelt.model.pricing()
 	local mcfg = smelt.config.model_config()
 
-	-- Header: model + provider
-	lines[#lines + 1] = pad_kv("model", model, width)
-	lines[#lines + 1] = pad_kv("provider", provider, width)
-	lines[#lines + 1] = pad_kv("api_base", api_base, width)
-	lines[#lines + 1] = pad_kv("mode", mode .. (reasoning ~= "off" and " / " .. reasoning or ""), width)
+	add_kv(lines, spans, "model", model, width)
+	add_kv(lines, spans, "provider", provider, width)
+	add_kv(lines, spans, "api_base", api_base, width)
+	add_kv(lines, spans, "mode", mode .. (reasoning ~= "off" and " / " .. reasoning or ""), width)
 
-	-- Context
 	local ctx_str
 	if ctx and window and window > 0 then
 		ctx_str = string.format("%s / %s (%s)", smelt.text.format_tokens(ctx), smelt.text.format_tokens(window), fmt_pct(ctx, window))
@@ -88,15 +106,20 @@ local function compose_lines()
 	else
 		ctx_str = "nil"
 	end
-	lines[#lines + 1] = pad_kv("context", ctx_str, width)
+	add_kv(lines, spans, "context", ctx_str, width)
 	local max_tok = smelt.model.max_tokens()
-	lines[#lines + 1] = pad_kv("max_tokens", max_tok and fmt_num(max_tok) or "default", width)
+	add_kv(lines, spans, "max_tokens", max_tok and fmt_num(max_tok) or "default", width)
+	add_kv(lines, spans, "auto_compact", fmt_bool(smelt.settings.auto_compact), width)
+	add_kv(lines, spans, "threshold", string.format("%.0f%%", (smelt.settings.compact_threshold or 0.8) * 100), width)
+	add_kv(lines, spans, "compactions", compact_stats(), width)
+	add_kv(lines, spans, "compact_fail", string.format("%s  consecutive=%s", compact.failures or 0, compact.consecutive_failures or 0), width)
+	if compact.last_phase then
+		add_kv(lines, spans, "compact_last", compact.last_phase, width)
+	end
 
-	-- Cost & pricing
-	lines[#lines + 1] = pad_kv("cost", cost and cost > 0 and smelt.text.format_cost(cost) or "0", width)
-	lines[#lines + 1] = pad_kv("pricing", pricing.source, width)
+	add_kv(lines, spans, "cost", cost and cost > 0 and smelt.text.format_cost(cost) or "0", width)
+	add_kv(lines, spans, "pricing", pricing.source, width)
 
-	-- Tokens
 	local tok_parts = {}
 	if tokens.input and tokens.input > 0 then
 		tok_parts[#tok_parts + 1] = "in=" .. smelt.text.format_tokens(tokens.input)
@@ -113,16 +136,9 @@ local function compose_lines()
 	if tokens.reasoning and tokens.reasoning > 0 then
 		tok_parts[#tok_parts + 1] = "rsn=" .. smelt.text.format_tokens(tokens.reasoning)
 	end
-	local tok_str = #tok_parts > 0 and table.concat(tok_parts, " ") or "nil"
-	lines[#lines + 1] = pad_kv("tokens", tok_str, width)
+	add_kv(lines, spans, "tokens", #tok_parts > 0 and table.concat(tok_parts, " ") or "nil", width)
+	add_kv(lines, spans, "cache_hit", tokens.cache_hit_ratio and string.format("%.1f%%", tokens.cache_hit_ratio * 100) or "nil", width)
 
-	if tokens.cache_hit_ratio then
-		lines[#lines + 1] = pad_kv("cache_hit", string.format("%.1f%%", tokens.cache_hit_ratio * 100), width)
-	else
-		lines[#lines + 1] = pad_kv("cache_hit", "nil", width)
-	end
-
-	-- Model config
 	local cfg_parts = {}
 	if mcfg.temperature ~= nil then
 		cfg_parts[#cfg_parts + 1] = "temp=" .. fmt_num(mcfg.temperature)
@@ -142,15 +158,11 @@ local function compose_lines()
 	if mcfg.repeat_penalty ~= nil then
 		cfg_parts[#cfg_parts + 1] = "rp=" .. fmt_num(mcfg.repeat_penalty)
 	end
-	lines[#lines + 1] = pad_kv("sampling", #cfg_parts > 0 and table.concat(cfg_parts, " ") or "defaults", width)
+	add_kv(lines, spans, "sampling", #cfg_parts > 0 and table.concat(cfg_parts, " ") or "defaults", width)
 
 	if mcfg.thinking_budgets then
 		local b = mcfg.thinking_budgets
-		lines[#lines + 1] = pad_kv(
-			"thinking",
-			string.format("low=%s med=%s high=%s max=%s", smelt.text.format_tokens(b.low), smelt.text.format_tokens(b.medium), smelt.text.format_tokens(b.high), smelt.text.format_tokens(b.max)),
-			width
-		)
+		add_kv(lines, spans, "thinking", string.format("low=%s med=%s high=%s max=%s", smelt.text.format_tokens(b.low), smelt.text.format_tokens(b.medium), smelt.text.format_tokens(b.high), smelt.text.format_tokens(b.max)), width)
 	end
 
 	if mcfg.input_cost or mcfg.output_cost then
@@ -167,22 +179,12 @@ local function compose_lines()
 		if mcfg.cache_write_cost then
 			cost_parts[#cost_parts + 1] = "cw=" .. fmt_num(mcfg.cache_write_cost)
 		end
-		lines[#lines + 1] = pad_kv("cost_override", table.concat(cost_parts, " "), width)
+		add_kv(lines, spans, "cost_override", table.concat(cost_parts, " "), width)
 	end
 
-	-- Session meta
-	lines[#lines + 1] = pad_kv("turns", tostring(#turns), width)
-	lines[#lines + 1] = pad_kv("messages", tostring(#messages), width)
-	lines[#lines + 1] = pad_kv("work_state", work_state, width)
-
-	-- Highlight keys in Comment
-	for i, line in ipairs(lines) do
-		local dot_idx = line:find("%.", 1, true)
-		if dot_idx then
-			-- key runs from start up to (but not including) the first dot
-			table.insert(spans, { row = i, col = 1, end_col = dot_idx, fg = "Comment" })
-		end
-	end
+	add_kv(lines, spans, "turns", tostring(#turns), width)
+	add_kv(lines, spans, "messages", tostring(#messages), width)
+	add_kv(lines, spans, "work_state", work_state, width)
 
 	return lines, spans
 end
@@ -195,7 +197,7 @@ local function paint()
 	if not buf or not win then
 		return
 	end
-	local ok, lines, spans = pcall(compose_lines)
+	local ok, lines, spans = pcall(compose_lines, win)
 	if not ok then
 		return
 	end
@@ -223,6 +225,7 @@ local function attach()
 	state.win = smelt.win.new(state.buf, {
 		name = "debug_panel.win",
 		surface = "readonly_text",
+		hide_cursor = true,
 		vim_enabled = smelt.settings.vim and true or false,
 	})
 	state.win:key("esc", close)

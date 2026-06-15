@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 373
 expression: frame.styles_text()
 ---
 dim: 60 18
@@ -7,67 +8,67 @@ dim: 60 18
   0   1   6 fg=AnsiValue(244) attrs=bold
   0   7  53 fg=AnsiValue(244)
   1   0   1 fg=AnsiValue(244)
-  1   1   1 fg=Black bg=White
-  1  32  26 attrs=dim
+  1   1   8 fg=AnsiValue(244) attrs=bold
   1  58   1 bg=AnsiValue(243)
   1  59   1 fg=AnsiValue(244)
-  2   0   1 fg=AnsiValue(244)
-  2  32  20 attrs=dim
+  2   0  11 fg=AnsiValue(244)
+  2  11  47 attrs=dim
   2  58   1 bg=AnsiValue(243)
   2  59   1 fg=AnsiValue(244)
-  3   0   1 fg=AnsiValue(244)
-  3  32  19 attrs=dim
+  3   0  11 fg=AnsiValue(244)
+  3  11  20 attrs=dim
   3  58   1 bg=AnsiValue(243)
   3  59   1 fg=AnsiValue(244)
-  4   0   1 fg=AnsiValue(244)
+  4   0  11 fg=AnsiValue(244)
+  4  11  19 attrs=dim
   4  58   1 bg=AnsiValue(243)
   4  59   1 fg=AnsiValue(244)
   5   0   1 fg=AnsiValue(244)
-  5  32  22 attrs=dim
+  5   1   4 fg=AnsiValue(244) attrs=bold
   5  58   1 bg=AnsiValue(243)
   5  59   1 fg=AnsiValue(244)
-  6   0   1 fg=AnsiValue(244)
-  6  32  22 attrs=dim
+  6   0  25 fg=AnsiValue(244)
+  6  25  22 attrs=dim
   6  58   1 bg=AnsiValue(243)
   6  59   1 fg=AnsiValue(244)
-  7   0   1 fg=AnsiValue(244)
-  7  32  14 attrs=dim
+  7   0  25 fg=AnsiValue(244)
+  7  25  22 attrs=dim
   7  58   1 bg=AnsiValue(243)
   7  59   1 fg=AnsiValue(244)
-  8   0   1 fg=AnsiValue(244)
-  8  32  25 attrs=dim
+  8   0  25 fg=AnsiValue(244)
+  8  25  14 attrs=dim
   8  58   1 bg=AnsiValue(243)
   8  59   1 fg=AnsiValue(244)
-  9   0   1 fg=AnsiValue(244)
-  9  32  20 attrs=dim
+  9   0  25 fg=AnsiValue(244)
+  9  25  25 attrs=dim
   9  58   1 bg=AnsiValue(243)
   9  59   1 fg=AnsiValue(244)
- 10   0   1 fg=AnsiValue(244)
- 10  32  22 attrs=dim
- 10  58   1 bg=AnsiValue(243)
+ 10   0  25 fg=AnsiValue(244)
+ 10  25  20 attrs=dim
+ 10  58   1 bg=AnsiValue(235)
  10  59   1 fg=AnsiValue(244)
- 11   0   1 fg=AnsiValue(244)
- 11  32  21 attrs=dim
+ 11   0  25 fg=AnsiValue(244)
+ 11  25  22 attrs=dim
  11  58   1 bg=AnsiValue(235)
  11  59   1 fg=AnsiValue(244)
- 12   0   1 fg=AnsiValue(244)
- 12  32  26 attrs=dim
+ 12   0  25 fg=AnsiValue(244)
+ 12  25  21 attrs=dim
  12  58   1 bg=AnsiValue(235)
  12  59   1 fg=AnsiValue(244)
- 13   0   1 fg=AnsiValue(244)
- 13  32  26 attrs=dim
+ 13   0  25 fg=AnsiValue(244)
+ 13  25  33 attrs=dim
  13  58   1 bg=AnsiValue(235)
  13  59   1 fg=AnsiValue(244)
- 14   0   1 fg=AnsiValue(244)
- 14  32  14 attrs=dim
+ 14   0  25 fg=AnsiValue(244)
+ 14  25  33 attrs=dim
  14  58   1 bg=AnsiValue(235)
  14  59   1 fg=AnsiValue(244)
- 15   0   1 fg=AnsiValue(244)
- 15  32  16 attrs=dim
+ 15   0  25 fg=AnsiValue(244)
+ 15  25  14 attrs=dim
  15  58   1 bg=AnsiValue(235)
  15  59   1 fg=AnsiValue(244)
- 16   0   1 fg=AnsiValue(244)
- 16  32  18 attrs=dim
+ 16   0  25 fg=AnsiValue(244)
+ 16  25  16 attrs=dim
  16  58   1 bg=AnsiValue(235)
  16  59   1 fg=AnsiValue(244)
  17   0  60 fg=AnsiValue(244)

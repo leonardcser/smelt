@@ -59,7 +59,32 @@ local TOOL_DENIED_MESSAGE = "Tool use is not allowed during compaction. Respond 
 -- plugin stops auto-firing for the rest of the session to avoid burning
 -- tokens in a loop. /compact still works (manual override).
 local MAX_CONSECUTIVE_FAILURES = 3
-local consecutive_failures = 0
+local compact_state = smelt.state("compact")
+local consecutive_failures = compact_state.consecutive_failures or 0
+
+local function set_consecutive_failures(n)
+	consecutive_failures = n
+	compact_state.consecutive_failures = n
+end
+
+local function record_compaction(kind, phase, before_tokens, first_live_message_index)
+	compact_state.total = (compact_state.total or 0) + 1
+	compact_state[kind] = (compact_state[kind] or 0) + 1
+	compact_state.last_phase = phase
+	compact_state.last_tokens_before = before_tokens
+	compact_state.last_first_live_message_index = first_live_message_index
+	set_consecutive_failures(0)
+end
+
+local function record_failure()
+	compact_state.failures = (compact_state.failures or 0) + 1
+	set_consecutive_failures(consecutive_failures + 1)
+end
+
+local function trip_circuit_breaker()
+	compact_state.failures = (compact_state.failures or 0) + 1
+	set_consecutive_failures(MAX_CONSECUTIVE_FAILURES)
+end
 
 local function is_terminal_provider_error(err)
 	return err and (err.kind == "quota" or err.kind == "rate_limited")
@@ -134,7 +159,7 @@ local function summarize_messages(history, instructions, done)
 						return
 					end
 					if is_terminal_provider_error(err) then
-						consecutive_failures = MAX_CONSECUTIVE_FAILURES
+						set_consecutive_failures(MAX_CONSECUTIVE_FAILURES)
 						finish(nil, err)
 						return
 					end
@@ -350,15 +375,14 @@ local function run_compact(opts)
 			return
 		end
 		if is_terminal_provider_error(err) then
-			consecutive_failures = MAX_CONSECUTIVE_FAILURES
+			trip_circuit_breaker()
 			smelt.notify.error(err.message)
 			return
 		end
 		if not summary then
-			consecutive_failures = consecutive_failures + 1
+			record_failure()
 			return
 		end
-		consecutive_failures = 0
 		local model_messages = smelt.session.checkpoint({
 			kind = "compaction",
 			summary = summary,
@@ -369,6 +393,7 @@ local function run_compact(opts)
 		if not model_messages then
 			return
 		end
+		record_compaction("manual", "summarize", before_tokens, first_live_message_index)
 		emit_event("summarize", before_tokens, nil, {
 			first_live_message_index = first_live_message_index,
 		})
@@ -413,14 +438,13 @@ local function compact_live_session(before_tokens, phase, opts, done)
 		end
 		if not summary then
 			if is_terminal_provider_error(err) then
-				consecutive_failures = MAX_CONSECUTIVE_FAILURES
+				trip_circuit_breaker()
 			else
-				consecutive_failures = consecutive_failures + 1
+				record_failure()
 			end
 			done(nil, err)
 			return
 		end
-		consecutive_failures = 0
 		local model_messages = smelt.session.checkpoint({
 			kind = "compaction",
 			summary = summary,
@@ -432,6 +456,7 @@ local function compact_live_session(before_tokens, phase, opts, done)
 			done(nil)
 			return
 		end
+		record_compaction("auto", phase, before_tokens, first_live_message_index)
 		emit_event(phase, before_tokens, nil, {
 			first_live_message_index = first_live_message_index,
 		})
@@ -442,7 +467,7 @@ end
 -- ── /compact command ──────────────────────────────────────────────────
 
 smelt.cmd.register("compact", function(arg)
-	consecutive_failures = 0
+	set_consecutive_failures(0)
 	run_compact({ instructions = arg, inject_recent_user_messages = false })
 end, { desc = "compact conversation history", args = { "<instructions>" }, while_busy = false })
 
@@ -503,17 +528,17 @@ smelt.engine.on_context_limit(function(messages, reply)
 			return
 		end
 		if is_terminal_provider_error(err) then
-			consecutive_failures = MAX_CONSECUTIVE_FAILURES
+			trip_circuit_breaker()
 			reply({ action = "abort", message = err.message })
 			return
 		end
 		if not summary then
-			consecutive_failures = consecutive_failures + 1
+			record_failure()
 			reply(nil)
 			return
 		end
-		consecutive_failures = 0
 		local replacement = checkpointed_messages_from_boundary(messages, summary, first_live_message_index)
+		record_compaction("recovery", "summarize-recovery", 0, first_live_message_index)
 		emit_event("summarize-recovery", 0, 0, {
 			first_live_message_index = first_live_message_index,
 		})

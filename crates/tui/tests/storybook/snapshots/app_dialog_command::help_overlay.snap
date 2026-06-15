@@ -4,20 +4,20 @@ assertion_line: 372
 expression: frame.text()
 ---
 ┌ help ────────────────────────────────────────────────────┐
-│/command                       commands  (try /resume, /c │
-│@<path>                        attach a file or URL       │
-│!<cmd>                         run a shell command        │
-│                                                          │
-│enter                          send / queue for later     │
-│ctrl+enter / ctrl+q            steer current response     │
-│ctrl+j / shift+enter           insert newline             │
-│ctrl+c                         cancel / interrupt / quit  │
-│ctrl+r                         search input history       │
-│ctrl+t                         cycle reasoning effort     │
-│ctrl+s                         stash / unstash input      │
-│shift+tab                      cycle mode  (normal → plan │
-│↑/↓  ctrl+p/n                  previous / next line  (his │
-│pgup / pgdn  ctrl+v / alt+v    page up / down             │
-│ctrl+a / ctrl+e                line start / end           │
-│alt+< / alt+>                  buffer start / end         │
+│prefixes                                                  │
+│/command  commands  (try /resume, /compact, /fork, /ps, / │
+│@<path>   attach a file or URL                            │
+│!<cmd>    run a shell command                             │
+│keys                                                      │
+│enter                   send / queue for later            │
+│ctrl+enter / ctrl+q     steer current response            │
+│ctrl+j / shift+enter    insert newline                    │
+│ctrl+c                  cancel / interrupt / quit         │
+│ctrl+r                  search input history              │
+│ctrl+t                  cycle reasoning effort            │
+│ctrl+s                  stash / unstash input             │
+│shift+tab               cycle mode  (normal → plan → appl │
+│↑/↓  ctrl+p/n           previous / next line  (history at │
+│pgup / pgdn  ctrl+v / a…page up / down                    │
+│ctrl+a / ctrl+e         line start / end                  │
 └──────────────────────────────────────────────────────────┘

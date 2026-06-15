@@ -1511,7 +1511,7 @@ impl Ui {
                                 terminal_width: term_size.0,
                                 terminal_height: term_size.1,
                                 focused,
-                                cursor_shape: if owns_cursor {
+                                cursor_shape: if owns_cursor && !win.hide_cursor {
                                     cursor_shape
                                 } else {
                                     CursorShape::Hidden

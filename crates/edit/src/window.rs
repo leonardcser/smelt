@@ -470,6 +470,10 @@ pub struct Window {
     /// whose selection state needs to remain visible while an external
     /// input (e.g. a sibling search box) drives navigation.
     pub selection_highlight: bool,
+    /// Suppress the block caret even when this focusable leaf owns keyboard
+    /// focus. Live dashboard panes use this so periodic text refreshes don't
+    /// make a stale byte-position cursor appear to jitter across changing rows.
+    pub hide_cursor: bool,
 
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
@@ -522,6 +526,7 @@ impl Window {
             surface: WindowSurface::default(),
             cursor_line: false,
             selection_highlight: false,
+            hide_cursor: false,
             viewport: None,
             scroll_top: 0,
             scroll_anchor: None,

@@ -639,7 +639,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     // lockstep with the Rust source (`Gutters::default()`) - no hand-kept
     // duplication that could drift on a default change.
     let new_doc: &'static str = Box::leak(format!(
-        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
+        "Open a split window over `buf` and return a `Win` userdata. `opts.name` opts the window into hot-reload survival; omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned. `opts.surface = \"editable_text\"|\"readonly_text\"|\"selectable_text\"|\"inert\"|\"list\"|\"list_inert\"` sets the leaf interaction role. `opts.hide_cursor = true` suppresses the block caret while keeping the leaf focusable. `opts.kind = \"input\"` (`opts.placeholder?`) marks the window as a single-line text input; `opts.kind = \"list\"` (`opts.initial_cursor?`) marks it as a navigable list leaf. `opts.scrollbar` reserves the rightmost column for an overflow scrollbar (default `{}`); pass `false` on 1-row pills / dialog chrome to reclaim that cell.",
         crate::smelt_edit::layout::Gutters::default().scrollbar
     ).into_boxed_str());
     m.fn_(
@@ -813,6 +813,9 @@ fn apply_window_opts(
     }
     if let Ok(selection_highlight) = opts.get::<bool>("selection_highlight") {
         w.selection_highlight = selection_highlight;
+    }
+    if let Ok(hide_cursor) = opts.get::<bool>("hide_cursor") {
+        w.hide_cursor = hide_cursor;
     }
     if let Ok(vim_enabled) = opts.get::<bool>("vim_enabled") {
         w.set_vim_enabled(vim_enabled);
