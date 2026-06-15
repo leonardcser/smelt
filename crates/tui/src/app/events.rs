@@ -1,5 +1,6 @@
 use crate::app::{
-    AppSequenceAction, CommandAction, EventOutcome, InputOutcome, QueueStage, QueuedInput, TuiApp,
+    AppSequenceAction, CommandAction, EventOutcome, InputOutcome, PendingChordPolicy, QueueStage,
+    QueuedInput, TuiApp,
 };
 
 use crate::input::Action;
@@ -7,8 +8,9 @@ use crate::keymap::{self, KeyAction};
 use crate::smelt_edit::UiHost;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-const APP_ESC: &[&str] = &["<Esc>"];
-const APP_ESC_ESC: &[&str] = &["<Esc>", "<Esc>"];
+const ESC_TOKEN: &str = "<Esc>";
+const APP_ESC: &[&str] = &[ESC_TOKEN];
+const APP_ESC_ESC: &[&str] = &[ESC_TOKEN, ESC_TOKEN];
 const APP_SEQUENCE_BINDINGS: &[smelt_core::keymap::SequenceBinding<'static, AppSequenceAction>] = &[
     smelt_core::keymap::SequenceBinding {
         sequence: APP_ESC_ESC,
@@ -23,6 +25,13 @@ const APP_SEQUENCE_BINDINGS: &[smelt_core::keymap::SequenceBinding<'static, AppS
         priority: 0,
     },
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GlobalLuaKeymapRoute {
+    Dispatch,
+    ObservePrefix,
+    Skip,
+}
 
 impl TuiApp {
     // ── Terminal event dispatch ───────────────────────────────────────────
@@ -304,26 +313,37 @@ impl TuiApp {
         None
     }
 
-    fn global_lua_keymaps_can_handle(&self, key: KeyEvent) -> bool {
-        if matches!(key.code, KeyCode::Esc)
-            && key.modifiers == KeyModifiers::NONE
-            && self.timers.pending_chord.is_none()
+    fn global_lua_keymap_route(&self, key: KeyEvent) -> GlobalLuaKeymapRoute {
+        if self.timers.pending_chord.is_some() {
+            return GlobalLuaKeymapRoute::Dispatch;
+        }
+
+        let plain_esc = matches!(key.code, KeyCode::Esc) && key.modifiers == KeyModifiers::NONE;
+        if !plain_esc {
+            return GlobalLuaKeymapRoute::Dispatch;
+        }
+
+        if self.app_focus == crate::app::AppFocus::Prompt
+            && self.ui.focused_overlay().is_none()
+            && self.prompt_escape_owned_by_vim()
         {
-            if self.prompt_escape_owned_by_vim() {
-                return false;
-            }
-            if matches!(
+            return GlobalLuaKeymapRoute::ObservePrefix;
+        }
+
+        if self.prompt_escape_owned_by_vim()
+            || matches!(
                 self.focused_vim_mode(),
                 Some(
                     crate::smelt_edit::VimMode::Insert
                         | crate::smelt_edit::VimMode::Visual
                         | crate::smelt_edit::VimMode::VisualLine
                 )
-            ) {
-                return false;
-            }
+            )
+        {
+            return GlobalLuaKeymapRoute::Skip;
         }
-        true
+
+        GlobalLuaKeymapRoute::Dispatch
     }
 
     fn pending_lua_keymap_cancelled_by(
@@ -349,7 +369,7 @@ impl TuiApp {
     }
 
     fn dispatch_single_global_lua_keymap(&mut self, key: KeyEvent) -> bool {
-        if !self.global_lua_keymaps_can_handle(key) {
+        if self.global_lua_keymap_route(key) != GlobalLuaKeymapRoute::Dispatch {
             return false;
         }
         let Some(token) = crate::lua::chord_string(key) else {
@@ -369,10 +389,27 @@ impl TuiApp {
         }
     }
 
+    fn pending_lua_chord_policy(
+        &self,
+        first_token: &str,
+        now: std::time::Instant,
+    ) -> PendingChordPolicy {
+        match first_token {
+            ESC_TOKEN => PendingChordPolicy::Timed {
+                expires_at: now
+                    + std::time::Duration::from_millis(crate::app::APP_SEQUENCE_TIMEOUT_MS),
+            },
+            _ => PendingChordPolicy::Sticky,
+        }
+    }
+
     fn dispatch_global_lua_keymap(&mut self, key: KeyEvent) -> Option<EventOutcome> {
-        if !self.global_lua_keymaps_can_handle(key) {
+        self.expire_pending_keymap_chord();
+        let route = self.global_lua_keymap_route(key);
+        if route == GlobalLuaKeymapRoute::Skip {
             return None;
         }
+        let observe_prefix = route == GlobalLuaKeymapRoute::ObservePrefix;
 
         let Some(token) = crate::lua::chord_string(key) else {
             return self.timers.pending_chord.take().map(|_| EventOutcome::Noop);
@@ -389,7 +426,8 @@ impl TuiApp {
         // If no sequence is pending, try exact single-key bindings first. Once a
         // prefix is pending, the next key belongs to that sequence before any
         // single-key binding gets a chance, matching Vim's modal mapping feel.
-        if !had_pending {
+        // Observe-only keys seed prefixes without stealing the local key action.
+        if !had_pending && !observe_prefix {
             match self.lua.run_keymap(&token, vim_mode.as_deref(), None) {
                 KeymapResult::Consumed => {
                     self.timers.pending_chord = None;
@@ -402,6 +440,7 @@ impl TuiApp {
             }
         }
 
+        let now = self.core.clock.instant_now();
         if self.timers.pending_chord.is_none() {
             self.timers.pending_chord = Some(crate::app::PendingChord {
                 tokens: Vec::new(),
@@ -410,11 +449,13 @@ impl TuiApp {
                 } else {
                     None
                 },
+                policy: self.pending_lua_chord_policy(&token, now),
             });
         }
-        let (mut tokens, vim_mode_at_start) = {
+        let (mut tokens, vim_mode_at_start, policy, first_token_at_start) = {
             let p = self.timers.pending_chord.take().unwrap();
-            (p.tokens, p.vim_mode_at_start)
+            let first = p.tokens.first().cloned();
+            (p.tokens, p.vim_mode_at_start, p.policy, first)
         };
         tokens.push(token);
 
@@ -431,11 +472,22 @@ impl TuiApp {
                 if tokens.is_empty() {
                     self.timers.pending_chord = None;
                 } else {
+                    let next_policy = if tokens.first() == first_token_at_start.as_ref() {
+                        policy
+                    } else {
+                        tokens
+                            .first()
+                            .map(|first| self.pending_lua_chord_policy(first, now))
+                            .unwrap_or(PendingChordPolicy::Sticky)
+                    };
                     self.timers.pending_chord = Some(crate::app::PendingChord {
                         tokens,
                         vim_mode_at_start,
+                        policy: next_policy,
                     });
-                    return Some(EventOutcome::Noop);
+                    if !observe_prefix {
+                        return Some(EventOutcome::Noop);
+                    }
                 }
                 None
             }
@@ -770,10 +822,6 @@ impl TuiApp {
 
     fn handle_idle_prompt_esc(&mut self, ev: Event, modifiers: KeyModifiers) -> EventOutcome {
         if self.prompt_escape_owned_by_vim() {
-            let vim_mode_at_start = self
-                .prompt_win()
-                .vim_enabled()
-                .then(|| self.prompt_win().vim_mode());
             let now = self.core.clock.instant_now();
             let action = {
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -785,7 +833,6 @@ impl TuiApp {
                     now,
                 )
             };
-            self.arm_prompt_esc_lua_prefix(vim_mode_at_start);
             return self.dispatch_input_action(action);
         }
 
@@ -806,12 +853,7 @@ impl TuiApp {
         let now = self.core.clock.instant_now();
 
         if self.prompt_escape_owned_by_vim() {
-            let vim_mode_at_start = self
-                .prompt_win()
-                .vim_enabled()
-                .then(|| self.prompt_win().vim_mode());
             self.apply_prompt_escape_to_input(ev, now);
-            self.arm_prompt_esc_lua_prefix(vim_mode_at_start);
             return EventOutcome::Noop;
         }
 
@@ -852,20 +894,6 @@ impl TuiApp {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.input
             .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
-    }
-
-    fn arm_prompt_esc_lua_prefix(&mut self, vim_mode_at_start: Option<crate::smelt_edit::VimMode>) {
-        if self.timers.pending_chord.is_some() {
-            return;
-        }
-        let vim_mode = self.current_vim_mode_label();
-        if !self.lua.chord_has_longer("<Esc>", vim_mode.as_deref()) {
-            return;
-        }
-        self.timers.pending_chord = Some(crate::app::PendingChord {
-            tokens: vec!["<Esc>".to_string()],
-            vim_mode_at_start,
-        });
     }
 
     fn dismiss_notification_for_esc(&mut self) -> Option<EventOutcome> {
@@ -2290,6 +2318,41 @@ mod tests {
         assert!(app.app.timers.pending_chord.is_none());
         assert_eq!(app.state().prompt_text, "a");
         assert_eq!(app.prompt_cpos(), 1);
+    }
+
+    #[test]
+    fn transient_escape_prefix_expires() {
+        let mut app = TestApp::builder().build();
+        assert!(app.run_lua(
+            r#"
+                smelt.keymap.set("", "<Esc><Esc>", function()
+                    _G.esc_esc_hit = (_G.esc_esc_hit or 0) + 1
+                end)
+            "#
+        ));
+
+        app.press(KeyCode::Esc);
+        assert!(app.app.timers.pending_chord.is_some());
+
+        app.feed_one(crate::app::test_harness::SourceEvent::Tick(
+            crate::app::APP_SEQUENCE_TIMEOUT_MS + 1,
+        ));
+        app.app.publish_diff_cells();
+
+        assert!(app.app.timers.pending_chord.is_none());
+        assert_eq!(
+            app.app
+                .core
+                .cells
+                .get::<String>("keymap_pending")
+                .as_deref(),
+            Some("")
+        );
+
+        app.press(KeyCode::Esc);
+
+        assert_eq!(app.lua_int_global("esc_esc_hit"), None);
+        assert!(app.app.timers.pending_chord.is_some());
     }
 
     #[test]

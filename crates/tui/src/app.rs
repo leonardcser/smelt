@@ -314,6 +314,22 @@ pub(crate) struct PendingChord {
     pub(crate) tokens: Vec<String>,
     /// Vim mode captured before the first key was dispatched; surfaced to chord handlers.
     pub(crate) vim_mode_at_start: Option<crate::smelt_edit::VimMode>,
+    pub(crate) policy: PendingChordPolicy,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PendingChordPolicy {
+    Sticky,
+    Timed { expires_at: Instant },
+}
+
+impl PendingChordPolicy {
+    fn expires_at(self) -> Option<Instant> {
+        match self {
+            Self::Sticky => None,
+            Self::Timed { expires_at } => Some(expires_at),
+        }
+    }
 }
 
 /// Idle time after which an app-level sequence such as Esc Esc expires.
@@ -908,6 +924,26 @@ impl TuiApp {
             .as_ref()
             .map(|pending| crate::lua::display_chord_sequence(&pending.tokens.concat()))
             .unwrap_or_default()
+    }
+
+    pub(crate) fn expire_pending_keymap_chord(&mut self) -> bool {
+        let now = self.core.clock.instant_now();
+        let expired = self
+            .timers
+            .pending_chord
+            .as_ref()
+            .and_then(|pending| pending.policy.expires_at())
+            .is_some_and(|expires_at| expires_at <= now);
+        if expired {
+            self.timers.pending_chord = None;
+            return true;
+        }
+        false
+    }
+
+    fn pending_keymap_chord_expiry_delay(&self) -> Option<Duration> {
+        let expires_at = self.timers.pending_chord.as_ref()?.policy.expires_at()?;
+        Some(expires_at.saturating_duration_since(self.core.clock.instant_now()))
     }
 
     /// Publish `vim_mode`, `keymap_pending`, `confirms_pending`, `now`,
@@ -1747,7 +1783,8 @@ impl TuiApp {
                 .next_deadline()
                 .map(|deadline| deadline.saturating_duration_since(now));
             let next_notification_delay = self.notification_expiry_delay();
-            let next_idle_delay = [next_timer_delay, next_notification_delay]
+            let next_keymap_delay = self.pending_keymap_chord_expiry_delay();
+            let next_idle_delay = [next_timer_delay, next_notification_delay, next_keymap_delay]
                 .into_iter()
                 .flatten()
                 .min();
@@ -1901,6 +1938,7 @@ impl TuiApp {
                     self.tick_timers();
                     self.drive_lua_tasks();
                     self.dismiss_expired_notification();
+                    self.expire_pending_keymap_chord();
                     self.publish_diff_cells();
                     self.render_normal(self.agent.is_some());
                 }
