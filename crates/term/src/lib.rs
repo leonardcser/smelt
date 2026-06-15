@@ -9,6 +9,7 @@
 //! - [`Grid`] / [`GridSlice`] - `set`/`put_str` (full overwrite),
 //!   `put_char`/`put_str_fg`/`put_line` (preserve bg).
 
+pub mod ansi;
 pub mod compositor;
 pub mod flush;
 pub mod geometry;

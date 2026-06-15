@@ -50,12 +50,14 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
     let need_undim = from.dim && !to.dim;
     let need_unitalic = from.italic && !to.italic;
     let need_uncrossed = from.crossedout && !to.crossedout;
+    let need_unreverse = from.reverse && !to.reverse;
     let need_ununderline = from.underline && !to.underline;
 
     let unsets = need_unbold as u8
         + need_undim as u8
         + need_unitalic as u8
         + need_uncrossed as u8
+        + need_unreverse as u8
         + need_ununderline as u8;
     let intensity_conflict = (need_unbold && to.dim) || (need_undim && to.bold);
 
@@ -81,6 +83,9 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
         if to.crossedout {
             w.queue(SetAttribute(Attribute::CrossedOut))?;
         }
+        if to.reverse {
+            w.queue(SetAttribute(Attribute::Reverse))?;
+        }
         if to.underline {
             w.queue(SetAttribute(Attribute::Underlined))?;
         }
@@ -102,6 +107,9 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
     if need_uncrossed {
         w.queue(SetAttribute(Attribute::NotCrossedOut))?;
     }
+    if need_unreverse {
+        w.queue(SetAttribute(Attribute::NoReverse))?;
+    }
     if need_ununderline {
         w.queue(SetAttribute(Attribute::NoUnderline))?;
     }
@@ -117,6 +125,9 @@ fn emit_style_diff<W: Write>(w: &mut W, from: &Style, to: &Style) -> std::io::Re
     }
     if !from.crossedout && to.crossedout {
         w.queue(SetAttribute(Attribute::CrossedOut))?;
+    }
+    if !from.reverse && to.reverse {
+        w.queue(SetAttribute(Attribute::Reverse))?;
     }
     if !from.underline && to.underline {
         w.queue(SetAttribute(Attribute::Underlined))?;
@@ -332,6 +343,15 @@ mod tests {
         curr.set(0, 0, 'A', Style::new().crossedout());
         let s = flush_to_string(&curr, &prev);
         assert!(s.contains("\x1b[9m"), "got {s:?}");
+    }
+
+    #[test]
+    fn flush_emits_reverse_attribute() {
+        let prev = Grid::new(3, 1);
+        let mut curr = Grid::new(3, 1);
+        curr.set(0, 0, 'A', Style::new().reverse());
+        let s = flush_to_string(&curr, &prev);
+        assert!(s.contains("\x1b[7m"), "got {s:?}");
     }
 
     // ── Transitions & cursor ─────────────────────────────────────────────

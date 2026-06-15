@@ -1,11 +1,12 @@
 name: Publish library crate
 
 # Publishes one of the independently-versioned library crates
-# (smelt-perf, smelt-style, smelt-term) to crates.io.
+# (smelt-perf, smelt-style, smelt-ansi, smelt-term) to crates.io.
 #
 # Trigger by pushing a tag of the form `<crate>-v<version>`, e.g.:
 #   git tag smelt-perf-v0.1.0 && git push origin smelt-perf-v0.1.0
 #   git tag smelt-style-v0.1.0 && git push origin smelt-style-v0.1.0
+#   git tag smelt-ansi-v0.1.0 && git push origin smelt-ansi-v0.1.0
 #   git tag smelt-term-v0.1.0 && git push origin smelt-term-v0.1.0
 #
 # Auth uses crates.io Trusted Publishing (OIDC). No long-lived token
@@ -17,6 +18,7 @@ on:
     tags:
       - "smelt-perf-v*"
       - "smelt-style-v*"
+      - "smelt-ansi-v*"
       - "smelt-term-v*"
 
 jobs:

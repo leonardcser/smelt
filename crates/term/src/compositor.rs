@@ -130,6 +130,9 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
                 if cell.style.crossedout {
                     w.queue(SetAttribute(Attribute::CrossedOut))?;
                 }
+                if cell.style.reverse {
+                    w.queue(SetAttribute(Attribute::Reverse))?;
+                }
                 current_style = cell.style;
             }
             let mut buf = [0u8; 4];

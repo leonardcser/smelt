@@ -235,6 +235,9 @@ fn fmt_style(s: &Style) -> String {
     if s.crossedout {
         attrs.push("crossedout");
     }
+    if s.reverse {
+        attrs.push("reverse");
+    }
     if !attrs.is_empty() {
         parts.push(format!("attrs={}", attrs.join("|")));
     }
@@ -386,6 +389,7 @@ fn apply_attrs(style: &mut Style, value: &str) {
             "italic" => style.italic = true,
             "underline" => style.underline = true,
             "crossedout" => style.crossedout = true,
+            "reverse" => style.reverse = true,
             _ => {}
         }
     }
@@ -523,6 +527,7 @@ mod tests {
                     bg: Some(Color::AnsiValue(208)),
                     bold: true,
                     dim: true,
+                    reverse: true,
                     ..Style::default()
                 },
             );
@@ -540,5 +545,6 @@ mod tests {
         assert_eq!(s.bg, Some(Color::AnsiValue(208)));
         assert!(s.bold);
         assert!(s.dim);
+        assert!(s.reverse);
     }
 }

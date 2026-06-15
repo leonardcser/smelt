@@ -72,7 +72,7 @@ fn color_str(s: &str) -> Result<Color, String> {
 
 // ── style + span + title ───────────────────────────────────────────────
 
-/// Read style fields (`fg`, `bg`, `bold`, `dim`, `italic`, `underline`, `crossedout`)
+/// Read style fields (`fg`, `bg`, `bold`, `dim`, `italic`, `underline`, `crossedout`, `reverse`)
 /// off a table. Unrecognised keys are ignored.
 pub(crate) fn style(t: &mlua::Table) -> Result<Style, String> {
     let mut style = Style::new();
@@ -96,6 +96,9 @@ pub(crate) fn style(t: &mlua::Table) -> Result<Style, String> {
     }
     if t.get::<bool>("crossedout").unwrap_or(false) {
         style = style.crossedout();
+    }
+    if t.get::<bool>("reverse").unwrap_or(false) {
+        style = style.reverse();
     }
     Ok(style)
 }

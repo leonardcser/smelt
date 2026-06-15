@@ -1,0 +1,12 @@
+[package]
+name = "smelt-ansi"
+version = "0.1.0"
+edition = "2021"
+description = "ANSI SGR transcript parser for Smelt style spans."
+license = "MIT"
+repository = "https://github.com/leonardcser/smelt"
+keywords = ["ansi", "sgr", "terminal", "style"]
+categories = ["command-line-interface", "parser-implementations"]
+
+[dependencies]
+smelt-style = { workspace = true }

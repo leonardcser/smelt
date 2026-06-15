@@ -371,6 +371,10 @@ impl<'a> LineBuilder<'a> {
         self.cur_style.crossedout = true;
     }
 
+    pub fn set_reverse(&mut self) {
+        self.cur_style.reverse = true;
+    }
+
     pub fn set_underline(&mut self) {
         self.cur_style.underline = true;
     }
@@ -408,6 +412,11 @@ impl<'a> LineBuilder<'a> {
     pub fn push_crossedout(&mut self) {
         self.push_clone();
         self.cur_style.crossedout = true;
+    }
+
+    pub fn push_reverse(&mut self) {
+        self.push_clone();
+        self.cur_style.reverse = true;
     }
 
     pub fn push_underline(&mut self) {
@@ -543,12 +552,20 @@ impl<'a> LineBuilder<'a> {
             italic: self.cur_style.italic,
             underline: self.cur_style.underline,
             crossedout: self.cur_style.crossedout,
+            reverse: self.cur_style.reverse,
         }
     }
 }
 
 fn style_has_axis_mods(s: &Style) -> bool {
-    s.fg.is_some() || s.bg.is_some() || s.bold || s.dim || s.italic || s.underline || s.crossedout
+    s.fg.is_some()
+        || s.bg.is_some()
+        || s.bold
+        || s.dim
+        || s.italic
+        || s.underline
+        || s.crossedout
+        || s.reverse
 }
 
 fn has_decoration(dec: &LineDecoration) -> bool {
@@ -568,6 +585,7 @@ fn style_is_default(s: &Style) -> bool {
         && !s.italic
         && !s.underline
         && !s.crossedout
+        && !s.reverse
 }
 
 /// Build a fresh `Buffer`, render into it, and return the outcome.

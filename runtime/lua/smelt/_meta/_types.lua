@@ -31,6 +31,7 @@
 ---@field bold? boolean Force-bold the highlight.
 ---@field dim? boolean Force-dim the highlight.
 ---@field italic? boolean Force-italic the highlight.
+---@field reverse? boolean Force reverse-video on the highlight.
 ---@field hl_eol? boolean Extend the highlight past the last column to fill the EOL.
 ---@field on_cursor_row? boolean Paint only on the window's cursor row. Decorates the selected list item without re-rendering on every move.
 ---@field virt_text? string Virtual-text chunk to render alongside the line.
@@ -403,6 +404,7 @@
 ---@field dim? boolean Dim / faint text.
 ---@field underline? boolean Underline.
 ---@field crossedout? boolean Strikethrough.
+---@field reverse? boolean Reverse video.
 
 --- Flat map keyed by highlight-group name (`Comment`, `Visual`, `SmeltAccent`, …). Each value is either a `StyleDecl` table or a string referencing another group in the same spec. Every themable color (foreground, background, diff row fills, scrollbar colors, mode indicators) is just a group.
 ---@class smelt.theme.ThemeSpec

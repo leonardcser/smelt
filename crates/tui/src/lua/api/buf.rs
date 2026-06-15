@@ -138,6 +138,8 @@ pub struct LuaMarkOpts {
     pub dim: Option<bool>,
     /// Force-italic the highlight.
     pub italic: Option<bool>,
+    /// Force reverse-video on the highlight.
+    pub reverse: Option<bool>,
     /// Extend the highlight past the last column to fill the EOL.
     pub hl_eol: Option<bool>,
     /// Paint only on the window's cursor row. Decorates the
@@ -514,6 +516,7 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
         dim: bool,
         bold: bool,
         italic: bool,
+        reverse: bool,
         fg: Option<LuaColor>,
         bg: Option<LuaColor>,
     }
@@ -531,6 +534,7 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
                 dim: false,
                 bold: false,
                 italic: false,
+                reverse: false,
                 fg: None,
                 bg: None,
             });
@@ -540,6 +544,7 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
             dim: tbl.get::<Option<bool>>("dim")?.unwrap_or(false),
             bold: tbl.get::<Option<bool>>("bold")?.unwrap_or(false),
             italic: tbl.get::<Option<bool>>("italic")?.unwrap_or(false),
+            reverse: tbl.get::<Option<bool>>("reverse")?.unwrap_or(false),
             fg: tbl.get::<Option<LuaColor>>("fg")?,
             bg: tbl.get::<Option<LuaColor>>("bg")?,
         })
@@ -589,6 +594,7 @@ fn set_styled_lines(id: crate::smelt_edit::BufId, lines: mlua::Table) -> LuaResu
                     style.dim = span.style.dim;
                     style.bold = span.style.bold;
                     style.italic = span.style.italic;
+                    style.reverse = span.style.reverse;
                     if let Some(c) = &span.style.fg {
                         style.fg = match c {
                             LuaColor::Group(name) => sink.theme().get(name).fg,
@@ -720,6 +726,9 @@ fn build_highlight_style(opts: &LuaMarkOpts) -> crate::smelt_edit::SpanStyle {
     }
     if let Some(b) = opts.italic {
         style.italic = b;
+    }
+    if let Some(b) = opts.reverse {
+        style.reverse = b;
     }
     style
 }

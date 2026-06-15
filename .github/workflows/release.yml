@@ -119,7 +119,7 @@ jobs:
           # on their own schedule via publish.yml. Skip them here.
           for file in Cargo.toml crates/*/Cargo.toml; do
             case "$file" in
-              crates/perf/Cargo.toml|crates/term/Cargo.toml|crates/style/Cargo.toml)
+              crates/perf/Cargo.toml|crates/term/Cargo.toml|crates/style/Cargo.toml|crates/ansi/Cargo.toml)
                 echo "Skipping $file (independently versioned)"
                 continue
                 ;;

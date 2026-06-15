@@ -834,6 +834,7 @@ fn merge_title_span_style(
         italic: base.italic || span.italic,
         underline: base.underline || span.underline,
         crossedout: base.crossedout || span.crossedout,
+        reverse: base.reverse || span.reverse,
     }
 }
 

@@ -8,6 +8,7 @@ smelt-protocol = { workspace = true }
 smelt-engine = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-buffer = { workspace = true }
+smelt-ansi = { workspace = true }
 smelt-lua-doc-derive = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "process"] }
 tokio-util = { workspace = true, features = ["rt"] }

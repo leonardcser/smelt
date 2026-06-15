@@ -32,6 +32,7 @@ pub struct Style {
     pub italic: bool,
     pub underline: bool,
     pub crossedout: bool,
+    pub reverse: bool,
 }
 
 impl Style {
@@ -44,6 +45,7 @@ impl Style {
             italic: false,
             underline: false,
             crossedout: false,
+            reverse: false,
         }
     }
 
@@ -81,6 +83,11 @@ impl Style {
         self.crossedout = true;
         self
     }
+
+    pub fn reverse(mut self) -> Self {
+        self.reverse = true;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -96,7 +103,8 @@ mod tests {
             .dim()
             .italic()
             .underline()
-            .crossedout();
+            .crossedout()
+            .reverse();
         assert_eq!(
             s,
             Style {
@@ -107,6 +115,7 @@ mod tests {
                 italic: true,
                 underline: true,
                 crossedout: true,
+                reverse: true,
             }
         );
     }

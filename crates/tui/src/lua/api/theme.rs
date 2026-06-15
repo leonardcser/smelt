@@ -138,6 +138,9 @@ fn style_to_lua(lua: &Lua, style: Style) -> LuaResult<mlua::Table> {
     if style.crossedout {
         t.set("crossedout", true)?;
     }
+    if style.reverse {
+        t.set("reverse", true)?;
+    }
     Ok(t)
 }
 
@@ -165,5 +168,6 @@ fn style_decl_to_style(decl: &StyleDecl, is_light: bool) -> Style {
         dim: decl.dim.unwrap_or(false),
         underline: decl.underline.unwrap_or(false),
         crossedout: decl.crossedout.unwrap_or(false),
+        reverse: decl.reverse.unwrap_or(false),
     }
 }

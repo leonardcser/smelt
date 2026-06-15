@@ -7,7 +7,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
-use smelt_core::content::ansi::{emit_ansi_row, parse_ansi, wrap_ansi};
+use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::builder::render_into;
 use smelt_core::theme::Theme;
 
@@ -26,7 +26,7 @@ fuzz_target!(|data: &[u8]| {
     let render_width = u16::from(input.width % 80);
     let wrap_width = usize::from(render_width);
 
-    let spans = parse_ansi(&text);
+    let spans = smelt_ansi::parse_ansi(&text);
     for span in &spans {
         assert!(!span.text.chars().any(|ch| ch.is_control() && ch != '\t'));
     }

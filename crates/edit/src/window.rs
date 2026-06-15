@@ -3133,6 +3133,7 @@ fn merge_styles(base: Style, top: Style) -> Style {
         italic: base.italic || top.italic,
         underline: base.underline || top.underline,
         crossedout: base.crossedout || top.crossedout,
+        reverse: base.reverse || top.reverse,
     }
 }
 
@@ -3146,6 +3147,7 @@ fn merge_span_style(base: Style, span: &crate::SpanStyle) -> Style {
         italic: base.italic || span.italic,
         underline: base.underline || span.underline,
         crossedout: base.crossedout || span.crossedout,
+        reverse: base.reverse || span.reverse,
     }
 }
 

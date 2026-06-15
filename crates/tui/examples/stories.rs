@@ -189,6 +189,7 @@ const STYLE_BOLD: Style = Style {
     italic: false,
     underline: false,
     crossedout: false,
+    reverse: false,
 };
 
 const STYLE_DIM: Style = Style {
@@ -199,6 +200,7 @@ const STYLE_DIM: Style = Style {
     italic: false,
     underline: false,
     crossedout: false,
+    reverse: false,
 };
 
 /// Truncate `text` to at most `max_w` visual columns.

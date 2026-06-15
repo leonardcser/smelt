@@ -46,6 +46,7 @@ Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `
 | `bold` | `boolean` |  | Force-bold the highlight. |
 | `dim` | `boolean` |  | Force-dim the highlight. |
 | `italic` | `boolean` |  | Force-italic the highlight. |
+| `reverse` | `boolean` |  | Force reverse-video on the highlight. |
 | `hl_eol` | `boolean` |  | Extend the highlight past the last column to fill the EOL. |
 | `on_cursor_row` | `boolean` |  | Paint only on the window's cursor row. Decorates the selected list item without re-rendering on every move. |
 | `virt_text` | `string` |  | Virtual-text chunk to render alongside the line. |
@@ -589,6 +590,7 @@ Style table for a single highlight group. Every field is optional - unset fields
 | `dim` | `boolean` |  | Dim / faint text. |
 | `underline` | `boolean` |  | Underline. |
 | `crossedout` | `boolean` |  | Strikethrough. |
+| `reverse` | `boolean` |  | Reverse video. |
 
 ### `smelt.theme.ThemeSpec`
 

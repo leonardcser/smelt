@@ -2554,6 +2554,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-ansi"
+version = "0.1.0"
+dependencies = [
+ "smelt-style",
+]
+
+[[package]]
 name = "smelt-buffer"
 version = "0.5.0-alpha.5"
 dependencies = [
@@ -2587,6 +2594,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar 3.1.1",
+ "smelt-ansi",
  "smelt-buffer",
  "smelt-engine",
  "smelt-lua-doc-derive",
@@ -2657,14 +2665,15 @@ dependencies = [
 
 [[package]]
 name = "smelt-style"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "smelt-term"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "insta",
+ "smelt-ansi",
  "smelt-style",
  "unicode-width",
 ]

@@ -102,6 +102,8 @@ pub struct StyleDecl {
     pub underline: Option<bool>,
     /// Strikethrough.
     pub crossedout: Option<bool>,
+    /// Reverse video.
+    pub reverse: Option<bool>,
 }
 
 impl StyleDecl {
@@ -116,6 +118,7 @@ impl StyleDecl {
             dim: self.dim.unwrap_or(false),
             underline: self.underline.unwrap_or(false),
             crossedout: self.crossedout.unwrap_or(false),
+            reverse: self.reverse.unwrap_or(false),
         }
     }
 }

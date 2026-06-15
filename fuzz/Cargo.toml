@@ -20,6 +20,7 @@ smelt-edit = { path = "../crates/edit" }
 smelt-core = { path = "../crates/core" }
 smelt-buffer = { path = "../crates/buffer" }
 smelt-style = { path = "../crates/style" }
+smelt-ansi = { path = "../crates/ansi" }
 smelt-term = { path = "../crates/term" }
 smelt-protocol = { path = "../crates/protocol" }
 smelt-engine = { path = "../crates/engine", features = ["fuzz"] }
