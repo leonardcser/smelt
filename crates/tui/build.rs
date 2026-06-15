@@ -4,12 +4,12 @@
 //!   - SMELT_BUILD_SHA       short git commit, or "unknown"
 //!   - SMELT_BUILD_DATE      committer ISO date, or "unknown"
 //!   - SMELT_TARGET          target triple (e.g. aarch64-apple-darwin)
-//!   - SMELT_BUILD_TAG       most recent reachable tag, or "unknown"
+//!   - SMELT_BUILD_TAG       most recent reachable app version tag, or "unknown"
 //!   - SMELT_BUILD_COMMITS   commits since that tag, or "0"
 //!   - SMELT_BUILD_DIRTY     "1" when the working tree has uncommitted changes, else "0"
 //!   - SMELT_DISPLAY         canonical user-facing identity string. Single
 //!     source of truth for the banner, `/version`, `/upgrade`, and `--version`.
-//!     Shape: `v{tag}` for a clean tagged build, `v{tag}-{commits}-{sha}[-dirty]`
+//!     Shape: `{tag}` for a clean tagged build, `{tag}-{commits}-{sha}[-dirty]`
 //!     for a dev build, `v{CARGO_PKG_VERSION}` when git is unavailable.
 //!
 //! The git lookups go through `git rev-parse` / `git show` / `git describe`,
@@ -27,7 +27,9 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".into());
 
     let pkg_version = env!("CARGO_PKG_VERSION");
-    let described = git(&["describe", "--tags", "--long", "--dirty"]);
+    let described = git(&[
+        "describe", "--tags", "--long", "--dirty", "--match", "v[0-9]*",
+    ]);
     let (tag, commits, dirty, display) = match described.as_deref() {
         Some(d) => parse_describe(d, pkg_version),
         None => (
@@ -48,23 +50,22 @@ fn main() {
 
     // Rebuild when HEAD moves. `git rev-parse --git-path HEAD` resolves
     // to the right file for both regular checkouts and worktrees.
-    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
-        let path = PathBuf::from(&head);
-        if path.exists() {
-            println!("cargo:rerun-if-changed={}", path.display());
-        }
-    }
+    rerun_if_git_path("HEAD");
+    // Release builds often add a tag without moving HEAD. Watch both loose and
+    // packed tags so the embedded display updates after tagging.
+    rerun_if_git_path("refs/tags");
+    rerun_if_git_path("packed-refs");
     // The dirty flag flips when tracked files change without a commit;
     // there's no single sentinel file to watch, so re-run every build.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=TARGET");
 }
 
-/// Split a `git describe --tags --long --dirty` result like
+/// Split a `git describe --tags --long --dirty --match 'v[0-9]*'` result like
 /// `v0.5.0-alpha.2-80-g827e6646-dirty` into `(tag, commits, dirty, display)`.
-/// `display` is the canonical user-facing identity: `v{tag}` on a clean
+/// `display` is the canonical user-facing identity: `{tag}` on a clean
 /// tagged build (commits == 0, not dirty), otherwise
-/// `v{tag}-{commits}-{sha}[-dirty]`. A missing or unparseable result
+/// `{tag}-{commits}-{sha}[-dirty]`. A missing or unparseable result
 /// falls back to `v{pkg_version}`.
 fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String, String) {
     let (core, dirty_flag) = match described.strip_suffix("-dirty") {
@@ -103,6 +104,15 @@ fn parse_describe(described: &str, pkg_version: &str) -> (String, String, String
         display
     };
     (tag, commits, dirty_flag.into(), display)
+}
+
+fn rerun_if_git_path(pathspec: &str) {
+    if let Some(path) = git(&["rev-parse", "--git-path", pathspec]) {
+        let path = PathBuf::from(&path);
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }
 
 fn git(args: &[&str]) -> Option<String> {
