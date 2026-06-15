@@ -3,7 +3,7 @@
 //! buffer for cursor mapping. Window layout owns soft wrapping.
 
 use crate::content::prompt_spans::{
-    build_char_kinds, build_display_spans, spans_to_string, Span, SpanKind,
+    build_char_kinds, build_display_spans, spans_to_string, Span, SpanKind, TAB_DISPLAY,
 };
 use smelt_buffer::attachment::{AttachmentId, AttachmentStore, ATTACHMENT_MARKER};
 use smelt_buffer::buffer::{Buffer, BufferCopy, BufferParser, CopyOutput, SpanMeta};
@@ -91,6 +91,28 @@ impl PromptCopier {
 /// Build source-char ↔ display-char maps from a span stream.
 /// Returns `(source_char_to_display_char, display_char_to_source_char)`.
 fn build_coord_maps(spans: &[Span]) -> (Vec<usize>, Vec<usize>) {
+    fn map_expanded_source_char(
+        s2d: &mut Vec<usize>,
+        d2s: &mut Vec<usize>,
+        s_cur: &mut usize,
+        d_cur: &mut usize,
+        display_chars: usize,
+    ) {
+        let source_char = *s_cur;
+        *s_cur += 1;
+        if display_chars == 0 {
+            s2d.push(*d_cur);
+            return;
+        }
+        for _ in 0..display_chars.saturating_sub(1) {
+            *d_cur += 1;
+            d2s.push(source_char);
+        }
+        *d_cur += 1;
+        d2s.push(*s_cur);
+        s2d.push(*d_cur);
+    }
+
     let mut s2d = vec![0usize];
     let mut d2s = vec![0usize];
     let mut s_cur = 0usize;
@@ -105,25 +127,20 @@ fn build_coord_maps(spans: &[Span]) -> (Vec<usize>, Vec<usize>) {
                     d2s.push(s_cur);
                 }
             }
-            Span::Attachment(label) => {
-                let label_chars = label.chars().count();
-                let marker_src = s_cur;
-                s_cur += 1;
-                if label_chars == 0 {
-                    s2d.push(d_cur);
-                    continue;
-                }
-                // Inner label chars attribute to the marker; last entry attributes
-                // to the next source char (so byte_at_display_pos at the boundary
-                // resolves to the char after the marker).
-                for _ in 0..label_chars.saturating_sub(1) {
-                    d_cur += 1;
-                    d2s.push(marker_src);
-                }
-                d_cur += 1;
-                d2s.push(s_cur);
-                s2d.push(d_cur);
-            }
+            Span::Tab => map_expanded_source_char(
+                &mut s2d,
+                &mut d2s,
+                &mut s_cur,
+                &mut d_cur,
+                TAB_DISPLAY.chars().count(),
+            ),
+            Span::Attachment(label) => map_expanded_source_char(
+                &mut s2d,
+                &mut d2s,
+                &mut s_cur,
+                &mut d_cur,
+                label.chars().count(),
+            ),
         }
     }
     (s2d, d2s)
@@ -358,6 +375,19 @@ mod tests {
         assert_eq!(buf.line_count(), 2);
         assert_eq!(buf.get_line(0).unwrap(), "hello world");
         assert_eq!(buf.get_line(1).unwrap(), "second");
+    }
+
+    #[test]
+    fn parser_expands_tabs_for_display_without_changing_source_mapping() {
+        let store = Arc::new(Mutex::new(AttachmentStore::new()));
+        let parser = Arc::new(PromptBufferParser::new(store));
+        let mut buf = make_buf_with_parser(parser);
+        buf.set_source("a\tb".into());
+        buf.ensure_rendered_at(80);
+
+        assert_eq!(buf.get_line(0), Some("a    b"));
+        assert_eq!(buf.display_cursor_pos(2), (0, 5));
+        assert_eq!(buf.byte_at_display_pos(0, 5), 2);
     }
 
     #[test]

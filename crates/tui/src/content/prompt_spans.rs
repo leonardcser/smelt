@@ -4,8 +4,11 @@ use crate::input::ATTACHMENT_MARKER;
 use smelt_core::attachment::{AttachmentId, AttachmentStore};
 pub(crate) use smelt_core::content::selection::{scan_at_token, try_at_ref};
 
+pub(crate) const TAB_DISPLAY: &str = "    ";
+
 pub(crate) enum Span {
     Plain(String),
+    Tab,
     Attachment(String),
     AtRef(String),
 }
@@ -22,6 +25,7 @@ pub(crate) fn build_char_kinds(spans: &[Span]) -> Vec<SpanKind> {
     for span in spans {
         let (text, kind) = match span {
             Span::Plain(t) => (t.as_str(), SpanKind::Plain),
+            Span::Tab => (TAB_DISPLAY, SpanKind::Plain),
             Span::Attachment(t) => (t.as_str(), SpanKind::Attachment),
             Span::AtRef(t) => (t.as_str(), SpanKind::AtRef),
         };
@@ -54,6 +58,12 @@ pub(crate) fn build_display_spans(
             spans.push(Span::Attachment(label));
             att_idx += 1;
             i += 1;
+        } else if chars[i] == '\t' {
+            if !plain.is_empty() {
+                spans.push(Span::Plain(std::mem::take(&mut plain)));
+            }
+            spans.push(Span::Tab);
+            i += 1;
         } else if let Some((token, end)) = try_at_ref(&chars, i) {
             if !plain.is_empty() {
                 spans.push(Span::Plain(std::mem::take(&mut plain)));
@@ -82,6 +92,7 @@ pub(crate) fn spans_to_string(spans: &[Span]) -> String {
     for span in spans {
         match span {
             Span::Plain(t) | Span::Attachment(t) | Span::AtRef(t) => s.push_str(t),
+            Span::Tab => s.push_str(TAB_DISPLAY),
         }
     }
     s
@@ -95,6 +106,6 @@ mod tests {
     fn display_spans_sanitize_plain_controls_but_keep_newlines() {
         let store = AttachmentStore::new();
         let spans = build_display_spans("a\0\tb\nc", &[], &store);
-        assert_eq!(spans_to_string(&spans), "a\u{FFFD}\u{FFFD}b\nc");
+        assert_eq!(spans_to_string(&spans), "a\u{FFFD}    b\nc");
     }
 }
