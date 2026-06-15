@@ -8,6 +8,7 @@ expression: frame.text()
 │!<cmd>                         run a shell command        │
 │                                                          │
 │enter                          send message               │
+│ctrl+enter                     send to current request    │
 │ctrl+j  shift+enter            insert newline             │
 │ctrl+c                         cancel / interrupt / quit  │
 │ctrl+r                         search input history       │
@@ -18,5 +19,4 @@ expression: frame.text()
 │pgup / pgdn  ctrl+v / alt+v    page up / down             │
 │ctrl+a / ctrl+e                line start / end           │
 │alt+< / alt+>                  buffer start / end         │
-│ctrl+k / ctrl+w                kill to end / delete word  │
 └──────────────────────────────────────────────────────────┘
