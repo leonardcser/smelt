@@ -161,6 +161,7 @@ impl TuiApp {
             let hit_target = self.ui.hit_test(me.row, me.column, None);
             let hits_overlay = hit_target.is_some_and(|ht| match ht {
                 HitTarget::Window(w) => self.ui.overlay_for_leaf(w).is_some(),
+                HitTarget::Paint(p) => self.ui.overlay_for_paint(p).is_some(),
                 HitTarget::Chrome { .. } => true,
                 _ => false,
             });
@@ -187,7 +188,7 @@ impl TuiApp {
         // `Ui::resolve_split_mouse` handles hit-test, click-count, and HitTarget capture
         // so drags stay on the originating window even if the pointer drifts.
         let now = self.core.clock.instant_now();
-        if let Some((win, count)) = self.ui.resolve_split_mouse(me, now) {
+        if let Some((target, count)) = self.ui.resolve_split_mouse(me, now) {
             let is_down = is_left_down(me.kind);
             let is_up = matches!(me.kind, MouseEventKind::Up(MouseButton::Left));
             let is_drag = matches!(me.kind, MouseEventKind::Drag(MouseButton::Left));
@@ -204,8 +205,11 @@ impl TuiApp {
                 None
             };
             if let Some(ev) = pointer_event {
-                self.fire_pointer_event(win, ev, me, crate::smelt_edit::MouseButton::Left);
+                self.fire_pointer_event(target, ev, me, crate::smelt_edit::MouseButton::Left);
             }
+            let HitTarget::Window(win) = target else {
+                return EventOutcome::Redraw;
+            };
             if win == crate::app::PROMPT_WIN {
                 if is_down && self.ui.active_modal().is_none() {
                     self.ui.set_focus(win);
@@ -365,22 +369,32 @@ impl TuiApp {
         }
     }
 
-    /// Fire a pointer `WinEvent` (`Press`/`Release`/`Drag`) on `win` with
+    /// Fire a pointer `WinEvent` (`Press`/`Release`/`Drag`) on `target` with
     /// leaf-relative cell coords. Coords are clamped to `(0, 0)` when the leaf
     /// has no live viewport (the event landed during a hit-test stale frame).
     fn fire_pointer_event(
         &mut self,
-        win: WinId,
+        target: HitTarget,
         event: crate::smelt_edit::WinEvent,
         me: MouseEvent,
         button: crate::smelt_edit::MouseButton,
     ) {
-        let rect = self
-            .ui
-            .win(win)
-            .and_then(|w| w.viewport)
-            .map(|v| v.rect)
-            .or_else(|| self.ui.paint_rect(crate::smelt_edit::PaintId::from(win)));
+        let (leaf, rect) = match target {
+            HitTarget::Window(win) => {
+                let rect = self
+                    .ui
+                    .win(win)
+                    .and_then(|w| w.viewport)
+                    .map(|v| v.rect)
+                    .or_else(|| self.ui.paint_rect(crate::smelt_edit::PaintId::from(win)));
+                (win, rect)
+            }
+            HitTarget::Paint(paint) => {
+                let rect = self.ui.paint_rect(paint);
+                (WinId(paint.0), rect)
+            }
+            HitTarget::Scrollbar { .. } | HitTarget::Chrome { .. } => return,
+        };
         let (rel_row, rel_col) = match rect {
             Some(rect) => (
                 me.row.saturating_sub(rect.top),
@@ -395,7 +409,7 @@ impl TuiApp {
             lua.queue_invocation(handle, w, payload);
         };
         self.ui.fire_win_event(
-            win,
+            leaf,
             event,
             crate::smelt_edit::Payload::Mouse {
                 row: rel_row,
@@ -821,6 +835,56 @@ mod tests {
         }
         app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
         app
+    }
+
+    #[test]
+    fn paint_leaf_press_keeps_capture_until_release() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        app.ui.set_terminal_size(20, 10);
+        let (paint, _) = app
+            .paint_registry
+            .register(1, Some("test.paint_leaf_mouse".into()));
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        {
+            let events = events.clone();
+            app.ui.leaf_on_event(
+                paint,
+                crate::smelt_edit::WinEvent::Press,
+                crate::smelt_edit::Callback::Rust(Box::new(move |_| {
+                    events.borrow_mut().push("press");
+                    crate::smelt_edit::CallbackResult::Consumed
+                })),
+            );
+        }
+        {
+            let events = events.clone();
+            app.ui.leaf_on_event(
+                paint,
+                crate::smelt_edit::WinEvent::Release,
+                crate::smelt_edit::Callback::Rust(Box::new(move |_| {
+                    events.borrow_mut().push("release");
+                    crate::smelt_edit::CallbackResult::Consumed
+                })),
+            );
+        }
+        app.ui.overlay_open(
+            crate::smelt_edit::Overlay::new(
+                crate::smelt_edit::LayoutTree::leaf(paint),
+                crate::smelt_edit::layout::Anchor::ScreenCenter,
+            )
+            .with_size((4, 2)),
+        );
+        let rect = app.ui.paint_rect(paint).expect("paint leaf rect");
+
+        app.handle_mouse(left_down(rect.top, rect.left));
+        assert_eq!(app.ui.capture(), Some(HitTarget::Paint(paint)));
+        app.handle_mouse(left_up(
+            rect.top + rect.height + 1,
+            rect.left + rect.width + 1,
+        ));
+
+        assert_eq!(app.ui.capture(), None);
+        assert_eq!(&*events.borrow(), &["press", "release"]);
     }
 
     #[test]

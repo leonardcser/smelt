@@ -271,8 +271,13 @@ local function on_press()
 		state.timer = nil
 	end
 	state.held = true
-	state.sim = seeded_sim()
-	state.fire_pixels = step_sim(state.sim, math.min(1, 1 / SIM_RAMP_TICKS))
+	if state.sim then
+		state.sim.cooldown = 0
+	else
+		state.sim = seeded_sim()
+	end
+	local envelope = math.min(1, math.max(1, state.sim.tick + 1) / SIM_RAMP_TICKS)
+	state.fire_pixels = step_sim(state.sim, envelope)
 	state.timer = smelt.timer.set(SIM_DELAY_MS, tick_animation)
 end
 

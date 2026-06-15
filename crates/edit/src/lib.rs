@@ -355,36 +355,37 @@ impl Ui {
         count
     }
 
-    /// Hit-test a primary-button Down/Drag/Up against any leaf (splits or overlay).
-    /// Latches capture on Down; returns `(win, click_count)` where `click_count`
+    /// Hit-test a primary-button Down/Drag/Up against any content leaf (splits or overlay).
+    /// Latches capture on Down; returns `(target, click_count)` where `click_count`
     /// is 0 for Drag/Up. Up clears capture. Call only when `dispatch_event`
     /// returned `Ignored` - that method owns scrollbar drag and modal blocking.
-    /// Overlay leaves participate so a `selectable` notification or dialog body
-    /// can drive its own selection through `Window::handle_mouse`.
+    /// Overlay leaves participate so custom paint leaves and selectable dialog bodies
+    /// can receive captured press / drag / release events.
     pub fn resolve_split_mouse(
         &mut self,
         me: crossterm::event::MouseEvent,
         now: std::time::Instant,
-    ) -> Option<(WinId, u8)> {
+    ) -> Option<(HitTarget, u8)> {
         use crossterm::event::{MouseButton, MouseEventKind};
         match me.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                let win = match self.hit_test(me.row, me.column, None)? {
-                    HitTarget::Window(w) => w,
+                let target = match self.hit_test(me.row, me.column, None)? {
+                    HitTarget::Window(w) => HitTarget::Window(w),
+                    HitTarget::Paint(p) => HitTarget::Paint(p),
                     _ => return None,
                 };
-                self.set_capture(HitTarget::Window(win));
+                self.set_capture(target);
                 let count = self.record_click(me.row, me.column, now);
-                Some((win, count))
+                Some((target, count))
             }
             MouseEventKind::Drag(MouseButton::Left) => match self.capture {
-                Some(HitTarget::Window(win)) => Some((win, 0)),
+                Some(target @ (HitTarget::Window(_) | HitTarget::Paint(_))) => Some((target, 0)),
                 _ => None,
             },
             MouseEventKind::Up(MouseButton::Left) => match self.capture {
-                Some(HitTarget::Window(win)) => {
+                Some(target @ (HitTarget::Window(_) | HitTarget::Paint(_))) => {
                     self.clear_capture();
-                    Some((win, 0))
+                    Some((target, 0))
                 }
                 _ => None,
             },
@@ -608,6 +609,7 @@ impl Ui {
                 HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
                     removed.layout.contains_leaf(w)
                 }
+                HitTarget::Paint(p) => removed.layout.contains_leaf(p),
             };
             if owned {
                 self.capture = None;
@@ -750,6 +752,7 @@ impl Ui {
         if let Some((id, target)) = self.overlay_hit_test(row, col, cursor) {
             return Some(match target {
                 OverlayHitTarget::Window(w) => HitTarget::Window(w),
+                OverlayHitTarget::Paint(p) => HitTarget::Paint(p),
                 OverlayHitTarget::Scrollbar(w) => HitTarget::Scrollbar { owner: w },
                 OverlayHitTarget::Chrome(action) => HitTarget::Chrome { owner: id, action },
             });
@@ -771,7 +774,10 @@ impl Ui {
                 {
                     return Some(HitTarget::Scrollbar { owner: bar_owner });
                 }
-                return Some(HitTarget::Window(win));
+                if self.wins.contains_key(&win) {
+                    return Some(HitTarget::Window(win));
+                }
+                return Some(HitTarget::Paint(paint_id));
             }
         }
         None
@@ -823,7 +829,10 @@ impl Ui {
                     {
                         return Some((id, OverlayHitTarget::Scrollbar(win)));
                     }
-                    return Some((id, OverlayHitTarget::Window(win)));
+                    if self.wins.contains_key(&win) {
+                        return Some((id, OverlayHitTarget::Window(win)));
+                    }
+                    return Some((id, OverlayHitTarget::Paint(*paint_id)));
                 }
             }
             return Some((
@@ -1120,6 +1129,16 @@ impl Ui {
         None
     }
 
+    /// Returns the `OverlayId` of the open overlay whose layout contains `paint`, if any.
+    pub fn overlay_for_paint(&self, paint: PaintId) -> Option<OverlayId> {
+        for (id, ov) in &self.overlays {
+            if ov.layout.contains_leaf(paint) {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
     #[cfg(test)]
     fn focus_history(&self) -> &[WinId] {
         &self.focus_history
@@ -1304,6 +1323,9 @@ impl Ui {
         match target {
             HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
                 self.splits().contains_leaf(w) || self.overlay_for_leaf(w).is_some()
+            }
+            HitTarget::Paint(p) => {
+                self.splits().contains_leaf(p) || self.overlay_for_paint(p).is_some()
             }
             HitTarget::Chrome { owner, .. } => self.overlays.iter().any(|(id, _)| *id == owner),
         }
@@ -1641,6 +1663,7 @@ impl Ui {
                         let raise = match hit {
                             Some(HitTarget::Chrome { owner, .. }) => Some(owner),
                             Some(HitTarget::Window(w)) => self.overlay_for_leaf(w),
+                            Some(HitTarget::Paint(p)) => self.overlay_for_paint(p),
                             _ => None,
                         };
                         if let Some(owner) = raise {
@@ -1665,6 +1688,21 @@ impl Ui {
                                         overlay::BodyDrag::Always => true,
                                         overlay::BodyDrag::Inert => {
                                             !leaf_focusable && !leaf_selectable
+                                        }
+                                    };
+                                    can_drag.then_some((owner, overlay::ChromeAction::Move))
+                                })
+                            }
+                            Some(HitTarget::Paint(p)) => {
+                                self.overlay_for_paint(p).and_then(|owner| {
+                                    let body_drag = self
+                                        .overlay(owner)
+                                        .map(|o| o.draggable.body)
+                                        .unwrap_or(overlay::BodyDrag::Never);
+                                    let can_drag = match body_drag {
+                                        overlay::BodyDrag::Never => false,
+                                        overlay::BodyDrag::Always | overlay::BodyDrag::Inert => {
+                                            true
                                         }
                                     };
                                     can_drag.then_some((owner, overlay::ChromeAction::Move))
@@ -2595,6 +2633,18 @@ mod tests {
         ui.set_layout(LayoutTree::vbox(leaves));
     }
 
+    fn register_window(ui: &mut Ui, win_id: WinId) {
+        let buf = ui.buf_create(BufCreateOpts::default());
+        assert!(ui.win_open_split_at(
+            win_id,
+            buf,
+            SplitConfig {
+                region: format!("test:{}", win_id.0),
+                gutters: layout::Gutters::default(),
+            },
+        ));
+    }
+
     #[test]
     fn render_prepare_hook_materializes_before_window_layout() {
         let mut ui = make_ui();
@@ -2998,6 +3048,7 @@ mod tests {
     #[test]
     fn overlay_hit_test_window_inside_leaf() {
         let mut ui = make_ui();
+        register_window(&mut ui, WinId(99));
         // 40x10 overlay centered at (7, 20)..(17, 60); single Leaf.
         let id = ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
         let hit = ui.overlay_hit_test(10, 30, None).unwrap();
@@ -3008,6 +3059,7 @@ mod tests {
     #[test]
     fn overlay_hit_test_chrome_when_inside_overlay_outside_leaves() {
         let mut ui = make_ui();
+        register_window(&mut ui, WinId(99));
         // Outer Vbox with single-border + inner Hbox of fixed width
         // gives the overlay a concrete (42, 10) natural size centered
         // at (7, 19). Border consumes the top/bottom row + left/right
@@ -3485,10 +3537,22 @@ mod tests {
     #[test]
     fn hit_test_returns_overlay_window_when_overlay_covers_point() {
         let mut ui = make_ui();
+        register_window(&mut ui, WinId(99));
         ui.overlay_open(sized_overlay(40, 10, layout::Anchor::ScreenCenter));
         // Centered (7,20)..(17,60); (10,30) lands on the leaf.
         let hit = ui.hit_test(10, 30, None).unwrap();
         assert!(matches!(hit, HitTarget::Window(WinId(99))));
+    }
+
+    #[test]
+    fn hit_test_returns_overlay_paint_when_paint_leaf_covers_point() {
+        let mut ui = make_ui();
+        let paint = PaintId(1u64 << 32);
+        ui.overlay_open(
+            Overlay::new(LayoutTree::leaf(paint), layout::Anchor::ScreenCenter).with_size((40, 10)),
+        );
+        let hit = ui.hit_test(10, 30, None).unwrap();
+        assert_eq!(hit, HitTarget::Paint(paint));
     }
 
     #[test]
@@ -4780,11 +4844,11 @@ mod tests {
             5,
         );
         let resolved = ui.resolve_split_mouse(me, std::time::Instant::now());
-        assert_eq!(resolved, Some((win, 1)));
+        assert_eq!(resolved, Some((HitTarget::Window(win), 1)));
         assert_eq!(ui.capture(), Some(HitTarget::Window(win)));
         // A second Down on the same cell increments the click count.
         let resolved = ui.resolve_split_mouse(me, std::time::Instant::now());
-        assert_eq!(resolved, Some((win, 2)));
+        assert_eq!(resolved, Some((HitTarget::Window(win), 2)));
     }
 
     #[test]
@@ -4800,7 +4864,7 @@ mod tests {
             50,
         );
         let resolved = ui.resolve_split_mouse(drag, std::time::Instant::now());
-        assert_eq!(resolved, Some((win, 0)));
+        assert_eq!(resolved, Some((HitTarget::Window(win), 0)));
         assert_eq!(ui.capture(), Some(HitTarget::Window(win)));
     }
 
@@ -4815,7 +4879,7 @@ mod tests {
             0,
         );
         let resolved = ui.resolve_split_mouse(up, std::time::Instant::now());
-        assert_eq!(resolved, Some((win, 0)));
+        assert_eq!(resolved, Some((HitTarget::Window(win), 0)));
         assert_eq!(ui.capture(), None);
     }
 
