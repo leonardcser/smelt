@@ -218,6 +218,7 @@ impl QueuedInput {
         QueuedInput::Request(Box::new(QueuedRequest::prompt(display, content)))
     }
 
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) fn request_from_text(display: impl Into<String>, text: impl Into<String>) -> Self {
         QueuedInput::request(display, Content::text(text.into()))
     }

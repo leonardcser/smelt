@@ -159,9 +159,9 @@ pub struct PlaceholderOpts {
     pub dismiss_keys: Vec<crate::smelt_edit::KeyBind>,
 }
 
-pub(crate) use queue::{
-    InputQueues, QueueStage, QueuedInput, QueuedTurnOptions, MAX_QUEUED_MESSAGES,
-};
+#[cfg(any(test, feature = "harness"))]
+pub(crate) use queue::MAX_QUEUED_MESSAGES;
+pub(crate) use queue::{InputQueues, QueueStage, QueuedInput, QueuedTurnOptions};
 pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
 
 /// Stack of live `smelt.work.busy` tokens. Each `push` returns a
