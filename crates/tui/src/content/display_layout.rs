@@ -110,13 +110,15 @@ pub(crate) struct DisplayLayoutCacheEntry {
     pub(crate) layout: LayoutIr,
 }
 
-pub(crate) struct CompileJob {
-    id: RenderNodeId,
-    block_id: BlockId,
-    index: usize,
-    key: DisplayCacheKey,
-    block: Block,
-    state: Option<ToolState>,
+pub(crate) enum CompileJob {
+    Block {
+        id: RenderNodeId,
+        block_id: BlockId,
+        index: usize,
+        key: DisplayCacheKey,
+        block: Block,
+        state: Option<ToolState>,
+    },
 }
 
 impl CompileJob {
@@ -124,19 +126,20 @@ impl CompileJob {
         self,
         env: TranscriptRenderEnv<'_>,
     ) -> (RenderNodeId, DisplayCacheKey, LayoutIr) {
-        let Self {
-            id,
-            block_id,
-            index,
-            key,
-            block,
-            state,
-        } = self;
-        (
-            id,
-            key,
-            compile_block_with_lua(env, block_id, index, &block, state.as_ref()),
-        )
+        match self {
+            Self::Block {
+                id,
+                block_id,
+                index,
+                key,
+                block,
+                state,
+            } => (
+                id,
+                key,
+                compile_block_with_lua(env, block_id, index, &block, state.as_ref()),
+            ),
+        }
     }
 }
 
@@ -228,10 +231,7 @@ impl DisplayModel {
             {
                 continue;
             }
-            let Some(block_id) = id.as_block_id() else {
-                self.blocks.remove(&id);
-                continue;
-            };
+            let RenderNodeId::Block(block_id) = id;
             let Some(block) = history.blocks.get(&block_id).cloned() else {
                 self.blocks.remove(&id);
                 continue;
@@ -240,7 +240,7 @@ impl DisplayModel {
                 Block::ToolCall { call_id, .. } => history.tool_state(call_id).cloned(),
                 _ => None,
             };
-            jobs.push(CompileJob {
+            jobs.push(CompileJob::Block {
                 id,
                 block_id,
                 index,
@@ -359,12 +359,10 @@ fn display_layout_entry_matches_history(
     if entry.key.renderer_cache_key.is_none() {
         return false;
     }
-    if !plan.ids().any(|id| id == entry.id) {
+    if !plan.contains_id(entry.id) {
         return false;
     }
-    let Some(block_id) = entry.id.as_block_id() else {
-        return false;
-    };
+    let RenderNodeId::Block(block_id) = entry.id;
     let Some(block) = history.blocks.get(&block_id) else {
         return false;
     };
@@ -713,7 +711,7 @@ mod tests {
     use smelt_core::transcript_model::LayoutKey;
 
     fn base_key(history: &BlockHistory, id: BlockId) -> NodeLayoutKey {
-        NodeLayoutKey::from_block_key(history.resolve_key(
+        history.resolve_key(
             id,
             LayoutKey {
                 width: 80,
@@ -722,7 +720,7 @@ mod tests {
                 content_hash: 0,
                 sidecar_hash: 0,
             },
-        ))
+        )
     }
 
     fn rendered_rows(block: &LayoutIr, width: u16) -> u64 {

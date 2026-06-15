@@ -1,4 +1,5 @@
-use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum RenderNodeId {
@@ -13,36 +14,7 @@ impl RenderNodeId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct NodeLayoutKey {
-    pub(crate) width: u16,
-    pub(crate) show_thinking: bool,
-    pub(crate) view_state: ViewState,
-    pub(crate) content_hash: u64,
-    pub(crate) sidecar_hash: u64,
-}
-
-impl NodeLayoutKey {
-    pub(crate) fn from_block_key(key: LayoutKey) -> Self {
-        Self {
-            width: key.width,
-            show_thinking: key.show_thinking,
-            view_state: key.view_state,
-            content_hash: key.content_hash,
-            sidecar_hash: key.sidecar_hash,
-        }
-    }
-
-    pub(crate) fn into_block_key(self) -> LayoutKey {
-        LayoutKey {
-            width: self.width,
-            show_thinking: self.show_thinking,
-            view_state: self.view_state,
-            content_hash: self.content_hash,
-            sidecar_hash: self.sidecar_hash,
-        }
-    }
-}
+pub(crate) type NodeLayoutKey = LayoutKey;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RenderNode {
@@ -67,6 +39,7 @@ impl RenderNode {
 pub(crate) struct RenderPlan {
     pub(crate) history_generation: u64,
     pub(crate) nodes: Vec<RenderNode>,
+    index_by_id: HashMap<RenderNodeId, usize>,
     pub(crate) fingerprint: u64,
 }
 
@@ -75,21 +48,29 @@ impl RenderPlan {
         Self {
             history_generation: 0,
             nodes: Vec::new(),
+            index_by_id: HashMap::new(),
             fingerprint: 0,
         }
     }
 
     pub(crate) fn for_history(history: &BlockHistory) -> Self {
-        let nodes = history
+        let nodes: Vec<_> = history
             .order
             .iter()
             .copied()
             .enumerate()
             .map(|(block_index, id)| RenderNode::Block { id, block_index })
             .collect();
+        let index_by_id = nodes
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, node)| (node.id(), index))
+            .collect();
         Self {
             history_generation: history.generation(),
             nodes,
+            index_by_id,
             fingerprint: history.generation(),
         }
     }
@@ -100,6 +81,10 @@ impl RenderPlan {
 
     pub(crate) fn node_id(&self, index: usize) -> Option<RenderNodeId> {
         self.nodes.get(index).copied().map(RenderNode::id)
+    }
+
+    pub(crate) fn contains_id(&self, id: RenderNodeId) -> bool {
+        self.index_by_id.contains_key(&id)
     }
 
     pub(crate) fn block_id(&self, index: usize) -> Option<BlockId> {
@@ -119,9 +104,7 @@ impl RenderPlan {
             return None;
         }
         let block_id = self.block_id(index)?;
-        Some(NodeLayoutKey::from_block_key(
-            history.resolve_key(block_id, base_key),
-        ))
+        Some(history.resolve_key(block_id, base_key))
     }
 
     pub(crate) fn ids(&self) -> impl Iterator<Item = RenderNodeId> + '_ {

@@ -753,14 +753,13 @@ fn render_cached_layout_to_buffer(
     history: &BlockHistory,
 ) -> Option<(Buffer, usize)> {
     let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
-    let block_key = key.into_block_key();
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let outcome = render_block_into(
         &mut buf,
         layout,
         RenderCtx {
-            width: block_key.width,
-            view_state: block_key.view_state,
+            width: key.width,
+            view_state: key.view_state,
             theme,
             history: Some(history),
         },
@@ -1179,9 +1178,7 @@ impl TranscriptProjection {
                 (history.block_gap(i) as RowIndex).min(exact_height)
             };
             running_total = running_total.saturating_add(gap);
-            let Some(block_id) = node.id.as_block_id() else {
-                continue;
-            };
+            let RenderNodeId::Block(block_id) = node.id;
             layout.push(LayoutEntry {
                 id: block_id,
                 start: running_total,
@@ -1546,7 +1543,7 @@ impl TranscriptProjection {
         for block_index in block_indices {
             let id = self.measurements.active.nodes[block_index].id;
             let key = self.measurements.active.nodes[block_index].key;
-            self.append_projected_block(history, theme, block_index, id, key, &mut rows);
+            self.append_projected_node(history, theme, block_index, id, key, &mut rows);
         }
 
         self.measurements.active.refresh_prefix_rows();
@@ -1558,6 +1555,19 @@ impl TranscriptProjection {
             layout,
             row_anchors,
         }
+    }
+
+    fn append_projected_node(
+        &mut self,
+        history: &BlockHistory,
+        theme: &Theme,
+        block_index: usize,
+        id: RenderNodeId,
+        key: NodeLayoutKey,
+        rows: &mut ProjectRows<'_>,
+    ) {
+        let RenderNodeId::Block(_) = id;
+        self.append_projected_block(history, theme, block_index, id, key, rows);
     }
 
     fn append_projected_block(
@@ -1583,6 +1593,7 @@ impl TranscriptProjection {
             return;
         };
         let gap = history.rendered_block_gap(block_index, block_rows);
+        let RenderNodeId::Block(block_id) = id;
         self.set_exact_height(
             block_index,
             (gap as usize).saturating_add(block_rows) as RowIndex,
@@ -1591,9 +1602,6 @@ impl TranscriptProjection {
             rows.texts.push(String::new());
             rows.row_anchors.push(None);
         }
-        let Some(block_id) = id.as_block_id() else {
-            return;
-        };
         let block_anchors = rendered_row_anchors(&block_buf, block_id, block_rows);
         let local_start = rows.texts.len() as RowIndex;
         for (r, anchor) in block_anchors.iter().copied().enumerate() {

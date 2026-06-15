@@ -49,6 +49,7 @@ mod task;
 mod timer;
 mod tools;
 mod transcript;
+mod transcript_groups;
 mod trust;
 
 use mlua::prelude::*;

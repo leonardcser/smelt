@@ -273,7 +273,7 @@ mod tests {
     use crate::content::display_layout::{
         DisplayCacheKey, DisplayLayoutCacheEntry, DisplayRowIndexEntry, DisplayRowIndexNode,
     };
-    use crate::content::render_plan::{NodeLayoutKey, RenderNodeId};
+    use crate::content::render_plan::RenderNodeId;
     use smelt_core::content::block_layout::{BlockLayout, LayoutLeaf, RunsSpec};
     use smelt_core::transcript_model::{BlockId, LayoutKey, ViewState};
 
@@ -285,13 +285,13 @@ mod tests {
             renderer_cache_key: Some(1),
             nodes: vec![DisplayRowIndexNode {
                 id: RenderNodeId::Block(BlockId::new(7)),
-                key: NodeLayoutKey::from_block_key(LayoutKey {
+                key: LayoutKey {
                     view_state: ViewState::Expanded,
                     width: 80,
                     show_thinking: false,
                     content_hash: 1,
                     sidecar_hash: 2,
-                }),
+                },
                 exact_height: 3,
             }],
         }

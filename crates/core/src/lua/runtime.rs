@@ -1466,6 +1466,68 @@ impl LuaRuntime {
             .specs()
     }
 
+    pub fn render_transcript_group_layout(
+        &self,
+        name: &str,
+        group: &serde_json::Value,
+        ctx: TranscriptRenderCtx,
+    ) -> BlockLayout {
+        let render_fn = {
+            let registry = self
+                .shared
+                .transcript_groups
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(entry) = registry.entries.get(name) else {
+                return fallback_transcript_group_layout(name);
+            };
+            match self.lua.registry_value::<mlua::Function>(&entry.render.key) {
+                Ok(f) => f,
+                Err(e) => {
+                    self.record_error(format!(
+                        "transcript group render `{name}`: renderer handle: {e}"
+                    ));
+                    return fallback_transcript_group_layout(name);
+                }
+            }
+        };
+
+        let group_table = match transcript_group_to_lua_table(&self.lua, name, group) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!(
+                    "transcript group render `{name}`: build group: {e}"
+                ));
+                return fallback_transcript_group_layout(name);
+            }
+        };
+        let ctx_table = match transcript_render_ctx_to_lua_table(
+            &self.lua,
+            ctx.show_thinking,
+            self.transcript_renderer_generation(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                self.record_error(format!("transcript group render `{name}`: build ctx: {e}"));
+                return fallback_transcript_group_layout(name);
+            }
+        };
+
+        let result: mlua::Value = match render_fn.call((group_table, ctx_table)) {
+            Ok(v) => v,
+            Err(e) => {
+                self.record_error(format!("transcript group render `{name}`: {e}"));
+                return fallback_transcript_group_layout(name);
+            }
+        };
+        transcript_layout_from_lua_value(
+            self,
+            result,
+            &format!("transcript group render `{name}`"),
+            || fallback_transcript_group_layout(name),
+        )
+    }
+
     /// Call the root transcript renderer and return its layout tree. Renderer
     /// errors, nil returns, invalid return types, or missing renderers use a
     /// small Rust fallback layout so transcript projection stays usable.
@@ -1525,35 +1587,13 @@ impl LuaRuntime {
             }
         };
 
-        match result {
-            mlua::Value::UserData(ud) => {
-                match ud.borrow::<crate::lua::api::layout::LuaBlockLayout>() {
-                    Ok(layout) => layout.0.clone(),
-                    Err(e) => {
-                        self.record_error(format!(
-                            "transcript render `{}` #{index}: expected smelt.layout value: {e}",
-                            transcript_block_kind(block)
-                        ));
-                        fallback_transcript_layout(block, state, ctx.show_thinking)
-                    }
-                }
-            }
-            mlua::Value::Nil => {
-                self.record_error(format!(
-                    "transcript render `{}` #{index}: returned nil; use smelt.layout.empty() to hide a block",
-                    transcript_block_kind(block)
-                ));
-                fallback_transcript_layout(block, state, ctx.show_thinking)
-            }
-            other => {
-                self.record_error(format!(
-                    "transcript render `{}` #{index}: expected smelt.layout value, got {}",
-                    transcript_block_kind(block),
-                    other.type_name()
-                ));
-                fallback_transcript_layout(block, state, ctx.show_thinking)
-            }
-        }
+        let label = format!(
+            "transcript render `{}` #{index}",
+            transcript_block_kind(block)
+        );
+        transcript_layout_from_lua_value(self, result, &label, || {
+            fallback_transcript_layout(block, state, ctx.show_thinking)
+        })
     }
 
     fn args_to_lua_table(
@@ -1926,6 +1966,60 @@ fn transcript_render_ctx_to_lua_table(
     Ok(ctx)
 }
 
+fn transcript_group_to_lua_table(
+    lua: &Lua,
+    name: &str,
+    group: &serde_json::Value,
+) -> LuaResult<mlua::Table> {
+    let value = json_to_lua(lua, group)?;
+    let mlua::Value::Table(table) = value else {
+        return Err(mlua::Error::external("group must encode to a Lua table"));
+    };
+    table.set(
+        "kind",
+        table
+            .get::<Option<String>>("kind")?
+            .unwrap_or_else(|| "group".into()),
+    )?;
+    table.set(
+        "name",
+        table
+            .get::<Option<String>>("name")?
+            .unwrap_or_else(|| name.to_string()),
+    )?;
+    Ok(table)
+}
+
+fn transcript_layout_from_lua_value(
+    runtime: &LuaRuntime,
+    result: mlua::Value,
+    label: &str,
+    fallback: impl FnOnce() -> BlockLayout,
+) -> BlockLayout {
+    match result {
+        mlua::Value::UserData(ud) => match ud.borrow::<crate::lua::api::layout::LuaBlockLayout>() {
+            Ok(layout) => layout.0.clone(),
+            Err(e) => {
+                runtime.record_error(format!("{label}: expected smelt.layout value: {e}"));
+                fallback()
+            }
+        },
+        mlua::Value::Nil => {
+            runtime.record_error(format!(
+                "{label}: returned nil; use smelt.layout.empty() to hide a node"
+            ));
+            fallback()
+        }
+        other => {
+            runtime.record_error(format!(
+                "{label}: expected smelt.layout value, got {}",
+                other.type_name()
+            ));
+            fallback()
+        }
+    }
+}
+
 fn transcript_block_to_lua_table(
     lua: &Lua,
     id: BlockId,
@@ -2177,6 +2271,14 @@ fn layout_text(content: impl Into<String>, hl_group: Option<&str>, ansi: bool) -
         hl_group: hl_group.map(str::to_string),
         ansi,
     }))
+}
+
+fn fallback_transcript_group_layout(name: &str) -> BlockLayout {
+    layout_text(
+        format!("{name} group render error"),
+        Some("ErrorMsg"),
+        false,
+    )
 }
 
 fn fallback_transcript_layout(
@@ -2738,6 +2840,7 @@ mod tests {
                   and type(smelt.transcript.extend_renderer) == "function"
                   and type(smelt.transcript.groups.register) == "function"
                   and type(smelt.transcript.defaults.render) == "function"
+                  and type(smelt.transcript.defaults.render_group_child_list) == "function"
                   and smelt.transcript.get_renderer() ~= nil
             "#,
             )
@@ -2838,6 +2941,38 @@ mod tests {
             .exec()
             .unwrap();
         assert_eq!(rt.transcript_group_cache_key(), None);
+    }
+
+    #[test]
+    fn transcript_group_renderer_can_be_invoked_by_rust() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.transcript.groups.register({
+                  name = "batch",
+                  cache_key = "v1",
+                  selector = { kind = "tool" },
+                  render = function(group, ctx)
+                    return smelt.layout.text(group.name .. ":" .. tostring(group.count) .. ":" .. tostring(ctx.show_thinking))
+                  end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+
+        let layout = rt.render_transcript_group_layout(
+            "batch",
+            &serde_json::json!({ "count": 3 }),
+            TranscriptRenderCtx {
+                show_thinking: true,
+            },
+        );
+        match layout {
+            BlockLayout::Leaf(LuaLeaf::Text(spec)) => assert_eq!(spec.content, "batch:3:true"),
+            other => panic!("unexpected layout: {other:?}"),
+        }
     }
 
     #[test]

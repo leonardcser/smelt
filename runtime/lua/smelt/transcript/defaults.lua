@@ -435,6 +435,50 @@ function smelt.transcript.defaults.render_unknown(block, ctx)
   return layout.text(block.content or block.text or block.summary or "")
 end
 
+local function field_path_value(item, field)
+  if type(field) == "string" then field = { field } end
+  if type(field) ~= "table" then return nil end
+  local value = item
+  for _, key in ipairs(field) do
+    if type(value) ~= "table" then return nil end
+    value = value[key]
+    if value == nil then return nil end
+  end
+  return value
+end
+
+local function child_failed(child)
+  return child.status == "err" or (child.output and child.output.is_error == true)
+end
+
+--- Render a compact ordered child list for collapsed group nodes. Failed children
+--- stay in place and use a plain error highlight; expand the group for details.
+---@type fun(group: table, ctx: smelt.transcript.Context, opts: table?): table
+function smelt.transcript.defaults.render_group_child_list(group, ctx, opts)
+  local _ = ctx
+  opts = opts or {}
+  local children = group.children or group.blocks or {}
+  local max = opts.max or #children
+  local lines = {}
+  for i, child in ipairs(children) do
+    if i > max then break end
+    local value = field_path_value(child, opts.field) or child.summary_text or child.name or child.text or child.content or ""
+    local text = tostring(value)
+    local span = { text = (opts.prefix or "  ") .. text }
+    if child_failed(child) then
+      span.hl = opts.error_hl or "ErrorMsg"
+      span.dim = opts.error_dim ~= false
+    elseif opts.dim ~= false then
+      span.dim = true
+    end
+    lines[#lines + 1] = { span }
+  end
+  if #children > max then
+    lines[#lines + 1] = { { text = (opts.prefix or "  ") .. "… " .. tostring(#children - max) .. " more", dim = true, selectable = false } }
+  end
+  return layout.runs(lines)
+end
+
 package.loaded["smelt.transcript.defaults"] = M
 
 return M

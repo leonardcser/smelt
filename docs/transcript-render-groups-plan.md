@@ -205,6 +205,8 @@ The grouping algorithm is intentionally small:
 4. Emit `RenderNode::Group` when run length is at least `min`; otherwise emit normal block nodes.
 5. Never skip over non-matching blocks and never create nested groups.
 
+Failure policy for grouped tool runs: preserve linearity and keep adjacent matching calls in the same group even if one child failed. Collapsed rendering should stay simple: list the same child identifiers (path/pattern/glob) in order and style failed children with an error highlight, optionally dimmed. The full error message remains in the expanded view. Do not split around failures and do not pull later successes across an error.
+
 `render` is mandatory. It returns the same `smelt.layout` tree used by ordinary transcript renderers; Rust compiles that tree into `LayoutIr`. This keeps Rust out of group presentation entirely.
 
 Possible declarative registration fields for the first pass:
