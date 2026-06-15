@@ -6,7 +6,7 @@
 //! emission helpers used by transcript rendering.
 
 use crate::style::Style;
-pub use smelt_ansi::{AnsiSpan, parse_ansi};
+pub use smelt_ansi::{parse_ansi, AnsiSpan};
 use smelt_buffer::wrap::wrap_line_ranges;
 
 /// Cumulative byte boundaries for a list of spans.
@@ -168,4 +168,3 @@ mod tests {
         assert_eq!(buf.get_line(2), Some("line3"));
     }
 }
-

@@ -4,7 +4,7 @@
 //! use it without depending on the renderer. This module re-exports that parser
 //! and adds adapters for [`Line`] / [`Span`].
 
-pub use smelt_ansi::{AnsiSpan, parse_ansi};
+pub use smelt_ansi::{parse_ansi, AnsiSpan};
 
 use crate::{Line, Span};
 
@@ -30,7 +30,7 @@ pub fn parse_ansi_line(text: &str) -> Line<'static> {
 pub fn parse_ansi_lines(text: &str) -> Vec<Line<'static>> {
     smelt_ansi::parse_ansi_lines(text)
         .into_iter()
-                .map(|spans| {
+        .map(|spans| {
             Line::from_spans(
                 spans
                     .into_iter()

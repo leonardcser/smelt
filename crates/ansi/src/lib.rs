@@ -245,13 +245,7 @@ fn apply_sgr(params: &str, mut style: Style) -> Style {
 fn parse_sgr_params(params: &str) -> Vec<Option<u16>> {
     params
         .split([';', ':'])
-        .map(|s| {
-            if s.is_empty() {
-                None
-            } else {
-                s.parse().ok()
-            }
-        })
+        .map(|s| if s.is_empty() { None } else { s.parse().ok() })
         .collect()
 }
 
@@ -490,4 +484,3 @@ mod tests {
         assert_eq!(lines[1][0].text, "two");
     }
 }
-
