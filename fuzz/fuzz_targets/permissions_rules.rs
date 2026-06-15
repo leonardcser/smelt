@@ -7,7 +7,7 @@ use smelt_core::permissions::rules::{
 };
 use smelt_core::permissions::{
     builtin_subpattern_parser, split_shell_commands, split_shell_commands_with_ops, Decision,
-    PermissionRequirement, Permissions, ToolOrigin,
+    PermissionRequirement, Permissions, ToolOrigin, ToolPath,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,7 +151,7 @@ fn path_resolver() -> Arc<smelt_core::permissions::PathsFn> {
             .get("path")
             .and_then(serde_json::Value::as_str)
             .filter(|path| !path.is_empty())
-            .map(|path| vec![path.to_string()])
+            .map(|path| vec![ToolPath::unknown(path.to_string())])
             .unwrap_or_default(),
         _ => Vec::new(),
     })
