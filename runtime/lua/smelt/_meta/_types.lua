@@ -453,6 +453,7 @@
 ---@field index integer Zero-based block index in transcript order.
 ---@field kind "user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"mode"|"process_status"|"compacted" Block kind.
 ---@field text? string User/mode/process text.
+---@field user_lines? table User text as styled span lines, including slash/ref/image accents.
 ---@field content? string Assistant/thinking/code content.
 ---@field image_labels? string[] User image labels.
 ---@field icon? string Mode icon.
@@ -471,6 +472,7 @@
 ---@field user_message? string Tool user-facing status message.
 ---@field output? smelt.transcript.ToolOutput Tool output snapshot.
 ---@field command? string Exec command.
+---@field command_spans? table Exec command as one styled span line, including the `!` accent.
 
 --- Renderer context. Width, theme, and scroll state are intentionally absent.
 ---@class smelt.transcript.Context

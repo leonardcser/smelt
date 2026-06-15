@@ -34,7 +34,7 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
-Render a code block with the current primitive slice.
+Render a code block with syntax highlighting.
 
 ## `smelt.transcript.defaults.render_compacted`
 
@@ -160,8 +160,8 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
 Render a user block. Custom renderers can layer richer panel/text
-annotations; the bundled default keeps the renderer path total and
-fallback-safe with current primitives.
+annotations; the bundled default keeps the same full-width prompt chrome as
+the Rust renderer while leaving the content policy in Lua.
 
 ## `smelt.transcript.defaults.render_user_text`
 

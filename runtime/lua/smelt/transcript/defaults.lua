@@ -236,42 +236,45 @@ function smelt.transcript.defaults.render_tool_output(output, ctx, opts)
   local hl = opts.hl or opts.hl_group
   if not hl and is_error then hl = "ErrorMsg" end
 
-  return layout.cap(
-    layout.gutter(
+  return layout.gutter(
+    layout.cap(
       layout.text(content, {
         hl_group = hl,
         ansi = true,
       }),
-      { text = opts.gutter or "  " }
+      {
+        rows = rows,
+        keep = opts.keep or "tail",
+        marker = opts.marker or "above",
+      }
     ),
-    {
-      rows = rows,
-      keep = opts.keep or "tail",
-      marker = opts.marker or "above",
-    }
+    { text = opts.gutter or "  " }
   )
 end
 
 --- Render a user block. Custom renderers can layer richer panel/text
---- annotations; the bundled default keeps the renderer path total and
---- fallback-safe with current primitives.
+--- annotations; the bundled default keeps the same full-width prompt chrome as
+--- the Rust renderer while leaving the content policy in Lua.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_user(block, ctx)
-  return M.render_user_text(block, ctx)
+  return layout.panel(M.render_user_text(block, ctx), {
+    hl = "SmeltUserBg",
+    padding = 1,
+  })
 end
 
 --- Render user text.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_user_text(block, ctx)
   local _ = ctx
-  return layout.text(block.text or "")
+  return layout.runs(block.user_lines or block.text or "")
 end
 
 --- Render assistant text.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_assistant(block, ctx)
   local _ = ctx
-  return layout.text(block.content or "")
+  return layout.markdown(block.content or "")
 end
 
 --- Render thinking, either expanded with the current gutter or folded to a
@@ -280,26 +283,55 @@ end
 function smelt.transcript.defaults.render_thinking(block, ctx)
   ctx = ctx or {}
   if not ctx.show_thinking then return M.render_thinking_summary(block, ctx) end
-  return layout.gutter(layout.text(block.content or ""), { text = "│ " })
+  return layout.gutter(
+    layout.markdown(block.content or "", {
+      dim = true,
+      italic = true,
+      inline = true,
+    }),
+    { text = "│ ", styled = true }
+  )
 end
 
 --- Render a compact thinking summary.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_thinking_summary(block, ctx)
   local _ = ctx
-  return layout.text(block.thinking_summary or "thinking")
+  return layout.gutter(
+    layout.markdown(block.thinking_summary or "thinking (0 lines)", {
+      dim = true,
+      italic = true,
+      inline = true,
+    }),
+    { text = "│ ", styled = true }
+  )
 end
 
 --- Render an exec block.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_exec(block, ctx)
-  local _ = ctx
+  ctx = ctx or {}
   local items = {}
-  items[#items + 1] = layout.text("!" .. (block.command or ""))
+  local command_spans = block.command_spans or {
+    { text = "!", fg = "SmeltExecPrefix", bold = true },
+    { text = block.command or "", bold = true },
+  }
+  items[#items + 1] = layout.panel(
+    layout.runs({ command_spans }),
+    { hl = "SmeltUserBg", padding = 1 }
+  )
   if block.output and block.output ~= "" then
+    local limits = ctx.limits or {}
     items[#items + 1] = layout.gutter(
-      layout.text(block.output, { ansi = true }),
-      { text = "  " }
+      layout.cap(
+        layout.text(block.output, { ansi = true }),
+        {
+          rows = limits.tool_output_rows or 20,
+          keep = "tail",
+          marker = "above",
+        }
+      ),
+      { text = "  ", styled = true }
     )
   end
   return layout.vbox(items)
@@ -309,8 +341,10 @@ end
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_mode(block, ctx)
   local _ = ctx
-  return layout.text((block.icon or "") .. (block.text or ""), {
-    hl = block.hl_group or "SmeltModeDefault",
+  local hl = block.hl_group or "SmeltModeDefault"
+  return layout.line({
+    { text = block.icon or "", fg = hl },
+    { text = block.text or "", fg = hl, italic = true },
   })
 end
 
@@ -318,7 +352,10 @@ end
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_process_status(block, ctx)
   local _ = ctx
-  return layout.text(block.text or "", { hl = block.hl_group or "SmeltProcess" })
+  local hl = block.hl_group or "SmeltProcess"
+  return layout.runs({ {
+    { text = block.text or "", fg = hl, italic = true },
+  } })
 end
 
 --- Render a compacted-history marker.
@@ -326,18 +363,18 @@ end
 function smelt.transcript.defaults.render_compacted(block, ctx)
   local _ = ctx
   local items = {}
-  items[#items + 1] = layout.text(" compacted ")
+  items[#items + 1] = layout.separator({ label = " compacted ", dim = true })
   if block.summary and block.summary ~= "" then
-    items[#items + 1] = layout.text(block.summary)
+    items[#items + 1] = layout.markdown(block.summary, { dim = true })
   end
   return layout.vbox(items)
 end
 
---- Render a code block with the current primitive slice.
+--- Render a code block with syntax highlighting.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_code(block, ctx)
   local _ = ctx
-  return layout.text(block.content or "")
+  return layout.code(block.content or "", { lang = block.lang or "" })
 end
 
 --- Render unknown block kinds without failing the transcript.

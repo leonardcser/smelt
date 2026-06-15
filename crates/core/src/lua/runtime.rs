@@ -9,6 +9,7 @@ use include_dir::{include_dir, Dir, DirEntry};
 use mlua::prelude::*;
 
 use crate::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
+use crate::content::display_safe_text;
 use crate::lua::{
     json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
 };
@@ -1898,6 +1899,10 @@ fn transcript_block_to_lua_table(
     match block {
         Block::User { text, image_labels } => {
             t.set("text", text.as_str())?;
+            t.set(
+                "user_lines",
+                crate::lua::serde_to_lua(lua, &user_styled_lines(text, image_labels))?,
+            )?;
             let labels = lua.create_table_with_capacity(image_labels.len(), 0)?;
             for (i, label) in image_labels.iter().enumerate() {
                 labels.set(i + 1, label.as_str())?;
@@ -1957,6 +1962,10 @@ fn transcript_block_to_lua_table(
         }
         Block::Exec { command, output } => {
             t.set("command", command.as_str())?;
+            t.set(
+                "command_spans",
+                crate::lua::serde_to_lua(lua, &exec_command_spans(command))?,
+            )?;
             t.set("output", output.as_str())?;
         }
         Block::Compacted { summary } => {
@@ -1991,6 +2000,128 @@ fn tool_output_to_lua_table(
     Ok(t)
 }
 
+fn user_styled_lines(text: &str, image_labels: &[String]) -> protocol::StyledLines {
+    let lines = user_display_lines(text);
+    let command_token_chars = lines
+        .first()
+        .and_then(|line| crate::commands::registered_command_token(line))
+        .map(|token| token.chars().count())
+        .unwrap_or(0);
+    protocol::StyledLines(
+        lines
+            .iter()
+            .enumerate()
+            .map(|(line_idx, line)| {
+                let command_prefix_chars = if line_idx == 0 {
+                    command_token_chars
+                } else {
+                    0
+                };
+                user_line_spans(line, image_labels, command_prefix_chars)
+            })
+            .collect(),
+    )
+}
+
+fn user_display_lines(text: &str) -> Vec<String> {
+    let all_lines: Vec<String> = text
+        .lines()
+        .map(|line| display_safe_text(&line.replace('\t', "    ")))
+        .collect();
+    let start = all_lines
+        .iter()
+        .position(|line| !line.is_empty())
+        .unwrap_or(0);
+    let end = all_lines
+        .iter()
+        .rposition(|line| !line.is_empty())
+        .map_or(0, |idx| idx + 1);
+    all_lines[start..end]
+        .iter()
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
+fn user_line_spans(
+    text: &str,
+    image_labels: &[String],
+    command_prefix_chars: usize,
+) -> Vec<protocol::StyledSpan> {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut out = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0usize;
+
+    let flush_plain = |out: &mut Vec<protocol::StyledSpan>, plain: &mut String| {
+        if !plain.is_empty() {
+            out.push(protocol::StyledSpan {
+                text: std::mem::take(plain),
+                bold: true,
+                ..Default::default()
+            });
+        }
+    };
+    let push_accent = |out: &mut Vec<protocol::StyledSpan>, text: String| {
+        if !text.is_empty() {
+            out.push(protocol::StyledSpan {
+                text,
+                fg: Some("SmeltAccent".into()),
+                bold: true,
+                ..Default::default()
+            });
+        }
+    };
+
+    let take = command_prefix_chars.min(len);
+    if take > 0 {
+        push_accent(&mut out, chars[..take].iter().collect());
+        i = take;
+    }
+
+    while i < len {
+        if chars[i] == '[' {
+            let remaining: String = chars[i..].iter().collect();
+            if let Some(label) = image_labels
+                .iter()
+                .find(|label| remaining.starts_with(label.as_str()))
+            {
+                flush_plain(&mut out, &mut plain);
+                push_accent(&mut out, label.clone());
+                i += label.chars().count();
+                continue;
+            }
+        }
+
+        if let Some((token, end)) = crate::content::selection::try_at_ref(&chars, i) {
+            flush_plain(&mut out, &mut plain);
+            push_accent(&mut out, token);
+            i = end;
+        } else {
+            plain.push(chars[i]);
+            i += 1;
+        }
+    }
+    flush_plain(&mut out, &mut plain);
+    out
+}
+
+fn exec_command_spans(command: &str) -> Vec<protocol::StyledSpan> {
+    vec![
+        protocol::StyledSpan {
+            text: "!".into(),
+            fg: Some("SmeltExecPrefix".into()),
+            bold: true,
+            ..Default::default()
+        },
+        protocol::StyledSpan {
+            text: display_safe_text(command),
+            bold: true,
+            ..Default::default()
+        },
+    ]
+}
+
 fn layout_text(content: impl Into<String>, hl_group: Option<&str>, ansi: bool) -> BlockLayout {
     BlockLayout::Leaf(LuaLeaf::Text(TextSpec {
         content: content.into(),
@@ -2018,6 +2149,7 @@ fn fallback_transcript_layout(
                     child: Box::new(layout_text(content.clone(), None, false)),
                     spec: crate::content::block_layout::GutterSpec {
                         text: "│ ".to_string(),
+                        styled: true,
                     },
                 }
             } else {
@@ -2052,6 +2184,7 @@ fn fallback_transcript_layout(
                     child: Box::new(layout_text(message.to_string(), None, false)),
                     spec: crate::content::block_layout::GutterSpec {
                         text: "  ".to_string(),
+                        styled: false,
                     },
                 });
             }
@@ -2066,6 +2199,7 @@ fn fallback_transcript_layout(
                             )),
                             spec: crate::content::block_layout::GutterSpec {
                                 text: "  ".to_string(),
+                                styled: false,
                             },
                         });
                     }
@@ -2111,22 +2245,35 @@ fn format_elapsed_secs(secs: u64) -> String {
 }
 
 fn thinking_fallback_summary(content: &str) -> String {
-    let non_empty = content
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count();
-    if non_empty == 0 {
-        return "thinking".to_string();
+    let (label, line_count) = thinking_summary(content);
+    format!("{label} ({})", pluralize(line_count, "line", "lines"))
+}
+
+fn thinking_summary(content: &str) -> (String, usize) {
+    let mut label = None;
+    let mut lines = 0usize;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        lines += 1;
+        if label.is_none()
+            && trimmed.starts_with("**")
+            && trimmed.ends_with("**")
+            && trimmed.len() > 4
+        {
+            label = Some(trimmed[2..trimmed.len() - 2].trim().to_string());
+        }
     }
-    let first = content
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(str::trim)
-        .unwrap_or("thinking");
-    if non_empty == 1 {
-        format!("thinking: {first}")
+    (label.unwrap_or_else(|| "thinking".to_string()), lines)
+}
+
+fn pluralize(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
     } else {
-        format!("thinking: {first} (+{} lines)", non_empty.saturating_sub(1))
+        format!("{count} {plural}")
     }
 }
 

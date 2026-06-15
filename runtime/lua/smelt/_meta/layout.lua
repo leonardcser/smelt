@@ -11,6 +11,10 @@ local layout = {}
 ---@type fun(child: any, opts: table): table
 layout.cap = nil
 
+--- Syntax-highlighted code layout leaf. `opts.lang` supplies the language name.
+---@type fun(content: string, opts: table?): table
+layout.code = nil
+
 --- Inline-diff render directive - the worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
 ---@type fun(opts: table): table
 layout.diff = nil
@@ -23,7 +27,7 @@ layout.empty = nil
 ---@type fun(opts: table): table
 layout.file_view = nil
 
---- Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child.
+--- Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child; `opts.styled = true` lets row-level styles include the prefix.
 ---@type fun(child: any, opts: table?): table
 layout.gutter = nil
 
@@ -31,15 +35,31 @@ layout.gutter = nil
 ---@type fun(items: table): table
 layout.hbox = nil
 
+--- Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap.
+---@type fun(spans: any, opts: table?): table
+layout.line = nil
+
+--- Markdown layout leaf. `opts.dim` dims all spans; `opts.italic` italicizes inline-mode spans; `opts.inline = true` preserves line-by-line inline markdown without block parsing.
+---@type fun(content: string, opts: table?): table
+layout.markdown = nil
+
+--- Render `child` inside a full-width background panel. `opts.hl_group` / `opts.hl` names the panel highlight group; `opts.padding` defaults to 1 cell/row.
+---@type fun(child: any, opts: table?): table
+layout.panel = nil
+
 --- Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`). `opts.hl_group` / `opts.hl` supplies a default theme group for spans without `hl`.
 ---@type fun(lines: any, opts: table?): table
 layout.runs = nil
+
+--- Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.
+---@type fun(opts: table?): table
+layout.separator = nil
 
 --- Plain text layout leaf. `opts.hl_group` / `opts.hl` may name a theme group; without it, text renders dimmed. `opts.ansi = true` enables ANSI parsing. Wrapping is computed by the transcript at the current width.
 ---@type fun(content: string, opts: table?): table
 layout.text = nil
 
---- Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.empty`/`layout.text`/`layout.runs`/`layout.vbox`/`layout.hbox`/`layout.gutter`/`layout.cap`/`layout.diff`/`layout.file_view`.
+--- Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by a `smelt.layout` primitive.
 ---@type fun(items: table): table
 layout.vbox = nil
 

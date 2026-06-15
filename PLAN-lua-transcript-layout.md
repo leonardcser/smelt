@@ -1046,6 +1046,22 @@ Exit criteria:
 - snapshots match or intentional changes are documented;
 - copy/search/selectability tests pass.
 
+Status after implementation:
+
+- `DisplayBlock` now stores a single compiled `LayoutIr` variant for every transcript block kind. The compile path invokes the root Lua transcript renderer for tools and non-tools alike, then Rust only validates, measures, and renders the resulting IR.
+- Added the full-block primitives consumed by defaults: `layout.line`, `layout.markdown`, `layout.code`, `layout.separator`, and `layout.panel`. `layout.gutter` now has an explicit `styled` option so Lua chooses whether row styling includes the prefix.
+- Bundled Lua defaults now render user, assistant, thinking, exec, mode, process-status, compacted, and code blocks with generic primitives. Rust-provided semantic annotations expose user styled lines, exec command spans, and folded thinking summaries without hiding block chrome in Rust.
+- The TUI renderer tree now keeps only primitive mechanics (`layout_ir` plus markdown internals). Obsolete per-block renderer modules for user/thinking/exec/mode/process-status/compacted/text/tool-output chrome were deleted.
+- Existing storybook snapshots are preserved, including unstyled raw tool-output gutters and styled thinking/exec gutters, via explicit Lua/default gutter composition.
+
+Validation after implementation:
+
+- `cargo build`
+- `cargo nextest run --workspace`
+- `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo xtask gen-lua-docs`
+- `git diff --check`
+
 ### Phase 6 — Persist renderer-produced DisplayIR
 
 Goal: make cold resume/preview scale with large sessions.
@@ -1070,8 +1086,7 @@ Goal: consolidate around the new architecture.
 
 Work:
 
-- Delete tool-body-only APIs.
-- Delete old per-block Rust renderer modules that are now policy-only.
+- Delete any remaining tool-body-only APIs or policy-only Rust renderer modules.
 - Keep Rust modules only for primitive mechanics: markdown/code/diff/text wrapping/panel/gutter/etc.
 - Update docs and Lua stubs.
 - Regenerate Lua API docs.

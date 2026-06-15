@@ -783,6 +783,8 @@ Declarative, width-independent content layout primitives for transcript/tool dis
 
 - `smelt.layout.cap` :: `fun(child: any, opts: table): table`
   Cap a child by rendered rows.
+- `smelt.layout.code` :: `fun(content: string, opts: table?): table`
+  Syntax-highlighted code layout leaf.
 - `smelt.layout.diff` :: `fun(opts: table): table`
   Inline-diff render directive - the worker renders the diff directly into the block buffer.
 - `smelt.layout.empty` :: `fun(): table`
@@ -793,8 +795,16 @@ Declarative, width-independent content layout primitives for transcript/tool dis
   Render `child` with an explicit non-selectable gutter prefix on each emitted row.
 - `smelt.layout.hbox` :: `fun(items: table): table`
   Lay `items` out horizontally.
+- `smelt.layout.line` :: `fun(spans: any, opts: table?): table`
+  Single styled line layout leaf.
+- `smelt.layout.markdown` :: `fun(content: string, opts: table?): table`
+  Markdown layout leaf.
+- `smelt.layout.panel` :: `fun(child: any, opts: table?): table`
+  Render `child` inside a full-width background panel.
 - `smelt.layout.runs` :: `fun(lines: any, opts: table?): table`
   Styled inline text layout leaf.
+- `smelt.layout.separator` :: `fun(opts: table?): table`
+  Full-width horizontal separator.
 - `smelt.layout.text` :: `fun(content: string, opts: table?): table`
   Plain text layout leaf.
 - `smelt.layout.vbox` :: `fun(items: table): table`
@@ -1072,7 +1082,7 @@ Bundled default transcript renderers.
 - `smelt.transcript.defaults.render_assistant` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render assistant text.
 - `smelt.transcript.defaults.render_code` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
-  Render a code block with the current primitive slice.
+  Render a code block with syntax highlighting.
 - `smelt.transcript.defaults.render_compacted` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a compacted-history marker.
 - `smelt.transcript.defaults.render_exec` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`

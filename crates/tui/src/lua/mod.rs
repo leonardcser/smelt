@@ -870,6 +870,21 @@ mod tests {
         assert_eq!(content, expected);
     }
 
+    fn assert_markdown_layout(layout: &BlockLayout, expected: &str) {
+        let BlockLayout::Leaf(LuaLeaf::Markdown(spec)) = layout else {
+            panic!("expected markdown layout, got {layout:?}");
+        };
+        assert_eq!(spec.content, expected);
+    }
+
+    fn assert_line_layout(layout: &BlockLayout, expected: &str) {
+        let BlockLayout::Leaf(LuaLeaf::Line(spec)) = layout else {
+            panic!("expected line layout, got {layout:?}");
+        };
+        let text: String = spec.spans.iter().map(|span| span.text.as_str()).collect();
+        assert_eq!(text, expected);
+    }
+
     #[test]
     fn transcript_default_renderer_handles_simple_blocks() {
         let rt = LuaRuntime::new();
@@ -879,7 +894,7 @@ mod tests {
             content: "hello".into(),
         };
         let layout = render_transcript_block(&rt, &assistant, None);
-        assert_text_layout(&layout, "hello");
+        assert_markdown_layout(&layout, "hello");
 
         let mode = Block::Mode {
             text: "plan".into(),
@@ -887,7 +902,7 @@ mod tests {
             hl_group: "SmeltModeDefault".into(),
         };
         let layout = render_transcript_block(&rt, &mode, None);
-        assert_text_layout(&layout, "◇ plan");
+        assert_line_layout(&layout, "◇ plan");
 
         let tool = Block::ToolCall {
             call_id: "call-1".into(),

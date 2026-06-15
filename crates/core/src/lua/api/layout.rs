@@ -1,8 +1,9 @@
 //! `smelt.layout` - declarative, width-independent content layout returned from Lua display callbacks.
 
 use crate::content::block_layout::{
-    BlockLayout, CapKeep, CapMarker, CapSpec, Constraint, DiffSpec, FileViewSpec, GutterSpec,
-    HboxItem, LuaLeaf, RunsSpec, TextSpec,
+    BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, DiffSpec, FileViewSpec,
+    GutterSpec, HboxItem, LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RunsSpec, SeparatorSpec,
+    TextSpec,
 };
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
@@ -112,6 +113,100 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "line",
+        "Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap.",
+        &["spans", "opts"],
+        |_, (spans, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let hl_group = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten())
+                .or_else(|| opts.as_ref().and_then(|t| t.get::<Option<String>>("hl").ok().flatten()));
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Line(LineSpec {
+                spans: crate::lua::styled_line_from_lua(spans, "smelt.layout.line")?,
+                hl_group,
+            }))))
+        },
+    )?;
+    m.fn_(
+        "markdown",
+        "Markdown layout leaf. `opts.dim` dims all spans; `opts.italic` italicizes inline-mode spans; `opts.inline = true` preserves line-by-line inline markdown without block parsing.",
+        &["content", "opts"],
+        |_, (content, opts): (String, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let dim = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("dim").ok().flatten())
+                .unwrap_or(false);
+            let italic = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("italic").ok().flatten())
+                .unwrap_or(false);
+            let inline = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("inline").ok().flatten())
+                .unwrap_or(false);
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Markdown(MarkdownSpec {
+                content,
+                dim,
+                italic,
+                inline,
+            }))))
+        },
+    )?;
+    m.fn_(
+        "code",
+        "Syntax-highlighted code layout leaf. `opts.lang` supplies the language name.",
+        &["content", "opts"],
+        |_, (content, opts): (String, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let lang = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("lang").ok().flatten())
+                .unwrap_or_default();
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Code(CodeSpec {
+                content,
+                lang,
+            }))))
+        },
+    )?;
+    m.fn_(
+        "separator",
+        "Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.",
+        &["opts"],
+        |_, opts: Option<mlua::Table>| -> LuaResult<LuaBlockLayout> {
+            let label = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("label").ok().flatten())
+                .unwrap_or_default();
+            let dim = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("dim").ok().flatten())
+                .unwrap_or(true);
+            Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Separator(
+                SeparatorSpec { label, dim },
+            ))))
+        },
+    )?;
+    m.fn_(
+        "panel",
+        "Render `child` inside a full-width background panel. `opts.hl_group` / `opts.hl` names the panel highlight group; `opts.padding` defaults to 1 cell/row.",
+        &["child", "opts"],
+        |_, (child, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
+            let child = layout_from_value(child, "panel")?;
+            let hl_group = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten())
+                .or_else(|| opts.as_ref().and_then(|t| t.get::<Option<String>>("hl").ok().flatten()))
+                .unwrap_or_else(|| "Normal".to_string());
+            let padding = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<u16>>("padding").ok().flatten())
+                .unwrap_or(1);
+            Ok(LuaBlockLayout(BlockLayout::Panel {
+                child: Box::new(child),
+                spec: PanelSpec { hl_group, padding },
+            }))
+        },
+    )?;
+    m.fn_(
         "diff",
         "Inline-diff render directive - the worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.",
         &["opts"],
@@ -157,7 +252,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "gutter",
-        "Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child.",
+        "Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child; `opts.styled = true` lets row-level styles include the prefix.",
         &["child", "opts"],
         |_, (child, opts): (mlua::Value, Option<mlua::Table>)| -> LuaResult<LuaBlockLayout> {
             let child = layout_from_value(child, "gutter")?;
@@ -165,9 +260,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .as_ref()
                 .and_then(|t| t.get::<Option<String>>("text").ok().flatten())
                 .unwrap_or_else(|| "  ".to_string());
+            let styled = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("styled").ok().flatten())
+                .unwrap_or(false);
             Ok(LuaBlockLayout(BlockLayout::Gutter {
                 child: Box::new(child),
-                spec: GutterSpec { text },
+                spec: GutterSpec { text, styled },
             }))
         },
     )?;
@@ -209,7 +308,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "vbox",
-        "Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.empty`/`layout.text`/`layout.runs`/`layout.vbox`/`layout.hbox`/`layout.gutter`/`layout.cap`/`layout.diff`/`layout.file_view`.",
+        "Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by a `smelt.layout` primitive.",
         &["items"],
         |_, items: mlua::Table| -> LuaResult<LuaBlockLayout> {
             Ok(LuaBlockLayout(BlockLayout::Vbox(collect_vbox_items(

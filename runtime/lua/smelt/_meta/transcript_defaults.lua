@@ -15,7 +15,7 @@ transcript_defaults.render = nil
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_assistant = nil
 
---- Render a code block with the current primitive slice.
+--- Render a code block with syntax highlighting.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_code = nil
 
@@ -69,8 +69,8 @@ transcript_defaults.render_tool_output = nil
 transcript_defaults.render_unknown = nil
 
 --- Render a user block. Custom renderers can layer richer panel/text
---- annotations; the bundled default keeps the renderer path total and
---- fallback-safe with current primitives.
+--- annotations; the bundled default keeps the same full-width prompt chrome as
+--- the Rust renderer while leaving the content policy in Lua.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_user = nil
 

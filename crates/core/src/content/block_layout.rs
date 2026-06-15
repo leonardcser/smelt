@@ -47,6 +47,45 @@ pub struct RunsSpec {
     pub hl_group: Option<String>,
 }
 
+/// One preformatted styled line. Unlike [`RunsSpec`], this leaf does not wrap.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LineSpec {
+    pub spans: Vec<protocol::StyledSpan>,
+    pub hl_group: Option<String>,
+}
+
+/// Markdown text leaf. `inline` preserves the historical thinking renderer's
+/// line-by-line inline-markdown behavior; otherwise the full markdown block
+/// parser is used.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MarkdownSpec {
+    pub content: String,
+    pub dim: bool,
+    pub italic: bool,
+    pub inline: bool,
+}
+
+/// Syntax-highlighted code leaf.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CodeSpec {
+    pub content: String,
+    pub lang: String,
+}
+
+/// Width-dependent horizontal separator leaf.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SeparatorSpec {
+    pub label: String,
+    pub dim: bool,
+}
+
+/// Full-width background panel wrapper.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PanelSpec {
+    pub hl_group: String,
+    pub padding: u16,
+}
+
 /// Serializable source-view render directive.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SourceViewIr {
@@ -58,6 +97,10 @@ pub enum SourceViewIr {
 pub enum LayoutLeaf {
     Text(TextSpec),
     Runs(RunsSpec),
+    Line(LineSpec),
+    Markdown(MarkdownSpec),
+    Code(CodeSpec),
+    Separator(SeparatorSpec),
     SourceView(SourceViewIr),
 }
 
@@ -68,6 +111,10 @@ pub enum Leaf<B> {
     Buf(B),
     Text(TextSpec),
     Runs(RunsSpec),
+    Line(LineSpec),
+    Markdown(MarkdownSpec),
+    Code(CodeSpec),
+    Separator(SeparatorSpec),
     Diff(DiffSpec),
     FileView(FileViewSpec),
     SourceView(SourceViewIr),
@@ -99,6 +146,8 @@ pub struct CapSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GutterSpec {
     pub text: String,
+    #[serde(default)]
+    pub styled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -124,6 +173,10 @@ pub enum BlockLayout<L = LuaLeaf> {
     Gutter {
         child: Box<BlockLayout<L>>,
         spec: GutterSpec,
+    },
+    Panel {
+        child: Box<BlockLayout<L>>,
+        spec: PanelSpec,
     },
     Cap {
         child: Box<BlockLayout<L>>,
@@ -155,7 +208,9 @@ impl<L> BlockLayout<L> {
                     item.layout.collect_leaves(out);
                 }
             }
-            BlockLayout::Gutter { child, .. } | BlockLayout::Cap { child, .. } => {
+            BlockLayout::Gutter { child, .. }
+            | BlockLayout::Panel { child, .. }
+            | BlockLayout::Cap { child, .. } => {
                 child.collect_leaves(out);
             }
         }

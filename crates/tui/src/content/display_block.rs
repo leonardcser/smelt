@@ -1,19 +1,14 @@
-use crate::content::display_renderers::{
-    compacted, exec, mode, process_status, text, thinking, user,
-};
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_core::content::block_layout::{
     BlockLayout, HboxItem, IrLeaf, LayoutIr, LuaLeaf, SourceViewIr, TextSpec,
 };
 use smelt_core::content::builder::{LineBuilder, Outcome};
-use smelt_core::content::code_block::{measure_code_block, parse_code_block, CodeBlock};
-use smelt_core::content::highlight::render_code_block;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 4;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
@@ -56,39 +51,7 @@ impl<'a> TranscriptRenderEnv<'a> {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum DisplayBlock {
-    User {
-        text: String,
-        image_labels: Vec<String>,
-    },
-    Mode {
-        text: String,
-        icon: String,
-        hl_group: String,
-    },
-    ProcessStatus {
-        text: String,
-    },
-    Thinking {
-        content: String,
-    },
-    Text {
-        content: String,
-    },
-    CodeLine {
-        content: String,
-        lang: String,
-        code: CodeBlock,
-    },
-    ToolCall {
-        layout: LayoutIr,
-    },
-    Exec {
-        command: String,
-        output: String,
-    },
-    Compacted {
-        summary: String,
-    },
+    Layout { layout: LayoutIr },
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -261,8 +224,15 @@ impl DisplayModel {
 }
 
 #[cfg(test)]
-pub(crate) fn compile_block(block: &Block) -> DisplayBlock {
-    compile_static_block(block)
+pub(crate) fn compile_block_with_show(block: &Block, show_thinking: bool) -> DisplayBlock {
+    let lua = LuaRuntime::new();
+    compile_block_with_lua(
+        TranscriptRenderEnv::new(&lua, show_thinking),
+        BlockId::new(0),
+        0,
+        block,
+        None,
+    )
 }
 
 fn compile_block_with_lua(
@@ -272,72 +242,43 @@ fn compile_block_with_lua(
     block: &Block,
     state: Option<&ToolState>,
 ) -> DisplayBlock {
-    if matches!(block, Block::ToolCall { .. }) {
-        let layout = env.lua.render_transcript_layout(
-            id,
-            index,
-            block,
-            state,
-            smelt_core::lua::runtime::TranscriptRenderCtx {
-                show_thinking: env.show_thinking,
-            },
-        );
-        let layout = match compile_layout_ir(&layout) {
-            Ok(layout) => layout,
-            Err(e) => {
-                env.lua.record_error(format!(
-                    "transcript render `tool` #{index}: compile layout IR: {e}"
-                ));
-                BlockLayout::Leaf(IrLeaf::Text(TextSpec {
-                    content: "tool render error".into(),
-                    hl_group: Some("ErrorMsg".into()),
-                    ansi: false,
-                }))
-            }
-        };
-        return DisplayBlock::ToolCall { layout };
-    }
-
-    compile_static_block(block)
+    let kind = block_kind(block);
+    let layout = env.lua.render_transcript_layout(
+        id,
+        index,
+        block,
+        state,
+        smelt_core::lua::runtime::TranscriptRenderCtx {
+            show_thinking: env.show_thinking,
+        },
+    );
+    let layout = match compile_layout_ir(&layout) {
+        Ok(layout) => layout,
+        Err(e) => {
+            env.lua.record_error(format!(
+                "transcript render `{kind}` #{index}: compile layout IR: {e}"
+            ));
+            BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                content: format!("{kind} render error"),
+                hl_group: Some("ErrorMsg".into()),
+                ansi: false,
+            }))
+        }
+    };
+    DisplayBlock::Layout { layout }
 }
 
-fn compile_static_block(block: &Block) -> DisplayBlock {
+fn block_kind(block: &Block) -> &'static str {
     match block {
-        Block::User { text, image_labels } => DisplayBlock::User {
-            text: text.clone(),
-            image_labels: image_labels.clone(),
-        },
-        Block::Mode {
-            text,
-            icon,
-            hl_group,
-        } => DisplayBlock::Mode {
-            text: text.clone(),
-            icon: icon.clone(),
-            hl_group: hl_group.clone(),
-        },
-        Block::ProcessStatus { text } => DisplayBlock::ProcessStatus { text: text.clone() },
-        Block::Thinking { content } => DisplayBlock::Thinking {
-            content: content.clone(),
-        },
-        Block::Text { content } => DisplayBlock::Text {
-            content: content.clone(),
-        },
-        Block::CodeLine { content, lang } => DisplayBlock::CodeLine {
-            content: content.clone(),
-            lang: lang.clone(),
-            code: parse_code_block(&[content.as_str()], lang),
-        },
-        Block::ToolCall { .. } => DisplayBlock::ToolCall {
-            layout: BlockLayout::Empty,
-        },
-        Block::Exec { command, output } => DisplayBlock::Exec {
-            command: command.clone(),
-            output: output.clone(),
-        },
-        Block::Compacted { summary } => DisplayBlock::Compacted {
-            summary: summary.clone(),
-        },
+        Block::User { .. } => "user",
+        Block::Mode { .. } => "mode",
+        Block::ProcessStatus { .. } => "process_status",
+        Block::Thinking { .. } => "thinking",
+        Block::Text { .. } => "assistant",
+        Block::CodeLine { .. } => "code",
+        Block::ToolCall { .. } => "tool",
+        Block::Exec { .. } => "exec",
+        Block::Compacted { .. } => "compacted",
     }
 }
 
@@ -353,6 +294,14 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
             ansi: spec.ansi,
         }))),
         BlockLayout::Leaf(LuaLeaf::Runs(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Runs(spec.clone()))),
+        BlockLayout::Leaf(LuaLeaf::Line(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Line(spec.clone()))),
+        BlockLayout::Leaf(LuaLeaf::Markdown(spec)) => {
+            Ok(BlockLayout::Leaf(IrLeaf::Markdown(spec.clone())))
+        }
+        BlockLayout::Leaf(LuaLeaf::Code(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Code(spec.clone()))),
+        BlockLayout::Leaf(LuaLeaf::Separator(spec)) => {
+            Ok(BlockLayout::Leaf(IrLeaf::Separator(spec.clone())))
+        }
         BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
             let ext = spec
                 .lang
@@ -406,6 +355,10 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
             child: Box::new(compile_layout_ir(child)?),
             spec: spec.clone(),
         }),
+        BlockLayout::Panel { child, spec } => Ok(BlockLayout::Panel {
+            child: Box::new(compile_layout_ir(child)?),
+            spec: spec.clone(),
+        }),
         BlockLayout::Cap { child, spec } => Ok(BlockLayout::Cap {
             child: Box::new(compile_layout_ir(child)?),
             spec: spec.clone(),
@@ -415,37 +368,15 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
 
 pub(crate) fn measure_block(block: &DisplayBlock, ctx: MeasureCtx) -> u64 {
     let _perf = smelt_perf::perf::begin(measure_block_label(block));
-    let width = ctx.width as usize;
-    let expanded_rows = match block {
-        DisplayBlock::User { text, .. } => user::measure(text, width) as u64,
-        DisplayBlock::Mode { .. } => 1,
-        DisplayBlock::ProcessStatus { text } => process_status::measure(text, width) as u64,
-        DisplayBlock::Thinking { content } => {
-            thinking::measure(content, width, ctx.show_thinking) as u64
-        }
-        DisplayBlock::Text { content } => text::measure(content, width) as u64,
-        DisplayBlock::CodeLine { code, .. } => measure_code_block(code, width) as u64,
-        DisplayBlock::ToolCall { layout } => {
-            crate::content::display_renderers::measure_layout_ir(layout, ctx.width) as u64
-        }
-        DisplayBlock::Exec { command, output } => exec::measure(command, output, width) as u64,
-        DisplayBlock::Compacted { summary } => compacted::measure(summary, width) as u64,
-    };
+    let _ = ctx.show_thinking;
+    let DisplayBlock::Layout { layout } = block;
+    let expanded_rows =
+        crate::content::display_renderers::measure_layout_ir(layout, ctx.width) as u64;
     ctx.view_state.measured_height(expanded_rows)
 }
 
-fn measure_block_label(block: &DisplayBlock) -> &'static str {
-    match block {
-        DisplayBlock::User { .. } => "transcript:measure_block:user",
-        DisplayBlock::Mode { .. } => "transcript:measure_block:mode",
-        DisplayBlock::ProcessStatus { .. } => "transcript:measure_block:process_status",
-        DisplayBlock::Thinking { .. } => "transcript:measure_block:thinking",
-        DisplayBlock::Text { .. } => "transcript:measure_block:text",
-        DisplayBlock::CodeLine { .. } => "transcript:measure_block:code_line",
-        DisplayBlock::ToolCall { .. } => "transcript:measure_block:tool_call",
-        DisplayBlock::Exec { .. } => "transcript:measure_block:exec",
-        DisplayBlock::Compacted { .. } => "transcript:measure_block:compacted",
-    }
+fn measure_block_label(_block: &DisplayBlock) -> &'static str {
+    "transcript:measure_block:layout"
 }
 
 pub(crate) fn render_block_into(
@@ -465,42 +396,15 @@ fn render_expanded_block(
     out: &mut LineBuilder,
     block: &DisplayBlock,
     width: usize,
-    show_thinking: bool,
+    _show_thinking: bool,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin(render_block_label(block));
-    match block {
-        DisplayBlock::User { text, image_labels } => user::render(out, text, image_labels, width),
-        DisplayBlock::Mode {
-            text,
-            icon,
-            hl_group,
-        } => mode::render(out, text, icon, hl_group),
-        DisplayBlock::ProcessStatus { text } => process_status::render(out, text),
-        DisplayBlock::Thinking { content } => thinking::render(out, content, width, show_thinking),
-        DisplayBlock::Text { content } => text::render(out, content, width),
-        DisplayBlock::CodeLine { code, .. } => {
-            render_code_block(out, code, width, false, None, false)
-        }
-        DisplayBlock::ToolCall { layout } => {
-            crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
-        }
-        DisplayBlock::Exec { command, output } => exec::render(out, command, output, width),
-        DisplayBlock::Compacted { summary } => compacted::render(out, summary, width),
-    }
+    let DisplayBlock::Layout { layout } = block;
+    crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
 }
 
-fn render_block_label(block: &DisplayBlock) -> &'static str {
-    match block {
-        DisplayBlock::User { .. } => "render:user",
-        DisplayBlock::Mode { .. } => "render:mode",
-        DisplayBlock::ProcessStatus { .. } => "render:process_status",
-        DisplayBlock::Thinking { .. } => "render:thinking",
-        DisplayBlock::Text { .. } => "render:text",
-        DisplayBlock::CodeLine { .. } => "render:code_line",
-        DisplayBlock::ToolCall { .. } => "render:tool_call",
-        DisplayBlock::Exec { .. } => "render:exec",
-        DisplayBlock::Compacted { .. } => "render:compacted",
-    }
+fn render_block_label(_block: &DisplayBlock) -> &'static str {
+    "render:layout"
 }
 
 fn apply_view_state(
@@ -721,8 +625,8 @@ mod tests {
         ];
 
         for block in blocks {
-            let display = compile_block(&block);
             for show_thinking in [false, true] {
+                let display = compile_block_with_show(&block, show_thinking);
                 assert_eq!(
                     measured_rows(&display, 36, show_thinking),
                     rendered_rows(&display, 36, show_thinking),
@@ -734,7 +638,7 @@ mod tests {
 
     #[test]
     fn layout_ir_measurement_matches_rendered_rows() {
-        let display = DisplayBlock::ToolCall {
+        let display = DisplayBlock::Layout {
             layout: BlockLayout::Vbox(vec![
                 BlockLayout::Leaf(IrLeaf::Runs(RunsSpec {
                     lines: protocol::StyledLines(vec![vec![protocol::StyledSpan {

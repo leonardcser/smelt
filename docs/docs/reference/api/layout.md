@@ -14,6 +14,14 @@ fun(child: any, opts: table): table
 
 Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head` or `tail`; `opts.marker` is `above`, `below`, or nil.
 
+## `smelt.layout.code`
+
+```lua
+fun(content: string, opts: table?): table
+```
+
+Syntax-highlighted code layout leaf. `opts.lang` supplies the language name.
+
 ## `smelt.layout.diff`
 
 ```lua
@@ -44,7 +52,7 @@ Syntax-highlighted file-view render directive - single line-number column, no di
 fun(child: any, opts: table?): table
 ```
 
-Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child.
+Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child; `opts.styled = true` lets row-level styles include the prefix.
 
 ## `smelt.layout.hbox`
 
@@ -54,6 +62,30 @@ fun(items: table): table
 
 Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` for a fixed-column or weighted slot.
 
+## `smelt.layout.line`
+
+```lua
+fun(spans: any, opts: table?): table
+```
+
+Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap.
+
+## `smelt.layout.markdown`
+
+```lua
+fun(content: string, opts: table?): table
+```
+
+Markdown layout leaf. `opts.dim` dims all spans; `opts.italic` italicizes inline-mode spans; `opts.inline = true` preserves line-by-line inline markdown without block parsing.
+
+## `smelt.layout.panel`
+
+```lua
+fun(child: any, opts: table?): table
+```
+
+Render `child` inside a full-width background panel. `opts.hl_group` / `opts.hl` names the panel highlight group; `opts.padding` defaults to 1 cell/row.
+
 ## `smelt.layout.runs`
 
 ```lua
@@ -61,6 +93,14 @@ fun(lines: any, opts: table?): table
 ```
 
 Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`). `opts.hl_group` / `opts.hl` supplies a default theme group for spans without `hl`.
+
+## `smelt.layout.separator`
+
+```lua
+fun(opts: table?): table
+```
+
+Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.
 
 ## `smelt.layout.text`
 
@@ -76,5 +116,5 @@ Plain text layout leaf. `opts.hl_group` / `opts.hl` may name a theme group; with
 fun(items: table): table
 ```
 
-Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by `layout.empty`/`layout.text`/`layout.runs`/`layout.vbox`/`layout.hbox`/`layout.gutter`/`layout.cap`/`layout.diff`/`layout.file_view`.
+Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by a `smelt.layout` primitive.
 

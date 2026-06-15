@@ -659,6 +659,7 @@ Semantic transcript block snapshot passed to the root renderer.
 | `index` | `integer` | yes | Zero-based block index in transcript order. |
 | `kind` | `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"mode"|"process_status"|"compacted"` | yes | Block kind. |
 | `text` | `string` |  | User/mode/process text. |
+| `user_lines` | `table` |  | User text as styled span lines, including slash/ref/image accents. |
 | `content` | `string` |  | Assistant/thinking/code content. |
 | `image_labels` | `string[]` |  | User image labels. |
 | `icon` | `string` |  | Mode icon. |
@@ -677,6 +678,7 @@ Semantic transcript block snapshot passed to the root renderer.
 | `user_message` | `string` |  | Tool user-facing status message. |
 | `output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Tool output snapshot. |
 | `command` | `string` |  | Exec command. |
+| `command_spans` | `table` |  | Exec command as one styled span line, including the `!` accent. |
 
 ### `smelt.transcript.Context`
 

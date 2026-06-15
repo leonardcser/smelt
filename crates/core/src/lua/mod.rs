@@ -117,6 +117,31 @@ pub fn lua_to_serde<T: serde::de::DeserializeOwned>(lua: &Lua, value: &mlua::Val
     serde_json::from_value(json).ok()
 }
 
+/// Decode a Lua value into one styled line.
+pub(crate) fn styled_line_from_lua(
+    value: mlua::Value,
+    label: &str,
+) -> LuaResult<Vec<protocol::StyledSpan>> {
+    match value {
+        mlua::Value::Nil => Ok(Vec::new()),
+        mlua::Value::String(s) => Ok(vec![protocol::StyledSpan {
+            text: s.to_string_lossy(),
+            ..Default::default()
+        }]),
+        mlua::Value::Table(line_table) => {
+            let mut spans = Vec::new();
+            for span in line_table.sequence_values::<mlua::Value>() {
+                spans.push(styled_span_from_lua(span?, label)?);
+            }
+            Ok(spans)
+        }
+        other => Err(mlua::Error::external(format!(
+            "{label}: expected styled line, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 /// Decode a Lua value into the styled-lines shape shared by tool summaries,
 /// transcript blocks, and `smelt.layout.runs`.
 pub(crate) fn styled_lines_from_lua(
@@ -132,77 +157,26 @@ pub(crate) fn styled_lines_from_lua(
             let mut lines = Vec::new();
             for line in lines_table.sequence_values::<mlua::Value>() {
                 let line = line?;
-                let line_table = match line {
-                    mlua::Value::Nil => {
-                        lines.push(Vec::new());
-                        continue;
+                match line {
+                    mlua::Value::Nil => lines.push(Vec::new()),
+                    mlua::Value::String(s) => lines.push(vec![StyledSpan {
+                        text: s.to_string_lossy(),
+                        ..Default::default()
+                    }]),
+                    mlua::Value::Table(t) => {
+                        let mut spans = Vec::new();
+                        for span in t.sequence_values::<mlua::Value>() {
+                            spans.push(styled_span_from_lua(span?, label)?);
+                        }
+                        lines.push(spans);
                     }
-                    mlua::Value::String(s) => {
-                        lines.push(vec![StyledSpan {
-                            text: s.to_string_lossy(),
-                            ..Default::default()
-                        }]);
-                        continue;
-                    }
-                    mlua::Value::Table(t) => t,
                     other => {
                         return Err(mlua::Error::external(format!(
                             "{label}: expected line table or string, got {}",
                             other.type_name()
                         )));
                     }
-                };
-
-                let mut spans = Vec::new();
-                for span in line_table.sequence_values::<mlua::Value>() {
-                    let span = span?;
-                    let span_table = match span {
-                        mlua::Value::String(s) => {
-                            spans.push(StyledSpan {
-                                text: s.to_string_lossy(),
-                                ..Default::default()
-                            });
-                            continue;
-                        }
-                        mlua::Value::Table(t) => t,
-                        other => {
-                            return Err(mlua::Error::external(format!(
-                                "{label}: expected span table or string, got {}",
-                                other.type_name()
-                            )));
-                        }
-                    };
-                    let style = span_table.get::<Option<mlua::Table>>("style")?;
-                    let mut out = StyledSpan {
-                        text: span_table
-                            .get::<Option<String>>("text")?
-                            .or_else(|| span_table.get::<Option<String>>(1).ok().flatten())
-                            .unwrap_or_default(),
-                        syntax: span_table.get::<Option<String>>("syntax")?,
-                        hl: span_table.get::<Option<String>>("hl")?,
-                        fg: span_table.get::<Option<String>>("fg")?,
-                        bg: span_table.get::<Option<String>>("bg")?,
-                        dim: span_table.get::<Option<bool>>("dim")?.unwrap_or(false),
-                        bold: span_table.get::<Option<bool>>("bold")?.unwrap_or(false),
-                        italic: span_table.get::<Option<bool>>("italic")?.unwrap_or(false),
-                        selectable: span_table
-                            .get::<Option<bool>>("selectable")?
-                            .unwrap_or(true),
-                        title_suffix: span_table
-                            .get::<Option<bool>>("title_suffix")?
-                            .unwrap_or(false),
-                    };
-                    if let Some(style) = style {
-                        out.hl = out.hl.or(style.get::<Option<String>>("hl")?);
-                        out.fg = out.fg.or(style.get::<Option<String>>("fg")?);
-                        out.bg = out.bg.or(style.get::<Option<String>>("bg")?);
-                        out.dim |= style.get::<Option<bool>>("dim")?.unwrap_or(false);
-                        out.bold |= style.get::<Option<bool>>("bold")?.unwrap_or(false);
-                        out.italic |= style.get::<Option<bool>>("italic")?.unwrap_or(false);
-                    }
-                    spans.push(out);
                 }
-                lines.push(spans);
             }
             Ok(StyledLines(lines))
         }
@@ -211,6 +185,55 @@ pub(crate) fn styled_lines_from_lua(
             other.type_name()
         ))),
     }
+}
+
+fn styled_span_from_lua(span: mlua::Value, label: &str) -> LuaResult<protocol::StyledSpan> {
+    use protocol::StyledSpan;
+
+    let span_table = match span {
+        mlua::Value::String(s) => {
+            return Ok(StyledSpan {
+                text: s.to_string_lossy(),
+                ..Default::default()
+            })
+        }
+        mlua::Value::Table(t) => t,
+        other => {
+            return Err(mlua::Error::external(format!(
+                "{label}: expected span table or string, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let style = span_table.get::<Option<mlua::Table>>("style")?;
+    let mut out = StyledSpan {
+        text: span_table
+            .get::<Option<String>>("text")?
+            .or_else(|| span_table.get::<Option<String>>(1).ok().flatten())
+            .unwrap_or_default(),
+        syntax: span_table.get::<Option<String>>("syntax")?,
+        hl: span_table.get::<Option<String>>("hl")?,
+        fg: span_table.get::<Option<String>>("fg")?,
+        bg: span_table.get::<Option<String>>("bg")?,
+        dim: span_table.get::<Option<bool>>("dim")?.unwrap_or(false),
+        bold: span_table.get::<Option<bool>>("bold")?.unwrap_or(false),
+        italic: span_table.get::<Option<bool>>("italic")?.unwrap_or(false),
+        selectable: span_table
+            .get::<Option<bool>>("selectable")?
+            .unwrap_or(true),
+        title_suffix: span_table
+            .get::<Option<bool>>("title_suffix")?
+            .unwrap_or(false),
+    };
+    if let Some(style) = style {
+        out.hl = out.hl.or(style.get::<Option<String>>("hl")?);
+        out.fg = out.fg.or(style.get::<Option<String>>("fg")?);
+        out.bg = out.bg.or(style.get::<Option<String>>("bg")?);
+        out.dim |= style.get::<Option<bool>>("dim")?.unwrap_or(false);
+        out.bold |= style.get::<Option<bool>>("bold")?.unwrap_or(false);
+        out.italic |= style.get::<Option<bool>>("italic")?.unwrap_or(false);
+    }
+    Ok(out)
 }
 
 pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<mlua::Value> {

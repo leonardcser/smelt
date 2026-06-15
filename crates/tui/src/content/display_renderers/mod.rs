@@ -2,29 +2,13 @@
 
 mod layout_ir;
 mod markdown;
-mod wrapped_output;
-
-mod chrome;
-pub(in crate::content) mod compacted;
-pub(in crate::content) mod exec;
-mod metrics;
-pub(in crate::content) mod mode;
-pub(in crate::content) mod process_status;
-pub(in crate::content) mod text;
-pub(in crate::content) mod thinking;
-pub(in crate::content) mod user;
 
 pub(crate) use layout_ir::{measure_layout_ir, render_layout_ir_into};
 pub(crate) use markdown::render_markdown_inner;
 
-/// Per-tool row cap (applied to command header and output body separately).
-const MAX_TOOL_BLOCK_ROWS: usize =
-    smelt_core::content::block_layout::DEFAULT_TOOL_BLOCK_ROWS as usize;
-
 #[cfg(test)]
 mod tests {
-    use super::thinking::thinking_summary;
-    use crate::content::display_block::{compile_block, render_block_into, RenderCtx};
+    use crate::content::display_block::{compile_block_with_show, render_block_into, RenderCtx};
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
     use smelt_core::content::LayoutContext;
@@ -33,6 +17,29 @@ mod tests {
     use std::collections::HashMap;
 
     const W: usize = 80;
+    const BLOCK_GUTTER_SPACE: &str = "  ";
+    const CHROME_INNER_PAD: usize = 1;
+    const THINKING_GUTTER: &str = "│ ";
+
+    fn thinking_summary(content: &str) -> (String, usize) {
+        let mut label = None;
+        let mut lines = 0usize;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            lines += 1;
+            if label.is_none()
+                && trimmed.starts_with("**")
+                && trimmed.ends_with("**")
+                && trimmed.len() > 4
+            {
+                label = Some(trimmed[2..trimmed.len() - 2].trim().to_string());
+            }
+        }
+        (label.unwrap_or_else(|| "thinking".to_string()), lines)
+    }
 
     fn mk_collector_buf() -> (Buffer, Theme) {
         (
@@ -49,7 +56,7 @@ mod tests {
         _body: Option<()>,
         ctx: LayoutContext,
     ) -> u16 {
-        let display = compile_block(block);
+        let display = compile_block_with_show(block, ctx.show_thinking);
         render_block_into(
             buf,
             &display,
@@ -446,6 +453,25 @@ mod tests {
     }
 
     #[test]
+    fn user_text_sanitizes_display_controls() {
+        let rows = layout_block_test(
+            &user("a\0\tb\nc\r"),
+            None,
+            &LayoutContext::new(40, true, ViewState::Expanded),
+        );
+        let text = rows
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("a\u{FFFD}    b"));
+        assert!(text.contains("c\u{FFFD}"));
+        assert!(!text.contains('\0'));
+        assert!(!text.contains('\r'));
+    }
+
+    #[test]
     fn exec_output_carriage_return_renders_latest_status_line() {
         let rows = layout_block_test(
             &Block::Exec {
@@ -466,6 +492,37 @@ mod tests {
         assert!(!text.contains("Rebasing (1/1)"));
         assert!(!text.contains("[K"));
         assert!(!text.contains('\r'));
+    }
+
+    #[test]
+    fn exec_command_controls_are_sanitized_before_wrapping() {
+        let command = "\0\0\x00677S7\0\0\0\0\0\0*\x001k77 @crates/term/tests/storybook/snapshots/layout::vbox_mixed_length_fill_and_min.snap @FI";
+        let (mut buf, theme) = mk_collector_buf();
+        let block = Block::Exec {
+            command: command.into(),
+            output: String::new(),
+        };
+        let rows = render_block_test_into(
+            &mut buf,
+            &theme,
+            &block,
+            None,
+            None,
+            LayoutContext::new(107, true, ViewState::Expanded),
+        ) as usize;
+
+        assert!(rows > 3, "long command should wrap inside chrome");
+        for row in 0..rows {
+            let line = buf.get_line(row).unwrap_or("");
+            assert!(
+                !line.contains('\0'),
+                "control byte leaked into row {row}: {line:?}"
+            );
+            assert!(
+                unicode_width::UnicodeWidthStr::width(line) <= 107,
+                "row {row} overflowed transcript width: {line:?}"
+            );
+        }
     }
 
     #[test]
@@ -503,13 +560,11 @@ mod tests {
         assert_eq!(label, "thinking");
     }
 
-    /// Snapshot the leftmost cells of every block variant against the values
-    /// declared in `metrics.rs`. This is the regression guard against block
-    /// renderers drifting back to ad-hoc `"  "` / `"│ "` literals.
+    /// Snapshot the leftmost cells of every block variant against the shared
+    /// spacing constants. This is the regression guard against block renderers
+    /// drifting back to ad-hoc `"  "` / `"│ "` literals.
     #[test]
-    fn leftmost_padding_matches_metrics() {
-        use super::metrics::{BLOCK_GUTTER_SPACE, CHROME_INNER_PAD, THINKING_GUTTER};
-
+    fn leftmost_padding_matches_shared_constants() {
         let chrome_pad: String = " ".repeat(CHROME_INNER_PAD);
         let ctx = LayoutContext {
             width: W as u16,

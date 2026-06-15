@@ -16,6 +16,18 @@ pub use smelt_buffer::wrap;
 pub use crate::buffer::SpanMeta;
 pub use context::LayoutContext;
 
+pub fn display_safe_char(ch: char) -> char {
+    if ch != '\n' && ch.is_control() {
+        '\u{FFFD}'
+    } else {
+        ch
+    }
+}
+
+pub fn display_safe_text(text: &str) -> String {
+    text.chars().map(display_safe_char).collect()
+}
+
 use crate::theme::HlGroup;
 
 /// Context for rendering content inside a bordered box.
