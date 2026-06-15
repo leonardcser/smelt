@@ -1612,7 +1612,7 @@ Transcript display policy and rendered transcript inspection.
   Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block.
 - `smelt.transcript.blocks` (UiHost) :: `fun(): table`
   Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
-- `smelt.transcript.extend_renderer` (Host) :: `fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): smelt.Reg`
+- `smelt.transcript.extend_renderer` (Host) :: `fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg`
   Add or replace named middleware around the root renderer.
 - `smelt.transcript.get_renderer` (Host) :: `fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?`
   Return the current composed root transcript renderer, or nil before the default renderer has been installed.
@@ -1622,7 +1622,7 @@ Transcript display policy and rendered transcript inspection.
   Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
 - `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`
   Return rendered transcript display rows in `[start, start + count)`.
-- `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil`
+- `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil`
   Replace the base transcript renderer used when the host asks Lua for a transcript block layout.
 - `smelt.transcript.text` (UiHost) :: `fun(): string`
   Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).

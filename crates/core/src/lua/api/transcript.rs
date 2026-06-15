@@ -8,6 +8,18 @@ use std::sync::Arc;
 use crate::lua::doc::{record_module_doc, Tier};
 use crate::lua::module::LuaMod;
 
+fn renderer_cache_key_hash(cache_key: Option<String>) -> u64 {
+    let Some(cache_key) = cache_key else {
+        return 0;
+    };
+    let hash = crate::utils::hash_serializable(&cache_key);
+    if hash == 0 {
+        1
+    } else {
+        hash
+    }
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -24,14 +36,17 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     let shared_set = Arc::clone(shared);
     m.private_fn(
         "__set_renderer",
-        &["renderer"],
-        move |lua, renderer: mlua::Function| -> LuaResult<u64> {
+        &["renderer", "cache_key"],
+        move |lua, (renderer, cache_key): (mlua::Function, Option<String>)| -> LuaResult<u64> {
             let handle = LuaHandle::from_func(lua, renderer)?;
             let mut slot = shared_set
                 .transcript_renderer
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *slot = Some(handle);
+            shared_set
+                .transcript_renderer_cache_key
+                .store(renderer_cache_key_hash(cache_key), Ordering::Release);
             Ok(shared_set
                 .transcript_renderer_generation
                 .fetch_add(1, Ordering::AcqRel)
@@ -60,6 +75,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "__invalidate_renderer",
         &[],
         move |_, ()| -> LuaResult<u64> {
+            shared_invalidate
+                .transcript_renderer_cache_key
+                .store(0, Ordering::Release);
             Ok(shared_invalidate
                 .transcript_renderer_generation
                 .fetch_add(1, Ordering::AcqRel)

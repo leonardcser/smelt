@@ -1425,6 +1425,14 @@ impl LuaRuntime {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    pub fn transcript_renderer_cache_key(&self) -> Option<u64> {
+        let key = self
+            .shared
+            .transcript_renderer_cache_key
+            .load(std::sync::atomic::Ordering::Acquire);
+        (key != 0).then_some(key)
+    }
+
     /// Call the root transcript renderer and return its layout tree. Renderer
     /// errors, nil returns, invalid return types, or missing renderers use a
     /// small Rust fallback layout so transcript projection stays usable.

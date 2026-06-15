@@ -119,10 +119,10 @@ The current branch is not a blank slate. These are the concrete seams the migrat
 
 These are the areas most likely to create accidental complexity or hidden Rust policy if left vague:
 
-1. **Root renderer composability.** One public `set_renderer(fn)` keeps Rust simple, but “last setter wins” can be hostile to plugins. Provide a small Lua-only middleware helper around the root renderer:
-   `transcript.get_renderer()` / `transcript.set_renderer(fn)` / `transcript.extend_renderer(name, fn)`. This must not become a Rust-owned per-kind or per-tool registry.
+1. **Root renderer composability.** One public `set_renderer(fn, opts?)` keeps Rust simple, but “last setter wins” can be hostile to plugins. Provide a small Lua-only middleware helper around the root renderer:
+   `transcript.get_renderer()` / `transcript.set_renderer(fn, opts?)` / `transcript.extend_renderer(name, fn, opts?)`. This must not become a Rust-owned per-kind or per-tool registry.
 2. **Intentional empty blocks.** `nil` should mean invalid renderer output/fallback, not “hide this block,” or user custom renderers cannot intentionally suppress a block. Add an explicit `layout.empty()` or equivalent zero-row node if hiding/collapsing is supported.
-3. **Determinism and cache invalidation.** A root renderer can close over arbitrary Lua globals. The contract is that renderer output must be deterministic for `(block, ctx, renderer generation)`. `set_renderer`, `extend_renderer`, extension removal, and Lua reload bump generation; width/theme/scroll do not. Do not try to hash Lua closures. If user/plugin code mutates renderer-affecting closed-over state without reinstalling/reloading the renderer, it must call an explicit invalidation API that bumps renderer generation.
+3. **Determinism and cache invalidation.** A root renderer can close over arbitrary Lua globals. The contract is that renderer output must be deterministic for `(block, ctx, renderer generation)` at runtime, and for `(block, ctx, opts.cache_key)` across process restarts when persisted DisplayIR is enabled. `set_renderer`, `extend_renderer`, extension removal, and Lua reload bump generation; width/theme/scroll do not. Do not try to hash Lua closures. If user/plugin code mutates renderer-affecting closed-over state without reinstalling/reloading the renderer, it must call an explicit invalidation API that bumps renderer generation and disables persistence until the renderer chain is reinstalled with stable cache keys.
 4. **Semantic block snapshot schema.** Define the snapshot shape before migrating blocks. It should be serializable/plain-data, versioned internally, and include enough precomputed semantic annotations that defaults do not need to duplicate Rust parsing behavior in Lua.
 5. **Copy/search/source metadata as composable wrappers.** Custom renderers must not lose copy/yank/search semantics by accident. Make `layout.source`, `layout.copy_as`, `layout.selectable`, and row metadata behavior precise, including how wrappers compose through panels/gutters/caps.
 6. **Dynamic primitives boundary.** Keep the dynamic set small. Pending elapsed needs a dynamic primitive so it can tick without Lua. Most other state changes (`status`, `output`, `user_message`, args) are semantic invalidations and should rerun Lua for that block.
@@ -308,7 +308,7 @@ end) -> Reg
 smelt.transcript.invalidate_renderer()
 ```
 
-`extend_renderer` composes functions in Lua. It does not create a Rust registry by block kind, role, tool name, or tool body. Its callback receives the next renderer and either handles the block or delegates. `set_renderer`, `extend_renderer`, removing an extension registration, and `invalidate_renderer` all bump renderer generation and invalidate derived DisplayIR; width/theme/scroll do not.
+`extend_renderer` composes functions in Lua. It does not create a Rust registry by block kind, role, tool name, or tool body. Its callback receives the next renderer and either handles the block or delegates. `set_renderer`, `extend_renderer`, removing an extension registration, and `invalidate_renderer` all bump renderer generation and invalidate derived DisplayIR; width/theme/scroll do not. `opts.cache_key` on `set_renderer` and `extend_renderer` is the opt-in contract for persisted DisplayIR across process restarts.
 
 ```lua
 local transcript = require("smelt.transcript")
@@ -1092,19 +1092,22 @@ Exit criteria:
 
 Status after implementation:
 
-- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_blocks }`; cache read/write and background persist metrics report both entry types.
-- `DisplayBlockCacheEntry` persists renderer-produced `DisplayBlock::Layout { LayoutIr }` entries keyed by semantic content hash, tool sidecar hash, display renderer version, renderer generation, and render-context hash. Old cache files are rejected by `DISPLAY_RENDERER_VERSION = 6`.
-- `TranscriptProjection` hydrates display blocks before first projection and exports only history-valid entries for the current renderer generation once it is known. Row-index entries also carry renderer generation, so renderer invalidation rejects persisted heights and materialized rows without hashing Lua closures.
-- Width/theme changes continue to discard only row/materialized state; display blocks remain width/theme-independent and theme-independent. Renderer generation changes clear display blocks, row indexes, and rendered rows.
-- Coverage includes DisplayIR cache round-tripping, cold hydration without a row index avoiding recompilation, and renderer-generation mismatch rejection for persisted display blocks and row indexes.
+- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_blocks }`; cache read/write and background persist metrics report both entry types. The cache payload schema is separated from renderer semantics by `FORMAT_VERSION = 2`, while renderer-produced layout semantics remain gated by `DISPLAY_RENDERER_VERSION = 6`.
+- `DisplayBlockCacheEntry` persists renderer-produced `DisplayBlock::Layout { LayoutIr }` entries keyed by semantic content hash, tool sidecar hash, display renderer version, runtime renderer generation, stable renderer cache key, and render-context hash.
+- Bundled transcript defaults install a stable renderer cache key. User renderers and renderer middleware opt into persisted DisplayIR with `opts.cache_key`; omitting a cache key keeps runtime caching but disables persisted DisplayIR and row-index export for that renderer chain.
+- `TranscriptProjection` hydrates display blocks before first projection and exports only history-valid entries for the current renderer generation/cache key once the renderer is known. Row-index entries carry the same renderer identity, so renderer invalidation rejects persisted heights and materialized rows without hashing Lua closures.
+- Projection plans carry renderer generation/cache key, and `project_planned` rechecks the current Lua renderer identity before materializing a saved plan. If the renderer changed after planning, the row index and visible range are rebuilt under the current renderer before rendering.
+- Width/theme changes continue to discard only row/materialized state; display blocks remain width/theme-independent. Renderer generation/cache-key changes clear display blocks, row indexes, and rendered rows.
+- Coverage includes DisplayIR cache round-tripping, cold hydration without a row index avoiding recompilation, renderer-generation mismatch rejection, renderer-cache-key mismatch rejection, custom renderers without cache keys opting out of persistence, and planned projection renderer-identity rechecks.
 
 Validation after implementation:
 
 - `cargo build`
+- `cargo test -p smelt-tui transcript_buf`
 - `cargo nextest run --workspace`
+- `cargo xtask gen-lua-docs`
 - `cargo fmt && cargo clippy --workspace --all-targets -- -D warnings`
 - `git diff --check`
-- Lua API docs were not regenerated because Phase 6 changed only internal TUI persistence.
 
 ### Phase 7 — Remove obsolete Rust renderer modules and old APIs
 
@@ -1150,7 +1153,7 @@ Exit criteria:
 
 ## Resolved design choices
 
-- Expose one Rust-facing root override point: `smelt.transcript.set_renderer(fn)`.
+- Expose one Rust-facing root override point: `smelt.transcript.set_renderer(fn, opts?)`. A stable `opts.cache_key` opts custom renderers into persisted DisplayIR; omitting it deliberately disables persistence for that renderer chain.
 - Provide Lua-level root-renderer composition with `smelt.transcript.get_renderer()` and `smelt.transcript.extend_renderer(name, fn)`. This is middleware around the single root renderer, not a Rust per-kind/per-tool registry.
 - Provide `smelt.transcript.invalidate_renderer()` for renderer-affecting closed-over Lua state changes that do not go through `set_renderer`, `extend_renderer`, extension removal, or Lua reload.
 - Transcript/default/preview renderers return declarative LayoutIR only. Imperative buffer/render/paint APIs remain low-level escape hatches for windows, overlays, prompt/status bars, pickers, and debug panels; they are not transcript display APIs.

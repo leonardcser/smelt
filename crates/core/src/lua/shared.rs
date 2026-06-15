@@ -99,6 +99,7 @@ pub struct LuaShared {
     pub tools: Mutex<HashMap<String, ToolHandles>>,
     pub transcript_renderer: Mutex<Option<LuaHandle>>,
     pub transcript_renderer_generation: AtomicU64,
+    pub transcript_renderer_cache_key: AtomicU64,
     pub callbacks: Mutex<HashMap<u64, LuaHandle>>,
     /// Callbacks registered for `smelt.engine.ask`. Separate from
     /// `callbacks` so `fire_ask_callback` can't accidentally fire a
@@ -248,6 +249,7 @@ impl Default for LuaShared {
             tools: Mutex::new(HashMap::new()),
             transcript_renderer: Mutex::new(None),
             transcript_renderer_generation: AtomicU64::new(0),
+            transcript_renderer_cache_key: AtomicU64::new(0),
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -311,6 +313,8 @@ impl LuaShared {
         }
         self.transcript_renderer_generation
             .fetch_add(1, Ordering::AcqRel);
+        self.transcript_renderer_cache_key
+            .store(0, Ordering::Release);
         if let Ok(mut m) = self.callbacks.lock() {
             m.clear();
         }

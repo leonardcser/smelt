@@ -20,8 +20,9 @@ transcript.blocks = nil
 --- Add or replace named middleware around the root renderer. Later extensions
 --- run first. The callback receives `(next, block, ctx)` and may return its own
 --- layout or delegate with `next(block, ctx)`. The returned `Reg` removes only
---- this registration instance.
----@type fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): smelt.Reg
+--- this registration instance. Omit `opts.cache_key` to opt out of persisted
+--- DisplayIR while the middleware is active.
+---@type fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg
 transcript.extend_renderer = nil
 
 --- Return the current composed root transcript renderer, or nil before the
@@ -31,7 +32,8 @@ transcript.get_renderer = nil
 
 --- Bump the renderer generation after changing closed-over state that affects
 --- renderer output without calling `set_renderer`, `extend_renderer`, or a
---- registration's `:remove()`.
+--- registration's `:remove()`. This also opts out of persisted DisplayIR until
+--- the renderer is installed again with a cache key.
 ---@type fun(): integer
 transcript.invalidate_renderer = nil
 
@@ -48,9 +50,11 @@ transcript.rows = nil
 --- Replace the base transcript renderer used when the host asks Lua for a
 --- transcript block layout. Existing middleware registered with `extend_renderer`
 --- remains wrapped around the new base. The renderer must return a `smelt.layout`
---- value; return `smelt.layout.empty()` to hide a block.
+--- value; return `smelt.layout.empty()` to hide a block. Omit `opts.cache_key`
+--- to opt out of persisted DisplayIR, or bump it whenever renderer output changes
+--- across process restarts.
 ---@see smelt.layout.empty
----@type fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil
+---@type fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil
 transcript.set_renderer = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.

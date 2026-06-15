@@ -189,8 +189,13 @@ impl TranscriptView {
         self.projection.display_cache_generation()
     }
 
-    pub(crate) fn invalidate_renderer_if_changed(&mut self, generation: u64) -> bool {
-        self.projection.invalidate_renderer_if_changed(generation)
+    pub(crate) fn invalidate_renderer_if_changed(
+        &mut self,
+        generation: u64,
+        cache_key: Option<u64>,
+    ) -> bool {
+        self.projection
+            .invalidate_renderer_if_changed(generation, cache_key)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -276,9 +281,13 @@ impl ResumePreviewCache {
         }
     }
 
-    pub(crate) fn invalidate_renderer_if_changed(&mut self, generation: u64) {
+    pub(crate) fn invalidate_renderer_if_changed(
+        &mut self,
+        generation: u64,
+        cache_key: Option<u64>,
+    ) {
         for view in self.views.values_mut() {
-            view.invalidate_renderer_if_changed(generation);
+            view.invalidate_renderer_if_changed(generation, cache_key);
         }
     }
 }
@@ -665,9 +674,11 @@ impl TuiApp {
 
     pub(crate) fn sync_transcript_renderer_generation(&mut self) {
         let generation = self.lua.transcript_renderer_generation();
-        self.transcript.invalidate_renderer_if_changed(generation);
+        let cache_key = self.lua.transcript_renderer_cache_key();
+        self.transcript
+            .invalidate_renderer_if_changed(generation, cache_key);
         self.resume_preview_cache
-            .invalidate_renderer_if_changed(generation);
+            .invalidate_renderer_if_changed(generation, cache_key);
     }
 
     /// Install a complete theme and publish it to the process-wide active slot.

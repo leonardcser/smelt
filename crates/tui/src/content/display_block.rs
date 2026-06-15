@@ -16,6 +16,7 @@ pub(crate) struct DisplayCacheKey {
     pub(crate) sidecar_hash: u64,
     pub(crate) renderer_version: u64,
     pub(crate) renderer_generation: u64,
+    pub(crate) renderer_cache_key: Option<u64>,
     pub(crate) render_context_hash: u64,
 }
 
@@ -24,6 +25,7 @@ impl DisplayCacheKey {
         content_hash: u64,
         sidecar_hash: u64,
         renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
         render_context_hash: u64,
     ) -> Self {
         Self {
@@ -31,15 +33,21 @@ impl DisplayCacheKey {
             sidecar_hash,
             renderer_version: DISPLAY_RENDERER_VERSION,
             renderer_generation,
+            renderer_cache_key,
             render_context_hash,
         }
     }
 
-    fn from_layout_key(key: LayoutKey, renderer_generation: u64) -> Self {
+    fn from_layout_key(
+        key: LayoutKey,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+    ) -> Self {
         Self::new(
             key.content_hash,
             key.sidecar_hash,
             renderer_generation,
+            renderer_cache_key,
             u64::from(key.show_thinking),
         )
     }
@@ -50,6 +58,7 @@ pub(crate) struct TranscriptRenderEnv<'a> {
     pub(crate) lua: &'a LuaRuntime,
     pub(crate) show_thinking: bool,
     pub(crate) renderer_generation: u64,
+    pub(crate) renderer_cache_key: Option<u64>,
 }
 
 impl<'a> TranscriptRenderEnv<'a> {
@@ -58,6 +67,21 @@ impl<'a> TranscriptRenderEnv<'a> {
             lua,
             show_thinking,
             renderer_generation: lua.transcript_renderer_generation(),
+            renderer_cache_key: lua.transcript_renderer_cache_key(),
+        }
+    }
+
+    pub(crate) fn with_renderer(
+        lua: &'a LuaRuntime,
+        show_thinking: bool,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+    ) -> Self {
+        Self {
+            lua,
+            show_thinking,
+            renderer_generation,
+            renderer_cache_key,
         }
     }
 }
@@ -72,6 +96,7 @@ pub(crate) struct DisplayRowIndexEntry {
     pub(crate) width: u16,
     pub(crate) show_thinking: bool,
     pub(crate) renderer_generation: u64,
+    pub(crate) renderer_cache_key: Option<u64>,
     pub(crate) nodes: Vec<DisplayRowIndexNode>,
 }
 
@@ -161,6 +186,7 @@ impl DisplayModel {
         keys: &[LayoutKey],
     ) -> usize {
         let renderer_generation = env.renderer_generation;
+        let renderer_cache_key = env.renderer_cache_key;
         let blocks = ids
             .iter()
             .copied()
@@ -172,7 +198,8 @@ impl DisplayModel {
                     .position(|candidate| *candidate == id)
                     .map(|index| (index, id, key))
             });
-        let jobs = self.collect_compile_jobs(history, renderer_generation, blocks);
+        let jobs =
+            self.collect_compile_jobs(history, renderer_generation, renderer_cache_key, blocks);
         let compiled = jobs.len();
         let blocks = jobs.into_iter().map(|job| job.compile(env)).collect();
         self.insert_compiled_blocks(blocks);
@@ -186,6 +213,7 @@ impl DisplayModel {
         &mut self,
         history: &BlockHistory,
         renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
         blocks: impl IntoIterator<Item = (usize, BlockId, LayoutKey)>,
     ) -> Vec<CompileJob> {
         let _perf = smelt_perf::perf::begin("transcript:display_model:ensure_many");
@@ -194,7 +222,8 @@ impl DisplayModel {
         let mut requested = 0;
         for (index, id, key) in blocks {
             requested += 1;
-            let display_key = DisplayCacheKey::from_layout_key(key, renderer_generation);
+            let display_key =
+                DisplayCacheKey::from_layout_key(key, renderer_generation, renderer_cache_key);
             if self
                 .blocks
                 .get(&id)
@@ -250,14 +279,26 @@ impl DisplayModel {
         &self,
         history: &BlockHistory,
         renderer_generation: Option<u64>,
+        renderer_cache_key: Option<u64>,
     ) -> Vec<DisplayBlockCacheEntry> {
+        if renderer_generation.is_some() && renderer_cache_key.is_none() {
+            return Vec::new();
+        }
         let mut entries = Vec::new();
         for id in &history.order {
             let Some(cached) = self.blocks.get(id) else {
                 continue;
             };
+            if cached.key.renderer_cache_key.is_none() {
+                continue;
+            }
             if renderer_generation
                 .is_some_and(|generation| cached.key.renderer_generation != generation)
+            {
+                continue;
+            }
+            if renderer_cache_key
+                .is_some_and(|cache_key| cached.key.renderer_cache_key != Some(cache_key))
             {
                 continue;
             }
@@ -292,8 +333,10 @@ impl DisplayModel {
         id: BlockId,
         key: LayoutKey,
         renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
     ) -> Option<&DisplayBlock> {
-        let display_key = DisplayCacheKey::from_layout_key(key, renderer_generation);
+        let display_key =
+            DisplayCacheKey::from_layout_key(key, renderer_generation, renderer_cache_key);
         self.blocks
             .get(&id)
             .filter(|cached| cached.key == display_key)
@@ -306,6 +349,9 @@ fn display_block_entry_matches_history(
     entry: &DisplayBlockCacheEntry,
 ) -> bool {
     if entry.key.renderer_version != DISPLAY_RENDERER_VERSION {
+        return false;
+    }
+    if entry.key.renderer_cache_key.is_none() {
         return false;
     }
     let Some(block) = history.blocks.get(&entry.id) else {

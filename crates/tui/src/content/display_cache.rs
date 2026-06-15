@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 const CACHE_FILE: &str = "session.ir.bin";
 const MAGIC: &[u8; 8] = b"SMELTIR\0";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIXED_HEADER_LEN: usize = MAGIC.len() + 4 + 8 + 2 + 8;
 
@@ -228,6 +228,7 @@ mod tests {
             width: 80,
             show_thinking: false,
             renderer_generation: 1,
+            renderer_cache_key: Some(1),
             nodes: vec![DisplayRowIndexNode {
                 id: BlockId::new(7),
                 key: LayoutKey {
@@ -245,7 +246,7 @@ mod tests {
     fn display_block() -> DisplayBlockCacheEntry {
         DisplayBlockCacheEntry {
             id: BlockId::new(7),
-            key: DisplayCacheKey::new(1, 2, 1, 0),
+            key: DisplayCacheKey::new(1, 2, 1, Some(1), 0),
             block: DisplayBlock::Layout {
                 layout: BlockLayout::Empty,
             },

@@ -43,8 +43,10 @@ smelt.transcript = smelt.transcript or {}
 ---@field command? string Exec command.
 ---@field command_spans? table Exec command as one styled span line, including the `!` accent.
 
+local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v6"
 local transcript = smelt.transcript
 local base_renderer = transcript.__get_renderer and transcript.__get_renderer() or nil
+local base_renderer_cache_key = nil
 local extensions = {}
 local order = {}
 local next_token = 0
@@ -53,6 +55,34 @@ local function require_function(name, value)
   if type(value) ~= "function" then
     error("smelt.transcript." .. name .. ": expected function", 3)
   end
+end
+
+local function parse_cache_key(name, opts)
+  if opts == nil then return nil end
+  if type(opts) ~= "table" then
+    error("smelt.transcript." .. name .. ": opts must be a table", 3)
+  end
+  local key = opts.cache_key
+  if key == nil or key == false then return nil end
+  if type(key) ~= "string" or key == "" then
+    error("smelt.transcript." .. name .. ": opts.cache_key must be a non-empty string", 3)
+  end
+  return key
+end
+
+local function effective_cache_key()
+  if not base_renderer_cache_key then return nil end
+  local parts = { "base", base_renderer_cache_key }
+  for i = 1, #order do
+    local name = order[i]
+    local entry = extensions[name]
+    if entry then
+      if not entry.cache_key then return nil end
+      parts[#parts + 1] = name
+      parts[#parts + 1] = entry.cache_key
+    end
+  end
+  return table.concat(parts, "\n")
 end
 
 local function rebuild_renderer()
@@ -67,18 +97,25 @@ local function rebuild_renderer()
       end
     end
   end
-  if renderer then transcript.__set_renderer(renderer) end
+  if renderer then transcript.__set_renderer(renderer, effective_cache_key()) end
+end
+
+local function set_base_renderer(renderer, cache_key)
+  base_renderer = renderer
+  base_renderer_cache_key = cache_key
+  rebuild_renderer()
 end
 
 --- Replace the base transcript renderer used when the host asks Lua for a
 --- transcript block layout. Existing middleware registered with `extend_renderer`
 --- remains wrapped around the new base. The renderer must return a `smelt.layout`
---- value; return `smelt.layout.empty()` to hide a block.
----@type fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil
-function smelt.transcript.set_renderer(renderer)
+--- value; return `smelt.layout.empty()` to hide a block. Omit `opts.cache_key`
+--- to opt out of persisted DisplayIR, or bump it whenever renderer output changes
+--- across process restarts.
+---@type fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil
+function smelt.transcript.set_renderer(renderer, opts)
   require_function("set_renderer", renderer)
-  base_renderer = renderer
-  rebuild_renderer()
+  set_base_renderer(renderer, parse_cache_key("set_renderer", opts))
 end
 
 --- Return the current composed root transcript renderer, or nil before the
@@ -91,9 +128,10 @@ end
 --- Add or replace named middleware around the root renderer. Later extensions
 --- run first. The callback receives `(next, block, ctx)` and may return its own
 --- layout or delegate with `next(block, ctx)`. The returned `Reg` removes only
---- this registration instance.
----@type fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): smelt.Reg
-function smelt.transcript.extend_renderer(name, renderer)
+--- this registration instance. Omit `opts.cache_key` to opt out of persisted
+--- DisplayIR while the middleware is active.
+---@type fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg
+function smelt.transcript.extend_renderer(name, renderer, opts)
   if type(name) ~= "string" or name == "" then
     error("smelt.transcript.extend_renderer: name must be a non-empty string", 2)
   end
@@ -102,7 +140,7 @@ function smelt.transcript.extend_renderer(name, renderer)
   next_token = next_token + 1
   local token = next_token
   if not extensions[name] then order[#order + 1] = name end
-  extensions[name] = { fn = renderer, token = token }
+  extensions[name] = { fn = renderer, token = token, cache_key = parse_cache_key("extend_renderer", opts) }
   rebuild_renderer()
 
   return smelt.reg.new(function()
@@ -121,7 +159,8 @@ end
 
 --- Bump the renderer generation after changing closed-over state that affects
 --- renderer output without calling `set_renderer`, `extend_renderer`, or a
---- registration's `:remove()`.
+--- registration's `:remove()`. This also opts out of persisted DisplayIR until
+--- the renderer is installed again with a cache key.
 ---@type fun(): integer
 function smelt.transcript.invalidate_renderer()
   return transcript.__invalidate_renderer()
@@ -129,9 +168,9 @@ end
 
 local defaults = require("smelt.transcript.defaults")
 
-smelt.transcript.set_renderer(function(block, ctx)
+set_base_renderer(function(block, ctx)
   return defaults.render(block, ctx)
-end)
+end, DEFAULT_RENDERER_CACHE_KEY)
 
 package.loaded["smelt.transcript"] = smelt.transcript
 

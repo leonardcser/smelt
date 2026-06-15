@@ -31,7 +31,7 @@ Return the laid-out transcript blocks for the current frame as a list of `{ idx,
 ## `smelt.transcript.extend_renderer`
 
 ```lua
-fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): smelt.Reg
+fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg
 ```
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.Reg`](types.md#smeltreg)
@@ -41,7 +41,8 @@ Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transc
 Add or replace named middleware around the root renderer. Later extensions
 run first. The callback receives `(next, block, ctx)` and may return its own
 layout or delegate with `next(block, ctx)`. The returned `Reg` removes only
-this registration instance.
+this registration instance. Omit `opts.cache_key` to opt out of persisted
+DisplayIR while the middleware is active.
 
 ## `smelt.transcript.get_renderer`
 
@@ -66,7 +67,8 @@ fun(): integer
 
 Bump the renderer generation after changing closed-over state that affects
 renderer output without calling `set_renderer`, `extend_renderer`, or a
-registration's `:remove()`.
+registration's `:remove()`. This also opts out of persisted DisplayIR until
+the renderer is installed again with a cache key.
 
 ## `smelt.transcript.is_empty`
 
@@ -91,7 +93,7 @@ Return rendered transcript display rows in `[start, start + count)`. This is exa
 ## `smelt.transcript.set_renderer`
 
 ```lua
-fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?): nil
+fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil
 ```
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
@@ -101,7 +103,9 @@ Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transc
 Replace the base transcript renderer used when the host asks Lua for a
 transcript block layout. Existing middleware registered with `extend_renderer`
 remains wrapped around the new base. The renderer must return a `smelt.layout`
-value; return `smelt.layout.empty()` to hide a block.
+value; return `smelt.layout.empty()` to hide a block. Omit `opts.cache_key`
+to opt out of persisted DisplayIR, or bump it whenever renderer output changes
+across process restarts.
 
 ## `smelt.transcript.text`
 
