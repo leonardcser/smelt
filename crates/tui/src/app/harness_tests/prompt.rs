@@ -44,9 +44,22 @@ fn queued_turn_preserves_work_elapsed() {
     }));
     let after = app.app.working.elapsed().expect("queued turn elapsed");
 
+    let saved_elapsed_ms = app
+        .app
+        .core
+        .session
+        .turn_metas
+        .last()
+        .map(|(_, meta)| meta.elapsed_ms)
+        .expect("completed turn meta");
+
     assert!(app.agent_running(), "queued turn should start immediately");
     assert_eq!(app.queued_message_count(), 0);
     assert_eq!(app.state().prompt_text, "");
+    assert!(
+        saved_elapsed_ms >= 3_000,
+        "completed turn meta reset elapsed time: {saved_elapsed_ms}ms"
+    );
     assert!(
         after >= before && after >= Duration::from_secs(3),
         "queued turn reset elapsed time: before {before:?}, after {after:?}"

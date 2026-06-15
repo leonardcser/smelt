@@ -431,34 +431,25 @@ impl TuiApp {
         }
         let start_queued =
             !cancelled && !self.queued_inputs.is_empty() && !self.busy_stack.is_busy();
-        let fallback_meta = (!cancelled).then(|| self.working.turn_meta()).flatten();
-        if cancelled {
-            {
-                self.working.finish(TurnOutcome::Interrupted);
-            };
+        let finished_meta = if cancelled {
+            let meta = self.working.finish(TurnOutcome::Interrupted);
             self.drain_queued_inputs_into_prompt();
+            meta
         } else {
-            if start_queued {
+            let meta = if start_queued {
                 self.working
-                    .finish_and_continue(TurnOutcome::Done, TurnPhase::Working);
+                    .finish_and_continue(TurnOutcome::Done, TurnPhase::Working)
             } else {
-                self.working.finish(TurnOutcome::Done);
-            }
+                self.working.finish(TurnOutcome::Done)
+            };
             self.clear_prompt_prediction();
-        }
-        let meta = self.pending_turn_meta.take().or_else(|| {
-            if cancelled {
-                self.working.turn_meta()
-            } else {
-                fallback_meta
-            }
-        });
-        if let Some(meta) = meta {
-            self.core
-                .session
-                .turn_metas
-                .push((self.core.session.history.len(), meta));
-        }
+            meta
+        };
+        let meta = self.pending_turn_meta.take().unwrap_or(finished_meta);
+        self.core
+            .session
+            .turn_metas
+            .push((self.core.session.history.len(), meta));
         if !cancelled {
             self.apply_pending_history_appends_for_request();
         }

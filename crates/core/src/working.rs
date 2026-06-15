@@ -118,7 +118,7 @@ impl WorkingState {
     }
 
     /// Archive the live turn's metadata as `last` and clear live.
-    pub fn finish(&mut self, outcome: TurnOutcome) {
+    pub fn finish(&mut self, outcome: TurnOutcome) -> TurnMeta {
         let now = self.clock.instant_now();
         let (elapsed, avg_tps) = match self.live.take() {
             Some(live) => (live.effective_elapsed(now), avg(&live.tps_samples)),
@@ -129,44 +129,31 @@ impl WorkingState {
             elapsed,
             avg_tps,
         });
+        turn_meta_for(outcome, elapsed, avg_tps)
     }
 
     /// Archive the live turn's metadata and keep its elapsed timer running for
     /// the next queued turn.
-    pub fn finish_and_continue(&mut self, outcome: TurnOutcome, phase: TurnPhase) {
+    pub fn finish_and_continue(&mut self, outcome: TurnOutcome, phase: TurnPhase) -> TurnMeta {
         let now = self.clock.instant_now();
         let retry_deadline = retry_deadline_for(phase, now);
-        match self.live.as_mut() {
-            Some(live) => {
-                self.last = Some(LastTurn {
-                    outcome,
-                    elapsed: live.effective_elapsed(now),
-                    avg_tps: avg(&live.tps_samples),
-                });
-                live.phase = phase;
-                live.retry_deadline = retry_deadline;
-                live.tps_samples.clear();
-            }
-            None => {
-                let (elapsed, avg_tps) = self
-                    .last
-                    .as_ref()
-                    .map(|last| (last.elapsed, last.avg_tps))
-                    .unwrap_or((Duration::ZERO, None));
-                self.last = Some(LastTurn {
-                    outcome,
-                    elapsed,
-                    avg_tps,
-                });
-                self.live = Some(LiveTurn {
-                    phase,
-                    timer: PausedTimer::new(now.checked_sub(elapsed).unwrap_or(now)),
-                    retry_deadline,
-                    tps_samples: Vec::new(),
-                    last_spinner_frame: usize::MAX,
-                });
-            }
-        }
+        let Some(live) = self.live.as_mut() else {
+            debug_assert!(false, "finish_and_continue called without a live turn");
+            let meta = self.finish(outcome);
+            self.begin(phase);
+            return meta;
+        };
+        let elapsed = live.effective_elapsed(now);
+        let avg_tps = avg(&live.tps_samples);
+        self.last = Some(LastTurn {
+            outcome,
+            elapsed,
+            avg_tps,
+        });
+        live.phase = phase;
+        live.retry_deadline = retry_deadline;
+        live.tps_samples.clear();
+        turn_meta_for(outcome, elapsed, avg_tps)
     }
 
     pub fn clear(&mut self) {
@@ -277,19 +264,15 @@ impl WorkingState {
 
     pub fn turn_meta(&self) -> Option<TurnMeta> {
         if let Some(live) = self.live.as_ref() {
-            return Some(TurnMeta {
-                elapsed_ms: live.effective_elapsed(self.clock.instant_now()).as_millis() as u64,
-                avg_tps: avg(&live.tps_samples),
-                interrupted: false,
-                tool_elapsed: std::collections::HashMap::new(),
-            });
+            return Some(turn_meta_for(
+                TurnOutcome::Done,
+                live.effective_elapsed(self.clock.instant_now()),
+                avg(&live.tps_samples),
+            ));
         }
-        self.last.as_ref().map(|last| TurnMeta {
-            elapsed_ms: last.elapsed.as_millis() as u64,
-            avg_tps: last.avg_tps,
-            interrupted: matches!(last.outcome, TurnOutcome::Interrupted),
-            tool_elapsed: std::collections::HashMap::new(),
-        })
+        self.last
+            .as_ref()
+            .map(|last| turn_meta_for(last.outcome, last.elapsed, last.avg_tps))
     }
 
     pub fn restore_from_turn_meta(&mut self, meta: &TurnMeta) {
@@ -303,6 +286,15 @@ impl WorkingState {
             elapsed: Duration::from_millis(meta.elapsed_ms),
             avg_tps: meta.avg_tps,
         });
+    }
+}
+
+fn turn_meta_for(outcome: TurnOutcome, elapsed: Duration, avg_tps: Option<f64>) -> TurnMeta {
+    TurnMeta {
+        elapsed_ms: elapsed.as_millis() as u64,
+        avg_tps,
+        interrupted: matches!(outcome, TurnOutcome::Interrupted),
+        tool_elapsed: std::collections::HashMap::new(),
     }
 }
 
