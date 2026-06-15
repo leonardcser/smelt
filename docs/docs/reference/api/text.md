@@ -70,6 +70,14 @@ fun(s: string, max_bytes: integer, opts: any?): string
 
 Return a valid UTF-8 string shortened to a byte budget. By default keeps the head: `truncate(s, n)`. Passing a string third argument appends it as a suffix when truncation happens. Passing an opts table enables `{ keep = "head"|"tail", prefix?, suffix? }`; use `{ keep = "tail" }` for recent-message snippets. Lua string slicing is byte-based and can split multi-byte characters; this function snaps to UTF-8 boundaries and also accepts already-invalid Lua byte strings.
 
+## `smelt.text.truncate_cells`
+
+```lua
+fun(s: string, width: integer, opts: table?): string
+```
+
+Return `s` shortened to at most `width` display cells, appending `opts.suffix` (default `"…"`) when truncation happens. Unlike `smelt.text.fit`, this does not pad short strings.
+
 ## `smelt.text.width`
 
 ```lua

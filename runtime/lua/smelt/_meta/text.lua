@@ -40,6 +40,11 @@ text.slugify = nil
 ---@type fun(s: string, max_bytes: integer, opts: any?): string
 text.truncate = nil
 
+--- Return `s` shortened to at most `width` display cells, appending `opts.suffix` (default `"…"`) when truncation happens. Unlike `smelt.text.fit`, this does not pad short strings.
+---@see smelt.text.fit
+---@type fun(s: string, width: integer, opts: table?): string
+text.truncate_cells = nil
+
 --- Return the visual column count of `s`. Lua's `#s` counts bytes; use this for sizing extmark ranges or computing column offsets so multi-byte and wide characters land correctly.
 ---@type fun(s: string): integer
 text.width = nil

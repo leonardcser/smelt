@@ -61,6 +61,32 @@ app_story!(prompt_queued_messages, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_turn_queue_row_truncates, |ctx| {
+    // Long next-turn queue entries stay on one prompt-above row, truncate with
+    // a Unicode ellipsis, and leave right padding so they do not hit the edge.
+    ctx.set_viewport(32, 8);
+    ctx.push_queued_message("turn queue message that should be clipped at the right edge");
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_request_queue_row_truncates, |ctx| {
+    // Promoted next-request entries use the `»` marker and share the same
+    // truncation/padding behavior as next-turn entries.
+    ctx.set_viewport(32, 8);
+    ctx.push_queued_message("request queue message that should be clipped at the right edge");
+    ctx.promote_next_queued_message();
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_stash_row_truncates, |ctx| {
+    // The stash reminder is fixed text, but on narrow terminals it still needs
+    // ellipsis truncation and right padding like the queue rows.
+    ctx.set_viewport(24, 8);
+    ctx.type_prompt("draft note");
+    ctx.stash_prompt();
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_compacting_keeps_token_counter_visible, |ctx| {
     // A narrow prompt bar during compaction should keep the token counter
     // visible even when secondary chrome needs to drop.

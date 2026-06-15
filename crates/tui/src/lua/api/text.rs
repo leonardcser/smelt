@@ -176,6 +176,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "truncate_cells",
+        "Return `s` shortened to at most `width` display cells, appending `opts.suffix` (default `\"…\"`) when truncation happens. Unlike `smelt.text.fit`, this does not pad short strings.",
+        &["s", "width", "opts"],
+        |_, (s, width, opts): (String, usize, Option<mlua::Table>)| -> LuaResult<String> {
+            let suffix = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("suffix").ok().flatten())
+                .unwrap_or_else(|| "…".into());
+            Ok(truncate_to_cells(&s, width, &suffix))
+        },
+    )?;
+    m.fn_(
         "fit",
         "Force `s` to occupy exactly `width` display cells: truncate when too long (appending `opts.suffix`, default `\"…\"`), pad when too short (with `opts.fill`, default `\" \"`). `opts.align` is `\"left\"` (default), `\"right\"`, or `\"center\"`. Use this for fixed-width UI slots - handles multi-byte and wide chars correctly so the result is always exactly `width` cells wide regardless of content.",
         &["s", "width", "opts"],
@@ -303,6 +315,19 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(out, "😀abc");
+    }
+
+    #[test]
+    fn lua_truncate_cells_uses_display_width_without_padding() {
+        let lua = Lua::new();
+        let smelt = lua.create_table().unwrap();
+        register(&lua, &smelt).unwrap();
+        lua.globals().set("smelt", smelt).unwrap();
+        let out: String = lua
+            .load("return smelt.text.truncate_cells('hello world', 8, { suffix = '…' })")
+            .eval()
+            .unwrap();
+        assert_eq!(out, "hello w…");
     }
 
     #[test]

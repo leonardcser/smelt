@@ -1,5 +1,5 @@
--- Scroll-pill overlays shown while the transcript is scrolled off-tail:
---   * Bottom pill - " ↓ jump to bottom " above the prompt; click re-pins to tail.
+-- Scroll-pill overlays for transcript navigation:
+--   * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail.
 --   * Top pill    - first line of the nearest user message above the viewport;
 --     click scrolls to it with one row of gap so repeated clicks walk back.
 -- Disable via `smelt.builtins.disable({ plugins = { "scroll_pills" } })`.
@@ -45,13 +45,20 @@ local function close_all()
   close_top()
 end
 
-local function is_off_tail(scroll)
+local function should_show_bottom(scroll)
   return scroll
     and scroll.viewport
     and scroll.viewport > 0
     and scroll.overflow
     and not scroll.follow
     and not scroll.at_bottom
+end
+
+local function can_show_top(scroll)
+  return scroll
+    and scroll.viewport
+    and scroll.viewport > 0
+    and scroll.overflow
 end
 
 -- ── Bottom pill: "jump to bottom" ─────────────────────────────────────
@@ -101,7 +108,7 @@ end
 -- Most-recent user block at-or-above the viewport top. Hidden when that
 -- block sits exactly at the viewport top (already visible, click would no-op).
 local function user_block_for_top_pill(scroll)
-  if not is_off_tail(scroll) then return nil end
+  if not can_show_top(scroll) then return nil end
   local blocks = smelt.transcript.blocks()
   for i = #blocks, 1, -1 do
     local b = blocks[i]
@@ -189,12 +196,11 @@ local function refresh()
   end
 
   local scroll = state.transcript_win:scroll()
-  if not is_off_tail(scroll) then
-    close_all()
-    return
+  if should_show_bottom(scroll) then
+    open_bottom()
+  else
+    close_bottom()
   end
-
-  open_bottom()
   refresh_top(scroll)
 end
 

@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 382
+expression: frame.text()
+---
+
+
+
+  ◌ Stashed (ctrl+s t…
+────────────────────────
+
+────────────────────────
+ ○ normal       1:1 100%

@@ -1,0 +1,13 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 382
+expression: frame.text()
+---
+
+
+
+  › turn queue message that s…
+─ ✿ working… ───────────────────
+
+────────────────────────────────
+ ○ normal               1:1 100%

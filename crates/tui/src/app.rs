@@ -1457,9 +1457,10 @@ impl TuiApp {
         let summary = body.lines().next().unwrap_or("");
         let prefix_w = indent.len() + label.len() + gap.len();
         let term_w = self.ui.terminal_size().0 as usize;
-        let budget = term_w.saturating_sub(prefix_w).saturating_sub(1);
-        let summary = smelt_core::content::width::take_to_cells(summary, budget);
-        let line = format!("{indent}{label}{gap}{summary}");
+        let available = term_w.saturating_sub(prefix_w);
+        let summary =
+            smelt_core::content::width::truncate_with_right_padding(summary, available, 2, "…");
+        let line = format!("{indent}{label}{gap}{}", summary.text);
 
         let buf = self
             .ui
@@ -1468,7 +1469,7 @@ impl TuiApp {
         let label_start = indent.len() as u16;
         let label_end = label_start + label.len() as u16;
         let msg_start = label_end + gap.len() as u16;
-        let msg_end = msg_start + summary.chars().count() as u16;
+        let msg_end = msg_start + summary.body.chars().count() as u16;
 
         let label_color = match kind {
             MessageKind::Error => self.ui.theme().get("ErrorMsg").fg,

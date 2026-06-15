@@ -26,9 +26,11 @@ local function dl(dark, light)
   return { dark = { ansi = dark }, light = { ansi = light } }
 end
 
+local accent = { ansi = 208 }
+
 return {
   -- ── Base palette: groups that hold literal color values. ──────────
-  SmeltAccent         = fg({ ansi = 208 }),   -- ember
+  SmeltAccent         = fg(accent),          -- ember
   SmeltSlug           = fg({ ansi = 0 }),     -- pill fg; bg falls back to SmeltAccent in statusline.lua
   SmeltMuted          = fg({ ansi = 244 }),   -- "comment grey"
   SmeltSuccess        = fg({ ansi = 77 }),    -- check-mark green
@@ -42,7 +44,7 @@ return {
   SmeltCodeBlockBg    = bg(dl(233, 253)),
   SmeltBar            = fg(dl(237, 250)),
   SmeltSelection      = bg(dl(238, 153)),
-  SmeltSearch         = bg(dl(94, 229)),
+  SmeltSearch         = bg(accent),
   SmeltYankFlash      = bg(dl(240, 195)),
   SmeltCursorLineBg   = bg(dl(237, 251)),
   SmeltScrollbarTrack = bg(dl(235, 253)),

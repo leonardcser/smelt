@@ -50,6 +50,17 @@ function M.segments_to_line(segs)
   return { text = table.concat(parts), highlights = highlights }
 end
 
+function M.truncate_right_padded(text, width, opts)
+  opts = opts or {}
+  width = math.max(width or 0, 0)
+  local pad = opts.pad or 2
+  local suffix = opts.suffix or "…"
+  local pad_w = math.min(math.max(pad, 0), width)
+  local body_w = math.max(0, width - pad_w)
+  local body = smelt.text.truncate_cells(text or "", body_w, { suffix = suffix })
+  return body .. string.rep(" ", pad_w), #body
+end
+
 -- ── priority-drop bar row (prompt top + bottom) ─────────────────────
 
 function M.compose(width, left, right)

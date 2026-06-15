@@ -5,6 +5,12 @@
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RightPaddedText {
+    pub text: String,
+    pub body: String,
+}
+
 /// Greatest prefix of `s` whose display width is `<= max_cells`. Snaps to
 /// char boundaries; a wide glyph that would straddle the cap is dropped
 /// rather than split.
@@ -39,6 +45,21 @@ pub fn truncate_to_cells(s: &str, max_cells: usize, suffix: &str) -> String {
     let mut out = take_to_cells(s, max_cells - suffix_w);
     out.push_str(suffix);
     out
+}
+
+/// Truncate `s` to fit beside fixed right padding. `width` is the total row
+/// budget; up to `pad` spaces are reserved at the right edge. Returns both the
+/// full padded text and the unpadded body so callers can style only the content.
+pub fn truncate_with_right_padding(
+    s: &str,
+    width: usize,
+    pad: usize,
+    suffix: &str,
+) -> RightPaddedText {
+    let pad_w = pad.min(width);
+    let body = truncate_to_cells(s, width - pad_w, suffix);
+    let text = format!("{body}{}", " ".repeat(pad_w));
+    RightPaddedText { text, body }
 }
 
 /// Build a padding string of exactly `gap` display cells using whole
@@ -91,6 +112,20 @@ mod tests {
     #[test]
     fn truncate_returns_suffix_prefix_when_suffix_overruns() {
         assert_eq!(truncate_to_cells("hello world", 2, "..."), "..");
+    }
+
+    #[test]
+    fn truncate_with_right_padding_reserves_edge_space() {
+        let out = truncate_with_right_padding("hello world", 10, 2, "…");
+        assert_eq!(out.body, "hello w…");
+        assert_eq!(out.text, "hello w…  ");
+    }
+
+    #[test]
+    fn truncate_with_right_padding_clamps_padding_to_width() {
+        let out = truncate_with_right_padding("hello", 1, 2, "…");
+        assert_eq!(out.body, "");
+        assert_eq!(out.text, " ");
     }
 
     #[test]

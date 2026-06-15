@@ -442,7 +442,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.esc_chord` | Idle-mode Esc-Esc: cancel any in-flight background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.predict` | Input prediction plugin. |
-| `smelt.plugins.scroll_pills` | Scroll-pill overlays shown while the transcript is scrolled off-tail: * Bottom pill - " ↓ jump to bottom " above the prompt; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
+| `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
 | `smelt.plugins.title` | Session title plugin. |
 | `smelt.plugins.upgrade` | Autoupgrade plugin. |
 | `smelt.plugins.version` | /version - surface the running smelt build identity as a notification. |
@@ -1444,6 +1444,8 @@ Visual-width measurement.
   Lowercase `s`, replace non-alphanumeric runs with `-`, drop empty segments.
 - `smelt.text.truncate` :: `fun(s: string, max_bytes: integer, opts: any?): string`
   Return a valid UTF-8 string shortened to a byte budget.
+- `smelt.text.truncate_cells` :: `fun(s: string, width: integer, opts: table?): string`
+  Return `s` shortened to at most `width` display cells, appending `opts.suffix` (default `"…"`) when truncation happens.
 - `smelt.text.width` :: `fun(s: string): integer`
   Return the visual column count of `s`.
 

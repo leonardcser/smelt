@@ -24,25 +24,27 @@ local OPTIONAL_PRIORITY = 4
 
 -- ── helpers ─────────────────────────────────────────────────────────
 
-local function queued_message_rows(queued)
+local function queued_message_rows(queued, width)
+  width = math.max(width or 0, 0)
   local rows = {}
   for _, row in ipairs(queued) do
     local kind = row.kind or "turn"
     local marker = kind == "request" and "»" or "›"
     local prefix = "  " .. marker .. " "
-    local text = prefix .. (row.text or "")
+    local text, body_end = bar.truncate_right_padded(prefix .. (row.text or ""), width)
+    local prefix_end = math.min(#prefix, body_end)
     rows[#rows + 1] = {
       text = text,
       highlights = {
         {
           bytes_start = 0,
-          bytes_end = #prefix,
+          bytes_end = prefix_end,
           style = { fg = "Comment" },
           selectable = false,
         },
         {
-          bytes_start = #prefix,
-          bytes_end = #text,
+          bytes_start = prefix_end,
+          bytes_end = body_end,
           style = { fg = "Comment" },
         },
       },
@@ -51,16 +53,17 @@ local function queued_message_rows(queued)
   return rows
 end
 
-local function stash_row()
+local function stash_row(width)
+  width = math.max(width or 0, 0)
   local indent = "  "
   local label = "◌ Stashed (ctrl+s to unstash)"
-  local text = indent .. label
+  local text, body_end = bar.truncate_right_padded(indent .. label, width)
   return {
     text = text,
     highlights = {
       {
-        bytes_start = #indent,
-        bytes_end = #text,
+        bytes_start = math.min(#indent, body_end),
+        bytes_end = body_end,
         style = { fg = "Comment" },
       },
     },
@@ -262,11 +265,11 @@ local function render_top(win)
   local width = win:content_width() or 80
   local rows = {}
   local queued = smelt.prompt.queued_rows()
-  for _, row in ipairs(queued_message_rows(queued)) do
+  for _, row in ipairs(queued_message_rows(queued, width)) do
     rows[#rows + 1] = row
   end
   if smelt.prompt.has_stash() then
-    rows[#rows + 1] = stash_row()
+    rows[#rows + 1] = stash_row(width)
   end
   rows[#rows + 1] = bar.compose(width, indicator_spans(), right_spans())
   bar.write_rows(buf, rows, TOP_NS)
