@@ -1031,6 +1031,13 @@ impl LuaRuntime {
         rt.cancel_all(&self.lua);
     }
 
+    pub fn cancel_turn_tasks(&self) {
+        let Ok(mut rt) = self.shared.tasks.lock() else {
+            return;
+        };
+        rt.cancel_scope(&self.lua, super::task::TaskScope::Turn);
+    }
+
     fn take_next_ready_task(&self, now: Instant) -> Result<Option<super::task::LuaTask>, ()> {
         let Ok(mut rt) = self.shared.tasks.lock() else {
             return Err(());
@@ -1668,7 +1675,7 @@ impl LuaRuntime {
                     };
                 }
             };
-            let task_id = match rt.spawn_with_timeout(
+            let task_id = match rt.spawn_scoped(
                 &self.lua,
                 func,
                 initial,
@@ -1676,6 +1683,7 @@ impl LuaRuntime {
                     request_id,
                     call_id: call_id.to_string(),
                 },
+                super::task::TaskScope::Turn,
                 deadline,
             ) {
                 Ok(id) => id,

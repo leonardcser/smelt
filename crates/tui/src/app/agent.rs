@@ -381,7 +381,7 @@ impl TuiApp {
     pub(crate) fn cancel_agent(&mut self) {
         self.sleep_inhibit.release();
         self.core.engine.send(UiCommand::Cancel);
-        self.lua.cancel_tasks();
+        self.lua.cancel_turn_tasks();
         self.cancel_generation = self.cancel_generation.wrapping_add(1);
         self.busy_stack.clear();
         // A turn is ending without going through `finish_turn`. Commit any
@@ -407,10 +407,10 @@ impl TuiApp {
             }
         } else if cancelled {
             // No active turn but user requested cancel - still notify the
-            // engine and kill any running Lua tasks (background tool calls,
-            // bash executions, etc.).
+            // engine and kill any stale turn-owned Lua tasks (tool calls,
+            // bash executions, etc.). App-scoped background work survives.
             self.core.engine.send(UiCommand::Cancel);
-            self.lua.cancel_tasks();
+            self.lua.cancel_turn_tasks();
             self.cancel_generation = self.cancel_generation.wrapping_add(1);
             self.busy_stack.clear();
             // Archive an interrupted outcome so the prompt bar shows
@@ -423,7 +423,7 @@ impl TuiApp {
         self.sleep_inhibit.release();
         if cancelled {
             self.core.engine.send(UiCommand::Cancel);
-            self.lua.cancel_tasks();
+            self.lua.cancel_turn_tasks();
             self.cancel_generation = self.cancel_generation.wrapping_add(1);
             self.busy_stack.clear();
         }

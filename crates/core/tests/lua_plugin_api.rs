@@ -265,7 +265,7 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
                 is_error,
                 ..
             } => Some((request_id, call_id, content, is_error)),
-            TaskDriveOutput::Error(_) => None,
+            _ => None,
         })
         .collect();
 
@@ -659,6 +659,115 @@ async fn process_run_kills_child_on_cancel() {
         elapsed < Duration::from_secs(3),
         "child should die fast after cancel; took {elapsed:?}"
     );
+}
+
+#[test]
+fn turn_cancellation_preserves_top_level_spawned_app_tasks() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            APP_DONE = false
+            smelt.spawn(function()
+                smelt.sleep(1000)
+                APP_DONE = true
+            end)
+            smelt.tools.register({
+                name = "slow_turn_tool",
+                execute = function()
+                    smelt.sleep(1000)
+                    return "too late"
+                end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("setup scoped tasks");
+
+    let now = Instant::now();
+    assert!(rt.drive_tasks(now).is_empty());
+    let result = rt.execute_tool(
+        "slow_turn_tool",
+        &HashMap::new(),
+        77,
+        "call-turn-cancel",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        now,
+    );
+    assert!(matches!(result, ToolExecResult::Pending));
+
+    rt.cancel_turn_tasks();
+    let outs = rt.drive_tasks(now);
+    assert!(
+        outs.is_empty(),
+        "turn cancellation should not surface Lua task output: {outs:?}"
+    );
+    let app_done: bool = get_global(&rt, "APP_DONE");
+    assert!(
+        !app_done,
+        "app-scoped task should survive turn cancellation"
+    );
+
+    let _ = rt.drive_tasks(now + Duration::from_millis(1001));
+    let app_done: bool = get_global(&rt, "APP_DONE");
+    assert!(
+        app_done,
+        "surviving app-scoped task should still resume later"
+    );
+}
+
+#[test]
+fn turn_cancellation_cancels_spawned_child_tasks() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            CHILD_DONE = false
+            smelt.tools.register({
+                name = "spawns_child_turn_task",
+                execute = function()
+                    smelt.spawn(function()
+                        smelt.sleep(1000)
+                        CHILD_DONE = true
+                    end)
+                    smelt.sleep(1000)
+                    return "too late"
+                end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("setup child task tool");
+
+    let now = Instant::now();
+    let result = rt.execute_tool(
+        "spawns_child_turn_task",
+        &HashMap::new(),
+        78,
+        "call-child-turn-cancel",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        now,
+    );
+    assert!(matches!(result, ToolExecResult::Pending));
+
+    rt.cancel_turn_tasks();
+    let outs = rt.drive_tasks(now);
+    assert!(
+        outs.is_empty(),
+        "turn cancellation should not surface Lua task output: {outs:?}"
+    );
+
+    let _ = rt.drive_tasks(now + Duration::from_millis(1001));
+    let child_done: bool = get_global(&rt, "CHILD_DONE");
+    assert!(!child_done, "turn-scoped child task should be cancelled");
 }
 
 // -- read_process_output tool ---------------------------------------------

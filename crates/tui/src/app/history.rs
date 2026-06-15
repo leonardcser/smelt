@@ -361,15 +361,16 @@ impl TuiApp {
 
     pub(crate) fn reset_session(&mut self) {
         let _perf = smelt_perf::perf::begin("app:reset_session");
-        // Cancel in-flight engine work and Lua tasks before clearing state so
-        // stale events and running child processes don't restore old data.
+        // Reset is a hard session boundary: cancel in-flight engine work and all
+        // Lua tasks before clearing state so stale events and child processes
+        // don't restore old data into the new session.
         if self.agent.is_some() {
             self.cancel_agent();
             self.agent = None;
         } else {
             self.core.engine.send(UiCommand::Cancel);
-            self.lua.cancel_tasks();
         }
+        self.lua.cancel_tasks();
         let old_id = self.core.session.id.clone();
         self.core.session.history.clear();
         self.reset_session_permissions();
@@ -412,6 +413,9 @@ impl TuiApp {
             self.cancel_agent();
             self.agent = None;
         }
+        // Loading a session is also a hard boundary for Lua work tied to the
+        // previous session.
+        self.lua.cancel_tasks();
         let old_id = self.core.session.id.clone();
         self.flush_persist();
 

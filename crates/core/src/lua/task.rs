@@ -14,6 +14,12 @@ enum TaskWait {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskScope {
+    App,
+    Turn,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommandQueueTarget {
     Turn,
     Request,
@@ -60,6 +66,7 @@ pub(crate) struct LuaTask {
     thread: mlua::Thread,
     wait: TaskWait,
     completion: TaskCompletion,
+    scope: TaskScope,
     cancel: CancellationToken,
     deadline: Option<TaskDeadline>,
 }
@@ -125,15 +132,23 @@ impl LuaTaskRuntime {
         initial_args: LuaMultiValue,
         completion: TaskCompletion,
     ) -> LuaResult<u64> {
-        self.spawn_with_timeout(lua, func, initial_args, completion, None)
+        self.spawn_scoped(
+            lua,
+            func,
+            initial_args,
+            completion,
+            current_task_scope().unwrap_or(TaskScope::App),
+            None,
+        )
     }
 
-    pub(crate) fn spawn_with_timeout(
+    pub(crate) fn spawn_scoped(
         &mut self,
         lua: &Lua,
         func: mlua::Function,
         initial_args: LuaMultiValue,
         completion: TaskCompletion,
+        scope: TaskScope,
         deadline: Option<TaskDeadline>,
     ) -> LuaResult<u64> {
         let thread = lua.create_thread(func)?;
@@ -143,6 +158,7 @@ impl LuaTaskRuntime {
             thread,
             wait: TaskWait::Ready(initial_args),
             completion,
+            scope,
             cancel: CancellationToken::new(),
             deadline,
         });
@@ -182,9 +198,20 @@ impl LuaTaskRuntime {
         false
     }
 
+    pub fn cancel_scope(&mut self, lua: &Lua, scope: TaskScope) {
+        self.cancel_matching(lua, |task| task.scope == scope);
+    }
+
     pub fn cancel_all(&mut self, lua: &Lua) {
+        self.cancel_matching(lua, |_| true);
+    }
+
+    fn cancel_matching(&mut self, lua: &Lua, mut matches: impl FnMut(&LuaTask) -> bool) {
         let marker = cancelled_marker(lua);
         for task in &mut self.tasks {
+            if !matches(task) {
+                continue;
+            }
             task.cancel.cancel();
             match &task.wait {
                 TaskWait::Sleep(_) | TaskWait::External(_) => {
@@ -290,8 +317,10 @@ pub(crate) fn step_task_owned(
     };
     let cancel = task.cancel.clone();
     let queue_target = task.completion.command_queue_target();
-    let result: LuaResult<LuaValue> =
-        with_task_context(cancel, queue_target, || task.thread.resume(resume_args));
+    let scope = task.scope;
+    let result: LuaResult<LuaValue> = with_task_context(cancel, queue_target, scope, || {
+        task.thread.resume(resume_args)
+    });
 
     match result {
         Ok(v) => {
@@ -359,17 +388,21 @@ pub(crate) fn step_task_owned(
 thread_local! {
     static CURRENT_TASK_CANCEL: RefCell<Option<CancellationToken>> = const { RefCell::new(None) };
     static CURRENT_COMMAND_QUEUE_TARGET: RefCell<Option<CommandQueueTarget>> = const { RefCell::new(None) };
+    static CURRENT_TASK_SCOPE: RefCell<Option<TaskScope>> = const { RefCell::new(None) };
 }
 
 /// Install task context for the closure's duration.
 fn with_task_context<R>(
     cancel: CancellationToken,
     queue_target: Option<CommandQueueTarget>,
+    scope: TaskScope,
     f: impl FnOnce() -> R,
 ) -> R {
     let previous_cancel = CURRENT_TASK_CANCEL.with(|c| c.replace(Some(cancel)));
     let previous_target = CURRENT_COMMAND_QUEUE_TARGET.with(|c| c.replace(queue_target));
+    let previous_scope = CURRENT_TASK_SCOPE.with(|c| c.replace(Some(scope)));
     let r = f();
+    CURRENT_TASK_SCOPE.with(|c| c.replace(previous_scope));
     CURRENT_COMMAND_QUEUE_TARGET.with(|c| c.replace(previous_target));
     CURRENT_TASK_CANCEL.with(|c| c.replace(previous_cancel));
     r
@@ -377,7 +410,7 @@ fn with_task_context<R>(
 
 /// Install the task's cancellation token for the closure's duration.
 pub fn with_task_cancel<R>(cancel: CancellationToken, f: impl FnOnce() -> R) -> R {
-    with_task_context(cancel, None, f)
+    with_task_context(cancel, None, TaskScope::App, f)
 }
 
 /// Current task's cancellation token; `None` when called outside `step_task`.
@@ -388,6 +421,11 @@ pub fn current_task_cancel() -> Option<CancellationToken> {
 /// Current slash-command queue target; `None` outside slash-command tasks.
 pub fn current_command_queue_target() -> Option<CommandQueueTarget> {
     CURRENT_COMMAND_QUEUE_TARGET.with(|c| *c.borrow())
+}
+
+/// Current task scope; `None` outside the Lua task runtime.
+pub fn current_task_scope() -> Option<TaskScope> {
+    CURRENT_TASK_SCOPE.with(|c| *c.borrow())
 }
 
 fn cancelled_marker(lua: &Lua) -> LuaValue {
@@ -771,11 +809,49 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_task_using_yield_with_cancel_silently_drops() {
+    fn cancel_scope_only_cancels_matching_tasks() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        let app_func: mlua::Function = lua
+            .load(r#"function() smelt.sleep(1000) end"#)
+            .eval()
+            .unwrap();
+        let turn_func: mlua::Function = lua
+            .load(r#"function() smelt.sleep(1000) end"#)
+            .eval()
+            .unwrap();
+        rt.spawn_scoped(
+            &lua,
+            app_func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+            TaskScope::App,
+            None,
+        )
+        .unwrap();
+        rt.spawn_scoped(
+            &lua,
+            turn_func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+            TaskScope::Turn,
+            None,
+        )
+        .unwrap();
+
+        let now = Instant::now();
+        assert!(rt.drive(&lua, now).is_empty());
+        assert_eq!(rt.tasks.len(), 2);
+
+        rt.cancel_scope(&lua, TaskScope::Turn);
+        assert!(rt.drive(&lua, now).is_empty());
+        assert_eq!(rt.tasks.len(), 1);
+        assert_eq!(rt.tasks[0].scope, TaskScope::App);
+    }
+
+    #[test]
+    fn cancelled_tool_completion_is_not_task_error() {
         let lua = Lua::new();
-        // Reproduce the real _bootstrap.lua yield_with_cancel path so the
-        // error string carries a Lua traceback (mlua appends it), not just
-        // the bare "cancelled" word.
         lua.load(
             r#"
             smelt = {}
@@ -792,12 +868,38 @@ mod tests {
         .unwrap();
         let mut rt = LuaTaskRuntime::new();
         let func: mlua::Function = lua
-            .load(
-                r#"function()
-                local r = smelt.sleep(100)
-                return r
-              end"#,
-            )
+            .load(r#"function() smelt.sleep(1000); return "done" end"#)
+            .eval()
+            .unwrap();
+        rt.spawn_scoped(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::ToolResult {
+                request_id: 42,
+                call_id: "call-cancel".into(),
+            },
+            TaskScope::Turn,
+            None,
+        )
+        .unwrap();
+
+        let now = Instant::now();
+        assert!(rt.drive(&lua, now).is_empty());
+        rt.cancel_scope(&lua, TaskScope::Turn);
+        let out = rt.drive(&lua, now);
+        assert!(
+            out.is_empty(),
+            "cancelled tool task should not emit Lua task output: {out:?}"
+        );
+    }
+
+    #[test]
+    fn uncancelled_cancelled_error_is_reported() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        let func: mlua::Function = lua
+            .load(r#"function() error("cancelled") end"#)
             .eval()
             .unwrap();
         rt.spawn(
@@ -808,22 +910,11 @@ mod tests {
         )
         .unwrap();
 
-        // First drive parks on sleep.
-        let out = rt.drive(&lua, Instant::now());
-        assert!(out.is_empty());
-        assert_eq!(rt.tasks.len(), 1);
-        assert!(matches!(rt.tasks[0].wait, TaskWait::Sleep(_)));
-
-        // Cancel all tasks.
-        rt.cancel_all(&lua);
-        assert!(matches!(rt.tasks[0].wait, TaskWait::Ready(_)));
-
-        // Next drive resumes with cancel marker and finishes silently.
         let out = rt.drive(&lua, Instant::now());
         assert!(
-            out.is_empty(),
-            "cancelled task should not emit error output, got: {out:?}"
+            out.iter()
+                .any(|o| matches!(o, TaskDriveOutput::Error(msg) if msg.contains("cancelled"))),
+            "plain user error named cancelled should be reported: {out:?}"
         );
-        assert_eq!(rt.tasks.len(), 0);
     }
 }
