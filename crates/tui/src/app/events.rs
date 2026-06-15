@@ -305,10 +305,25 @@ impl TuiApp {
     }
 
     fn global_lua_keymaps_can_handle(&self, key: KeyEvent) -> bool {
-        !(matches!(key.code, KeyCode::Esc)
+        if matches!(key.code, KeyCode::Esc)
             && key.modifiers == KeyModifiers::NONE
-            && self.focused_vim_mode() == Some(crate::smelt_edit::VimMode::Insert)
-            && self.timers.pending_chord.is_none())
+            && self.timers.pending_chord.is_none()
+        {
+            if self.prompt_escape_owned_by_vim() {
+                return false;
+            }
+            if matches!(
+                self.focused_vim_mode(),
+                Some(
+                    crate::smelt_edit::VimMode::Insert
+                        | crate::smelt_edit::VimMode::Visual
+                        | crate::smelt_edit::VimMode::VisualLine
+                )
+            ) {
+                return false;
+            }
+        }
+        true
     }
 
     fn pending_lua_keymap_cancelled_by(
@@ -415,9 +430,6 @@ impl TuiApp {
             smelt_core::keymap::ChordOutcome::Pending { tokens } => {
                 if tokens.is_empty() {
                     self.timers.pending_chord = None;
-                    if had_pending {
-                        return Some(EventOutcome::Noop);
-                    }
                 } else {
                     self.timers.pending_chord = Some(crate::app::PendingChord {
                         tokens,
@@ -757,6 +769,10 @@ impl TuiApp {
 
     fn handle_idle_prompt_esc(&mut self, ev: Event, modifiers: KeyModifiers) -> EventOutcome {
         if self.prompt_escape_owned_by_vim() {
+            let vim_mode_at_start = self
+                .prompt_win()
+                .vim_enabled()
+                .then(|| self.prompt_win().vim_mode());
             let now = self.core.clock.instant_now();
             let action = {
                 let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -768,6 +784,7 @@ impl TuiApp {
                     now,
                 )
             };
+            self.arm_prompt_esc_lua_prefix(vim_mode_at_start);
             return self.dispatch_input_action(action);
         }
 
@@ -788,7 +805,12 @@ impl TuiApp {
         let now = self.core.clock.instant_now();
 
         if self.prompt_escape_owned_by_vim() {
+            let vim_mode_at_start = self
+                .prompt_win()
+                .vim_enabled()
+                .then(|| self.prompt_win().vim_mode());
             self.apply_prompt_escape_to_input(ev, now);
+            self.arm_prompt_esc_lua_prefix(vim_mode_at_start);
             return EventOutcome::Noop;
         }
 
@@ -829,6 +851,20 @@ impl TuiApp {
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
         self.input
             .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
+    }
+
+    fn arm_prompt_esc_lua_prefix(&mut self, vim_mode_at_start: Option<crate::smelt_edit::VimMode>) {
+        if self.timers.pending_chord.is_some() {
+            return;
+        }
+        let vim_mode = self.current_vim_mode_label();
+        if !self.lua.chord_has_longer("<Esc>", vim_mode.as_deref()) {
+            return;
+        }
+        self.timers.pending_chord = Some(crate::app::PendingChord {
+            tokens: vec!["<Esc>".to_string()],
+            vim_mode_at_start,
+        });
     }
 
     fn dismiss_notification_for_esc(&mut self) -> Option<EventOutcome> {
@@ -2238,6 +2274,21 @@ mod tests {
         app.press(KeyCode::Char('r'));
 
         assert_eq!(app.lua_int_global("leader_hit"), None);
+    }
+
+    #[test]
+    fn lua_keymap_prefix_mismatch_passes_current_prompt_key() {
+        let mut app = TestApp::builder().build();
+
+        app.press(KeyCode::Esc);
+
+        assert!(app.app.timers.pending_chord.is_some());
+
+        app.press(KeyCode::Char('a'));
+
+        assert!(app.app.timers.pending_chord.is_none());
+        assert_eq!(app.state().prompt_text, "a");
+        assert_eq!(app.prompt_cpos(), 1);
     }
 
     #[test]
