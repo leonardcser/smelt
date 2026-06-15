@@ -1,0 +1,24 @@
+{
+  "_about": "External terminal paste over a Vim VisualLine selection must replace the selected line and leave Vim visual mode. The original bug left the prompt stuck in VisualLine after paste; structural fuzz invariants did not catch it because the source and byte offsets stayed valid.",
+  "_fix": "fix(tui): exit visual mode after external paste replacement",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "paste",
+      "data": "one\ntwo\nthree"
+    },
+    {
+      "kind": "key_special",
+      "data": 1
+    },
+    {
+      "kind": "key_unicode",
+      "data": 86
+    },
+    {
+      "kind": "paste",
+      "data": "THREE"
+    }
+  ],
+  "vim": true
+}

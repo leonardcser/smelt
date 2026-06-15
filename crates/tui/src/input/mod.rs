@@ -181,6 +181,19 @@ impl PromptState {
         Some(deleted)
     }
 
+    fn replace_selection_for_insert(&mut self, ctx: &mut PromptCtx<'_>) {
+        let was_vim_visual = ctx.win.vim_enabled()
+            && matches!(ctx.win.vim_mode(), VimMode::Visual | VimMode::VisualLine);
+        if self.selection_range(ctx.as_ref()).is_none() {
+            return;
+        }
+
+        self.delete_selection(ctx);
+        if was_vim_visual {
+            ctx.win.set_vim_mode(VimMode::Normal);
+        }
+    }
+
     pub(crate) fn vim_enabled(&self, win: &crate::smelt_edit::Window) -> bool {
         win.vim_enabled()
     }
@@ -434,7 +447,7 @@ impl PromptState {
         // ATTACHMENT_MARKER (3 bytes) shifts byte offsets after the anchor.
         if self.selection_range(ctx.as_ref()).is_some() {
             self.save_undo(ctx);
-            self.delete_selection(ctx);
+            self.replace_selection_for_insert(ctx);
         }
         let id = self.store.lock().unwrap().insert_image(label, data_url);
         self.insert_attachment_id(ctx, id);
@@ -867,15 +880,14 @@ impl PromptState {
                 // Terminals with bracketed paste off send it as a key - handle both paths.
                 if let Some(url) = clipboard_image_to_data_url() {
                     self.save_undo(ctx);
+                    self.replace_selection_for_insert(ctx);
                     self.insert_image(ctx, "clipboard.png".into(), url);
                     return Action::Redraw;
                 }
                 if let Some(text) = clipboard.read() {
                     if !text.is_empty() {
                         self.save_undo(ctx);
-                        if self.has_selection(ctx.as_ref()) {
-                            self.delete_selection(ctx);
-                        }
+                        self.replace_selection_for_insert(ctx);
                         self.insert_paste(ctx, text);
                         return Action::Redraw;
                     }
@@ -983,9 +995,7 @@ impl PromptState {
 
         if let Event::Paste(data) = ev {
             self.save_undo(ctx);
-            if self.selection_range(ctx.as_ref()).is_some() {
-                self.delete_selection(ctx);
-            }
+            self.replace_selection_for_insert(ctx);
             if let Some(path) = engine::image::normalize_pasted_path(&data) {
                 if engine::image::is_image_file(&path) && std::path::Path::new(&path).exists() {
                     match engine::image::read_image_as_data_url(&path) {
@@ -2116,6 +2126,72 @@ mod tests {
             crate::smelt_edit::VimMode::Normal,
             "Should be in normal mode"
         );
+    }
+
+    struct ReadClipboard(Option<String>);
+
+    impl smelt_buffer::clipboard::Sink for ReadClipboard {
+        fn read(&mut self) -> Option<String> {
+            self.0.take()
+        }
+
+        fn write(&mut self, _text: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn clipboard_key_paste_replaces_visual_selection_and_exits_visual() {
+        let mut input = Harness::new();
+        let mut clipboard =
+            crate::smelt_edit::Clipboard::new(Box::new(ReadClipboard(Some("X".into()))));
+        input.state.set_vim_enabled(&mut input.win, true);
+        input.buf.set_source("abc".to_string());
+        input.win.set_cpos(1);
+        input
+            .win
+            .begin_visual(crate::smelt_edit::VimMode::Visual, 1);
+
+        let action = input.state.execute_key_action(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            KeyAction::ClipboardImage,
+            None,
+            &mut clipboard,
+        );
+
+        assert!(matches!(action, Action::Redraw));
+        assert_eq!(input.buf.source(), "aXc");
+        assert_eq!(input.win.vim_mode(), crate::smelt_edit::VimMode::Normal);
+    }
+
+    #[test]
+    fn clipboard_key_paste_replaces_visual_line_selection_and_exits_visual() {
+        let mut input = Harness::new();
+        let mut clipboard =
+            crate::smelt_edit::Clipboard::new(Box::new(ReadClipboard(Some("TWO".into()))));
+        input.state.set_vim_enabled(&mut input.win, true);
+        input.buf.set_source("one\ntwo\nthree".to_string());
+        input.win.set_cpos(4);
+        input
+            .win
+            .begin_visual(crate::smelt_edit::VimMode::VisualLine, 4);
+
+        let action = input.state.execute_key_action(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            KeyAction::ClipboardImage,
+            None,
+            &mut clipboard,
+        );
+
+        assert!(matches!(action, Action::Redraw));
+        assert_eq!(input.buf.source(), "one\nTWO\nthree");
+        assert_eq!(input.win.vim_mode(), crate::smelt_edit::VimMode::Normal);
     }
 
     #[test]

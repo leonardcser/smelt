@@ -162,6 +162,34 @@ fn vim_shift_v_enters_visual_line() {
 }
 
 #[test]
+fn vim_terminal_paste_exits_visual_mode() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("abc");
+    app.press(KeyCode::Esc);
+    app.type_char('v');
+    assert_eq!(app.state().vim_mode, VimMode::Visual);
+
+    app.feed_one(SourceEvent::Term(Event::Paste("X".into())));
+
+    assert_eq!(app.state().prompt_text, "abX");
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn vim_terminal_paste_exits_visual_line_mode() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("one\ntwo\nthree");
+    app.press(KeyCode::Esc);
+    app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
+    assert_eq!(app.state().vim_mode, VimMode::VisualLine);
+
+    app.feed_one(SourceEvent::Term(Event::Paste("THREE".into())));
+
+    assert_eq!(app.state().prompt_text, "one\ntwo\nTHREE");
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+}
+
+#[test]
 fn vim_esc_from_visual_returns_to_normal() {
     let mut app = TestApp::builder().with_vim(true).build();
     app.type_text("abc");

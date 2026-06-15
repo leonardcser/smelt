@@ -43,7 +43,7 @@ impl PromptState {
         self.from_paste = false;
         if self.selection_range(ctx.as_ref()).is_some() {
             self.save_undo(ctx);
-            self.delete_selection(ctx);
+            self.replace_selection_for_insert(ctx);
         }
         let p = ctx.buf.text_mut().insert(ctx.win.cpos(), c);
         ctx.win.set_cpos(p + c.len_utf8());
