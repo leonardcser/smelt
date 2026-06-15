@@ -8,7 +8,7 @@ pub(crate) use markdown::render_markdown_inner;
 
 #[cfg(test)]
 mod tests {
-    use crate::content::display_block::{compile_block_with_show, render_block_into, RenderCtx};
+    use crate::content::display_layout::{compile_block_with_show, render_block_into, RenderCtx};
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
     use smelt_core::content::LayoutContext;

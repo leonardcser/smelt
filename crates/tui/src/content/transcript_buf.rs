@@ -1,4 +1,4 @@
-use super::display_block::{
+use super::display_layout::{
     measure_block, render_block_into, CompileJob, DisplayModel, DisplayRowIndexEntry,
     DisplayRowIndexNode, MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
@@ -38,7 +38,7 @@ pub(crate) struct TranscriptProjection {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TranscriptProjectionCounters {
     pub full_row_builds: usize,
-    pub display_blocks: usize,
+    pub display_layouts: usize,
     pub exact_height_measured_blocks: usize,
     pub range_materialized_blocks: usize,
 }
@@ -551,7 +551,7 @@ fn upsert_row_index_entry(entries: &mut Vec<DisplayRowIndexEntry>, entry: Displa
     }
 }
 
-fn render_display_block_to_buffer(
+fn render_cached_layout_to_buffer(
     display_model: &DisplayModel,
     id: BlockId,
     key: LayoutKey,
@@ -559,11 +559,11 @@ fn render_display_block_to_buffer(
     renderer_cache_key: Option<u64>,
     theme: &Theme,
 ) -> Option<(Buffer, usize)> {
-    let display_block = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
+    let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
     let outcome = render_block_into(
         &mut buf,
-        display_block,
+        layout,
         RenderCtx {
             width: key.width,
             view_state: key.view_state,
@@ -601,15 +601,15 @@ impl TranscriptProjection {
     ) -> usize {
         let crate::content::display_cache::DisplayCacheData {
             row_indexes,
-            display_blocks,
+            display_layouts,
         } = data;
-        let hydrated_blocks = self
+        let hydrated_layouts = self
             .display_model
-            .hydrate_from_cache(history, display_blocks);
+            .hydrate_from_cache(history, display_layouts);
         self.cached_row_indexes = row_indexes;
         smelt_perf::perf::record_value(
             "transcript:display_model_cache:loaded",
-            hydrated_blocks as u64,
+            hydrated_layouts as u64,
         );
         smelt_perf::perf::record_value(
             "transcript:row_index_cache:loaded",
@@ -624,7 +624,7 @@ impl TranscriptProjection {
     ) -> crate::content::display_cache::DisplayCacheData {
         crate::content::display_cache::DisplayCacheData {
             row_indexes: self.row_index_cache_entries(history),
-            display_blocks: self.display_model.cache_entries(
+            display_layouts: self.display_model.cache_entries(
                 history,
                 self.renderer_generation,
                 self.renderer_cache_key,
@@ -713,7 +713,7 @@ impl TranscriptProjection {
         }
         #[cfg(test)]
         {
-            self.counters.display_blocks += compiled;
+            self.counters.display_layouts += compiled;
         }
         let _ = compiled;
     }
@@ -756,14 +756,14 @@ impl TranscriptProjection {
         }
         if width != self.layout_width {
             // Width changes invalidate row indexes and materialized rows, but
-            // display blocks are width-independent and stay reusable.
+            // display layouts are width-independent and stay reusable.
             self.layout_width = width;
             self.clear_materialized_state();
         }
     }
 
     /// Clear cached visible/layout state so the next projection rebuilds from scratch.
-    /// Display blocks are theme-independent; only rendered buffers/rows carry colors.
+    /// Display layouts are theme-independent; only rendered buffers/rows carry colors.
     pub(crate) fn invalidate_theme(&mut self) {
         self.clear_materialized_state();
     }
@@ -937,12 +937,12 @@ impl TranscriptProjection {
         }
         self.ensure_block_indices(env, history, missing.iter().copied());
         for i in missing {
-            self.measure_display_block_height(history, i, renderer_generation, renderer_cache_key);
+            self.measure_cached_layout_height(history, i, renderer_generation, renderer_cache_key);
         }
         self.exact_rows.refresh_prefix_rows();
     }
 
-    fn measure_display_block_height(
+    fn measure_cached_layout_height(
         &mut self,
         history: &BlockHistory,
         index: usize,
@@ -1342,7 +1342,7 @@ impl TranscriptProjection {
     ) {
         let renderer_generation = self.exact_rows.renderer_generation;
         let renderer_cache_key = self.exact_rows.renderer_cache_key;
-        let Some((block_buf, block_rows)) = render_display_block_to_buffer(
+        let Some((block_buf, block_rows)) = render_cached_layout_to_buffer(
             &self.display_model,
             id,
             key,
@@ -1474,7 +1474,7 @@ impl TranscriptProjection {
             };
             let id = node.id;
             let bkey = node.key;
-            let Some((block_buf, block_rows)) = render_display_block_to_buffer(
+            let Some((block_buf, block_rows)) = render_cached_layout_to_buffer(
                 &self.display_model,
                 id,
                 bkey,
@@ -1985,7 +1985,7 @@ mod tests {
         assert!(rows.iter().any(|line| line == "line 0"));
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 1);
-        assert_eq!(counters.display_blocks, 100);
+        assert_eq!(counters.display_layouts, 100);
         assert_eq!(counters.exact_height_measured_blocks, 100);
 
         projection.reset_counters();
@@ -2012,7 +2012,7 @@ mod tests {
         assert_eq!(total, 199);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.display_blocks, 100);
+        assert_eq!(counters.display_layouts, 100);
         assert_eq!(counters.exact_height_measured_blocks, 100);
 
         projection.reset_counters();
@@ -2082,12 +2082,12 @@ mod tests {
         assert_eq!(projection.display_model_len(), 3);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.display_blocks, 3);
+        assert_eq!(counters.display_layouts, 3);
         assert_eq!(counters.exact_height_measured_blocks, 3);
     }
 
     #[test]
-    fn exact_total_rows_keeps_display_blocks_width_independent() {
+    fn exact_total_rows_keeps_display_layouts_width_independent() {
         let mut projection = TranscriptProjection::new();
         let block_count = 537;
         let mut transcript = Transcript::new();
@@ -2103,7 +2103,7 @@ mod tests {
         assert_eq!(projection.display_model_len(), block_count);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.display_blocks, block_count);
+        assert_eq!(counters.display_layouts, block_count);
         assert_eq!(counters.exact_height_measured_blocks, block_count);
 
         projection.reset_counters();
@@ -2113,8 +2113,8 @@ mod tests {
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
         assert_eq!(
-            counters.display_blocks, 0,
-            "display blocks are width-independent and should not be recompiled"
+            counters.display_layouts, 0,
+            "display layouts are width-independent and should not be recompiled"
         );
         assert_eq!(
             counters.exact_height_measured_blocks, block_count,
@@ -2135,13 +2135,13 @@ mod tests {
         assert_eq!(total, 199);
         let cache = projection.display_cache_data(&transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
-        assert_eq!(cache.display_blocks.len(), 100);
+        assert_eq!(cache.display_layouts.len(), 100);
         assert!(cache
             .row_indexes
             .iter()
             .all(|entry| entry.renderer_cache_key.is_some()));
         assert!(cache
-            .display_blocks
+            .display_layouts
             .iter()
             .all(|entry| entry.key.renderer_cache_key.is_some()));
 
@@ -2161,7 +2161,7 @@ mod tests {
     }
 
     #[test]
-    fn display_blocks_round_trip_without_row_index_recompilation() {
+    fn display_layouts_round_trip_without_row_index_recompilation() {
         let lua = test_lua();
         let mut transcript = Transcript::new();
         for i in 0..100 {
@@ -2172,7 +2172,7 @@ mod tests {
         let mut projection = TranscriptProjection::new();
         let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
         let mut cache = projection.display_cache_data(&transcript.history);
-        assert_eq!(cache.display_blocks.len(), 100);
+        assert_eq!(cache.display_layouts.len(), 100);
         cache.row_indexes.clear();
 
         let mut hydrated = TranscriptProjection::new();
@@ -2186,7 +2186,7 @@ mod tests {
         );
         let counters = hydrated.counters();
         assert_eq!(
-            counters.display_blocks, 0,
+            counters.display_layouts, 0,
             "hydrated DisplayIR should avoid Lua recompilation"
         );
         assert_eq!(
@@ -2224,7 +2224,7 @@ mod tests {
 
         let cache = projection.display_cache_data(&transcript.history);
         assert!(cache.row_indexes.is_empty());
-        assert!(cache.display_blocks.is_empty());
+        assert!(cache.display_layouts.is_empty());
     }
 
     #[test]
@@ -2240,11 +2240,11 @@ mod tests {
         let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
         let mut cache = projection.display_cache_data(&transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
-        assert_eq!(cache.display_blocks.len(), 20);
+        assert_eq!(cache.display_layouts.len(), 20);
         for entry in &mut cache.row_indexes {
             entry.renderer_cache_key = entry.renderer_cache_key.map(|key| key.wrapping_add(1));
         }
-        for entry in &mut cache.display_blocks {
+        for entry in &mut cache.display_layouts {
             entry.key.renderer_cache_key =
                 entry.key.renderer_cache_key.map(|key| key.wrapping_add(1));
         }
@@ -2259,7 +2259,7 @@ mod tests {
         );
         let counters = hydrated.counters();
         assert_eq!(
-            counters.display_blocks, 20,
+            counters.display_layouts, 20,
             "renderer-cache-key mismatch must recompile persisted DisplayIR"
         );
         assert_eq!(
@@ -2281,11 +2281,11 @@ mod tests {
         let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
         let mut cache = projection.display_cache_data(&transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
-        assert_eq!(cache.display_blocks.len(), 20);
+        assert_eq!(cache.display_layouts.len(), 20);
         for entry in &mut cache.row_indexes {
             entry.renderer_generation = entry.renderer_generation.wrapping_add(1);
         }
-        for entry in &mut cache.display_blocks {
+        for entry in &mut cache.display_layouts {
             entry.key.renderer_generation = entry.key.renderer_generation.wrapping_add(1);
         }
 
@@ -2299,7 +2299,7 @@ mod tests {
         );
         let counters = hydrated.counters();
         assert_eq!(
-            counters.display_blocks, 20,
+            counters.display_layouts, 20,
             "renderer-generation mismatch must recompile persisted DisplayIR"
         );
         assert_eq!(
@@ -2338,7 +2338,7 @@ mod tests {
             "only appended blocks should be measured"
         );
         assert_eq!(
-            second_counters.display_blocks, 50,
+            second_counters.display_layouts, 50,
             "only appended blocks should be compiled"
         );
     }
@@ -2368,7 +2368,7 @@ mod tests {
             counters.exact_height_measured_blocks, 2,
             "same-order rewrite should remeasure the changed block and following gap: {counters:?}"
         );
-        assert_eq!(counters.display_blocks, 1);
+        assert_eq!(counters.display_layouts, 1);
     }
 
     #[test]
@@ -2423,7 +2423,7 @@ mod tests {
         assert_eq!(text, vec!["line 75", "", "line 76"]);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.display_blocks, 0);
+        assert_eq!(counters.display_layouts, 0);
         assert_eq!(counters.exact_height_measured_blocks, 0);
         assert!(
             counters.range_materialized_blocks < transcript.history.order.len(),
@@ -2469,7 +2469,7 @@ mod tests {
         assert_eq!(copied.kill_ring, "line 75");
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
-        assert_eq!(counters.display_blocks, 0);
+        assert_eq!(counters.display_layouts, 0);
         assert_eq!(counters.exact_height_measured_blocks, 0);
         assert!(
             counters.range_materialized_blocks < transcript.history.order.len(),

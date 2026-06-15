@@ -117,8 +117,8 @@ fn write(req: &PersistRequest) {
         req.display_cache.row_indexes.len() as u64,
     );
     smelt_perf::perf::record_value(
-        "persist:write:display_cache_display_blocks",
-        req.display_cache.display_blocks.len() as u64,
+        "persist:write:display_cache_display_layouts",
+        req.display_cache.display_layouts.len() as u64,
     );
     smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
     let session_dir = session::dir_for(&req.session);

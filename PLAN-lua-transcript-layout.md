@@ -975,7 +975,7 @@ Status after implementation:
 - Rust can now invoke the root renderer with semantic block snapshots and a width/theme-independent context. Errors, `nil`, invalid return types, or missing renderers record an error and fall back to minimal Rust layout; `layout.empty()` remains the explicit zero-row/hide result.
 - Shared semantic annotations (`elapsed_text`, `status_hl`, `thinking_summary`) are computed in Rust and passed to Lua defaults so the emergency fallback and bundled policy do not maintain separate formatting rules.
 - `smelt.transcript.defaults` has default functions for every current block kind and keeps the raw tool-output helper as ordinary Lua composition over `layout.text`, `layout.gutter`, and `layout.cap`.
-- Lua layout compilation now lives with the display-block layer instead of app transcript plumbing, so tool-body and root-rendered layouts share one conversion seam.
+- Lua layout compilation now lives with the display-layout layer instead of app transcript plumbing, so tool-body and root-rendered layouts share one conversion seam.
 - Generated API docs now mark mixed Host/UiHost namespaces and per-function tiers, avoiding the earlier flattening of `smelt.transcript` inspection APIs into the Host label.
 - Unit coverage exercises host-runtime transcript bootstrap, default simple-block rendering, middleware composition/removal/generation behavior, explicit invalidation, renderer error fallback, `nil` fallback, and `layout.empty()` hiding.
 
@@ -1012,7 +1012,7 @@ Status after implementation:
 - Tool calls now compile full-block `LayoutIr` by invoking the root transcript renderer. Rust no longer pre-renders or caches a body-only `ToolBody`, and the old `DisplayBlock::ToolCall` branch is gone.
 - `runtime/lua/smelt/transcript/defaults.lua` owns the default tool block: styled `layout.runs` header, status colors, elapsed/title suffix placement, user messages, denied body suppression, and raw-output tail caps. Built-in structured body functions live next to their tools and populate the defaults' private dispatch table.
 - `layout.runs` preserves styled summary spans, syntax highlighting, selectability, and `title_suffix` metadata so Lua-rendered headers keep the old copy/yank behavior. Tool summaries and `layout.runs` now share the same Rust styled-lines decoder.
-- The display cache was simplified to disposable row-index entries only; derived tool bodies are no longer serialized in `session.ir.bin`. Compiled display-block keys include the renderer context bit used by Lua so toggling `show_thinking` cannot reuse stale Lua-produced tool layout.
+- The display cache was simplified to disposable row-index entries only; derived tool bodies are no longer serialized in `session.ir.bin`. Compiled display-layout keys include the renderer context bit used by Lua so toggling `show_thinking` cannot reuse stale Lua-produced tool layout.
 - Confirm previews render generic compiled layout IR, sharing the same primitive renderer path as transcript tool layouts. The generic `LayoutIr` renderer now lives under a layout-named module, with legacy wrapped-output helpers split out for exec output.
 
 Deferred debt:
@@ -1092,12 +1092,12 @@ Exit criteria:
 
 Status after implementation:
 
-- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_blocks }`; cache read/write and background persist metrics report both entry types. The cache payload schema is separated from renderer semantics by `FORMAT_VERSION = 3`, while renderer-produced layout semantics remain gated by `DISPLAY_RENDERER_VERSION = 6`.
-- `DisplayBlockCacheEntry` persists renderer-produced `LayoutIr` entries keyed by semantic content hash, tool sidecar hash, display renderer version, runtime renderer generation, stable renderer cache key, and render-context hash.
+- `session.ir.bin` now serializes `DisplayCacheData { row_indexes, display_layouts }`; cache read/write and background persist metrics report both entry types. The cache payload schema is separated from renderer semantics by `FORMAT_VERSION = 3`, while renderer-produced layout semantics remain gated by `DISPLAY_RENDERER_VERSION = 6`.
+- `DisplayLayoutCacheEntry` persists renderer-produced `LayoutIr` entries keyed by semantic content hash, tool sidecar hash, display renderer version, runtime renderer generation, stable renderer cache key, and render-context hash.
 - Bundled transcript defaults install a stable renderer cache key. User renderers and renderer middleware opt into persisted DisplayIR with `opts.cache_key`; omitting a cache key keeps runtime caching but disables persisted DisplayIR and row-index export for that renderer chain.
-- `TranscriptProjection` hydrates display blocks before first projection and exports only history-valid entries for the current renderer generation/cache key once the renderer is known. Row-index entries carry the same renderer identity, so renderer invalidation rejects persisted heights and materialized rows without hashing Lua closures.
+- `TranscriptProjection` hydrates display layouts before first projection and exports only history-valid entries for the current renderer generation/cache key once the renderer is known. Row-index entries carry the same renderer identity, so renderer invalidation rejects persisted heights and materialized rows without hashing Lua closures.
 - Projection plans carry renderer generation/cache key, and `project_planned` rechecks the current Lua renderer identity before materializing a saved plan. If the renderer changed after planning, the row index and visible range are rebuilt under the current renderer before rendering.
-- Width/theme changes continue to discard only row/materialized state; display blocks remain width/theme-independent. Renderer generation/cache-key changes clear display blocks, row indexes, and rendered rows.
+- Width/theme changes continue to discard only row/materialized state; display layouts remain width/theme-independent. Renderer generation/cache-key changes clear display layouts, row indexes, and rendered rows.
 - Coverage includes DisplayIR cache round-tripping, cold hydration without a row index avoiding recompilation, renderer-generation mismatch rejection, renderer-cache-key mismatch rejection, custom renderers without cache keys opting out of persistence, and planned projection renderer-identity rechecks.
 
 Validation after implementation:
@@ -1131,7 +1131,8 @@ Exit criteria:
 Status after implementation:
 
 - Audited transcript/content/runtime docs and code for `DisplayBlock::...`, `LuaLeaf::Buf`, `layout.leaf(buf)`, `smelt.layout.tool_output`, `set_tool_renderer`, tool-body-only APIs, and compatibility/shim markers; no transcript display leftovers remain.
-- Removed the single-variant `DisplayBlock` wrapper. `DisplayModel` and persisted display-block cache entries now store `LayoutIr` directly, with `session.ir.bin` payload format bumped to `FORMAT_VERSION = 3` for the serialized shape change.
+- Removed the single-variant `DisplayBlock` wrapper. `DisplayModel` and persisted display-layout cache entries now store `LayoutIr` directly, with `session.ir.bin` payload format bumped to `FORMAT_VERSION = 3` for the serialized shape change.
+- Renamed the remaining transcript display cache, module, counter, and test terminology from display blocks to display layouts (`content::display_layout`, `DisplayLayoutCacheEntry`, `display_layouts`).
 - Removed the obsolete buffer-leaf carrier from content layout (`LuaLeaf::Buf` and generic `Leaf<B>`). Lua-returned layout leaves are now declarative primitives/source directives only, and traversal tests use generic leaf payloads instead of buffer IDs.
 - The remaining TUI content renderer modules are primitive mechanics: generic `layout_ir`, markdown internals, source-view/diff/file rendering, wrapping, panel/gutter/cap/hbox composition.
 

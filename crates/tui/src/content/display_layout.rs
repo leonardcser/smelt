@@ -103,10 +103,10 @@ pub(crate) struct DisplayRowIndexNode {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DisplayBlockCacheEntry {
+pub(crate) struct DisplayLayoutCacheEntry {
     pub(crate) id: BlockId,
     pub(crate) key: DisplayCacheKey,
-    pub(crate) block: LayoutIr,
+    pub(crate) layout: LayoutIr,
 }
 
 pub(crate) struct CompileJob {
@@ -150,14 +150,14 @@ pub(crate) struct RenderCtx<'a> {
     pub theme: &'a Theme,
 }
 
-struct CachedDisplayBlock {
+struct CachedLayout {
     key: DisplayCacheKey,
-    block: LayoutIr,
+    layout: LayoutIr,
 }
 
 #[derive(Default)]
 pub(crate) struct DisplayModel {
-    blocks: HashMap<BlockId, CachedDisplayBlock>,
+    blocks: HashMap<BlockId, CachedLayout>,
 }
 
 impl DisplayModel {
@@ -248,18 +248,18 @@ impl DisplayModel {
     pub(crate) fn hydrate_from_cache(
         &mut self,
         history: &BlockHistory,
-        entries: Vec<DisplayBlockCacheEntry>,
+        entries: Vec<DisplayLayoutCacheEntry>,
     ) -> usize {
         let mut hydrated = 0usize;
         for entry in entries {
-            if !display_block_entry_matches_history(history, &entry) {
+            if !display_layout_entry_matches_history(history, &entry) {
                 continue;
             }
             self.blocks.insert(
                 entry.id,
-                CachedDisplayBlock {
+                CachedLayout {
                     key: entry.key,
-                    block: entry.block,
+                    layout: entry.layout,
                 },
             );
             hydrated += 1;
@@ -273,7 +273,7 @@ impl DisplayModel {
         history: &BlockHistory,
         renderer_generation: Option<u64>,
         renderer_cache_key: Option<u64>,
-    ) -> Vec<DisplayBlockCacheEntry> {
+    ) -> Vec<DisplayLayoutCacheEntry> {
         if renderer_generation.is_some() && renderer_cache_key.is_none() {
             return Vec::new();
         }
@@ -295,12 +295,12 @@ impl DisplayModel {
             {
                 continue;
             }
-            let entry = DisplayBlockCacheEntry {
+            let entry = DisplayLayoutCacheEntry {
                 id: *id,
                 key: cached.key,
-                block: cached.block.clone(),
+                layout: cached.layout.clone(),
             };
-            if display_block_entry_matches_history(history, &entry) {
+            if display_layout_entry_matches_history(history, &entry) {
                 entries.push(entry);
             }
         }
@@ -309,10 +309,10 @@ impl DisplayModel {
 
     pub(crate) fn insert_compiled_blocks(
         &mut self,
-        blocks: Vec<(BlockId, DisplayCacheKey, LayoutIr)>,
+        layouts: Vec<(BlockId, DisplayCacheKey, LayoutIr)>,
     ) {
-        for (id, key, block) in blocks {
-            self.blocks.insert(id, CachedDisplayBlock { key, block });
+        for (id, key, layout) in layouts {
+            self.blocks.insert(id, CachedLayout { key, layout });
         }
     }
 
@@ -333,13 +333,13 @@ impl DisplayModel {
         self.blocks
             .get(&id)
             .filter(|cached| cached.key == display_key)
-            .map(|cached| &cached.block)
+            .map(|cached| &cached.layout)
     }
 }
 
-fn display_block_entry_matches_history(
+fn display_layout_entry_matches_history(
     history: &BlockHistory,
-    entry: &DisplayBlockCacheEntry,
+    entry: &DisplayLayoutCacheEntry,
 ) -> bool {
     if entry.key.renderer_version != DISPLAY_RENDERER_VERSION {
         return false;
@@ -718,7 +718,7 @@ mod tests {
                     .into(),
             },
             Block::User {
-                text: "Please inspect @crates/tui/src/content/display_block.rs and this long line that wraps."
+                text: "Please inspect @crates/tui/src/content/display_layout.rs and this long line that wraps."
                     .into(),
                 image_labels: vec![],
             },

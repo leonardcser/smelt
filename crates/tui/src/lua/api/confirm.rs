@@ -195,7 +195,7 @@ fn render_preview_into(
     let Some(layout) = app.lua.render_tool_preview(tool_name, args) else {
         return false;
     };
-    let preview = match crate::content::display_block::compile_layout_ir(&layout) {
+    let preview = match crate::content::display_layout::compile_layout_ir(&layout) {
         Ok(preview) => preview,
         Err(err) => {
             app.lua
