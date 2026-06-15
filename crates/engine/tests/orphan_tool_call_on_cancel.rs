@@ -117,7 +117,10 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
             key: "test-key".into(),
             key_env: "TEST_KEY".into(),
             provider_type: "anthropic-compatible".into(),
-            model_config: ModelConfig::default(),
+            model_config: ModelConfig {
+                max_tokens: Some(4096),
+                ..ModelConfig::default()
+            },
         },
         model: "test-model".into(),
         instructions: None,

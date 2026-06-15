@@ -10,8 +10,11 @@
 //! `process.run`) use `#[tokio::test]`; everything else uses the
 //! plain `#[test]` form.
 
-use smelt_core::lua::LuaRuntime;
+use smelt_core::lua::{LuaRuntime, TaskDriveOutput, ToolEnv, ToolExecResult};
 use smelt_core::permissions::ToolEffectKind;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 /// Inlined copy of `runtime/lua/smelt/_bootstrap.lua` so the host-only
@@ -106,6 +109,98 @@ fn tools_register_records_effect_metadata() {
         defaults.tool_effects.get("test_process_tool"),
         Some(&ToolEffectKind::ProcessControl)
     );
+}
+
+#[test]
+fn execute_tool_does_not_hold_task_mutex_while_stepping_handler() {
+    #[derive(Debug)]
+    enum Msg {
+        ReturnedPending,
+        ReturnedImmediate,
+        Completed(String, bool),
+    }
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = fresh();
+        rt.lua
+            .load(
+                r#"
+                smelt.tools.register({
+                    name = "task_all_tool",
+                    execute = function()
+                        local results = smelt.task.all(
+                            function() return "a" end,
+                            function() return "b" end
+                        )
+                        return results[1] .. "," .. results[2]
+                    end,
+                })
+                "#,
+            )
+            .exec()
+            .expect("register task_all_tool");
+
+        let result = rt.execute_tool(
+            "task_all_tool",
+            &HashMap::new(),
+            42,
+            "call-1",
+            ToolEnv {
+                mode: protocol::AgentMode::normal(),
+                session_id: "sess",
+                session_dir: Path::new("/tmp"),
+            },
+            Instant::now(),
+        );
+        match result {
+            ToolExecResult::Pending => tx.send(Msg::ReturnedPending).unwrap(),
+            ToolExecResult::Immediate { .. } => {
+                tx.send(Msg::ReturnedImmediate).unwrap();
+                return;
+            }
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            rt.pump_task_events();
+            for out in rt.drive_tasks(Instant::now()) {
+                if let TaskDriveOutput::ToolComplete {
+                    request_id,
+                    call_id,
+                    content,
+                    is_error,
+                    ..
+                } = out
+                {
+                    assert_eq!(request_id, 42);
+                    assert_eq!(call_id, "call-1");
+                    tx.send(Msg::Completed(content, is_error)).unwrap();
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    });
+
+    match rx.recv_timeout(Duration::from_millis(500)) {
+        Ok(Msg::ReturnedPending) => {}
+        Ok(Msg::ReturnedImmediate) => panic!("unexpected immediate result from execute_tool"),
+        Ok(Msg::Completed(content, is_error)) => {
+            panic!("tool completed before execute_tool returned pending: is_error={is_error}, content={content}")
+        }
+        Err(_) => panic!("execute_tool did not return; likely held task mutex across Lua resume"),
+    }
+
+    match rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(Msg::Completed(content, is_error)) => {
+            assert!(!is_error, "tool completed with error: {content}");
+            assert_eq!(content, "a,b");
+        }
+        Ok(Msg::ReturnedPending) => panic!("execute_tool returned pending twice"),
+        Ok(Msg::ReturnedImmediate) => panic!("unexpected late immediate result"),
+        Err(_) => panic!("task_all_tool did not complete after execute_tool returned"),
+    }
 }
 
 // -- reg.compose / reg.new ----------------------------------------------

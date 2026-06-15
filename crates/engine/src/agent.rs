@@ -1263,9 +1263,9 @@ impl<'a> Turn<'a> {
         // `execute_concurrent` short-circuits the actual work on
         // cancellation by draining its pending vecs with a synthetic
         // `cancelled` outcome (which the invariant requires).
+        // Tool evaluation replies for plugin calls share `cmd_rx` with user commands.
+        // Leave them queued until `execute_concurrent` has the full request-id plan.
         for tc in tool_calls {
-            self.drain_commands();
-
             let args: HashMap<String, Value> =
                 serde_json::from_str(&tc.function.arguments).unwrap_or_default();
 

@@ -1018,24 +1018,43 @@ impl LuaRuntime {
         rt.cancel_all(&self.lua);
     }
 
+    fn take_next_ready_task(&self, now: Instant) -> Result<Option<super::task::LuaTask>, ()> {
+        let Ok(mut rt) = self.shared.tasks.lock() else {
+            return Err(());
+        };
+        Ok(rt.take_next_ready(now))
+    }
+
+    fn step_task_outside_runtime_lock(
+        &self,
+        task: super::task::LuaTask,
+        now: Instant,
+        outs: &mut Vec<TaskDriveOutput>,
+    ) -> Result<(), ()> {
+        // Keep the task mutex unlocked while resuming Lua; task code can re-enter
+        // the runtime via `smelt.spawn`, cancellation handles, or task helpers.
+        if let Some(parked) = crate::lua::step_task_owned(&self.lua, task, now, outs) {
+            let Ok(mut rt) = self.shared.tasks.lock() else {
+                return Err(());
+            };
+            rt.put_back(parked);
+        }
+        Ok(())
+    }
+
     pub fn drive_tasks(&self, now: Instant) -> Vec<TaskDriveOutput> {
         let mut outs = Vec::new();
-        // Step one task at a time without holding the `tasks` mutex across the
-        // resume. Re-entrant `smelt.spawn` / `Reg::remove()` calls from inside
-        // the coroutine acquire the lock synchronously instead of deadlocking.
         loop {
-            let task = {
-                let Ok(mut rt) = self.shared.tasks.lock() else {
-                    return Vec::new();
-                };
-                rt.take_next_ready(now)
+            let task = match self.take_next_ready_task(now) {
+                Ok(Some(task)) => task,
+                Ok(None) => break,
+                Err(()) => return Vec::new(),
             };
-            let Some(task) = task else { break };
-            if let Some(parked) = crate::lua::step_task_owned(&self.lua, task, now, &mut outs) {
-                let Ok(mut rt) = self.shared.tasks.lock() else {
-                    return Vec::new();
-                };
-                rt.put_back(parked);
+            if self
+                .step_task_outside_runtime_lock(task, now, &mut outs)
+                .is_err()
+            {
+                return Vec::new();
             }
         }
         let mut forward = Vec::with_capacity(outs.len());
@@ -1568,43 +1587,49 @@ impl LuaRuntime {
         initial.push_back(mlua::Value::Table(args_table));
         initial.push_back(mlua::Value::Table(ctx_table));
 
-        let mut rt = match self.shared.tasks.lock() {
-            Ok(g) => g,
-            Err(_) => {
+        let task_opt = {
+            let mut rt = match self.shared.tasks.lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    return ToolExecResult::Immediate {
+                        content: "task runtime poisoned".into(),
+                        is_error: true,
+                        metadata: None,
+                    };
+                }
+            };
+            if let Err(e) = rt.spawn(
+                &self.lua,
+                func,
+                initial,
+                TaskCompletion::ToolResult {
+                    request_id,
+                    call_id: call_id.to_string(),
+                },
+            ) {
+                return ToolExecResult::Immediate {
+                    content: format!("tool spawn: {e}"),
+                    is_error: true,
+                    metadata: None,
+                };
+            }
+            rt.take_next_ready(now)
+        };
+        // Single-step the freshly-spawned task: if the handler yields, callers
+        // get `Pending` and the task is parked for the next `drive_tasks` tick.
+        let mut outputs = Vec::new();
+        if let Some(task) = task_opt {
+            if self
+                .step_task_outside_runtime_lock(task, now, &mut outputs)
+                .is_err()
+            {
                 return ToolExecResult::Immediate {
                     content: "task runtime poisoned".into(),
                     is_error: true,
                     metadata: None,
                 };
             }
-        };
-        if let Err(e) = rt.spawn(
-            &self.lua,
-            func,
-            initial,
-            TaskCompletion::ToolResult {
-                request_id,
-                call_id: call_id.to_string(),
-            },
-        ) {
-            return ToolExecResult::Immediate {
-                content: format!("tool spawn: {e}"),
-                is_error: true,
-                metadata: None,
-            };
         }
-        // Single-step the freshly-spawned task: if the handler yields, callers
-        // get `Pending` and the task is parked for the next `drive_tasks` tick.
-        // (The general drive loop is fixed-point, but at tool entry we want
-        // "yielded at all → Pending" so async handlers don't get coalesced.)
-        let task_opt = rt.take_next_ready(now);
-        let mut outputs = Vec::new();
-        if let Some(task) = task_opt {
-            if let Some(parked) = crate::lua::step_task_owned(&self.lua, task, now, &mut outputs) {
-                rt.put_back(parked);
-            }
-        }
-        drop(rt);
 
         let mut immediate: Option<(String, bool, Option<serde_json::Value>)> = None;
         for out in outputs {

@@ -136,7 +136,10 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
             key: "test-key".into(),
             key_env: "TEST_KEY".into(),
             provider_type: "anthropic-compatible".into(),
-            model_config: ModelConfig::default(),
+            model_config: ModelConfig {
+                max_tokens: Some(4096),
+                ..ModelConfig::default()
+            },
         },
         model: "test-model".into(),
         instructions: None,

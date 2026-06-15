@@ -81,7 +81,7 @@ pub struct ToolEnv<'a> {
 /// be held across a call into Lua code. Lua callbacks can re-enter the runtime
 /// (e.g. `smelt.spawn` from inside a coroutine, `Reg:remove()` cancelling a
 /// sibling task), and `std::sync::Mutex` is non-reentrant - holding the lock
-/// across a resume would deadlock. `drive_tasks` enforces this by popping a
+/// across a resume would deadlock. Task drivers enforce this by popping a
 /// task out via `take_next_ready`, dropping the lock for the duration of
 /// `step_task_owned`, then reacquiring to `put_back` the parked task.
 pub struct LuaTaskRuntime {
