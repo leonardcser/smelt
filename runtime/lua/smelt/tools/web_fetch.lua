@@ -1,5 +1,7 @@
 -- Built-in web_fetch tool. Fetches a URL and extracts content via an isolated LLM call.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
 local MAX_RESPONSE_SIZE = 5 * 1024 * 1024
 local DEFAULT_TIMEOUT = 30
 local MAX_TIMEOUT = 120
@@ -199,6 +201,16 @@ local function ask_extract(content, prompt)
   local result = smelt.task.wait(id)
   if not result or result.err then return nil end
   return result.content
+end
+
+transcript_defaults.__tool_body_renderers.web_fetch = function(block, ctx)
+  local items = {}
+  local args = block.args or {}
+  if args.prompt and args.prompt ~= "" then
+    items[#items + 1] = smelt.layout.text(args.prompt)
+  end
+  items[#items + 1] = transcript_defaults.render_tool_output(block.output, ctx)
+  return smelt.layout.vbox(items)
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({

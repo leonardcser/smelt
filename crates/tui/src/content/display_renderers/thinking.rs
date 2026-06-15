@@ -5,8 +5,7 @@ use smelt_core::content::builder::LineBuilder;
 use smelt_core::content::highlight::{emit_inline_spans, parse_inline_spans, wrap_inline_spans};
 use smelt_core::content::inline_line::InlineLine;
 
-use super::metrics::{block_inner_width, THINKING_GUTTER};
-use super::tools::pluralize;
+use super::metrics::{block_inner_width, pluralize, THINKING_GUTTER};
 
 pub(in crate::content) fn render(
     out: &mut LineBuilder,

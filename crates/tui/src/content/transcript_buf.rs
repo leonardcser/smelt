@@ -1,6 +1,6 @@
 use super::display_block::{
     measure_block, render_block_into, CompileJob, DisplayModel, DisplayRowIndexEntry,
-    DisplayRowIndexNode, MeasureCtx, RenderCtx,
+    DisplayRowIndexNode, MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
@@ -588,13 +588,9 @@ impl TranscriptProjection {
         self.counters = TranscriptProjectionCounters::default();
     }
 
-    fn finish_compile_jobs(
-        &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        jobs: Vec<CompileJob>,
-    ) {
+    fn finish_compile_jobs(&mut self, env: TranscriptRenderEnv<'_>, jobs: Vec<CompileJob>) {
         let compiled = jobs.len();
-        let blocks = jobs.into_iter().map(|job| job.compile(lua)).collect();
+        let blocks = jobs.into_iter().map(|job| job.compile(env)).collect();
         self.display_model.insert_compiled_blocks(blocks);
         if compiled > 0 {
             self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
@@ -608,7 +604,7 @@ impl TranscriptProjection {
 
     fn ensure_block_indices(
         &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
+        env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
         indices: impl IntoIterator<Item = usize>,
     ) {
@@ -619,7 +615,7 @@ impl TranscriptProjection {
                 .filter_map(|index| nodes.get(index).map(|node| (index, node.id, node.key)));
             self.display_model.collect_compile_jobs(history, blocks)
         };
-        self.finish_compile_jobs(lua, jobs);
+        self.finish_compile_jobs(env, jobs);
     }
 
     fn clear_materialized_state(&mut self) {
@@ -761,7 +757,11 @@ impl TranscriptProjection {
                 *last as u64,
             );
         }
-        self.ensure_block_indices(lua, history, missing.iter().copied());
+        self.ensure_block_indices(
+            TranscriptRenderEnv::new(lua, show_thinking),
+            history,
+            missing.iter().copied(),
+        );
         for i in missing {
             self.measure_display_block_height(history, i);
         }
@@ -1043,7 +1043,12 @@ impl TranscriptProjection {
             "transcript:project_visible_range:blocks",
             plan.block_range.len() as u64,
         );
-        let materialized = self.collect_blocks_range(lua, history, theme, plan.block_range());
+        let materialized = self.collect_blocks_range(
+            TranscriptRenderEnv::new(lua, plan.key.show_thinking),
+            history,
+            theme,
+            plan.block_range(),
+        );
         let row_base = materialized.row_base;
         let total_rows = materialized.total_rows;
         let materialized_rows = materialized.texts.len() as RowIndex;
@@ -1071,7 +1076,7 @@ impl TranscriptProjection {
 
     fn collect_blocks_range(
         &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
+        env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
         theme: &Theme,
         block_range: std::ops::Range<usize>,
@@ -1099,7 +1104,7 @@ impl TranscriptProjection {
         };
 
         let block_indices = start..end;
-        self.ensure_block_indices(lua, history, block_indices.clone());
+        self.ensure_block_indices(env, history, block_indices.clone());
         for block_index in block_indices {
             let id = self.exact_rows.nodes[block_index].id;
             let key = self.exact_rows.nodes[block_index].key;
@@ -1230,7 +1235,11 @@ impl TranscriptProjection {
             .rebuild_if_stale(history, width, show_thinking, base_key);
         let mut rows: Vec<String> = Vec::new();
         let block_indices = 0..self.exact_rows.nodes.len();
-        self.ensure_block_indices(lua, history, block_indices.clone());
+        self.ensure_block_indices(
+            TranscriptRenderEnv::new(lua, show_thinking),
+            history,
+            block_indices.clone(),
+        );
         for i in block_indices {
             let Some(node) = self.exact_rows.nodes.get(i) else {
                 continue;
@@ -1291,7 +1300,12 @@ impl TranscriptProjection {
             return DisplayRows::empty();
         }
 
-        let materialized = self.collect_blocks_range(lua, history, theme, block_range);
+        let materialized = self.collect_blocks_range(
+            TranscriptRenderEnv::new(lua, show_thinking),
+            history,
+            theme,
+            block_range,
+        );
         let local_start = row_to_usize(start.saturating_sub(materialized.row_base));
         let local_end =
             row_to_usize(end.saturating_sub(materialized.row_base)).min(materialized.texts.len());
@@ -1367,7 +1381,12 @@ impl TranscriptProjection {
         }
 
         let mut scratch = Buffer::new(BufId(0), BufCreateOpts::default());
-        let materialized = self.collect_blocks_range(lua, history, theme, block_range);
+        let materialized = self.collect_blocks_range(
+            TranscriptRenderEnv::new(lua, show_thinking),
+            history,
+            theme,
+            block_range,
+        );
         let row_base = materialized.row_base;
         scratch.set_all_lines(materialized.texts);
         for p in materialized.pending {

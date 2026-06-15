@@ -39,6 +39,14 @@ pub(super) fn chrome_text_width(width: usize) -> usize {
     width.saturating_sub(2 * CHROME_INNER_PAD).max(1)
 }
 
+pub(super) fn pluralize(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

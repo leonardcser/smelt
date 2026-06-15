@@ -7,7 +7,7 @@ use smelt_core::style::Color;
 use smelt_core::theme::intern;
 
 use super::metrics::chrome_text_width;
-use super::tools::{measure_wrapped_output, render_wrapped_output};
+use super::wrapped_output::{measure_wrapped_output, render_wrapped_output};
 
 pub(in crate::content) fn render(
     out: &mut LineBuilder,

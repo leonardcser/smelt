@@ -1,6 +1,7 @@
 -- Built-in `bash` tool.
 
 local M = {}
+local transcript_defaults = require("smelt.transcript.defaults")
 
 local DEFAULT_TIMEOUT_MS = 120000
 local MAX_TIMEOUT_MS = 600000
@@ -104,6 +105,13 @@ function M.execute(args, ctx)
     is_error = result.is_error and true or false,
     metadata = result.background_id and { background_id = result.background_id } or nil,
   }
+end
+
+transcript_defaults.__tool_body_renderers.bash = function(block, ctx)
+  local output = block.output or { content = "", is_error = false }
+  local content = (output.content or ""):gsub("%s+$", "")
+  if not content:match("%S") then return nil end
+  return transcript_defaults.render_tool_output({ content = content, is_error = output.is_error }, ctx)
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({

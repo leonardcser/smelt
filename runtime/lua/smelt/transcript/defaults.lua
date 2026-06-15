@@ -2,6 +2,8 @@ smelt.transcript = smelt.transcript or {}
 smelt.transcript.defaults = smelt.transcript.defaults or {}
 
 local M = smelt.transcript.defaults
+M.__tool_body_renderers = M.__tool_body_renderers or {}
+
 local layout = smelt.layout
 
 local status_hl = {
@@ -189,139 +191,12 @@ function tool_header_lines(block, status, hl)
   return lines
 end
 
-local function edit_fields(args)
-  return args.file_path or "", args.old_string or "", args.new_string or "", args.replace_all == true
-end
-
-local function replace_first(haystack, needle, replacement)
-  local s, e = string.find(haystack, needle, 1, true)
-  if not s then return haystack end
-  return haystack:sub(1, s - 1) .. replacement .. haystack:sub(e + 1)
-end
-
-local function replace_all(haystack, needle, replacement)
-  local out = {}
-  local start = 1
-  while true do
-    local s, e = string.find(haystack, needle, start, true)
-    if not s then
-      out[#out + 1] = haystack:sub(start)
-      break
-    end
-    out[#out + 1] = haystack:sub(start, s - 1)
-    out[#out + 1] = replacement
-    start = e + 1
-  end
-  return table.concat(out)
-end
-
-local function apply_edit(content, old_string, new_string, do_all)
-  if do_all then return replace_all(content, old_string, new_string) end
-  return replace_first(content, old_string, new_string)
-end
-
-local function planned_edit_diff(args)
-  local path, old_string, new_string, do_all = edit_fields(args)
-  local cached = path ~= "" and smelt.fs.file_state.get(path) or nil
-  local content = cached and cached.content or nil
-  if not content then
-    return layout.diff({
-      old = old_string,
-      new = new_string,
-      path = path,
-      anchor = old_string,
-    })
-  end
-  return layout.diff({
-    old = content,
-    new = apply_edit(content, old_string, new_string, do_all),
-    path = path,
-    anchor = old_string,
-  })
-end
-
-local function notebook_preview_layout(meta)
-  meta = meta or {}
-  local lang = meta.syntax_ext
-  local path = meta.path or ""
-  local body
-  if meta.edit_mode == "insert" then
-    body = layout.file_view({
-      content = meta.new_source or "",
-      path = path .. "." .. (lang or "py"),
-      lang = lang,
-    })
-  else
-    body = layout.diff({
-      old = meta.old_source or "",
-      new = meta.new_source or "",
-      path = lang and (path .. "." .. lang) or path,
-      lang = lang,
-    })
-  end
-  local title = meta.title or ""
-  if title == "" then return body end
-  return layout.vbox({ layout.text(title), body })
-end
-
-local tool_body_renderers = {
-  bash = function(block, ctx)
-    local content = ((block.output and block.output.content) or ""):gsub("%s+$", "")
-    if not content:match("%S") then return nil end
-    return M.render_tool_output({ content = content, is_error = block.output.is_error }, ctx)
-  end,
-  edit_file = function(block)
-    local args = block.args or {}
-    local meta = block.output and block.output.metadata
-    if meta then
-      return layout.diff({
-        old = meta.old_content or args.old_string or "",
-        new = meta.new_content or args.new_string or "",
-        path = meta.path or args.file_path or "",
-        anchor = args.old_string or "",
-      })
-    end
-    return planned_edit_diff(args)
-  end,
-  edit_notebook = function(block)
-    return notebook_preview_layout((block.output and block.output.metadata) or {})
-  end,
-  exit_plan_mode = function(block)
-    return layout.text((block.args and block.args.plan_summary) or "")
-  end,
-  glob = function(block)
-    return layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " files")
-  end,
-  grep = function(block)
-    return layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " matches")
-  end,
-  read_file = function(block)
-    return layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " lines")
-  end,
-  web_fetch = function(block, ctx)
-    local items = {}
-    local args = block.args or {}
-    if args.prompt and args.prompt ~= "" then
-      items[#items + 1] = layout.text(args.prompt)
-    end
-    items[#items + 1] = M.render_tool_output(block.output, ctx)
-    return layout.vbox(items)
-  end,
-  write_file = function(block)
-    local args = block.args or {}
-    return layout.file_view({
-      content = args.content or "",
-      path = args.file_path or "",
-    })
-  end,
-}
-
 --- Render a tool body. Raw output is the safe default when no tool-specific
 --- structured renderer is available.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table?
 function smelt.transcript.defaults.render_tool_body(block, ctx, opts)
   opts = opts or {}
-  local renderer = tool_body_renderers[block.name or ""]
+  local renderer = M.__tool_body_renderers[block.name or ""]
   if not block.output and not renderer then return nil end
 
   local output = block.output or { content = "", is_error = false }

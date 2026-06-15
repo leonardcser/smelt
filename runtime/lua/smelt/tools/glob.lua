@@ -1,5 +1,7 @@
 -- Built-in glob tool. Gitignore-aware pattern matching; results sorted newest-first.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
 local function describe(args)
   local pattern = args.pattern or ""
   local path = args.path or ""
@@ -7,6 +9,10 @@ local function describe(args)
     return pattern
   end
   return pattern .. " in " .. path
+end
+
+transcript_defaults.__tool_body_renderers.glob = function(block)
+  return smelt.layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " files")
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({

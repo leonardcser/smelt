@@ -1,5 +1,7 @@
 -- Built-in edit_file tool. Exact-string find/replace under flock + mtime staleness check.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
 local function replace_first(haystack, needle, replacement)
   local s, e = string.find(haystack, needle, 1, true)
   if not s then
@@ -54,6 +56,20 @@ local function planned_diff(args)
     path = path,
     anchor = old_string,
   })
+end
+
+transcript_defaults.__tool_body_renderers.edit_file = function(block)
+  local args = block.args or {}
+  local meta = block.output and block.output.metadata
+  if meta then
+    return smelt.layout.diff({
+      old = meta.old_content or args.old_string or "",
+      new = meta.new_content or args.new_string or "",
+      path = meta.path or args.file_path or "",
+      anchor = args.old_string or "",
+    })
+  end
+  return planned_diff(args)
 end
 
 smelt.tools.register({

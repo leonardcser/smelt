@@ -1,7 +1,8 @@
 //! Per-tool transcript rendering. Each story drives the real
 //! `ToolStarted` → `ToolFinished` pipeline for a tool registered
-//! under `runtime/lua/smelt/tools/`. The tool's own `render(args,
-//! output, ctx)` Lua callback decides the body (diff, file_view, "N
+//! under `runtime/lua/smelt/tools/`. The root transcript renderer
+//! asks the bundled Lua defaults for the full tool block, including
+//! any tool-adjacent structured body renderer (diff, file_view, "N
 //! lines", etc.), so the snapshot reflects the production block
 //! exactly as users see it. The `ctx.tool_call*` helpers hide the
 //! args/call-id/outcome boilerplate so each story stays focused on

@@ -1347,7 +1347,7 @@ impl LuaRuntime {
         };
         let _perf = smelt_perf::perf::begin("lua:tool");
         match func.call::<mlua::Value>(args_table) {
-            Ok(v) => match decode_styled_lines(v) {
+            Ok(v) => match crate::lua::styled_lines_from_lua(v, "tool summary") {
                 Ok(lines) => lines,
                 Err(e) => {
                     self.record_error(format!("tool summary `{tool_name}`: {e}"));
@@ -2127,92 +2127,6 @@ fn thinking_fallback_summary(content: &str) -> String {
         format!("thinking: {first}")
     } else {
         format!("thinking: {first} (+{} lines)", non_empty.saturating_sub(1))
-    }
-}
-
-/// Decode a Lua return value into `protocol::StyledLines`.
-///
-/// Accepted shapes:
-///   * `nil` - empty
-///   * `string` - wrapped as one or more plain-text lines (split on `\n`)
-///   * `table` - must be a 2D sequence: outer list is lines, each line is a
-///     list of span tables of shape `{ text, syntax?, selectable?, title_suffix?, style? = { hl?, dim?,
-///     bold?, italic?, fg?, bg? } }`. Mirrors `buf:styled`.
-fn decode_styled_lines(value: mlua::Value) -> Result<protocol::StyledLines, String> {
-    use protocol::{StyledLines, StyledSpan};
-    match value {
-        mlua::Value::Nil => Ok(StyledLines::empty()),
-        mlua::Value::String(s) => Ok(StyledLines::from_plain(s.to_string_lossy())),
-        mlua::Value::Table(t) => {
-            let mut lines: Vec<Vec<StyledSpan>> = Vec::new();
-            for line_val in t.sequence_values::<mlua::Value>() {
-                let line_val = line_val.map_err(|e| format!("decode line: {e}"))?;
-                let line_tbl = match line_val {
-                    mlua::Value::Table(l) => l,
-                    mlua::Value::Nil => {
-                        lines.push(Vec::new());
-                        continue;
-                    }
-                    other => {
-                        return Err(format!("expected line table, got {}", other.type_name()));
-                    }
-                };
-                let mut spans: Vec<StyledSpan> = Vec::new();
-                for span_val in line_tbl.sequence_values::<mlua::Table>() {
-                    let span_tbl = span_val.map_err(|e| format!("decode span: {e}"))?;
-                    let style_tbl = span_tbl
-                        .get::<Option<mlua::Table>>("style")
-                        .map_err(|e| format!("decode span style: {e}"))?;
-                    let (hl, dim, bold, italic, fg, bg) = if let Some(s) = style_tbl {
-                        (
-                            s.get::<Option<String>>("hl").ok().flatten(),
-                            s.get::<Option<bool>>("dim").ok().flatten().unwrap_or(false),
-                            s.get::<Option<bool>>("bold")
-                                .ok()
-                                .flatten()
-                                .unwrap_or(false),
-                            s.get::<Option<bool>>("italic")
-                                .ok()
-                                .flatten()
-                                .unwrap_or(false),
-                            s.get::<Option<String>>("fg").ok().flatten(),
-                            s.get::<Option<String>>("bg").ok().flatten(),
-                        )
-                    } else {
-                        (None, false, false, false, None, None)
-                    };
-                    spans.push(StyledSpan {
-                        text: span_tbl
-                            .get::<Option<String>>("text")
-                            .map_err(|e| format!("decode span text: {e}"))?
-                            .unwrap_or_default(),
-                        syntax: span_tbl
-                            .get::<Option<String>>("syntax")
-                            .map_err(|e| format!("decode span syntax: {e}"))?,
-                        hl,
-                        fg,
-                        bg,
-                        dim,
-                        bold,
-                        italic,
-                        selectable: span_tbl
-                            .get::<Option<bool>>("selectable")
-                            .map_err(|e| format!("decode span selectable: {e}"))?
-                            .unwrap_or(true),
-                        title_suffix: span_tbl
-                            .get::<Option<bool>>("title_suffix")
-                            .map_err(|e| format!("decode span title_suffix: {e}"))?
-                            .unwrap_or(false),
-                    });
-                }
-                lines.push(spans);
-            }
-            Ok(StyledLines(lines))
-        }
-        other => Err(format!(
-            "expected nil | string | table, got {}",
-            other.type_name()
-        )),
     }
 }
 

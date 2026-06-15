@@ -1,6 +1,8 @@
 -- Built-in read_file tool. Supports text, notebooks (.ipynb), and images.
 -- Returns a stub for unchanged files at the same range to save prompt-cache tokens.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
 local DEFAULT_LINE_LIMIT = 2000
 
 local FILE_UNCHANGED_STUB = "File unchanged since last read. The content from the earlier read_file "
@@ -50,6 +52,10 @@ local function format_text_window(content, offset, limit)
     out[#out + 1] = string.format("%4d\t%s", i, line)
   end
   return table.concat(out, "\n")
+end
+
+transcript_defaults.__tool_body_renderers.read_file = function(block)
+  return smelt.layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " lines")
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({

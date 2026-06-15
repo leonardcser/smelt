@@ -1,5 +1,18 @@
 -- Built-in write_file tool. Refuses to overwrite unread files and detects mtime drift.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
+local function file_view(args)
+  return smelt.layout.file_view({
+    content = args.content or "",
+    path    = args.file_path or "",
+  })
+end
+
+transcript_defaults.__tool_body_renderers.write_file = function(block)
+  return file_view(block.args or {})
+end
+
 smelt.tools.register({
   name = "write_file",
   description = "Writes a file to the local filesystem. This tool will overwrite the existing file if there is one at the provided path.",
@@ -28,10 +41,7 @@ smelt.tools.register({
     return p ~= "" and { { path = p, kind = "file" } } or {}
   end,
   preview = function(args)
-    return smelt.layout.file_view({
-      content = args.content or "",
-      path    = args.file_path or "",
-    })
+    return file_view(args)
   end,
   execute = function(args)
     local path = args.file_path or ""

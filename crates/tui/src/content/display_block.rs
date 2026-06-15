@@ -8,6 +8,7 @@ use smelt_core::content::block_layout::{
 use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block, CodeBlock};
 use smelt_core::content::highlight::render_code_block;
+use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
@@ -19,19 +20,37 @@ pub(crate) struct DisplayCacheKey {
     pub(crate) content_hash: u64,
     pub(crate) sidecar_hash: u64,
     pub(crate) renderer_version: u64,
+    pub(crate) render_context_hash: u64,
 }
 
 impl DisplayCacheKey {
-    pub(crate) fn new(content_hash: u64, sidecar_hash: u64) -> Self {
+    pub(crate) fn new(content_hash: u64, sidecar_hash: u64, render_context_hash: u64) -> Self {
         Self {
             content_hash,
             sidecar_hash,
             renderer_version: DISPLAY_RENDERER_VERSION,
+            render_context_hash,
         }
     }
 
     fn from_layout_key(key: LayoutKey) -> Self {
-        Self::new(key.content_hash, key.sidecar_hash)
+        Self::new(
+            key.content_hash,
+            key.sidecar_hash,
+            u64::from(key.show_thinking),
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TranscriptRenderEnv<'a> {
+    pub(crate) lua: &'a LuaRuntime,
+    pub(crate) show_thinking: bool,
+}
+
+impl<'a> TranscriptRenderEnv<'a> {
+    pub(crate) fn new(lua: &'a LuaRuntime, show_thinking: bool) -> Self {
+        Self { lua, show_thinking }
     }
 }
 
@@ -89,7 +108,6 @@ pub(crate) struct DisplayRowIndexNode {
 pub(crate) struct CompileJob {
     id: BlockId,
     index: usize,
-    show_thinking: bool,
     key: DisplayCacheKey,
     block: Block,
     state: Option<ToolState>,
@@ -98,12 +116,11 @@ pub(crate) struct CompileJob {
 impl CompileJob {
     pub(crate) fn compile(
         self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
+        env: TranscriptRenderEnv<'_>,
     ) -> (BlockId, DisplayCacheKey, DisplayBlock) {
         let Self {
             id,
             index,
-            show_thinking,
             key,
             block,
             state,
@@ -111,7 +128,7 @@ impl CompileJob {
         (
             id,
             key,
-            compile_block_with_lua(lua, id, index, &block, state.as_ref(), show_thinking),
+            compile_block_with_lua(env, id, index, &block, state.as_ref()),
         )
     }
 }
@@ -154,7 +171,7 @@ impl DisplayModel {
     #[cfg(test)]
     pub(crate) fn ensure_many(
         &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
+        env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
         ids: &[BlockId],
         keys: &[LayoutKey],
@@ -172,7 +189,7 @@ impl DisplayModel {
             });
         let jobs = self.collect_compile_jobs(history, blocks);
         let compiled = jobs.len();
-        let blocks = jobs.into_iter().map(|job| job.compile(lua)).collect();
+        let blocks = jobs.into_iter().map(|job| job.compile(env)).collect();
         self.insert_compiled_blocks(blocks);
         compiled
     }
@@ -210,7 +227,6 @@ impl DisplayModel {
             jobs.push(CompileJob {
                 id,
                 index,
-                show_thinking: key.show_thinking,
                 key: display_key,
                 block,
                 state,
@@ -250,25 +266,26 @@ pub(crate) fn compile_block(block: &Block) -> DisplayBlock {
 }
 
 fn compile_block_with_lua(
-    lua: &smelt_core::lua::runtime::LuaRuntime,
+    env: TranscriptRenderEnv<'_>,
     id: BlockId,
     index: usize,
     block: &Block,
     state: Option<&ToolState>,
-    show_thinking: bool,
 ) -> DisplayBlock {
     if matches!(block, Block::ToolCall { .. }) {
-        let layout = lua.render_transcript_layout(
+        let layout = env.lua.render_transcript_layout(
             id,
             index,
             block,
             state,
-            smelt_core::lua::runtime::TranscriptRenderCtx { show_thinking },
+            smelt_core::lua::runtime::TranscriptRenderCtx {
+                show_thinking: env.show_thinking,
+            },
         );
         let layout = match compile_layout_ir(&layout) {
             Ok(layout) => layout,
             Err(e) => {
-                lua.record_error(format!(
+                env.lua.record_error(format!(
                     "transcript render `tool` #{index}: compile layout IR: {e}"
                 ));
                 BlockLayout::Leaf(IrLeaf::Text(TextSpec {
@@ -756,11 +773,21 @@ mod tests {
         let lua = smelt_core::lua::runtime::LuaRuntime::new();
         let mut model = DisplayModel::new();
         assert_eq!(
-            model.ensure_many(&lua, &transcript.history, &[id], &[key]),
+            model.ensure_many(
+                TranscriptRenderEnv::new(&lua, key.show_thinking),
+                &transcript.history,
+                &[id],
+                &[key],
+            ),
             1
         );
         assert_eq!(
-            model.ensure_many(&lua, &transcript.history, &[id], &[narrow]),
+            model.ensure_many(
+                TranscriptRenderEnv::new(&lua, narrow.show_thinking),
+                &transcript.history,
+                &[id],
+                &[narrow],
+            ),
             0
         );
     }

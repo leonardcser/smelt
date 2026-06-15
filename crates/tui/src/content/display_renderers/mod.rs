@@ -1,7 +1,8 @@
 //! Display renderers for compiled transcript blocks.
 
+mod layout_ir;
 mod markdown;
-mod tools;
+mod wrapped_output;
 
 mod chrome;
 pub(in crate::content) mod compacted;
@@ -13,8 +14,8 @@ pub(in crate::content) mod text;
 pub(in crate::content) mod thinking;
 pub(in crate::content) mod user;
 
+pub(crate) use layout_ir::{measure_layout_ir, render_layout_ir_into};
 pub(crate) use markdown::render_markdown_inner;
-pub(crate) use tools::{measure_layout_ir, render_layout_ir_into};
 
 /// Per-tool row cap (applied to command header and output body separately).
 const MAX_TOOL_BLOCK_ROWS: usize =

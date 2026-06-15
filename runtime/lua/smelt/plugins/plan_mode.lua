@@ -1,5 +1,11 @@
 -- Plan-mode plugin: registers the `plan` mode and `exit_plan_mode` tool.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
+transcript_defaults.__tool_body_renderers.exit_plan_mode = function(block)
+  return smelt.layout.text((block.args and block.args.plan_summary) or "")
+end
+
 smelt.mode.register({
   name = "plan",
   after = "normal",

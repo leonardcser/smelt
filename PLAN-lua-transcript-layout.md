@@ -1010,10 +1010,10 @@ Status after implementation:
 
 - The old tool `render(args, output, ctx)` hook is removed from `smelt.tools.ToolDef`, `ToolHandles`, docs, generated stubs, and all bundled tool registrations.
 - Tool calls now compile full-block `LayoutIr` by invoking the root transcript renderer. `DisplayBlock::ToolCall` stores the resulting layout tree; Rust no longer pre-renders or caches a body-only `ToolBody`.
-- `runtime/lua/smelt/transcript/defaults.lua` owns the default tool block: styled `layout.runs` header, status colors, elapsed/title suffix placement, user messages, denied body suppression, raw-output tail caps, and built-in structured bodies for edit/write/notebook/web-fetch/read/search/process tools.
-- `layout.runs` preserves styled summary spans, syntax highlighting, selectability, and `title_suffix` metadata so Lua-rendered headers keep the old copy/yank behavior.
-- The display cache was simplified to disposable row-index entries only; derived tool bodies are no longer serialized in `session.ir.bin`.
-- Confirm previews render generic compiled layout IR, sharing the same primitive renderer path as transcript tool layouts.
+- `runtime/lua/smelt/transcript/defaults.lua` owns the default tool block: styled `layout.runs` header, status colors, elapsed/title suffix placement, user messages, denied body suppression, and raw-output tail caps. Built-in structured body functions live next to their tools and populate the defaults' private dispatch table.
+- `layout.runs` preserves styled summary spans, syntax highlighting, selectability, and `title_suffix` metadata so Lua-rendered headers keep the old copy/yank behavior. Tool summaries and `layout.runs` now share the same Rust styled-lines decoder.
+- The display cache was simplified to disposable row-index entries only; derived tool bodies are no longer serialized in `session.ir.bin`. Compiled display-block keys include the renderer context bit used by Lua so toggling `show_thinking` cannot reuse stale Lua-produced tool layout.
+- Confirm previews render generic compiled layout IR, sharing the same primitive renderer path as transcript tool layouts. The generic `LayoutIr` renderer now lives under a layout-named module, with legacy wrapped-output helpers split out for exec output.
 
 Deferred debt:
 

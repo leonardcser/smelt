@@ -1,5 +1,7 @@
 -- Built-in grep tool. Uses ripgrep, falls back to grep when rg is absent.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
 local function pick_bool(v, default)
   if type(v) == "boolean" then return v end
   return default
@@ -113,6 +115,10 @@ local function run_grep_fallback(args)
 
   local timeout_secs = math.max(1, math.floor(timeout_ms / 1000))
   return smelt.process.run("grep", cmd_args, { timeout_secs = timeout_secs })
+end
+
+transcript_defaults.__tool_body_renderers.grep = function(block)
+  return smelt.layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " matches")
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({
