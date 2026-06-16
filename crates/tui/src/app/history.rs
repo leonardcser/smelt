@@ -426,6 +426,26 @@ impl TuiApp {
         self.core.session.snapshot_accounting();
     }
 
+    pub(crate) fn set_session_title(
+        &mut self,
+        title: String,
+        slug: String,
+        target_history_len: Option<usize>,
+    ) {
+        self.core.session.title = Some(title);
+        self.core.session.slug = Some(slug.clone());
+        let hist_len = target_history_len.unwrap_or(self.core.session.history.len());
+        self.core.session.snapshot_metadata_at(hist_len);
+        self.set_task_label(slug);
+        self.save_session();
+    }
+
+    pub(crate) fn restore_session_metadata_after_rewind(&mut self, hist_idx: usize) {
+        self.core.session.restore_metadata_after_rewind(hist_idx);
+        let slug = self.core.session.slug.clone().unwrap_or_default();
+        self.set_task_label(slug);
+    }
+
     pub(crate) fn fork_session(&mut self) {
         if self.core.session.history.is_empty() {
             self.notify_error("nothing to fork".into());
@@ -548,12 +568,12 @@ impl TuiApp {
         self.core.session = loaded;
         self.persisted_fingerprints = None;
         self.bump_epoch("session_epoch");
-        if let Some(ref slug) = self.core.session.slug {
-            self.set_task_label(slug.clone());
-        }
         // Drop snapshots beyond the restored history length.
         let hist_len = self.core.session.history.len();
         self.core.session.prune_accounting_snapshots(hist_len);
+        self.core.session.prune_metadata_snapshots(hist_len);
+        let slug = self.core.session.slug.clone().unwrap_or_default();
+        self.set_task_label(slug);
         self.reset_session_permissions();
         self.queued_inputs.clear();
         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
@@ -582,9 +602,11 @@ impl TuiApp {
 
     fn rebuild_screen_from_history(&mut self) {
         self.clear_transcript();
-        if let Some(ref slug) = self.core.session.slug {
-            self.set_task_label(slug.clone());
-        }
+        self.core
+            .session
+            .prune_metadata_snapshots(self.core.session.history.len());
+        let slug = self.core.session.slug.clone().unwrap_or_default();
+        self.set_task_label(slug);
         let display_cache = crate::content::display_cache::read_for_session(&self.core.session);
         let persisted_fingerprints = persist_fingerprints(&self.core.session, &display_cache);
         self.transcript.replace_transcript_with_display_cache(
@@ -781,11 +803,9 @@ impl TuiApp {
         self.core
             .session
             .restore_accounting_after_rewind(hist_idx, keep_checkpoint_at_boundary);
+        self.restore_session_metadata_after_rewind(hist_idx);
         self.truncate_to(block_idx);
         self.reset_session_permissions();
-        if self.core.session.history.is_empty() {
-            self.task_label = None;
-        }
         self.sync_session_snapshot();
         self.publish_history_delta("rewound");
 
@@ -798,6 +818,7 @@ impl TuiApp {
         self.core.session.turn_metas.clear();
         self.core.session.clear_accounting_snapshots();
         self.core.session.clear_context_tokens();
+        self.core.session.clear_metadata_snapshots();
         self.task_label = None;
         self.clear_transcript();
         self.reset_session_permissions();

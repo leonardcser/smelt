@@ -71,6 +71,7 @@ local function update_title(new_text)
 
   -- Gather all prior user messages from the session history.
   local history = smelt.session.messages()
+  local target_history_len = #smelt.session.history()
   local user_msgs = {}
   for _, m in ipairs(history) do
     if m.role == "user" and m.content and m.content ~= "" then
@@ -81,6 +82,7 @@ local function update_title(new_text)
   -- Append the newly submitted text.
   if new_text and new_text ~= "" then
     table.insert(user_msgs, new_text)
+    target_history_len = target_history_len + 1
   end
 
   -- Skip shell escapes and empty submissions.
@@ -119,8 +121,9 @@ local function update_title(new_text)
     guard = guard,
     on_response = function(response, err)
       if err then
+        if err.kind == "cancelled" then return end
         local title, slug = fallback_title(trimmed)
-        smelt.session.title(title, slug)
+        smelt.session.set_title_for_history(title, slug, target_history_len)
         return
       end
       local parsed = parse_response((response and response.content) or "")
@@ -135,11 +138,11 @@ local function update_title(new_text)
           if #parts == 5 then break end
         end
         slug = table.concat(parts, "-")
-        smelt.session.title(title, slug)
+        smelt.session.set_title_for_history(title, slug, target_history_len)
         return
       end
       local title, slug = fallback_title(trimmed)
-      smelt.session.title(title, slug)
+      smelt.session.set_title_for_history(title, slug, target_history_len)
     end,
   })
 end

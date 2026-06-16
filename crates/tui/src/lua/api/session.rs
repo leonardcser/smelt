@@ -150,10 +150,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 (Some(title), maybe_slug) => {
                     crate::lua::with_app(|app| {
                         let slug = maybe_slug.unwrap_or_else(|| engine::provider::slugify(&title));
-                        app.core.session.title = Some(title);
-                        app.core.session.slug = Some(slug.clone());
-                        app.set_task_label(slug);
-                        app.save_session();
+                        app.set_session_title(title, slug, None);
                     });
                     Ok(mlua::Value::Nil)
                 }
@@ -166,6 +163,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     }
                 }
             }
+        },
+    )?;
+    m.fn_(
+        "set_title_for_history",
+        "Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.",
+        &["title", "slug", "history_len"],
+        |_, (title, slug, history_len): (String, String, usize)| -> LuaResult<()> {
+            crate::lua::with_app(|app| app.set_session_title(title, slug, Some(history_len)));
+            Ok(())
         },
     )?;
     let slug = m.sub(

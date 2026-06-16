@@ -150,6 +150,14 @@ fun(block_idx: integer?, opts: table?): nil
 
 Rewind the session to a prior user turn. `block_idx = nil` rewinds to before the first turn; `opts.restore_vim_insert = true` re-enters vim insert mode after the rewind.
 
+## `smelt.session.set_title_for_history`
+
+```lua
+fun(title: string, slug: string, history_len: integer): nil
+```
+
+Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.
+
 ## `smelt.session.system`
 
 ```lua

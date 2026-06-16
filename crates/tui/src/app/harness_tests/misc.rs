@@ -47,6 +47,73 @@ fn title_response_after_rewind_is_ignored() {
 }
 
 #[test]
+fn cancelled_title_request_does_not_fallback_to_submitted_text() {
+    let mut app = TestApp::builder().build();
+
+    publish_input_submit(&mut app, "Temporary request to cancel");
+    let ask_ids = engine_ask_ids(app.drain_engine_sends());
+    assert_eq!(ask_ids.len(), 1, "title should issue one background ask");
+
+    respond_ask_with_error(
+        &mut app,
+        ask_ids[0],
+        protocol::EngineAskErrorKind::Cancelled,
+    );
+
+    assert_eq!(app.app.core.session.title, None);
+    assert_eq!(app.app.core.session.slug, None);
+}
+
+#[test]
+fn rewind_restores_session_title_snapshot() {
+    let mut app = TestApp::builder().build();
+    app.app.core.session.history = vec![
+        protocol::HistoryItem::user(protocol::Content::text("First task")),
+        protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+            Some(protocol::Content::text("done")),
+            None,
+            Vec::new(),
+        )),
+        protocol::HistoryItem::user(protocol::Content::text("Second task")),
+        protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+            Some(protocol::Content::text("done")),
+            None,
+            Vec::new(),
+        )),
+    ];
+    app.app.restore_screen();
+
+    app.app
+        .set_session_title("First task".into(), "first-task".into(), Some(1));
+    app.app
+        .set_session_title("Second task".into(), "second-task".into(), Some(3));
+
+    let restored = app.app.rewind_to(2).expect("second user turn");
+
+    assert_eq!(restored.0, "Second task");
+    assert_eq!(app.app.core.session.history.len(), 2);
+    assert_eq!(app.app.core.session.title.as_deref(), Some("First task"));
+    assert_eq!(app.app.core.session.slug.as_deref(), Some("first-task"));
+    assert_eq!(app.app.task_label.as_deref(), Some("first-task"));
+}
+
+#[test]
+fn rewind_to_start_clears_session_title_snapshot() {
+    let mut app = TestApp::builder().build();
+    app.app.core.session.history = vec![protocol::HistoryItem::user(protocol::Content::text(
+        "First task",
+    ))];
+    app.app
+        .set_session_title("First task".into(), "first-task".into(), Some(1));
+
+    app.app.rewind_to_start();
+
+    assert_eq!(app.app.core.session.title, None);
+    assert_eq!(app.app.core.session.slug, None);
+    assert_eq!(app.app.task_label, None);
+}
+
+#[test]
 fn second_title_request_supersedes_inflight_response() {
     let mut app = TestApp::builder().build();
 

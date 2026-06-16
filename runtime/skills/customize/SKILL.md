@@ -1453,6 +1453,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Cancel any in-flight agent and clear the session to a blank slate.
 - `smelt.session.rewind_to` :: `fun(block_idx: integer?, opts: table?): nil`
   Rewind the session to a prior user turn.
+- `smelt.session.set_title_for_history` :: `fun(title: string, slug: string, history_len: integer): nil`
+  Set the session title and slug for a specific history length.
 - `smelt.session.system` :: `fun(): string`
   Currently-assembled system prompt sent on the next turn.
 - `smelt.session.text` :: `fun(id: string): string?`

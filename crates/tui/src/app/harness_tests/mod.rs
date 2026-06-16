@@ -69,6 +69,20 @@ fn respond_ask_with_text(app: &mut TestApp, id: u64, text: &str) {
     app.app.drive_lua_tasks();
 }
 
+fn respond_ask_with_error(app: &mut TestApp, id: u64, kind: protocol::EngineAskErrorKind) {
+    let _g = crate::lua::install_app_ptr(&mut app.app);
+    app.app
+        .dispatch_engine_event(protocol::EngineEvent::EngineAskResponse {
+            id,
+            message: None,
+            error: Some(protocol::EngineAskError {
+                kind,
+                message: kind.as_str().to_string(),
+            }),
+        });
+    app.app.drive_lua_tasks();
+}
+
 fn respond_pending_ask_with_text(app: &mut TestApp, text: &str) {
     respond_ask_with_text(app, app.pending_ask_id().expect("pending ask id"), text);
 }

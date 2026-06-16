@@ -80,6 +80,10 @@ session.reset = nil
 ---@type fun(block_idx: integer?, opts: table?): nil
 session.rewind_to = nil
 
+--- Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.
+---@type fun(title: string, slug: string, history_len: integer): nil
+session.set_title_for_history = nil
+
 --- Currently-assembled system prompt sent on the next turn. Reflects every prompt section (base, skills, instructions). Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.
 ---@type fun(): string
 session.system = nil

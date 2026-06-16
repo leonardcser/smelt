@@ -74,6 +74,26 @@ impl AccountingSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionMetadataSnapshot {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub first_user_message: Option<String>,
+}
+
+impl SessionMetadataSnapshot {
+    fn from_session(session: &Session) -> Self {
+        Self {
+            title: session.title.clone(),
+            slug: session.slug.clone(),
+            first_user_message: session.first_user_message.clone(),
+        }
+    }
+}
+
 fn default_checkpoint_kind() -> String {
     "compaction".to_string()
 }
@@ -107,6 +127,9 @@ pub struct Session {
     pub title: Option<String>,
     pub slug: Option<String>,
     pub first_user_message: Option<String>,
+    /// Title/slug snapshots keyed by semantic history length. Rewind restores
+    /// the latest snapshot at or before the retained history boundary.
+    pub metadata_snapshots: Vec<(usize, SessionMetadataSnapshot)>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub mode: Option<String>,
@@ -153,6 +176,8 @@ struct SessionWire {
     #[serde(default)]
     pub first_user_message: Option<String>,
     #[serde(default)]
+    pub metadata_snapshots: Vec<(usize, SessionMetadataSnapshot)>,
+    #[serde(default)]
     pub created_at_ms: u64,
     #[serde(default)]
     pub updated_at_ms: u64,
@@ -198,6 +223,8 @@ struct SessionWireV2 {
     pub slug: Option<String>,
     #[serde(default)]
     pub first_user_message: Option<String>,
+    #[serde(default)]
+    pub metadata_snapshots: Vec<(usize, SessionMetadataSnapshot)>,
     #[serde(default)]
     pub created_at_ms: u64,
     #[serde(default)]
@@ -337,11 +364,13 @@ impl From<SessionWire> for Session {
         } else {
             w.session_cost_usd
         };
+        let metadata_snapshots = remap_msg_to_hist(&w.metadata_snapshots, &table, hist_len);
         Self {
             id: w.id,
             title: w.title,
             slug: w.slug,
             first_user_message: w.first_user_message,
+            metadata_snapshots,
             created_at_ms: w.created_at_ms,
             updated_at_ms: w.updated_at_ms,
             mode: w.mode,
@@ -366,11 +395,13 @@ impl From<SessionWireV2> for Session {
     fn from(w: SessionWireV2) -> Self {
         let context_tokens = w.context_tokens;
         let display_context_tokens = w.display_context_tokens.or(context_tokens);
+        let metadata_snapshots = w.metadata_snapshots;
         Self {
             id: w.id,
             title: w.title,
             slug: w.slug,
             first_user_message: w.first_user_message,
+            metadata_snapshots,
             created_at_ms: w.created_at_ms,
             updated_at_ms: w.updated_at_ms,
             mode: w.mode,
@@ -399,6 +430,7 @@ impl From<&Session> for SessionWireV2 {
             title: s.title.clone(),
             slug: s.slug.clone(),
             first_user_message: s.first_user_message.clone(),
+            metadata_snapshots: s.metadata_snapshots.clone(),
             created_at_ms: s.created_at_ms,
             updated_at_ms: s.updated_at_ms,
             mode: s.mode.clone(),
@@ -488,6 +520,8 @@ struct SessionJsonlMeta {
     #[serde(default)]
     pub first_user_message: Option<String>,
     #[serde(default)]
+    pub metadata_snapshots: Vec<(usize, SessionMetadataSnapshot)>,
+    #[serde(default)]
     pub created_at_ms: u64,
     #[serde(default)]
     pub updated_at_ms: u64,
@@ -529,6 +563,7 @@ impl From<&Session> for SessionJsonlMeta {
             title: s.title.clone(),
             slug: s.slug.clone(),
             first_user_message: s.first_user_message.clone(),
+            metadata_snapshots: s.metadata_snapshots.clone(),
             created_at_ms: s.created_at_ms,
             updated_at_ms: s.updated_at_ms,
             mode: s.mode.clone(),
@@ -556,6 +591,7 @@ impl SessionJsonlMeta {
             title: self.title,
             slug: self.slug,
             first_user_message: self.first_user_message,
+            metadata_snapshots: self.metadata_snapshots,
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             mode: self.mode,
@@ -588,6 +624,7 @@ impl Session {
             title: None,
             slug: None,
             first_user_message: None,
+            metadata_snapshots: Vec::new(),
             created_at_ms: now,
             updated_at_ms: now,
             mode: None,
@@ -660,6 +697,51 @@ impl Session {
         let snapshot = AccountingSnapshot::from_session(self);
         self.accounting_snapshots
             .push((self.history.len(), snapshot));
+    }
+
+    pub fn snapshot_metadata_at(&mut self, hist_idx: usize) {
+        let snapshot = SessionMetadataSnapshot::from_session(self);
+        truncate_snapshots_after(&mut self.metadata_snapshots, hist_idx);
+        if let Some((len, existing)) = self.metadata_snapshots.last_mut() {
+            if *len == hist_idx {
+                *existing = snapshot;
+                return;
+            }
+        }
+        self.metadata_snapshots.push((hist_idx, snapshot));
+    }
+
+    pub fn restore_metadata_after_rewind(&mut self, hist_idx: usize) {
+        truncate_snapshots_after(&mut self.metadata_snapshots, hist_idx);
+        if let Some((_, snapshot)) = self.metadata_snapshots.last().cloned() {
+            self.apply_metadata_snapshot(snapshot);
+        } else {
+            self.clear_metadata();
+        }
+    }
+
+    pub fn prune_metadata_snapshots(&mut self, hist_idx: usize) {
+        truncate_snapshots_after(&mut self.metadata_snapshots, hist_idx);
+        if let Some((_, snapshot)) = self.metadata_snapshots.last().cloned() {
+            self.apply_metadata_snapshot(snapshot);
+        }
+    }
+
+    pub fn clear_metadata_snapshots(&mut self) {
+        self.metadata_snapshots.clear();
+        self.clear_metadata();
+    }
+
+    fn apply_metadata_snapshot(&mut self, snapshot: SessionMetadataSnapshot) {
+        self.title = snapshot.title;
+        self.slug = snapshot.slug;
+        self.first_user_message = snapshot.first_user_message;
+    }
+
+    fn clear_metadata(&mut self) {
+        self.title = None;
+        self.slug = None;
+        self.first_user_message = None;
     }
 
     pub fn clear_accounting_snapshots(&mut self) {
@@ -897,6 +979,7 @@ impl Session {
             title: self.title.clone(),
             slug: self.slug.clone(),
             first_user_message: self.first_user_message.clone(),
+            metadata_snapshots: self.metadata_snapshots.clone(),
             created_at_ms: now,
             updated_at_ms: now,
             mode: self.mode.clone(),
