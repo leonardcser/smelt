@@ -183,9 +183,14 @@ impl WorkingState {
         if live.timer.is_paused() {
             return Some(WorkState::Paused);
         }
+        let now = self.clock.instant_now();
         Some(match live.phase {
-            TurnPhase::Retrying { .. } => WorkState::Retrying,
-            TurnPhase::Working | TurnPhase::Compacting => WorkState::Working,
+            TurnPhase::Retrying { .. } if retry_remaining_at(live, now).is_some() => {
+                WorkState::Retrying
+            }
+            TurnPhase::Working | TurnPhase::Compacting | TurnPhase::Retrying { .. } => {
+                WorkState::Working
+            }
         })
     }
 
@@ -194,26 +199,23 @@ impl WorkingState {
         if live.timer.is_paused() {
             return Some("paused");
         }
+        let now = self.clock.instant_now();
         Some(match live.phase {
             TurnPhase::Working => "working",
             TurnPhase::Compacting => "compacting",
-            TurnPhase::Retrying { .. } => "retrying",
+            TurnPhase::Retrying { .. } if retry_remaining_at(live, now).is_some() => "retrying",
+            TurnPhase::Retrying { .. } => "working",
         })
     }
 
     /// Retry countdown for the cell publisher. Returns `(attempt, remaining_ms)`
-    /// while the live turn is in `Retrying` phase, `None` otherwise.
+    /// while a retry backoff still has time remaining, `None` otherwise.
     pub fn retry_info(&self) -> Option<(u32, u64)> {
         let live = self.live.as_ref()?;
         match live.phase {
-            TurnPhase::Retrying { delay, attempt } => {
-                let now = self.clock.instant_now();
-                let remaining = live
-                    .retry_deadline
-                    .map(|t| t.saturating_duration_since(now))
-                    .unwrap_or(delay)
-                    .as_millis() as u64;
-                Some((attempt, remaining))
+            TurnPhase::Retrying { attempt, .. } => {
+                let remaining = retry_remaining_at(live, self.clock.instant_now())?;
+                Some((attempt, remaining.as_millis() as u64))
             }
             _ => None,
         }
@@ -309,6 +311,17 @@ fn retry_deadline_for(phase: TurnPhase, now: Instant) -> Option<Instant> {
         TurnPhase::Retrying { delay, .. } => Some(now + delay),
         _ => None,
     }
+}
+
+fn retry_remaining_at(live: &LiveTurn, now: Instant) -> Option<Duration> {
+    let TurnPhase::Retrying { delay, .. } = live.phase else {
+        return None;
+    };
+    let remaining = live
+        .retry_deadline
+        .map(|t| t.saturating_duration_since(now))
+        .unwrap_or(delay);
+    (!remaining.is_zero()).then_some(remaining)
 }
 
 fn avg(samples: &[f64]) -> Option<f64> {
@@ -625,6 +638,25 @@ mod tests {
         clock.advance(Duration::from_secs(2));
         let (_, remaining_ms) = s.retry_info().expect("retry info");
         assert_eq!(remaining_ms, 3000);
+    }
+
+    #[test]
+    fn retry_countdown_expires_back_to_working() {
+        let (clock, mut s) = fixture();
+        s.begin(TurnPhase::Retrying {
+            delay: Duration::from_millis(500),
+            attempt: 1,
+        });
+
+        assert_eq!(s.engine_state(), Some(WorkState::Retrying));
+        assert_eq!(s.phase_label(), Some("retrying"));
+        assert!(s.retry_info().is_some());
+
+        clock.advance(Duration::from_millis(500));
+
+        assert_eq!(s.engine_state(), Some(WorkState::Working));
+        assert_eq!(s.phase_label(), Some("working"));
+        assert!(s.retry_info().is_none());
     }
 
     #[test]

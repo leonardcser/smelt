@@ -230,9 +230,9 @@ local function indicator_spans()
   end
 
   if retry_attempt > 0 then
+    local retry_secs = math.max(1, math.ceil(retry_remaining_ms / 1000))
     spans[#spans + 1] = {
-      text = string.format(" (retrying in %ds #%d)",
-        math.floor(retry_remaining_ms / 1000), retry_attempt),
+      text = string.format(" (retrying in %ds #%d)", retry_secs, retry_attempt),
       style = { fg = "Comment", dim = true },
       priority = OPTIONAL_PRIORITY,
     }

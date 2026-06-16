@@ -2056,6 +2056,7 @@ impl TuiApp {
                     if self.ui.tick_drag_autoscroll() {
                         self.dispatch_ui_window_events(false);
                     }
+                    self.publish_diff_cells();
                     self.render_normal();
                 }
 
