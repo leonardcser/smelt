@@ -725,9 +725,10 @@ impl Ui {
         let mut all_ids = Vec::new();
         for leaf in removed.layout.leaves_in_order() {
             let win = WinId(leaf.0);
-            all_ids.extend(self.callbacks.clear_all(win));
             self.named_wins.unbind_by_id(win);
             self.wins.remove(&win);
+            all_ids.extend(self.close_decorations_owned_by(win));
+            all_ids.extend(self.callbacks.clear_all(win));
         }
         all_ids
     }
@@ -754,6 +755,22 @@ impl Ui {
             }
         }
         None
+    }
+
+    fn decoration_ids_owned_by(&self, owner: WinId) -> Vec<DecorationId> {
+        self.decorations
+            .iter()
+            .filter_map(|(id, dec)| (dec.owner == owner).then_some(*id))
+            .collect()
+    }
+
+    fn close_decorations_owned_by(&mut self, owner: WinId) -> Vec<u64> {
+        let ids = self.decoration_ids_owned_by(owner);
+        let mut callbacks = Vec::new();
+        for id in ids {
+            callbacks.extend(self.decoration_close_tree(id));
+        }
+        callbacks
     }
 
     fn decorations_in_z_order(&self) -> Vec<(DecorationId, &Decoration)> {
@@ -1073,9 +1090,10 @@ impl Ui {
         if let Some(removed) = self.overlay_close(id) {
             for leaf in removed.layout.leaves_in_order() {
                 let win = WinId(leaf.0);
-                all_ids.extend(self.callbacks.clear_all(win));
                 self.named_wins.unbind_by_id(win);
                 self.wins.remove(&win);
+                all_ids.extend(self.close_decorations_owned_by(win));
+                all_ids.extend(self.callbacks.clear_all(win));
             }
         }
         all_ids.extend(self.callbacks.clear_overlay_all(id));
@@ -1083,7 +1101,7 @@ impl Ui {
     }
 
     /// Close a window. Returns Lua callback ids for the caller to drop from the Lua registry.
-    /// When `id` is an overlay leaf, closes the whole overlay and clears all leaf callbacks.
+    /// When `id` is an overlay or decoration leaf, closes the whole owner tree.
     #[must_use]
     pub fn win_close(&mut self, id: WinId) -> Vec<u64> {
         if let Some(overlay_id) = self.overlay_for_leaf(id) {
@@ -1094,7 +1112,12 @@ impl Ui {
         }
         self.named_wins.unbind_by_id(id);
         self.wins.remove(&id);
-        self.callbacks.clear_all(id)
+        if self.focus == Some(id) {
+            self.focus = None;
+        }
+        let mut all_ids = self.close_decorations_owned_by(id);
+        all_ids.extend(self.callbacks.clear_all(id));
+        all_ids
     }
 
     // ── Callbacks ────────────────────────────────────────────────────
@@ -3117,6 +3140,51 @@ mod tests {
         assert!(removed.is_some());
         assert!(ui.overlay(id).is_none());
         assert!(ui.overlay_close(id).is_none());
+    }
+
+    #[test]
+    fn closing_split_owner_closes_owned_decorations() {
+        let mut ui = make_ui();
+        let owner = WinId(10);
+        let child = WinId(11);
+        let grandchild = WinId(12);
+        make_split(&mut ui, owner);
+        register_window(&mut ui, child);
+        register_window(&mut ui, grandchild);
+
+        let first = ui.decoration_open(Decoration::new(owner, LayoutTree::leaf(child)));
+        let nested = ui.decoration_open(Decoration::new(child, LayoutTree::leaf(grandchild)));
+        assert!(ui.set_focus(owner));
+        assert!(ui.set_focus(child));
+
+        let _ = ui.win_close(owner);
+
+        assert!(ui.decoration(first).is_none());
+        assert!(ui.decoration(nested).is_none());
+        assert!(ui.focus().is_none());
+        assert!(ui.win(owner).is_none());
+        assert!(ui.win(child).is_none());
+        assert!(ui.win(grandchild).is_none());
+    }
+
+    #[test]
+    fn closing_overlay_owner_closes_owned_decorations() {
+        let mut ui = make_ui();
+        let owner = WinId(20);
+        let child = WinId(21);
+        register_window(&mut ui, owner);
+        register_window(&mut ui, child);
+        ui.overlay_open(Overlay::new(
+            LayoutTree::leaf(owner),
+            layout::Anchor::ScreenCenter,
+        ));
+        let decoration = ui.decoration_open(Decoration::new(owner, LayoutTree::leaf(child)));
+
+        let _ = ui.win_close(owner);
+
+        assert!(ui.decoration(decoration).is_none());
+        assert!(ui.win(owner).is_none());
+        assert!(ui.win(child).is_none());
     }
 
     #[test]

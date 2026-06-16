@@ -53,14 +53,16 @@ app_story!(prompt_modal_picker_hides_tip, |ctx| {
     // smelt.prompt.acquire(). The discovery tip must stay hidden while that
     // modal picker is open even though the prompt text is empty.
     ctx.set_viewport(50, 10);
-    ctx.run_lua(r#"
+    ctx.run_lua(
+        r#"
       smelt.cmd.picker("tipless", {
         items = {
           { label = "alpha", description = "first" },
           { label = "beta", description = "second" },
         },
       })
-    "#);
+    "#,
+    );
     ctx.run_command("/tipless");
     ctx.assert_snapshot();
 });
