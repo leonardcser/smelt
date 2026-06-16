@@ -263,40 +263,60 @@ end
 
 -- ── Kimi usage ─────────────────────────────────────────────────────────
 
-local function to_number(value)
+local function to_int(value)
   local n = tonumber(value)
-  if n and n == n then return n end
+  if n and n == n then return math.floor(n) end
   return nil
 end
 
-local function kimi_row(raw, default_label)
+local function reset_hint_from(raw)
   if type(raw) ~= "table" then return nil end
-  local limit = to_number(raw.limit)
-  local used = to_number(raw.used)
-  local remaining = to_number(raw.remaining)
+  local reset = raw.reset_at or raw.resetAt or raw.reset_time or raw.resetTime
+  local reset_hint = parse_iso_reset(reset)
+  local ttl = to_int(raw.reset_in or raw.resetIn or raw.ttl or raw.window)
+  if not reset_hint and ttl and ttl > 0 then reset_hint = "resets in " .. format_duration(ttl) end
+  return reset_hint
+end
+
+local function kimi_row(raw, default_label, fallback_reset_sources)
+  if type(raw) ~= "table" then return nil end
+  local limit = to_int(raw.limit)
+  local used = to_int(raw.used)
+  local remaining = to_int(raw.remaining)
   if not used and remaining and limit then used = limit - remaining end
   if not used and not limit then return nil end
   used = used or 0
   limit = limit or 0
-  local reset = raw.reset_at or raw.resetAt or raw.reset_time or raw.resetTime
-  local reset_hint = parse_iso_reset(reset)
-  local ttl = raw.reset_in or raw.resetIn or raw.ttl or raw.window
-  if not reset_hint and ttl then reset_hint = "resets in " .. format_duration(ttl) end
+  local reset_hint = reset_hint_from(raw)
+  if not reset_hint then
+    for _, source in ipairs(fallback_reset_sources or {}) do
+      reset_hint = reset_hint_from(source)
+      if reset_hint then break end
+    end
+  end
   return { label = raw.name or raw.title or default_label, used = used, limit = limit, reset = reset_hint }
+end
+
+local function format_kimi_duration(value)
+  local duration = to_int(value)
+  if not duration then return nil end
+  return tostring(duration)
 end
 
 local function kimi_limit_label(item, detail, window, idx)
   local label = item.name or item.title or item.scope or detail.name or detail.title or detail.scope
   if label then return tostring(label) end
-  local duration = to_number(window.duration or item.duration or detail.duration)
+  local duration = format_kimi_duration(window.duration or item.duration or detail.duration)
   local unit = tostring(window.timeUnit or item.timeUnit or detail.timeUnit or "")
   if duration then
+    local n = tonumber(duration)
     if unit:find("MINUTE", 1, true) then
-      if duration >= 60 and duration % 60 == 0 then return tostring(duration / 60) .. "h limit" end
-      return tostring(duration) .. "m limit"
+      if n and n >= 60 and n % 60 == 0 then return tostring(math.floor(n / 60)) .. "h limit" end
+      return duration .. "m limit"
     end
-    if unit:find("HOUR", 1, true) then return tostring(duration) .. "h limit" end
-    if unit:find("DAY", 1, true) then return tostring(duration) .. "d limit" end
+    if unit:find("HOUR", 1, true) then return duration .. "h limit" end
+    if unit:find("DAY", 1, true) then return duration .. "d limit" end
+    return duration .. "s limit"
   end
   return "Limit #" .. tostring(idx)
 end
@@ -314,7 +334,7 @@ local function kimi_usage_lines()
     if type(item) == "table" then
       local detail_tbl = type(item.detail) == "table" and item.detail or item
       local window = type(item.window) == "table" and item.window or {}
-      local parsed = kimi_row(detail_tbl, kimi_limit_label(item, detail_tbl, window, idx))
+      local parsed = kimi_row(detail_tbl, kimi_limit_label(item, detail_tbl, window, idx), { item, window })
       if parsed then rows[#rows + 1] = parsed end
     end
   end
@@ -389,6 +409,7 @@ local function render_dialog(buf, provider_lines, fresh, error_message, title)
   else
     append(lines, dim_lines(loading_provider_lines(title)))
   end
+  lines[#lines + 1] = blank()
   buf:styled(lines)
 end
 
