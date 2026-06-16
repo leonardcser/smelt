@@ -130,3 +130,44 @@ fn picker_filter_workflow_via_set_items() {
     assert_eq!(lines.len(), 1);
     assert!(lines[0].contains("apple"));
 }
+
+#[test]
+fn prompt_picker_custom_rank_uses_returned_indices() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+            _G.prompt_picker_rank_result = nil
+            _G.prompt_picker_rank_calls = 0
+            smelt.spawn(function()
+                local result = smelt.prompt.open_picker({
+                    items = {
+                        { label = "alpha" },
+                        { label = "beta" },
+                        { label = "gamma" },
+                    },
+                    rank = function(items, query, original)
+                        _G.prompt_picker_rank_calls = _G.prompt_picker_rank_calls + 1
+                        assert(#items == 3)
+                        assert(query == "")
+                        assert(original[1].label == "alpha")
+                        return { 3, {}, 1, 99 }
+                    end,
+                })
+                if result then
+                    _G.prompt_picker_rank_result = result.item.label .. ":" .. tostring(result.index)
+                end
+            end)
+        "#,
+    ));
+
+    drive_lua_tasks(&mut app);
+    app.press(KeyCode::Enter);
+    drive_lua_tasks(&mut app);
+
+    assert!(app.run_lua(
+        r#"
+            assert(_G.prompt_picker_rank_calls >= 1)
+            assert(_G.prompt_picker_rank_result == "gamma:3")
+        "#,
+    ));
+}

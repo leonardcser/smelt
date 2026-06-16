@@ -18,9 +18,23 @@
 --   entry = { label, description?, ansi_color?, search_terms? }
 -- opts.on_select = function(item)   -- fires on navigation
 -- opts.on_enter  = function(item, idx)  -- persistent mode; see above
+-- opts.rank      = function(items, query, original) -> { idx, ... }
+--   Returns 1-based indices into `items` in display order; missing/invalid
+--   indices are ignored.
 
-local function filter_items(all_items, query)
+local function filter_items(all_items, query, rank, original)
   return smelt.perf.time("picker:filter", function()
+    if rank then
+      local ranked = rank(all_items, query, original) or {}
+      local out = {}
+      for _, idx in ipairs(ranked) do
+        if type(idx) == "number" and all_items[idx] then
+          out[#out + 1] = all_items[idx]
+        end
+      end
+      return out
+    end
+
     local order = smelt.fuzzy.rank(all_items, query)
     local out = {}
     for i, idx in ipairs(order) do out[i] = all_items[idx] end
@@ -49,6 +63,7 @@ local function stamp(original)
       label        = it.label,
       description  = it.description,
       ansi_color   = it.ansi_color,
+      label_color  = it.label_color,
       prefix       = it.prefix,
       search_terms = it.search_terms,
       _idx         = i,
@@ -82,11 +97,12 @@ end
 ---@field items smelt.prompt.PickerItem[] | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer.
 ---@field on_select? fun(item: smelt.prompt.PickerItem): nil Fires on every cursor move.
 ---@field on_enter? fun(item: smelt.prompt.PickerItem, idx: integer): nil Persistent-mode accept handler.
+---@field rank? fun(items: table[], query: string, original: smelt.prompt.PickerItem[]): integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order.
 ---@field on_dismiss? fun(): nil Fires on Esc.
 
 -- Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
--- the current prompt buffer on every keystroke, ranked by `smelt.fuzzy.rank`.
--- Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
+-- the current prompt buffer on every keystroke, ranked by `opts.rank` or
+-- `smelt.fuzzy.rank`. Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
 -- to switch to persistent mode (the picker stays open across selections
 -- until Esc). Returns `{ action, item, index }` on accept or `nil` on
 -- dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
@@ -106,12 +122,16 @@ function smelt.prompt.open_picker(opts)
 
   local on_select = opts.on_select
   local on_enter = opts.on_enter
+  local rank = opts.rank
+  if rank ~= nil and type(rank) ~= "function" then
+    error("smelt.prompt.open_picker: opts.rank must be a function", 2)
+  end
   local persistent = type(on_enter) == "function"
 
   local all_items = stamp(original)
   local prompt = smelt.prompt.win()
   local query = smelt.prompt.text() or ""
-  local current = query == "" and all_items or filter_items(all_items, query)
+  local current = (query == "" and not rank) and all_items or filter_items(all_items, query, rank, original)
   local selected = 1
 
   local picker = smelt.picker.new({
@@ -176,7 +196,7 @@ function smelt.prompt.open_picker(opts)
     original = resolve_items(opts.items)
     all_items = stamp(original or {})
     query = smelt.prompt.text() or ""
-    current = query == "" and all_items or filter_items(all_items, query)
+    current = (query == "" and not rank) and all_items or filter_items(all_items, query, rank, original)
     if #current == 0 then
       selected = 1
     else
@@ -233,7 +253,7 @@ function smelt.prompt.open_picker(opts)
 
   regs[#regs + 1] = prompt:on("text_changed", function(ctx)
     query = ctx.text or ""
-    current = query == "" and all_items or filter_items(all_items, query)
+    current = (query == "" and not rank) and all_items or filter_items(all_items, query, rank, original)
     -- Reset selection to the top match on each keystroke; the user is
     -- searching, so "best match" beats "stay where you were".
     selected = 1

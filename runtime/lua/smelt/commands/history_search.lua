@@ -19,11 +19,29 @@ local function build_items()
     items[#items + 1] = {
       label        = label,
       search_terms = entry,
-      _entry       = entry,
-      _hay         = label .. " " .. entry,
+      _entry         = entry,
+      _history_index = i,
+      _hay           = label .. " " .. entry,
     }
   end
   return items
+end
+
+local function rank_history(items, query, original)
+  local by_history_index = {}
+  for pos, item in ipairs(items) do
+    local source = original[item._idx]
+    if source and source._history_index then
+      by_history_index[source._history_index] = pos
+    end
+  end
+
+  local out = {}
+  for _, match in ipairs(smelt.history.search(query or "")) do
+    local pos = by_history_index[match.index]
+    if pos then out[#out + 1] = pos end
+  end
+  return out
 end
 
 local saved_text
@@ -39,7 +57,7 @@ local function open()
   end
   smelt.spawn(function()
     local ok, r = pcall(function()
-      return smelt.prompt.open_picker({ items = build_items() })
+      return smelt.prompt.open_picker({ items = build_items(), rank = rank_history })
     end)
     if ok and r and r.action == "enter" then
       smelt.prompt.set_text(r.item._entry or "")

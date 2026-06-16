@@ -1,6 +1,10 @@
+use crate::app::transcript_search::{
+    previous_search_position, TranscriptSearchIndex, TranscriptSearchSession,
+};
 use crate::app::TuiApp;
 use crate::smelt_edit::{
-    BufId, DisplayDocument, DocPosition, DocRange, HostDisplayDocument, RowIndex, TextRange, WinId,
+    BufId, Buffer, DisplayDocument, DocPosition, DocRange, HostDisplayDocument, RowIndex,
+    TextRange, WinId, Window,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -29,28 +33,84 @@ pub(crate) struct SearchSession {
     pub(crate) target_buf: BufId,
     pub(crate) query: String,
     pub(crate) direction: SearchDirection,
-    pub(crate) matches: Vec<TextRange>,
-    pub(crate) current: Option<usize>,
+    pub(crate) backend: SearchBackend,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SearchBackend {
+    Full {
+        matches: Vec<TextRange>,
+        current: Option<usize>,
+    },
+    Transcript(TranscriptSearchSession),
+}
+
+pub(crate) struct SearchRenderSession {
+    pub(crate) target: WinId,
+    query: String,
+    full_matches: Option<Vec<TextRange>>,
+}
+
+impl From<&SearchSession> for SearchRenderSession {
+    fn from(session: &SearchSession) -> Self {
+        Self {
+            target: session.target,
+            query: session.query.clone(),
+            full_matches: match &session.backend {
+                SearchBackend::Full { matches, .. } => Some(matches.clone()),
+                SearchBackend::Transcript(_) => None,
+            },
+        }
+    }
+}
+
+impl SearchRenderSession {
+    pub(crate) fn visible_line_matches(
+        &self,
+        win: &Window,
+        buf: &Buffer,
+        visible_rows: u16,
+    ) -> Vec<DocRange> {
+        if let Some(matches) = &self.full_matches {
+            let visible_start = win.scroll_top();
+            let visible_end = visible_start.saturating_add(visible_rows.max(1) as RowIndex);
+            matches
+                .iter()
+                .filter_map(TextRange::rows)
+                .filter(|range| range.start.row >= visible_start && range.start.row < visible_end)
+                .collect()
+        } else {
+            visible_buffer_matches(win, buf, visible_rows, &self.query)
+        }
+    }
 }
 
 impl SearchSession {
-    pub(crate) fn visible_line_matches(
-        &self,
-        visible_start: RowIndex,
-        visible_rows: u16,
-    ) -> Vec<DocRange> {
-        let visible_end = visible_start.saturating_add(visible_rows.max(1) as RowIndex);
-        self.matches
-            .iter()
-            .filter_map(TextRange::rows)
-            .filter(|range| range.start.row >= visible_start && range.start.row < visible_end)
-            .collect()
+    pub(crate) fn current_range(&self) -> Option<TextRange> {
+        match &self.backend {
+            SearchBackend::Full { matches, current } => {
+                current.and_then(|index| matches.get(index).cloned())
+            }
+            SearchBackend::Transcript(session) => session
+                .current
+                .and_then(|index| session.matches.get(index).copied())
+                .map(TextRange::Rows),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_matches(&self) -> &[TextRange] {
+        match &self.backend {
+            SearchBackend::Full { matches, .. } => matches,
+            SearchBackend::Transcript(_) => &[],
+        }
     }
 }
 
 #[derive(Default)]
 pub(crate) struct SearchState {
     pub(crate) session: Option<SearchSession>,
+    pub(super) transcript_index: Option<TranscriptSearchIndex>,
 }
 
 impl TuiApp {
@@ -106,19 +166,44 @@ impl TuiApp {
             self.clear_search();
             return;
         };
-        let matches = self.scan_search_matches(target, &query);
         let origin = self.search_origin(target).unwrap_or_default();
+        if target == crate::app::TRANSCRIPT_WIN {
+            let Some(mut transcript_session) = self.new_transcript_search_session(&query) else {
+                self.clear_search();
+                return;
+            };
+            let current =
+                self.advance_transcript_search(&mut transcript_session, &query, origin, direction);
+            self.search.session = Some(SearchSession {
+                target,
+                target_buf,
+                query,
+                direction,
+                backend: SearchBackend::Transcript(transcript_session),
+            });
+            if let Some(range) = current {
+                self.jump_to_search_range(range);
+            }
+            return;
+        }
+
+        let matches = self.scan_search_matches(target, &query);
         let current = initial_match(&matches, origin, direction);
         self.search.session = Some(SearchSession {
             target,
             target_buf,
             query,
             direction,
-            matches,
-            current,
+            backend: SearchBackend::Full { matches, current },
         });
-        if let Some(index) = current {
-            self.jump_to_search_match(index);
+        if let Some(range) = self
+            .search
+            .session
+            .as_ref()
+            .and_then(SearchSession::current_range)
+            .and_then(|range| range.rows())
+        {
+            self.jump_to_search_range(range);
         }
     }
 
@@ -126,7 +211,7 @@ impl TuiApp {
         let Some(session) = self.search.session.as_ref() else {
             return false;
         };
-        if session.target != target || session.query.is_empty() || session.matches.is_empty() {
+        if session.target != target || session.query.is_empty() {
             return false;
         }
         let direction = if reverse {
@@ -134,20 +219,87 @@ impl TuiApp {
         } else {
             session.direction
         };
-        let len = session.matches.len();
-        let current = session.current.unwrap_or_else(|| {
-            initial_match(
-                &session.matches,
-                self.search_origin(target).unwrap_or_default(),
-                direction,
-            )
-            .unwrap_or(0)
-        });
-        let next = match direction {
-            SearchDirection::Forward => (current + 1) % len,
-            SearchDirection::Backward => (current + len - 1) % len,
+
+        if matches!(session.backend, SearchBackend::Transcript(_)) {
+            let mut session = self.search.session.take().expect("search session exists");
+            let query = session.query.clone();
+            let range = match &mut session.backend {
+                SearchBackend::Transcript(transcript) => {
+                    if !self.sync_transcript_search_session(transcript, &query) {
+                        let Some(new_session) = self.new_transcript_search_session(&query) else {
+                            self.search.session = Some(session);
+                            return false;
+                        };
+                        *transcript = new_session;
+                    }
+                    let origin = match (
+                        transcript
+                            .current
+                            .and_then(|index| transcript.matches.get(index).copied()),
+                        direction,
+                    ) {
+                        (Some(range), SearchDirection::Forward) => range.end,
+                        (Some(range), SearchDirection::Backward)
+                            if range.start.row == 0 && range.start.byte_col == 0 =>
+                        {
+                            DocPosition {
+                                row: RowIndex::MAX,
+                                byte_col: usize::MAX,
+                            }
+                        }
+                        (Some(range), SearchDirection::Backward) => {
+                            previous_search_position(range.start)
+                        }
+                        (None, _) => self.search_origin(target).unwrap_or_default(),
+                    };
+                    self.advance_transcript_search(transcript, &query, origin, direction)
+                }
+                SearchBackend::Full { .. } => None,
+            };
+            let Some(range) = range else {
+                self.search.session = Some(session);
+                return false;
+            };
+            self.search.session = Some(session);
+            self.jump_to_search_range(range);
+            return true;
+        }
+
+        let Some((next, range)) = self.search.session.as_ref().and_then(|session| {
+            let SearchBackend::Full { matches, current } = &session.backend else {
+                return None;
+            };
+            if matches.is_empty() {
+                return None;
+            }
+            let len = matches.len();
+            let current = current.unwrap_or_else(|| {
+                initial_match(
+                    matches,
+                    self.search_origin(target).unwrap_or_default(),
+                    direction,
+                )
+                .unwrap_or(0)
+            });
+            let next = match direction {
+                SearchDirection::Forward => (current + 1) % len,
+                SearchDirection::Backward => (current + len - 1) % len,
+            };
+            matches
+                .get(next)
+                .and_then(TextRange::rows)
+                .map(|range| (next, range))
+        }) else {
+            return false;
         };
-        self.jump_to_search_match(next);
+        if let Some(SearchSession {
+            backend: SearchBackend::Full { current, .. },
+            ..
+        }) = self.search.session.as_mut()
+        {
+            *current = Some(next);
+        }
+        self.jump_to_search_range(range);
         true
     }
 
@@ -176,23 +328,12 @@ impl TuiApp {
                 let row_index = start.saturating_add(offset as RowIndex);
                 for (byte_col, _) in row.text.match_indices(query) {
                     let end_col = byte_col + query.len();
-                    if !row
-                        .selectable_ranges
-                        .iter()
-                        .any(|range| range.start <= byte_col && end_col <= range.end)
-                    {
+                    if !row_match_is_selectable(row, byte_col, end_col) {
                         continue;
                     }
-                    matches.push(TextRange::Rows(DocRange {
-                        start: DocPosition {
-                            row: row_index,
-                            byte_col,
-                        },
-                        end: DocPosition {
-                            row: row_index,
-                            byte_col: byte_col + query.len(),
-                        },
-                    }));
+                    matches.push(TextRange::Rows(doc_range_for_match(
+                        row_index, byte_col, end_col,
+                    )));
                 }
             }
             start = start.saturating_add(count);
@@ -213,14 +354,10 @@ impl TuiApp {
         })
     }
 
-    fn jump_to_search_match(&mut self, index: usize) {
-        let Some(session) = self.search.session.as_mut() else {
+    fn jump_to_search_range(&mut self, range: DocRange) {
+        let Some(session) = self.search.session.as_ref() else {
             return;
         };
-        let Some(range) = session.matches.get(index).and_then(TextRange::rows) else {
-            return;
-        };
-        session.current = Some(index);
         let target = session.target;
         let Some((buf_id, viewport_rows, is_row_backed)) = self.ui.win(target).map(|w| {
             (
@@ -278,6 +415,61 @@ fn initial_match(
             .rposition(starts_at_or_before)
             .or_else(|| (!matches.is_empty()).then_some(matches.len() - 1)),
     }
+}
+
+pub(super) fn row_match_is_selectable(
+    row: &crate::smelt_edit::DisplayRow,
+    byte_col: usize,
+    end_col: usize,
+) -> bool {
+    row.selectable_ranges
+        .iter()
+        .any(|range| range.start <= byte_col && end_col <= range.end)
+}
+
+pub(super) fn doc_range_for_match(row: RowIndex, byte_col: usize, end_col: usize) -> DocRange {
+    DocRange {
+        start: DocPosition { row, byte_col },
+        end: DocPosition {
+            row,
+            byte_col: end_col,
+        },
+    }
+}
+
+fn visible_buffer_matches(
+    win: &Window,
+    buf: &Buffer,
+    visible_rows: u16,
+    query: &str,
+) -> Vec<DocRange> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let visible_start = win.scroll_top();
+    let visible_end = visible_start.saturating_add(visible_rows.max(1) as RowIndex);
+    let materialized = win.materialized_rows();
+    let mut matches = Vec::new();
+    for (local_row, line) in buf.lines().iter().enumerate() {
+        let absolute_row = materialized
+            .map(|rows| rows.absolute_row(local_row as RowIndex))
+            .unwrap_or(local_row as RowIndex);
+        if absolute_row < visible_start || absolute_row >= visible_end {
+            continue;
+        }
+        let selectable_ranges =
+            crate::smelt_edit::selectable_byte_ranges_for_line(line, &buf.highlights_at(local_row));
+        for (byte_col, _) in line.match_indices(query) {
+            let end_col = byte_col + query.len();
+            if selectable_ranges
+                .iter()
+                .any(|range| range.start <= byte_col && end_col <= range.end)
+            {
+                matches.push(doc_range_for_match(absolute_row, byte_col, end_col));
+            }
+        }
+    }
+    matches
 }
 
 fn search_top_padding(win: WinId) -> RowIndex {

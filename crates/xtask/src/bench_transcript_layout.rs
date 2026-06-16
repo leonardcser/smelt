@@ -5,6 +5,8 @@ pub fn run(args: Vec<String>) {
     let mut workloads: Option<String> = None;
     let mut release = true;
     let mut skip_nav = false;
+    let mut search = false;
+    let mut search_bytes: Option<String> = None;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -28,6 +30,13 @@ pub fn run(args: Vec<String>) {
                 }));
             }
             "--skip-nav" => skip_nav = true,
+            "--search" => search = true,
+            "--search-bytes" => {
+                search_bytes = Some(iter.next().unwrap_or_else(|| {
+                    eprintln!("bench-transcript-layout: --search-bytes requires a value");
+                    std::process::exit(2);
+                }));
+            }
             "--debug" => release = false,
             "-h" | "--help" => {
                 print_usage();
@@ -60,6 +69,12 @@ pub fn run(args: Vec<String>) {
     if skip_nav {
         cmd.env("SMELT_TRANSCRIPT_BENCH_SKIP_NAV", "1");
     }
+    if search {
+        cmd.env("SMELT_TRANSCRIPT_BENCH_SEARCH", "1");
+    }
+    if let Some(bytes) = search_bytes {
+        cmd.env("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES", bytes);
+    }
 
     eprintln!(
         "running transcript layout benchmark: profile={} runs={}",
@@ -76,11 +91,13 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--debug]");
     eprintln!();
     eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
     eprintln!();
     eprintln!("workloads: mixed_10mib, mixed_50mib, markdown_4mib, tool_output_4mib, tiny_blocks_1mib, huge_blocks_4mib");
     eprintln!("--skip-nav omits the app-level navigation/search suite for projection-only runs.");
+    eprintln!("--search enables the large app-level transcript search benchmark.");
+    eprintln!("--search-bytes N sets its generated transcript size; default is 50 MiB.");
 }

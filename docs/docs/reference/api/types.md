@@ -545,6 +545,7 @@ omit it for single-shot behaviour.
 | `items` | [smelt.prompt.PickerItem[]](types.md#smeltpromptpickeritem) | yes | | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer. |
 | `on_select` | `fun(item: smelt.prompt.PickerItem):` |  | nil Fires on every cursor move. |
 | `on_enter` | `fun(item: smelt.prompt.PickerItem, idx: integer):` |  | nil Persistent-mode accept handler. |
+| `rank` | `fun(items: table[], query: string, original: smelt.prompt.PickerItem[]):` |  | integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order. |
 | `on_dismiss` | `fun():` |  | nil Fires on Esc. |
 
 ### `smelt.provider.Config`

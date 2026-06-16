@@ -18,6 +18,7 @@ pub(crate) mod search;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
 pub(crate) mod transcript;
+pub(crate) mod transcript_search;
 pub(crate) mod ui_host;
 pub(crate) mod well_known;
 

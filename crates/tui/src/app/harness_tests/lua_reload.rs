@@ -91,6 +91,8 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
 fn lua_history_entries_and_search_return_sequences() {
     let mut app = TestApp::builder().build();
     app.app.input_history.push("first prompt".into());
+    app.app.input_history.push("older bun prompt".into());
+    app.app.input_history.push("newer bun prompt".into());
     app.app.input_history.push("second search target".into());
 
     assert!(app.run_lua(
@@ -102,6 +104,9 @@ fn lua_history_entries_and_search_return_sequences() {
             assert(#matches >= 1)
             assert(type(matches[1].index) == "number")
             assert(type(matches[1].score) == "number")
+            local bun_matches = smelt.history.search("bun")
+            assert(#bun_matches >= 2)
+            assert(entries[bun_matches[1].index] == "newer bun prompt")
         "#,
     ));
 }

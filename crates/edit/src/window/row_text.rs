@@ -114,6 +114,12 @@ impl Window {
         self.row_text_state().active
     }
 
+    pub fn materialized_rows(&self) -> Option<MaterializedRows> {
+        self.row_text_state()
+            .active
+            .then_some(self.row_text_state().materialized)
+    }
+
     pub fn row_cursor(&self) -> Option<DocPosition> {
         self.row_text_state()
             .active

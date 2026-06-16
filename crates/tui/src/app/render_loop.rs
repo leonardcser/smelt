@@ -139,7 +139,11 @@ impl TuiApp {
         let render_now = self.core.clock.instant_now();
         let clipboard = &self.core.clipboard;
         let focused_overlay = self.ui.focused_overlay().is_some();
-        let search_session = self.search.session.clone();
+        let search_session = self
+            .search
+            .session
+            .as_ref()
+            .map(crate::app::search::SearchRenderSession::from);
         let ui = &mut self.ui;
         let _ = ui.render_with_paints_prepared(
             out,
@@ -223,10 +227,7 @@ impl TuiApp {
                         let ranges = win.doc_ranges_to_row_ranges(
                             buf,
                             viewport_rows,
-                            search
-                                .visible_line_matches(win.scroll_top(), viewport_rows)
-                                .iter()
-                                .copied(),
+                            search.visible_line_matches(win, buf, viewport_rows),
                         );
                         buf.set_range_layer(crate::smelt_edit::RangeLayer::Search, ranges);
                     } else {

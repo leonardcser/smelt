@@ -11,23 +11,50 @@ fn transcript_search_opens_status_input_and_repeats_matches() {
     app.type_text("alpha");
     app.press(KeyCode::Enter);
 
-    let matches = app.app.search.session.as_ref().unwrap().matches.clone();
-    assert_eq!(
-        transcript_row_cursor_row(&app),
-        matches[0].rows().unwrap().start.row
-    );
-    assert_eq!(matches.len(), 20);
+    let first_match = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap();
+    assert_eq!(transcript_row_cursor_row(&app), first_match.start.row);
 
     app.type_char('n');
-    assert_eq!(
-        transcript_row_cursor_row(&app),
-        matches[1].rows().unwrap().start.row
-    );
+    let next_match = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap();
+    assert_eq!(transcript_row_cursor_row(&app), next_match.start.row);
+    assert!(next_match.start.row > first_match.start.row);
     app.type_char('N');
-    assert_eq!(
-        transcript_row_cursor_row(&app),
-        matches[0].rows().unwrap().start.row
-    );
+    assert_eq!(transcript_row_cursor_row(&app), first_match.start.row);
+}
+
+#[test]
+fn transcript_search_reverse_repeat_wraps_from_first_match() {
+    let mut app = row_document_transcript_app(20, true);
+    app.type_char('g');
+    app.type_char('g');
+
+    app.type_char('/');
+    app.type_text("alpha");
+    app.press(KeyCode::Enter);
+    let first_row = transcript_row_cursor_row(&app);
+
+    app.type_char('N');
+    assert!(transcript_row_cursor_row(&app) > first_row);
+    app.type_char('n');
+    assert_eq!(transcript_row_cursor_row(&app), first_row);
 }
 
 #[test]
@@ -39,7 +66,14 @@ fn transcript_search_jump_keeps_match_below_top_overlay() {
     app.type_text("row 010");
     app.press(KeyCode::Enter);
 
-    let match_row = app.app.search.session.as_ref().unwrap().matches[0]
+    let match_row = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
         .rows()
         .unwrap()
         .start
@@ -87,23 +121,24 @@ fn backward_search_starts_from_previous_match() {
     assert!(app.state().cmdline_open);
     app.type_text("alpha");
     app.press(KeyCode::Enter);
-    let matches = app.app.search.session.as_ref().unwrap().matches.clone();
-    let current = app.app.search.session.as_ref().unwrap().current.unwrap();
-    assert_eq!(
-        transcript_row_cursor_row(&app),
-        matches[current].rows().unwrap().start.row
-    );
+    let current_row = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .start
+        .row;
+    assert_eq!(transcript_row_cursor_row(&app), current_row);
 
     app.type_char('n');
-    assert_eq!(
-        transcript_row_cursor_row(&app),
-        matches[current - 1].rows().unwrap().start.row
-    );
+    assert!(transcript_row_cursor_row(&app) < current_row);
     app.type_char('N');
-    assert_eq!(
-        transcript_row_cursor_row(&app),
-        matches[current].rows().unwrap().start.row
-    );
+    assert_eq!(transcript_row_cursor_row(&app), current_row);
 }
 
 #[test]
@@ -206,15 +241,22 @@ fn viewer_search_ignores_non_selectable_spans() {
     app.type_char('/');
     app.type_text("chrome");
     app.press(KeyCode::Enter);
-    assert!(app.app.search.session.as_ref().unwrap().matches.is_empty());
+    assert!(app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .full_matches()
+        .is_empty());
 
     app.type_char('/');
     app.type_text("real");
     app.press(KeyCode::Enter);
     let session = app.app.search.session.as_ref().unwrap();
-    assert_eq!(session.matches.len(), 1);
+    assert_eq!(session.full_matches().len(), 1);
     assert_eq!(
-        session.matches[0].rows().unwrap().start.byte_col,
+        session.full_matches()[0].rows().unwrap().start.byte_col,
         "chrome ".len()
     );
 }
