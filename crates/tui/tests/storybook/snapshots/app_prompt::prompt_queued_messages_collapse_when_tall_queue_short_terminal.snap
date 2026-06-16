@@ -1,15 +1,14 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 382
 expression: frame.text()
 ---
 
 
-  › follow-up 9
   › follow-up 10
   › follow-up 11
   › follow-up 12
-  +8 more queued
+  +9 more queued
+─ ✿ working… ─────────────────────────────────────
 
 ──────────────────────────────────────────────────
  ○ normal                                 1:1 100%

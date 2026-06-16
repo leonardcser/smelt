@@ -338,16 +338,22 @@ local function render_top(win)
   local reserved = 1 -- indicator bar row
   if smelt.prompt.has_stash() then reserved = reserved + 1 end
   if should_show_tip(queued) then reserved = reserved + 1 end
-  local max_queued = math.max(0, (win_height or natural_rows) - reserved)
-  local hidden = math.max(0, #queued - max_queued)
-  local start_idx = 1
-  if hidden > 0 then
-    start_idx = #queued - max_queued + 1
+  local queue_slots = math.max(0, (win_height or natural_rows) - reserved)
+  local visible_queued = math.min(#queued, queue_slots)
+  local hidden = #queued - visible_queued
+  local show_more = hidden > 0 and queue_slots > 0
+  if show_more then
+    -- The summary row occupies one of the queue slots, so keep one fewer
+    -- concrete queued message when collapsing. Otherwise the indicator bar is
+    -- pushed out of the capped top window on short terminals.
+    visible_queued = queue_slots - 1
+    hidden = #queued - visible_queued
   end
+  local start_idx = #queued - visible_queued + 1
   for i = start_idx, #queued do
     rows[#rows + 1] = queued_message_row(queued[i], width)
   end
-  if hidden > 0 then
+  if show_more then
     rows[#rows + 1] = more_row(hidden, width)
   end
   if smelt.prompt.has_stash() then
