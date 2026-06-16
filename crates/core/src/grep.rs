@@ -48,10 +48,24 @@ pub(crate) enum RunOutcome {
     Cancelled,
 }
 
-fn append_hard_excludes(args: &mut Vec<String>) {
+fn append_hard_excludes(args: &mut Vec<String>, path: &Path) {
+    let search_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+
     for dir in [".git", ".jj", ".hg", ".svn", ".sl", ".worktrees"] {
-        args.push(format!("--glob=!**/{dir}/**"));
+        if !path_contains_component(&search_path, dir) {
+            args.push(format!("--glob=!**/{dir}/**"));
+        }
     }
+}
+
+fn path_contains_component(path: &Path, needle: &str) -> bool {
+    let needle = std::ffi::OsStr::new(needle);
+    path.components()
+        .any(|component| component.as_os_str() == needle)
 }
 
 fn is_noop_glob(glob: &str) -> bool {
@@ -118,7 +132,7 @@ pub(crate) async fn run_async(
         args.push(format!("--type={t}"));
     }
 
-    append_hard_excludes(&mut args);
+    append_hard_excludes(&mut args, &path);
 
     args.push("--".into());
     args.push(pattern.to_string());
@@ -321,6 +335,22 @@ mod tests {
             "include_ignored=true should search ignored output: {}",
             out.stdout
         );
+        assert_eq!(out.exit_code, 0);
+        assert!(!out.timed_out);
+    }
+
+    #[tokio::test]
+    async fn explicit_path_inside_hard_excluded_dir_is_searchable() {
+        if !rg_available() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join(".worktrees/session/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), "needle\n").unwrap();
+
+        let out = run("needle", &src, &Options::default()).await;
+        assert!(out.stdout.contains("needle"), "stdout: {}", out.stdout);
         assert_eq!(out.exit_code, 0);
         assert!(!out.timed_out);
     }
