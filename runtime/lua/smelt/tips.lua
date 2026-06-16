@@ -135,15 +135,21 @@ function M.banner_lines()
 end
 
 M.register({
-  id = "steer.current.response",
-  key = "ctrl+enter",
+  id = "steer.response",
+  key = "ctrl+enter / ctrl+q",
   text = "steer the current response without waiting for it to finish",
 })
 
 M.register({
-  id = "queue.followup",
-  key = "ctrl+q",
-  text = "queue your prompt to run after the current turn",
+  id = "enter.queue",
+  key = "enter",
+  text = "while the agent is running, queue your prompt for the next turn",
+})
+
+M.register({
+  id = "enter.empty",
+  key = "enter",
+  text = "on an empty prompt, continue the turn or advance queued messages",
 })
 
 M.register({
@@ -168,6 +174,24 @@ M.register({
   id = "dialog.dismiss",
   key = "esc / ctrl+c",
   text = "dismisses most dialogs",
+})
+
+M.register({
+  id = "esc.unqueue",
+  key = "esc",
+  text = "brings queued messages back into the prompt for editing",
+})
+
+M.register({
+  id = "esc.esc.cancel",
+  key = "esc esc",
+  text = "cancels the running turn, or rewinds the last turn when idle",
+})
+
+M.register({
+  id = "newline.insert",
+  key = "ctrl+j / shift+enter",
+  text = "insert a newline without sending the prompt",
 })
 
 M.register({
@@ -198,6 +222,35 @@ M.register({
   id = "reasoning.cycle",
   key = "ctrl+t",
   text = "cycle reasoning effort for the next request",
+})
+
+M.register({
+  id = "settings.discover",
+  text = "toggle settings like show_tokens, show_cost, vim, and auto_compact in init.lua",
+})
+
+M.register({
+  id = "commands.discover",
+  key = "/",
+  text = "try /resume, /compact, /fork, /ps, /color, /trust",
+})
+
+M.register({
+  id = "paste.image",
+  key = "cmd+v",
+  text = "paste an image from the clipboard into the prompt",
+})
+
+M.register({
+  id = "transcript.search",
+  key = "/ and ?",
+  text = "search the transcript forward or backward",
+})
+
+M.register({
+  id = "transcript.back",
+  key = "ctrl+c",
+  text = "in the transcript, return focus to the prompt",
 })
 
 M.register({

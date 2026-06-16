@@ -55,10 +55,6 @@ impl TuiApp {
                         self.lua.cycle_reasoning();
                         return false;
                     }
-                    Some(KeyAction::Redraw) => {
-                        self.ui.force_redraw();
-                        return false;
-                    }
                     _ => {}
                 }
             }

@@ -571,7 +571,6 @@ impl PromptState {
                 self.toggle_stash(ctx);
                 Action::Redraw
             }
-            KeyAction::Redraw => Action::Redraw,
 
             // ── Submit / newline ─────────────────────────────────────────
             KeyAction::Submit | KeyAction::SubmitToRequestQueue => {

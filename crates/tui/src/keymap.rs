@@ -15,7 +15,6 @@ pub(crate) enum KeyAction {
     ToggleMode,
     CycleReasoning,
     ToggleStash,
-    Redraw,
 
     // Submit
     Submit,
@@ -243,7 +242,6 @@ static BINDINGS: &[Binding] = &[
     bind(KeyCode::Char('s'), CTRL, when(), KeyAction::ToggleStash),
     bind(KeyCode::BackTab, NONE, when(), KeyAction::ToggleMode),
     bind(KeyCode::Char('t'), CTRL, when(), KeyAction::CycleReasoning),
-    bind(KeyCode::Char('l'), CTRL, when(), KeyAction::Redraw),
     // ── Submit / newline ────────────────────────────────────────────────
     bind(
         KeyCode::Enter,
