@@ -354,7 +354,7 @@ fn transcript_tail_follow_keeps_cursor_fixed_relative_to_viewport() {
     assert!(cursor_before < total_rows - 1);
     assert!(!app.app.transcript_win().is_following_tail());
 
-    app.app.transcript_win_mut().scroll_to_bottom();
+    app.app.transcript_win_mut().follow_tail();
     app.render_silent();
     assert!(app.app.transcript_win().is_following_tail());
     assert_eq!(
@@ -473,5 +473,58 @@ fn transcript_vim_visual_char_starts_at_cursor() {
     assert!(
         highlights.is_empty(),
         "mouse down after visual should clear selection, got {highlights:?}"
+    );
+}
+
+#[test]
+fn transcript_jump_to_bottom_preserves_cursor_screen_row() {
+    let mut app = row_document_transcript_app(100, true);
+    let win = app.app.transcript_win();
+    let viewport_rows = win
+        .viewport
+        .map(|v| v.rect.height)
+        .expect("transcript viewport after render");
+    let buf_id = win.buf;
+
+    // Scroll up so the viewport is no longer at the tail. Wheel-style panning
+    // keeps the cursor on the same screen row.
+    {
+        let (w, buf) = app
+            .app
+            .ui
+            .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
+        let w = w.expect("transcript window");
+        let buf = buf.expect("transcript buffer");
+        w.pan_by_lines(buf, -(viewport_rows as isize * 3), viewport_rows);
+    }
+
+    app.render_silent();
+    let win = app.app.transcript_win();
+    assert!(
+        !win.is_following_tail(),
+        "scrolled up should break tail-follow"
+    );
+    let screen_row_before = win
+        .cursor_screen_row(viewport_rows)
+        .expect("cursor should be visible");
+
+    // Jump to bottom via the same API the bottom pill uses.
+    {
+        let (w, buf) = app
+            .app
+            .ui
+            .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
+        let w = w.expect("transcript window");
+        let buf = buf.expect("transcript buffer");
+        w.jump_to_bottom(buf);
+    }
+    app.render_silent();
+
+    let win = app.app.transcript_win();
+    assert!(win.is_following_tail(), "jump_to_bottom should engage tail");
+    assert_eq!(
+        win.cursor_screen_row(viewport_rows),
+        Some(screen_row_before),
+        "cursor should stay on the same screen row after jumping to bottom"
     );
 }

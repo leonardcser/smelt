@@ -5218,7 +5218,7 @@ mod tests {
 
         let mut out = Vec::new();
         ui.render(&mut out).unwrap();
-        ui.win_mut(transcript).unwrap().scroll_to_bottom();
+        ui.win_mut(transcript).unwrap().follow_tail();
         ui.resolve_tail_scrolls();
         assert_eq!(ui.win(transcript).unwrap().scroll_top(), 40);
 
@@ -5263,7 +5263,7 @@ mod tests {
             Some(window::WindowViewport::new(rect, 19, 50, 0, Some(bar)));
         // Start at top in tail-follow mode.
         ui.win_mut(win).unwrap().pin_scroll(0);
-        ui.win_mut(win).unwrap().scroll_to_bottom();
+        ui.win_mut(win).unwrap().follow_tail();
         ui.resolve_tail_scrolls();
         assert_eq!(
             ui.win(win).unwrap().scroll_top(),
@@ -5293,7 +5293,7 @@ mod tests {
             "clearing selection does not implicitly re-tail"
         );
 
-        ui.win_mut(win).unwrap().scroll_to_bottom();
+        ui.win_mut(win).unwrap().follow_tail();
         ui.resolve_tail_scrolls();
         assert_eq!(ui.win(win).unwrap().scroll_top(), 40);
     }

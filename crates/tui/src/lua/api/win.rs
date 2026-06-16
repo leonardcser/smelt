@@ -386,10 +386,11 @@ impl mlua::UserData for LuaWin {
             },
         );
 
-        // ── scroll: get / set / pin-to-tail ────────────────────────
+        // ── scroll: get / set / jump-to-tail ───────────────────────
         // `win:scroll()` returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom }`.
         // `win:scroll(integer)` pins the viewport at that `scroll_top`.
-        // `win:scroll("tail")` switches the viewport into tail-follow mode.
+        // `win:scroll("tail")` jumps the viewport to the buffer tail while
+        // keeping the cursor on the same screen row, then enables tail-follow.
         methods.add_function(
             "scroll",
             |lua, (this_ud, arg): (mlua::AnyUserData, mlua::Value)| -> LuaResult<mlua::Value> {
@@ -450,8 +451,13 @@ impl mlua::UserData for LuaWin {
                     }
                     mlua::Value::String(s) if s.to_str()?.as_ref() == "tail" => {
                         crate::lua::with_app(|app| {
-                            if let Some(w) = app.ui.win_mut(this.id) {
-                                w.scroll_to_bottom();
+                            let Some(win) = app.ui.win(this.id) else {
+                                return;
+                            };
+                            let buf_id = win.buf;
+                            let (w, buf) = app.ui.win_and_buf_mut(this.id, buf_id);
+                            if let (Some(w), Some(buf)) = (w, buf) {
+                                w.jump_to_bottom(buf);
                             }
                         });
                         Ok(mlua::Value::UserData(this_ud))
@@ -628,7 +634,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "clear_placeholder" => fn() -> (), "Clear the window's placeholder text and opts. Idempotent.",
             "placeholder_text" => fn() -> Option<String>, "Return the current placeholder text, or `nil` if none is set.",
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
-            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` re-pins the viewport to the buffer's tail.",
+            "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
         },
     });
 

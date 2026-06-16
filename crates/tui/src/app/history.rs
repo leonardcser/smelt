@@ -718,7 +718,7 @@ impl TuiApp {
         self.refresh_compaction_marker();
         self.publish_history_delta("checkpoint");
         self.schedule_session_save();
-        self.transcript_win_mut().scroll_to_bottom();
+        self.transcript_win_mut().follow_tail();
         true
     }
 

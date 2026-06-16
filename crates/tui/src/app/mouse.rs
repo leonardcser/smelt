@@ -1134,7 +1134,7 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        app.transcript_win_mut().scroll_to_bottom();
+        app.transcript_win_mut().follow_tail();
         app.render_normal_to(&mut std::io::sink());
         let rendered_rows = app.ui.buf(app.transcript_win().buf).unwrap().lines();
         assert!(rendered_rows.iter().any(|line| line == "line 99"));
@@ -1186,7 +1186,7 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        app.transcript_win_mut().scroll_to_bottom();
+        app.transcript_win_mut().follow_tail();
         app.render_normal_to(&mut std::io::sink());
         let before_top = app.transcript_win().scroll_top();
 
@@ -1222,7 +1222,7 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        app.transcript_win_mut().scroll_to_bottom();
+        app.transcript_win_mut().follow_tail();
         app.render_normal_to(&mut std::io::sink());
 
         let vp = app
@@ -1288,7 +1288,7 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        app.transcript_win_mut().scroll_to_bottom();
+        app.transcript_win_mut().follow_tail();
         app.render_normal_to(&mut std::io::sink());
 
         let vp = app
@@ -1335,7 +1335,7 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        app.transcript_win_mut().scroll_to_bottom();
+        app.transcript_win_mut().follow_tail();
         app.render_normal_to(&mut std::io::sink());
 
         let vp = app

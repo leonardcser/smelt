@@ -259,7 +259,7 @@ impl TuiApp {
             self.load_session(loaded);
             self.restore_screen();
             self.finish_transcript_turn();
-            self.transcript_win_mut().scroll_to_bottom();
+            self.transcript_win_mut().follow_tail();
         }
     }
 

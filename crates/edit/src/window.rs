@@ -1841,8 +1841,33 @@ impl Window {
     // ── Follow-tail ────────────────────────────────────────────────────
 
     /// Re-engage sticky-bottom scrolling. The next tail-follow pass resolves
-    /// `scroll_top` against the current row count.
-    pub fn scroll_to_bottom(&mut self) {
+    /// `scroll_top` against the current row count. This is a state-only change:
+    /// the viewport does not jump until the next render / content append.
+    /// For an explicit "jump to bottom now" action, use `jump_to_bottom`.
+    pub fn follow_tail(&mut self) {
+        self.scroll_state = VerticalScroll::Tail;
+    }
+
+    /// Jump the viewport to the bottom of the buffer while keeping the cursor
+    /// on the same screen row it occupied before the jump, then engage
+    /// tail-follow. This is the explicit "go to bottom" user action (e.g.
+    /// clicking a scroll-to-bottom pill or pressing `<C-End>`). Callers that
+    /// only want to re-enable streaming tail-follow without moving the cursor
+    /// should use `follow_tail`.
+    pub fn jump_to_bottom(&mut self, buf: &Buffer) {
+        let viewport_rows = self.viewport.map(|v| v.rect.height).unwrap_or(0);
+        let total = self.scroll_row_total(buf);
+        if total == 0 || viewport_rows == 0 {
+            self.follow_tail();
+            return;
+        }
+        let max_scroll = total.saturating_sub(viewport_rows as RowIndex);
+        if self.selection_anchor().is_some() {
+            self.set_scroll(max_scroll, buf);
+            self.pin_current_scroll();
+            return;
+        }
+        self.preserve_cursor_screen_row(max_scroll, buf, viewport_rows);
         self.scroll_state = VerticalScroll::Tail;
     }
 
@@ -2534,6 +2559,53 @@ impl Window {
         self.scroll_to_preserving_cursor_screen_row(new_scroll, buf, viewport_rows);
     }
 
+    /// Move `scroll_top` to `new_scroll_top` and adjust the cursor so it stays
+    /// on the same screen row it occupied before the scroll. This is the shared
+    /// cursor-anchoring primitive for wheel pans and explicit jumps.
+    fn preserve_cursor_screen_row(
+        &mut self,
+        new_scroll_top: RowIndex,
+        buf: &Buffer,
+        viewport_rows: u16,
+    ) {
+        let total_visual = self.scroll_row_total(buf);
+        if total_visual == 0 || viewport_rows == 0 {
+            return;
+        }
+        let max_scroll = total_visual.saturating_sub(viewport_rows as RowIndex);
+        let cur_scroll = self.scroll_top.min(max_scroll);
+        let new_scroll = new_scroll_top.min(max_scroll);
+        let screen_row =
+            Self::screen_row_or_edge(self.absolute_cursor_row(), cur_scroll, viewport_rows);
+
+        if self.row_text_state().active {
+            let mut state = *self.row_text_state();
+            let mut cursor = state.cursor;
+            let target_row = new_scroll
+                .saturating_add(screen_row as RowIndex)
+                .min(total_visual.saturating_sub(1));
+            self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut cursor, target_row);
+            state.cursor = cursor;
+            self.project_row_cursor_to_local(state, buf);
+            *self.row_text_state_mut() = state;
+        } else {
+            let target_vrow = self
+                .local_row(new_scroll.saturating_add(screen_row as RowIndex))
+                .min(self.visual_row_total(buf).saturating_sub(1));
+            let want = self.curswant().unwrap_or(self.cursor_col() as usize);
+            let cpos = self.cpos_at_visual(buf, row_to_usize(target_vrow), want);
+            let (row, col) = self.cursor_visual(buf, cpos);
+            {
+                let text = self.text_state_mut();
+                text.cpos = cpos;
+                text.cursor_row = row;
+                text.cursor_col = col;
+                text.curswant = Some(want);
+            }
+        }
+        self.set_scroll(new_scroll, buf);
+    }
+
     /// Set `scroll_top` as a viewport operation: preserve the cursor's screen row
     /// and re-anchor the cursor to the buffer position now under that row.
     pub fn scroll_to_preserving_cursor_screen_row(
@@ -2546,11 +2618,7 @@ impl Window {
         if total_visual == 0 || viewport_rows == 0 {
             return;
         }
-        let max_scroll = self.clamp_scroll_top(total_visual, viewport_rows, buf);
-        let cur_scroll = self.scroll_top;
-
-        let screen_row =
-            Self::screen_row_or_edge(self.absolute_cursor_row(), cur_scroll, viewport_rows);
+        let max_scroll = total_visual.saturating_sub(viewport_rows as RowIndex);
         let new_scroll = scroll_top.min(max_scroll);
         // Pin scroll for shift+mouse drag selection, but preserve cursor screen
         // row for vim visual/visual-line mode (the cursor should stay fixed
@@ -2560,45 +2628,17 @@ impl Window {
             self.pin_current_scroll();
             return;
         }
-        if new_scroll == cur_scroll {
+        if new_scroll == self.scroll_top {
             self.set_scroll(new_scroll, buf);
             self.update_tail_state(buf, viewport_rows);
             return;
         }
-        if self.row_text_state().active {
-            let mut state = *self.row_text_state();
-            let mut cursor = state.cursor;
-            let target_row = new_scroll
-                .saturating_add(screen_row as RowIndex)
-                .min(total_visual.saturating_sub(1));
-            self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut cursor, target_row);
-            state.cursor = cursor;
-            self.project_row_cursor_to_local(state, buf);
-            *self.row_text_state_mut() = state;
-            self.set_scroll(new_scroll, buf);
-            self.update_tail_state(buf, viewport_rows);
-            return;
-        }
-
-        let target_vrow = self
-            .local_row(new_scroll.saturating_add(screen_row as RowIndex))
-            .min(self.visual_row_total(buf).saturating_sub(1));
-        let want = self.curswant().unwrap_or(self.cursor_col() as usize);
-        let cpos = self.cpos_at_visual(buf, row_to_usize(target_vrow), want);
-        let (row, col) = self.cursor_visual(buf, cpos);
-        {
-            let text = self.text_state_mut();
-            text.cpos = cpos;
-            text.cursor_row = row;
-            text.cursor_col = col;
-            text.curswant = Some(want);
-        }
-        self.set_scroll(new_scroll, buf);
+        self.preserve_cursor_screen_row(new_scroll, buf, viewport_rows);
         self.update_tail_state(buf, viewport_rows);
     }
 
     /// One-shot positioning. Leaves tail-follow state alone - callers that want
-    /// tail-follow re-engagement (transcript `<C-End>`) call `scroll_to_bottom`
+    /// tail-follow re-engagement (transcript `<C-End>`) call `follow_tail`
     /// instead; non-streaming surfaces (pickers, dialog lists) get to stay at
     /// their default `false` even when the cursor lands on the last row.
     fn jump_to_line_col(&mut self, buf: &Buffer, line_idx: usize, col: usize, viewport_rows: u16) {
@@ -3369,12 +3409,36 @@ mod tests {
     }
 
     #[test]
-    fn scroll_to_bottom_sets_tail_mode() {
+    fn follow_tail_sets_tail_mode() {
         let mut w = make_win();
         w.pin_scroll(10);
-        w.scroll_to_bottom();
+        w.follow_tail();
         assert_eq!(w.scroll_top, 10);
         assert!(w.is_following_tail());
+    }
+
+    #[test]
+    fn jump_to_bottom_with_selection_pins_without_moving_cursor() {
+        let mut w = make_win();
+        let rows = sample_rows(30);
+        let buf = make_buf(rows);
+        let viewport = 10;
+        w.viewport = Some(WindowViewport::new(
+            Rect::new(0, 0, 80, viewport),
+            80,
+            30,
+            0,
+            None,
+        ));
+        w.jump_to_line_col(&buf, 3, 0, viewport);
+        let cpos = w.cpos();
+        w.text_state_mut().selection_anchor = Some(cpos.saturating_sub(1));
+
+        w.jump_to_bottom(&buf);
+
+        assert_eq!(w.scroll_top, 20);
+        assert_eq!(w.cpos(), cpos, "selection jump must not move the endpoint");
+        assert_eq!(w.scroll_state(), VerticalScroll::Pinned);
     }
 
     #[test]
@@ -3451,7 +3515,7 @@ mod tests {
             None,
         ));
         w.jump_to_line_col(&buf, 10, 0, viewport);
-        w.scroll_to_bottom();
+        w.follow_tail();
         assert!(w.is_following_tail());
         assert_eq!(w.scroll_top, 9);
 
@@ -3603,7 +3667,7 @@ mod tests {
         let max_scroll = (30 - viewport) as RowIndex;
         w.jump_to_line_col(&buf, 29, 0, viewport);
         w.pin_scroll(0);
-        w.scroll_to_bottom();
+        w.follow_tail();
         w.pan_by_lines(&buf, 3, viewport);
         assert_eq!(w.scroll_top, max_scroll, "scroll stays at max_scroll");
         assert!(w.is_following_tail());
@@ -3618,7 +3682,7 @@ mod tests {
         let max_scroll = (30 - viewport) as RowIndex;
         w.jump_to_line_col(&buf, 29, 0, viewport);
         w.pin_scroll(0);
-        w.scroll_to_bottom();
+        w.follow_tail();
         w.pan_by_lines(&buf, -3, viewport);
         assert_eq!(w.scroll_top, max_scroll - 3);
         assert!(!w.is_following_tail());
@@ -4172,7 +4236,7 @@ mod tests {
         let buf = make_buf(rows);
         let viewport = 10;
         w.jump_to_line_col(&buf, 29, 0, viewport);
-        w.scroll_to_bottom();
+        w.follow_tail();
         assert!(w.is_following_tail());
         w.text_state_mut().selection_anchor = Some(w.cpos().saturating_sub(1));
         w.update_tail_state(&buf, viewport);

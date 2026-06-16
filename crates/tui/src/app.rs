@@ -818,7 +818,7 @@ impl TuiApp {
                 ));
                 // Opt the transcript into per-frame tail-follow. Plugin leaves
                 // stay pinned unless a caller explicitly requests tail mode.
-                w.scroll_to_bottom();
+                w.follow_tail();
             }
             assert!(ui.win_open_split_at(
                 crate::app::PROMPT_WIN,
@@ -1684,7 +1684,7 @@ impl TuiApp {
                 self.set_task_label(slug.clone());
             }
             self.finish_transcript_turn();
-            self.transcript_win_mut().scroll_to_bottom();
+            self.transcript_win_mut().follow_tail();
         }
         if let Some(message) = self.startup_auth_error.take() {
             self.notify_error(message);
