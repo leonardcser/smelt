@@ -175,6 +175,16 @@ local function open_ps()
     list_ctx = nil
   end
 
+  local function kill_selected(ctx)
+    local p = ctx.list:selected()
+    if not p then return end
+    smelt.process.kill(p.id)
+    for i, row in ipairs(rows) do
+      if row.id == p.id then table.remove(rows, i); break end
+    end
+    ctx.list:set_items(rows)
+  end
+
   while true do
     query = ""
     rows = process_rows()
@@ -201,15 +211,7 @@ local function open_ps()
       end,
 
       keymaps = {
-        { key = "alt-d", hint = "⌥d: kill", on_press = function(ctx)
-            local p = ctx.list:selected()
-            if not p then return end
-            smelt.process.kill(p.id)
-            for i, row in ipairs(rows) do
-              if row.id == p.id then table.remove(rows, i); break end
-            end
-            ctx.list:set_items(rows)
-          end },
+        { key = "alt-d", hint = "⌥d: kill", on_press = kill_selected },
         { key = "ctrl-r", hint = "^r: refresh", on_press = function(ctx)
             list_ctx = ctx
             refresh_list()

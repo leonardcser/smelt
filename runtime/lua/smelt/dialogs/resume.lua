@@ -99,7 +99,8 @@ end
 
 local function update_state_label(buf, workspace_only)
   buf:clear_ns(NS_STATE)
-  local label = workspace_only and " workspace " or " all "
+  local scope = workspace_only and "workspace" or "all"
+  local label = " ⌥d: delete · " .. scope .. " "
   buf:mark(NS_STATE, 1, 0, {
     virt_text     = label,
     virt_text_pos = "right_align",
@@ -422,7 +423,7 @@ smelt.cmd.register("resume", function()
         { key = "esc",    on_press = function() close(nil) end },
         { key = "c-c",    on_press = function() close(nil) end },
         { key = "ctrl-w", on_press = toggle_workspace },
-        { key = "alt-d",  on_press = delete_selected },
+        { key = "alt-d",  hint = "⌥d: delete", on_press = delete_selected },
       },
     })
     list:refresh()
