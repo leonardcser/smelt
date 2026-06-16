@@ -212,7 +212,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
     local pattern = args.pattern or ""
     local path = args.path or ""
     if path == "" then return pattern end
-    return pattern .. " in " .. path
+    return pattern .. " in " .. smelt.path.display(path)
   end,
   paths_for_workspace = function(args)
     local p = args.path or ""

@@ -69,7 +69,7 @@ local function grep_label(child)
   local pattern = args.pattern or child.summary_text or ""
   local label = pattern ~= "" and ('"' .. tostring(pattern) .. '"') or "grep"
   if args.path and args.path ~= "" then
-    label = label .. " in " .. tostring(args.path)
+    label = label .. " in " .. (display_path(args.path) or tostring(args.path))
   elseif args.glob and args.glob ~= "" then
     label = label .. " glob:" .. tostring(args.glob)
   elseif args.type and args.type ~= "" then
@@ -81,7 +81,7 @@ end
 local function glob_label(child)
   local args = child.args or {}
   local label = args.pattern or child.summary_text or "glob"
-  if args.path and args.path ~= "" then label = label .. " in " .. tostring(args.path) end
+  if args.path and args.path ~= "" then label = label .. " in " .. (display_path(args.path) or tostring(args.path)) end
   return label
 end
 

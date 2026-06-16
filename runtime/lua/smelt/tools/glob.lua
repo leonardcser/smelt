@@ -8,7 +8,7 @@ local function describe(args)
   if path == "" then
     return pattern
   end
-  return pattern .. " in " .. path
+  return pattern .. " in " .. smelt.path.display(path)
 end
 
 local function glob_collapsed_detail(block)
