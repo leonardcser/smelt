@@ -87,7 +87,7 @@ const EARLY_DIRS: &[&str] = &["early"];
 /// calling `require("smelt.plugins.<name>")` from their `init.lua`. Exposed
 /// so the `gen-lua-docs` xtask can emit an opt-in vs autoload table in the
 /// `customize` skill.
-pub const OPTIONAL_PLUGINS: &[&str] = &["smelt.plugins.which_key"];
+pub const OPTIONAL_PLUGINS: &[&str] = &["smelt.plugins.which_key", "smelt.plugins.inspect"];
 
 /// Outcome of dispatching a keymap chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

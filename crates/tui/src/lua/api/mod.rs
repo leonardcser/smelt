@@ -7,6 +7,7 @@ mod confirm;
 mod engine;
 mod history;
 mod input;
+mod inspect;
 mod keymap;
 mod layout;
 mod metrics;
@@ -107,6 +108,7 @@ impl LuaRuntime {
         render::register(lua, &smelt)?;
         text::register(lua, &smelt)?;
         engine::register(lua, &smelt, shared)?;
+        inspect::register(lua, &smelt, shared)?;
         history::register(lua, &smelt)?;
         input::register(lua, &smelt, shared)?;
         keymap::register(lua, &smelt_keymap, shared)?;

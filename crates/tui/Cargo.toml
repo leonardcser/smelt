@@ -16,7 +16,7 @@ smelt-buffer = { workspace = true }
 smelt-term = { workspace = true }
 smelt-edit = { workspace = true }
 smelt-lua-doc-derive = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "process", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "net", "process", "signal"] }
 crossterm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

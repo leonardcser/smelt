@@ -83,6 +83,7 @@ pub struct TuiApp {
     /// Owned here so reducer handlers (`apply_ops`) can mutate it directly
     /// instead of threading `&mut Option<TurnState>` through every call.
     pub(crate) agent: Option<TurnState>,
+    pub(crate) inspect_server: Option<crate::inspect_server::Server>,
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     pub(crate) persister: crate::persist::Persister,
     pub(crate) session_save_pending: bool,
@@ -944,6 +945,7 @@ impl TuiApp {
             working: smelt_core::working::WorkingState::new(working_clock),
             layout: crate::content::layout::LayoutState::default(),
             agent: None,
+            inspect_server: None,
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
             session_save_pending: false,

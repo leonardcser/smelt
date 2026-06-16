@@ -13,6 +13,7 @@ pub mod history;
 pub mod message;
 pub mod mode;
 pub mod model;
+pub mod request_log;
 pub mod style;
 pub mod usage;
 

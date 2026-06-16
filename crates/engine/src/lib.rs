@@ -15,6 +15,7 @@ pub mod paths;
 pub mod pricing;
 pub mod provider;
 pub mod redact;
+mod request_log;
 pub(crate) mod result_dedup;
 pub(crate) mod skills;
 #[cfg(test)]

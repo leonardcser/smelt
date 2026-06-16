@@ -239,6 +239,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
                         reasoning_effort: ReasoningEffort::Off,
                         tools: Vec::new(),
                         session_id: "sess".into(),
+                        session_dir: std::path::PathBuf::from("/tmp/sess"),
                         stream: false,
                         visible_retries: false,
                     });

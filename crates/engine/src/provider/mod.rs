@@ -122,7 +122,8 @@ pub(crate) enum StreamDelta<'a> {
     },
 }
 
-pub(crate) struct LLMResponse {
+#[derive(Clone)]
+pub struct LLMResponse {
     pub(crate) content: Option<String>,
     pub(crate) reasoning_content: Option<String>,
     pub(crate) reasoning_details: Option<Vec<ReasoningBlock>>,
@@ -131,7 +132,7 @@ pub(crate) struct LLMResponse {
     pub(crate) tokens_per_sec: Option<f64>,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderError {
     #[error("cancelled")]
     Cancelled,
@@ -763,10 +764,26 @@ pub struct ResponseFormat {
     pub schema: serde_json::Value,
 }
 
+/// Snapshot of one provider request attempt, delivered to the
+/// `ChatOptions::on_attempt` hook after the attempt finishes.
+pub struct RequestAttemptInfo<'a> {
+    pub url: &'a str,
+    pub provider_kind: ProviderKind,
+    pub model: &'a str,
+    pub body: &'a serde_json::Value,
+    pub attempt: u32,
+    pub elapsed_ms: u64,
+    pub result: Result<&'a LLMResponse, &'a ProviderError>,
+    /// Verbatim non-streaming response body, available only for non-streaming
+    /// requests.
+    pub raw_response: Option<&'a serde_json::Value>,
+}
+
 pub struct ChatOptions<'a> {
     pub(crate) cancel: &'a CancellationToken,
     pub(crate) on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
     pub(crate) on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
+    pub(crate) on_attempt: Option<&'a (dyn Fn(RequestAttemptInfo<'_>) + Send + Sync)>,
     pub response_format: Option<ResponseFormat>,
     pub cache: CacheConfig,
 }
@@ -777,6 +794,7 @@ impl<'a> ChatOptions<'a> {
             cancel,
             on_retry: None,
             on_delta: None,
+            on_attempt: None,
             response_format: None,
             cache: CacheConfig::default(),
         }
@@ -875,19 +893,21 @@ impl Provider {
         *self.turn_state.lock().unwrap() = None;
     }
 
-    #[cfg(test)]
     pub(crate) fn api_base(&self) -> &str {
         &self.api_base
+    }
+
+    pub(crate) fn provider_kind(&self) -> ProviderKind {
+        self.kind
+    }
+
+    pub(crate) fn model_config(&self) -> &crate::config::ModelConfig {
+        &self.model_config
     }
 
     #[cfg(test)]
     pub(crate) fn api_key(&self) -> &str {
         &self.api_key
-    }
-
-    #[cfg(test)]
-    pub(crate) fn model_config_for_test(&self) -> &crate::config::ModelConfig {
-        &self.model_config
     }
 
     pub fn with_model_config(mut self, config: crate::config::ModelConfig) -> Self {
@@ -1079,6 +1099,25 @@ impl Provider {
         let max_retries = 9;
         let max_stream_retries = 5;
 
+        let emit_attempt = |attempt: u32,
+                            elapsed_ms: u64,
+                            result: Result<&LLMResponse, &ProviderError>,
+                            raw_response: Option<&serde_json::Value>,
+                            url: &str| {
+            if let Some(cb) = opts.on_attempt {
+                cb(RequestAttemptInfo {
+                    url,
+                    provider_kind: self.kind,
+                    model,
+                    body: &body,
+                    attempt,
+                    elapsed_ms,
+                    result,
+                    raw_response,
+                });
+            }
+        };
+
         for attempt in 0..=max_retries {
             let request_start = self.clock.instant_now();
 
@@ -1229,14 +1268,17 @@ impl Provider {
             let on_delta = opts.on_delta.unwrap_or(noop_delta);
 
             let parsed_result = if use_stream {
-                request_wire
-                    .read_stream(
-                        resp,
-                        opts.cancel,
-                        on_delta,
-                        unix_secs(self.clock.system_now()),
-                    )
-                    .await
+                (
+                    request_wire
+                        .read_stream(
+                            resp,
+                            opts.cancel,
+                            on_delta,
+                            unix_secs(self.clock.system_now()),
+                        )
+                        .await,
+                    None,
+                )
             } else {
                 let data: serde_json::Value = resp
                     .json()
@@ -1256,12 +1298,20 @@ impl Provider {
                     );
                 }
 
-                request_wire.parse_response(&data)
+                (request_wire.parse_response(&data), Some(data))
             };
 
-            let parsed = match parsed_result {
-                Ok(parsed) => parsed,
-                Err(err) if attempt < max_stream_retries => {
+            let (parsed, raw) = match parsed_result {
+                (Ok(parsed), raw) => (parsed, raw),
+                (Err(err), _) if attempt < max_stream_retries => {
+                    let elapsed = self.clock.instant_now().duration_since(request_start);
+                    emit_attempt(
+                        attempt as u32,
+                        elapsed.as_millis() as u64,
+                        Err(&err),
+                        None,
+                        &url,
+                    );
                     let Some(delay) =
                         retry_delay_for(&err, attempt, None, unix_secs(self.clock.system_now()))
                     else {
@@ -1279,7 +1329,17 @@ impl Provider {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                Err(err) => return Err(err),
+                (Err(err), _) => {
+                    let elapsed = self.clock.instant_now().duration_since(request_start);
+                    emit_attempt(
+                        attempt as u32,
+                        elapsed.as_millis() as u64,
+                        Err(&err),
+                        None,
+                        &url,
+                    );
+                    return Err(err);
+                }
             };
 
             let elapsed = self.clock.instant_now().duration_since(request_start);
@@ -1290,22 +1350,30 @@ impl Provider {
                     None
                 }
             });
+            let response = parsed.into_response(tokens_per_sec);
+            emit_attempt(
+                attempt as u32,
+                elapsed.as_millis() as u64,
+                Ok(&response),
+                raw.as_ref(),
+                &url,
+            );
 
             if log::Level::Debug.enabled() {
                 log::entry(
                     log::Level::Debug,
                     "response",
                     &serde_json::json!({
-                        "content": parsed.content,
-                        "reasoning_content": parsed.reasoning,
-                        "tool_calls": parsed.tool_calls,
-                        "context_tokens": parsed.usage.context_tokens,
-                        "prompt_tokens": parsed.usage.prompt_tokens,
+                        "content": response.content,
+                        "reasoning_content": response.reasoning_content,
+                        "tool_calls": response.tool_calls,
+                        "context_tokens": response.usage.context_tokens,
+                        "prompt_tokens": response.usage.prompt_tokens,
                     }),
                 );
             }
 
-            return Ok(parsed.into_response(tokens_per_sec));
+            return Ok(response);
         }
 
         Err(ProviderError::MaxRetries)

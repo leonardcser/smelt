@@ -475,6 +475,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                     let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
                     let session_id = app.core.session.id.clone();
+                    let session_dir = smelt_core::session::dir_for(&app.core.session);
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
@@ -484,6 +485,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         reasoning_effort,
                         tools: Vec::new(),
                         session_id,
+                        session_dir,
                         stream,
                         visible_retries,
                     })
@@ -539,6 +541,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     }
                     let model = model_ref.and_then(|r| resolve_model_for_ask(app, &r));
                     let session_id = app.core.session.id.clone();
+                    let session_dir = smelt_core::session::dir_for(&app.core.session);
                     app.core.engine.send(protocol::UiCommand::EngineAsk {
                         id,
                         system,
@@ -548,6 +551,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         reasoning_effort,
                         tools: app.lua.tool_defs(app.core.config.mode.clone()),
                         session_id,
+                        session_dir,
                         stream,
                         visible_retries,
                     })

@@ -14,6 +14,7 @@ pub(crate) mod commands;
 pub(crate) mod content;
 pub mod event_source;
 pub(crate) mod format;
+pub(crate) mod inspect_server;
 pub use smelt_core::fuzzy;
 pub mod instructions;
 pub(crate) mod keymap;

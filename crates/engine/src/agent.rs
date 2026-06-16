@@ -66,10 +66,20 @@ pub(crate) async fn engine_task(
                 match cmd {
                     UiCommand::StartTurn(payload) => {
                         let protocol::StartTurnPayload {
-                            turn_id, input, mode, model, reasoning_effort,
-                            history, api_base, api_key, session_id, session_dir: _,
-                            model_config_overrides, permission_overrides,
-                            system_prompt: tui_system_prompt, tools,
+                            turn_id,
+                            input,
+                            mode,
+                            model,
+                            reasoning_effort,
+                            history,
+                            api_base,
+                            api_key,
+                            session_id,
+                            session_dir,
+                            model_config_overrides,
+                            permission_overrides,
+                            system_prompt: tui_system_prompt,
+                            tools,
                         } = *payload;
                         let display = input.display();
 
@@ -109,6 +119,7 @@ pub(crate) async fn engine_task(
                             permission_overrides,
                             pending_history_items: Vec::new(),
                             session_id,
+                            session_dir,
                             started_at: config.clock.instant_now(),
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
@@ -187,6 +198,9 @@ pub(crate) struct AskTask {
     /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
     /// the EngineAsk hits the same cache shard as the main turn.
     pub session_id: String,
+    /// On-disk directory for this session. Used to write the
+    /// `requests.jsonl` introspection sidecar.
+    pub session_dir: std::path::PathBuf,
     /// Whether text deltas for this auxiliary request should be forwarded
     /// as `EngineAskDelta` events.
     pub stream: bool,
@@ -228,6 +242,7 @@ pub(crate) fn dispatch_background_cmd(
             reasoning_effort,
             tools,
             session_id,
+            session_dir,
             stream,
             visible_retries,
         } => {
@@ -244,6 +259,7 @@ pub(crate) fn dispatch_background_cmd(
                     reasoning_effort,
                     tools,
                     session_id,
+                    session_dir,
                     stream,
                     visible_retries,
                 },
@@ -273,6 +289,7 @@ fn spawn_engine_ask(
         reasoning_effort,
         tools: supplied_tools,
         session_id,
+        session_dir,
         stream,
         visible_retries,
     } = task;
@@ -305,6 +322,11 @@ fn spawn_engine_ask(
     let cache_ttl_long = config.cache_ttl_long;
     tokio::spawn(async move {
         messages.insert(0, protocol::Message::system(&system));
+        let log_messages = messages.clone();
+        let log_session_dir = session_dir.clone();
+        let log_system = system.clone();
+        let log_tools = tools.clone();
+        let ask_id = id;
 
         let mut opts = ChatOptions::new(&cancel);
         opts.cache = provider.default_cache_config(cache_ttl_long, Some(&session_id));
@@ -352,6 +374,28 @@ fn spawn_engine_ask(
             if stream {
                 opts.on_delta = Some(&on_delta);
             }
+            let log_pricing = pricing.clone();
+            let on_attempt = move |info: crate::provider::RequestAttemptInfo<'_>| {
+                let resolved = crate::pricing::resolve(
+                    info.model,
+                    &log_pricing.provider_type,
+                    &log_pricing.api_base,
+                    &log_pricing.model_config,
+                );
+                let ctx = crate::request_log::RequestContext {
+                    request_id: ask_id,
+                    kind: "engine_ask".to_string(),
+                    turn_id: None,
+                    ask_id: Some(ask_id),
+                    history_len: None,
+                    background: true,
+                    system_prompt: Some(log_system.clone()),
+                    messages: Some(log_messages.clone()),
+                    tools: Some(log_tools.clone()),
+                };
+                crate::request_log::append(&log_session_dir, ctx, &info, &resolved);
+            };
+            opts.on_attempt = Some(&on_attempt);
             provider
                 .chat(&messages, &tool_defs, &model_name, reasoning_effort, &opts)
                 .await
@@ -639,6 +683,9 @@ struct Turn<'a> {
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
     session_id: String,
+    /// On-disk directory for this session. Used to write the
+    /// `requests.jsonl` introspection sidecar.
+    session_dir: std::path::PathBuf,
     started_at: Instant,
     tps_samples: Vec<f64>,
     tool_elapsed: HashMap<String, u64>,
@@ -2158,21 +2205,50 @@ impl<'a> Turn<'a> {
                     });
                 }
             };
-            let opts = ChatOptions {
-                cancel: &self.cancel,
-                on_retry: Some(&on_retry),
-                on_delta: Some(&on_delta),
-                response_format: None,
-                cache: self
-                    .provider
-                    .default_cache_config(self.config.cache_ttl_long, Some(&self.session_id)),
-            };
+            // Resolve pricing once so the request-log sidecar can record an
+            // estimated cost alongside usage on success.
+            let pricing = crate::pricing::resolve(
+                &self.model,
+                self.provider.provider_kind().as_str(),
+                self.provider.api_base(),
+                self.provider.model_config(),
+            );
+            let session_dir = self.session_dir.clone();
+            let system_prompt = self.system_prompt.clone();
+            let tools = self.tools.clone();
+            let turn_id = self.turn_id;
+            let history_len = self.history.len();
             // Convert the engine's `Vec<HistoryItem>` to the wire-format
             // `Vec<Message>` the provider speaks. Pairing is invariant-safe
             // by construction (every `AssistantStep` carries its
             // `ToolInvocation`s inline), so the resulting Message slice
             // satisfies "assistant tool_calls followed by tool_results".
             let wire_messages = protocol::history_to_messages(&self.history);
+            let log_wire_messages = wire_messages.clone();
+            let on_attempt = move |info: crate::provider::RequestAttemptInfo<'_>| {
+                let ctx = crate::request_log::RequestContext {
+                    request_id: turn_id,
+                    kind: "turn".to_string(),
+                    turn_id: Some(turn_id),
+                    ask_id: None,
+                    history_len: Some(history_len),
+                    background: false,
+                    system_prompt: Some(system_prompt.clone()),
+                    messages: Some(log_wire_messages.clone()),
+                    tools: Some(tools.clone()),
+                };
+                crate::request_log::append(&session_dir, ctx, &info, &pricing);
+            };
+            let opts = ChatOptions {
+                cancel: &self.cancel,
+                on_retry: Some(&on_retry),
+                on_delta: Some(&on_delta),
+                on_attempt: Some(&on_attempt),
+                response_format: None,
+                cache: self
+                    .provider
+                    .default_cache_config(self.config.cache_ttl_long, Some(&self.session_id)),
+            };
             let chat_future = self.provider.chat(
                 &wire_messages,
                 tool_defs,
@@ -2457,6 +2533,7 @@ mod tests {
             permission_overrides: None,
             pending_history_items: Vec::new(),
             session_id: "s".into(),
+            session_dir: std::path::PathBuf::from("/tmp/s"),
             started_at: Instant::now(),
             tps_samples: Vec::new(),
             tool_elapsed: HashMap::new(),
@@ -2649,7 +2726,7 @@ mod tests {
             Some(&overrides),
             std::sync::Arc::new(crate::clock::RealClock),
         );
-        let cfg = p.model_config_for_test();
+        let cfg = p.model_config();
         assert_eq!(cfg.temperature, Some(0.9));
         assert_eq!(cfg.top_p, Some(0.2));
         assert_eq!(cfg.top_k, Some(7));

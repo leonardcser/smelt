@@ -7,6 +7,7 @@ use crate::style::StyledLines;
 use crate::usage::{ModelConfigOverrides, PermissionOverrides, TokenUsage, TurnMeta};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Structured JSON output specification mirroring `engine::ResponseFormat`.
 /// Lives on the wire so the TUI can forward Lua-provided schemas to the
@@ -497,6 +498,9 @@ pub enum UiCommand {
         /// cache shard as the main turn.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         session_id: String,
+        /// On-disk directory for this session. The engine writes the
+        /// `requests.jsonl` sidecar here for introspection.
+        session_dir: PathBuf,
         /// Emit incremental text deltas as `EngineAskDelta` events.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         stream: bool,

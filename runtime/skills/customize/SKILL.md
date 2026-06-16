@@ -454,6 +454,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 
 | Plugin | Summary |
 | --- | --- |
+| `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and the exact provider requests/responses logged to `requests.jsonl`. |
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- PLUGINS_END -->
@@ -1229,6 +1230,17 @@ Single-line input handle constructor.
 
 - `smelt.input.new` :: `fun(opts: table?): smelt.input.Input?`
   Create a single-line input and return an `Input` handle.
+
+#### `smelt.inspect`
+
+Local session introspection web UI.
+
+- `smelt.inspect.start` :: `fun(): any`
+  Start the local session-inspector web server on an ephemeral loopback port and return its URL.
+- `smelt.inspect.stop` :: `fun(): nil`
+  Stop the running session-inspector web server, if any.
+- `smelt.inspect.url` :: `fun(): any`
+  Return the URL of the running inspector server, or nil if it is not running.
 
 #### `smelt.keymap`
 
