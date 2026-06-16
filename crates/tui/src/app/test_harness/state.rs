@@ -97,6 +97,12 @@ impl TestApp {
             ));
     }
 
+    /// Side-channel: seed prompt history without submitting through the engine.
+    /// Storybook uses this to open reverse-history UI deterministically.
+    pub fn push_history_entry(&mut self, text: String) {
+        self.app.input_history.push(text);
+    }
+
     /// Snapshot of the working-status bar's live state. Used by fuzz
     /// invariants that assert phase transitions (e.g. compaction ends with
     /// `animating == false`, `Retrying` event leaves `animating == true`).

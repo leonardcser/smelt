@@ -1,0 +1,12 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+ explain the renderer layering
+  info  history notice
+──────────────────────────────────────────────────
+
+──────────────────────────────────────────────────
+ ○ normal                                 1:1 100%

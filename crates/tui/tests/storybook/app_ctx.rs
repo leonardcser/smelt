@@ -305,12 +305,48 @@ impl AppStoryCtx {
         self.app.push_queued_message(text.to_string());
     }
 
+    /// Seed a prompt-history entry so reverse-history picker stories can open
+    /// without submitting a real engine turn.
+    pub fn push_history_entry(&mut self, text: &str) {
+        self.app.push_history_entry(text.to_string());
+    }
+
+    /// Seed model picker entries in the live config. Each tuple is
+    /// `(provider, model_name, provider_type)`.
+    pub fn seed_models(&mut self, models: &[(&str, &str, &str)]) {
+        self.app.app.core.config.available_models = models
+            .iter()
+            .map(
+                |(provider, model, provider_type)| smelt_core::config::ResolvedModel {
+                    key: format!("{provider}/{model}"),
+                    provider_name: (*provider).to_string(),
+                    model_name: (*model).to_string(),
+                    api_base: format!("https://{provider}.example/v1"),
+                    api_key_env: format!("{}_API_KEY", provider.to_ascii_uppercase()),
+                    provider_type: (*provider_type).to_string(),
+                    config: smelt_core::config::ModelConfig {
+                        name: Some((*model).to_string()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .collect();
+    }
+
     /// Execute a Lua snippet against the embedded runtime. Used by
     /// dialog stories that need to seed state or invoke a primitive
     /// directly.
     pub fn run_lua(&mut self, snippet: &str) {
         let ok = self.app.run_lua(snippet);
         assert!(ok, "story Lua snippet failed");
+    }
+
+    /// Pump spawned Lua coroutines to their next yield point.
+    pub fn pump_lua(&mut self) {
+        for _ in 0..4 {
+            self.app
+                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
+        }
     }
 
     /// Seed the latest provider-reported context token count through the

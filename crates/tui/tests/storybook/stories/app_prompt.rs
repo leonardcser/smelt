@@ -165,6 +165,73 @@ app_story!(
     }
 );
 
+app_story!(prompt_slash_completion_with_live_notification, |ctx| {
+    // When a toast arrives while slash completion is already open, it paints
+    // above the prompt-docked picker.
+    ctx.set_viewport(50, 8);
+    ctx.type_prompt("/");
+    ctx.notify("slash notice", None);
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_file_completion_with_error_notification, |ctx| {
+    // `@file` uses the same prompt-docked picker plane as slash completion.
+    // An error toast must paint above the picker row when they coincide.
+    ctx.set_viewport(50, 8);
+    ctx.write_fixture("src/main.rs", "fn main() {}\n");
+    ctx.write_fixture("README.md", "# story\n");
+    ctx.type_prompt("@");
+    ctx.run_lua(r#"smelt.notify.error("file lookup failed", "story")"#);
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_history_picker_with_notification, |ctx| {
+    // Reverse-history search is a secondary prompt-docked picker opened by
+    // `/history`; the notification should remain the top prompt-adjacent row.
+    ctx.set_viewport(50, 8);
+    ctx.push_history_entry("explain the renderer layering");
+    ctx.push_history_entry("open the model picker next");
+    ctx.run_command("/history");
+    ctx.notify("history notice", None);
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_model_picker_with_notification, |ctx| {
+    // `/model` opens a persistent prompt-docked picker after the slash command
+    // resolves. It should stack the same way as completions and history search.
+    ctx.set_viewport(50, 8);
+    ctx.seed_models(&[
+        ("openai", "gpt-5", "openai"),
+        ("anthropic", "claude-sonnet-4", "anthropic"),
+        ("copilot", "gpt-4.1", "copilot"),
+    ]);
+    ctx.run_command("/model");
+    ctx.notify("model notice", None);
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_centered_picker_with_notification, |ctx| {
+    // Generic `smelt.picker.open` uses the dialog z-plane. If it overlaps a
+    // toast, the centered picker stays above the notification.
+    ctx.set_viewport(50, 8);
+    ctx.run_lua(
+        r#"
+      smelt.spawn(function()
+        smelt.picker.open({
+          items = {
+            { label = "alpha", description = "first" },
+            { label = "beta", description = "second" },
+            { label = "gamma", description = "third" },
+          },
+        })
+      end)
+    "#,
+    );
+    ctx.pump_lua();
+    ctx.notify("center notice", None);
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_turn_queue_row_truncates, |ctx| {
     // Long next-turn queue entries stay on one prompt-above row, truncate with
     // a Unicode ellipsis, and leave right padding so they do not hit the edge.

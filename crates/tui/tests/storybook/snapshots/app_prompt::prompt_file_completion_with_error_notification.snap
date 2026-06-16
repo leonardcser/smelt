@@ -1,0 +1,12 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ ./src/main.rs
+ ./src
+  error  file lookup failed
+──────────────────────────────────────────────────
+ @
+──────────────────────────────────────────────────
+ ○ normal                                 1:1 100%

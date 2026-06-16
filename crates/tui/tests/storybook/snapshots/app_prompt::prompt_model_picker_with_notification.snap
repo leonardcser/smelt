@@ -1,0 +1,12 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ gpt-4.1          copilot
+ claude-sonnet-4  anthropic
+  info  model notice
+──────────────────────────────────────────────────
+
+──────────────────────────────────────────────────
+ ○ normal                                 1:1 100%
