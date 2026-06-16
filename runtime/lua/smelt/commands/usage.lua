@@ -95,12 +95,35 @@ local function format_duration(total_seconds)
   return tostring(seconds) .. "s"
 end
 
+local function timezone_offset(value)
+  local sign, h, m = tostring(value or ""):match("^([%+%-])(%d%d):?(%d%d)$")
+  if not sign then return nil end
+  local offset = (tonumber(h) * 3600) + (tonumber(m) * 60)
+  if sign == "-" then offset = -offset end
+  return offset
+end
+
+local function local_timezone_offset(epoch)
+  return timezone_offset(os.date("%z", epoch)) or 0
+end
+
+local function iso_timezone_offset(tz)
+  if tz == "Z" or tz == "z" then return 0 end
+  return timezone_offset(tz)
+end
+
 local function parse_iso_reset(value)
   if type(value) ~= "string" or value == "" then return nil end
-  local y, mo, d, h, mi, s = value:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)")
+  local y, mo, d, h, mi, s, tz = value:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)%.?%d*([Zz%+%-]?%d*:?.*)$")
   if not y then return "resets at " .. value end
-  local stamp = os.time({ year = y, month = mo, day = d, hour = h, min = mi, sec = s })
-  local diff = stamp and os.difftime(stamp, os.time()) or nil
+  local local_stamp = os.time({ year = y, month = mo, day = d, hour = h, min = mi, sec = s })
+  if not local_stamp then return "resets at " .. value end
+  local tz_offset = iso_timezone_offset(tz)
+  local stamp = local_stamp
+  if tz_offset then
+    stamp = local_stamp + local_timezone_offset(local_stamp) - tz_offset
+  end
+  local diff = os.difftime(stamp, os.time())
   if diff and diff > 0 then return "resets in " .. format_duration(diff) end
   return "reset"
 end
@@ -384,8 +407,11 @@ local function cost_and_pricing_lines()
   local cost = smelt.session.cost() or 0
   local pricing = smelt.model.pricing() or {}
   local left = "cost " .. smelt.text.format_cost(cost)
-  local right = string.format("input %s / output %s per 1M", rate(pricing.input), rate(pricing.output))
-  local source = pricing.source and ("  " .. pricing.source) or ""
+  local input = tonumber(pricing.input) or 0
+  local output = tonumber(pricing.output) or 0
+  if input == 0 and output == 0 then return { row(span(left, VALUE)) } end
+  local right = string.format("input %s / output %s per 1M", rate(input), rate(output))
+  local source = pricing.source and pricing.source ~= "none" and ("  " .. pricing.source) or ""
   return { row(span(left, VALUE), span("  │  ", DIM), span(right, DIM), span(source, DIM)) }
 end
 
