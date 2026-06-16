@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+ beta   second
+ alpha  first
+──────────────────────────────────────────────────
+
+──────────────────────────────────────────────────
+ ○ normal                                 1:1 100%

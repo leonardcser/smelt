@@ -47,6 +47,24 @@ app_story!(prompt_slash_completion_two_rows_when_cramped, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_modal_picker_hides_tip, |ctx| {
+    // Secondary prompt-docked pickers (for slash-command follow-ups like
+    // /model, file finders, and reverse history search) own the prompt via
+    // smelt.prompt.acquire(). The discovery tip must stay hidden while that
+    // modal picker is open even though the prompt text is empty.
+    ctx.set_viewport(50, 10);
+    ctx.run_lua(r#"
+      smelt.cmd.picker("tipless", {
+        items = {
+          { label = "alpha", description = "first" },
+          { label = "beta", description = "second" },
+        },
+      })
+    "#);
+    ctx.run_command("/tipless");
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_shell_escape_prefix, |ctx| {
     // `!cmd` switches the prompt into shell-escape rendering: accent
     // `!` prefix, panel chrome shared with the exec block.
