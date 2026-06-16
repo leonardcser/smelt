@@ -91,3 +91,71 @@ app_story!(grep_group_expanded, |ctx| {
     ctx.run_lua("smelt.transcript.fold_all('open')");
     ctx.assert_snapshot();
 });
+
+app_story!(glob_group_collapsed, |ctx| {
+    ctx.set_viewport(84, 12);
+    ctx.tool_call_with_metadata(
+        "glob",
+        &[
+            ("pattern", json!("**/*.rs")),
+            ("path", json!("crates/tui/src")),
+        ],
+        "crates/tui/src/app.rs\ncrates/tui/src/commands.rs\ncrates/tui/src/theme.rs",
+        json!({ "display_count": { "value": 3, "unit": "file" } }),
+        Some(5),
+    );
+    ctx.tool_call_with_metadata(
+        "glob",
+        &[
+            ("pattern", json!("**/*.lua")),
+            ("path", json!("runtime/lua/smelt")),
+        ],
+        "runtime/lua/smelt/tools/bash.lua\nruntime/lua/smelt/tools/glob.lua",
+        json!({ "display_count": { "value": 2, "unit": "file" } }),
+        Some(6),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(glob_group_expanded, |ctx| {
+    ctx.set_viewport(84, 18);
+    ctx.tool_call_with_metadata(
+        "glob",
+        &[
+            ("pattern", json!("**/*.rs")),
+            ("path", json!("crates/tui/src")),
+        ],
+        "crates/tui/src/app.rs\ncrates/tui/src/commands.rs\ncrates/tui/src/theme.rs",
+        json!({ "display_count": { "value": 3, "unit": "file" } }),
+        Some(5),
+    );
+    ctx.tool_call_with_metadata(
+        "glob",
+        &[
+            ("pattern", json!("**/*.lua")),
+            ("path", json!("runtime/lua/smelt")),
+        ],
+        "runtime/lua/smelt/tools/bash.lua\nruntime/lua/smelt/tools/glob.lua",
+        json!({ "display_count": { "value": 2, "unit": "file" } }),
+        Some(6),
+    );
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+    ctx.assert_snapshot();
+});
+
+app_story!(background_process_group_collapsed, |ctx| {
+    ctx.set_viewport(76, 10);
+    ctx.push_background_process_completed("4210", Some(0));
+    ctx.push_background_process_completed("4211", Some(1));
+    ctx.push_background_process_completed("4212", None);
+    ctx.assert_snapshot();
+});
+
+app_story!(background_process_group_expanded, |ctx| {
+    ctx.set_viewport(76, 14);
+    ctx.push_background_process_completed("4210", Some(0));
+    ctx.push_background_process_completed("4211", Some(1));
+    ctx.push_background_process_completed("4212", None);
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+    ctx.assert_snapshot();
+});

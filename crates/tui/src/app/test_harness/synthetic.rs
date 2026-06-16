@@ -142,6 +142,17 @@ impl TestApp {
             });
     }
 
+    /// Push a typed process-status block into the transcript. Mirrors the
+    /// display block produced when a background process completion is
+    /// committed to history, without needing to spawn a real process.
+    pub fn push_process_status(&mut self, text: &str, event: Option<protocol::ProcessStatusEvent>) {
+        self.app
+            .push_block(smelt_core::transcript_model::Block::ProcessStatus {
+                text: text.to_string(),
+                event,
+            });
+    }
+
     /// Open a `Block::Exec` shell-escape block in the transcript with
     /// `command` as the header. Pair with
     /// `SourceEvent::ExecOutput`/`ExecDone` to stream output and close

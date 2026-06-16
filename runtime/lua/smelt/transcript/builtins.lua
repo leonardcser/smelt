@@ -122,27 +122,54 @@ local function process_exit_code(child)
   return code
 end
 
+local function process_id(child)
+  local id = child.process_id
+  if id == nil and type(child.event_data) == "table" then id = child.event_data.process_id end
+  return id
+end
+
 local function process_failed(child)
   local code = tonumber(process_exit_code(child))
   return code ~= nil and code ~= 0
 end
 
+local function process_status_fragment(child)
+  local id = process_id(child)
+  local subject = id and tostring(id) or "process"
+  local code = tonumber(process_exit_code(child))
+  if code == 0 then return subject .. " finished successfully" end
+  if code ~= nil then return subject .. " exited with code " .. tostring(code) end
+  return subject .. " exited"
+end
+
+local function failed_process_summary(failed)
+  if #failed == 0 then return "" end
+  if #failed == 1 then return ": " .. process_status_fragment(failed[1]) end
+
+  local max = math.min(#failed, 2)
+  local parts = {}
+  for i = 1, max do
+    parts[#parts + 1] = tostring(process_id(failed[i]) or process_status_fragment(failed[i]))
+  end
+  if #failed > max then parts[#parts + 1] = "+" .. tostring(#failed - max) .. " more" end
+  return ": " .. table.concat(parts, ", ")
+end
+
 local function render_background_process_completed_group(group, ctx)
-  local count = group.child_count or #defaults.group_children(group)
-  local failed = 0
-  for _, child in ipairs(defaults.group_children(group)) do
-    if process_failed(child) then failed = failed + 1 end
+  if group.view_state == "expanded" then return defaults.render_group_children(group, ctx) end
+
+  local children = defaults.group_children(group)
+  local count = group.child_count or #children
+  local failed = {}
+  for _, child in ipairs(children) do
+    if process_failed(child) then failed[#failed + 1] = child end
   end
+
   local text = "background processes finished: " .. tostring(count)
-  if failed > 0 then
-    text = text .. " (" .. tostring(failed) .. " failed)"
+  if #failed > 0 then
+    text = text .. ", " .. tostring(#failed) .. " failed" .. failed_process_summary(failed)
   end
-  local header = summary_line(text, failed > 0)
-  if group.view_state ~= "expanded" then return header end
-  return layout.vbox({
-    header,
-    defaults.render_group_children(group, ctx),
-  })
+  return summary_line(text, #failed > 0)
 end
 
 function M.register()

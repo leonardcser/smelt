@@ -112,7 +112,7 @@ impl ProcessStatusEvent {
                     Some(code) => format!("exited with code {code}"),
                     None => "exited".to_string(),
                 };
-                format!("Background process {process_id} {status}.")
+                format!("background process {process_id} {status}.")
             }
         }
     }

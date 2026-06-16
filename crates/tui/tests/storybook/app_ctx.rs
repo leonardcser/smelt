@@ -84,6 +84,15 @@ impl AppStoryCtx {
         self.app.push_compacted(summary);
     }
 
+    /// Push a typed background-process completion status block. This drives the
+    /// same transcript block shape produced by the live background process
+    /// registry without spawning a subprocess in the story.
+    pub fn push_background_process_completed(&mut self, id: &str, exit_code: Option<i32>) {
+        let event = protocol::ProcessStatusEvent::background_process_completed(id, exit_code);
+        let text = event.display_text();
+        self.app.push_process_status(&text, Some(event));
+    }
+
     /// Run a shell-escape (`Block::Exec`) lifecycle: open the block,
     /// stream `output` line by line, then close. Goes through the same
     /// `start_exec` / `append_exec_output` / `finish_exec` /
