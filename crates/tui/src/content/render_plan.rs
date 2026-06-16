@@ -71,8 +71,6 @@ impl Default for TranscriptDefaultViewPolicy {
             "grep",
             "glob",
             "web_fetch",
-            "write_file",
-            "edit_file",
             "edit_notebook",
         ] {
             policy.tools.insert(tool.to_string(), ViewState::Collapsed);
@@ -778,6 +776,17 @@ mod tests {
                     args: HashMap::new(),
                 }),
                 ViewState::Collapsed
+            );
+        }
+        for tool in ["write_file", "edit_file"] {
+            assert_eq!(
+                policy.block_default_view_state(&Block::ToolCall {
+                    call_id: format!("call-{tool}"),
+                    name: tool.into(),
+                    summary: protocol::StyledLines::default(),
+                    args: HashMap::new(),
+                }),
+                ViewState::Expanded
             );
         }
     }

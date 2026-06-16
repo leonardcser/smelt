@@ -156,14 +156,25 @@ local function run_grep_fallback(args)
   return smelt.process.run("grep", cmd_args, { timeout_secs = timeout_secs })
 end
 
+local function grep_collapsed_detail(block)
+  local output = block.output
+  if output and output.is_error then return "error" end
+
+  local mode = requested_mode((block and block.args) or {})
+  local metadata = output and output.metadata
+  if type(metadata) == "table" and type(metadata.display_count) == "table" then
+    return transcript_defaults.display_count_text(block, { unit = count_unit_for_mode(mode) })
+  end
+
+  return smelt.text.line_count((output and output.content) or "") .. " matches"
+end
+
 transcript_defaults.__tool_body_renderers.grep = function(block, ctx)
   if not block.output then return nil end
   return transcript_defaults.render_tool_output_tail(block.output, ctx)
 end
 
-transcript_defaults.__tool_collapsed_details.grep = function(block)
-  return smelt.text.line_count((block.output and block.output.content) or "") .. " matches"
-end
+transcript_defaults.__tool_collapsed_details.grep = grep_collapsed_detail
 
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "grep",

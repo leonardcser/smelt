@@ -58,10 +58,14 @@ local function planned_diff(args)
   })
 end
 
-local function line_delta_detail(old_text, new_text)
-  local removed = smelt.text.line_count(old_text or "")
-  local added = smelt.text.line_count(new_text or "")
-  return tostring(removed) .. " removed, " .. tostring(added) .. " added"
+local function line_label(count, label)
+  return tostring(count) .. " " .. label .. (count == 1 and "" or "s")
+end
+
+local function replacement_line_detail(old_text, new_text)
+  local old_lines = smelt.text.line_count(old_text or "")
+  local new_lines = smelt.text.line_count(new_text or "")
+  return line_label(old_lines, "old line") .. ", " .. line_label(new_lines, "new line")
 end
 
 transcript_defaults.__tool_body_renderers.edit_file = function(block)
@@ -80,11 +84,7 @@ end
 
 transcript_defaults.__tool_collapsed_details.edit_file = function(block)
   local args = block.args or {}
-  local meta = block.output and block.output.metadata
-  if meta then
-    return line_delta_detail(meta.old_content or args.old_string or "", meta.new_content or args.new_string or "")
-  end
-  return line_delta_detail(args.old_string or "", args.new_string or "")
+  return replacement_line_detail(args.old_string or "", args.new_string or "")
 end
 
 smelt.tools.register({

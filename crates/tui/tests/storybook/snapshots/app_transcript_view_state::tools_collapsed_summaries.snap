@@ -9,7 +9,7 @@ expression: frame.text()
   wrote 3 lines
 
 * edit_file src/lib.rs
-  1 removed, 1 added
+  1 old line, 1 new line
 
 * edit_notebook analysis.ipynb
   replaced cell, 1 lines

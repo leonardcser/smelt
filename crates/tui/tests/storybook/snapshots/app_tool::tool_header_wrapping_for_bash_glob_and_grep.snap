@@ -14,7 +14,7 @@ expression: frame.text()
 
 * grep wrap_fragments_with_widths|continuation_indent|ToolSum
        maryResolver in crates/tui/src crates/buffer/src
-  3 matches
+  3 files
 
 ─ ✿ working… ─────────────────────────────────────────────────
 

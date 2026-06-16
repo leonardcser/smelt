@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * glob [invalid
-  1 files
+  error
 
 
 ─ ✿ working… ───────────────────────────────────────────────

@@ -2,8 +2,8 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-* grep (?P<bad in crates/tui/src
-  error
+* grep definitely_not_present in crates/tui/src
+  0 files
 
 
 ─ ✿ working… ─────────────────────────────────────────────────────────

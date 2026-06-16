@@ -11,7 +11,7 @@ dim: 86 18
   4   2  13 attrs=dim
   6   0   1 fg=AnsiValue(77)
   6   1  10 attrs=dim
-  7   2  18 attrs=dim
+  7   2  22 attrs=dim
   9   0   1 fg=AnsiValue(77)
   9   1  14 attrs=dim
  10   2  22 attrs=dim

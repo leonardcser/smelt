@@ -77,6 +77,7 @@ app_story!(tools_collapsed_summaries, |ctx| {
         }),
         Some(6),
     );
+    ctx.run_lua("smelt.transcript.fold_kind('tool', 'close')");
     ctx.assert_snapshot();
 });
 

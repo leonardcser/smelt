@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * edit_file src/lib.rs
-  1 removed, 1 added
+  old_string not found in src/lib.rs
 
 
 

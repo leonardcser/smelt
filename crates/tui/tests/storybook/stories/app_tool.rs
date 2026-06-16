@@ -94,6 +94,32 @@ app_story!(edit_file_tool_block_with_diff_gutter, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(edit_file_tool_block_with_metadata_summary, |ctx| {
+    ctx.set_viewport(80, 10);
+    ctx.tool_call_with_metadata(
+        "edit_file",
+        &[
+            ("file_path", json!("runtime/lua/smelt/plugins/compact.lua")),
+            (
+                "old_string",
+                json!("Use them as evidence for task priority and return instructions."),
+            ),
+            (
+                "new_string",
+                json!("Use them as evidence for task priority and return/resume instructions."),
+            ),
+        ],
+        "edited runtime/lua/smelt/plugins/compact.lua",
+        json!({
+            "old_content": "line 1\nUse them as evidence for task priority and return instructions.\nline 3\n",
+            "new_content": "line 1\nUse them as evidence for task priority and return/resume instructions.\nline 3\n",
+            "path": "runtime/lua/smelt/plugins/compact.lua"
+        }),
+        Some(5),
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(edit_file_tool_block_error, |ctx| {
     // `edit_file.render` falls back to `layout.text(content, is_error)`
     // when the result is an error - same fallback every tool with a
@@ -230,6 +256,18 @@ app_story!(glob_tool_block, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(glob_tool_block_no_matches, |ctx| {
+    ctx.set_viewport(60, 8);
+    ctx.tool_call_with_metadata(
+        "glob",
+        &[("pattern", json!("missing/**/*.rs"))],
+        "no matches found",
+        json!({ "display_count": { "value": 0, "unit": "file" } }),
+        Some(2),
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(glob_tool_block_error, |ctx| {
     // Error path: skip the "N files" summary and render the error
     // message via the shared `is_error` guard.
@@ -260,6 +298,22 @@ app_story!(grep_tool_block, |ctx| {
         "crates/tui/src/render/markdown.rs\ncrates/tui/src/render/blocks/tool.rs",
         json!({ "display_count": { "value": 2, "unit": "file" } }),
         Some(11),
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(grep_tool_block_no_matches, |ctx| {
+    ctx.set_viewport(70, 8);
+    ctx.tool_call_with_metadata(
+        "grep",
+        &[
+            ("pattern", json!("definitely_not_present")),
+            ("path", json!("crates/tui/src")),
+            ("output_mode", json!("files_with_matches")),
+        ],
+        "no matches found",
+        json!({ "display_count": { "value": 0, "unit": "file" } }),
+        Some(4),
     );
     ctx.assert_snapshot();
 });
