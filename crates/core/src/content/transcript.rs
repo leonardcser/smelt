@@ -1,6 +1,6 @@
 //! `Transcript` owns the block history. Streaming parsing lives in `StreamParser`; display projection in `tui`.
 
-use crate::transcript_model::{Block, BlockHistory, BlockId, BlockOrigin, ToolState, ViewState};
+use crate::transcript_model::{Block, BlockHistory, BlockId, BlockOrigin, ToolState};
 
 pub struct Transcript {
     pub history: BlockHistory,
@@ -23,14 +23,6 @@ impl Transcript {
 
     pub fn block(&self, id: BlockId) -> Option<&Block> {
         self.history.blocks.get(&id)
-    }
-
-    pub fn block_view_state(&self, id: BlockId) -> ViewState {
-        self.history.view_state(id)
-    }
-
-    pub fn set_block_view_state(&mut self, id: BlockId, state: ViewState) {
-        self.history.set_view_state(id, state);
     }
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
@@ -253,18 +245,6 @@ mod tests {
         assert!(t.block(id).is_some());
         let missing = crate::transcript_model::BlockId::new(9999);
         assert!(t.block(missing).is_none());
-    }
-
-    #[test]
-    fn view_state_defaults_to_expanded_and_can_be_set() {
-        let mut t = Transcript::new();
-        t.push(Block::Text {
-            content: "x".into(),
-        });
-        let id = t.history.order[0];
-        assert_eq!(t.block_view_state(id), ViewState::Expanded);
-        t.set_block_view_state(id, ViewState::Collapsed);
-        assert_eq!(t.block_view_state(id), ViewState::Collapsed);
     }
 
     #[test]

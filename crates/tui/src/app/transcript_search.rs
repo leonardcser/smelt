@@ -1,10 +1,12 @@
 use crate::app::search::{doc_range_for_match, row_match_is_selectable, SearchDirection};
 use crate::app::TuiApp;
+use crate::content::render_plan::RenderNodeId;
+use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::smelt_edit::{DisplayRow, DocPosition, DocRange, RowIndex};
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey};
 use std::collections::HashMap;
 
-const SEARCH_TRANSCRIPT_PREFETCH_BLOCKS: usize = 64;
+const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
 const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
 
 #[derive(Clone, Debug)]
@@ -27,15 +29,16 @@ pub(super) struct TranscriptSearchIndex {
 
 #[derive(Clone, Debug)]
 struct TranscriptSearchEntry {
-    block_id: BlockId,
+    id: RenderNodeId,
     layout_key: LayoutKey,
+    block_ids: Vec<BlockId>,
     first_row: RowIndex,
     rows: RowIndex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TranscriptSearchKey {
-    generation: u64,
+    layout_generation: u64,
     width: u16,
     show_thinking: bool,
 }
@@ -44,47 +47,37 @@ impl TranscriptSearchIndex {
     fn append_from_layout(
         mut self,
         key: TranscriptSearchKey,
-        layout: &[(BlockId, RowIndex, RowIndex)],
+        layout: &TranscriptSearchLayout,
         history: &BlockHistory,
-        base_key: LayoutKey,
     ) -> Option<Self> {
         if self.key.width != key.width || self.key.show_thinking != key.show_thinking {
             return None;
         }
         let old_len = self.entries.len();
         let old_key = self.key;
-        if old_len >= layout.len() {
+        if old_len >= layout.entries.len() {
             return None;
         }
-        for (entry, &(block_id, first_row, rows)) in self.entries.iter().zip(layout.iter()) {
-            if entry.block_id != block_id
-                || entry.first_row != first_row
-                || entry.rows != rows
-                || entry.layout_key != history.resolve_key(block_id, base_key)
+        for (entry, layout_entry) in self.entries.iter().zip(layout.entries.iter()) {
+            if entry.id != layout_entry.id
+                || entry.layout_key != layout_entry.key
+                || entry.block_ids != layout_entry.block_ids
+                || entry.first_row != layout_entry.first_row
+                || entry.rows != layout_entry.rows
             {
                 return None;
             }
         }
 
         let _perf = smelt_perf::perf::begin("search:transcript:index_extend");
-        for &(block_id, first_row, rows) in &layout[old_len..] {
-            let block = history.blocks.get(&block_id)?;
-            let entry_index = self.entries.len();
-            self.entries.push(TranscriptSearchEntry {
-                block_id,
-                layout_key: history.resolve_key(block_id, base_key),
-                first_row,
-                rows,
-            });
-            for gram in unique_trigrams(&block_search_text(history, block)) {
-                self.trigrams.entry(gram).or_default().push(entry_index);
-            }
+        for layout_entry in &layout.entries[old_len..] {
+            push_search_entry(&mut self.entries, &mut self.trigrams, history, layout_entry)?;
         }
         self.key = key;
         self.extends = Some(old_key);
         smelt_perf::perf::record_value(
-            "search:transcript:index_appended_blocks",
-            (layout.len() - old_len) as u64,
+            "search:transcript:index_appended_entries",
+            (layout.entries.len() - old_len) as u64,
         );
         Some(self)
     }
@@ -120,37 +113,16 @@ impl TranscriptSearchIndex {
     }
 }
 
-fn base_transcript_search_layout_key(key: TranscriptSearchKey) -> LayoutKey {
-    LayoutKey {
-        width: key.width,
-        show_thinking: key.show_thinking,
-        view_state: ViewState::Expanded,
-        content_hash: 0,
-        sidecar_hash: 0,
-    }
-}
-
 fn build_transcript_search_index(
     key: TranscriptSearchKey,
-    layout: &[(BlockId, RowIndex, RowIndex)],
+    layout: &TranscriptSearchLayout,
     history: &BlockHistory,
-    base_key: LayoutKey,
 ) -> TranscriptSearchIndex {
-    let mut entries = Vec::with_capacity(layout.len());
+    let mut entries = Vec::with_capacity(layout.entries.len());
     let mut trigrams: HashMap<u32, Vec<usize>> = HashMap::new();
-    for &(block_id, first_row, rows) in layout {
-        let Some(block) = history.blocks.get(&block_id) else {
+    for layout_entry in &layout.entries {
+        if push_search_entry(&mut entries, &mut trigrams, history, layout_entry).is_none() {
             continue;
-        };
-        let entry_index = entries.len();
-        entries.push(TranscriptSearchEntry {
-            block_id,
-            layout_key: history.resolve_key(block_id, base_key),
-            first_row,
-            rows,
-        });
-        for gram in unique_trigrams(&block_search_text(history, block)) {
-            trigrams.entry(gram).or_default().push(entry_index);
         }
     }
     TranscriptSearchIndex {
@@ -161,8 +133,42 @@ fn build_transcript_search_index(
     }
 }
 
+fn push_search_entry(
+    entries: &mut Vec<TranscriptSearchEntry>,
+    trigrams: &mut HashMap<u32, Vec<usize>>,
+    history: &BlockHistory,
+    layout_entry: &TranscriptSearchLayoutEntry,
+) -> Option<()> {
+    let search_text = layout_entry
+        .block_ids
+        .iter()
+        .map(|id| {
+            history
+                .blocks
+                .get(id)
+                .map(|block| block_search_text(history, block))
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join("\n");
+    let entry_index = entries.len();
+    entries.push(TranscriptSearchEntry {
+        id: layout_entry.id,
+        layout_key: layout_entry.key,
+        block_ids: layout_entry.block_ids.clone(),
+        first_row: layout_entry.first_row,
+        rows: layout_entry.rows,
+    });
+    for gram in unique_trigrams(&search_text) {
+        trigrams.entry(gram).or_default().push(entry_index);
+    }
+    Some(())
+}
+
 fn record_index_size(index: &TranscriptSearchIndex) {
-    smelt_perf::perf::record_value("search:transcript:index_blocks", index.entries.len() as u64);
+    smelt_perf::perf::record_value(
+        "search:transcript:index_entries",
+        index.entries.len() as u64,
+    );
     smelt_perf::perf::record_value(
         "search:transcript:index_trigrams",
         index.trigrams.len() as u64,
@@ -170,17 +176,24 @@ fn record_index_size(index: &TranscriptSearchIndex) {
 }
 
 impl TuiApp {
-    fn transcript_search_key(&mut self) -> TranscriptSearchKey {
-        self.sync_transcript_renderer_generation();
+    fn transcript_search_key(&mut self, layout_generation: u64) -> TranscriptSearchKey {
         TranscriptSearchKey {
-            generation: self.transcript.history().generation(),
+            layout_generation,
             width: self.transcript_width() as u16,
             show_thinking: self.core.config.settings.show_thinking,
         }
     }
 
     fn ensure_transcript_search_index(&mut self) -> Option<&TranscriptSearchIndex> {
-        let key = self.transcript_search_key();
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        let show_thinking = self.core.config.settings.show_thinking;
+        let layout = {
+            let _perf = smelt_perf::perf::begin("search:transcript:index_layout");
+            self.transcript
+                .materialize_search_layout(&self.lua, width, show_thinking)
+        };
+        let key = self.transcript_search_key(layout.generation);
         if self
             .search
             .transcript_index
@@ -190,15 +203,9 @@ impl TuiApp {
             return self.search.transcript_index.as_ref();
         }
 
-        let base_key = base_transcript_search_layout_key(key);
-        let layout = {
-            let _perf = smelt_perf::perf::begin("search:transcript:index_layout");
-            self.transcript
-                .materialize_block_layout(&self.lua, key.width, key.show_thinking)
-        };
         let history = self.transcript.history();
         if let Some(index) = self.search.transcript_index.take() {
-            if let Some(index) = index.append_from_layout(key, &layout, history, base_key) {
+            if let Some(index) = index.append_from_layout(key, &layout, history) {
                 self.search.transcript_index = Some(index);
                 record_index_size(self.search.transcript_index.as_ref()?);
                 return self.search.transcript_index.as_ref();
@@ -206,9 +213,7 @@ impl TuiApp {
         }
 
         let _perf = smelt_perf::perf::begin("search:transcript:index_build");
-        self.search.transcript_index = Some(build_transcript_search_index(
-            key, &layout, history, base_key,
-        ));
+        self.search.transcript_index = Some(build_transcript_search_index(key, &layout, history));
         record_index_size(self.search.transcript_index.as_ref()?);
         self.search.transcript_index.as_ref()
     }
@@ -365,13 +370,13 @@ impl TuiApp {
             .matches
             .len()
             .saturating_add(SEARCH_TRANSCRIPT_PREFETCH_MATCHES);
-        let mut scanned_blocks = 0usize;
+        let mut scanned_entries = 0usize;
         let origin = match direction {
             SearchDirection::Forward => range.end,
             SearchDirection::Backward => previous_search_position(range.start),
         };
         while session.matches.len() < target_matches
-            && scanned_blocks < SEARCH_TRANSCRIPT_PREFETCH_BLOCKS
+            && scanned_entries < SEARCH_TRANSCRIPT_PREFETCH_ENTRIES
         {
             let Some(entry_index) =
                 self.next_unscanned_transcript_candidate(session, origin, direction)
@@ -379,7 +384,7 @@ impl TuiApp {
                 break;
             };
             self.scan_transcript_candidate(session, query, entry_index);
-            scanned_blocks += 1;
+            scanned_entries += 1;
         }
     }
 
@@ -433,7 +438,7 @@ impl TuiApp {
         if let Some(scanned) = session.scanned.get_mut(entry_index) {
             *scanned = true;
         }
-        smelt_perf::perf::record_value("search:transcript:scanned_blocks", 1);
+        smelt_perf::perf::record_value("search:transcript:scanned_entries", 1);
         smelt_perf::perf::record_value("search:transcript:scanned_rows", rows);
         if rows == 0 {
             return;

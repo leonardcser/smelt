@@ -522,7 +522,7 @@
 ---@field cache_key? string Persisted layout cache key; omit to opt out while active.
 ---@field priority? integer Higher priority plans first. Defaults to 0.
 ---@field min? integer Minimum adjacent matching blocks required. Defaults to 2.
----@field default_view? "collapsed"|"expanded" Initial presentation when the group first appears.
+---@field default_view? "collapsed"|"peek"|"expanded" Initial presentation when the group first appears.
 ---@field selector smelt.transcript.GroupSelector Declarative block matcher.
 ---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
 ---@field render fun(group: table, ctx: smelt.transcript.Context): table Virtual group renderer.

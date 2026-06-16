@@ -744,7 +744,7 @@ the selector metadata and the virtual-node renderer.
 | `cache_key` | `string` |  | Persisted layout cache key; omit to opt out while active. |
 | `priority` | `integer` |  | Higher priority plans first. Defaults to 0. |
 | `min` | `integer` |  | Minimum adjacent matching blocks required. Defaults to 2. |
-| `default_view` | `"collapsed"|"expanded"` |  | Initial presentation when the group first appears. |
+| `default_view` | `"collapsed"|"peek"|"expanded"` |  | Initial presentation when the group first appears. |
 | `selector` | [smelt.transcript.GroupSelector](types.md#smelttranscriptgroupselector) | yes | Declarative block matcher. |
 | `bucket` | `string|string[]` |  | Stable field names used to split adjacent matching runs. |
 | `render` | `fun(group: table, ctx: smelt.transcript.Context):` | yes | table Virtual group renderer. |

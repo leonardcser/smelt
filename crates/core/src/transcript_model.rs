@@ -346,8 +346,6 @@ pub struct BlockHistory {
     pub(crate) next_id: u64,
     tool_states: HashMap<String, ToolState>,
     tool_display_hashes: HashMap<String, u64>,
-    /// Absent entries default to `ViewState::Expanded`.
-    pub(crate) view_states: HashMap<BlockId, ViewState>,
     /// Absent entries default to `Status::Done`.
     pub(crate) statuses: HashMap<BlockId, Status>,
     /// Optional provenance for blocks projected from durable history or session checkpoints.
@@ -368,7 +366,6 @@ impl BlockHistory {
             next_id: 0,
             tool_states: HashMap::new(),
             tool_display_hashes: HashMap::new(),
-            view_states: HashMap::new(),
             statuses: HashMap::new(),
             origins: HashMap::new(),
             finished_blocks: Vec::new(),
@@ -425,23 +422,6 @@ impl BlockHistory {
         self.origins.values().any(|origin| {
             matches!(origin, BlockOrigin::History(history_index) if *history_index >= before_history_index)
         })
-    }
-
-    pub(crate) fn view_state(&self, id: BlockId) -> ViewState {
-        self.view_states.get(&id).copied().unwrap_or_default()
-    }
-
-    pub(crate) fn set_view_state(&mut self, id: BlockId, state: ViewState) {
-        let prev = self.view_states.get(&id).copied().unwrap_or_default();
-        if prev == state {
-            return;
-        }
-        if matches!(state, ViewState::Expanded) {
-            self.view_states.remove(&id);
-        } else {
-            self.view_states.insert(id, state);
-        }
-        self.bump_generation();
     }
 
     #[cfg(test)]
@@ -542,7 +522,6 @@ impl BlockHistory {
         for id in removed {
             self.blocks.remove(&id);
             self.content_hashes.remove(&id);
-            self.view_states.remove(&id);
             self.statuses.remove(&id);
             self.origins.remove(&id);
         }
@@ -613,7 +592,6 @@ impl BlockHistory {
         self.next_id = 0;
         self.tool_states.clear();
         self.tool_display_hashes.clear();
-        self.view_states.clear();
         self.statuses.clear();
         self.origins.clear();
         self.bump_generation();
@@ -635,7 +613,7 @@ impl BlockHistory {
         }
     }
 
-    /// Substitute the actual per-block view state and content hash into a base
+    /// Substitute the actual per-block content and sidecar hash into a base
     /// `LayoutKey` so cache lookups and layout passes agree.
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
         let sidecar_hash = match self.blocks.get(&id) {
@@ -645,7 +623,6 @@ impl BlockHistory {
             _ => 0,
         };
         LayoutKey {
-            view_state: self.view_state(id),
             content_hash: self.content_hash(id),
             sidecar_hash,
             ..base
@@ -660,7 +637,6 @@ impl BlockHistory {
         for id in removed {
             self.blocks.remove(&id);
             self.content_hashes.remove(&id);
-            self.view_states.remove(&id);
             self.statuses.remove(&id);
             self.origins.remove(&id);
         }
@@ -919,43 +895,6 @@ mod tests {
     }
 
     #[test]
-    fn set_view_state_to_same_value_is_noop_and_skips_generation_bump() {
-        let mut history = BlockHistory::new();
-        let id = history.push(Block::Text {
-            content: "x".into(),
-        });
-        let g = history.generation();
-        history.set_view_state(id, ViewState::Expanded);
-        assert_eq!(history.generation(), g);
-    }
-
-    #[test]
-    fn set_view_state_to_expanded_removes_entry_and_bumps_generation() {
-        let mut history = BlockHistory::new();
-        let id = history.push(Block::Text {
-            content: "x".into(),
-        });
-        history.set_view_state(id, ViewState::Collapsed);
-        let g = history.generation();
-        history.set_view_state(id, ViewState::Expanded);
-        assert_eq!(history.view_state(id), ViewState::Expanded);
-        assert!(!history.view_states.contains_key(&id));
-        assert_ne!(history.generation(), g);
-    }
-
-    #[test]
-    fn set_view_state_to_non_expanded_inserts_and_bumps() {
-        let mut history = BlockHistory::new();
-        let id = history.push(Block::Text {
-            content: "x".into(),
-        });
-        let g = history.generation();
-        history.set_view_state(id, ViewState::TrimmedHead { keep: 5 });
-        assert_ne!(history.generation(), g);
-        assert_eq!(history.view_state(id), ViewState::TrimmedHead { keep: 5 });
-    }
-
-    #[test]
     fn set_status_streaming_then_done_pushes_finished_block() {
         let mut history = BlockHistory::new();
         let id = history.push(Block::Text {
@@ -1016,13 +955,11 @@ mod tests {
         history.push(Block::Text {
             content: "b".into(),
         });
-        history.set_view_state(id, ViewState::Collapsed);
         history.set_status(id, Status::Streaming);
         let g = history.generation();
         history.clear();
         assert!(history.is_empty());
         assert_eq!(history.next_id, 0);
-        assert!(history.view_states.is_empty());
         assert!(history.statuses.is_empty());
         assert!(history.tool_states.is_empty());
         assert_ne!(history.generation(), g);
@@ -1091,16 +1028,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_key_substitutes_view_state_and_content_hash() {
+    fn resolve_key_substitutes_content_and_sidecar_hashes() {
         let mut history = BlockHistory::new();
         let id = history.push(Block::Text {
             content: "x".into(),
         });
-        history.set_view_state(id, ViewState::Collapsed);
         let base = LayoutKey {
             width: 80,
             show_thinking: true,
-            view_state: ViewState::Expanded,
+            view_state: ViewState::Collapsed,
             content_hash: 0,
             sidecar_hash: 0,
         };

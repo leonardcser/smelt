@@ -121,6 +121,13 @@ struct ExactNodeRow {
     exact_height: Option<RowIndex>,
 }
 
+#[derive(serde::Serialize)]
+struct SemanticLayoutNodeKey {
+    id: RenderNodeId,
+    key: NodeLayoutKey,
+    exact_height: Option<RowIndex>,
+}
+
 impl ExactNodeRow {
     fn measured_or_estimated_height(&self) -> RowIndex {
         self.exact_height.unwrap_or(self.estimated_height)
@@ -322,6 +329,25 @@ impl ExactRowIndex {
         self.prefix_rows.last().copied().unwrap_or(0)
     }
 
+    fn semantic_layout_hash(&self) -> u64 {
+        smelt_core::utils::hash_serializable(&(
+            self.generation,
+            self.renderer_generation,
+            self.renderer_cache_key,
+            self.presentation_generation,
+            self.width,
+            self.show_thinking,
+            self.nodes
+                .iter()
+                .map(|node| SemanticLayoutNodeKey {
+                    id: node.id,
+                    key: node.key,
+                    exact_height: node.exact_height,
+                })
+                .collect::<Vec<_>>(),
+        ))
+    }
+
     fn start_index_for_row(&self, row: RowIndex) -> usize {
         let idx = self.prefix_rows.partition_point(|prefix| *prefix <= row);
         idx.saturating_sub(1).min(self.nodes.len())
@@ -349,7 +375,7 @@ impl ExactRowIndex {
             .min(self.nodes.len())
     }
 
-    fn block_range_for_rows(&self, rows: std::ops::Range<RowIndex>) -> std::ops::Range<usize> {
+    fn node_range_for_rows(&self, rows: std::ops::Range<RowIndex>) -> std::ops::Range<usize> {
         if rows.start >= rows.end {
             return 0..0;
         }
@@ -530,6 +556,21 @@ struct LayoutEntry {
     rows: RowIndex,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptSearchLayout {
+    pub(crate) generation: u64,
+    pub(crate) entries: Vec<TranscriptSearchLayoutEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptSearchLayoutEntry {
+    pub(crate) id: RenderNodeId,
+    pub(crate) key: NodeLayoutKey,
+    pub(crate) block_ids: Vec<BlockId>,
+    pub(crate) first_row: RowIndex,
+    pub(crate) rows: RowIndex,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 struct ProjectKey {
     generation: u64,
@@ -558,7 +599,7 @@ pub(crate) struct ProjectionPlan {
     scroll_target: ScrollTarget,
     scroll_top: RowIndex,
     viewport_rows: u16,
-    block_range: std::ops::Range<usize>,
+    node_range: std::ops::Range<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -620,8 +661,8 @@ fn layout_view_state(
 }
 
 impl ProjectionPlan {
-    pub(crate) fn block_range(&self) -> std::ops::Range<usize> {
-        self.block_range.clone()
+    pub(crate) fn node_range(&self) -> std::ops::Range<usize> {
+        self.node_range.clone()
     }
 }
 
@@ -1066,7 +1107,7 @@ impl TranscriptProjection {
         let _ = compiled;
     }
 
-    fn ensure_block_indices(
+    fn ensure_node_indices(
         &mut self,
         env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
@@ -1292,7 +1333,7 @@ impl TranscriptProjection {
                 *last as u64,
             );
         }
-        self.ensure_block_indices(env, history, missing.iter().copied());
+        self.ensure_node_indices(env, history, missing.iter().copied());
         for i in missing {
             self.measure_cached_layout_height(history, i, renderer_generation, renderer_cache_key);
         }
@@ -1349,12 +1390,12 @@ impl TranscriptProjection {
     fn exact_block_layout(&self, history: &BlockHistory) -> Vec<LayoutEntry> {
         let mut layout = Vec::with_capacity(self.measurements.active.nodes.len());
         let mut running_total: RowIndex = 0;
-        for (i, node) in self.measurements.active.nodes.iter().enumerate() {
+        for (i, measured_node) in self.measurements.active.nodes.iter().enumerate() {
             debug_assert!(
-                node.exact_height.is_some(),
+                measured_node.exact_height.is_some(),
                 "exact block layout requested before height measurement"
             );
-            let Some(exact_height) = node.exact_height else {
+            let Some(exact_height) = measured_node.exact_height else {
                 continue;
             };
             let gap = (self
@@ -1363,18 +1404,71 @@ impl TranscriptProjection {
                 as RowIndex)
                 .min(exact_height);
             running_total = running_total.saturating_add(gap);
-            let Some(block_id) = node.id.as_block_id() else {
-                running_total = running_total.saturating_add(exact_height.saturating_sub(gap));
-                continue;
-            };
-            layout.push(LayoutEntry {
-                id: block_id,
-                start: running_total,
-                rows: exact_height.saturating_sub(gap),
-            });
-            running_total = running_total.saturating_add(exact_height.saturating_sub(gap));
+            let start = running_total;
+            let rows = exact_height.saturating_sub(gap);
+            match self.render_plan.node(i) {
+                Some(RenderNode::Block { id, .. }) => layout.push(LayoutEntry {
+                    id: *id,
+                    start,
+                    rows,
+                }),
+                Some(RenderNode::Group { child_ids, .. }) => {
+                    layout.extend(child_ids.iter().copied().map(|id| LayoutEntry {
+                        id,
+                        start,
+                        rows,
+                    }));
+                }
+                None => {}
+            }
+            running_total = running_total.saturating_add(rows);
         }
         layout
+    }
+
+    fn exact_search_layout(
+        &self,
+        generation: u64,
+        history: &BlockHistory,
+    ) -> TranscriptSearchLayout {
+        let mut entries = Vec::with_capacity(self.measurements.active.nodes.len());
+        let mut running_total: RowIndex = 0;
+        for (i, measured_node) in self.measurements.active.nodes.iter().enumerate() {
+            debug_assert!(
+                measured_node.exact_height.is_some(),
+                "search layout requested before height measurement"
+            );
+            let Some(exact_height) = measured_node.exact_height else {
+                continue;
+            };
+            let gap = (self
+                .render_plan
+                .rendered_node_gap(history, i, exact_height as usize)
+                as RowIndex)
+                .min(exact_height);
+            running_total = running_total.saturating_add(gap);
+            let first_row = running_total;
+            let rows = exact_height.saturating_sub(gap);
+            let block_ids = match self.render_plan.node(i) {
+                Some(RenderNode::Block { id, .. }) => vec![*id],
+                Some(RenderNode::Group { child_ids, .. }) => child_ids.clone(),
+                None => Vec::new(),
+            };
+            if !block_ids.is_empty() {
+                entries.push(TranscriptSearchLayoutEntry {
+                    id: measured_node.id,
+                    key: measured_node.key,
+                    block_ids,
+                    first_row,
+                    rows,
+                });
+            }
+            running_total = running_total.saturating_add(rows);
+        }
+        TranscriptSearchLayout {
+            generation,
+            entries,
+        }
     }
 
     pub(crate) fn exact_total_rows(
@@ -1716,13 +1810,13 @@ impl TranscriptProjection {
                 start..total_rows
             }
         };
-        let block_range = self.measurements.active.block_range_for_rows(row_window);
+        let node_range = self.measurements.active.node_range_for_rows(row_window);
         ProjectionPlan {
             key,
             scroll_target,
             scroll_top,
             viewport_rows,
-            block_range,
+            node_range,
         }
     }
 
@@ -1858,9 +1952,9 @@ impl TranscriptProjection {
         let _perf = smelt_perf::perf::begin("transcript:project_visible_range");
         smelt_perf::perf::record_value(
             "transcript:project_visible_range:blocks",
-            plan.block_range.len() as u64,
+            plan.node_range.len() as u64,
         );
-        let materialized = self.collect_blocks_range(
+        let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
                 lua,
                 plan.key.show_thinking,
@@ -1869,7 +1963,7 @@ impl TranscriptProjection {
             ),
             history,
             theme,
-            plan.block_range(),
+            plan.node_range(),
         );
         let row_base = materialized.row_base;
         let total_rows = materialized.total_rows;
@@ -1897,18 +1991,18 @@ impl TranscriptProjection {
         }
     }
 
-    fn collect_blocks_range(
+    fn collect_nodes_range(
         &mut self,
         env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
         theme: &Theme,
-        block_range: std::ops::Range<usize>,
+        node_range: std::ops::Range<usize>,
     ) -> MaterializedTranscriptRange {
-        let _perf = smelt_perf::perf::begin("transcript:collect_blocks_range");
-        let start = block_range.start.min(self.measurements.active.nodes.len());
-        let end = block_range.end.min(self.measurements.active.nodes.len());
+        let _perf = smelt_perf::perf::begin("transcript:collect_nodes_range");
+        let start = node_range.start.min(self.measurements.active.nodes.len());
+        let end = node_range.end.min(self.measurements.active.nodes.len());
         smelt_perf::perf::record_value(
-            "transcript:collect_blocks_range:blocks",
+            "transcript:collect_nodes_range:blocks",
             end.saturating_sub(start) as u64,
         );
         #[cfg(test)]
@@ -1929,7 +2023,7 @@ impl TranscriptProjection {
         };
 
         let block_indices = start..end;
-        self.ensure_block_indices(env, history, block_indices.clone());
+        self.ensure_node_indices(env, history, block_indices.clone());
         for block_index in block_indices {
             let id = self.measurements.active.nodes[block_index].id;
             let key = self.measurements.active.nodes[block_index].key;
@@ -2054,6 +2148,18 @@ impl TranscriptProjection {
             .collect()
     }
 
+    pub(crate) fn materialize_search_layout(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+    ) -> TranscriptSearchLayout {
+        self.rebuild_row_index(lua, history, width, show_thinking);
+        let generation = self.measurements.active.semantic_layout_hash();
+        self.exact_search_layout(generation, history)
+    }
+
     /// Render the full transcript history into a regular buffer. This is for
     /// small transcript-shaped surfaces outside the main transcript viewport
     /// (for example a streaming `/btw` dialog) that still want the exact same
@@ -2068,7 +2174,7 @@ impl TranscriptProjection {
         theme: &Theme,
     ) {
         self.rebuild_row_index(lua, history, width, show_thinking);
-        let materialized = self.collect_blocks_range(
+        let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
                 lua,
                 show_thinking,
@@ -2146,7 +2252,7 @@ impl TranscriptProjection {
         }
         let mut rows: Vec<String> = Vec::new();
         let block_indices = 0..self.measurements.active.nodes.len();
-        self.ensure_block_indices(env, history, block_indices.clone());
+        self.ensure_node_indices(env, history, block_indices.clone());
         for i in block_indices {
             let Some(node) = self.measurements.active.nodes.get(i) else {
                 continue;
@@ -2212,12 +2318,12 @@ impl TranscriptProjection {
             return DisplayRows::empty();
         }
         let end = end.min(total_rows);
-        let block_range = self.measurements.active.block_range_for_rows(start..end);
-        if block_range.start >= block_range.end {
+        let node_range = self.measurements.active.node_range_for_rows(start..end);
+        if node_range.start >= node_range.end {
             return DisplayRows::empty();
         }
 
-        let materialized = self.collect_blocks_range(
+        let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
                 lua,
                 show_thinking,
@@ -2226,7 +2332,7 @@ impl TranscriptProjection {
             ),
             history,
             theme,
-            block_range,
+            node_range,
         );
         let local_start = row_to_usize(start.saturating_sub(materialized.row_base));
         let local_end =
@@ -2295,16 +2401,16 @@ impl TranscriptProjection {
             return CopyOutput::default();
         }
         let end_row = range.end.row.min(total_rows.saturating_sub(1));
-        let block_range = self
+        let node_range = self
             .measurements
             .active
-            .block_range_for_rows(range.start.row..end_row.saturating_add(1));
-        if block_range.start >= block_range.end {
+            .node_range_for_rows(range.start.row..end_row.saturating_add(1));
+        if node_range.start >= node_range.end {
             return CopyOutput::default();
         }
 
         let mut scratch = Buffer::new(BufId(0), BufCreateOpts::default());
-        let materialized = self.collect_blocks_range(
+        let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
                 lua,
                 show_thinking,
@@ -2313,7 +2419,7 @@ impl TranscriptProjection {
             ),
             history,
             theme,
-            block_range,
+            node_range,
         );
         let row_base = materialized.row_base;
         scratch.set_all_lines(materialized.texts);
@@ -2559,7 +2665,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_override_collapses_block_without_mutating_history_view_state() {
+    fn fold_override_collapses_block_without_mutating_semantic_layout_key() {
         let lua = test_lua();
         let mut transcript = Transcript::new();
         transcript.push(Block::Text {
@@ -3330,6 +3436,51 @@ mod tests {
         let collapsed = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
         assert!(collapsed.iter().any(|line| line == "* read_file ×2"));
         assert!(!collapsed.iter().any(|line| line == "  2 lines"));
+    }
+
+    #[test]
+    fn grouped_children_remain_in_semantic_block_layout() {
+        let lua = test_lua();
+        install_read_file_renderer(&lua);
+        let mut transcript = Transcript::new();
+        push_named_tool(
+            &mut transcript,
+            "read-1",
+            "read_file",
+            "crates/core/src/transcript_model.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "crates/core/src/transcript_model.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "read-2",
+            "read_file",
+            "crates/tui/src/content/display_layout.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "crates/tui/src/content/display_layout.rs")]),
+        );
+        let first = transcript.history.order[0];
+        let second = transcript.history.order[1];
+        let mut projection = TranscriptProjection::new();
+
+        let layout = projection.materialize_block_layout(&lua, &mut transcript.history, 80, false);
+        let search_layout =
+            projection.materialize_search_layout(&lua, &mut transcript.history, 80, false);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [crate::content::render_plan::RenderNode::Group { name, child_ids, .. }] if name == "read_file_batch" && child_ids.as_slice() == [first, second]
+        ));
+        assert_eq!(layout.len(), 2);
+        assert_eq!(layout[0].0, first);
+        assert_eq!(layout[1].0, second);
+        assert_eq!(layout[0].1, layout[1].1);
+        assert_eq!(layout[0].2, layout[1].2);
+        assert!(layout[0].2 > 0);
+        assert_eq!(search_layout.entries.len(), 1);
+        assert_eq!(search_layout.entries[0].block_ids, vec![first, second]);
+        assert_eq!(search_layout.entries[0].first_row, layout[0].1);
+        assert_eq!(search_layout.entries[0].rows, layout[0].2);
     }
 
     #[test]

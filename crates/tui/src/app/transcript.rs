@@ -99,6 +99,20 @@ impl TranscriptView {
         )
     }
 
+    pub(crate) fn materialize_search_layout(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        show_thinking: bool,
+    ) -> crate::content::transcript_buf::TranscriptSearchLayout {
+        self.projection.materialize_search_layout(
+            lua,
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+        )
+    }
+
     pub(crate) fn visible_block_layout(
         &self,
     ) -> impl Iterator<
