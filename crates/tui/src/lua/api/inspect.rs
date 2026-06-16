@@ -14,7 +14,7 @@ pub(super) fn register(
         lua,
         smelt,
         "inspect",
-        "Local session introspection web UI. `smelt.inspect.url()` reads the running server URL; the optional `inspect` plugin adds `smelt.inspect.start()` and `smelt.inspect.stop()`.",
+        "Local session introspection web UI. `smelt.inspect.url()` reads the running server URL; the optional `inspect` plugin adds `smelt.inspect.start()`, `smelt.inspect.stop()`, and `smelt.inspect.open()`.",
         Tier::UiHost,
     )?;
 
@@ -70,6 +70,31 @@ pub(super) fn register(
                 });
                 Ok(())
             })
+        },
+    )?;
+
+    inspect.private_fn(
+        "__open_url",
+        &["url"],
+        move |lua, url: String| -> LuaResult<mlua::Table> {
+            let result = lua.create_table()?;
+            match engine::browser::open_url_if_available(&url) {
+                engine::browser::BrowserOpenResult::Opened => {
+                    result.set("ok", true)?;
+                    result.set("opened", true)?;
+                }
+                engine::browser::BrowserOpenResult::Unavailable(reason) => {
+                    result.set("ok", false)?;
+                    result.set("opened", false)?;
+                    result.set("reason", reason)?;
+                }
+                engine::browser::BrowserOpenResult::Failed(err) => {
+                    result.set("ok", false)?;
+                    result.set("opened", false)?;
+                    result.set("error", err)?;
+                }
+            }
+            Ok(result)
         },
     )?;
 

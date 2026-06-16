@@ -774,6 +774,10 @@ pub struct RequestAttemptInfo<'a> {
     pub attempt: u32,
     pub elapsed_ms: u64,
     pub result: Result<&'a LLMResponse, &'a ProviderError>,
+    /// HTTP status returned by the provider, when a response was received.
+    pub http_status: Option<u16>,
+    /// Raw HTTP error body, capped by the request log writer.
+    pub error_body: Option<&'a str>,
     /// Verbatim non-streaming response body, available only for non-streaming
     /// requests.
     pub raw_response: Option<&'a serde_json::Value>,
@@ -1099,21 +1103,29 @@ impl Provider {
         let max_retries = 9;
         let max_stream_retries = 5;
 
-        let emit_attempt = |attempt: u32,
-                            elapsed_ms: u64,
-                            result: Result<&LLMResponse, &ProviderError>,
-                            raw_response: Option<&serde_json::Value>,
-                            url: &str| {
+        struct AttemptEvent<'a> {
+            attempt: u32,
+            elapsed_ms: u64,
+            result: Result<&'a LLMResponse, &'a ProviderError>,
+            raw_response: Option<&'a serde_json::Value>,
+            http_status: Option<u16>,
+            error_body: Option<&'a str>,
+            url: &'a str,
+        }
+
+        let emit_attempt = |event: AttemptEvent<'_>| {
             if let Some(cb) = opts.on_attempt {
                 cb(RequestAttemptInfo {
-                    url,
+                    url: event.url,
                     provider_kind: self.kind,
                     model,
                     body: &body,
-                    attempt,
-                    elapsed_ms,
-                    result,
-                    raw_response,
+                    attempt: event.attempt,
+                    elapsed_ms: event.elapsed_ms,
+                    result: event.result,
+                    http_status: event.http_status,
+                    error_body: event.error_body,
+                    raw_response: event.raw_response,
                 });
             }
         };
@@ -1158,12 +1170,33 @@ impl Provider {
             let resp = tokio::select! {
                 biased;
                 _ = opts.cancel.cancelled() => {
-                    return Err(ProviderError::Cancelled);
+                    let err = ProviderError::Cancelled;
+                    let elapsed = self.clock.instant_now().duration_since(request_start);
+                    emit_attempt(AttemptEvent {
+                        attempt: attempt as u32,
+                        elapsed_ms: elapsed.as_millis() as u64,
+                        result: Err(&err),
+                        raw_response: None,
+                        http_status: None,
+                        error_body: None,
+                        url: &url,
+                    });
+                    return Err(err);
                 }
                 result = req.send() => match result {
                     Ok(r) => r,
                     Err(e) => {
                         let err = ProviderError::Network(e.to_string());
+                        let elapsed = self.clock.instant_now().duration_since(request_start);
+                        emit_attempt(AttemptEvent {
+                            attempt: attempt as u32,
+                            elapsed_ms: elapsed.as_millis() as u64,
+                            result: Err(&err),
+                            raw_response: None,
+                            http_status: None,
+                            error_body: None,
+                            url: &url,
+                        });
                         log::entry(log::Level::Warn, "request_error", &serde_json::json!({
                             "attempt": attempt,
                             "error": format!("{e:?}"),
@@ -1186,10 +1219,20 @@ impl Provider {
 
                 let err = ProviderError::from_http_at(
                     code,
-                    text,
+                    text.clone(),
                     retry_after,
                     unix_secs(self.clock.system_now()),
                 );
+                let elapsed = self.clock.instant_now().duration_since(request_start);
+                emit_attempt(AttemptEvent {
+                    attempt: attempt as u32,
+                    elapsed_ms: elapsed.as_millis() as u64,
+                    result: Err(&err),
+                    raw_response: None,
+                    http_status: Some(code),
+                    error_body: Some(&text),
+                    url: &url,
+                });
 
                 log::entry(
                     log::Level::Warn,
@@ -1256,6 +1299,8 @@ impl Provider {
                 return Err(err);
             }
 
+            let http_status = Some(resp.status().as_u16());
+
             if is_codex && self.turn_state.lock().unwrap().is_none() {
                 if let Some(val) = resp.headers().get("x-codex-turn-state") {
                     if let Ok(s) = val.to_str() {
@@ -1278,40 +1323,62 @@ impl Provider {
                         )
                         .await,
                     None,
+                    http_status,
+                    None,
                 )
             } else {
-                let data: serde_json::Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+                match resp.text().await {
+                    Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(data) => {
+                            if log::Level::Debug.enabled() {
+                                log::entry(
+                                    log::Level::Debug,
+                                    "raw_response",
+                                    &serde_json::json!({
+                                        "url": url,
+                                        "provider_kind": format!("{:?}", self.kind),
+                                        "wire_api": format!("{:?}", request_wire),
+                                        "data": data,
+                                    }),
+                                );
+                            }
 
-                if log::Level::Debug.enabled() {
-                    log::entry(
-                        log::Level::Debug,
-                        "raw_response",
-                        &serde_json::json!({
-                            "url": url,
-                            "provider_kind": format!("{:?}", self.kind),
-                            "wire_api": format!("{:?}", request_wire),
-                            "data": data,
-                        }),
-                    );
+                            (
+                                request_wire.parse_response(&data),
+                                Some(data),
+                                http_status,
+                                None,
+                            )
+                        }
+                        Err(e) => (
+                            Err(ProviderError::InvalidResponse(e.to_string())),
+                            None,
+                            http_status,
+                            Some(text),
+                        ),
+                    },
+                    Err(e) => (
+                        Err(ProviderError::InvalidResponse(e.to_string())),
+                        None,
+                        http_status,
+                        None,
+                    ),
                 }
-
-                (request_wire.parse_response(&data), Some(data))
             };
 
-            let (parsed, raw) = match parsed_result {
-                (Ok(parsed), raw) => (parsed, raw),
-                (Err(err), _) if attempt < max_stream_retries => {
+            let (parsed, raw, status) = match parsed_result {
+                (Ok(parsed), raw, status, _) => (parsed, raw, status),
+                (Err(err), _, status, error_body) if attempt < max_stream_retries => {
                     let elapsed = self.clock.instant_now().duration_since(request_start);
-                    emit_attempt(
-                        attempt as u32,
-                        elapsed.as_millis() as u64,
-                        Err(&err),
-                        None,
-                        &url,
-                    );
+                    emit_attempt(AttemptEvent {
+                        attempt: attempt as u32,
+                        elapsed_ms: elapsed.as_millis() as u64,
+                        result: Err(&err),
+                        raw_response: None,
+                        http_status: status,
+                        error_body: error_body.as_deref(),
+                        url: &url,
+                    });
                     let Some(delay) =
                         retry_delay_for(&err, attempt, None, unix_secs(self.clock.system_now()))
                     else {
@@ -1329,15 +1396,17 @@ impl Provider {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
-                (Err(err), _) => {
+                (Err(err), _, status, error_body) => {
                     let elapsed = self.clock.instant_now().duration_since(request_start);
-                    emit_attempt(
-                        attempt as u32,
-                        elapsed.as_millis() as u64,
-                        Err(&err),
-                        None,
-                        &url,
-                    );
+                    emit_attempt(AttemptEvent {
+                        attempt: attempt as u32,
+                        elapsed_ms: elapsed.as_millis() as u64,
+                        result: Err(&err),
+                        raw_response: None,
+                        http_status: status,
+                        error_body: error_body.as_deref(),
+                        url: &url,
+                    });
                     return Err(err);
                 }
             };
@@ -1351,13 +1420,15 @@ impl Provider {
                 }
             });
             let response = parsed.into_response(tokens_per_sec);
-            emit_attempt(
-                attempt as u32,
-                elapsed.as_millis() as u64,
-                Ok(&response),
-                raw.as_ref(),
-                &url,
-            );
+            emit_attempt(AttemptEvent {
+                attempt: attempt as u32,
+                elapsed_ms: elapsed.as_millis() as u64,
+                result: Ok(&response),
+                raw_response: raw.as_ref(),
+                http_status: status,
+                error_body: None,
+                url: &url,
+            });
 
             if log::Level::Debug.enabled() {
                 log::entry(

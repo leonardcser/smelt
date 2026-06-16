@@ -25,6 +25,11 @@ function smelt.inspect.stop()
 	return result.ok, result.error
 end
 
+-- Open the inspector URL in a browser when the host environment can do so.
+function smelt.inspect.open(url)
+	return smelt.inspect.__open_url(url)
+end
+
 function M.setup()
 	smelt.cmd.register("inspect", function(_arg)
 		local url, err = smelt.inspect.url()
@@ -32,7 +37,16 @@ function M.setup()
 			url, err = smelt.inspect.start()
 		end
 		if url then
-			notify("UI: " .. url)
+			local opened = smelt.inspect.open(url)
+			if opened.opened then
+				notify("Opened UI: " .. url)
+			elseif opened.error then
+				notify.error("UI: " .. url .. " (could not open browser: " .. opened.error .. ")")
+			elseif opened.reason then
+				notify("UI: " .. url .. " (browser auto-open unavailable: " .. opened.reason .. ")")
+			else
+				notify("UI: " .. url)
+			end
 		else
 			notify.error(err or "failed to start server")
 		end

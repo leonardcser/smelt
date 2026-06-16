@@ -1498,6 +1498,7 @@ mod tests {
                 r#"
                     require("smelt.plugins.inspect")
                     smelt.inspect.url = function() return "http://127.0.0.1:1234" end
+                    smelt.inspect.open = function(_) return {} end
                 "#,
             )
             .exec()

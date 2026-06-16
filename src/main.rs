@@ -116,6 +116,79 @@ enum ColorMode {
 enum Commands {
     /// Manage provider authentication (add providers, Codex or Copilot login/logout)
     Auth,
+    /// Start the local session/request inspector web UI
+    Inspect(InspectArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct InspectArgs {
+    /// Session id or prefix to open initially
+    #[arg(long, short)]
+    session: Option<String>,
+    /// Fixed loopback port to bind instead of an ephemeral port
+    #[arg(long)]
+    port: Option<u16>,
+    /// Force opening the browser even when GUI auto-detection is unavailable
+    #[arg(long, conflicts_with = "no_open")]
+    open: bool,
+    /// Do not open a browser; only print the URL
+    #[arg(long)]
+    no_open: bool,
+}
+
+fn inspect_url(base_url: &str, session: Option<&str>) -> Result<String, String> {
+    let Some(session) = session else {
+        return Ok(base_url.to_string());
+    };
+    if !tui::inspect_server::is_safe_session_ref(session) {
+        return Err("session must contain only ASCII letters, digits, '-' or '_'".to_string());
+    }
+    Ok(format!("{base_url}?session={session}"))
+}
+
+async fn run_inspect_command(args: InspectArgs) {
+    let mut server = match tui::inspect_server::Server::start_on_port(args.port).await {
+        Ok(server) => server,
+        Err(err) => {
+            eprintln!("error: failed to start inspector: {err}");
+            std::process::exit(1);
+        }
+    };
+    let url = match inspect_url(&server.url(), args.session.as_deref()) {
+        Ok(url) => url,
+        Err(err) => {
+            server.stop().await;
+            eprintln!("error: {err}");
+            std::process::exit(2);
+        }
+    };
+
+    println!("Smelt inspector: {url}");
+    if args.no_open {
+        println!("Browser auto-open disabled; press Ctrl-C to stop.");
+    } else if args.open {
+        match engine::browser::open_url(&url) {
+            Ok(()) => println!("Opened inspector in your browser."),
+            Err(err) => eprintln!("warning: could not open browser: {err}"),
+        }
+        println!("Press Ctrl-C to stop.");
+    } else {
+        match engine::browser::open_url_if_available(&url) {
+            engine::browser::BrowserOpenResult::Opened => {
+                println!("Opened inspector in your browser. Press Ctrl-C to stop.");
+            }
+            engine::browser::BrowserOpenResult::Unavailable(reason) => {
+                println!("Browser auto-open unavailable ({reason}); press Ctrl-C to stop.");
+            }
+            engine::browser::BrowserOpenResult::Failed(err) => {
+                eprintln!("warning: could not open browser: {err}");
+                println!("Press Ctrl-C to stop.");
+            }
+        }
+    }
+
+    let _ = tokio::signal::ctrl_c().await;
+    server.stop().await;
 }
 
 #[tokio::main]
@@ -171,9 +244,17 @@ async fn main() {
         *map = lua_flag_values;
     }
 
-    if let Some(Commands::Auth) = args.command {
-        setup::run_auth_command().await;
-        return;
+    if let Some(command) = args.command.take() {
+        match command {
+            Commands::Auth => {
+                setup::run_auth_command().await;
+                return;
+            }
+            Commands::Inspect(inspect_args) => {
+                run_inspect_command(inspect_args).await;
+                return;
+            }
+        }
     }
 
     if let Some(ref path) = args.config {

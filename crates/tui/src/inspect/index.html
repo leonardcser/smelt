@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smelt Session Inspector</title>
+<link rel="stylesheet" href="/assets/style.css">
+<script defer src="/assets/vendor/marked.min.js"></script>
+<script defer src="/assets/vendor/purify.min.js"></script>
+<script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+<header>
+  <h1><span class="icon" style="--icon:url('/assets/icons/database.svg')" aria-hidden="true"></span>Smelt Inspector</h1>
+  <span class="subtle">local session/request debugger</span>
+</header>
+<main>
+  <aside id="sidebar"><div class="empty">Loading sessions…</div></aside>
+  <section id="detail"><div class="empty">Select a session to inspect.</div></section>
+</main>
+</body>
+</html>

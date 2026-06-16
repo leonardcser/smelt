@@ -1,40 +1,33 @@
 //! Authentication façade for provider login/logout and cached model lists.
 
-use crate::browser::{self, BrowserStatus};
+use crate::browser::{self, BrowserOpenResult};
 use crate::provider;
 
 fn present_auth_link(progress: &LoginProgress<'_>, url: &str, code: &str) {
-    let status = browser::browser_status();
-    present_auth_link_with_opener(progress, url, code, status, browser::open_url);
+    present_auth_link_with_opener(progress, url, code, || browser::open_url_if_available(url));
 }
 
-fn present_auth_link_with_opener<F>(
-    progress: &LoginProgress<'_>,
-    url: &str,
-    code: &str,
-    status: BrowserStatus,
-    opener: F,
-) where
-    F: FnOnce(&str) -> Result<(), String>,
+fn present_auth_link_with_opener<F>(progress: &LoginProgress<'_>, url: &str, code: &str, opener: F)
+where
+    F: FnOnce() -> BrowserOpenResult,
 {
-    if status.can_open() {
-        match opener(url) {
-            Ok(()) => {
-                if code.is_empty() {
-                    (progress.on_message)("Opened authorization page in your browser.");
-                } else {
-                    (progress.on_message)(&format!(
-                        "Opened authorization page in your browser. Enter code if prompted: {code}"
-                    ));
-                }
-                return;
+    match opener() {
+        BrowserOpenResult::Opened => {
+            if code.is_empty() {
+                (progress.on_message)("Opened authorization page in your browser.");
+            } else {
+                (progress.on_message)(&format!(
+                    "Opened authorization page in your browser. Enter code if prompted: {code}"
+                ));
             }
-            Err(err) => {
-                (progress.on_message)(&format!("Could not open browser automatically: {err}"));
-            }
+            return;
         }
-    } else if let Some(reason) = status.reason() {
-        (progress.on_message)(&format!("Browser auto-open unavailable ({reason})."));
+        BrowserOpenResult::Unavailable(reason) => {
+            (progress.on_message)(&format!("Browser auto-open unavailable ({reason})."));
+        }
+        BrowserOpenResult::Failed(err) => {
+            (progress.on_message)(&format!("Could not open browser automatically: {err}"));
+        }
     }
 
     (progress.on_prompt)(url, code);
@@ -305,10 +298,6 @@ mod tests {
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn status(can_open: bool, reason: Option<&'static str>) -> BrowserStatus {
-        BrowserStatus::new(can_open, reason)
-    }
-
     #[test]
     fn present_auth_link_opens_when_browser_available() {
         let prompts = Mutex::new(Vec::<(String, String)>::new());
@@ -326,16 +315,13 @@ mod tests {
             on_message: &on_message,
         };
 
-        present_auth_link_with_opener(
-            &progress,
-            "https://example.test/auth",
-            "ABCD-1234",
-            status(true, None),
-            |url| {
-                opened.lock().unwrap().push(url.to_string());
-                Ok(())
-            },
-        );
+        present_auth_link_with_opener(&progress, "https://example.test/auth", "ABCD-1234", || {
+            opened
+                .lock()
+                .unwrap()
+                .push("https://example.test/auth".to_string());
+            BrowserOpenResult::Opened
+        });
 
         assert_eq!(
             *opened.lock().unwrap(),
@@ -364,13 +350,9 @@ mod tests {
             on_message: &on_message,
         };
 
-        present_auth_link_with_opener(
-            &progress,
-            "https://example.test/auth",
-            "",
-            status(false, Some("headless")),
-            |_| panic!("opener should not run"),
-        );
+        present_auth_link_with_opener(&progress, "https://example.test/auth", "", || {
+            BrowserOpenResult::Unavailable("headless")
+        });
 
         assert_eq!(
             prompts.lock().unwrap().as_slice(),
@@ -398,13 +380,9 @@ mod tests {
             on_message: &on_message,
         };
 
-        present_auth_link_with_opener(
-            &progress,
-            "https://example.test/auth",
-            "CODE",
-            status(true, None),
-            |_| Err("missing opener".to_string()),
-        );
+        present_auth_link_with_opener(&progress, "https://example.test/auth", "CODE", || {
+            BrowserOpenResult::Failed("missing opener".to_string())
+        });
 
         assert_eq!(
             prompts.lock().unwrap().as_slice(),

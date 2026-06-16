@@ -2,6 +2,19 @@ use std::ffi::OsString;
 use std::process::Stdio;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrowserOpenResult {
+    Opened,
+    Unavailable(&'static str),
+    Failed(String),
+}
+
+impl BrowserOpenResult {
+    pub fn opened(&self) -> bool {
+        matches!(self, Self::Opened)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserStatus {
     can_open: bool,
     reason: Option<&'static str>,
@@ -87,17 +100,23 @@ where
     }
 }
 
-fn browser_command_for(platform: BrowserPlatform, url: &str) -> Option<BrowserCommand> {
+fn browser_commands_for(platform: BrowserPlatform, url: &str) -> Vec<BrowserCommand> {
     match platform {
-        BrowserPlatform::Macos => Some(BrowserCommand {
+        BrowserPlatform::Macos => vec![BrowserCommand {
             program: "open",
             args: vec![url.to_string()],
-        }),
-        BrowserPlatform::Linux => Some(BrowserCommand {
-            program: "xdg-open",
-            args: vec![url.to_string()],
-        }),
-        BrowserPlatform::Windows => Some(BrowserCommand {
+        }],
+        BrowserPlatform::Linux => vec![
+            BrowserCommand {
+                program: "xdg-open",
+                args: vec![url.to_string()],
+            },
+            BrowserCommand {
+                program: "open",
+                args: vec![url.to_string()],
+            },
+        ],
+        BrowserPlatform::Windows => vec![BrowserCommand {
             program: "cmd",
             args: vec![
                 "/C".to_string(),
@@ -105,22 +124,69 @@ fn browser_command_for(platform: BrowserPlatform, url: &str) -> Option<BrowserCo
                 "".to_string(),
                 url.to_string(),
             ],
-        }),
-        BrowserPlatform::Other => None,
+        }],
+        BrowserPlatform::Other => Vec::new(),
+    }
+}
+
+fn validate_url(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    let allowed = lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("file://");
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "open_url: refusing to open {url:?} (only http(s)/mailto/file schemes are allowed)"
+        ))
     }
 }
 
 pub fn open_url(url: &str) -> Result<(), String> {
-    let command = browser_command_for(BrowserPlatform::current(), url)
-        .ok_or_else(|| "unsupported platform".to_string())?;
-    std::process::Command::new(command.program)
-        .args(command.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("failed to launch browser: {e}"))
+    validate_url(url)?;
+    let commands = browser_commands_for(BrowserPlatform::current(), url);
+    if commands.is_empty() {
+        return Err("unsupported platform".to_string());
+    }
+    let mut last_err = None;
+    for command in commands {
+        match std::process::Command::new(command.program)
+            .args(command.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(_) => return Ok(()),
+            Err(err) => last_err = Some(format!("{}: {err}", command.program)),
+        }
+    }
+    Err(format!(
+        "failed to launch browser: {}",
+        last_err.unwrap_or_else(|| "no launcher available".to_string())
+    ))
+}
+
+pub fn open_url_if_available(url: &str) -> BrowserOpenResult {
+    let status = browser_status();
+    open_url_with_status(url, status, open_url)
+}
+
+fn open_url_with_status<F>(url: &str, status: BrowserStatus, opener: F) -> BrowserOpenResult
+where
+    F: FnOnce(&str) -> Result<(), String>,
+{
+    if !status.can_open() {
+        return BrowserOpenResult::Unavailable(
+            status.reason().unwrap_or("browser auto-open unavailable"),
+        );
+    }
+    match opener(url) {
+        Ok(()) => BrowserOpenResult::Opened,
+        Err(err) => BrowserOpenResult::Failed(err),
+    }
 }
 
 #[cfg(test)]
@@ -167,24 +233,79 @@ mod tests {
     }
 
     #[test]
-    fn browser_command_matches_platform() {
+    fn open_url_with_status_reports_unavailable_without_opening() {
+        let result = open_url_with_status(
+            "https://example.test",
+            BrowserStatus::new(false, Some("headless")),
+            |_| panic!("opener should not be called"),
+        );
+
+        assert_eq!(result, BrowserOpenResult::Unavailable("headless"));
+    }
+
+    #[test]
+    fn open_url_with_status_reports_opened() {
+        let result = open_url_with_status(
+            "https://example.test",
+            BrowserStatus::new(true, None),
+            |url| {
+                assert_eq!(url, "https://example.test");
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, BrowserOpenResult::Opened);
+    }
+
+    #[test]
+    fn open_url_with_status_reports_open_failure() {
+        let result = open_url_with_status(
+            "https://example.test",
+            BrowserStatus::new(true, None),
+            |_| Err("missing opener".to_string()),
+        );
+
         assert_eq!(
-            browser_command_for(BrowserPlatform::Macos, "https://example.test"),
-            Some(BrowserCommand {
+            result,
+            BrowserOpenResult::Failed("missing opener".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_url_rejects_non_user_facing_schemes() {
+        assert!(validate_url("https://example.test").is_ok());
+        assert!(validate_url("http://example.test").is_ok());
+        assert!(validate_url("mailto:test@example.test").is_ok());
+        assert!(validate_url("file:///tmp/example.html").is_ok());
+        assert!(validate_url("javascript:alert(1)").is_err());
+        assert!(validate_url("-bad").is_err());
+    }
+
+    #[test]
+    fn browser_commands_match_platform() {
+        assert_eq!(
+            browser_commands_for(BrowserPlatform::Macos, "https://example.test"),
+            vec![BrowserCommand {
                 program: "open",
                 args: vec!["https://example.test".to_string()]
-            })
+            }]
         );
         assert_eq!(
-            browser_command_for(BrowserPlatform::Linux, "https://example.test"),
-            Some(BrowserCommand {
-                program: "xdg-open",
-                args: vec!["https://example.test".to_string()]
-            })
+            browser_commands_for(BrowserPlatform::Linux, "https://example.test"),
+            vec![
+                BrowserCommand {
+                    program: "xdg-open",
+                    args: vec!["https://example.test".to_string()]
+                },
+                BrowserCommand {
+                    program: "open",
+                    args: vec!["https://example.test".to_string()]
+                }
+            ]
         );
         assert_eq!(
-            browser_command_for(BrowserPlatform::Windows, "https://example.test"),
-            Some(BrowserCommand {
+            browser_commands_for(BrowserPlatform::Windows, "https://example.test"),
+            vec![BrowserCommand {
                 program: "cmd",
                 args: vec![
                     "/C".to_string(),
@@ -192,11 +313,11 @@ mod tests {
                     "".to_string(),
                     "https://example.test".to_string()
                 ]
-            })
+            }]
         );
         assert_eq!(
-            browser_command_for(BrowserPlatform::Other, "https://example.test"),
-            None
+            browser_commands_for(BrowserPlatform::Other, "https://example.test"),
+            Vec::<BrowserCommand>::new()
         );
     }
 }

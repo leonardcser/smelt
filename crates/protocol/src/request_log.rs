@@ -26,7 +26,13 @@ pub struct RequestLogEntry {
     pub api_base: String,
     pub model: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
     pub body: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_key: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,4 +78,6 @@ pub struct RequestError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }

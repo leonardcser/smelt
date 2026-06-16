@@ -76,7 +76,13 @@ fn build_entry(
         Err(_) => (None, None, None, None),
     };
 
-    let error = info.result.err().map(provider_error_to_log_error);
+    let error = info.result.err().map(|err| {
+        provider_error_to_log_error(
+            err,
+            info.http_status,
+            info.error_body.map(truncate_error_body),
+        )
+    });
 
     RequestLogEntry {
         request_id: ctx.request_id,
@@ -95,7 +101,18 @@ fn build_entry(
             .to_string(),
         model: info.model.to_string(),
         url: info.url.to_string(),
+        http_status: info.http_status,
         body: info.body.clone(),
+        prompt_cache_key: info
+            .body
+            .get("prompt_cache_key")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        stream: info
+            .body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         system_prompt: ctx.system_prompt,
         messages: ctx.messages,
         tools: ctx.tools,
@@ -110,25 +127,46 @@ fn build_entry(
     }
 }
 
-fn provider_error_to_log_error(err: &crate::provider::ProviderError) -> RequestError {
+fn provider_error_to_log_error(
+    err: &crate::provider::ProviderError,
+    http_status: Option<u16>,
+    body: Option<String>,
+) -> RequestError {
     use crate::provider::ProviderError;
     let (kind, status) = match err {
-        ProviderError::Cancelled => ("cancelled", None),
-        ProviderError::RateLimited { .. } => ("rate_limited", None),
-        ProviderError::QuotaExceeded(_) => ("quota", None),
-        ProviderError::Auth(_) => ("auth", None),
-        ProviderError::NotFound(_) => ("not_found", None),
+        ProviderError::Cancelled => ("cancelled", http_status),
+        ProviderError::RateLimited { .. } => ("rate_limited", http_status),
+        ProviderError::QuotaExceeded(_) => ("quota", http_status),
+        ProviderError::Auth(_) => ("auth", http_status),
+        ProviderError::NotFound(_) => ("not_found", http_status),
         ProviderError::Server { status, .. } => ("server", Some(*status)),
-        ProviderError::Network(_) => ("network", None),
-        ProviderError::Stream(_) => ("stream", None),
-        ProviderError::InvalidResponse(_) => ("invalid_response", None),
-        ProviderError::MaxRetries => ("max_retries", None),
+        ProviderError::Network(_) => ("network", http_status),
+        ProviderError::Stream(_) => ("stream", http_status),
+        ProviderError::InvalidResponse(_) => ("invalid_response", http_status),
+        ProviderError::MaxRetries => ("max_retries", http_status),
     };
     RequestError {
         kind: kind.to_string(),
         status,
         message: err.to_string(),
+        body,
     }
+}
+
+fn truncate_error_body(body: &str) -> String {
+    const LIMIT: usize = 64 * 1024;
+    if body.len() <= LIMIT {
+        return body.to_string();
+    }
+    let end = body
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|&idx| idx <= LIMIT)
+        .last()
+        .unwrap_or(0);
+    let mut out = body[..end].to_string();
+    out.push_str("\n… truncated …");
+    out
 }
 
 #[cfg(test)]
@@ -163,6 +201,18 @@ mod tests {
     }
 
     #[test]
+    fn truncates_error_body_on_char_boundary() {
+        let mut body = "a".repeat(64 * 1024 - 1);
+        body.push('é');
+        body.push_str("tail");
+
+        let truncated = truncate_error_body(&body);
+
+        assert!(truncated.ends_with("\n… truncated …"));
+        assert!(truncated.starts_with(&"a".repeat(64 * 1024 - 1)));
+    }
+
+    #[test]
     fn request_log_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let session_dir = tmp.path();
@@ -186,6 +236,8 @@ mod tests {
             elapsed_ms: 42,
             result: Ok(&resp),
             raw_response: Some(&body),
+            http_status: Some(200),
+            error_body: None,
         };
         let ctx = RequestContext {
             request_id: 7,
@@ -210,6 +262,8 @@ mod tests {
             elapsed_ms: 100,
             result: Err(&err),
             raw_response: None,
+            http_status: None,
+            error_body: None,
         };
         let ctx_err = RequestContext {
             request_id: 7,

@@ -4,11 +4,297 @@
 //! API backed by `smelt_core::session`. The engine writes `requests.jsonl`
 //! directly; this module only reads it.
 
-use std::path::PathBuf;
+use protocol::request_log::RequestLogEntry;
+use protocol::TokenUsage;
+use serde::Serialize;
+use std::io::{BufRead, BufReader as StdBufReader};
+use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-const INDEX_HTML: &str = include_str!("inspect.html");
+const INDEX_HTML: &str = include_str!("inspect/index.html");
+
+struct StaticAsset {
+    path: &'static str,
+    content_type: &'static str,
+    body: &'static str,
+}
+
+const INSPECT_ASSETS: &[StaticAsset] = &[
+    StaticAsset {
+        path: "style.css",
+        content_type: "text/css; charset=utf-8",
+        body: include_str!("inspect/style.css"),
+    },
+    StaticAsset {
+        path: "app.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/app.js"),
+    },
+    StaticAsset {
+        path: "format.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/format.js"),
+    },
+    StaticAsset {
+        path: "markdown.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/markdown.js"),
+    },
+    StaticAsset {
+        path: "json_view.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/json_view.js"),
+    },
+    StaticAsset {
+        path: "render_overview.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/render_overview.js"),
+    },
+    StaticAsset {
+        path: "render_conversation.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/render_conversation.js"),
+    },
+    StaticAsset {
+        path: "render_requests.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/render_requests.js"),
+    },
+    StaticAsset {
+        path: "vendor/marked.min.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/marked.min.js"),
+    },
+    StaticAsset {
+        path: "vendor/purify.min.js",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/purify.min.js"),
+    },
+    StaticAsset {
+        path: "vendor/shiki-core.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/shiki-core.mjs"),
+    },
+    StaticAsset {
+        path: "vendor/shiki-json.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/shiki-json.mjs"),
+    },
+    StaticAsset {
+        path: "vendor/shiki-github-dark-default.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/shiki-github-dark-default.mjs"),
+    },
+    StaticAsset {
+        path: "vendor/shiki-engine-javascript.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/shiki-engine-javascript.mjs"),
+    },
+    StaticAsset {
+        path: "vendor/node/process.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/node/process.mjs"),
+    },
+    StaticAsset {
+        path: "vendor/node/events.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/node/events.mjs"),
+    },
+    StaticAsset {
+        path: "vendor/node/tty.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/node/tty.mjs"),
+    },
+    StaticAsset {
+        path: "vendor/node/async_hooks.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        body: include_str!("inspect/vendor/node/async_hooks.mjs"),
+    },
+    StaticAsset {
+        path: "icons/account.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/account.svg"),
+    },
+    StaticAsset {
+        path: "icons/arrow-right.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/arrow-right.svg"),
+    },
+    StaticAsset {
+        path: "icons/check.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/check.svg"),
+    },
+    StaticAsset {
+        path: "icons/circle-outline.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/circle-outline.svg"),
+    },
+    StaticAsset {
+        path: "icons/comment-discussion.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/comment-discussion.svg"),
+    },
+    StaticAsset {
+        path: "icons/copy.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/copy.svg"),
+    },
+    StaticAsset {
+        path: "icons/dashboard.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/dashboard.svg"),
+    },
+    StaticAsset {
+        path: "icons/database.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/database.svg"),
+    },
+    StaticAsset {
+        path: "icons/debug-alt.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/debug-alt.svg"),
+    },
+    StaticAsset {
+        path: "icons/error.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/error.svg"),
+    },
+    StaticAsset {
+        path: "icons/eye.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/eye.svg"),
+    },
+    StaticAsset {
+        path: "icons/file-code.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/file-code.svg"),
+    },
+    StaticAsset {
+        path: "icons/folder.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/folder.svg"),
+    },
+    StaticAsset {
+        path: "icons/gear.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/gear.svg"),
+    },
+    StaticAsset {
+        path: "icons/history.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/history.svg"),
+    },
+    StaticAsset {
+        path: "icons/hubot.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/hubot.svg"),
+    },
+    StaticAsset {
+        path: "icons/json.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/json.svg"),
+    },
+    StaticAsset {
+        path: "icons/list-filter.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/list-filter.svg"),
+    },
+    StaticAsset {
+        path: "icons/note.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/note.svg"),
+    },
+    StaticAsset {
+        path: "icons/package.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/package.svg"),
+    },
+    StaticAsset {
+        path: "icons/pulse.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/pulse.svg"),
+    },
+    StaticAsset {
+        path: "icons/search.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/search.svg"),
+    },
+    StaticAsset {
+        path: "icons/server.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/server.svg"),
+    },
+    StaticAsset {
+        path: "icons/symbol-event.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/symbol-event.svg"),
+    },
+    StaticAsset {
+        path: "icons/symbol-method.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/symbol-method.svg"),
+    },
+    StaticAsset {
+        path: "icons/terminal.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/terminal.svg"),
+    },
+    StaticAsset {
+        path: "icons/tools.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/tools.svg"),
+    },
+    StaticAsset {
+        path: "icons/warning.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/warning.svg"),
+    },
+    StaticAsset {
+        path: "icons/zap.svg",
+        content_type: "image/svg+xml",
+        body: include_str!("inspect/icons/zap.svg"),
+    },
+];
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionListItem {
+    #[serde(flatten)]
+    meta: smelt_core::session::SessionMeta,
+    project: Option<String>,
+    path_group: Option<String>,
+    request_stats: RequestStats,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct RequestStats {
+    request_count: u64,
+    error_count: u64,
+    streaming_count: u64,
+    raw_response_count: u64,
+    total_cost_usd: f64,
+    total_elapsed_ms: u64,
+    total_prompt_tokens: u64,
+    total_completion_tokens: u64,
+    total_cache_read_tokens: u64,
+    total_cache_write_tokens: u64,
+    total_reasoning_tokens: u64,
+    latest_timestamp_ms: Option<u64>,
+    first_request_ms: Option<u64>,
+    latest_provider_kind: Option<String>,
+    latest_model: Option<String>,
+    latest_context_tokens: Option<u32>,
+    max_context_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionSummary {
+    id: String,
+    project: Option<String>,
+    path_group: Option<String>,
+    request_stats: RequestStats,
+}
 
 /// Handle to the running inspect server.
 pub struct Server {
@@ -20,7 +306,12 @@ pub struct Server {
 impl Server {
     /// Bind a loopback address on an ephemeral port and start serving.
     pub async fn start() -> std::io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        Self::start_on_port(None).await
+    }
+
+    /// Bind a loopback address on `port` (or an ephemeral port when `None`) and start serving.
+    pub async fn start_on_port(port: Option<u16>) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).await?;
         let local_addr = listener.local_addr()?;
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -91,17 +382,24 @@ async fn handle_connection(mut stream: TcpStream) {
 }
 
 async fn route(path: &str) -> (&'static str, &'static str, String) {
+    let path = path.split('?').next().unwrap_or(path);
     if let Some(rest) = path.strip_prefix("/api/sessions/") {
         let mut segments = rest.split('/');
         let id = segments.next().unwrap_or("");
+        if !is_safe_session_ref(id) {
+            return not_found();
+        }
         let suffix = segments.next();
         match suffix {
             None | Some("") => session_detail(id).await,
+            Some("summary") => session_summary(id).await,
             Some("requests") => session_requests(id).await,
             _ => not_found(),
         }
     } else if path == "/api/sessions" {
         list_sessions().await
+    } else if let Some(asset) = path.strip_prefix("/assets/") {
+        asset_response(asset)
     } else {
         spa_index()
     }
@@ -109,6 +407,14 @@ async fn route(path: &str) -> (&'static str, &'static str, String) {
 
 fn spa_index() -> (&'static str, &'static str, String) {
     ("200 OK", "text/html; charset=utf-8", INDEX_HTML.to_string())
+}
+
+fn asset_response(path: &str) -> (&'static str, &'static str, String) {
+    INSPECT_ASSETS
+        .iter()
+        .find(|asset| asset.path == path)
+        .map(|asset| ("200 OK", asset.content_type, asset.body.to_string()))
+        .unwrap_or_else(not_found)
 }
 
 fn not_found() -> (&'static str, &'static str, String) {
@@ -128,7 +434,7 @@ fn server_error(message: &str) -> (&'static str, &'static str, String) {
 }
 
 async fn list_sessions() -> (&'static str, &'static str, String) {
-    let sessions = match tokio::task::spawn_blocking(smelt_core::session::list_sessions).await {
+    let sessions = match tokio::task::spawn_blocking(list_session_items).await {
         Ok(s) => s,
         Err(e) => return server_error(&e.to_string()),
     };
@@ -146,6 +452,21 @@ async fn session_detail(id: &str) -> (&'static str, &'static str, String) {
     };
     match session {
         Some(session) => match serde_json::to_string(&session) {
+            Ok(body) => ("200 OK", "application/json", body),
+            Err(e) => server_error(&e.to_string()),
+        },
+        None => not_found(),
+    }
+}
+
+async fn session_summary(id: &str) -> (&'static str, &'static str, String) {
+    let id = id.to_string();
+    let summary = match tokio::task::spawn_blocking(move || build_session_summary(&id)).await {
+        Ok(s) => s,
+        Err(e) => return server_error(&e.to_string()),
+    };
+    match summary {
+        Some(summary) => match serde_json::to_string(&summary) {
             Ok(body) => ("200 OK", "application/json", body),
             Err(e) => server_error(&e.to_string()),
         },
@@ -176,6 +497,147 @@ async fn session_requests(id: &str) -> (&'static str, &'static str, String) {
 
 fn session_dir(id: &str) -> PathBuf {
     engine::state_dir().join("sessions").join(id)
+}
+
+pub fn is_safe_session_ref(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn list_session_items() -> Vec<SessionListItem> {
+    smelt_core::session::list_sessions()
+        .into_iter()
+        .map(|meta| {
+            let (project, path_group) = project_labels(meta.cwd.as_deref());
+            let request_stats = request_stats_for_session(&meta.id);
+            SessionListItem {
+                meta,
+                project,
+                path_group,
+                request_stats,
+            }
+        })
+        .collect()
+}
+
+fn build_session_summary(id: &str) -> Option<SessionSummary> {
+    let meta = smelt_core::session::list_sessions()
+        .into_iter()
+        .find(|meta| meta.id == id || meta.id.starts_with(id))?;
+    let (project, path_group) = project_labels(meta.cwd.as_deref());
+    Some(SessionSummary {
+        id: meta.id.clone(),
+        project,
+        path_group,
+        request_stats: request_stats_for_session(&meta.id),
+    })
+}
+
+fn project_labels(cwd: Option<&str>) -> (Option<String>, Option<String>) {
+    let Some(cwd) = cwd.filter(|s| !s.is_empty()) else {
+        return (None, None);
+    };
+    let path = Path::new(cwd);
+    let project = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| Some(cwd.to_string()));
+    let path_group = path
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    (project, path_group)
+}
+
+fn request_stats_for_session(id: &str) -> RequestStats {
+    let path = session_dir(id).join("requests.jsonl");
+    let Ok(file) = std::fs::File::open(path) else {
+        return RequestStats::default();
+    };
+    let mut stats = RequestStats::default();
+    for entry in StdBufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<RequestLogEntry>(&line).ok())
+    {
+        stats.record(&entry);
+    }
+    stats
+}
+
+impl RequestStats {
+    fn record(&mut self, entry: &RequestLogEntry) {
+        self.request_count += 1;
+        if entry.error.is_some() {
+            self.error_count += 1;
+        }
+        if entry.stream {
+            self.streaming_count += 1;
+        }
+        if entry
+            .response
+            .as_ref()
+            .and_then(|response| response.raw.as_ref())
+            .is_some()
+        {
+            self.raw_response_count += 1;
+        }
+        self.total_cost_usd += entry.cost_usd.unwrap_or(0.0);
+        self.total_elapsed_ms += entry.elapsed_ms.unwrap_or(0);
+        if let Some(usage) = entry.usage.as_ref() {
+            self.add_usage(usage);
+            if usage.context_tokens.is_some() {
+                self.latest_context_tokens = usage.context_tokens;
+            }
+            self.max_context_tokens = max_opt(self.max_context_tokens, usage.context_tokens);
+        }
+        self.first_request_ms = min_opt(self.first_request_ms, Some(entry.timestamp_ms));
+        self.latest_timestamp_ms = max_opt_u64(self.latest_timestamp_ms, Some(entry.timestamp_ms));
+        self.latest_provider_kind = Some(entry.provider_kind.clone());
+        self.latest_model = Some(entry.model.clone());
+    }
+
+    fn add_usage(&mut self, usage: &TokenUsage) {
+        self.total_prompt_tokens += u64::from(usage.prompt_tokens.unwrap_or(0));
+        self.total_completion_tokens += u64::from(usage.completion_tokens.unwrap_or(0));
+        self.total_cache_read_tokens += u64::from(usage.cache_read_tokens.unwrap_or(0));
+        self.total_cache_write_tokens += u64::from(usage.cache_write_tokens.unwrap_or(0));
+        self.total_reasoning_tokens += u64::from(usage.reasoning_tokens.unwrap_or(0));
+    }
+}
+
+fn min_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn max_opt_u64(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn max_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
