@@ -419,7 +419,9 @@ impl WindowSurface {
     pub fn supports_text_selection(self) -> bool {
         matches!(
             self.kind,
-            WindowSurfaceKind::ReadonlyText | WindowSurfaceKind::SelectableText
+            WindowSurfaceKind::ReadonlyText
+                | WindowSurfaceKind::SelectableText
+                | WindowSurfaceKind::List { .. }
         )
     }
 
@@ -3298,6 +3300,16 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
         assert!(!w.text_hit_at_mouse(&buf, trailing, vp).is_selectable());
+    }
+
+    #[test]
+    fn list_surfaces_support_text_selection() {
+        let mut w = make_win();
+        w.set_surface(WindowSurface::list(true));
+        assert!(w.supports_text_selection());
+
+        w.set_surface(WindowSurface::list(false));
+        assert!(w.supports_text_selection());
     }
 
     #[test]
