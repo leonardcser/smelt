@@ -92,6 +92,7 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
             end,
           },
           ui = {
+            size = function() return { width = 80, height = 24 } end,
             layout = {
               vbox = function(items) return items end,
               leaf = function(target, opts) return { target = target, opts = opts } end,
