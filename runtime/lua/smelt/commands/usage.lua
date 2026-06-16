@@ -1,5 +1,12 @@
--- `/usage` and `/cost` - show local session cost plus active-provider usage limits.
+-- `/usage` and `/cost` - show session cost plus active-provider usage limits.
+--
+-- Design:
+--   * Provider usage is cached and prefetched in the background on startup.
+--   * Opening the dialog renders whatever we have instantly; provider data is
+--     dimmed while a refresh is in flight and bright once fresh.
+--   * Closing the dialog unsubscribes from further updates.
 
+local cache = require("smelt.commands.usage.cache")
 local bar = require("smelt.bar")
 
 local DIM = { fg = "Comment" }
@@ -13,17 +20,32 @@ local function text_row(text, style) return row(span(text, style)) end
 local function blank() return row(span("", DIM)) end
 local function append(dst, src) for _, line in ipairs(src) do dst[#dst + 1] = line end end
 
-local function log_usage_error(provider, message, data)
-  data = data or {}
-  data.provider = provider
-  data.message = message
-  smelt.log.warn("usage_fetch_failed", data)
+-- ── Dimming ────────────────────────────────────────────────────────────
+
+local function dim_span(s)
+  local out = { text = s.text }
+  local style = {}
+  if type(s.style) == "table" then
+    for k, v in pairs(s.style) do style[k] = v end
+  end
+  style.dim = true
+  out.style = style
+  return out
 end
 
-local function usage_unavailable(provider, message, data, style)
-  log_usage_error(provider, message, data)
-  return { text_row(provider .. ": " .. message, style or DIM) }
+local function dim_line(line)
+  local out = {}
+  for _, s in ipairs(line) do out[#out + 1] = dim_span(s) end
+  return out
 end
+
+local function dim_lines(lines)
+  local out = {}
+  for _, line in ipairs(lines) do out[#out + 1] = dim_line(line) end
+  return out
+end
+
+-- ── Provider detection ─────────────────────────────────────────────────
 
 local function active_provider()
   local active = smelt.model()
@@ -45,6 +67,8 @@ local function is_kimi_provider(provider, api_base)
   api_base = (api_base or ""):lower()
   return provider == "kimi-code" or api_base:find("api.kimi.com/coding", 1, true) ~= nil
 end
+
+-- ── Formatting helpers ─────────────────────────────────────────────────
 
 local function pct(value)
   local n = tonumber(value)
@@ -117,6 +141,79 @@ local function usage_table_lines(rows)
   return lines
 end
 
+-- ── Shared fetching / error handling ───────────────────────────────────
+
+local function log_usage_error(provider, message, data)
+  data = data or {}
+  data.provider = provider
+  data.message = message
+  smelt.log.warn("usage_fetch_failed", data)
+end
+
+local function fetch_auth_json(provider, path)
+  local res, auth_err = smelt.auth.request(provider, { path = path })
+  if not res then
+    local msg = tostring(auth_err or "")
+    if msg:find("not logged in", 1, true) then
+      return nil, "not_logged_in", msg
+    end
+    if msg:find("sign in again", 1, true) or msg:find("refresh token", 1, true) then
+      return nil, "auth_expired", msg
+    end
+    return nil, "auth_error", msg
+  end
+
+  local payload = smelt.parse.json(res.body or "")
+  if res.status ~= 200 then
+    local body = tostring(res.body or "")
+    if tonumber(res.status) == 401 then
+      return nil, "auth_expired", body
+    elseif tonumber(res.status) == 403 then
+      return nil, "forbidden", body
+    end
+    return nil, "http_error", body
+  end
+
+  if type(payload) ~= "table" then
+    return nil, "invalid_json", tostring(res.body or ""):sub(1, 1000)
+  end
+
+  return payload, nil, nil
+end
+
+local ERROR_MESSAGES = {
+  codex = {
+    not_logged_in = "not logged in",
+    auth_expired = "authentication expired - run `smelt auth` to sign in again",
+    forbidden = "usage unavailable for this account",
+    invalid_json = "usage response was invalid - try again later",
+    auth_error = "usage unavailable - try again later",
+    http_error = "usage unavailable right now - try again later",
+    default = "usage unavailable right now - try again later",
+  },
+  kimi = {
+    not_logged_in = "not logged in",
+    auth_expired = "authentication expired - sign in to Kimi Code again",
+    forbidden = "usage unavailable for this account",
+    invalid_json = "usage response was invalid - try again later",
+    auth_error = "usage unavailable - check your connection and try again",
+    http_error = "usage unavailable right now - try again later",
+    default = "usage unavailable right now - try again later",
+  },
+}
+
+local function render_fetch_error(title, kind, detail, messages)
+  if kind == "not_logged_in" then
+    return { text_row(title .. ": " .. messages.not_logged_in, DIM) }
+  end
+  local style = (kind == "auth_expired") and ERR or DIM
+  local friendly = messages[kind] or messages.default
+  log_usage_error(title, friendly, { kind = kind, detail = detail })
+  return { text_row(title .. ": " .. friendly, style) }
+end
+
+-- ── Codex usage ────────────────────────────────────────────────────────
+
 local function add_codex_rate_limits(rows, details, prefix)
   if type(details) ~= "table" then return end
   for _, spec in ipairs({ { key = "primary_window", secondary = false }, { key = "secondary_window", secondary = true } }) do
@@ -135,47 +232,9 @@ local function add_codex_rate_limits(rows, details, prefix)
 end
 
 local function codex_usage_lines()
-  local res, auth_err = smelt.auth.request("codex", { path = "/wham/usage" })
-  if not res then
-    local msg = tostring(auth_err or "")
-    local friendly = "usage unavailable - try again later"
-    local style = DIM
-    if msg:find("not logged in", 1, true) then
-      return { text_row("Codex: not logged in", DIM) }
-    end
-    if msg:find("sign in again", 1, true) or msg:find("refresh token", 1, true) then
-      friendly = "authentication expired - run `smelt auth` to sign in again"
-      style = ERR
-    end
-    return usage_unavailable("Codex", friendly, {
-      kind = "auth",
-      error = msg,
-    }, style)
-  end
-
-  local payload = smelt.parse.json(res.body or "")
-  if res.status ~= 200 then
-    local body = tostring(res.body or "")
-    local message = "usage unavailable right now - try again later"
-    local style = DIM
-    if tonumber(res.status) == 401 then
-      message = "authentication expired - run `smelt auth` to sign in again"
-      style = ERR
-    elseif tonumber(res.status) == 403 then
-      message = "usage unavailable for this account"
-    end
-    return usage_unavailable("Codex", message, {
-      kind = "http",
-      status = res.status,
-      body = body:sub(1, 1000),
-    }, style)
-  end
-  if type(payload) ~= "table" then
-    return usage_unavailable("Codex", "usage response was invalid - try again later", {
-      kind = "invalid_json",
-      status = res.status,
-      body = tostring(res.body or ""):sub(1, 1000),
-    })
+  local payload, kind, detail = fetch_auth_json("codex", "/wham/usage")
+  if not payload then
+    return render_fetch_error("Codex", kind, detail, ERROR_MESSAGES.codex)
   end
 
   local lines = { text_row("Codex", HEAD) }
@@ -201,6 +260,8 @@ local function codex_usage_lines()
   if #rows == 0 then lines[#lines + 1] = text_row("  no usage windows returned", DIM) end
   return lines
 end
+
+-- ── Kimi usage ─────────────────────────────────────────────────────────
 
 local function to_number(value)
   local n = tonumber(value)
@@ -241,41 +302,9 @@ local function kimi_limit_label(item, detail, window, idx)
 end
 
 local function kimi_usage_lines()
-  local res, auth_err = smelt.auth.request("kimi-code", { path = "/usages" })
-  if not res then
-    local msg = tostring(auth_err or "")
-    if msg:find("not logged in", 1, true) then
-      return { text_row("Kimi Code: not logged in", DIM) }
-    end
-    return usage_unavailable("Kimi Code", "usage unavailable - check your connection and try again", {
-      kind = "auth",
-      error = msg,
-    })
-  end
-
-  local payload = smelt.parse.json(res.body or "")
-  if res.status ~= 200 then
-    local body = tostring(res.body or "")
-    local message = "usage unavailable right now - try again later"
-    local style = DIM
-    if tonumber(res.status) == 401 then
-      message = "authentication expired - sign in to Kimi Code again"
-      style = ERR
-    elseif tonumber(res.status) == 403 then
-      message = "usage unavailable for this account"
-    end
-    return usage_unavailable("Kimi Code", message, {
-      kind = "http",
-      status = res.status,
-      body = body:sub(1, 1000),
-    }, style)
-  end
-  if type(payload) ~= "table" then
-    return usage_unavailable("Kimi Code", "usage response was invalid - try again later", {
-      kind = "invalid_json",
-      status = res.status,
-      body = tostring(res.body or ""):sub(1, 1000),
-    })
+  local payload, kind, detail = fetch_auth_json("kimi-code", "/usages")
+  if not payload then
+    return render_fetch_error("Kimi Code", kind, detail, ERROR_MESSAGES.kimi)
   end
 
   local rows = {}
@@ -283,9 +312,9 @@ local function kimi_usage_lines()
   if summary then rows[#rows + 1] = summary end
   for idx, item in ipairs(payload.limits or {}) do
     if type(item) == "table" then
-      local detail = type(item.detail) == "table" and item.detail or item
+      local detail_tbl = type(item.detail) == "table" and item.detail or item
       local window = type(item.window) == "table" and item.window or {}
-      local parsed = kimi_row(detail, kimi_limit_label(item, detail, window, idx))
+      local parsed = kimi_row(detail_tbl, kimi_limit_label(item, detail_tbl, window, idx))
       if parsed then rows[#rows + 1] = parsed end
     end
   end
@@ -306,6 +335,25 @@ local function kimi_usage_lines()
   return lines
 end
 
+-- ── Provider dispatch ──────────────────────────────────────────────────
+
+local function provider_title(provider, model, api_base)
+  if is_codex_provider(provider) then return "Codex" end
+  if is_kimi_provider(provider, api_base) then return "Kimi Code" end
+  return provider ~= "" and provider or "Usage"
+end
+
+local function fetch_provider_usage(provider, model, api_base)
+  if is_codex_provider(provider) then
+    return codex_usage_lines()
+  elseif is_kimi_provider(provider, api_base) then
+    return kimi_usage_lines()
+  end
+  return { text_row("No subscription usage for active provider: " .. (provider ~= "" and provider or "unknown"), DIM) }
+end
+
+-- ── Cost/pricing (always local, always bright) ─────────────────────────
+
 local function rate(value)
   value = tonumber(value) or 0
   if value == 0 then return "-" end
@@ -321,53 +369,72 @@ local function cost_and_pricing_lines()
   return { row(span(left, VALUE), span("  │  ", DIM), span(right, DIM), span(source, DIM)) }
 end
 
-local function provider_usage_lines()
-  local provider, model, api_base = active_provider()
-  local usage_provider = provider ~= "" and provider or model
+-- ── Dialog rendering ───────────────────────────────────────────────────
 
-  if is_codex_provider(usage_provider) then
-    return codex_usage_lines()
-  elseif is_kimi_provider(usage_provider, api_base) then
-    return kimi_usage_lines()
+local function loading_provider_lines(title)
+  return {
+    text_row(title, HEAD),
+    usage_row("loading", 0, "refreshing…", nil, 18),
+  }
+end
+
+local function render_dialog(buf, provider_lines, fresh, error_message, title)
+  local lines = {}
+  append(lines, cost_and_pricing_lines())
+  lines[#lines + 1] = blank()
+  if provider_lines then
+    append(lines, fresh and provider_lines or dim_lines(provider_lines))
+  elseif error_message then
+    lines[#lines + 1] = text_row(title .. ": " .. error_message, ERR)
+  else
+    append(lines, dim_lines(loading_provider_lines(title)))
   end
-
-  return { text_row("No subscription usage for active provider: " .. (usage_provider ~= "" and usage_provider or "unknown"), DIM) }
+  buf:styled(lines)
 end
 
-local function usage_lines()
-  local lines = {}
-  append(lines, cost_and_pricing_lines())
-  lines[#lines + 1] = blank()
-  append(lines, provider_usage_lines())
-  return lines
-end
-
-local function loading_lines()
-  local provider, model, api_base = active_provider()
-  local usage_provider = provider ~= "" and provider or model
-  local title = is_codex_provider(usage_provider) and "Codex"
-    or (is_kimi_provider(usage_provider, api_base) and "Kimi Code" or "Usage")
-  local lines = {}
-  append(lines, cost_and_pricing_lines())
-  lines[#lines + 1] = blank()
-  lines[#lines + 1] = text_row(title, HEAD)
-  lines[#lines + 1] = usage_row("loading", 0, "fetching…", nil, 18)
-  return lines
-end
+-- ── Command handler ────────────────────────────────────────────────────
 
 local function open_usage()
+  local provider, model, api_base = active_provider()
+  local key = cache.key(provider, model)
+  local title = provider_title(provider, model, api_base)
+
   local handle, buf = smelt.dialog.viewer({
     title      = "usage",
-    styled     = loading_lines(),
     wrap       = false,
     max_height = "50%",
   })
 
-  smelt.spawn(function()
-    buf:styled(usage_lines())
+  local callback = function(lines, fresh, error_message)
+    render_dialog(buf, lines, fresh, error_message, title)
+  end
+
+  cache.subscribe(key, callback)
+
+  local entry = cache.get(key)
+  render_dialog(buf, entry and entry.lines or nil, entry and not entry.refreshing, entry and entry.error, title)
+
+  cache.refresh(key, function()
+    return fetch_provider_usage(provider, model, api_base)
   end)
-  return handle
+
+  handle.win:on("close", function()
+    cache.unsubscribe(key, callback)
+  end)
 end
+
+-- ── Startup prefetch ───────────────────────────────────────────────────
+
+smelt.lifecycle.on_ready(function()
+  local provider, model, api_base = active_provider()
+  -- Prefetch only matters for providers with remote usage endpoints.
+  if is_codex_provider(provider) or is_kimi_provider(provider, api_base) then
+    local key = cache.key(provider, model)
+    cache.prefetch(key, function()
+      return fetch_provider_usage(provider, model, api_base)
+    end)
+  end
+end)
 
 smelt.cmd.register("usage", open_usage, { desc = "show session cost and active provider usage", while_busy = true })
 smelt.cmd.register("cost", open_usage, { desc = "show session cost and active provider usage", while_busy = true })
