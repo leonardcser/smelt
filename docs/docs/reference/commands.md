@@ -23,6 +23,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                |
 | `/messages`               | Show recorded errors, warnings, and notices                |
 | `/skills`                 | Show loaded skills and their source locations              |
+| `/mcp`                    | Show MCP servers, lifecycle state, and tool names          |
 | `/help`                   | Show keybindings (also `F1`)                               |
 | `/docs`                   | Open the smelt documentation in your browser               |
 | `/btw <question>`         | Ask a side question; answer streams into a dialog          |

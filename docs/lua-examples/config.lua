@@ -24,6 +24,7 @@ smelt.provider.register("openai", {
 
 -- MCP servers
 smelt.mcp.register("filesystem", {
+  description = "Read and write files under /home via MCP.",
   command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/home" },
   env = { DEBUG = "true" },
   timeout = 30000,

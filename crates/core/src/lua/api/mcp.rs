@@ -4,7 +4,7 @@ use crate::lua::doc::Tier;
 use crate::lua::lua_type::{LuaType, LuaTypeTuple};
 use crate::lua::module::LuaMod;
 use crate::lua::LuaShared;
-use crate::mcp::{McpServerConfig, McpStatus};
+use crate::mcp::{McpServerConfig, McpStatus, McpToolDef, McpTransportConfig};
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use std::sync::Arc;
@@ -27,12 +27,13 @@ fn status_to_table(lua: &Lua, status: &McpStatus) -> LuaResult<mlua::Table> {
 
 fn config_to_table(lua: &Lua, config: &McpServerConfig) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
-    match config {
-        McpServerConfig::Local {
+    t.set("description", config.description.as_str())?;
+    t.set("enabled", config.enabled)?;
+    match &config.transport {
+        McpTransportConfig::Local {
             command,
             env,
             timeout,
-            enabled,
         } => {
             t.set("type", "local")?;
             let cmd_tbl = lua.create_table()?;
@@ -46,10 +47,21 @@ fn config_to_table(lua: &Lua, config: &McpServerConfig) -> LuaResult<mlua::Table
             }
             t.set("env", env_tbl)?;
             t.set("timeout", *timeout)?;
-            t.set("enabled", *enabled)?;
         }
     }
     Ok(t)
+}
+
+fn tool_to_table(lua: &Lua, def: &McpToolDef) -> LuaResult<mlua::Table> {
+    let row = lua.create_table()?;
+    row.set("server", def.server_name.as_str())?;
+    row.set("name", def.tool_name.as_str())?;
+    row.set("qualified_name", def.qualified_name())?;
+    row.set("description", def.description.as_str())?;
+    if let Ok(s) = serde_json::to_string(&def.input_schema) {
+        row.set("schema", s)?;
+    }
+    Ok(row)
 }
 
 /// Wrapper that accepts either a single command string or a list of
@@ -105,6 +117,8 @@ pub struct LuaMcpConfig {
     /// Trailing arguments appended after `command`.
     #[lua(default)]
     pub args: Vec<String>,
+    /// Human-readable description shown by `/mcp`.
+    pub description: Option<String>,
     /// Extra environment variables to set on the child process.
     #[lua(default)]
     pub env: std::collections::HashMap<String, String>,
@@ -137,11 +151,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
             let mut full_cmd = cfg.command.0;
             full_cmd.extend(cfg.args);
-            let config = McpServerConfig::Local {
-                command: full_cmd,
-                env: cfg.env,
-                timeout: cfg.timeout.unwrap_or(30000),
+            let config = McpServerConfig {
+                description: cfg.description.unwrap_or_default(),
                 enabled: cfg.enabled.unwrap_or(true),
+                transport: McpTransportConfig::Local {
+                    command: full_cmd,
+                    env: cfg.env,
+                    timeout: cfg.timeout.unwrap_or(30000),
+                },
             };
             if let Ok(mut map) = shared_for_register.mcp_configs.lock() {
                 map.insert(name.clone(), config);
@@ -159,7 +176,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     m.fn_(
         "list",
-        "Snapshot every declared MCP server. Each row is `{ name, config, status, tool_count }` where `status` is `{ kind = \"disabled\"|\"connecting\"|\"connected\"|\"error\", since_ms?, error?, at_ms? }`. Lifecycle reads are sync - safe to call from a status renderer or keymap.",
+        "Snapshot every declared MCP server. Each row is `{ name, description, server_info, config, status, tool_count, tools }` where `description` is the configured human summary, `server_info` is `{ name, version, instructions }?`, `status` is `{ kind = \"disabled\"|\"connecting\"|\"connected\"|\"error\", since_ms?, error?, at_ms? }`, and `tools` contains `{ server, name, qualified_name, description, schema }` rows. Lifecycle reads are sync - safe to call from a status renderer or keymap.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let out = lua.create_table()?;
@@ -171,9 +188,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 for server in mgr.servers_snapshot() {
                     let row = lua.create_table()?;
                     row.set("name", server.name.as_str())?;
+                    row.set("description", server.description())?;
+                    if let Some(info) = server.info() {
+                        let info_tbl = lua.create_table()?;
+                        info_tbl.set("name", info.name)?;
+                        info_tbl.set("version", info.version)?;
+                        info_tbl.set("instructions", info.instructions)?;
+                        row.set("server_info", info_tbl)?;
+                    }
                     row.set("config", config_to_table(lua, &server.config)?)?;
                     row.set("status", status_to_table(lua, &server.status())?)?;
-                    row.set("tool_count", server.tools().len())?;
+                    let mut tools = server.tools();
+                    tools.sort_by(|a, b| a.tool_name.cmp(&b.tool_name));
+                    row.set("tool_count", tools.len())?;
+                    let tools_tbl = lua.create_table()?;
+                    for (i, def) in tools.iter().enumerate() {
+                        tools_tbl.set(i + 1, tool_to_table(lua, def)?)?;
+                    }
+                    row.set("tools", tools_tbl)?;
                     rows.push(row);
                 }
                 rows.sort_by(|a, b| {
@@ -207,15 +239,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     None => mgr.tool_defs(),
                 };
                 for def in defs {
-                    let row = lua.create_table()?;
-                    row.set("server", def.server_name.as_str())?;
-                    row.set("name", def.tool_name.as_str())?;
-                    row.set("qualified_name", def.qualified_name())?;
-                    row.set("description", def.description.as_str())?;
-                    if let Ok(s) = serde_json::to_string(&def.input_schema) {
-                        row.set("schema", s)?;
-                    }
-                    rows.push(row);
+                    rows.push(tool_to_table(lua, &def)?);
                 }
                 Ok(rows)
             })

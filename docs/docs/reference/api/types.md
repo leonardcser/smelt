@@ -353,6 +353,7 @@ MCP server config accepted by `smelt.mcp.register`.
 | `type` | `string` |  | Server kind. Only `"local"` (the default) is supported. |
 | `command` | `string|string[]` |  | Executable + leading argv. Either a string (`"my-server"`) or a list (`{"my-server", "--flag"}`). |
 | `args` | `string[]` |  | Trailing arguments appended after `command`. |
+| `description` | `string` |  | Human-readable description shown by `/mcp`. |
 | `env` | `table<string, string>` |  | Extra environment variables to set on the child process. |
 | `timeout` | `integer` |  | Request timeout in milliseconds. Defaults to `30000`. |
 | `enabled` | `boolean` |  | Whether the server is enabled. Defaults to `true`. |

@@ -277,6 +277,7 @@ the agent can use it immediately.
 
 ```lua
 smelt.mcp.register("filesystem", {
+  description = "Read and write files under /tmp via MCP.",
   command = { "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp" },
   env = { DEBUG = "true" },
   timeout = 30000,
@@ -284,14 +285,15 @@ smelt.mcp.register("filesystem", {
 })
 ```
 
-| Field     | Description                                                             |
-| --------- | ----------------------------------------------------------------------- |
-| `type`    | Server kind. Only `"local"` (the default) is supported.                 |
-| `command` | String or array of strings: executable and leading argv                 |
-| `args`    | Additional arguments (appended to `command`)                            |
-| `env`     | Environment variables for the server process                            |
-| `timeout` | Connection and tool-call timeout in milliseconds. Default `30000`.      |
-| `enabled` | Set to `false` to skip connecting on startup. Default `true`.           |
+| Field         | Description                                                                    |
+| ------------- | ------------------------------------------------------------------------------ |
+| `type`        | Server kind. Only `"local"` (the default) is supported.                 |
+| `description` | Human-readable summary shown by `/mcp`.                                      |
+| `command`     | String or array of strings: executable and leading argv                 |
+| `args`        | Additional arguments (appended to `command`)                            |
+| `env`         | Environment variables for the server process                            |
+| `timeout`     | Connection and tool-call timeout in milliseconds. Default `30000`.      |
+| `enabled`     | Set to `false` to skip connecting on startup. Default `true`.           |
 
 MCP tools appear in the agent's tool list with names prefixed by the server
 name (e.g. `filesystem_read_file`). They default to "ask" permission.

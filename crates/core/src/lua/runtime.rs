@@ -2652,6 +2652,7 @@ mod tests {
         let modules = autoload_modules();
         assert!(modules.contains(&"smelt.tools.bash".to_string()));
         assert!(modules.contains(&"smelt.commands.btw".to_string()));
+        assert!(modules.contains(&"smelt.commands.mcp".to_string()));
         assert!(modules.contains(&"smelt.plugins.esc_chord".to_string()));
     }
 
@@ -2788,11 +2789,14 @@ mod tests {
         rt.shared.providers.lock().unwrap().push(Default::default());
         rt.shared.mcp_configs.lock().unwrap().insert(
             "srv".into(),
-            crate::mcp::McpServerConfig::Local {
-                command: vec!["echo".into()],
-                env: Default::default(),
-                timeout: 1,
+            crate::mcp::McpServerConfig {
+                description: String::new(),
                 enabled: true,
+                transport: crate::mcp::McpTransportConfig::Local {
+                    command: vec!["echo".into()],
+                    env: Default::default(),
+                    timeout: 1,
+                },
             },
         );
         *rt.shared.permission_rules.lock().unwrap() =

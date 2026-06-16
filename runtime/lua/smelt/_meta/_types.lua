@@ -247,6 +247,7 @@
 ---@field type? string Server kind. Only `"local"` (the default) is supported.
 ---@field command? string|string[] Executable + leading argv. Either a string (`"my-server"`) or a list (`{"my-server", "--flag"}`).
 ---@field args? string[] Trailing arguments appended after `command`.
+---@field description? string Human-readable description shown by `/mcp`.
 ---@field env? table<string, string> Extra environment variables to set on the child process.
 ---@field timeout? integer Request timeout in milliseconds. Defaults to `30000`.
 ---@field enabled? boolean Whether the server is enabled. Defaults to `true`.

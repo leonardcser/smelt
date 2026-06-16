@@ -1,7 +1,7 @@
 pub mod dispatcher;
 
 use engine::log;
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequestParams, ServerInfo};
 use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceExt;
@@ -14,8 +14,19 @@ use tokio::sync::RwLock;
 
 /// Configuration for a single MCP server.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct McpServerConfig {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub transport: McpTransportConfig,
+}
+
+/// Transport-specific MCP server configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type")]
-pub enum McpServerConfig {
+pub enum McpTransportConfig {
     #[serde(rename = "local")]
     Local {
         command: Vec<String>,
@@ -23,8 +34,6 @@ pub enum McpServerConfig {
         env: HashMap<String, String>,
         #[serde(default = "default_timeout")]
         timeout: u64,
-        #[serde(default = "default_true")]
-        enabled: bool,
     },
 }
 
@@ -34,6 +43,24 @@ fn default_timeout() -> u64 {
 
 fn default_true() -> bool {
     true
+}
+
+/// Server metadata returned by the MCP initialization handshake.
+#[derive(Debug, Clone, Default)]
+pub struct McpServerInfo {
+    pub name: String,
+    pub version: String,
+    pub instructions: String,
+}
+
+impl From<&ServerInfo> for McpServerInfo {
+    fn from(info: &ServerInfo) -> Self {
+        Self {
+            name: info.server_info.name.to_string(),
+            version: info.server_info.version.to_string(),
+            instructions: info.instructions.clone().unwrap_or_default(),
+        }
+    }
 }
 
 /// A discovered MCP tool definition (before wrapping as a Tool trait object).
@@ -110,20 +137,23 @@ pub struct McpServer {
     pub name: String,
     pub config: McpServerConfig,
     status: StdRwLock<McpStatus>,
+    info: StdRwLock<Option<McpServerInfo>>,
     tools: StdRwLock<Vec<McpToolDef>>,
     client: RwLock<Option<RunningService<rmcp::RoleClient, ()>>>,
 }
 
 impl McpServer {
     fn new(name: String, config: McpServerConfig) -> Self {
-        let initial = match &config {
-            McpServerConfig::Local { enabled, .. } if !*enabled => McpStatus::Disabled,
-            _ => McpStatus::Connecting,
+        let initial = if config.enabled {
+            McpStatus::Connecting
+        } else {
+            McpStatus::Disabled
         };
         Self {
             name,
             config,
             status: StdRwLock::new(initial),
+            info: StdRwLock::new(None),
             tools: StdRwLock::new(Vec::new()),
             client: RwLock::new(None),
         }
@@ -140,6 +170,14 @@ impl McpServer {
         self.tools.read().map(|t| t.clone()).unwrap_or_default()
     }
 
+    pub fn info(&self) -> Option<McpServerInfo> {
+        self.info.read().map(|i| i.clone()).unwrap_or_default()
+    }
+
+    pub fn description(&self) -> String {
+        self.config.description.clone()
+    }
+
     fn set_status(&self, status: McpStatus) {
         if let Ok(mut s) = self.status.write() {
             *s = status;
@@ -149,6 +187,12 @@ impl McpServer {
     fn set_tools(&self, tools: Vec<McpToolDef>) {
         if let Ok(mut t) = self.tools.write() {
             *t = tools;
+        }
+    }
+
+    fn set_info(&self, info: Option<McpServerInfo>) {
+        if let Ok(mut i) = self.info.write() {
+            *i = info;
         }
     }
 
@@ -165,14 +209,16 @@ impl McpServer {
     }
 
     async fn connect(&self) {
-        let McpServerConfig::Local {
+        if !self.config.enabled {
+            return;
+        }
+        let McpTransportConfig::Local {
             command,
             env,
             timeout,
-            enabled,
-        } = &self.config;
-        if !enabled || command.is_empty() {
-            return;
+        } = &self.config.transport;
+        if command.is_empty() {
+            return self.record_failure("missing command".into()).await;
         }
 
         let timeout_dur = Duration::from_millis(*timeout);
@@ -199,6 +245,7 @@ impl McpServer {
             Ok(Err(e)) => return self.record_failure(format!("handshake failed: {e}")).await,
             Err(_) => return self.record_failure("connection timed out".into()).await,
         };
+        self.set_info(client.peer_info().map(McpServerInfo::from));
 
         let mcp_tools = match tokio::time::timeout(timeout_dur, client.list_all_tools()).await {
             Ok(Ok(t)) => t,
@@ -493,22 +540,23 @@ mod tests {
         let json = json!({
             "type": "local",
             "command": ["node", "server.js"],
+            "description": "Node tools",
             "env": {"API_KEY": "secret"},
             "timeout": 5000,
             "enabled": false,
         });
         let config: McpServerConfig = serde_json::from_value(json).unwrap();
-        match config {
-            McpServerConfig::Local {
+        assert_eq!(config.description, "Node tools");
+        assert!(!config.enabled);
+        match config.transport {
+            McpTransportConfig::Local {
                 command,
                 env,
                 timeout,
-                enabled,
             } => {
                 assert_eq!(command, vec!["node", "server.js"]);
                 assert_eq!(env.get("API_KEY").map(String::as_str), Some("secret"));
                 assert_eq!(timeout, 5000);
-                assert!(!enabled);
             }
         }
     }
@@ -520,17 +568,17 @@ mod tests {
             "command": ["mcp-server"],
         });
         let config: McpServerConfig = serde_json::from_value(json).unwrap();
-        match config {
-            McpServerConfig::Local {
+        assert!(config.description.is_empty());
+        assert!(config.enabled);
+        match config.transport {
+            McpTransportConfig::Local {
                 command,
                 env,
                 timeout,
-                enabled,
             } => {
                 assert_eq!(command, vec!["mcp-server"]);
                 assert!(env.is_empty());
                 assert_eq!(timeout, 30000);
-                assert!(enabled);
             }
         }
     }
