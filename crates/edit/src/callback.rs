@@ -14,6 +14,11 @@ pub struct KeyBind {
 
 impl KeyBind {
     pub fn new(code: KeyCode, mods: KeyModifiers) -> Self {
+        let mods = if code == KeyCode::BackTab {
+            mods - KeyModifiers::SHIFT
+        } else {
+            mods
+        };
         Self { code, mods }
     }
 
@@ -448,6 +453,18 @@ mod tests {
         assert!(cbs
             .take_overlay_keymap(oid(2), KeyBind::char('q'))
             .is_none());
+    }
+
+    #[test]
+    fn backtab_keybind_ignores_shift_modifier() {
+        assert_eq!(
+            KeyBind::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+            KeyBind::new(KeyCode::BackTab, KeyModifiers::NONE)
+        );
+        assert_eq!(
+            KeyBind::new(KeyCode::BackTab, KeyModifiers::SHIFT | KeyModifiers::ALT),
+            KeyBind::new(KeyCode::BackTab, KeyModifiers::ALT)
+        );
     }
 
     #[test]

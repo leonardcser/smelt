@@ -1924,11 +1924,12 @@ impl TuiApp {
                     let ctrl = match deferred {
                         DeferredDialog::Confirm(req) => SessionControl::NeedsConfirm(req),
                     };
-                    let taken = self.agent.take();
-                    let pending_ref: &[PendingTool] =
-                        taken.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
-                    let end = self.dispatch_control(ctrl, pending_ref);
-                    self.agent = taken;
+                    let mut turn = self
+                        .agent
+                        .take()
+                        .expect("deferred dialog requires active turn");
+                    let end = self.dispatch_control(ctrl, &mut turn);
+                    self.agent = Some(turn);
                     match end {
                         SessionControl::Continue | SessionControl::NeedsConfirm(_) => {}
                         SessionControl::Done => {

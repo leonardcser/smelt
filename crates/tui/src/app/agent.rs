@@ -743,13 +743,80 @@ impl TuiApp {
         }
     }
 
+    fn permission_decision_for_confirm(&self, req: &ConfirmRequest) -> Decision {
+        self.active_permissions()
+            .evaluate_tool_with_approvals(
+                self.core.config.mode.clone(),
+                smelt_core::permissions::ToolOrigin::Lua,
+                &req.tool_name,
+                &req.args,
+            )
+            .decision
+    }
+
+    fn resolve_confirm_by_policy(
+        &mut self,
+        req: &ConfirmRequest,
+        approved: bool,
+        handle_id: Option<u64>,
+        label: &'static str,
+        pending: Option<&mut Vec<PendingTool>>,
+    ) {
+        if let Some(handle_id) = handle_id {
+            self.core.confirms.take(handle_id);
+            self.core.cells.set_dyn(
+                "confirm_resolved",
+                std::rc::Rc::new(smelt_core::cells::ConfirmResolved {
+                    handle_id,
+                    decision: label.into(),
+                }),
+            );
+        }
+
+        if approved {
+            self.set_active_status(&req.call_id, ToolStatus::Pending);
+            self.send_permission_decision(req.request_id, true, None);
+        } else {
+            self.send_permission_decision(req.request_id, false, None);
+            self.finish_tool(&req.call_id, ToolStatus::Denied, None, None);
+            if let Some(pending) = pending {
+                pending.retain(|p| p.call_id != req.call_id);
+            } else if let Some(ref mut ag) = self.agent {
+                ag.pending.retain(|p| p.call_id != req.call_id);
+            }
+        }
+    }
+
+    pub(crate) fn resolve_open_confirm_for_current_mode(&mut self, handle_id: u64) -> bool {
+        let Some(req) = self
+            .core
+            .confirms
+            .get(handle_id)
+            .map(|entry| entry.req.clone())
+        else {
+            return false;
+        };
+
+        match self.permission_decision_for_confirm(&req) {
+            Decision::Allow => {
+                self.resolve_confirm_by_policy(&req, true, Some(handle_id), "auto_allow", None);
+                true
+            }
+            Decision::Deny => {
+                self.resolve_confirm_by_policy(&req, false, Some(handle_id), "auto_deny", None);
+                true
+            }
+            Decision::Ask | Decision::Error(_) => false,
+        }
+    }
+
     /// Dispatches one engine-event control signal; returns the same
     /// `SessionControl` variant so callers can decide whether to continue
     /// draining, end the turn, or surface an error.
     pub(crate) fn dispatch_control(
         &mut self,
         ctrl: SessionControl,
-        pending: &[PendingTool],
+        turn: &mut TurnState,
     ) -> SessionControl {
         let should_queue = self
             .timers
@@ -763,20 +830,35 @@ impl TuiApp {
             SessionControl::Error => SessionControl::Error,
             SessionControl::NeedsConfirm(mut req) => {
                 if req.tool_name.is_empty() {
-                    req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
+                    req.tool_name = turn
+                        .pending
+                        .last()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default();
                 }
 
-                let permissions = self.active_permissions();
-
-                let outcome = permissions.evaluate_tool_with_approvals(
+                let outcome = turn.permissions.evaluate_tool_with_approvals(
                     self.core.config.mode.clone(),
                     smelt_core::permissions::ToolOrigin::Lua,
                     &req.tool_name,
                     &req.args,
                 );
-                if outcome.decision == Decision::Allow {
-                    self.send_permission_decision(req.request_id, true, None);
-                    return SessionControl::Continue;
+                match outcome.decision {
+                    Decision::Allow => {
+                        self.resolve_confirm_by_policy(&req, true, None, "auto_allow", None);
+                        return SessionControl::Continue;
+                    }
+                    Decision::Deny => {
+                        self.resolve_confirm_by_policy(
+                            &req,
+                            false,
+                            None,
+                            "auto_deny",
+                            Some(&mut turn.pending),
+                        );
+                        return SessionControl::Continue;
+                    }
+                    Decision::Ask | Decision::Error(_) => {}
                 }
 
                 if should_queue {
@@ -786,7 +868,7 @@ impl TuiApp {
                     return SessionControl::Continue;
                 }
 
-                let options = permissions.approval_options(
+                let options = turn.permissions.approval_options(
                     &req.tool_name,
                     &req.approval_candidates,
                     &outcome,

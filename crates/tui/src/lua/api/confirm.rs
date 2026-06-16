@@ -10,8 +10,8 @@
 //! once via `smelt.cell("confirm_requested"):get()` instead of polling
 //! Rust by handle. Rust exposes:
 //!
-//! - `__back_tab` - toggles app mode + auto-allows when the new mode
-//!   covers this request.
+//! - `__back_tab` - toggles app mode + resolves when the new mode
+//!   covers or blocks this request.
 //! - `__render_preview` - dispatches to the tool's `preview` callback.
 //! - `__resolve` - final pick, removes the registry entry.
 //!
@@ -39,69 +39,26 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     // smelt.confirm.__back_tab(handle_id) → bool. Cycles app mode and returns true if the
-    // new mode auto-allows the request. The with_app borrow must be released before calling
-    // back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: gather
-    // request payload, run cycle, then re-enter with_app to inspect and resolve.
+    // new mode resolves the request. The with_app borrow must be released before calling
+    // back into Lua (smelt.mode.cycle re-enters with_app), so the body is split: validate
+    // the handle, run cycle, then re-enter with_app to inspect and resolve.
     m.private_fn(
         "__back_tab",
         &["handle_id"],
         |lua, handle_id: u64| -> LuaResult<bool> {
-            let request: Option<(
-                u64,
-                String,
-                String,
-                std::collections::HashMap<String, serde_json::Value>,
-            )> = crate::lua::with_app(|app| {
-                app.core.confirms.get(handle_id).map(|entry| {
-                    (
-                        entry.req.request_id,
-                        entry.req.call_id.clone(),
-                        entry.req.tool_name.clone(),
-                        entry.req.args.clone(),
-                    )
-                })
-            });
-            let Some((request_id, call_id, tool_name, args)) = request else {
+            let exists = crate::lua::with_app(|app| app.core.confirms.get(handle_id).is_some());
+            if !exists {
                 return Ok(false);
-            };
+            }
 
             let smelt: mlua::Table = lua.globals().get("smelt")?;
             let mode_tbl: mlua::Table = smelt.get("mode")?;
             let cycle: mlua::Function = mode_tbl.get("cycle")?;
             cycle.call::<()>(())?;
 
-            let auto_allowed = crate::lua::with_app(|app| {
-                if app
-                    .core
-                    .permissions
-                    .evaluate_tool(
-                        app.core.config.mode.clone(),
-                        smelt_core::permissions::ToolOrigin::Lua,
-                        &tool_name,
-                        &args,
-                    )
-                    .decision
-                    == protocol::Decision::Allow
-                {
-                    app.set_active_status(
-                        &call_id,
-                        smelt_core::transcript_model::ToolStatus::Pending,
-                    );
-                    app.send_permission_decision(request_id, true, None);
-                    app.core.confirms.take(handle_id);
-                    app.core.cells.set_dyn(
-                        "confirm_resolved",
-                        std::rc::Rc::new(ConfirmResolved {
-                            handle_id,
-                            decision: "auto_allow".into(),
-                        }),
-                    );
-                    true
-                } else {
-                    false
-                }
-            });
-            Ok(auto_allowed)
+            Ok(crate::lua::with_app(|app| {
+                app.resolve_open_confirm_for_current_mode(handle_id)
+            }))
         },
     )?;
 

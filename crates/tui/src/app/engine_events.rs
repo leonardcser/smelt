@@ -16,7 +16,7 @@ impl TuiApp {
         if let Some(mut ag) = self.agent.take() {
             let prev_dispatching_turn_id = self.dispatching_turn_id.replace(ag.turn_id);
             let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-            let end = self.dispatch_control(ctrl, &ag.pending);
+            let end = self.dispatch_control(ctrl, &mut ag);
             self.dispatching_turn_id = prev_dispatching_turn_id;
             self.agent = Some(ag);
             match end {

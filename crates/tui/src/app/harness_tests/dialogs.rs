@@ -15,6 +15,215 @@ fn tool_result<'a>(app: &'a TestApp, call_id: &str) -> Option<(&'a str, bool)> {
     })
 }
 
+fn confirm_test_permissions() -> std::sync::Arc<smelt_core::permissions::Permissions> {
+    use smelt_core::permissions::rules::{RawModePerms, RawPerms, RawRuleSet, ToolDefaults};
+    let mut modes = std::collections::HashMap::new();
+    modes.insert(
+        "apply".to_string(),
+        RawModePerms {
+            tools: RawRuleSet {
+                allow: vec!["test_tool".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    modes.insert(
+        "deny".to_string(),
+        RawModePerms {
+            tools: RawRuleSet {
+                deny: vec!["test_tool".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    std::sync::Arc::new(smelt_core::permissions::Permissions::from_raw(
+        &RawPerms {
+            default: RawModePerms::default(),
+            modes,
+        },
+        &ToolDefaults::default(),
+    ))
+}
+
+fn confirm_req(request_id: u64) -> smelt_core::ConfirmRequest {
+    smelt_core::ConfirmRequest {
+        call_id: format!("call-{request_id}"),
+        tool_name: "test_tool".into(),
+        args: std::collections::HashMap::new(),
+        approval_candidates: Vec::new(),
+        grant_options: Vec::new(),
+        summary: protocol::StyledLines::from_plain("test tool"),
+        request_id,
+    }
+}
+
+fn install_confirm_test_permissions(app: &mut TestApp) {
+    app.app.core.permissions = confirm_test_permissions();
+}
+
+fn permission_decisions(cmds: Vec<protocol::UiCommand>) -> Vec<(u64, bool)> {
+    cmds.into_iter()
+        .filter_map(|cmd| match cmd {
+            protocol::UiCommand::PermissionDecision {
+                request_id,
+                approved,
+                ..
+            } => Some((request_id, approved)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn dispatch_confirm_request(
+    app: &mut TestApp,
+    req: smelt_core::ConfirmRequest,
+    pending: &mut Vec<crate::app::PendingTool>,
+) -> crate::app::SessionControl {
+    let mut turn = app.app.agent.take().expect("test turn is active");
+    turn.pending = std::mem::take(pending);
+    let ctrl = app.app.dispatch_control(
+        crate::app::SessionControl::NeedsConfirm(Box::new(req)),
+        &mut turn,
+    );
+    *pending = std::mem::take(&mut turn.pending);
+    app.app.agent = Some(turn);
+    ctrl
+}
+
+fn actions_permission_decisions(actions: &[Action]) -> Vec<(u64, bool)> {
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            Action::EngineSend(cmd) => match cmd.as_ref() {
+                protocol::UiCommand::PermissionDecision {
+                    request_id,
+                    approved,
+                    ..
+                } => Some((*request_id, *approved)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn request_permission_auto_allows_when_current_mode_allows() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+    app.app.core.config.mode = protocol::AgentMode::parse("apply").unwrap();
+
+    let mut pending = Vec::new();
+    let ctrl = dispatch_confirm_request(&mut app, confirm_req(10), &mut pending);
+
+    assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    assert_eq!(app.pending_confirm_count(), 0);
+    assert_eq!(
+        permission_decisions(app.drain_engine_sends()),
+        vec![(10, true)]
+    );
+}
+
+#[test]
+fn request_permission_auto_denies_when_current_mode_denies() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+    app.app.core.config.mode = protocol::AgentMode::parse("deny").unwrap();
+
+    let mut pending = vec![crate::app::PendingTool {
+        call_id: "call-11".into(),
+        name: "test_tool".into(),
+    }];
+    let ctrl = dispatch_confirm_request(&mut app, confirm_req(11), &mut pending);
+
+    assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    assert_eq!(app.pending_confirm_count(), 0);
+    assert!(pending.is_empty());
+    assert!(app.agent_running());
+    assert_eq!(
+        permission_decisions(app.drain_engine_sends()),
+        vec![(11, false)]
+    );
+}
+
+#[test]
+fn open_confirm_recheck_keeps_dialog_when_mode_still_asks() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut pending = Vec::new();
+        let ctrl = dispatch_confirm_request(&mut app, confirm_req(12), &mut pending);
+        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    }
+
+    let handle_id = app.first_pending_confirm().unwrap();
+    assert!(!app.app.resolve_open_confirm_for_current_mode(handle_id));
+    assert_eq!(app.pending_confirm_count(), 1);
+    assert!(permission_decisions(app.drain_engine_sends()).is_empty());
+}
+
+#[test]
+fn shift_tab_on_open_confirm_cycles_mode_and_auto_allows() {
+    let mut app = TestApp::builder()
+        .with_mode_cycle(vec![
+            protocol::AgentMode::normal(),
+            protocol::AgentMode::parse("apply").unwrap(),
+        ])
+        .build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut pending = Vec::new();
+        let ctrl = dispatch_confirm_request(&mut app, confirm_req(13), &mut pending);
+        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    }
+    assert_eq!(app.pending_confirm_count(), 1);
+    app.clear_actions();
+
+    app.press_mod(KeyCode::BackTab, KeyModifiers::SHIFT);
+
+    assert_eq!(app.pending_confirm_count(), 0);
+    assert_eq!(app.app.core.config.mode.as_str(), "apply");
+    assert_eq!(
+        actions_permission_decisions(app.actions()),
+        vec![(13, true)]
+    );
+}
+
+#[test]
+fn open_confirm_recheck_auto_denies_without_stopping_turn() {
+    let mut app = TestApp::builder().build();
+    install_confirm_test_permissions(&mut app);
+    app.start_turn(1);
+
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut pending = Vec::new();
+        let ctrl = dispatch_confirm_request(&mut app, confirm_req(14), &mut pending);
+        assert!(matches!(ctrl, crate::app::SessionControl::Continue));
+    }
+
+    let handle_id = app.first_pending_confirm().unwrap();
+    app.app.core.config.mode = protocol::AgentMode::parse("deny").unwrap();
+
+    assert!(app.app.resolve_open_confirm_for_current_mode(handle_id));
+    assert_eq!(app.pending_confirm_count(), 0);
+    assert!(app.agent_running());
+    assert_eq!(
+        permission_decisions(app.drain_engine_sends()),
+        vec![(14, false)]
+    );
+}
+
 #[test]
 fn present_plan_save_draft_writes_artifact_and_manifest() {
     let home_guard = test_home_guard();
