@@ -176,14 +176,19 @@ function M.compose_status(items, opts)
   end
 
   local function span_cols(spans, right)
-    local w, separated_seen = 0, false
+    local w, separated_seen, has_run = 0, false, false
     for _, s in ipairs(spans) do
       if (s.align_right or false) == right then
         if s.separated then
-          if separated_seen then w = w + STATUS_SEP_LEN end
+          if separated_seen then
+            w = w + STATUS_SEP_LEN
+          elseif has_run then
+            w = w + 1
+          end
           separated_seen = true
         end
         w = w + smelt.text.width(s.text)
+        has_run = true
       end
     end
     return w
@@ -250,6 +255,8 @@ function M.compose_status(items, opts)
     if s.separated then
       if separated_seen then
         runs[#runs + 1] = { text = STATUS_SEP, style = sep_style, selectable = false }
+      elseif #runs > 0 then
+        runs[#runs + 1] = { text = " ", style = fill_style, selectable = false }
       end
       if s.align_right then right_separated_seen = true else left_separated_seen = true end
     end

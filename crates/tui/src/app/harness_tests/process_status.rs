@@ -58,6 +58,35 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
 }
 
 #[test]
+fn statusline_separates_first_inline_indicator_after_pills() {
+    let mut app = TestApp::builder().build();
+    let _guard = crate::lua::install_app_ptr(&mut app.app);
+    let row: String = app
+        .app
+        .lua
+        .lua
+        .load(
+            r#"
+            local bar = require("smelt._bar")
+            local row = bar.compose_status({
+              { text = " INSERT ", style = { hl_group = "SmeltVimInsert" } },
+              { text = " ⚡yolo ", style = { hl_group = "SmeltModeDefault" } },
+              { text = "14 procs", style = { fg = "SmeltProcess" }, separated = true },
+              { text = "permission pending", style = { fg = "SmeltAccent" }, separated = true },
+            }, { width = 80, bg_group = "SmeltStatusBg", sep_group = "SmeltBar" })
+            return row.text
+            "#,
+        )
+        .eval()
+        .expect("compose statusline");
+
+    assert!(
+        row.starts_with(" INSERT  ⚡yolo  14 procs · permission pending"),
+        "{row:?}"
+    );
+}
+
+#[test]
 fn tick_event_advances_virtual_clock() {
     let mut app = TestApp::builder().build();
     let before = app.app.core.clock.instant_now();
