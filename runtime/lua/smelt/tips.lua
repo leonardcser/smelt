@@ -214,9 +214,9 @@ M.register({
 })
 
 M.register({
-  id = "resume.delete",
+  id = "list.delete",
   key = "alt+d",
-  text = "in /resume, delete the highlighted saved session",
+  text = "in /resume and /ps, delete or kill the highlighted item",
 })
 
 M.register({
