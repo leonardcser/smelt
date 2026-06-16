@@ -1024,7 +1024,7 @@ impl TuiApp {
     }
 
     /// Publish `vim_mode`, `keymap_pending`, `confirms_pending`, `now`,
-    /// `spinner_frame`, and the `work_*` family of cells whenever their values change.
+    /// `notification_visible`, `spinner_frame`, and the `work_*` family of cells whenever their values change.
     pub(crate) fn publish_diff_cells(&mut self) {
         let keymap_pending = self.keymap_pending_cell_value();
         self.core
@@ -1071,6 +1071,10 @@ impl TuiApp {
         self.core
             .cells
             .publish_if_changed("permission_pending", permission_pending);
+
+        self.core
+            .cells
+            .publish_if_changed("notification_visible", self.notification.is_some());
 
         let cursor = self.focused_cursor_pos();
         self.core.cells.publish_if_changed("cursor_pos", cursor);
@@ -1487,7 +1491,7 @@ impl TuiApp {
             MessageKind::Warning => "warn",
             MessageKind::Error => "error",
         };
-        let indent = " ";
+        let indent = "  ";
         let gap = "  ";
 
         // The toast is a single visible row anchored over the prompt-above

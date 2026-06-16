@@ -61,8 +61,9 @@ app_story!(user_message_block_single_line, |ctx| {
 app_story!(user_message_block_multiline_chrome, |ctx| {
     // Multi-line user messages get the panel chrome (rounded box,
     // `block_w` width). Exercises `UserBlockGeometry::new` + the
-    // shared `chrome::render` path.
-    ctx.set_viewport(50, 10);
+    // shared `chrome::render` path. Height leaves room for the idle
+    // prompt tip without clipping the message header.
+    ctx.set_viewport(50, 11);
     ctx.push_user_turn("let's plan this out.\nstep 1: parse\nstep 2: render\nstep 3: ship");
     ctx.assert_snapshot();
 });
@@ -94,7 +95,9 @@ app_story!(turn_error_block, |ctx| {
 });
 
 app_story!(compacted_block_summary, |ctx| {
-    ctx.set_viewport(60, 8);
+    // Tall enough for the compacted header, wrapped summary, idle prompt
+    // tip, and prompt/status chrome without clipping.
+    ctx.set_viewport(60, 9);
     ctx.push_compacted(
         "Compacted 8 earlier turns: parser refactor, renderer wiring, three bug fixes.",
     );

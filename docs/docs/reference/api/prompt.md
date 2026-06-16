@@ -78,7 +78,7 @@ dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.
 fun(): string[]
 ```
 
-Return the queued prompt text rows. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.
+Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.
 
 ## `smelt.prompt.queued_rows`
 

@@ -105,19 +105,19 @@ impl TestApp {
     }
 
     /// Render one frame and return the resulting `SnapshotFrame`. Used
-    /// by the app-level storybook harness; `render_normal` updates the
+    /// by the app-level storybook harness; `render_normal_to` updates the
     /// `Ui` snapshot buffer as a side effect of composing layers, so
-    /// the post-render `ui.snapshot()` reflects the rendered frame. The
-    /// ANSI bytes `render_normal` flushes to stdout are captured (and
-    /// discarded) by the test harness.
+    /// the post-render `ui.snapshot()` reflects the rendered frame. ANSI
+    /// bytes are written to a sink so tests stay quiet.
     pub fn render_to_frame(&mut self) -> crate::smelt_edit::SnapshotFrame {
         let _guard = crate::lua::install_app_ptr(&mut self.app);
         // The main loop refreshes diff cells once per tick before
-        // rendering; storybook drives `render_normal` directly without
+        // rendering; storybook drives the render path directly without
         // that loop, so we have to publish here or Lua renderers see
         // stale `work_*` / `vim_mode` / `now` values.
         self.app.publish_diff_cells();
-        self.app.render_normal();
+        let mut sink = std::io::sink();
+        self.app.render_normal_to(&mut sink);
         self.app.ui.snapshot()
     }
 

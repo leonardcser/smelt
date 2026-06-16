@@ -23,7 +23,14 @@ function M.display_count_text(block, opts)
   local count = tonumber(display_count.value)
   if count == nil then count = tonumber(opts.count) or 0 end
   local unit = display_count.unit or opts.unit or "item"
-  local plural = display_count.plural or opts.plural or (unit .. "s")
+  local plural = display_count.plural or opts.plural
+  if plural == nil then
+    if unit == "match" then
+      plural = "matches"
+    else
+      plural = unit .. "s"
+    end
+  end
   return count .. " " .. (count == 1 and unit or plural)
 end
 

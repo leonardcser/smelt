@@ -75,6 +75,7 @@ local function should_show_tip(queued)
   if not tips.enabled() then return false end
   if #queued > 0 or smelt.prompt.has_stash() then return false end
   if (smelt.prompt.text() or "") ~= "" then return false end
+  if smelt.cell("notification_visible"):get() then return false end
   local work_state = smelt.cell("work_state"):get()
   return not work_state or work_state == "idle"
 end

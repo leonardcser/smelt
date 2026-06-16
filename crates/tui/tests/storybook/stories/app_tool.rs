@@ -217,13 +217,14 @@ app_story!(glob_tool_block, |ctx| {
     // `glob.render` returns "N files" - the header carries the pattern
     // via `summary(args)` (`pattern` + optional `path`).
     ctx.set_viewport(60, 10);
-    ctx.tool_call(
+    ctx.tool_call_with_metadata(
         "glob",
         &[
             ("pattern", json!("**/*.rs")),
             ("path", json!("crates/term")),
         ],
         "crates/term/src/grid.rs\ncrates/term/src/lib.rs\ncrates/term/src/snapshot.rs",
+        json!({ "display_count": { "value": 3, "unit": "file" } }),
         Some(4),
     );
     ctx.assert_snapshot();
@@ -245,10 +246,11 @@ app_story!(glob_tool_block_error, |ctx| {
 // ── grep ──────────────────────────────────────────────────────────
 
 app_story!(grep_tool_block, |ctx| {
-    // `grep.render` returns "N matches" - the header carries the
-    // pattern + path via `summary(args)`.
+    // `grep.render` returns a mode-aware count - the header carries the
+    // pattern + path via `summary(args)`. `files_with_matches` reports
+    // matched files via `output.metadata.display_count`.
     ctx.set_viewport(70, 10);
-    ctx.tool_call(
+    ctx.tool_call_with_metadata(
         "grep",
         &[
             ("pattern", json!("fn render")),
@@ -256,6 +258,7 @@ app_story!(grep_tool_block, |ctx| {
             ("output_mode", json!("files_with_matches")),
         ],
         "crates/tui/src/render/markdown.rs\ncrates/tui/src/render/blocks/tool.rs",
+        json!({ "display_count": { "value": 2, "unit": "file" } }),
         Some(11),
     );
     ctx.assert_snapshot();
@@ -295,16 +298,17 @@ app_story!(tool_header_wrapping_for_bash_glob_and_grep, |ctx| {
         "test result: ok",
         Some(6100),
     );
-    ctx.tool_call(
+    ctx.tool_call_with_metadata(
         "glob",
         &[
             ("pattern", json!("crates/tui/tests/storybook/snapshots/app_tool::*.snap")),
             ("path", json!("/Users/leo/dev/rust/smelt/.worktrees/transcript-layout-rewrite")),
         ],
         "crates/tui/tests/storybook/snapshots/app_tool::grep_tool_block.snap\ncrates/tui/tests/storybook/snapshots/app_tool::glob_tool_block.snap",
+        json!({ "display_count": { "value": 2, "unit": "file" } }),
         Some(34),
     );
-    ctx.tool_call(
+    ctx.tool_call_with_metadata(
         "grep",
         &[
             ("pattern", json!("wrap_fragments_with_widths|continuation_indent|ToolSummaryResolver")),
@@ -312,6 +316,7 @@ app_story!(tool_header_wrapping_for_bash_glob_and_grep, |ctx| {
             ("output_mode", json!("files_with_matches")),
         ],
         "crates/buffer/src/inline_line.rs\ncrates/tui/src/app/history.rs\ncrates/tui/src/content/display_renderers/layout_ir.rs",
+        json!({ "display_count": { "value": 3, "unit": "file" } }),
         Some(89),
     );
     ctx.assert_snapshot();

@@ -23,10 +23,11 @@ dim: 72 18
  10  65   1 fg=AnsiValue(244)
  11   5  61 fg=AnsiValue(244)
  12   5  61 fg=AnsiValue(244)
+ 13   0   5 fg=AnsiValue(208) attrs=bold
  13   5   1 fg=AnsiValue(244)
  13   7   1 fg=Black bg=White
  13   8  15 attrs=dim
- 13  65   1 fg=AnsiValue(244)
+ 13  65   5 fg=AnsiValue(244)
  14   0   5 fg=AnsiValue(237)
  14   5  61 fg=AnsiValue(244)
  14  66   6 fg=AnsiValue(237)

@@ -384,6 +384,7 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "keymap_pending",
     "model",
     "now",
+    "notification_visible",
     "permission_pending",
     "reasoning",
     "running_procs",
@@ -658,6 +659,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("task_label", String::new());
     cells.declare("running_procs", 0u32);
     cells.declare("permission_pending", false);
+    cells.declare("notification_visible", false);
     cells.declare("cursor_pos", CursorPos::default());
 
     cells.register_lua_projector::<Vec<WorkBusyEntry>, _>(|v, lua| {
