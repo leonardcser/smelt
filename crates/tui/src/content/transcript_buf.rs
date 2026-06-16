@@ -1912,10 +1912,10 @@ impl TranscriptProjection {
             }
         }
 
-        let start_local = range.start.row.saturating_sub(row_base);
-        let end_local = range.end.row.saturating_sub(row_base);
-        let start = scratch.byte_at_display_pos(row_to_usize(start_local), range.start.byte_col);
-        let end = scratch.byte_at_display_pos(row_to_usize(end_local), range.end.byte_col);
+        let start_local = row_to_usize(range.start.row.saturating_sub(row_base));
+        let end_local = row_to_usize(range.end.row.saturating_sub(row_base));
+        let start = scratch.byte_at_display_byte_pos(start_local, range.start.byte_col);
+        let end = scratch.byte_at_display_byte_pos(end_local, range.end.byte_col);
         let clipboard = copy_byte_range(&scratch, start, end);
         let raw = smelt_buffer::text::slice(&scratch.text(), start..end).to_string();
         CopyOutput {
@@ -1974,7 +1974,7 @@ impl smelt_core::buffer::BufferCopy for TranscriptCopier {
         src: &str,
         range: std::ops::Range<usize>,
     ) -> smelt_core::buffer::CopyOutput {
-        let raw = src[range.start..range.end].to_string();
+        let raw = smelt_buffer::text::slice(src, range.start..range.end).to_string();
         let clipboard = copy_byte_range(buf, range.start, range.end);
         smelt_core::buffer::CopyOutput {
             kill_ring: raw,
@@ -2755,6 +2755,38 @@ mod tests {
             counters.range_materialized_blocks < transcript.history.order.len(),
             "range rows should materialize only intersecting blocks, got {counters:?}"
         );
+    }
+
+    #[test]
+    fn copy_range_treats_doc_columns_as_bytes_for_multibyte_text() {
+        let mut transcript = Transcript::new();
+        let content = "alpha ’ beta gamma";
+        transcript.push(Block::Text {
+            content: content.into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let copied = projection.copy_range(
+            &test_lua(),
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: 0,
+                    byte_col: "alpha ’ ".len(),
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: 0,
+                    byte_col: "alpha ’ beta".len(),
+                },
+            },
+        );
+
+        assert_eq!(copied.clipboard, "beta");
+        assert_eq!(copied.kill_ring, "beta");
     }
 
     #[test]

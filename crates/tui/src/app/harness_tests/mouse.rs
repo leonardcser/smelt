@@ -194,6 +194,112 @@ fn transcript_triple_click_event_pipeline_yanks_clicked_display_line() {
 }
 
 #[test]
+fn transcript_triple_click_wrapped_markdown_highlights_and_copies_paragraph() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.set_terminal_size(52, 16);
+    for i in 0..40 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("filler row {i:02}"),
+            });
+    }
+    let expected = "This paragraph includes markdown and a curly ’ quote before beta so selection copy keeps beta aligned across wraps and highlights every soft-wrapped row in the paragraph.";
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: "This paragraph includes **markdown** and a curly ’ quote before beta so selection copy keeps beta aligned across wraps and highlights every soft-wrapped row in the paragraph.".into(),
+        });
+    for i in 0..20 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("trailing row {i:02}"),
+            });
+    }
+    app.render_silent();
+    pin_transcript_top_to_line_containing(&mut app, "curly");
+    assert!(
+        app.app.transcript_win().has_materialized_rows(),
+        "regression should exercise row-backed transcript selection"
+    );
+
+    let (row, column) = {
+        let win = app.app.transcript_win();
+        let vp = win.viewport.expect("transcript viewport");
+        let materialized = win.materialized_rows().expect("row-backed transcript");
+        let scroll_top = win.scroll_top();
+        let pad_left = win.config.gutters.pad_left;
+        let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
+        let local_scroll = win.local_visual_row(scroll_top) as usize;
+        let visible_end = local_scroll
+            .saturating_add(vp.rect.height as usize)
+            .min(buf.line_count());
+        let line_idx = (local_scroll..visible_end)
+            .find(|&idx| buf.lines()[idx].contains("curly"))
+            .expect("wrapped markdown row visible");
+        let abs_row = materialized.absolute_row(line_idx as crate::smelt_edit::RowIndex);
+        let line = &buf.lines()[line_idx];
+        let hit_col = smelt_buffer::text::byte_to_cell(line, line.find("curly").unwrap()) as u16;
+        (
+            vp.rect.top + abs_row.saturating_sub(scroll_top) as u16,
+            vp.rect
+                .left
+                .saturating_add(vp.gutter_width)
+                .saturating_add(pad_left)
+                .saturating_add(hit_col),
+        )
+    };
+
+    for _ in 0..3 {
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row,
+            column,
+            modifiers: KeyModifiers::empty(),
+        })));
+        app.feed_one(SourceEvent::Term(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            row,
+            column,
+            modifiers: KeyModifiers::empty(),
+        })));
+    }
+
+    let copied = app.app.core.clipboard.kill_ring.current();
+    assert_eq!(
+        copied.split_whitespace().collect::<Vec<_>>().join(" "),
+        expected
+    );
+    assert!(
+        copied.contains("quote before beta"),
+        "multibyte quote must not shift copied text: {copied:?}"
+    );
+
+    let (scroll_top, viewport_rows, highlighted_lines, highlights) = {
+        let (buf_id, scroll_top, viewport_rows) = {
+            let win = app.app.transcript_win();
+            (win.buf, win.scroll_top(), win.viewport.unwrap().rect.height)
+        };
+        let highlights = app
+            .app
+            .transcript_selection_highlights(scroll_top, 0, viewport_rows);
+        let buf = app.app.ui.buf(buf_id).expect("transcript buffer");
+        let lines = highlights
+            .iter()
+            .filter_map(|(line, _, _)| buf.get_line(*line))
+            .filter(|line| {
+                line.contains("paragraph") || line.contains("curly") || line.contains("beta")
+            })
+            .count();
+        (scroll_top, viewport_rows, lines, highlights)
+    };
+    assert!(
+        highlighted_lines >= 2,
+        "yank flash should cover multiple wrapped rows at scroll_top={scroll_top}, viewport_rows={viewport_rows}; highlights={highlights:?}"
+    );
+}
+
+#[test]
 fn user_message_padding_click_snaps_cursor_after_left_pad() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 

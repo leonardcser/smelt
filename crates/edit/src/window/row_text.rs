@@ -420,18 +420,15 @@ impl Window {
                         }
                     }
                     3 => {
-                        let local = state
-                            .materialized
-                            .local_row(pos.row)
-                            .min(self.visual_row_total(buf).saturating_sub(1));
-                        if let Some(line) = buf.get_line(row_to_usize(local)) {
+                        if let Some((start, end)) = self.row_copy_group_range(&state, buf, pos.row)
+                        {
                             state.selection_anchor = Some(DocPosition {
-                                row: pos.row,
+                                row: start,
                                 byte_col: 0,
                             });
                             state.cursor = DocPosition {
-                                row: pos.row,
-                                byte_col: line.len(),
+                                row: end,
+                                byte_col: self.row_line_len(&state, buf, end),
                             };
                         }
                     }
@@ -501,6 +498,54 @@ impl Window {
             }
             _ => (Status::Ignored, None),
         }
+    }
+
+    fn row_copy_group_range(
+        &self,
+        state: &RowTextState,
+        buf: &Buffer,
+        row: RowIndex,
+    ) -> Option<(RowIndex, RowIndex)> {
+        let row_count = buf.line_count() as RowIndex;
+        if row_count == 0 {
+            return None;
+        }
+        let is_continuation = |row: RowIndex| {
+            let dec = buf.decoration_at(row_to_usize(row));
+            dec.soft_wrapped || dec.copy_continuation
+        };
+        let mut first = state
+            .materialized
+            .local_row(row)
+            .min(row_count.saturating_sub(1));
+        while first > 0 && is_continuation(first) {
+            first -= 1;
+        }
+
+        let mut last = state
+            .materialized
+            .local_row(row)
+            .min(row_count.saturating_sub(1));
+        while last + 1 < row_count && is_continuation(last + 1) {
+            last += 1;
+        }
+
+        Some((
+            state.materialized.absolute_row(first),
+            state.materialized.absolute_row(last),
+        ))
+    }
+
+    fn row_line_len(&self, state: &RowTextState, buf: &Buffer, row: RowIndex) -> usize {
+        let row_count = buf.line_count() as RowIndex;
+        if row_count == 0 {
+            return 0;
+        }
+        let local = state
+            .materialized
+            .local_row(row)
+            .min(row_count.saturating_sub(1));
+        buf.get_line(row_to_usize(local)).map(str::len).unwrap_or(0)
     }
 
     fn row_doc_pos_at_mouse(

@@ -4687,6 +4687,70 @@ mod tests {
     }
 
     #[test]
+    fn row_text_mouse_triple_click_selects_soft_wrapped_group() {
+        let mut w = make_win();
+        let mut buf = make_buf(vec![
+            "wrapped paragraph start".into(),
+            "wrapped paragraph middle".into(),
+            "wrapped paragraph end".into(),
+            "next paragraph".into(),
+        ]);
+        let continuation = smelt_buffer::buffer::LineDecoration {
+            soft_wrapped: true,
+            ..Default::default()
+        };
+        buf.set_decoration(1, continuation.clone());
+        buf.set_decoration(2, continuation);
+        w.set_materialized_rows(0, 4, 5);
+        w.scroll_top = 0;
+
+        let viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 0,
+            total_rows: 4,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let mouse_ctx = MouseCtx {
+            soft_breaks: &[],
+            hard_breaks: &[],
+            viewport,
+            click_count: 3,
+        };
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 1,
+            column: 3,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        let (status, range) = w.handle_row_mouse(&buf, event, mouse_ctx, now);
+        assert_eq!(status, Status::Capture);
+        assert!(range.is_none());
+
+        let state = w.row_text_state();
+        assert_eq!(
+            state.selection_anchor,
+            Some(DocPosition {
+                row: 0,
+                byte_col: 0
+            })
+        );
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 2,
+                byte_col: "wrapped paragraph end".len()
+            }
+        );
+        let ranges = w.row_selection_anchor_range(&buf).unwrap();
+        assert_eq!(ranges.start.row, 0);
+        assert_eq!(ranges.end.row, 2);
+        assert_eq!(ranges.end.byte_col, "wrapped paragraph end".len());
+    }
+
+    #[test]
     fn row_text_drag_autoscroll_steps_scroll_and_updates_row_cursor() {
         let mut w = make_win();
         let rows = sample_rows(20);

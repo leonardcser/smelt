@@ -1052,6 +1052,26 @@ impl Buffer {
         offsets[row] + crate::text::cell_to_byte(line, col)
     }
 
+    /// Map a display `(row, byte_col)` back to an editable-space byte offset.
+    ///
+    /// `byte_col` is a byte offset inside `lines[row]`, snapped to a UTF-8
+    /// boundary and clamped to that row. Use [`Self::byte_at_display_pos`] for
+    /// terminal-cell columns.
+    pub fn byte_at_display_byte_pos(&self, row: usize, byte_col: usize) -> usize {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        let row = row.min(self.lines.len() - 1);
+        let line = &self.lines[row];
+        let byte_col = crate::text::snap(line, byte_col.min(line.len()));
+        if let Some(maps) = &self.projection_maps {
+            let char_col = crate::text::char_pos(line, byte_col).min(line.chars().count());
+            return maps.byte_at(&self.source, row, char_col);
+        }
+        let offsets = crate::text::line_start_offsets(&self.lines);
+        offsets[row] + byte_col
+    }
+
     /// Set source↔display coord maps. Parsers call this from `parse()` when
     /// their source bytes don't map 1:1 to display chars. Public Buffer APIs
     /// convert map character columns to terminal-cell columns.
@@ -1869,6 +1889,22 @@ mod tests {
         assert_eq!(buf.byte_at_display_pos(0, 1), 1);
         // Click within row 1.
         assert_eq!(buf.byte_at_display_pos(1, 1), 5);
+    }
+
+    #[test]
+    fn byte_at_display_byte_pos_treats_columns_as_bytes() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["alpha ’ beta".into()]);
+
+        assert_eq!(
+            buf.byte_at_display_byte_pos(0, "alpha ’ ".len()),
+            "alpha ’ ".len()
+        );
+        assert_eq!(
+            buf.byte_at_display_byte_pos(0, "alpha ’".len() - 1),
+            "alpha ".len(),
+            "mid-codepoint columns snap to a UTF-8 boundary"
+        );
     }
 
     #[test]
