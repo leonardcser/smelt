@@ -320,7 +320,7 @@ impl TuiApp {
                         message: message.clone(),
                     }),
                 );
-                self.notify_error(message);
+                self.notify_error_sticky(message);
                 SessionControl::Error
             }
             EngineEvent::Shutdown { .. } => SessionControl::Done,
@@ -401,7 +401,7 @@ impl TuiApp {
         }
         EngineEvent::TurnError { message } => {
             self.working.finish(TurnOutcome::Interrupted);
-            self.notify_error(message);
+            self.notify_error_sticky(message);
         }
         _ => {}
     }

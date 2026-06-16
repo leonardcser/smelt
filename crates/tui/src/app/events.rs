@@ -443,9 +443,9 @@ impl TuiApp {
     ///
     /// Returns `Some(outcome)` when consumed; `None` to continue with path-specific logic.
     ///
-    /// Dispatch priority: resize/mouse → pending prompt Vim input → content search opener
-    /// → window-local Lua keymaps → global Lua keymaps → pane chords → cmdline `:`
-    /// → content focus → overlay keys.
+    /// Dispatch priority: resize/mouse → notification dismissal → pending prompt Vim input
+    /// → content search opener → window-local Lua keymaps → global Lua keymaps
+    /// → pane chords → cmdline `:` → content focus.
     fn dispatch_common(&mut self, ev: &Event, running: bool) -> Option<EventOutcome> {
         if let Event::Resize(w, h) = *ev {
             self.handle_resize(w, h);
@@ -455,6 +455,9 @@ impl TuiApp {
             return Some(self.handle_mouse(me));
         }
         if let Event::Key(k) = *ev {
+            if let Some(outcome) = self.handle_notification_key(k) {
+                return Some(outcome);
+            }
             if self.prompt_vim_pending_input_owns_key(k) {
                 return Some(self.dispatch_prompt_event_to_input(Event::Key(k), running));
             }
@@ -498,21 +501,7 @@ impl TuiApp {
             }
         }
         if self.app_focus == crate::app::AppFocus::Content {
-            if matches!(
-                ev,
-                Event::Key(KeyEvent {
-                    code: KeyCode::Esc,
-                    ..
-                })
-            ) {
-                if let Some(outcome) = self.dismiss_notification_for_esc() {
-                    return Some(outcome);
-                }
-            }
             return Some(self.handle_event_app_history(ev));
-        }
-        if let Some(outcome) = self.handle_overlay_keys(ev) {
-            return Some(outcome);
         }
         None
     }
@@ -789,10 +778,6 @@ impl TuiApp {
             return outcome;
         }
 
-        if let Some(outcome) = self.dismiss_notification_for_esc() {
-            return outcome;
-        }
-
         EventOutcome::Noop
     }
 
@@ -815,10 +800,6 @@ impl TuiApp {
         if !self.queued_inputs.is_empty() {
             self.drain_queued_inputs_into_prompt();
             return EventOutcome::Noop;
-        }
-
-        if let Some(outcome) = self.dismiss_notification_for_esc() {
-            return outcome;
         }
 
         EventOutcome::Noop
@@ -878,10 +859,19 @@ impl TuiApp {
             .handle_event(&mut pctx, ev, None, &mut self.core.clipboard, now);
     }
 
-    fn dismiss_notification_for_esc(&mut self) -> Option<EventOutcome> {
-        if self.notification.is_some() {
+    fn handle_notification_key(&mut self, key: KeyEvent) -> Option<EventOutcome> {
+        let notification = self.notification?;
+        if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
+            if matches!(self.app_focus, crate::app::AppFocus::Prompt)
+                && self.prompt_escape_owned_by_vim()
+            {
+                return None;
+            }
             self.dismiss_notification();
             return Some(EventOutcome::Redraw);
+        }
+        if !notification.lifetime.is_sticky() {
+            self.dismiss_notification();
         }
         None
     }
@@ -969,14 +959,6 @@ impl TuiApp {
             self.ui.cancel_pointer_interaction();
             self.invalidate_for_width(w);
         }
-    }
-
-    fn handle_overlay_keys(&mut self, ev: &Event) -> Option<EventOutcome> {
-        if matches!(ev, Event::Key(k) if k.code != KeyCode::Esc) && self.notification.is_some() {
-            self.dismiss_notification();
-        }
-
-        None
     }
 
     // ── Input processing (commands, settings, rewind, shell) ─────────────

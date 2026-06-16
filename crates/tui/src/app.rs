@@ -179,7 +179,39 @@ pub(crate) struct PromptResizeClick {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Notification {
     pub(crate) win: crate::smelt_edit::WinId,
-    pub(crate) expires_at: Instant,
+    pub(crate) lifetime: NotificationLifetime,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum NotificationLifetime {
+    Timed { expires_at: Instant },
+    Sticky,
+}
+
+impl NotificationLifetime {
+    fn timed(now: Instant) -> Self {
+        Self::Timed {
+            expires_at: now + Duration::from_millis(NOTIFICATION_TTL_MS),
+        }
+    }
+
+    fn is_sticky(self) -> bool {
+        matches!(self, Self::Sticky)
+    }
+
+    fn is_expired(self, now: Instant) -> bool {
+        match self {
+            Self::Timed { expires_at } => expires_at <= now,
+            Self::Sticky => false,
+        }
+    }
+
+    fn expiry_delay(self, now: Instant) -> Option<Duration> {
+        match self {
+            Self::Timed { expires_at } => Some(expires_at.saturating_duration_since(now)),
+            Self::Sticky => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -384,7 +416,7 @@ pub(crate) const ESC_CHORD_TIMEOUT_MS: u64 = 500;
 /// Idle time after the last keypress before showing a deferred permission dialog.
 pub(crate) const CONFIRM_DEFER_MS: u64 = 1500;
 
-/// How long a notification toast stays visible without user interaction.
+/// How long a timed notification toast stays visible without user interaction.
 pub(crate) const NOTIFICATION_TTL_MS: u64 = 5000;
 
 pub(crate) enum DeferredDialog {
@@ -1466,6 +1498,15 @@ impl TuiApp {
         );
     }
 
+    pub(crate) fn notify_error_sticky(&mut self, message: String) {
+        self.record_notice_with_lifetime(
+            smelt_core::messages::MessageKind::Error,
+            "smelt".into(),
+            message,
+            NotificationLifetime::Sticky,
+        );
+    }
+
     #[allow(dead_code)] // Only reachable via the Lua surface today.
     pub(crate) fn notify_warn(&mut self, message: String) {
         self.record_notice(
@@ -1486,13 +1527,33 @@ impl TuiApp {
         source: String,
         body: String,
     ) {
+        self.record_notice_with_lifetime(
+            kind,
+            source,
+            body,
+            NotificationLifetime::timed(self.core.clock.instant_now()),
+        );
+    }
+
+    fn record_notice_with_lifetime(
+        &mut self,
+        kind: smelt_core::messages::MessageKind,
+        source: String,
+        body: String,
+        lifetime: NotificationLifetime,
+    ) {
         if let Ok(mut messages) = self.lua.core_shared().messages.lock() {
             messages.append(kind, source, body.clone());
         }
-        self.open_notification(kind, &body);
+        self.open_notification(kind, &body, lifetime);
     }
 
-    fn open_notification(&mut self, kind: smelt_core::messages::MessageKind, body: &str) {
+    fn open_notification(
+        &mut self,
+        kind: smelt_core::messages::MessageKind,
+        body: &str,
+        lifetime: NotificationLifetime,
+    ) {
         use smelt_core::messages::MessageKind;
         if let Some(notification) = self.notification.take() {
             self.close_overlay_leaf(notification.win);
@@ -1586,10 +1647,7 @@ impl TuiApp {
                 // never obscures a modal asking for input.
                 .with_z(40),
         );
-        self.notification = Some(Notification {
-            win,
-            expires_at: self.core.clock.instant_now() + Duration::from_millis(NOTIFICATION_TTL_MS),
-        });
+        self.notification = Some(Notification { win, lifetime });
     }
 
     pub(crate) fn dismiss_notification(&mut self) {
@@ -1599,9 +1657,10 @@ impl TuiApp {
     }
 
     pub(crate) fn dismiss_expired_notification(&mut self) -> bool {
+        let now = self.core.clock.instant_now();
         if self
             .notification
-            .is_some_and(|notification| notification.expires_at <= self.core.clock.instant_now())
+            .is_some_and(|notification| notification.lifetime.is_expired(now))
         {
             self.dismiss_notification();
             return true;
@@ -1610,11 +1669,9 @@ impl TuiApp {
     }
 
     pub(crate) fn notification_expiry_delay(&self) -> Option<Duration> {
-        self.notification.map(|notification| {
-            notification
-                .expires_at
-                .saturating_duration_since(self.core.clock.instant_now())
-        })
+        let now = self.core.clock.instant_now();
+        self.notification
+            .and_then(|notification| notification.lifetime.expiry_delay(now))
     }
 
     #[cfg(any(test, feature = "harness"))]
@@ -1687,7 +1744,7 @@ impl TuiApp {
             self.transcript_win_mut().follow_tail();
         }
         if let Some(message) = self.startup_auth_error.take() {
-            self.notify_error(message);
+            self.notify_error_sticky(message);
         }
 
         {
@@ -1747,7 +1804,7 @@ impl TuiApp {
         // the end with `ctx.kind = "launch"`.
         let load_err = crate::lua::with_app_ptr(self, |app| app.bring_up_lua("launch"));
         if let Some(err) = load_err {
-            self.notify_error(format!("lua init: {err}"));
+            self.notify_error_sticky(format!("lua init: {err}"));
         }
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).

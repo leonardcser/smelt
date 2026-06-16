@@ -592,7 +592,7 @@ fn resolve_model_for_ask(
         match smelt_core::config::resolve_model_ref(&app.core.config.available_models, reference) {
             Ok(m) => m.clone(),
             Err(err) => {
-                app.notify_error(format!("smelt.engine: {err}"));
+                app.notify_error_sticky(format!("smelt.engine: {err}"));
                 return None;
             }
         };

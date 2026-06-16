@@ -259,7 +259,7 @@ impl TuiApp {
                     ) {
                         Ok(model) => Some(model),
                         Err(err) => {
-                            self.notify_error(err.to_string());
+                            self.notify_error_sticky(err.to_string());
                             None
                         }
                     }
@@ -271,7 +271,7 @@ impl TuiApp {
                     ) {
                         Ok(model) => Some(model),
                         Err(err) => {
-                            self.notify_error(err.to_string());
+                            self.notify_error_sticky(err.to_string());
                             None
                         }
                     }
@@ -537,7 +537,7 @@ impl TuiApp {
         match lookup_api_key(key_env, |v| std::env::var(v)) {
             Ok(key) => Some(key),
             Err(err) => {
-                self.notify_error(err.message());
+                self.notify_error_sticky(err.message());
                 None
             }
         }

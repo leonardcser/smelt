@@ -108,6 +108,36 @@ fn non_escape_key_breaks_pending_escape_sequence() {
 }
 
 #[test]
+fn timed_notification_expires_after_ttl() {
+    let mut app = TestApp::builder().build();
+
+    app.app.notify_error("transient error".into());
+    assert!(app.state().notification.is_some());
+
+    app.feed_one(SourceEvent::Tick(crate::app::NOTIFICATION_TTL_MS + 1));
+
+    assert!(app.state().notification.is_none());
+}
+
+#[test]
+fn sticky_notification_waits_for_escape() {
+    let mut app = TestApp::builder().with_vim(false).build();
+
+    app.app.notify_error_sticky("quota reached".into());
+    let notification = app.state().notification;
+    assert!(notification.is_some());
+
+    app.feed_one(SourceEvent::Tick(crate::app::NOTIFICATION_TTL_MS + 1));
+    assert_eq!(app.state().notification, notification);
+
+    app.type_char('x');
+    assert_eq!(app.state().notification, notification);
+
+    app.press(KeyCode::Esc);
+    assert!(app.state().notification.is_none());
+}
+
+#[test]
 fn transcript_vim_gg_g_and_count_g_use_row_document() {
     let mut app = row_document_transcript_app(100, true);
     let total_rows = transcript_total_rows(&app);

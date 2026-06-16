@@ -29,7 +29,7 @@ impl TuiApp {
         self.pending_lua_reload = false;
         let err = self.bring_up_lua("reload");
         match err {
-            Some(e) => self.notify_error(format!("lua reload: {e}")),
+            Some(e) => self.notify_error_sticky(format!("lua reload: {e}")),
             None => self.notify("lua reloaded".into()),
         }
     }
@@ -125,7 +125,7 @@ impl TuiApp {
             Ok::<mlua::Value, mlua::Error>(mlua::Value::Table(t))
         });
         for he in hook_errors {
-            self.notify_error(he);
+            self.notify_error_sticky(he);
         }
         err
     }
@@ -138,7 +138,7 @@ impl TuiApp {
         let outcome = self.prompt_inputs.refresh();
         self.core.skills = Some(outcome.loader);
         if let Some(err) = outcome.system_prompt_read_error {
-            self.notify_error(err);
+            self.notify_error_sticky(err);
         }
         self.core
             .engine
