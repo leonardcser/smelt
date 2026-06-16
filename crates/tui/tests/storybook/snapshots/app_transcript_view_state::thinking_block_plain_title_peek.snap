@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+│ Modifying code …
+│ I need to modify the code and inspect the details.
+│ It looks like I should check the edit file diff output.
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────
+ ○ normal                                                     1:1 100%

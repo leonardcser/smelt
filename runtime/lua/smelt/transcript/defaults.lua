@@ -402,12 +402,99 @@ local function thinking_content_layout(content)
   })
 end
 
---- Render a compact live preview of thinking: first rendered row, omitted rows, tail.
+local function collect_lines(content)
+  local lines = {}
+  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+    lines[#lines + 1] = line
+  end
+  return lines
+end
+
+local function trim(line)
+  return tostring(line or ""):match("^%s*(.-)%s*$")
+end
+
+local function bold_thinking_title(line)
+  if line:sub(1, 2) ~= "**" or line:sub(-2) ~= "**" or #line <= 4 then return nil end
+  local title = trim(line:sub(3, -3))
+  if title == "" then return nil end
+  return title
+end
+
+local function looks_like_plain_title(line)
+  local words = 0
+  for _ in line:gmatch("%S+") do words = words + 1 end
+  return words > 0
+      and words <= 12
+      and smelt.text.width(line) <= 80
+      and not line:match("[%.%!%?]$")
+end
+
+local function body_after_title(lines, start)
+  while start <= #lines and trim(lines[start]) == "" do
+    start = start + 1
+  end
+  if start > #lines then return "" end
+  local body = {}
+  for i = start, #lines do body[#body + 1] = lines[i] end
+  return table.concat(body, "\n")
+end
+
+local function thinking_title_and_body(content)
+  local lines = collect_lines(content or "")
+  local first_idx = nil
+  for i, line in ipairs(lines) do
+    if trim(line) ~= "" then
+      first_idx = i
+      break
+    end
+  end
+  if not first_idx then return nil, "" end
+
+  local first = trim(lines[first_idx])
+  local bold_title = bold_thinking_title(first)
+  if bold_title then return bold_title, body_after_title(lines, first_idx + 1) end
+
+  local saw_blank_after_first = false
+  for i = first_idx + 1, #lines do
+    local line = trim(lines[i])
+    if line == "" then
+      saw_blank_after_first = true
+    else
+      break
+    end
+  end
+  if saw_blank_after_first and looks_like_plain_title(first) then
+    return first, body_after_title(lines, first_idx + 1)
+  end
+  return nil, content or ""
+end
+
+--- Render a compact live preview of thinking: titled blocks keep the title and
+--- show the tail of the body without a standalone omitted-row marker.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_thinking_peek(block, ctx)
   local _ = ctx
   local content = block.content or ""
-  if content == "" then content = block.thinking_summary or "thinking (0 lines)" end
+  local title, body = thinking_title_and_body(content)
+  if title then
+    local title_text = title .. (body ~= "" and " …" or "")
+    local items = {
+      layout.markdown(title_text, {
+        dim = true,
+        italic = true,
+        inline = true,
+      }),
+    }
+    if body ~= "" then
+      items[#items + 1] = layout.cap(thinking_content_layout(body), {
+        rows = 3,
+        keep = "tail",
+      })
+    end
+    return layout.gutter(layout.vbox(items), { text = "│ ", styled = true })
+  end
+  if content == "" then return M.render_thinking_summary(block, ctx) end
   return layout.gutter(
     layout.cap(thinking_content_layout(content), {
       rows = 4,
@@ -424,7 +511,7 @@ end
 function smelt.transcript.defaults.render_thinking_summary(block, ctx)
   local _ = ctx
   return layout.gutter(
-    layout.markdown(block.thinking_summary or "thinking (0 lines)", {
+    layout.markdown(block.thinking_summary or "thinking", {
       dim = true,
       italic = true,
       inline = true,
