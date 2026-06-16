@@ -2,10 +2,10 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-│ Inspecting the renderer (4 lines)
-
-
-
+│ Inspecting the renderer
+│ … 6 lines collapsed …
+│ thinking
+│ … 6 lines collapsed …
 
 
 ─ ✿ working… ───────────────────────────────────────────

@@ -2406,7 +2406,15 @@ fn format_elapsed_secs(secs: u64) -> String {
 
 fn thinking_fallback_summary(content: &str) -> String {
     let (label, line_count) = thinking_summary(content);
-    format!("{label} ({})", pluralize(line_count, "line", "lines"))
+    let collapsed_lines = if label == "thinking" {
+        line_count
+    } else {
+        line_count.saturating_sub(1)
+    };
+    format!(
+        "{label}\n… {} collapsed …",
+        pluralize(collapsed_lines, "line", "lines")
+    )
 }
 
 fn thinking_summary(content: &str) -> (String, usize) {

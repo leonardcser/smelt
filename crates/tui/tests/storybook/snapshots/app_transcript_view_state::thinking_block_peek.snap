@@ -3,9 +3,15 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 │ Inspecting the renderer
-│ Read the transcript model first.
-│ Check the Lua defaults next.
+│ … 3 lines omitted …
 │ Update the stories last.
+│ Run the snapshot tests.
+│ Review the final diff.
+│ Read the transcript model first.
+│ … 2 lines omitted …
+│ Update the stories last.
+│ Run the snapshot tests.
+│ Review the final diff.
 
 
 ─ ✿ working… ───────────────────────────────────────────

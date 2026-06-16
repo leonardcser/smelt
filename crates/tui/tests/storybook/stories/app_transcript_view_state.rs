@@ -6,29 +6,39 @@ use serde_json::json;
 
 use crate::app_story;
 
-const THINKING: &str = "**Inspecting the renderer**\nRead the transcript model first.\nCheck the Lua defaults next.\nUpdate the stories last.";
+const THINKING: &str = "**Inspecting the renderer**\nRead the transcript model first.\nCheck the Lua defaults next.\nCompare the rendered rows.\nUpdate the stories last.\nRun the snapshot tests.\nReview the final diff.";
+const THINKING_UNTITLED: &str = "Read the transcript model first.\nCheck the Lua defaults next.\nCompare the rendered rows.\nUpdate the stories last.\nRun the snapshot tests.\nReview the final diff.";
 
 app_story!(thinking_block_collapsed, |ctx| {
     ctx.set_viewport(56, 10);
     ctx.engine(EngineEvent::Thinking {
         content: THINKING.into(),
     });
+    ctx.engine(EngineEvent::Thinking {
+        content: THINKING_UNTITLED.into(),
+    });
     ctx.run_lua("smelt.transcript.fold_kind('thinking', 'close')");
     ctx.assert_snapshot();
 });
 
 app_story!(thinking_block_peek, |ctx| {
-    ctx.set_viewport(56, 10);
+    ctx.set_viewport(56, 16);
     ctx.engine(EngineEvent::Thinking {
         content: THINKING.into(),
+    });
+    ctx.engine(EngineEvent::Thinking {
+        content: THINKING_UNTITLED.into(),
     });
     ctx.assert_snapshot();
 });
 
 app_story!(thinking_block_expanded, |ctx| {
-    ctx.set_viewport(56, 12);
+    ctx.set_viewport(56, 18);
     ctx.engine(EngineEvent::Thinking {
         content: THINKING.into(),
+    });
+    ctx.engine(EngineEvent::Thinking {
+        content: THINKING_UNTITLED.into(),
     });
     ctx.run_lua("smelt.transcript.fold_kind('thinking', 'open')");
     ctx.assert_snapshot();
