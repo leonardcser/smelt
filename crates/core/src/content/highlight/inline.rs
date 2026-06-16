@@ -1,13 +1,16 @@
 //! Inline markdown rendering: pulldown-cmark inline event lowering,
 //! inline-span wrapping, and the markdown table renderer that uses both.
 
+use crate::buffer::SpanMeta;
 use crate::content::builder::{display_width, LineBuilder};
+use crate::content::file_icons::{self, FileIcon, FileIconOptions};
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
 use crate::content::ColumnAlignment;
 use crate::style::Color;
 use crate::theme::{intern, HlGroup};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthStr;
 
 /// Render a markdown table. `alignments` may be empty (defaults to left for all
@@ -23,6 +26,29 @@ pub fn render_markdown_table(
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
 ) -> u16 {
+    render_markdown_table_with_options(
+        out,
+        rows,
+        alignments,
+        width,
+        dim,
+        bctx,
+        indent,
+        &InlineOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_markdown_table_with_options(
+    out: &mut LineBuilder,
+    rows: &[Vec<String>],
+    alignments: &[ColumnAlignment],
+    width: usize,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+    options: &InlineOptions,
+) -> u16 {
     if rows.is_empty() {
         return 0;
     }
@@ -36,7 +62,7 @@ pub fn render_markdown_table(
 
     let start = out.line_count();
     let Some(col_widths) = fit_column_widths(rows, num_cols, max_table) else {
-        let rendered = render_table_stacked(out, rows, max_table, dim, bctx, indent);
+        let rendered = render_table_stacked(out, rows, max_table, dim, bctx, indent, options);
         out.stamp_chrome_delimited_block(start);
         return rendered;
     };
@@ -44,11 +70,21 @@ pub fn render_markdown_table(
     let mut total_rows = 0u16;
     total_rows += render_border(out, &col_widths, bctx, indent, "┏", "┳", "┓");
     if let Some(header) = rows.first() {
-        total_rows += render_table_row(out, header, &col_widths, align_for, dim, bctx, indent);
+        total_rows += render_table_row(
+            out,
+            header,
+            &col_widths,
+            align_for,
+            dim,
+            bctx,
+            indent,
+            options,
+        );
         total_rows += render_border(out, &col_widths, bctx, indent, "┣", "╋", "┫");
     }
     for row in rows.iter().skip(1) {
-        total_rows += render_table_row(out, row, &col_widths, align_for, dim, bctx, indent);
+        total_rows +=
+            render_table_row(out, row, &col_widths, align_for, dim, bctx, indent, options);
     }
     total_rows += render_border(out, &col_widths, bctx, indent, "┗", "┻", "┛");
     out.stamp_chrome_delimited_block(start);
@@ -63,6 +99,26 @@ pub fn measure_markdown_table(
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
 ) -> u16 {
+    measure_markdown_table_with_options(
+        rows,
+        alignments,
+        width,
+        dim,
+        bctx,
+        indent,
+        &InlineOptions::default(),
+    )
+}
+
+pub fn measure_markdown_table_with_options(
+    rows: &[Vec<String>],
+    alignments: &[ColumnAlignment],
+    width: usize,
+    dim: bool,
+    bctx: Option<&super::super::BoxContext>,
+    indent: &str,
+    options: &InlineOptions,
+) -> u16 {
     let _ = alignments;
     if rows.is_empty() {
         return 0;
@@ -74,17 +130,17 @@ pub fn measure_markdown_table(
 
     let max_table = markdown_table_width(width, bctx, indent);
     let Some(col_widths) = fit_column_widths(rows, num_cols, max_table) else {
-        return measure_table_stacked(rows, max_table, dim);
+        return measure_table_stacked(rows, max_table, dim, options);
     };
 
     let header_rows = rows
         .first()
-        .map(|header| measure_table_row(header, &col_widths, dim))
+        .map(|header| measure_table_row(header, &col_widths, dim, options))
         .unwrap_or(0);
     let body_rows: u16 = rows
         .iter()
         .skip(1)
-        .map(|row| measure_table_row(row, &col_widths, dim))
+        .map(|row| measure_table_row(row, &col_widths, dim, options))
         .sum();
     header_rows.saturating_add(body_rows).saturating_add(3) // top border, header separator, bottom border
 }
@@ -100,15 +156,20 @@ fn markdown_table_width(
     }
 }
 
-fn measure_table_row(row: &[String], widths: &[usize], dim: bool) -> u16 {
+fn measure_table_row(row: &[String], widths: &[usize], dim: bool, options: &InlineOptions) -> u16 {
     row.iter()
         .enumerate()
-        .map(|(c, cell)| measure_cell_rows(cell, widths.get(c).copied().unwrap_or(0), dim))
+        .map(|(c, cell)| measure_cell_rows(cell, widths.get(c).copied().unwrap_or(0), dim, options))
         .max()
         .unwrap_or(1)
 }
 
-fn measure_table_stacked(rows: &[Vec<String>], max_table: usize, dim: bool) -> u16 {
+fn measure_table_stacked(
+    rows: &[Vec<String>],
+    max_table: usize,
+    dim: bool,
+    options: &InlineOptions,
+) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
         None => return 0,
@@ -130,23 +191,25 @@ fn measure_table_stacked(rows: &[Vec<String>], max_table: usize, dim: bool) -> u
         for (c, cell) in row.iter().enumerate() {
             let label = header.get(c).map(|s| s.as_str()).unwrap_or("");
             if side_by_side {
-                total_rows = total_rows.saturating_add(measure_cell_rows(cell, value_width, dim));
+                total_rows =
+                    total_rows.saturating_add(measure_cell_rows(cell, value_width, dim, options));
             } else {
                 let inner_indent = content_width.min(2);
                 let text_width = content_width.saturating_sub(inner_indent).max(1);
                 if !label.is_empty() {
-                    total_rows =
-                        total_rows.saturating_add(measure_cell_rows(label, text_width, dim));
+                    total_rows = total_rows
+                        .saturating_add(measure_cell_rows(label, text_width, dim, options));
                 }
-                total_rows = total_rows.saturating_add(measure_cell_rows(cell, text_width, dim));
+                total_rows =
+                    total_rows.saturating_add(measure_cell_rows(cell, text_width, dim, options));
             }
         }
     }
     total_rows
 }
 
-fn measure_cell_rows(text: &str, max_width: usize, dim: bool) -> u16 {
-    let spans = parse_inline_spans(text, dim);
+fn measure_cell_rows(text: &str, max_width: usize, dim: bool, options: &InlineOptions) -> u16 {
+    let spans = parse_inline_spans_with_options(text, dim, options);
     wrap_inline_spans(&spans, max_width).len() as u16
 }
 
@@ -252,6 +315,7 @@ fn render_border(
     1
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_table_row(
     out: &mut LineBuilder,
     row: &[String],
@@ -260,11 +324,14 @@ fn render_table_row(
     dim: bool,
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
+    options: &InlineOptions,
 ) -> u16 {
     let wrapped: Vec<Vec<Vec<InlineSpan>>> = row
         .iter()
         .enumerate()
-        .map(|(c, cell)| wrap_cell_spans(out, cell, widths.get(c).copied().unwrap_or(0), dim))
+        .map(|(c, cell)| {
+            wrap_cell_spans(out, cell, widths.get(c).copied().unwrap_or(0), dim, options)
+        })
         .collect();
     let height = wrapped.iter().map(|w| w.len()).max().unwrap_or(1);
 
@@ -315,6 +382,7 @@ fn render_table_stacked(
     dim: bool,
     bctx: Option<&super::super::BoxContext>,
     indent: &str,
+    options: &InlineOptions,
 ) -> u16 {
     let header = match rows.first() {
         Some(h) => h,
@@ -348,12 +416,12 @@ fn render_table_stacked(
             if side_by_side {
                 let label_visual = strip_markdown_markers(label).width();
                 let pad = label_width.saturating_sub(label_visual);
-                let wrapped = wrap_cell_spans(out, cell, value_width, dim);
+                let wrapped = wrap_cell_spans(out, cell, value_width, dim, options);
                 for (li, spans) in wrapped.iter().enumerate() {
                     render_row_prefix(out, bctx, indent);
                     if li == 0 {
                         out.print_gutter("  ");
-                        emit_table_label(out, label, dim);
+                        emit_table_label(out, label, dim, options);
                         if pad > 0 {
                             out.print_gutter(&" ".repeat(pad));
                         }
@@ -370,7 +438,7 @@ fn render_table_stacked(
                 let inner_indent = content_width.min(2);
                 let text_width = content_width.saturating_sub(inner_indent).max(1);
                 if !label.is_empty() {
-                    let labels = wrap_cell_spans(out, label, text_width, dim);
+                    let labels = wrap_cell_spans(out, label, text_width, dim, options);
                     for spans in &labels {
                         render_row_prefix(out, bctx, indent);
                         if inner_indent > 0 {
@@ -382,7 +450,7 @@ fn render_table_stacked(
                     }
                 }
 
-                let wrapped = wrap_cell_spans(out, cell, text_width, dim);
+                let wrapped = wrap_cell_spans(out, cell, text_width, dim, options);
                 for spans in &wrapped {
                     render_row_prefix(out, bctx, indent);
                     if inner_indent > 0 {
@@ -403,8 +471,9 @@ fn wrap_cell_spans(
     text: &str,
     max_width: usize,
     dim: bool,
+    options: &InlineOptions,
 ) -> Vec<Vec<InlineSpan>> {
-    let spans = parse_inline_spans(text, dim);
+    let spans = parse_inline_spans_with_options(text, dim, options);
     let rows = wrap_inline_spans(&spans, max_width);
     if rows.len() > 1 {
         out.mark_wrapped();
@@ -412,8 +481,8 @@ fn wrap_cell_spans(
     rows
 }
 
-fn emit_table_label(out: &mut LineBuilder, label: &str, dim: bool) {
-    let spans = parse_inline_spans(label, dim);
+fn emit_table_label(out: &mut LineBuilder, label: &str, dim: bool, options: &InlineOptions) {
+    let spans = parse_inline_spans_with_options(label, dim, options);
     emit_table_label_spans(out, &spans, dim);
 }
 
@@ -473,6 +542,11 @@ fn strip_markdown_markers(text: &str) -> String {
 
 // ── Parse-then-wrap pipeline ─────────────────────────────────────────
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InlineOptions {
+    pub file_icons: FileIconOptions,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InlineStyle {
     pub bold: bool,
@@ -488,20 +562,42 @@ pub struct InlineStyle {
 pub struct InlineSpan {
     pub text: String,
     pub style: InlineStyle,
+    pub meta: SpanMeta,
 }
 
 pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
+    parse_inline_spans_with_options(text, dim, &InlineOptions::default())
+}
+
+pub fn parse_inline_spans_with_options(
+    text: &str,
+    dim: bool,
+    options: &InlineOptions,
+) -> Vec<InlineSpan> {
     if text.is_empty() {
         return Vec::new();
     }
 
-    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    lower_inline_fragment_events(text, Parser::new_ext(text, options).into_offset_iter(), dim)
+    let parser_options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    lower_inline_fragment_events(
+        text,
+        Parser::new_ext(text, parser_options).into_offset_iter(),
+        dim,
+        options,
+    )
 }
 
 pub fn lower_inline_events<'a>(
     events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
     dim: bool,
+) -> Vec<InlineSpan> {
+    lower_inline_events_with_options(events, dim, &InlineOptions::default())
+}
+
+pub fn lower_inline_events_with_options<'a>(
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    dim: bool,
+    options: &InlineOptions,
 ) -> Vec<InlineSpan> {
     let mut styles = vec![InlineStyle {
         dim,
@@ -531,7 +627,7 @@ pub fn lower_inline_events<'a>(
             Event::End(_) if styles.len() > 1 => {
                 styles.pop();
             }
-            event => lower_inline_event(event, &mut out, &styles),
+            event => lower_inline_event(event, &mut out, &styles, options),
         }
     }
 
@@ -542,6 +638,15 @@ pub fn lower_inline_event_lines<'a>(
     events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
     line_ranges: &[Range<usize>],
     dim: bool,
+) -> Vec<Vec<InlineSpan>> {
+    lower_inline_event_lines_with_options(events, line_ranges, dim, &InlineOptions::default())
+}
+
+pub fn lower_inline_event_lines_with_options<'a>(
+    events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    line_ranges: &[Range<usize>],
+    dim: bool,
+    options: &InlineOptions,
 ) -> Vec<Vec<InlineSpan>> {
     let mut styles = vec![InlineStyle {
         dim,
@@ -582,7 +687,7 @@ pub fn lower_inline_event_lines<'a>(
             }
             event => {
                 if let Some(line_index) = line_index_for_event(line_ranges, &range) {
-                    lower_inline_event(event, &mut out[line_index], &styles);
+                    lower_inline_event(event, &mut out[line_index], &styles, options);
                     if let Some((_, link_line_index)) = link_stack.last_mut() {
                         *link_line_index = Some(line_index);
                     }
@@ -604,6 +709,7 @@ fn lower_inline_fragment_events<'a>(
     source: &str,
     events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
     dim: bool,
+    options: &InlineOptions,
 ) -> Vec<InlineSpan> {
     let mut styles = vec![InlineStyle {
         dim,
@@ -671,7 +777,7 @@ fn lower_inline_fragment_events<'a>(
                     &mut out,
                     *styles.last().unwrap(),
                 );
-                lower_inline_event(event, &mut out, &styles);
+                lower_inline_event(event, &mut out, &styles, options);
             }
         }
     }
@@ -745,20 +851,82 @@ fn link_style(style: InlineStyle) -> InlineStyle {
     }
 }
 
-fn lower_inline_event(event: Event<'_>, out: &mut Vec<InlineSpan>, styles: &[InlineStyle]) {
+fn inline_file_icon(text: &str, options: &FileIconOptions) -> Option<FileIcon> {
+    let path = inline_file_path(text, options)?;
+    file_icons::lookup_path(&path, options)
+}
+
+fn inline_file_path(text: &str, options: &FileIconOptions) -> Option<PathBuf> {
+    if text.trim() != text || text.contains("://") {
+        return None;
+    }
+    let candidate =
+        strip_location_suffix(text.trim_end_matches([',', '.', ')', ';', ':', '!', '?']));
+    if candidate.is_empty() {
+        return None;
+    }
+    let path = Path::new(candidate);
+    if path.is_absolute() {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    let cwd = options.base_dir.as_deref()?;
+    for base in cwd.ancestors() {
+        let absolute = base.join(path);
+        if absolute.is_file() {
+            return Some(absolute);
+        }
+    }
+    None
+}
+
+fn strip_location_suffix(text: &str) -> &str {
+    let Some((path, line)) = text.rsplit_once(':') else {
+        return text;
+    };
+    if !line.chars().all(|c| c.is_ascii_digit()) {
+        return text;
+    }
+    let without_line = path;
+    if let Some((path, col)) = without_line.rsplit_once(':') {
+        if col.chars().all(|c| c.is_ascii_digit()) {
+            return path;
+        }
+    }
+    without_line
+}
+
+fn lower_inline_event(
+    event: Event<'_>,
+    out: &mut Vec<InlineSpan>,
+    styles: &[InlineStyle],
+    options: &InlineOptions,
+) {
     match event {
         Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
             push_inline_span(out, text.as_ref(), *styles.last().unwrap());
         }
         Event::Code(text) => {
-            push_inline_span(
-                out,
-                text.as_ref(),
-                InlineStyle {
-                    group: Some(intern("SmeltAccent")),
-                    ..*styles.last().unwrap()
-                },
-            );
+            let code_style = InlineStyle {
+                group: Some(intern("SmeltAccent")),
+                ..*styles.last().unwrap()
+            };
+            if let Some(icon) = inline_file_icon(text.as_ref(), &options.file_icons) {
+                let mut icon_style = code_style;
+                if let Some(group) = icon.group {
+                    icon_style.group = Some(group);
+                }
+                let icon_text = format!("{} ", icon.icon);
+                push_inline_span_meta(
+                    out,
+                    &icon_text,
+                    icon_style,
+                    SpanMeta {
+                        selectable: false,
+                        copy_as: None,
+                    },
+                );
+            }
+            push_inline_span(out, text.as_ref(), code_style);
         }
         Event::SoftBreak | Event::HardBreak => {
             push_inline_span(out, " ", *styles.last().unwrap());
@@ -805,15 +973,28 @@ fn push_tag_style(styles: &mut Vec<InlineStyle>, tag: Tag<'_>) {
 }
 
 fn push_inline_span(out: &mut Vec<InlineSpan>, text: &str, style: InlineStyle) {
+    push_inline_span_meta(out, text, style, SpanMeta::default());
+}
+
+fn push_inline_span_meta(
+    out: &mut Vec<InlineSpan>,
+    text: &str,
+    style: InlineStyle,
+    meta: SpanMeta,
+) {
     if text.is_empty() {
         return;
     }
-    if let Some(last) = out.last_mut().filter(|span| span.style == style) {
+    if let Some(last) = out
+        .last_mut()
+        .filter(|span| span.style == style && span.meta == meta)
+    {
         last.text.push_str(text);
     } else {
         out.push(InlineSpan {
             text: text.to_string(),
             style,
+            meta,
         });
     }
 }
@@ -822,7 +1003,13 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
     let line = InlineLine::new(
         spans
             .iter()
-            .map(|span| InlineRun::new(span.text.clone(), span.style, BreakPolicy::Normal))
+            .map(|span| {
+                InlineRun::new(
+                    span.text.clone(),
+                    (span.style, span.meta.clone()),
+                    BreakPolicy::Normal,
+                )
+            })
             .collect(),
     );
     line.wrap_ranges(max_cols)
@@ -831,7 +1018,8 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
             row.into_iter()
                 .map(|run| InlineSpan {
                     text: run.text,
-                    style: run.meta,
+                    style: run.meta.0,
+                    meta: run.meta.1,
                 })
                 .collect()
         })
@@ -853,7 +1041,7 @@ pub fn emit_inline_spans(out: &mut LineBuilder, spans: &[InlineSpan]) {
                 ..Default::default()
             },
         );
-        out.print(&span.text);
+        out.print_with_meta(&span.text, span.meta.clone());
         out.pop_style();
     }
 }
@@ -870,6 +1058,21 @@ mod tests {
     use super::super::super::builder::test_util::render_test;
     use super::*;
     use crate::content::BoxContext;
+
+    fn file_icon_options(enabled: bool, base_dir: Option<PathBuf>) -> InlineOptions {
+        InlineOptions {
+            file_icons: FileIconOptions::new(enabled, false, false, base_dir),
+        }
+    }
+
+    fn expected_icon_text(path: &Path, options: &InlineOptions) -> String {
+        format!(
+            "{} ",
+            file_icons::lookup_path(path, &options.file_icons)
+                .unwrap()
+                .icon
+        )
+    }
 
     /// Parse `text` into styled inline spans and return a compact
     /// `Vec<(tag, text)>` representation.
@@ -929,6 +1132,62 @@ mod tests {
     }
     fn l(s: &str) -> (&'static str, String) {
         ("link", s.into())
+    }
+
+    #[test]
+    fn inline_code_existing_file_gets_nonselectable_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let path = file.to_string_lossy();
+        let options = file_icon_options(true, Some(dir.path().to_path_buf()));
+        let spans = parse_inline_spans_with_options(&format!("`{path}`"), false, &options);
+
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, expected_icon_text(&file, &options));
+        assert!(!spans[0].meta.selectable);
+        assert_eq!(spans[1].text, path);
+        assert!(spans[1].meta.selectable);
+    }
+
+    #[test]
+    fn inline_code_workspace_relative_file_gets_icon() {
+        let cwd = std::env::current_dir().unwrap();
+        let options = file_icon_options(true, Some(cwd));
+        let spans = parse_inline_spans_with_options("`Cargo.toml`", false, &options);
+
+        assert_eq!(spans.len(), 2);
+        assert_eq!(
+            spans[0].text,
+            expected_icon_text(Path::new("Cargo.toml"), &options)
+        );
+        assert!(!spans[0].meta.selectable);
+        assert_eq!(spans[1].text, "Cargo.toml");
+    }
+
+    #[test]
+    fn inline_code_file_icon_allows_line_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("main.py");
+        std::fs::write(&file, "print('hi')\n").unwrap();
+        let text = format!("{}:12:3", file.display());
+        let options = file_icon_options(true, Some(dir.path().to_path_buf()));
+        let spans = parse_inline_spans_with_options(&format!("`{text}`"), false, &options);
+
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, expected_icon_text(&file, &options));
+        assert!(!spans[0].meta.selectable);
+        assert_eq!(spans[1].text, text);
+    }
+
+    #[test]
+    fn inline_code_file_icons_are_setting_gated() {
+        let cwd = std::env::current_dir().unwrap();
+        let options = file_icon_options(false, Some(cwd));
+        let spans = parse_inline_spans_with_options("`Cargo.toml`", false, &options);
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "Cargo.toml");
     }
 
     // ── Plain ──────────────────────────────────────────────────────────
@@ -1297,11 +1556,8 @@ mod tests {
         super::super::syntax::render_code_block(out, &block, width, dim, bctx, fence)
     }
 
-    /// Source-text round-trip for fenced code blocks: opening fence on
-    /// the first row, closing fence on the last, raw line per row in
-    /// between. Lets vim-visual / click-drag selections that cover any
-    /// subset of code rows reconstruct the markdown - fences re-attach
-    /// when the first / last row is in the selection.
+    /// Source-text for fenced code blocks stores raw code for contained copies
+    /// and fenced markdown as external source for transcript-spanning copies.
     #[test]
     fn render_code_block_with_fence_attaches_source_text_per_line() {
         let lines = ["let x = 1;", "let y = 2;", "let z = 3;"];
@@ -1309,13 +1565,19 @@ mod tests {
             render_code_block(sink, &lines, "rust", 80, false, None, true);
         });
         assert_eq!(block.lines.len(), 3);
+        assert_eq!(block.lines[0].source_text.as_deref(), Some("let x = 1;"));
         assert_eq!(
-            block.lines[0].source_text.as_deref(),
+            block.lines[0].external_source_text.as_deref(),
             Some("```rust\nlet x = 1;")
         );
         assert_eq!(block.lines[1].source_text.as_deref(), Some("let y = 2;"));
         assert_eq!(
-            block.lines[2].source_text.as_deref(),
+            block.lines[1].external_source_text.as_deref(),
+            Some("let y = 2;")
+        );
+        assert_eq!(block.lines[2].source_text.as_deref(), Some("let z = 3;"));
+        assert_eq!(
+            block.lines[2].external_source_text.as_deref(),
             Some("let z = 3;\n```")
         );
     }
@@ -1326,8 +1588,9 @@ mod tests {
             render_code_block(sink, &["let x = 1;"], "rust", 80, false, None, true);
         });
         assert_eq!(block.lines.len(), 1);
+        assert_eq!(block.lines[0].source_text.as_deref(), Some("let x = 1;"));
         assert_eq!(
-            block.lines[0].source_text.as_deref(),
+            block.lines[0].external_source_text.as_deref(),
             Some("```rust\nlet x = 1;\n```")
         );
     }
@@ -1386,10 +1649,12 @@ mod tests {
             InlineSpan {
                 text: "ab".into(),
                 style: InlineStyle::default(),
+                meta: SpanMeta::default(),
             },
             InlineSpan {
                 text: "cd".into(),
                 style: InlineStyle::default(),
+                meta: SpanMeta::default(),
             },
         ];
         assert_eq!(inline_spans_width(&spans), 4);
@@ -1400,6 +1665,7 @@ mod tests {
         let spans = vec![InlineSpan {
             text: "hello world".into(),
             style: InlineStyle::default(),
+            meta: SpanMeta::default(),
         }];
         let rows = wrap_inline_spans(&spans, 0);
         assert_eq!(rows.len(), 1);
@@ -1436,6 +1702,7 @@ mod tests {
         let spans = vec![InlineSpan {
             text: "abcdefghij".into(),
             style: InlineStyle::default(),
+            meta: SpanMeta::default(),
         }];
         let rows = wrap_inline_spans(&spans, 3);
         assert!(rows.len() >= 3);

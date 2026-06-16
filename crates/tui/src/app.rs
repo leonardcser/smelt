@@ -906,6 +906,19 @@ impl TuiApp {
             )
         };
 
+        let inline_options = smelt_core::content::highlight::InlineOptions {
+            file_icons: smelt_core::content::file_icons::FileIconOptions::new(
+                app_config.settings.file_icons,
+                app_config.settings.file_icon_colors,
+                ui.theme().is_light(),
+                Some(std::path::PathBuf::from(&cwd)),
+            ),
+        };
+        let mut transcript = crate::app::transcript::TranscriptView::new();
+        transcript.set_inline_options(inline_options.clone());
+        let mut resume_preview_cache = crate::app::transcript::ResumePreviewCache::new(6);
+        resume_preview_cache.set_inline_options(inline_options);
+
         let working_clock = Arc::clone(&clock);
         let core = smelt_core::Core::new(
             app_config,
@@ -922,9 +935,9 @@ impl TuiApp {
         Self {
             core,
             lua,
-            transcript: crate::app::transcript::TranscriptView::new(),
+            transcript,
             parser: smelt_core::content::stream_parser::StreamParser::new(),
-            resume_preview_cache: crate::app::transcript::ResumePreviewCache::new(6),
+            resume_preview_cache,
             input_history: History::load(),
             input,
             exec: None,

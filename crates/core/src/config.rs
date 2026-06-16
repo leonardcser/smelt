@@ -202,6 +202,10 @@ settings! {
     show_prediction:       Bool   = true;
     /// Curated discovery tips in the start banner and prompt chrome.
     show_tips:             Bool   = true;
+    /// Show Nerd Font file-type icons before inline-code paths that point at existing files.
+    file_icons:            Bool   = false;
+    /// Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled.
+    file_icon_colors:      Bool   = true;
     /// Task-slug label in status bar.
     show_slug:             Bool   = true;
     /// Downgrade `Allow` to `Ask` for paths outside the workspace.

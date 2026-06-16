@@ -3,6 +3,7 @@ pub mod block_layout;
 pub mod builder;
 pub mod code_block;
 pub(crate) mod context;
+pub mod file_icons;
 pub mod highlight;
 pub mod selection;
 pub mod stream_parser;

@@ -344,7 +344,13 @@ impl TuiApp {
         &mut self,
         f: F,
     ) {
+        let old_file_icon_options = (
+            self.core.config.settings.file_icons,
+            self.core.config.settings.file_icon_colors,
+        );
         f(&mut self.core.config.settings);
+        let file_icons = self.core.config.settings.file_icons;
+        let file_icon_colors = self.core.config.settings.file_icon_colors;
         let vim = self.core.config.settings.vim;
         let prompt_win = self
             .ui
@@ -352,6 +358,10 @@ impl TuiApp {
             .expect("prompt window");
         self.input.set_vim_enabled(prompt_win, vim);
         self.transcript_win_mut().set_vim_enabled(vim);
+        if old_file_icon_options != (file_icons, file_icon_colors) {
+            self.sync_inline_options();
+            self.sync_transcript_renderer_generation();
+        }
     }
 
     /// Replace all resolved settings at once, propagating to input/screen.

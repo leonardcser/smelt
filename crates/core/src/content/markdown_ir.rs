@@ -2,7 +2,9 @@ use std::ops::Range;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use crate::content::highlight::{lower_inline_event_lines, InlineSpan, InlineStyle};
+use crate::content::highlight::{
+    lower_inline_event_lines_with_options, InlineOptions, InlineSpan, InlineStyle,
+};
 use crate::content::ColumnAlignment;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,7 +103,14 @@ impl SpecialBlock {
 }
 
 pub fn parse_markdown(source: &str) -> MarkdownBlock<'_> {
-    let mut specials = collect_special_blocks(source);
+    parse_markdown_with_options(source, &InlineOptions::default())
+}
+
+pub fn parse_markdown_with_options<'a>(
+    source: &'a str,
+    inline_options: &InlineOptions,
+) -> MarkdownBlock<'a> {
+    let mut specials = collect_special_blocks(source, inline_options);
     specials.sort_by_key(|block| block.range().start);
     specials.dedup_by(|a, b| a.range() == b.range());
 
@@ -164,7 +173,7 @@ fn markdown_options() -> Options {
         | Options::ENABLE_HEADING_ATTRIBUTES
 }
 
-fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
+fn collect_special_blocks(source: &str, inline_options: &InlineOptions) -> Vec<SpecialBlock> {
     let options = markdown_options();
     let parser = Parser::new_ext(source, options).into_offset_iter();
     let mut out = Vec::new();
@@ -210,6 +219,7 @@ fn collect_special_blocks(source: &str) -> Vec<SpecialBlock> {
                         text_range.clone(),
                         open.kind,
                         &open.events,
+                        inline_options,
                     ))
                 } else {
                     None
@@ -332,9 +342,15 @@ fn markdown_lines<'a>(
     range: Range<usize>,
     kind: MarkdownTextKind,
     events: &[(Event<'a>, Range<usize>)],
+    inline_options: &InlineOptions,
 ) -> Vec<MarkdownLine> {
     let ranges = line_ranges(source, range);
-    let inline_lines = lower_inline_event_lines(events.iter().cloned(), &ranges, false);
+    let inline_lines = lower_inline_event_lines_with_options(
+        events.iter().cloned(),
+        &ranges,
+        false,
+        inline_options,
+    );
 
     ranges
         .into_iter()
@@ -394,6 +410,7 @@ fn structural_prefix_spans<'a>(
         vec![InlineSpan {
             text: prefix.to_string(),
             style: InlineStyle::default(),
+            meta: Default::default(),
         }]
     }
 }

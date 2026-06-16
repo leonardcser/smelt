@@ -74,17 +74,20 @@ pub fn render_code_block(
         }
         for (vi, vrow) in visual_rows.iter().enumerate() {
             if vi == 0 {
-                let mut src = String::new();
+                let mut external_src = String::new();
                 if fence && line_idx == 0 {
-                    src.push_str("```");
-                    src.push_str(block.lang());
-                    src.push('\n');
+                    external_src.push_str("```");
+                    external_src.push_str(block.lang());
+                    external_src.push('\n');
                 }
-                src.push_str(line);
+                external_src.push_str(line);
                 if fence && line_idx == last_idx {
-                    src.push_str("\n```");
+                    external_src.push_str("\n```");
                 }
-                out.set_source_text(&src);
+                out.set_source_text(line);
+                if fence {
+                    out.set_external_source_text(&external_src);
+                }
             } else {
                 out.mark_soft_wrap_continuation();
             }
@@ -575,9 +578,18 @@ mod tests {
         let block = render_test(80, |out| {
             render_code_block(out, &["a", "b", "c"], "rust", 80, false, None, true);
         });
-        assert_eq!(block.lines[0].source_text.as_deref(), Some("```rust\na"));
+        assert_eq!(block.lines[0].source_text.as_deref(), Some("a"));
+        assert_eq!(
+            block.lines[0].external_source_text.as_deref(),
+            Some("```rust\na")
+        );
         assert_eq!(block.lines[1].source_text.as_deref(), Some("b"));
-        assert_eq!(block.lines[2].source_text.as_deref(), Some("c\n```"));
+        assert_eq!(block.lines[1].external_source_text.as_deref(), Some("b"));
+        assert_eq!(block.lines[2].source_text.as_deref(), Some("c"));
+        assert_eq!(
+            block.lines[2].external_source_text.as_deref(),
+            Some("c\n```")
+        );
     }
 
     #[test]

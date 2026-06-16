@@ -1,11 +1,12 @@
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
-    emit_inline_spans, inline_spans_width, measure_markdown_table, render_code_block,
-    render_markdown_table, wrap_inline_spans, InlineSpan, InlineStyle,
+    emit_inline_spans, inline_spans_width, measure_markdown_table_with_options,
+    parse_inline_spans_with_options, render_code_block, render_markdown_table_with_options,
+    wrap_inline_spans, InlineOptions, InlineSpan, InlineStyle,
 };
 use smelt_core::content::markdown_ir::{
-    parse_markdown, MarkdownBlock, MarkdownLine, MarkdownNode, MarkdownTextKind,
+    parse_markdown_with_options, MarkdownBlock, MarkdownLine, MarkdownNode, MarkdownTextKind,
 };
 use smelt_core::content::{is_markdown_list_item, split_markdown_list_prefix};
 use smelt_core::theme::intern;
@@ -18,20 +19,41 @@ pub fn render_markdown_inner(
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
 ) -> u16 {
-    let _perf = smelt_perf::perf::begin("render:markdown");
-    let block = parse_markdown(content);
-    render_markdown_block(out, &block, width, indent, dim, bctx)
+    render_markdown_inner_with_options(
+        out,
+        content,
+        width,
+        indent,
+        dim,
+        bctx,
+        &InlineOptions::default(),
+    )
 }
 
-pub fn measure_markdown_inner(
+pub fn render_markdown_inner_with_options(
+    out: &mut LineBuilder,
     content: &str,
     width: usize,
     indent: &str,
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
 ) -> u16 {
-    let block = parse_markdown(content);
-    measure_markdown_block(&block, width, indent, dim, bctx)
+    let _perf = smelt_perf::perf::begin("render:markdown");
+    let block = parse_markdown_with_options(content, inline_options);
+    render_markdown_block(out, &block, width, indent, dim, bctx, inline_options)
+}
+
+pub fn measure_markdown_inner_with_options(
+    content: &str,
+    width: usize,
+    indent: &str,
+    dim: bool,
+    bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
+) -> u16 {
+    let block = parse_markdown_with_options(content, inline_options);
+    measure_markdown_block(&block, width, indent, dim, bctx, inline_options)
 }
 
 fn render_markdown_block(
@@ -41,6 +63,7 @@ fn render_markdown_block(
     indent: &str,
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     let max_cols = if let Some(b) = bctx {
         b.inner_w
@@ -52,6 +75,7 @@ fn render_markdown_block(
         indent,
         dim,
         bctx,
+        inline_options,
     };
     let mut state = RenderState::default();
 
@@ -84,8 +108,16 @@ fn render_markdown_block(
             } => {
                 render_block_gap(out, &mut state);
                 let start = out.line_count();
-                state.rows +=
-                    render_markdown_table(out, rows, alignments, width, dim, bctx, indent);
+                state.rows += render_markdown_table_with_options(
+                    out,
+                    rows,
+                    alignments,
+                    width,
+                    dim,
+                    bctx,
+                    indent,
+                    inline_options,
+                );
                 let source = smelt_buffer::text::slice(block.source, range.clone())
                     .trim_end_matches(['\r', '\n']);
                 out.stamp_copy_group(start, source);
@@ -110,6 +142,7 @@ fn measure_markdown_block(
     indent: &str,
     dim: bool,
     bctx: Option<&smelt_core::content::BoxContext>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     let max_cols = if let Some(b) = bctx {
         b.inner_w
@@ -127,6 +160,7 @@ fn measure_markdown_block(
                     MarkdownTextKind::Paragraph,
                     max_cols,
                     dim,
+                    inline_options,
                     &mut state,
                 );
             }
@@ -152,9 +186,17 @@ fn measure_markdown_block(
                 alignments, rows, ..
             } => {
                 measure_block_gap(&mut state);
-                state.rows = state.rows.saturating_add(measure_markdown_table(
-                    rows, alignments, width, dim, bctx, indent,
-                ));
+                state.rows = state
+                    .rows
+                    .saturating_add(measure_markdown_table_with_options(
+                        rows,
+                        alignments,
+                        width,
+                        dim,
+                        bctx,
+                        indent,
+                        inline_options,
+                    ));
                 state.last_content_was_heading = false;
                 state.prev_was_block = true;
             }
@@ -212,6 +254,7 @@ fn measure_source_lines(
     kind: MarkdownTextKind,
     max_cols: usize,
     dim: bool,
+    inline_options: &InlineOptions,
     state: &mut MeasureState,
 ) {
     let lines: Vec<&str> = source.lines().collect();
@@ -219,6 +262,7 @@ fn measure_source_lines(
         max_cols,
         dim,
         kind,
+        inline_options,
     };
     walk_text_lines(
         lines.len(),
@@ -273,6 +317,7 @@ struct RenderTextCtx<'a> {
     indent: &'a str,
     dim: bool,
     bctx: Option<&'a smelt_core::content::BoxContext>,
+    inline_options: &'a InlineOptions,
 }
 
 fn render_text_gap(out: &mut LineBuilder, state: &mut RenderState, kind: MarkdownTextKind) -> bool {
@@ -385,13 +430,14 @@ fn walk_text_lines<'a>(
     }
 }
 
-struct MeasureSourceSink {
+struct MeasureSourceSink<'a> {
     max_cols: usize,
     dim: bool,
     kind: MarkdownTextKind,
+    inline_options: &'a InlineOptions,
 }
 
-impl TextFlowSink for MeasureSourceSink {
+impl TextFlowSink for MeasureSourceSink<'_> {
     fn text_gap(&mut self, state: &mut FlowState, kind: MarkdownTextKind) -> bool {
         measure_text_gap(state, kind)
     }
@@ -402,7 +448,7 @@ impl TextFlowSink for MeasureSourceSink {
     }
 
     fn emit_line(&mut self, _index: usize, line: &str, state: &mut FlowState) {
-        let spans = fallback_markdown_line_spans(line, self.kind, self.dim);
+        let spans = fallback_markdown_line_spans(line, self.kind, self.dim, self.inline_options);
         state.rows = state
             .rows
             .saturating_add(wrap_inline_spans(&spans, self.max_cols).len() as u16);
@@ -452,7 +498,8 @@ impl TextFlowSink for RenderSourceSink<'_, '_, '_> {
     }
 
     fn emit_line(&mut self, _index: usize, line: &str, state: &mut FlowState) {
-        let spans = fallback_markdown_line_spans(line, self.kind, self.ctx.dim);
+        let spans =
+            fallback_markdown_line_spans(line, self.kind, self.ctx.dim, self.ctx.inline_options);
         render_markdown_line(self.out, line, &spans, self.ctx, state);
     }
 }
@@ -511,7 +558,12 @@ fn render_markdown_line(
     state.rows += wrapped.len() as u16;
 }
 
-fn fallback_markdown_line_spans(line: &str, kind: MarkdownTextKind, dim: bool) -> Vec<InlineSpan> {
+fn fallback_markdown_line_spans(
+    line: &str,
+    kind: MarkdownTextKind,
+    dim: bool,
+    inline_options: &InlineOptions,
+) -> Vec<InlineSpan> {
     let trimmed = line.trim_start();
     let body = if kind == MarkdownTextKind::List {
         split_markdown_list_prefix(trimmed).1
@@ -520,7 +572,7 @@ fn fallback_markdown_line_spans(line: &str, kind: MarkdownTextKind, dim: bool) -
     };
     markdown_line_spans(
         line,
-        &smelt_core::content::highlight::parse_inline_spans(body, false),
+        &parse_inline_spans_with_options(body, false, inline_options),
         kind,
         dim,
     )
@@ -562,6 +614,7 @@ fn markdown_line_spans(
                     dim,
                     ..Default::default()
                 },
+                meta: Default::default(),
             });
         }
         if !prefix.is_empty() {
@@ -571,6 +624,7 @@ fn markdown_line_spans(
                     dim: true,
                     ..Default::default()
                 },
+                meta: Default::default(),
             });
         }
         line_spans.extend(base_spans.iter().cloned().map(|mut span| {
@@ -620,15 +674,22 @@ mod tests {
 
     #[test]
     fn markdown_line_spans_use_shared_block_markers() {
-        let heading =
-            fallback_markdown_line_spans("#not heading", MarkdownTextKind::Paragraph, false);
+        let options = InlineOptions::default();
+        let heading = fallback_markdown_line_spans(
+            "#not heading",
+            MarkdownTextKind::Paragraph,
+            false,
+            &options,
+        );
         assert_ne!(heading[0].style.group, Some(intern("SmeltHeading")));
 
-        let bullet = fallback_markdown_line_spans("+ item", MarkdownTextKind::List, false);
+        let bullet =
+            fallback_markdown_line_spans("+ item", MarkdownTextKind::List, false, &options);
         assert_eq!(bullet[0].text, "+ ");
         assert!(bullet[0].style.dim);
 
-        let ordered = fallback_markdown_line_spans("12) item", MarkdownTextKind::List, false);
+        let ordered =
+            fallback_markdown_line_spans("12) item", MarkdownTextKind::List, false, &options);
         assert_eq!(ordered[0].text, "12) ");
         assert!(ordered[0].style.dim);
     }

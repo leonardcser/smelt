@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+Files touched:  Cargo.toml,  src/main.rs:12, 󰂺 README.md, and 
+scripts/run.sh.
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                               1:1 100%

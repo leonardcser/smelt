@@ -1,4 +1,4 @@
-use super::markdown::{measure_markdown_inner, render_markdown_inner};
+use super::markdown::{measure_markdown_inner_with_options, render_markdown_inner_with_options};
 use crate::content::source_view::{render_source_view, SourceView, SourceViewTarget};
 use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
@@ -9,15 +9,24 @@ use smelt_core::content::block_layout::{
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
 use smelt_core::content::highlight::{
-    emit_inline_spans, parse_inline_spans, render_code_block, wrap_inline_spans, InlineSpan,
-    InlineSyntax,
+    emit_inline_spans, parse_inline_spans_with_options, render_code_block, wrap_inline_spans,
+    InlineOptions, InlineSpan, InlineSyntax,
 };
 use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
 use smelt_core::theme::intern;
 use smelt_core::transcript_model::{BlockHistory, ToolStatus};
 
 pub(crate) fn render_layout_ir_into(out: &mut LineBuilder, layout: &LayoutIr, width: u16) -> u16 {
-    render_layout_ir_range(out, layout, width, 0, u16::MAX, None, None)
+    render_layout_ir_range(
+        out,
+        layout,
+        width,
+        0,
+        u16::MAX,
+        None,
+        None,
+        &InlineOptions::default(),
+    )
 }
 
 pub(crate) fn render_layout_ir_into_with_history(
@@ -25,12 +34,31 @@ pub(crate) fn render_layout_ir_into_with_history(
     layout: &LayoutIr,
     width: u16,
     history: &BlockHistory,
+    inline_options: &InlineOptions,
 ) -> u16 {
-    render_layout_ir_range(out, layout, width, 0, u16::MAX, None, Some(history))
+    render_layout_ir_range(
+        out,
+        layout,
+        width,
+        0,
+        u16::MAX,
+        None,
+        Some(history),
+        inline_options,
+    )
 }
 
+#[cfg(test)]
 pub(crate) fn measure_layout_ir(layout: &LayoutIr, width: u16) -> u16 {
-    measure_layout_ir_full(layout, width)
+    measure_layout_ir_with_options(layout, width, &InlineOptions::default())
+}
+
+pub(crate) fn measure_layout_ir_with_options(
+    layout: &LayoutIr,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> u16 {
+    measure_layout_ir_full(layout, width, inline_options)
 }
 
 fn pluralize(count: usize, singular: &str, plural: &str) -> String {
@@ -41,6 +69,7 @@ fn pluralize(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_layout_ir_range(
     out: &mut LineBuilder,
     layout: &LayoutIr,
@@ -49,21 +78,43 @@ fn render_layout_ir_range(
     row_count: u16,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     if row_count == 0 {
         return 0;
     }
     match layout {
         BlockLayout::Empty => 0,
-        BlockLayout::Leaf(leaf) => {
-            render_ir_leaf(out, leaf, width, row_start, row_count, gutter, history)
-        }
-        BlockLayout::Vbox(items) => {
-            render_ir_vbox(out, items, width, row_start, row_count, gutter, history)
-        }
-        BlockLayout::Hbox(items) => {
-            render_ir_hbox(out, items, width, row_start, row_count, gutter, history)
-        }
+        BlockLayout::Leaf(leaf) => render_ir_leaf(
+            out,
+            leaf,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            history,
+            inline_options,
+        ),
+        BlockLayout::Vbox(items) => render_ir_vbox(
+            out,
+            items,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            history,
+            inline_options,
+        ),
+        BlockLayout::Hbox(items) => render_ir_hbox(
+            out,
+            items,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            history,
+            inline_options,
+        ),
         BlockLayout::Gutter { child, spec } => {
             let spec_width = display_width_u16(&spec.text);
             let child_width = child_width_after_gutter(width, spec_width);
@@ -75,20 +126,46 @@ fn render_layout_ir_range(
                 row_count,
                 Some(spec),
                 history,
+                inline_options,
             )
         }
         BlockLayout::Panel { child, spec } => render_ir_panel(
-            out, child, spec, width, row_start, row_count, gutter, history,
+            out,
+            child,
+            spec,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            history,
+            inline_options,
         ),
         BlockLayout::Style { child, spec } => render_ir_style(
-            out, child, spec, width, row_start, row_count, gutter, history,
+            out,
+            child,
+            spec,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            history,
+            inline_options,
         ),
         BlockLayout::Cap { child, spec } => render_ir_cap(
-            out, child, spec, width, row_start, row_count, gutter, history,
+            out,
+            child,
+            spec,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            history,
+            inline_options,
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_ir_vbox(
     out: &mut LineBuilder,
     items: &[LayoutIr],
@@ -97,6 +174,7 @@ fn render_ir_vbox(
     row_count: u16,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     let mut written = 0u16;
     let mut skipped = row_start;
@@ -104,7 +182,8 @@ fn render_ir_vbox(
         if written >= row_count {
             break;
         }
-        let child_rows = measure_layout_ir_full_with_gutter(child, width, gutter_width(gutter));
+        let child_rows =
+            measure_layout_ir_full_with_gutter(child, width, gutter_width(gutter), inline_options);
         if skipped >= child_rows {
             skipped = skipped.saturating_sub(child_rows);
             continue;
@@ -118,49 +197,59 @@ fn render_ir_vbox(
             child_count,
             gutter,
             history,
+            inline_options,
         ));
         skipped = 0;
     }
     written
 }
 
-fn measure_layout_ir_full(layout: &LayoutIr, width: u16) -> u16 {
-    measure_layout_ir_full_with_gutter(layout, width, 0)
+fn measure_layout_ir_full(layout: &LayoutIr, width: u16, inline_options: &InlineOptions) -> u16 {
+    measure_layout_ir_full_with_gutter(layout, width, 0, inline_options)
 }
 
-fn measure_layout_ir_full_with_gutter(layout: &LayoutIr, width: u16, gutter_cells: u16) -> u16 {
+fn measure_layout_ir_full_with_gutter(
+    layout: &LayoutIr,
+    width: u16,
+    gutter_cells: u16,
+    inline_options: &InlineOptions,
+) -> u16 {
     match layout {
         BlockLayout::Empty => 0,
-        BlockLayout::Leaf(leaf) => measure_ir_leaf(leaf, width, gutter_cells),
+        BlockLayout::Leaf(leaf) => measure_ir_leaf(leaf, width, gutter_cells, inline_options),
         BlockLayout::Vbox(items) => items
             .iter()
-            .map(|child| measure_layout_ir_full_with_gutter(child, width, gutter_cells))
+            .map(|child| {
+                measure_layout_ir_full_with_gutter(child, width, gutter_cells, inline_options)
+            })
             .sum(),
         BlockLayout::Hbox(items) => {
             let widths = solve_ir_hbox_widths(items, width);
             items
                 .iter()
                 .zip(widths)
-                .map(|(item, w)| measure_layout_ir_full(&item.layout, w))
+                .map(|(item, w)| measure_layout_ir_full(&item.layout, w, inline_options))
                 .max()
                 .unwrap_or(0)
         }
         BlockLayout::Gutter { child, spec } => {
             let spec_width = display_width_u16(&spec.text);
             let child_width = child_width_after_gutter(width, spec_width);
-            measure_layout_ir_full_with_gutter(child, child_width, spec_width)
+            measure_layout_ir_full_with_gutter(child, child_width, spec_width, inline_options)
         }
-        BlockLayout::Panel { child, spec } => measure_ir_panel(child, spec, width),
+        BlockLayout::Panel { child, spec } => measure_ir_panel(child, spec, width, inline_options),
         BlockLayout::Style { child, .. } => {
-            measure_layout_ir_full_with_gutter(child, width, gutter_cells)
+            measure_layout_ir_full_with_gutter(child, width, gutter_cells, inline_options)
         }
         BlockLayout::Cap { child, spec } => {
-            let child_rows = measure_layout_ir_full_with_gutter(child, width, gutter_cells);
+            let child_rows =
+                measure_layout_ir_full_with_gutter(child, width, gutter_cells, inline_options);
             cap_rows(child_rows, spec).len().min(u16::MAX as usize) as u16
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_ir_leaf(
     out: &mut LineBuilder,
     leaf: &IrLeaf,
@@ -169,14 +258,21 @@ fn render_ir_leaf(
     row_count: u16,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     match leaf {
         IrLeaf::Text(spec) => render_text_spec(out, spec, width, row_start, row_count, gutter),
         IrLeaf::Runs(spec) => render_runs_spec(out, spec, width, row_start, row_count, gutter),
         IrLeaf::Line(spec) => render_line_spec(out, spec, row_start, row_count, gutter),
-        IrLeaf::Markdown(spec) => {
-            render_markdown_spec(out, spec, width, row_start, row_count, gutter)
-        }
+        IrLeaf::Markdown(spec) => render_markdown_spec(
+            out,
+            spec,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            inline_options,
+        ),
         IrLeaf::Code(spec) => render_code_spec(out, spec, width, row_start, row_count, gutter),
         IrLeaf::Elapsed(spec) => {
             render_elapsed_spec(out, spec, row_start, row_count, gutter, history)
@@ -193,12 +289,17 @@ fn render_ir_leaf(
     }
 }
 
-fn measure_ir_leaf(leaf: &IrLeaf, width: u16, gutter_cells: u16) -> u16 {
+fn measure_ir_leaf(
+    leaf: &IrLeaf,
+    width: u16,
+    gutter_cells: u16,
+    inline_options: &InlineOptions,
+) -> u16 {
     match leaf {
         IrLeaf::Text(spec) => measure_text_spec(spec, width),
         IrLeaf::Runs(spec) => measure_runs_spec(spec, width),
         IrLeaf::Line(spec) => measure_line_spec(spec),
-        IrLeaf::Markdown(spec) => measure_markdown_spec(spec, width),
+        IrLeaf::Markdown(spec) => measure_markdown_spec(spec, width, inline_options),
         IrLeaf::Code(spec) => measure_code_spec(spec, width),
         IrLeaf::Elapsed(_) => 1,
         IrLeaf::Separator(spec) => measure_separator_spec(spec),
@@ -416,26 +517,58 @@ fn render_markdown_spec(
     row_start: u16,
     row_count: u16,
     gutter: Option<&GutterSpec>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     if spec.inline {
-        return render_inline_markdown_spec(out, spec, width, row_start, row_count, gutter);
+        return render_inline_markdown_spec(
+            out,
+            spec,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            inline_options,
+        );
     }
 
-    let total = measure_markdown_spec(spec, width);
+    let total = measure_markdown_spec(spec, width, inline_options);
     if row_start == 0 && row_count >= total && gutter.is_none() {
-        return render_markdown_inner(out, &spec.content, width as usize, "", spec.dim, None);
+        return render_markdown_inner_with_options(
+            out,
+            &spec.content,
+            width as usize,
+            "",
+            spec.dim,
+            None,
+            inline_options,
+        );
     }
 
     render_via_temp(out, width, row_start, row_count, gutter, |col| {
-        render_markdown_inner(col, &spec.content, width as usize, "", spec.dim, None)
+        render_markdown_inner_with_options(
+            col,
+            &spec.content,
+            width as usize,
+            "",
+            spec.dim,
+            None,
+            inline_options,
+        )
     })
 }
 
-fn measure_markdown_spec(spec: &MarkdownSpec, width: u16) -> u16 {
+fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &InlineOptions) -> u16 {
     if spec.inline {
-        return measure_inline_markdown_spec(spec, width);
+        return measure_inline_markdown_spec(spec, width, inline_options);
     }
-    measure_markdown_inner(&spec.content, width as usize, "", spec.dim, None)
+    measure_markdown_inner_with_options(
+        &spec.content,
+        width as usize,
+        "",
+        spec.dim,
+        None,
+        inline_options,
+    )
 }
 
 fn render_inline_markdown_spec(
@@ -445,12 +578,13 @@ fn render_inline_markdown_spec(
     row_start: u16,
     row_count: u16,
     gutter: Option<&GutterSpec>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     let max_cols = width.max(1) as usize;
     let mut seen = 0u16;
     let mut rows = 0u16;
     'outer: for line in spec.content.lines() {
-        let spans = inline_markdown_spans(line, spec.dim, spec.italic);
+        let spans = inline_markdown_spans(line, spec.dim, spec.italic, inline_options);
         let wrapped = wrap_inline_spans(&spans, max_cols);
         if wrapped.len() > 1 {
             out.mark_wrapped();
@@ -487,19 +621,28 @@ fn render_inline_markdown_spec(
     rows
 }
 
-fn measure_inline_markdown_spec(spec: &MarkdownSpec, width: u16) -> u16 {
+fn measure_inline_markdown_spec(
+    spec: &MarkdownSpec,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> u16 {
     let max_cols = width.max(1) as usize;
     spec.content
         .lines()
         .map(|line| {
-            let spans = inline_markdown_spans(line, spec.dim, spec.italic);
+            let spans = inline_markdown_spans(line, spec.dim, spec.italic, inline_options);
             wrap_inline_spans(&spans, max_cols).len() as u16
         })
         .sum()
 }
 
-fn inline_markdown_spans(line: &str, dim: bool, italic: bool) -> Vec<InlineSpan> {
-    let mut spans = parse_inline_spans(line, dim);
+fn inline_markdown_spans(
+    line: &str,
+    dim: bool,
+    italic: bool,
+    inline_options: &InlineOptions,
+) -> Vec<InlineSpan> {
+    let mut spans = parse_inline_spans_with_options(line, dim, inline_options);
     if italic {
         for span in &mut spans {
             span.style.italic = true;
@@ -755,10 +898,20 @@ fn render_ir_style(
     row_count: u16,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     out.save_style();
     apply_style_spec(out, spec);
-    let rows = render_layout_ir_range(out, child, width, row_start, row_count, gutter, history);
+    let rows = render_layout_ir_range(
+        out,
+        child,
+        width,
+        row_start,
+        row_count,
+        gutter,
+        history,
+        inline_options,
+    );
     out.pop_style();
     rows
 }
@@ -794,11 +947,12 @@ fn render_ir_panel(
     row_count: u16,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
 ) -> u16 {
-    let total = measure_ir_panel(child, spec, width);
+    let total = measure_ir_panel(child, spec, width, inline_options);
     let end = row_start.saturating_add(row_count).min(total);
     let child_width = panel_child_width(width, spec.padding);
-    let child_rows = measure_layout_ir_full(child, child_width);
+    let child_rows = measure_layout_ir_full(child, child_width, inline_options);
     let panel_hl = intern(&spec.hl_group);
     let panel_bg = out
         .theme()
@@ -831,7 +985,16 @@ fn render_ir_panel(
             );
             let outcome = {
                 let mut col = LineBuilder::new(&mut buf, &theme, child_width);
-                render_layout_ir_range(&mut col, child, child_width, child_row, 1, None, history);
+                render_layout_ir_range(
+                    &mut col,
+                    child,
+                    child_width,
+                    child_row,
+                    1,
+                    None,
+                    history,
+                    inline_options,
+                );
                 col.finish()
             };
             if outcome.was_wrapped {
@@ -850,9 +1013,14 @@ fn render_ir_panel(
     rows
 }
 
-fn measure_ir_panel(child: &LayoutIr, spec: &PanelSpec, width: u16) -> u16 {
+fn measure_ir_panel(
+    child: &LayoutIr,
+    spec: &PanelSpec,
+    width: u16,
+    inline_options: &InlineOptions,
+) -> u16 {
     let child_width = panel_child_width(width, spec.padding);
-    let child_rows = measure_layout_ir_full(child, child_width);
+    let child_rows = measure_layout_ir_full(child, child_width, inline_options);
     child_rows.saturating_add(spec.padding.saturating_mul(2))
 }
 
@@ -937,8 +1105,10 @@ fn render_ir_cap(
     row_count: u16,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
 ) -> u16 {
-    let child_rows = measure_layout_ir_full_with_gutter(child, width, gutter_width(gutter));
+    let child_rows =
+        measure_layout_ir_full_with_gutter(child, width, gutter_width(gutter), inline_options);
     let rows = cap_rows(child_rows, spec);
     let mut written = 0u16;
     for row in rows
@@ -956,6 +1126,7 @@ fn render_ir_cap(
                     1,
                     gutter,
                     history,
+                    inline_options,
                 ));
             }
             CapRow::Marker { skipped, direction } => {
@@ -1077,6 +1248,7 @@ fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_ir_hbox(
     out: &mut LineBuilder,
     items: &[smelt_core::content::block_layout::HboxItem<IrLeaf>],
@@ -1085,12 +1257,13 @@ fn render_ir_hbox(
     row_count: u16,
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     let widths = solve_ir_hbox_widths(items, total_width);
     let total_rows = items
         .iter()
         .zip(widths.iter().copied())
-        .map(|(item, w)| measure_layout_ir_full(&item.layout, w))
+        .map(|(item, w)| measure_layout_ir_full(&item.layout, w, inline_options))
         .max()
         .unwrap_or(0);
     let end = row_start.saturating_add(row_count).min(total_rows);
@@ -1111,7 +1284,16 @@ fn render_ir_hbox(
             );
             {
                 let mut col = LineBuilder::new(&mut buf, &theme, col_w);
-                render_layout_ir_range(&mut col, &item.layout, col_w, row, 1, None, history);
+                render_layout_ir_range(
+                    &mut col,
+                    &item.layout,
+                    col_w,
+                    row,
+                    1,
+                    None,
+                    history,
+                    inline_options,
+                );
                 col.finish();
             }
             let emitted = emit_buffer_row_clipped(&buf, 0, col_w, out);

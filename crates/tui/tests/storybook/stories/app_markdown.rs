@@ -89,6 +89,28 @@ app_story!(text_block_markdown_inline_emphasis, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(text_block_markdown_inline_file_icons, |ctx| {
+    // Existing file paths inside inline code get non-copyable file-type icons.
+    std::fs::create_dir_all("src").unwrap();
+    std::fs::create_dir_all("scripts").unwrap();
+    std::fs::write("Cargo.toml", "[package]\nname = \"demo\"\n").unwrap();
+    std::fs::write("src/main.rs", "fn main() {}\n").unwrap();
+    std::fs::write("README.md", "# Demo\n").unwrap();
+    std::fs::write("scripts/run.sh", "#!/bin/sh\n").unwrap();
+    ctx.set_viewport(80, 10);
+    ctx.run_lua("smelt.settings.file_icons = true");
+    ctx.engine(EngineEvent::Text {
+        content: concat!(
+            "Files touched: `Cargo.toml`, ",
+            "`src/main.rs:12`, ",
+            "`README.md`, and ",
+            "`scripts/run.sh`."
+        )
+        .into(),
+    });
+    ctx.assert_snapshot();
+});
+
 app_story!(text_block_markdown_link, |ctx| {
     // `[label](url)` renders as `label (url)`, with the URL styled via
     // SmeltLink. Autolinks render as the URL itself with the same link style.

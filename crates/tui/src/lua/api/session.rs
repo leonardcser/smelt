@@ -563,10 +563,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     if cached_view.is_none() {
                         let display_cache = crate::content::display_cache::read_for_session(&session);
                         cached_view = Some(
-                            crate::app::transcript::TranscriptView::from_transcript_with_display_cache(
+                            crate::app::transcript::TranscriptView::from_transcript_with_display_cache_and_inline_options(
                                 &app.lua,
                                 crate::app::history::build_transcript_from_session(&app.lua, &session),
                                 display_cache,
+                                app.inline_options(),
                             ),
                         );
                     }
@@ -574,6 +575,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
                 let cache_key = cached_key?;
                 let mut view = cached_view?;
+                view.set_inline_options(app.inline_options());
                 let scroll_target = scroll_top
                     .map(crate::content::transcript_buf::ScrollTarget::visible_row)
                     .unwrap_or_else(crate::content::transcript_buf::ScrollTarget::visible_tail);

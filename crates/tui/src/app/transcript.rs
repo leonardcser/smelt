@@ -6,6 +6,8 @@ use crate::content::prompt_parser::{
 };
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
+use smelt_core::content::file_icons::FileIconOptions;
+use smelt_core::content::highlight::InlineOptions;
 
 use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::runtime::LuaRuntime;
@@ -31,12 +33,14 @@ impl TranscriptView {
         }
     }
 
-    pub(crate) fn from_transcript_with_display_cache(
+    pub(crate) fn from_transcript_with_display_cache_and_inline_options(
         lua: &LuaRuntime,
         transcript: Transcript,
         display_cache: crate::content::display_cache::DisplayCacheData,
+        inline_options: InlineOptions,
     ) -> Self {
         let mut view = Self::from_transcript(transcript);
+        view.set_inline_options(inline_options);
         view.projection
             .hydrate_display_cache(lua, &view.transcript.history, display_cache);
         view
@@ -48,7 +52,17 @@ impl TranscriptView {
         transcript: Transcript,
         display_cache: crate::content::display_cache::DisplayCacheData,
     ) {
-        *self = Self::from_transcript_with_display_cache(lua, transcript, display_cache);
+        let inline_options = self.projection.inline_options().clone();
+        *self = Self::from_transcript_with_display_cache_and_inline_options(
+            lua,
+            transcript,
+            display_cache,
+            inline_options,
+        );
+    }
+
+    pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
+        self.projection.set_inline_options(options);
     }
 
     pub(crate) fn invalidate_theme(&mut self) {
@@ -335,6 +349,12 @@ impl ResumePreviewCache {
             if old_key != key {
                 self.views.remove(&old_key);
             }
+        }
+    }
+
+    pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
+        for view in self.views.values_mut() {
+            view.set_inline_options(options.clone());
         }
     }
 
@@ -771,9 +791,30 @@ impl TuiApp {
         self.resume_preview_cache.invalidate_theme();
     }
 
+    pub(crate) fn inline_options(&self) -> InlineOptions {
+        InlineOptions {
+            file_icons: FileIconOptions::new(
+                self.core.config.settings.file_icons,
+                self.core.config.settings.file_icon_colors,
+                self.ui.theme().is_light(),
+                Some(std::path::PathBuf::from(&self.cwd)),
+            ),
+        }
+    }
+
+    pub(crate) fn sync_inline_options(&mut self) {
+        let options = self.inline_options();
+        self.transcript.set_inline_options(options.clone());
+        self.resume_preview_cache.set_inline_options(options);
+    }
+
     pub(crate) fn sync_transcript_renderer_generation(&mut self) {
         let generation = self.lua.transcript_renderer_generation();
-        let cache_key = self.lua.transcript_renderer_cache_key();
+        let inline_options = self.inline_options();
+        let cache_key = crate::content::display_layout::transcript_renderer_cache_key(
+            &self.lua,
+            &inline_options,
+        );
         self.transcript
             .invalidate_renderer_if_changed(generation, cache_key);
         self.resume_preview_cache
@@ -784,6 +825,8 @@ impl TuiApp {
     pub(crate) fn install_theme(&mut self, theme: Theme) {
         *self.ui.theme_mut() = theme;
         smelt_core::theme::set_active(self.ui.theme().clone());
+        self.sync_inline_options();
+        self.sync_transcript_renderer_generation();
         self.invalidate_for_theme();
     }
 
@@ -791,6 +834,8 @@ impl TuiApp {
     pub(crate) fn mutate_theme(&mut self, f: impl FnOnce(&mut Theme)) {
         f(self.ui.theme_mut());
         smelt_core::theme::set_active(self.ui.theme().clone());
+        self.sync_inline_options();
+        self.sync_transcript_renderer_generation();
         self.invalidate_for_theme();
     }
 

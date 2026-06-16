@@ -199,6 +199,10 @@ pub struct LineDecoration {
     /// still coalescing into a single `source_text` on copy.
     pub copy_continuation: bool,
     pub source_text: Option<String>,
+    /// Alternate row source used when a selection spans outside a structured
+    /// copy group. Code blocks use this to preserve fenced markdown for full
+    /// transcript copies while keeping contained copies fence-free.
+    pub external_source_text: Option<String>,
     /// Logical line mapping for this row. `None` = fall back to `row + 1`.
     pub source_line: Option<SourceLine>,
     /// `true` when the row's content was already laid out at the producer's
@@ -1284,6 +1288,7 @@ impl Buffer {
             block_selectable: false,
             copy_continuation: false,
             source_text: None,
+            external_source_text: None,
             source_line: None,
             pre_formatted: false,
         };

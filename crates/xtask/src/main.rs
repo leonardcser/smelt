@@ -2,6 +2,7 @@
 
 mod bench_transcript_layout;
 mod fuzz;
+mod gen_file_icons;
 mod gen_lua_docs;
 mod synth;
 
@@ -10,6 +11,7 @@ fn main() {
     let cmd = args.next();
     match cmd.as_deref() {
         Some("bench-transcript-layout") => bench_transcript_layout::run(args.collect()),
+        Some("gen-file-icons") => gen_file_icons::run(args.collect()),
         Some("gen-lua-docs") => gen_lua_docs::run(),
         Some("synth") => synth::run(),
         Some("fuzz") => fuzz::run(args.collect()),
@@ -32,6 +34,7 @@ fn print_usage() {
     eprintln!(
         "  bench-transcript-layout [--runs N] [--workloads CSV] run transcript layout benches"
     );
+    eprintln!("  gen-file-icons [DEVICONS_DIR]          regenerate nvim-web-devicons registry");
     eprintln!("  gen-lua-docs                          regenerate Lua API stubs + reference docs");
     eprintln!(
         "  synth                                 generate a synthetic session for perf testing"

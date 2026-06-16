@@ -7,12 +7,29 @@ use smelt_core::content::block_layout::{
     BlockLayout, HboxItem, IrLeaf, LayoutIr, LuaLeaf, SourceViewIr, TextSpec,
 };
 use smelt_core::content::builder::{LineBuilder, Outcome};
+use smelt_core::content::highlight::InlineOptions;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 9;
+
+pub(crate) fn transcript_renderer_cache_key(
+    lua: &LuaRuntime,
+    inline_options: &InlineOptions,
+) -> Option<u64> {
+    let icon_hash = inline_options
+        .file_icons
+        .enabled
+        .then(|| inline_options.file_icons.cache_hash());
+    match (lua.transcript_renderer_cache_key(), icon_hash) {
+        (Some(base), Some(icon_hash)) => Some(base ^ icon_hash.rotate_left(17)),
+        (Some(base), None) => Some(base),
+        (None, Some(icon_hash)) => Some(icon_hash),
+        (None, None) => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
@@ -57,7 +74,7 @@ impl DisplayCacheKey {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct TranscriptRenderEnv<'a> {
     pub(crate) lua: &'a LuaRuntime,
     pub(crate) renderer_generation: u64,
@@ -65,11 +82,16 @@ pub(crate) struct TranscriptRenderEnv<'a> {
 }
 
 impl<'a> TranscriptRenderEnv<'a> {
+    #[cfg(test)]
     pub(crate) fn new(lua: &'a LuaRuntime) -> Self {
+        Self::with_inline_options(lua, InlineOptions::default())
+    }
+
+    pub(crate) fn with_inline_options(lua: &'a LuaRuntime, inline_options: InlineOptions) -> Self {
         Self {
             lua,
             renderer_generation: lua.transcript_renderer_generation(),
-            renderer_cache_key: lua.transcript_renderer_cache_key(),
+            renderer_cache_key: transcript_renderer_cache_key(lua, &inline_options),
         }
     }
 
@@ -161,18 +183,20 @@ impl CompileJob {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct MeasureCtx {
     pub width: u16,
     pub view_state: ViewState,
+    pub inline_options: InlineOptions,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct RenderCtx<'a> {
     pub width: u16,
     pub view_state: ViewState,
     pub theme: &'a Theme,
     pub history: Option<&'a BlockHistory>,
+    pub inline_options: InlineOptions,
 }
 
 struct CachedLayout {
@@ -233,7 +257,10 @@ impl DisplayModel {
             blocks,
         );
         let compiled = jobs.len();
-        let blocks = jobs.into_iter().map(|job| job.compile(env)).collect();
+        let blocks = jobs
+            .into_iter()
+            .map(|job| job.compile(env.clone()))
+            .collect();
         self.insert_compiled_blocks(blocks);
         compiled
     }
@@ -760,8 +787,11 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
 
 pub(crate) fn measure_block(layout: &LayoutIr, ctx: MeasureCtx) -> u64 {
     let _perf = smelt_perf::perf::begin("transcript:measure_block:layout");
-    let expanded_rows =
-        crate::content::display_renderers::measure_layout_ir(layout, ctx.width) as u64;
+    let expanded_rows = crate::content::display_renderers::measure_layout_ir_with_options(
+        layout,
+        ctx.width,
+        &ctx.inline_options,
+    ) as u64;
     ctx.view_state.measured_height(expanded_rows)
 }
 
@@ -772,7 +802,13 @@ pub(crate) fn render_block_into(
 ) -> Outcome {
     let outcome = {
         let mut out = LineBuilder::new(buf, ctx.theme, ctx.width);
-        render_expanded_block(&mut out, layout, ctx.width as usize, ctx.history);
+        render_expanded_block(
+            &mut out,
+            layout,
+            ctx.width as usize,
+            ctx.history,
+            &ctx.inline_options,
+        );
         out.finish()
     };
     apply_view_state(buf, ctx.theme, ctx.width, ctx.view_state, outcome)
@@ -783,6 +819,7 @@ fn render_expanded_block(
     layout: &LayoutIr,
     width: usize,
     history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
 ) -> u16 {
     let _perf = smelt_perf::perf::begin("render:layout");
     if let Some(history) = history {
@@ -791,6 +828,7 @@ fn render_expanded_block(
             layout,
             width as u16,
             history,
+            inline_options,
         )
     } else {
         crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
@@ -966,6 +1004,7 @@ mod tests {
                 view_state: ViewState::Expanded,
                 theme: &theme,
                 history: None,
+                inline_options: Default::default(),
             },
         )
         .line_count as u64
@@ -977,6 +1016,7 @@ mod tests {
             MeasureCtx {
                 width,
                 view_state: ViewState::Expanded,
+                inline_options: Default::default(),
             },
         )
     }

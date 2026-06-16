@@ -475,6 +475,8 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `show_cost` | `bool` | `true` | Session cost in status bar. |
 | `show_prediction` | `bool` | `true` | Ghost-text input predictions in the prompt. |
 | `show_tips` | `bool` | `true` | Curated discovery tips in the start banner and prompt chrome. |
+| `file_icons` | `bool` | `false` | Show Nerd Font file-type icons before inline-code paths that point at existing files. |
+| `file_icon_colors` | `bool` | `true` | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled. |
 | `show_slug` | `bool` | `true` | Task-slug label in status bar. |
 | `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
 | `redact_secrets` | `bool` | `true` | Scrub detected secrets from user input and tool results before they reach the LLM. |
@@ -857,7 +859,7 @@ Environment and system primitives: getenv, setenv, platform, cwd, pid, etc.
 - `smelt.os.home` :: `fun(): string?`
   Return the user's home directory, or `nil` if it cannot be determined.
 - `smelt.os.open_url` :: `fun(url: string): boolean, string?`
-  Open `url` in the system's default browser. macOS uses `open`, Windows uses `cmd /c start`, everything else tries `xdg-open` then falls back to `open`.
+  Open `url` in the system's default browser.
 - `smelt.os.pid` :: `fun(): integer`
   Return the OS process id of the running smelt instance.
 - `smelt.os.platform` :: `fun(): string`

@@ -251,6 +251,11 @@ impl<'a> LineBuilder<'a> {
         self.cur_decoration.source_text = Some(text.to_string());
     }
 
+    /// Attach alternate source text used when a selection spans outside the current copy group.
+    pub fn set_external_source_text(&mut self, text: &str) {
+        self.cur_decoration.external_source_text = Some(text.to_string());
+    }
+
     /// Set `source_text` on the first row in `[start, end)` and `copy_continuation`
     /// on the remaining rows. Used by table renderers that want copy-coalescing
     /// without `soft_wrapped`.
@@ -681,6 +686,7 @@ pub mod test_util {
     pub struct TestLine {
         pub text: String,
         pub source_text: Option<String>,
+        pub external_source_text: Option<String>,
         pub soft_wrapped: bool,
         pub cell_selectable: bool,
         pub block_selectable: bool,
@@ -749,6 +755,7 @@ pub mod test_util {
                 TestLine {
                     text,
                     source_text: dec.source_text,
+                    external_source_text: dec.external_source_text,
                     soft_wrapped: dec.soft_wrapped,
                     cell_selectable: dec.cell_selectable,
                     block_selectable: dec.block_selectable,

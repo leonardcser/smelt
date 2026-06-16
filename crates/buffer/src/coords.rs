@@ -219,7 +219,9 @@ pub fn copy_byte_range(buf: &Buffer, start: usize, end: usize) -> String {
         }
 
         if all_selectable_covered {
-            if let Some(src) = dec.source_text.as_deref() {
+            let src =
+                external_source_text_for_selection(buf, r, sr, er).or(dec.source_text.as_deref());
+            if let Some(src) = src {
                 out.push_str(src);
                 source_text_emitted = true;
                 continue;
@@ -229,6 +231,41 @@ pub fn copy_byte_range(buf: &Buffer, start: usize, end: usize) -> String {
         emit_row_cells(line, &highlights, c_start, c_end, &mut out);
     }
     out
+}
+
+fn external_source_text_for_selection(
+    buf: &Buffer,
+    row: usize,
+    selection_start_row: usize,
+    selection_end_row: usize,
+) -> Option<&str> {
+    let dec = buf.decoration_at(row);
+    let src = dec.external_source_text.as_deref()?;
+    let (group_start, group_end) = external_source_group(buf, row);
+    if selection_start_row < group_start || selection_end_row > group_end {
+        Some(src)
+    } else {
+        None
+    }
+}
+
+fn external_source_group(buf: &Buffer, row: usize) -> (usize, usize) {
+    let mut start = row;
+    while start > 0 && external_source_group_row(buf, start - 1) {
+        start -= 1;
+    }
+
+    let mut end = row;
+    while end + 1 < buf.line_count() && external_source_group_row(buf, end + 1) {
+        end += 1;
+    }
+
+    (start, end)
+}
+
+fn external_source_group_row(buf: &Buffer, row: usize) -> bool {
+    let dec = buf.decoration_at(row);
+    dec.external_source_text.is_some() || dec.copy_continuation
 }
 
 fn byte_to_row_col(lines: &[String], byte: usize) -> (usize, usize) {
@@ -544,6 +581,60 @@ mod tests {
         buf.set_all_lines(vec!["+ add".into()]);
         buf.add_highlight_group_with_meta(0, 0, 2, hl_for_test(), copy_as_meta(""));
         assert_eq!(copy_byte_range(&buf, 0, "+ add".len()), "add");
+    }
+
+    #[test]
+    fn copy_uses_inner_source_text_when_selection_stays_inside_external_group() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["echo hi".into(), "echo bye".into()]);
+        buf.set_decoration(
+            0,
+            LineDecoration {
+                source_text: Some("echo hi".into()),
+                external_source_text: Some("```sh\necho hi".into()),
+                ..Default::default()
+            },
+        );
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                source_text: Some("echo bye".into()),
+                external_source_text: Some("echo bye\n```".into()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            copy_byte_range(&buf, 0, "echo hi\necho bye".len()),
+            "echo hi\necho bye"
+        );
+    }
+
+    #[test]
+    fn copy_uses_external_source_text_when_selection_spans_external_group() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["before".into(), "echo hi".into(), "echo bye".into()]);
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                source_text: Some("echo hi".into()),
+                external_source_text: Some("```sh\necho hi".into()),
+                ..Default::default()
+            },
+        );
+        buf.set_decoration(
+            2,
+            LineDecoration {
+                source_text: Some("echo bye".into()),
+                external_source_text: Some("echo bye\n```".into()),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            copy_byte_range(&buf, 0, "before\necho hi\necho bye".len()),
+            "before\n```sh\necho hi\necho bye\n```"
+        );
     }
 
     #[test]

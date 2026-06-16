@@ -13,6 +13,7 @@ use crate::smelt_edit::{
 };
 use smelt_buffer::coords::copy_byte_range;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
+use smelt_core::content::highlight::InlineOptions;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ pub(crate) struct TranscriptProjection {
     display_cache_generation: u64,
     renderer_generation: Option<u64>,
     renderer_cache_key: Option<u64>,
+    inline_options: InlineOptions,
     #[cfg(test)]
     counters: TranscriptProjectionCounters,
 }
@@ -868,6 +870,7 @@ fn upsert_row_index_entry(entries: &mut Vec<DisplayRowIndexEntry>, entry: Displa
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_cached_layout_to_buffer(
     display_model: &DisplayModel,
     id: RenderNodeId,
@@ -876,6 +879,7 @@ fn render_cached_layout_to_buffer(
     renderer_cache_key: Option<u64>,
     theme: &Theme,
     history: &BlockHistory,
+    inline_options: &InlineOptions,
 ) -> Option<(Buffer, usize)> {
     let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
@@ -887,6 +891,7 @@ fn render_cached_layout_to_buffer(
             view_state: layout_view_state(id, key.view_state, history),
             theme,
             history: Some(history),
+            inline_options: inline_options.clone(),
         },
     );
     Some((buf, outcome.line_count))
@@ -906,6 +911,7 @@ impl TranscriptProjection {
             display_cache_generation: 0,
             renderer_generation: None,
             renderer_cache_key: None,
+            inline_options: InlineOptions::default(),
             #[cfg(test)]
             counters: TranscriptProjectionCounters::default(),
         }
@@ -947,6 +953,23 @@ impl TranscriptProjection {
             );
             self.presentation.prune(self.render_plan.ids());
         }
+    }
+
+    pub(crate) fn inline_options(&self) -> &InlineOptions {
+        &self.inline_options
+    }
+
+    pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
+        if self.inline_options == options {
+            return;
+        }
+        self.inline_options = options;
+        self.display_layouts = DisplayModel::new();
+        self.display_layouts_generation = u64::MAX;
+        self.measurements.clear();
+        self.clear_visible_state();
+        self.visible.full_rows = None;
+        self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
     }
 
     pub(crate) fn hydrate_display_cache(
@@ -1075,7 +1098,10 @@ impl TranscriptProjection {
 
     fn finish_compile_jobs(&mut self, env: TranscriptRenderEnv<'_>, jobs: Vec<CompileJob>) {
         let compiled = jobs.len();
-        let blocks = jobs.into_iter().map(|job| job.compile(env)).collect();
+        let blocks = jobs
+            .into_iter()
+            .map(|job| job.compile(env.clone()))
+            .collect();
         self.display_layouts.insert_compiled_blocks(blocks);
         if compiled > 0 {
             self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
@@ -1218,7 +1244,7 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
     ) {
-        let env = TranscriptRenderEnv::new(lua);
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         self.rebuild_row_index_with_env(env, history, width);
     }
 
@@ -1339,6 +1365,7 @@ impl TranscriptProjection {
             MeasureCtx {
                 width: key.width,
                 view_state: layout_view_state(id, key.view_state, history),
+                inline_options: self.inline_options.clone(),
             },
         ) as RowIndex;
         let gap = self
@@ -1681,8 +1708,8 @@ impl TranscriptProjection {
     ) -> ProjectionPlan {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
-        let env = TranscriptRenderEnv::new(lua);
-        self.rebuild_row_index_with_env(env, history, width);
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.rebuild_row_index_with_env(env.clone(), history, width);
         let key = ProjectKey {
             generation: self.render_plan.fingerprint,
             width,
@@ -1728,6 +1755,7 @@ impl TranscriptProjection {
                     self.measurements.active.renderer_cache_key,
                     theme,
                     history,
+                    &self.inline_options,
                 )?;
                 Some(row_offset_for_display_offset(
                     &block_buf,
@@ -1820,7 +1848,8 @@ impl TranscriptProjection {
     ) -> MaterializedRows {
         let _perf = smelt_perf::perf::begin("transcript:project_planned");
         let mut plan = plan;
-        let current_env = TranscriptRenderEnv::new(lua);
+        let current_env =
+            TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         if self.render_plan.history_generation != history.generation()
             || self.render_plan.group_generation != lua.transcript_group_generation()
             || self.render_plan.group_cache_key != lua.transcript_group_cache_key()
@@ -1829,7 +1858,7 @@ impl TranscriptProjection {
             || current_env.renderer_cache_key != plan.key.renderer_cache_key
             || self.presentation.generation() != plan.key.presentation_generation
         {
-            self.rebuild_row_index_with_env(current_env, history, plan.key.width);
+            self.rebuild_row_index_with_env(current_env.clone(), history, plan.key.width);
             let key = ProjectKey {
                 generation: self.render_plan.fingerprint,
                 width: plan.key.width,
@@ -2021,6 +2050,7 @@ impl TranscriptProjection {
             renderer_cache_key,
             theme,
             history,
+            &self.inline_options,
         ) else {
             return;
         };
@@ -2158,7 +2188,7 @@ impl TranscriptProjection {
         theme: &Theme,
     ) -> Arc<Vec<String>> {
         let _perf = smelt_perf::perf::begin("transcript:build_rows");
-        let env = TranscriptRenderEnv::new(lua);
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         let renderer_generation = env.renderer_generation;
         let renderer_cache_key = env.renderer_cache_key;
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
@@ -2221,6 +2251,7 @@ impl TranscriptProjection {
                 renderer_cache_key,
                 theme,
                 history,
+                &self.inline_options,
             ) else {
                 continue;
             };

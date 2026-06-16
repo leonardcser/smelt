@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Local session introspection web UI. `smelt.inspect.url()` reads the running server URL; the optional `inspect` plugin adds `smelt.inspect.start()` and `smelt.inspect.stop()`.
+Local session introspection web UI. `smelt.inspect.url()` reads the running server URL; the optional `inspect` plugin adds `smelt.inspect.start()`, `smelt.inspect.stop()`, and `smelt.inspect.open()`.
 
 ## `smelt.inspect.url`
 

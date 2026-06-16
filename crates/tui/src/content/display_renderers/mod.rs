@@ -4,7 +4,7 @@ mod layout_ir;
 mod markdown;
 
 pub(crate) use layout_ir::{
-    measure_layout_ir, render_layout_ir_into, render_layout_ir_into_with_history,
+    measure_layout_ir_with_options, render_layout_ir_into, render_layout_ir_into_with_history,
 };
 pub(crate) use markdown::render_markdown_inner;
 
@@ -67,6 +67,7 @@ mod tests {
                 view_state: ctx.view_state,
                 theme,
                 history: None,
+                inline_options: Default::default(),
             },
         )
         .line_count as u16
@@ -528,24 +529,28 @@ mod tests {
     }
 
     #[test]
-    fn thinking_peek_caps_tail_by_rendered_rows() {
+    fn thinking_peek_renders_full_block() {
         let content = concat!(
             "first\n",
-            "middle line that should be hidden once the rendered-row preview is capped\n",
+            "middle line that should remain visible in presentation-state peek\n",
             "tail words tail words tail words tail words tail words tail words tail words tail words tail words"
         );
         let rows = layout_block_test(
             &thinking(content),
             None,
-            &LayoutContext::new(32, true, ViewState::Peek),
+            &LayoutContext::new(32, ViewState::Peek),
         );
 
-        assert_eq!(rows.len(), 5);
+        let expanded_rows = layout_block_test(
+            &thinking(content),
+            None,
+            &LayoutContext::new(32, ViewState::Expanded),
+        );
+
+        assert_eq!(rows.len(), expanded_rows.len());
         assert_eq!(rows[0].text, "│ first");
-        assert!(rows[1].text.starts_with("│ … "));
-        assert!(rows[1].text.contains("omitted"));
-        assert!(rows[2..].iter().all(|row| row.text.starts_with("│ ")));
-        assert!(!rows.iter().any(|row| row.text.contains("middle line")));
+        assert!(rows.iter().all(|row| row.text.starts_with("│ ")));
+        assert!(rows.iter().any(|row| row.text.contains("middle line")));
     }
 
     #[test]
@@ -553,7 +558,7 @@ mod tests {
         let rows = layout_block_test(
             &thinking("one\ntwo\nthree"),
             None,
-            &LayoutContext::new(80, true, ViewState::Peek),
+            &LayoutContext::new(80, ViewState::Peek),
         );
         let text: Vec<_> = rows.into_iter().map(|row| row.text).collect();
         assert_eq!(text, vec!["│ one", "│ two", "│ three"]);
