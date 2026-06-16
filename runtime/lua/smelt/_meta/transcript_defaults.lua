@@ -27,6 +27,11 @@ transcript_defaults.render_compacted = nil
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_exec = nil
 
+--- Render a compact ordered child list for collapsed group nodes. Failed children
+--- stay in place and use a plain error highlight; expand the group for details.
+---@type fun(group: table, ctx: smelt.transcript.Context, opts: table?): table
+transcript_defaults.render_group_child_list = nil
+
 --- Render a mode note.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_mode = nil
@@ -35,8 +40,8 @@ transcript_defaults.render_mode = nil
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_process_status = nil
 
---- Render thinking, either expanded with the current gutter or folded to a
---- deterministic text summary when `ctx.show_thinking` is false.
+--- Render thinking with the current gutter. Folding is controlled by transcript
+--- presentation state, not by a separate show/hide setting.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_thinking = nil
 

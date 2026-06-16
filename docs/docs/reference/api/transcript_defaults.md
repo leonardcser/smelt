@@ -56,6 +56,17 @@ Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transc
 
 Render an exec block.
 
+## `smelt.transcript.defaults.render_group_child_list`
+
+```lua
+fun(group: table, ctx: smelt.transcript.Context, opts: table?): table
+```
+
+Types: [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+
+Render a compact ordered child list for collapsed group nodes. Failed children
+stay in place and use a plain error highlight; expand the group for details.
+
 ## `smelt.transcript.defaults.render_mode`
 
 ```lua
@@ -84,8 +95,8 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
-Render thinking, either expanded with the current gutter or folded to a
-deterministic text summary when `ctx.show_thinking` is false.
+Render thinking with the current gutter. Folding is controlled by transcript
+presentation state, not by a separate show/hide setting.
 
 ## `smelt.transcript.defaults.render_thinking_summary`
 

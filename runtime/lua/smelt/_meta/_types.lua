@@ -508,6 +508,24 @@
 ---@class smelt.transcript.StreamOpts
 ---@field width? integer Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters.
 
+--- Group selector declared through `smelt.transcript.groups.register`.
+---@class smelt.transcript.GroupSelector
+---@field kind? string Match block kind.
+---@field name? string Match tool name for tool blocks.
+---@field terminal? boolean Match terminal/non-terminal blocks.
+
+--- Declarative transcript group registration. The host owns planning; Lua owns
+--- the selector metadata and the virtual-node renderer.
+---@class smelt.transcript.GroupSpec
+---@field name string Unique group name. Registering the same name replaces it.
+---@field cache_key? string Persisted layout cache key; omit to opt out while active.
+---@field priority? integer Higher priority plans first. Defaults to 0.
+---@field min? integer Minimum adjacent matching blocks required. Defaults to 2.
+---@field default_view? "collapsed"|"expanded" Initial presentation when the group first appears.
+---@field selector smelt.transcript.GroupSelector Declarative block matcher.
+---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
+---@field render fun(group: table, ctx: smelt.transcript.Context): table Virtual group renderer.
+
 --- Tool output snapshot passed to transcript renderers.
 ---@class smelt.transcript.ToolOutput
 ---@field content string Captured output text.

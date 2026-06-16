@@ -1,4 +1,6 @@
-use crate::content::render_plan::{NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan};
+use crate::content::render_plan::{
+    NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptPresentationState,
+};
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_core::content::block_layout::{
     BlockLayout, HboxItem, IrLeaf, LayoutIr, LuaLeaf, SourceViewIr, TextSpec,
@@ -273,7 +275,7 @@ impl DisplayModel {
                     });
                 }
                 RenderNode::Group { ref name, .. } => {
-                    let snapshot = group_snapshot_json(history, index, &node);
+                    let snapshot = group_snapshot_json(history, index, &node, key.view_state);
                     jobs.push(CompileJob::Group {
                         id,
                         name: name.clone(),
@@ -292,11 +294,12 @@ impl DisplayModel {
         &mut self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        presentation: &TranscriptPresentationState,
         entries: Vec<DisplayLayoutCacheEntry>,
     ) -> usize {
         let mut hydrated = 0usize;
         for entry in entries {
-            if !display_layout_entry_matches_history(history, plan, &entry) {
+            if !display_layout_entry_matches_history(history, plan, presentation, &entry) {
                 continue;
             }
             self.blocks.insert(
@@ -316,6 +319,7 @@ impl DisplayModel {
         &self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        presentation: &TranscriptPresentationState,
         renderer_generation: Option<u64>,
         renderer_cache_key: Option<u64>,
     ) -> Vec<DisplayLayoutCacheEntry> {
@@ -345,7 +349,7 @@ impl DisplayModel {
                 key: cached.key,
                 layout: cached.layout.clone(),
             };
-            if display_layout_entry_matches_history(history, plan, &entry) {
+            if display_layout_entry_matches_history(history, plan, presentation, &entry) {
                 entries.push(entry);
             }
         }
@@ -385,6 +389,7 @@ impl DisplayModel {
 fn display_layout_entry_matches_history(
     history: &BlockHistory,
     plan: &RenderPlan,
+    presentation: &TranscriptPresentationState,
     entry: &DisplayLayoutCacheEntry,
 ) -> bool {
     if entry.key.renderer_version != DISPLAY_RENDERER_VERSION {
@@ -420,6 +425,7 @@ fn display_layout_entry_matches_history(
             .and_then(|index| {
                 plan.node_key(
                     history,
+                    presentation,
                     index,
                     LayoutKey {
                         width: 0,
@@ -480,6 +486,7 @@ fn group_snapshot_json(
     history: &BlockHistory,
     node_index: usize,
     node: &RenderNode,
+    view_state: ViewState,
 ) -> serde_json::Value {
     let RenderNode::Group {
         id,
@@ -487,7 +494,7 @@ fn group_snapshot_json(
         bucket,
         child_range,
         child_ids,
-        view_state,
+        ..
     } = node
     else {
         return serde_json::Value::Null;
@@ -503,7 +510,7 @@ fn group_snapshot_json(
         "group_kind": name,
         "name": name,
         "bucket": bucket,
-        "view_state": view_state_label(*view_state),
+        "view_state": view_state_label(view_state),
         "children": children,
         "child_ids": child_ids,
         "child_count": child_ids.len(),

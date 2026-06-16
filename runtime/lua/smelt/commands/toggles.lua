@@ -1,9 +1,21 @@
--- `/thinking` toggles thinking blocks for the current session.
+-- `/thinking` folds or unfolds thinking blocks for the current session.
 
-smelt.cmd.register("thinking", function()
-  smelt.settings.show_thinking = not smelt.settings.show_thinking
-  smelt.notify("thinking blocks: " .. (smelt.settings.show_thinking and "on" or "off"))
-end, { desc = "toggle thinking blocks for this session" })
+smelt.cmd.register("thinking", function(arg)
+  local action = "toggle"
+  if arg and arg ~= "" then
+    action = arg:lower()
+  end
+  if action == "on" or action == "open" or action == "show" then
+    action = "open"
+  elseif action == "off" or action == "close" or action == "hide" then
+    action = "close"
+  elseif action ~= "toggle" then
+    smelt.notify.error("usage: /thinking [open|close|toggle]")
+    return
+  end
+  local changed = smelt.transcript.fold_kind("thinking", action)
+  smelt.notify("thinking blocks: " .. (changed and action or "unchanged"))
+end, { desc = "fold or unfold thinking blocks", args = "[open|close|toggle]" })
 
 -- `/reasoning` - set explicitly or show current effort.
 smelt.cmd.register("reasoning", function(arg)

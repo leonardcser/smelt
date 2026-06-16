@@ -328,12 +328,11 @@ function smelt.transcript.defaults.render_assistant(block, ctx)
   return layout.markdown(block.content or "")
 end
 
---- Render thinking, either expanded with the current gutter or folded to a
---- deterministic text summary when `ctx.show_thinking` is false.
+--- Render thinking with the current gutter. Folding is controlled by transcript
+--- presentation state, not by a separate show/hide setting.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_thinking(block, ctx)
-  ctx = ctx or {}
-  if not ctx.show_thinking then return M.render_thinking_summary(block, ctx) end
+  local _ = ctx
   return layout.gutter(
     layout.markdown(block.content or "", {
       dim = true,

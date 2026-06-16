@@ -25,6 +25,21 @@ transcript.blocks = nil
 ---@type fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg
 transcript.extend_renderer = nil
 
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Apply a fold action (`open` or `close`) to every current transcript render node.
+---@type fun(action: string): boolean
+transcript.fold_all = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Apply a fold action (`toggle`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.
+---@type fun(row: integer, action: string, opts: table?): boolean
+transcript.fold_at_row = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Apply a fold action (`toggle`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`.
+---@type fun(kind: string, action: string): boolean
+transcript.fold_kind = nil
+
 --- Return the current composed root transcript renderer, or nil before the
 --- default renderer has been installed.
 ---@type fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?
@@ -41,6 +56,11 @@ transcript.invalidate_renderer = nil
 --- Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
 ---@type fun(): boolean
 transcript.is_empty = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return render-node metadata for absolute display row `row`, including `{ kind, id, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
+---@type fun(row: integer): table?
+transcript.node_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return rendered transcript display rows in `[start, start + count)`. This is exact for the requested absolute display-row range and materializes only the bounded range needed for the query.

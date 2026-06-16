@@ -629,10 +629,13 @@ mod tests {
             );
         }
 
-        // Thinking collapsed (one summary row).
+        // Thinking rendering is independent of the old show/hide flag; folding is
+        // applied by transcript presentation state.
         let lines = render(&thinking("**title**\nbody"), None);
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].text.starts_with(THINKING_GUTTER));
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            assert!(line.text.starts_with(THINKING_GUTTER));
+        }
 
         // Text/markdown: renderer emits no left indent.
         let lines = render(&text("hello world"), None);

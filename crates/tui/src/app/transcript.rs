@@ -161,6 +161,70 @@ impl TranscriptView {
         )
     }
 
+    pub(crate) fn node_metadata_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        show_thinking: bool,
+        row: crate::smelt_edit::RowIndex,
+    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+        self.projection.node_metadata_at_row(
+            lua,
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+            row,
+        )
+    }
+
+    pub(crate) fn fold_node_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        show_thinking: bool,
+        row: crate::smelt_edit::RowIndex,
+        action: crate::content::transcript_buf::FoldAction,
+        activation: crate::content::transcript_buf::FoldActivation,
+    ) -> bool {
+        self.projection.fold_node_at_row(
+            lua,
+            &mut self.transcript.history,
+            width,
+            show_thinking,
+            crate::content::transcript_buf::FoldAtRow {
+                row,
+                action,
+                activation,
+            },
+        )
+    }
+
+    pub(crate) fn fold_all(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        show_thinking: bool,
+        action: crate::content::transcript_buf::FoldAction,
+    ) -> bool {
+        self.projection
+            .rebuild_row_index(lua, &mut self.transcript.history, width, show_thinking);
+        self.projection.fold_all(&self.transcript.history, action)
+    }
+
+    pub(crate) fn fold_block_kind(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        show_thinking: bool,
+        kind: &str,
+        action: crate::content::transcript_buf::FoldAction,
+    ) -> bool {
+        self.projection
+            .rebuild_row_index(lua, &mut self.transcript.history, width, show_thinking);
+        self.projection
+            .fold_block_kind(&self.transcript.history, kind, action)
+    }
+
     pub(crate) fn copy_range(
         &mut self,
         lua: &LuaRuntime,
@@ -482,6 +546,68 @@ impl TuiApp {
     ) -> Vec<String> {
         self.transcript_rows_and_breaks_range(self.core.config.settings.show_thinking, start, count)
             .into_text_rows()
+    }
+
+    pub(crate) fn transcript_node_at_row(
+        &mut self,
+        row: crate::smelt_edit::RowIndex,
+    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        self.transcript.node_metadata_at_row(
+            &self.lua,
+            width,
+            self.core.config.settings.show_thinking,
+            row,
+        )
+    }
+
+    pub(crate) fn fold_transcript_node_at_row(
+        &mut self,
+        row: crate::smelt_edit::RowIndex,
+        action: crate::content::transcript_buf::FoldAction,
+        activation: crate::content::transcript_buf::FoldActivation,
+    ) -> bool {
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        self.transcript.fold_node_at_row(
+            &self.lua,
+            width,
+            self.core.config.settings.show_thinking,
+            row,
+            action,
+            activation,
+        )
+    }
+
+    pub(crate) fn fold_all_transcript_nodes(
+        &mut self,
+        action: crate::content::transcript_buf::FoldAction,
+    ) -> bool {
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        self.transcript.fold_all(
+            &self.lua,
+            width,
+            self.core.config.settings.show_thinking,
+            action,
+        )
+    }
+
+    pub(crate) fn fold_transcript_block_kind(
+        &mut self,
+        kind: &str,
+        action: crate::content::transcript_buf::FoldAction,
+    ) -> bool {
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        self.transcript.fold_block_kind(
+            &self.lua,
+            width,
+            self.core.config.settings.show_thinking,
+            kind,
+            action,
+        )
     }
 
     pub(crate) fn snap_cpos_to_selectable(

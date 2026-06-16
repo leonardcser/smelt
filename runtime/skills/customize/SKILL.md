@@ -1065,12 +1065,14 @@ Bundled default transcript renderers.
   Render a compacted-history marker.
 - `smelt.transcript.defaults.render_exec` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render an exec block.
+- `smelt.transcript.defaults.render_group_child_list` :: `fun(group: table, ctx: smelt.transcript.Context, opts: table?): table`
+  Render a compact ordered child list for collapsed group nodes.
 - `smelt.transcript.defaults.render_mode` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a mode note.
 - `smelt.transcript.defaults.render_process_status` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a process-status note.
 - `smelt.transcript.defaults.render_thinking` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
-  Render thinking, either expanded with the current gutter or folded to a deterministic text summary when `ctx.show_thinking` is false.
+  Render thinking with the current gutter.
 - `smelt.transcript.defaults.render_thinking_summary` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a compact thinking summary.
 - `smelt.transcript.defaults.render_tool` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
@@ -1087,6 +1089,17 @@ Bundled default transcript renderers.
   Render a user block.
 - `smelt.transcript.defaults.render_user_text` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render user text.
+
+#### `smelt.transcript.groups`
+
+- `smelt.transcript.groups.cache_key` :: `fun(): integer?`
+  Current group-registry cache key, or nil when any active group opted out of persisted planning/layout caches.
+- `smelt.transcript.groups.generation` :: `fun(): integer`
+  Current group-registry generation.
+- `smelt.transcript.groups.list` :: `fun(): smelt.transcript.GroupSpec[]`
+  Return group specs in planner order: higher priority first, then registration order.
+- `smelt.transcript.groups.register` :: `fun(spec: smelt.transcript.GroupSpec): smelt.Reg`
+  Register or replace a declarative transcript group type.
 
 #### `smelt.trust`
 
@@ -1594,12 +1607,20 @@ Transcript display policy and rendered transcript inspection.
   Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
 - `smelt.transcript.extend_renderer` (Host) :: `fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg`
   Add or replace named middleware around the root renderer.
+- `smelt.transcript.fold_all` (UiHost) :: `fun(action: string): boolean`
+  Apply a fold action (`open` or `close`) to every current transcript render node.
+- `smelt.transcript.fold_at_row` (UiHost) :: `fun(row: integer, action: string, opts: table?): boolean`
+  Apply a fold action (`toggle`, `open`, `close`) to the render node at absolute display row `row`.
+- `smelt.transcript.fold_kind` (UiHost) :: `fun(kind: string, action: string): boolean`
+  Apply a fold action (`toggle`, `open`, or `close`) to every current block node with the given kind, e.g.
 - `smelt.transcript.get_renderer` (Host) :: `fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?`
   Return the current composed root transcript renderer, or nil before the default renderer has been installed.
 - `smelt.transcript.invalidate_renderer` (Host) :: `fun(): integer`
   Bump the renderer generation after changing closed-over state that affects renderer output without calling `set_renderer`, `extend_renderer`, or a registration's `:remove()`.
 - `smelt.transcript.is_empty` (UiHost) :: `fun(): boolean`
   Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
+- `smelt.transcript.node_at_row` (UiHost) :: `fun(row: integer): table?`
+  Return render-node metadata for absolute display row `row`, including `{ kind, id, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
 - `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`
   Return rendered transcript display rows in `[start, start + count)`.
 - `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil`

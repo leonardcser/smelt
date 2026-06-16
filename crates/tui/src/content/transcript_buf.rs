@@ -2,7 +2,9 @@ use super::display_layout::{
     measure_block, render_block_into, CompileJob, DisplayModel, DisplayRowIndexEntry,
     DisplayRowIndexNode, MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
-use crate::content::render_plan::{NodeLayoutKey, RenderNodeId, RenderPlan};
+use crate::content::render_plan::{
+    NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptPresentationState,
+};
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
@@ -15,6 +17,7 @@ use std::sync::Arc;
 
 pub(crate) struct TranscriptProjection {
     render_plan: RenderPlan,
+    presentation: TranscriptPresentationState,
     display_layouts: DisplayModel,
     display_layouts_generation: u64,
     active_width: u16,
@@ -62,6 +65,7 @@ struct CachedRows {
     generation: u64,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
+    presentation_generation: u64,
     width: u16,
     show_thinking: bool,
 }
@@ -72,6 +76,7 @@ struct RowIndexKey {
     show_thinking: bool,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
+    presentation_generation: u64,
     base_key: LayoutKey,
 }
 
@@ -81,12 +86,14 @@ impl RowIndexKey {
         show_thinking: bool,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
+        presentation_generation: u64,
     ) -> Self {
         Self {
             width,
             show_thinking,
             renderer_generation,
             renderer_cache_key,
+            presentation_generation,
             base_key: base_layout_key(width, show_thinking),
         }
     }
@@ -100,6 +107,7 @@ struct ExactRowIndex {
     generation: u64,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
+    presentation_generation: u64,
     width: u16,
     show_thinking: bool,
 }
@@ -122,16 +130,24 @@ impl ExactRowIndex {
         self.generation == plan.fingerprint
             && self.renderer_generation == key.renderer_generation
             && self.renderer_cache_key == key.renderer_cache_key
+            && self.presentation_generation == key.presentation_generation
             && self.width == key.width
             && self.show_thinking == key.show_thinking
             && self.nodes.len() == plan.len()
     }
 
-    fn rebuild_if_stale(&mut self, history: &BlockHistory, plan: &RenderPlan, key: RowIndexKey) {
+    fn rebuild_if_stale(
+        &mut self,
+        history: &BlockHistory,
+        plan: &RenderPlan,
+        presentation: &TranscriptPresentationState,
+        key: RowIndexKey,
+    ) {
         let gen = plan.fingerprint;
         if self.generation == gen
             && self.renderer_generation == key.renderer_generation
             && self.renderer_cache_key == key.renderer_cache_key
+            && self.presentation_generation == key.presentation_generation
             && self.width == key.width
             && self.show_thinking == key.show_thinking
         {
@@ -153,7 +169,7 @@ impl ExactRowIndex {
             let Some(id) = plan.node_id(index) else {
                 continue;
             };
-            let Some(node_key) = plan.node_key(history, index, key.base_key) else {
+            let Some(node_key) = plan.node_key(history, presentation, index, key.base_key) else {
                 continue;
             };
             let old_same_index = old_nodes.get(index).filter(|node| node.id == id);
@@ -184,6 +200,7 @@ impl ExactRowIndex {
         self.generation = gen;
         self.renderer_generation = key.renderer_generation;
         self.renderer_cache_key = key.renderer_cache_key;
+        self.presentation_generation = key.presentation_generation;
         self.width = key.width;
         self.show_thinking = key.show_thinking;
         self.rebuild_prefix_rows();
@@ -207,6 +224,7 @@ impl ExactRowIndex {
         &mut self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        presentation: &TranscriptPresentationState,
         key: RowIndexKey,
     ) -> bool {
         let old_len = self.nodes.len();
@@ -222,6 +240,7 @@ impl ExactRowIndex {
             && self.generation == plan.fingerprint
             && self.renderer_generation == key.renderer_generation
             && self.renderer_cache_key == key.renderer_cache_key
+            && self.presentation_generation == key.presentation_generation
             && self.width == key.width
             && self.show_thinking == key.show_thinking
         {
@@ -233,7 +252,7 @@ impl ExactRowIndex {
             let Some(id) = plan.node_id(index) else {
                 return false;
             };
-            let Some(node_key) = plan.node_key(history, index, key.base_key) else {
+            let Some(node_key) = plan.node_key(history, presentation, index, key.base_key) else {
                 return false;
             };
             let node = &mut self.nodes[index];
@@ -258,7 +277,7 @@ impl ExactRowIndex {
             let Some(id) = plan.node_id(index) else {
                 return false;
             };
-            let Some(node_key) = plan.node_key(history, index, key.base_key) else {
+            let Some(node_key) = plan.node_key(history, presentation, index, key.base_key) else {
                 return false;
             };
             self.nodes.push(ExactNodeRow {
@@ -271,6 +290,7 @@ impl ExactRowIndex {
         self.generation = plan.fingerprint;
         self.renderer_generation = key.renderer_generation;
         self.renderer_cache_key = key.renderer_cache_key;
+        self.presentation_generation = key.presentation_generation;
         self.width = key.width;
         self.show_thinking = key.show_thinking;
         self.prefix_dirty |= prefix_dirty;
@@ -300,6 +320,16 @@ impl ExactRowIndex {
         idx.saturating_sub(1).min(self.nodes.len())
     }
 
+    fn node_index_at_row(&self, row: RowIndex) -> Option<usize> {
+        if self.nodes.is_empty() || row >= self.total_rows() {
+            return None;
+        }
+        Some(
+            self.start_index_for_row(row)
+                .min(self.nodes.len().saturating_sub(1)),
+        )
+    }
+
     fn block_index(&self, id: BlockId) -> Option<usize> {
         self.nodes
             .iter()
@@ -325,6 +355,7 @@ impl ExactRowIndex {
         &mut self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        presentation: &TranscriptPresentationState,
         entry: &DisplayRowIndexEntry,
         key: RowIndexKey,
     ) -> bool {
@@ -346,7 +377,7 @@ impl ExactRowIndex {
             if cached.id != id {
                 return false;
             }
-            let Some(node_key) = plan.node_key(history, index, key.base_key) else {
+            let Some(node_key) = plan.node_key(history, presentation, index, key.base_key) else {
                 return false;
             };
             if cached.key != node_key {
@@ -363,6 +394,7 @@ impl ExactRowIndex {
         self.generation = plan.fingerprint;
         self.renderer_generation = key.renderer_generation;
         self.renderer_cache_key = key.renderer_cache_key;
+        self.presentation_generation = key.presentation_generation;
         self.width = key.width;
         self.show_thinking = key.show_thinking;
         self.rebuild_prefix_rows();
@@ -427,6 +459,7 @@ impl MeasurementIndexStore {
         &self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        presentation: &TranscriptPresentationState,
         renderer_generation: Option<u64>,
         renderer_cache_key: Option<u64>,
     ) -> Vec<DisplayRowIndexEntry> {
@@ -435,13 +468,13 @@ impl MeasurementIndexStore {
             .iter()
             .filter(|entry| {
                 row_index_entry_matches_renderer(entry, renderer_generation, renderer_cache_key)
-                    && row_index_entry_matches(history, plan, entry)
+                    && row_index_entry_matches(history, plan, presentation, entry)
             })
             .cloned()
             .collect();
         if let Some(current) = self.active.cache_entry() {
             if row_index_entry_matches_renderer(&current, renderer_generation, renderer_cache_key)
-                && row_index_entry_matches(history, plan, &current)
+                && row_index_entry_matches(history, plan, presentation, &current)
             {
                 upsert_row_index_entry(&mut entries, current);
             }
@@ -494,6 +527,7 @@ struct ProjectKey {
     show_thinking: bool,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
+    presentation_generation: u64,
     mode: ProjectionMode,
 }
 
@@ -515,6 +549,46 @@ pub(crate) struct ProjectionPlan {
     scroll_top: RowIndex,
     viewport_rows: u16,
     block_range: std::ops::Range<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FoldAction {
+    Toggle,
+    Open,
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FoldActivation {
+    AnyNodeRow,
+    ExplicitTargetOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FoldAtRow {
+    pub(crate) row: RowIndex,
+    pub(crate) action: FoldAction,
+    pub(crate) activation: FoldActivation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptNodeRow {
+    pub(crate) id: RenderNodeId,
+    pub(crate) index: usize,
+    pub(crate) first_row: RowIndex,
+    pub(crate) rows: RowIndex,
+    pub(crate) row_offset: RowIndex,
+    pub(crate) view_state: ViewState,
+    pub(crate) explicit_fold_target: bool,
+}
+
+impl TranscriptNodeRow {
+    pub(crate) fn can_activate(self, activation: FoldActivation) -> bool {
+        match activation {
+            FoldActivation::AnyNodeRow => true,
+            FoldActivation::ExplicitTargetOnly => self.explicit_fold_target,
+        }
+    }
 }
 
 impl ProjectionPlan {
@@ -700,6 +774,7 @@ fn row_offset_for_display_offset(
 fn row_index_entry_matches(
     history: &BlockHistory,
     plan: &RenderPlan,
+    presentation: &TranscriptPresentationState,
     entry: &DisplayRowIndexEntry,
 ) -> bool {
     if entry.nodes.len() != plan.len() {
@@ -708,7 +783,7 @@ fn row_index_entry_matches(
     let base_key = base_layout_key(entry.width, entry.show_thinking);
     entry.nodes.iter().enumerate().all(|(index, node)| {
         plan.node_id(index) == Some(node.id)
-            && plan.node_key(history, index, base_key) == Some(node.key)
+            && plan.node_key(history, presentation, index, base_key) == Some(node.key)
     })
 }
 
@@ -771,6 +846,7 @@ impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
             render_plan: RenderPlan::empty(),
+            presentation: TranscriptPresentationState::default(),
             display_layouts: DisplayModel::new(),
             display_layouts_generation: u64::MAX,
             active_width: 0,
@@ -802,6 +878,7 @@ impl TranscriptProjection {
                 group_generation,
                 group_cache_key,
             );
+            self.presentation.prune(self.render_plan.ids());
         }
     }
 
@@ -816,9 +893,12 @@ impl TranscriptProjection {
             row_indexes,
             display_layouts,
         } = data;
-        let hydrated_layouts =
-            self.display_layouts
-                .hydrate_from_cache(history, &self.render_plan, display_layouts);
+        let hydrated_layouts = self.display_layouts.hydrate_from_cache(
+            history,
+            &self.render_plan,
+            &self.presentation,
+            display_layouts,
+        );
         self.measurements.hydrate(row_indexes);
         smelt_perf::perf::record_value(
             "transcript:display_model_cache:loaded",
@@ -845,6 +925,7 @@ impl TranscriptProjection {
             display_layouts: self.display_layouts.cache_entries(
                 history,
                 &self.render_plan,
+                &self.presentation,
                 self.renderer_generation,
                 self.renderer_cache_key,
             ),
@@ -889,6 +970,7 @@ impl TranscriptProjection {
         self.measurements.export_entries(
             history,
             &self.render_plan,
+            &self.presentation,
             self.renderer_generation,
             self.renderer_cache_key,
         )
@@ -1045,10 +1127,13 @@ impl TranscriptProjection {
             smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
             return false;
         };
-        let hydrated = self
-            .measurements
-            .active
-            .hydrate_from_cache(history, plan, &entry, key);
+        let hydrated = self.measurements.active.hydrate_from_cache(
+            history,
+            plan,
+            &self.presentation,
+            &entry,
+            key,
+        );
         smelt_perf::perf::record_value(
             if hydrated {
                 "transcript:row_index_cache:hydrated"
@@ -1097,13 +1182,16 @@ impl TranscriptProjection {
             show_thinking,
             renderer_generation,
             renderer_cache_key,
+            self.presentation.generation(),
         );
         let hydrated_index = self.try_hydrate_row_index(history, &plan, row_key);
         let reused_index = hydrated_index
-            || self
-                .measurements
-                .active
-                .sync_stable_order_prefix(history, &plan, row_key);
+            || self.measurements.active.sync_stable_order_prefix(
+                history,
+                &plan,
+                &self.presentation,
+                row_key,
+            );
         smelt_perf::perf::record_value(
             "transcript:rebuild_row_index:reused_index",
             u64::from(reused_index),
@@ -1112,7 +1200,7 @@ impl TranscriptProjection {
             let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
             self.measurements
                 .active
-                .rebuild_if_stale(history, &plan, row_key);
+                .rebuild_if_stale(history, &plan, &self.presentation, row_key);
         }
         if self.measurements.active.is_exact_for(&plan, row_key) {
             if reused_index {
@@ -1244,6 +1332,142 @@ impl TranscriptProjection {
         self.measurements.active.total_rows()
     }
 
+    pub(crate) fn node_at_row(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        row: RowIndex,
+    ) -> Option<TranscriptNodeRow> {
+        self.rebuild_row_index(lua, history, width, show_thinking);
+        self.node_at_prepared_row(history, row)
+    }
+
+    fn node_at_prepared_row(
+        &self,
+        history: &BlockHistory,
+        row: RowIndex,
+    ) -> Option<TranscriptNodeRow> {
+        let index = self.measurements.active.node_index_at_row(row)?;
+        let node = self.measurements.active.nodes.get(index)?;
+        let first_row = self.measurements.active.prefix_row(index);
+        let rows = node.exact_height.unwrap_or(node.estimated_height);
+        let row_offset = row.saturating_sub(first_row).min(rows.saturating_sub(1));
+        let view_state =
+            self.presentation
+                .effective_view_state(&self.render_plan, history, index)?;
+        let explicit_fold_target = match view_state {
+            ViewState::Collapsed => true,
+            ViewState::TrimmedHead { .. } => row_offset.saturating_add(1) == rows,
+            ViewState::TrimmedTail { .. } => row_offset == 0,
+            ViewState::Expanded => false,
+        };
+        Some(TranscriptNodeRow {
+            id: node.id,
+            index,
+            first_row,
+            rows,
+            row_offset,
+            view_state,
+            explicit_fold_target,
+        })
+    }
+
+    pub(crate) fn fold_node_at_row(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        request: FoldAtRow,
+    ) -> bool {
+        let Some(node) = self.node_at_row(lua, history, width, show_thinking, request.row) else {
+            return false;
+        };
+        if !node.can_activate(request.activation) {
+            return false;
+        }
+        self.fold_node(history, node.id, request.action)
+    }
+
+    pub(crate) fn fold_node(
+        &mut self,
+        history: &BlockHistory,
+        id: RenderNodeId,
+        action: FoldAction,
+    ) -> bool {
+        let changed = match action {
+            FoldAction::Toggle => self.presentation.toggle(&self.render_plan, history, id),
+            FoldAction::Open => {
+                self.presentation
+                    .set(&self.render_plan, history, id, ViewState::Expanded)
+            }
+            FoldAction::Close => {
+                self.presentation
+                    .set(&self.render_plan, history, id, ViewState::Collapsed)
+            }
+        };
+        if changed {
+            self.clear_visible_state();
+            self.visible.full_rows = None;
+        }
+        changed
+    }
+
+    pub(crate) fn fold_all(&mut self, history: &BlockHistory, action: FoldAction) -> bool {
+        let view_state = match action {
+            FoldAction::Open => ViewState::Expanded,
+            FoldAction::Close => ViewState::Collapsed,
+            FoldAction::Toggle => return false,
+        };
+        let changed = self
+            .presentation
+            .set_all(&self.render_plan, history, view_state);
+        if changed {
+            self.clear_visible_state();
+            self.visible.full_rows = None;
+        }
+        changed
+    }
+
+    pub(crate) fn fold_block_kind(
+        &mut self,
+        history: &BlockHistory,
+        kind: &str,
+        action: FoldAction,
+    ) -> bool {
+        let ids: Vec<_> = self
+            .render_plan
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                RenderNode::Block { id, .. } => history
+                    .blocks
+                    .get(id)
+                    .filter(|block| block.kind() == kind)
+                    .map(|_| RenderNodeId::Block(*id)),
+                RenderNode::Group { .. } => None,
+            })
+            .collect();
+        let mut changed = false;
+        for id in ids {
+            changed |= self.fold_node(history, id, action);
+        }
+        changed
+    }
+
+    pub(crate) fn node_metadata_at_row(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        row: RowIndex,
+    ) -> Option<TranscriptNodeRow> {
+        self.node_at_row(lua, history, width, show_thinking, row)
+    }
+
     fn resize_anchor_for(&self, width: u16, scroll_target: ScrollTarget) -> Option<ResizeAnchor> {
         let row = scroll_target.visible_row_anchor()?;
         let width_changed = self
@@ -1293,6 +1517,7 @@ impl TranscriptProjection {
             show_thinking,
             renderer_generation: env.renderer_generation,
             renderer_cache_key: env.renderer_cache_key,
+            presentation_generation: self.presentation.generation(),
             mode: scroll_target.mode(viewport_rows),
         };
         self.plan_projection_from_prepared(
@@ -1433,6 +1658,7 @@ impl TranscriptProjection {
             || self.render_plan.fingerprint != plan.key.generation
             || current_env.renderer_generation != plan.key.renderer_generation
             || current_env.renderer_cache_key != plan.key.renderer_cache_key
+            || self.presentation.generation() != plan.key.presentation_generation
         {
             self.rebuild_row_index_with_env(current_env, history, plan.key.width);
             let key = ProjectKey {
@@ -1441,6 +1667,7 @@ impl TranscriptProjection {
                 show_thinking: plan.key.show_thinking,
                 renderer_generation: current_env.renderer_generation,
                 renderer_cache_key: current_env.renderer_cache_key,
+                presentation_generation: self.presentation.generation(),
                 mode: plan.scroll_target.mode(plan.viewport_rows),
             };
             plan = self.plan_projection_from_prepared(
@@ -1482,6 +1709,7 @@ impl TranscriptProjection {
             || prev.show_thinking != key.show_thinking
             || prev.renderer_generation != key.renderer_generation
             || prev.renderer_cache_key != key.renderer_cache_key
+            || prev.presentation_generation != key.presentation_generation
         {
             return None;
         }
@@ -1767,6 +1995,7 @@ impl TranscriptProjection {
             if c.generation == gen
                 && c.renderer_generation == renderer_generation
                 && c.renderer_cache_key == renderer_cache_key
+                && c.presentation_generation == self.presentation.generation()
                 && c.width == width
                 && c.show_thinking == show_thinking
             {
@@ -1784,17 +2013,20 @@ impl TranscriptProjection {
             show_thinking,
             renderer_generation,
             renderer_cache_key,
+            self.presentation.generation(),
         );
         let hydrated_index = self.try_hydrate_row_index(history, &plan, row_key);
         let reused_index = hydrated_index
-            || self
-                .measurements
-                .active
-                .sync_stable_order_prefix(history, &plan, row_key);
+            || self.measurements.active.sync_stable_order_prefix(
+                history,
+                &plan,
+                &self.presentation,
+                row_key,
+            );
         if !reused_index {
             self.measurements
                 .active
-                .rebuild_if_stale(history, &plan, row_key);
+                .rebuild_if_stale(history, &plan, &self.presentation, row_key);
         }
         let mut rows: Vec<String> = Vec::new();
         let block_indices = 0..self.measurements.active.nodes.len();
@@ -1833,6 +2065,7 @@ impl TranscriptProjection {
             generation: gen,
             renderer_generation,
             renderer_cache_key,
+            presentation_generation: self.presentation.generation(),
             width,
             show_thinking,
         });
@@ -2151,6 +2384,114 @@ mod tests {
 
         assert!(buf.line_count() > 0);
         assert_eq!(buf.get_line(buf.line_count() - 1), Some("hello"));
+    }
+
+    #[test]
+    fn fold_override_collapses_block_without_mutating_history_view_state() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "one\ntwo\nthree".into(),
+        });
+        let id = transcript.history.order[0];
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(77), Default::default());
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(0),
+            80,
+        );
+        assert!(buf.lines().iter().any(|line| line == "three"));
+
+        assert!(projection.fold_node_at_row(
+            &lua,
+            &mut transcript.history,
+            80,
+            false,
+            FoldAtRow {
+                row: 0,
+                action: FoldAction::Close,
+                activation: FoldActivation::AnyNodeRow,
+            },
+        ));
+        let history_key = transcript
+            .history
+            .resolve_key(id, base_layout_key(80, false));
+        assert_eq!(history_key.view_state, ViewState::Expanded);
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(0),
+            80,
+        );
+        assert_eq!(buf.line_count(), 2);
+        assert!(buf.lines().iter().any(|line| line.contains("more lines")));
+        let node = projection
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 1)
+            .expect("collapsed summary row");
+        assert!(node.explicit_fold_target);
+    }
+
+    #[test]
+    fn thinking_blocks_default_collapsed_and_can_expand() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Thinking {
+            content: "first thought\nsecond thought\nthird thought".into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(78), Default::default());
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(0),
+            80,
+        );
+        assert!(buf.lines().iter().any(|line| line.contains("more lines")));
+        assert!(!buf
+            .lines()
+            .iter()
+            .any(|line| line.contains("third thought")));
+
+        assert!(projection.fold_node_at_row(
+            &lua,
+            &mut transcript.history,
+            80,
+            false,
+            FoldAtRow {
+                row: 1,
+                action: FoldAction::Open,
+                activation: FoldActivation::ExplicitTargetOnly,
+            },
+        ));
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(0),
+            80,
+        );
+        assert!(buf
+            .lines()
+            .iter()
+            .any(|line| line.contains("third thought")));
     }
 
     #[test]

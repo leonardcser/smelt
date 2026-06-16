@@ -2,6 +2,7 @@
 
 use crate::app::{AppFocus, EventOutcome, PromptResizeClick, PromptResizeDrag, TuiApp};
 use crate::content::layout::HitRegion;
+use crate::content::transcript_buf::{FoldAction, FoldActivation};
 use crate::smelt_edit::{HitTarget, WinId};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
@@ -224,10 +225,16 @@ impl TuiApp {
                 if is_down && self.ui.active_modal().is_none() {
                     self.ui.set_focus(win);
                 }
+                if !is_up {
+                    let _ = self.update_transcript_fold_mouse(me);
+                }
                 let yank = self.handle_content_mouse(me, count);
                 if is_up {
                     if let Some(out) = yank {
+                        self.transcript_fold_mouse = None;
                         self.yank_to_clipboard(out);
+                    } else if self.update_transcript_fold_mouse(me) {
+                        return EventOutcome::Redraw;
                     }
                 }
             } else if self
@@ -534,6 +541,77 @@ impl TuiApp {
         let out = crate::smelt_edit::CopyOutput::same(text);
         let out = if out.is_empty() { None } else { Some(out) };
         (status, out)
+    }
+
+    fn transcript_mouse_row(&self, me: MouseEvent) -> Option<crate::smelt_edit::RowIndex> {
+        let viewport = crate::smelt_edit::UiHost::viewport_for(self, crate::app::TRANSCRIPT_WIN)?;
+        if me.row < viewport.rect.top
+            || me.row >= viewport.rect.top.saturating_add(viewport.rect.height)
+        {
+            return None;
+        }
+        Some(
+            self.transcript_win().scroll_top().saturating_add(
+                me.row.saturating_sub(viewport.rect.top) as crate::smelt_edit::RowIndex,
+            ),
+        )
+    }
+
+    fn update_transcript_fold_mouse(&mut self, me: MouseEvent) -> bool {
+        const DRAG_THRESHOLD: u16 = 1;
+        match me.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.transcript_fold_mouse = None;
+                let Some(row) = self.transcript_mouse_row(me) else {
+                    return false;
+                };
+                let Some(node) = self.transcript_node_at_row(row) else {
+                    return false;
+                };
+                if !node.explicit_fold_target {
+                    return false;
+                }
+                self.transcript_fold_mouse = Some(crate::app::TranscriptFoldMouse {
+                    node: node.id,
+                    row: me.row,
+                    col: me.column,
+                    dragged: false,
+                });
+                false
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(mut down) = self.transcript_fold_mouse {
+                    let moved = down.row.abs_diff(me.row) > DRAG_THRESHOLD
+                        || down.col.abs_diff(me.column) > DRAG_THRESHOLD;
+                    down.dragged |= moved;
+                    self.transcript_fold_mouse = Some(down);
+                }
+                false
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(down) = self.transcript_fold_mouse.take() else {
+                    return false;
+                };
+                if down.dragged {
+                    return false;
+                }
+                let Some(row) = self.transcript_mouse_row(me) else {
+                    return false;
+                };
+                let Some(node) = self.transcript_node_at_row(row) else {
+                    return false;
+                };
+                if node.id != down.node || !node.explicit_fold_target {
+                    return false;
+                }
+                self.fold_transcript_node_at_row(
+                    row,
+                    FoldAction::Toggle,
+                    FoldActivation::ExplicitTargetOnly,
+                )
+            }
+            _ => false,
+        }
     }
 
     /// Drive a transcript-pane mouse event through `Window::handle_mouse`.

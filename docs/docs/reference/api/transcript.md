@@ -44,6 +44,36 @@ layout or delegate with `next(block, ctx)`. The returned `Reg` removes only
 this registration instance. Omit `opts.cache_key` to opt out of persisted
 DisplayIR while the middleware is active.
 
+## `smelt.transcript.fold_all`
+
+```lua
+fun(action: string): boolean
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Apply a fold action (`open` or `close`) to every current transcript render node.
+
+## `smelt.transcript.fold_at_row`
+
+```lua
+fun(row: integer, action: string, opts: table?): boolean
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Apply a fold action (`toggle`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.
+
+## `smelt.transcript.fold_kind`
+
+```lua
+fun(kind: string, action: string): boolean
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Apply a fold action (`toggle`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`.
+
 ## `smelt.transcript.get_renderer`
 
 ```lua
@@ -79,6 +109,16 @@ fun(): boolean
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
 Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted). Reads `transcript.history` directly, so unlike `blocks()` it works before the first frame projects and is the right signal for empty-state plugins (logo splash, onboarding hints).
+
+## `smelt.transcript.node_at_row`
+
+```lua
+fun(row: integer): table?
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return render-node metadata for absolute display row `row`, including `{ kind, id, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
 
 ## `smelt.transcript.rows`
 

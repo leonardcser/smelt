@@ -1,6 +1,6 @@
 use smelt_core::lua::TranscriptGroupSpec;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -32,7 +32,7 @@ pub(crate) enum RenderNode {
         bucket: String,
         child_range: Range<usize>,
         child_ids: Vec<BlockId>,
-        view_state: ViewState,
+        default_view_state: ViewState,
     },
 }
 
@@ -42,6 +42,104 @@ impl RenderNode {
             Self::Block { id, .. } => RenderNodeId::Block(*id),
             Self::Group { id, .. } => RenderNodeId::Group(*id),
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TranscriptPresentationState {
+    overrides: HashMap<RenderNodeId, ViewState>,
+    generation: u64,
+}
+
+impl TranscriptPresentationState {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn effective_view_state(
+        &self,
+        plan: &RenderPlan,
+        history: &BlockHistory,
+        index: usize,
+    ) -> Option<ViewState> {
+        let id = plan.node_id(index)?;
+        self.overrides
+            .get(&id)
+            .copied()
+            .or_else(|| plan.node_default_view_state(history, index))
+    }
+
+    pub(crate) fn set(
+        &mut self,
+        plan: &RenderPlan,
+        history: &BlockHistory,
+        id: RenderNodeId,
+        view_state: ViewState,
+    ) -> bool {
+        if !plan.contains_id(id) {
+            return false;
+        }
+        let Some(default) = plan.node_default_view_state_by_id(history, id) else {
+            return false;
+        };
+        let changed = if view_state == default {
+            self.overrides.remove(&id).is_some()
+        } else if self.overrides.get(&id) == Some(&view_state) {
+            false
+        } else {
+            self.overrides.insert(id, view_state);
+            true
+        };
+        if changed {
+            self.bump();
+        }
+        changed
+    }
+
+    pub(crate) fn toggle(
+        &mut self,
+        plan: &RenderPlan,
+        history: &BlockHistory,
+        id: RenderNodeId,
+    ) -> bool {
+        let Some(index) = plan.index_of(id) else {
+            return false;
+        };
+        let Some(current) = self.effective_view_state(plan, history, index) else {
+            return false;
+        };
+        let next = if matches!(current, ViewState::Expanded) {
+            ViewState::Collapsed
+        } else {
+            ViewState::Expanded
+        };
+        self.set(plan, history, id, next)
+    }
+
+    pub(crate) fn set_all(
+        &mut self,
+        plan: &RenderPlan,
+        history: &BlockHistory,
+        view_state: ViewState,
+    ) -> bool {
+        let mut changed = false;
+        for id in plan.ids().collect::<Vec<_>>() {
+            changed |= self.set(plan, history, id, view_state);
+        }
+        changed
+    }
+
+    pub(crate) fn prune(&mut self, ids: impl IntoIterator<Item = RenderNodeId>) {
+        let live: HashSet<RenderNodeId> = ids.into_iter().collect();
+        let before = self.overrides.len();
+        self.overrides.retain(|id, _| live.contains(id));
+        if self.overrides.len() != before {
+            self.bump();
+        }
+    }
+
+    fn bump(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
     }
 }
 
@@ -115,35 +213,97 @@ impl RenderPlan {
         self.index_by_id.contains_key(&id)
     }
 
+    pub(crate) fn index_of(&self, id: RenderNodeId) -> Option<usize> {
+        self.index_by_id.get(&id).copied()
+    }
+
+    pub(crate) fn node_default_view_state(
+        &self,
+        history: &BlockHistory,
+        index: usize,
+    ) -> Option<ViewState> {
+        match self.nodes.get(index)? {
+            RenderNode::Block { id, .. } => {
+                let semantic = history.resolve_key(
+                    *id,
+                    LayoutKey {
+                        width: 0,
+                        show_thinking: false,
+                        view_state: ViewState::Expanded,
+                        content_hash: 0,
+                        sidecar_hash: 0,
+                    },
+                );
+                if semantic.view_state != ViewState::Expanded {
+                    return Some(semantic.view_state);
+                }
+                match history.blocks.get(id) {
+                    Some(Block::Thinking { .. }) => Some(ViewState::Collapsed),
+                    _ => Some(ViewState::Expanded),
+                }
+            }
+            RenderNode::Group {
+                default_view_state, ..
+            } => Some(*default_view_state),
+        }
+    }
+
+    pub(crate) fn node_default_view_state_by_id(
+        &self,
+        history: &BlockHistory,
+        id: RenderNodeId,
+    ) -> Option<ViewState> {
+        self.index_of(id)
+            .and_then(|index| self.node_default_view_state(history, index))
+    }
+
     pub(crate) fn node_key(
+        &self,
+        history: &BlockHistory,
+        presentation: &TranscriptPresentationState,
+        index: usize,
+        base_key: LayoutKey,
+    ) -> Option<NodeLayoutKey> {
+        let view_state = presentation.effective_view_state(self, history, index)?;
+        self.node_key_with_view_state(history, index, base_key, view_state)
+    }
+
+    pub(crate) fn node_key_with_view_state(
         &self,
         history: &BlockHistory,
         index: usize,
         base_key: LayoutKey,
+        view_state: ViewState,
     ) -> Option<NodeLayoutKey> {
         if history.generation() != self.history_generation {
             return None;
         }
         match self.nodes.get(index)? {
-            RenderNode::Block { id, .. } => Some(history.resolve_key(*id, base_key)),
+            RenderNode::Block { id, .. } => Some(LayoutKey {
+                width: base_key.width,
+                show_thinking: base_key.show_thinking,
+                view_state,
+                content_hash: history.content_hash(*id),
+                sidecar_hash: block_sidecar_hash(history, *id),
+            }),
             RenderNode::Group {
                 id,
                 name,
                 bucket,
                 child_range,
                 child_ids,
-                view_state,
+                ..
             } => Some(LayoutKey {
                 width: base_key.width,
                 show_thinking: base_key.show_thinking,
-                view_state: *view_state,
+                view_state,
                 content_hash: smelt_core::utils::hash_serializable(&GroupContentKey {
                     id: *id,
                     name,
                     bucket,
                     group_generation: self.group_generation,
                     group_cache_key: self.group_cache_key,
-                    view_state: *view_state,
+                    view_state,
                     child_ids,
                     child_hashes: child_range
                         .clone()
@@ -264,7 +424,7 @@ fn build_nodes(history: &BlockHistory, groups: &[TranscriptGroupSpec]) -> Vec<Re
             bucket,
             child_range: start..index,
             child_ids,
-            view_state: view_state(spec.default_view.as_deref()),
+            default_view_state: view_state(spec.default_view.as_deref()),
         });
     }
     nodes

@@ -153,6 +153,97 @@ impl mlua::UserData for LuaTranscriptStream {
     }
 }
 
+fn view_state_label(view_state: smelt_core::transcript_model::ViewState) -> &'static str {
+    match view_state {
+        smelt_core::transcript_model::ViewState::Expanded => "expanded",
+        smelt_core::transcript_model::ViewState::Peek => "peek",
+        smelt_core::transcript_model::ViewState::Collapsed => "collapsed",
+        smelt_core::transcript_model::ViewState::TrimmedHead { .. } => "trimmed_head",
+        smelt_core::transcript_model::ViewState::TrimmedTail { .. } => "trimmed_tail",
+    }
+}
+
+fn fold_action(action: &str) -> Option<crate::content::transcript_buf::FoldAction> {
+    match action {
+        "toggle" => Some(crate::content::transcript_buf::FoldAction::Toggle),
+        "peek" => Some(crate::content::transcript_buf::FoldAction::Peek),
+        "open" => Some(crate::content::transcript_buf::FoldAction::Open),
+        "close" => Some(crate::content::transcript_buf::FoldAction::Close),
+        _ => None,
+    }
+}
+
+fn node_id_table(
+    lua: &Lua,
+    id: crate::content::render_plan::RenderNodeId,
+) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    match id {
+        crate::content::render_plan::RenderNodeId::Block(id) => {
+            t.set("kind", "block")?;
+            t.set("type", "block")?;
+            t.set("id", id.get())?;
+            t.set("block_id", id.get())?;
+        }
+        crate::content::render_plan::RenderNodeId::Group(id) => {
+            t.set("kind", "group")?;
+            t.set("type", "group")?;
+            t.set("id", id)?;
+            t.set("group_id", id)?;
+        }
+    }
+    Ok(t)
+}
+
+fn render_node_id_from_table(
+    t: mlua::Table,
+) -> LuaResult<Option<crate::content::render_plan::RenderNodeId>> {
+    let kind = t
+        .get::<String>("kind")
+        .or_else(|_| t.get::<String>("type"))
+        .ok();
+    match kind.as_deref() {
+        Some("block") => {
+            let id = t.get::<u64>("block_id").or_else(|_| t.get::<u64>("id"))?;
+            Ok(Some(crate::content::render_plan::RenderNodeId::Block(
+                smelt_core::transcript_model::BlockId::new(id),
+            )))
+        }
+        Some("group") => {
+            let id = t.get::<u64>("group_id").or_else(|_| t.get::<u64>("id"))?;
+            Ok(Some(crate::content::render_plan::RenderNodeId::Group(id)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn node_snapshot_table(
+    lua: &Lua,
+    node: crate::content::transcript_buf::TranscriptNodeRow,
+) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    let id = node_id_table(lua, node.id)?;
+    match node.id {
+        crate::content::render_plan::RenderNodeId::Block(block_id) => {
+            t.set("kind", "block")?;
+            t.set("block_id", block_id.get())?;
+        }
+        crate::content::render_plan::RenderNodeId::Group(group_id) => {
+            t.set("kind", "group")?;
+            t.set("group_id", group_id)?;
+        }
+    }
+    t.set("id", id.clone())?;
+    t.set("node_id", id)?;
+    t.set("index", node.index)?;
+    t.set("first_row", node.first_row)?;
+    t.set("rows", node.rows)?;
+    t.set("row_offset", node.row_offset)?;
+    t.set("view_state", view_state_label(node.view_state))?;
+    t.set("explicit_fold_target", node.explicit_fold_target)?;
+    Ok(t)
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let transcript: mlua::Table = smelt.get("transcript")?;
     let m = LuaMod::extend(lua, transcript, "smelt.transcript", Tier::UiHost);
@@ -253,6 +344,72 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 block_snapshot_table(lua, idx, role, first_row, rows, first_line)
             })
             .transpose()
+        },
+    )?;
+    m.fn_(
+        "node_at_row",
+        "Return render-node metadata for absolute display row `row`, including `{ kind, id, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.",
+        &["row"],
+        |lua, row: crate::smelt_edit::RowIndex| -> LuaResult<Option<mlua::Table>> {
+            let snap = crate::lua::try_with_app(|app| app.transcript_node_at_row(row)).flatten();
+            snap.map(|node| node_snapshot_table(lua, node)).transpose()
+        },
+    )?;
+    m.fn_(
+        "fold_at_row",
+        "Apply a fold action (`toggle`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.",
+        &["row", "action", "opts"],
+        |_, (row, action, opts): (crate::smelt_edit::RowIndex, String, Option<mlua::Table>)| -> LuaResult<bool> {
+            let action = match action.as_str() {
+                "toggle" => crate::content::transcript_buf::FoldAction::Toggle,
+                "open" => crate::content::transcript_buf::FoldAction::Open,
+                "close" => crate::content::transcript_buf::FoldAction::Close,
+                _ => return Ok(false),
+            };
+            let explicit = opts
+                .as_ref()
+                .and_then(|t| t.get::<bool>("explicit").ok())
+                .unwrap_or(false);
+            let activation = if explicit {
+                crate::content::transcript_buf::FoldActivation::ExplicitTargetOnly
+            } else {
+                crate::content::transcript_buf::FoldActivation::AnyNodeRow
+            };
+            Ok(crate::lua::try_with_app(|app| {
+                app.fold_transcript_node_at_row(row, action, activation)
+            })
+            .unwrap_or(false))
+        },
+    )?;
+    m.fn_(
+        "fold_all",
+        "Apply a fold action (`open` or `close`) to every current transcript render node.",
+        &["action"],
+        |_, action: String| -> LuaResult<bool> {
+            let action = match action.as_str() {
+                "open" => crate::content::transcript_buf::FoldAction::Open,
+                "close" => crate::content::transcript_buf::FoldAction::Close,
+                _ => return Ok(false),
+            };
+            Ok(
+                crate::lua::try_with_app(|app| app.fold_all_transcript_nodes(action))
+                    .unwrap_or(false),
+            )
+        },
+    )?;
+    m.fn_(
+        "fold_kind",
+        "Apply a fold action (`toggle`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`.",
+        &["kind", "action"],
+        |_, (kind, action): (String, String)| -> LuaResult<bool> {
+            let action = match action.as_str() {
+                "toggle" => crate::content::transcript_buf::FoldAction::Toggle,
+                "open" => crate::content::transcript_buf::FoldAction::Open,
+                "close" => crate::content::transcript_buf::FoldAction::Close,
+                _ => return Ok(false),
+            };
+            Ok(crate::lua::try_with_app(|app| app.fold_transcript_block_kind(&kind, action))
+                .unwrap_or(false))
         },
     )?;
     Ok(())

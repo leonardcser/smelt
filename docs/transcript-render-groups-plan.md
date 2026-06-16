@@ -52,6 +52,8 @@ Use migrations or cache invalidation at release boundaries where needed, but tar
 
 - `BlockHistory` stays semantic and flat. It does not contain groups or presentation-only fold state.
 - `TranscriptPresentationState` owns manual `ViewState` overrides keyed by `RenderNodeId`.
+- Thinking is modeled as ordinary collapsible transcript content: thinking block nodes render their full content, default to collapsed through presentation policy, and expand/collapse with the same node APIs and bindings as every other block/group.
+- A config-driven default-view policy map replaces one-off booleans such as `show_thinking`: users can set defaults by block kind, tool name, or group name without changing semantic history.
 - Lua registers virtual group node types with `smelt.transcript.groups.register { name, selector, bucket?, default_view?, cache_key, render }`.
 - Rust stores the declarative registry fields, builds a `RenderPlan` by maximal adjacent run batching, and never asks Lua to plan the viewport.
 - Render/layout/projection caches are keyed by `RenderNodeId`; semantic transcript operations continue to use `BlockId`.
@@ -341,7 +343,26 @@ struct TranscriptPresentationState {
 
 `BlockHistory` should remain semantic transcript data. Existing `BlockHistory.view_states` should move into `TranscriptPresentationState` rather than becoming a permanent second source of truth. If manual block fold state must be migrated, represent old block ids as `RenderNodeId::Block(id)` and then remove the old storage path.
 
-Default view state has one precedence chain. Group registrations provide the default for their group nodes. User/view configuration can override registration defaults explicitly:
+Default view state has one precedence chain. Group registrations provide the default for their group nodes. User/view configuration can override registration defaults explicitly. Thinking is the canonical built-in block default: it is rendered as full thinking content and starts collapsed, rather than being hidden/replaced by a global `show_thinking` toggle.
+
+The durable settings shape should be a map/table, not one boolean per block family. A concrete Lua-facing target shape is:
+
+```lua
+smelt.settings.transcript_view = {
+  blocks = {
+    thinking = "collapsed",
+    tool = "expanded",
+  },
+  tools = {
+    read_file = "collapsed",
+  },
+  groups = {
+    read_file_batch = "collapsed",
+  },
+}
+```
+
+Renderer APIs may still receive cache-context flags while this is being migrated, but the product model is fold defaults plus manual overrides. Do not add new show/hide toggles for transcript content.
 
 ```lua
 smelt.transcript.groups.register({
@@ -357,9 +378,9 @@ smelt.transcript.view.set_default("group/read_file_batch", "expanded")
 Resolution order:
 
 1. Manual override for this `RenderNodeId` in `TranscriptPresentationState`.
-2. Explicit user/view default from `smelt.transcript.view.set_default`.
+2. Explicit user/view default from the settings-backed transcript view policy (`smelt.settings.transcript_view` / `smelt.transcript.view.set_default`).
 3. Group registration `default_view` for group nodes.
-4. Built-in block default for block nodes, if any.
+4. Built-in block default for block nodes (`thinking = collapsed` initially).
 5. `Expanded`.
 
 Manual expand/collapse should apply to both block and group nodes. The initial product recommendation is session-local manual overrides plus config-driven defaults. Persist overrides only if that clearly improves the product after the node-id model is stable.
@@ -518,8 +539,9 @@ Deliverable: Lua-defined groups appear in the transcript.
 ### Phase 4: Generalized presentation state
 
 - Replace block-only view-state lookup in projection with render-node view-state lookup.
-- Support defaults from Lua group/block policy.
+- Support defaults from Lua group/block policy, including built-in `thinking = collapsed` and the planned settings-backed per-kind/per-tool/per-group default-view map.
 - Keep manual overrides in `TranscriptPresentationState`, separate from semantic history and default policy.
+- Retire `show_thinking` as the UX model: thinking blocks are rendered as full content and folded by presentation state, not replaced by a separate summary/hide path.
 - Add toggle commands/APIs for the node at a display row.
 - Use Vim-compatible fold bindings for transcript render nodes: `za` toggles, `zo` opens, `zc` closes, `zR` opens all, and `zM` closes all. `Enter` is contextual activation: it toggles only when the focused row is an explicit fold summary/affordance, not arbitrary expanded content.
 - Mouse folding should be limited to explicit fold affordances and collapsed summaries. Fire on mouse-up only when down/up target the same node and movement stayed below drag threshold; drag selection always wins and never toggles.

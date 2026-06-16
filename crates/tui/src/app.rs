@@ -152,6 +152,8 @@ pub struct TuiApp {
     pub(crate) prompt_resize_drag: Option<PromptResizeDrag>,
     /// Last prompt resize-handle click, used to reset manual height on double-click.
     pub(crate) prompt_resize_last_click: Option<PromptResizeClick>,
+    /// Last transcript fold click candidate, toggled only if mouse-up lands on the same fold target.
+    pub(crate) transcript_fold_mouse: Option<TranscriptFoldMouse>,
     /// Parser-visible prompt placeholder. `placeholders` owns the app-level text;
     /// this mirror lets the prompt parser render it as wrapped ghost text.
     pub(crate) prompt_placeholder_display: Arc<Mutex<Option<String>>>,
@@ -174,6 +176,14 @@ pub(crate) struct PromptResizeClick {
     pub(crate) row: u16,
     pub(crate) col: u16,
     pub(crate) at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TranscriptFoldMouse {
+    pub(crate) node: crate::content::render_plan::RenderNodeId,
+    pub(crate) row: u16,
+    pub(crate) col: u16,
+    pub(crate) dragged: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -383,6 +393,8 @@ pub(crate) struct Timers {
     pub(crate) last_keypress: Option<Instant>,
     /// Pending `Ctrl-W` pane chord; next key navigates panes instead of flowing to input.
     pub(crate) pending_pane_chord: Option<Instant>,
+    /// Pending transcript `z` fold chord while content pane is focused.
+    pub(crate) pending_transcript_fold_chord: Option<Instant>,
     /// Active Lua-keymap chord sequence; `None` between chords.
     pub(crate) pending_chord: Option<PendingChord>,
 }
@@ -963,6 +975,7 @@ impl TuiApp {
             prompt_input_rows_override: None,
             prompt_resize_drag: None,
             prompt_resize_last_click: None,
+            transcript_fold_mouse: None,
             prompt_placeholder_display,
             placeholders: HashMap::new(),
             prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
@@ -975,6 +988,7 @@ impl TuiApp {
                 last_ctrlc: None,
                 last_keypress: None,
                 pending_pane_chord: None,
+                pending_transcript_fold_chord: None,
                 pending_chord: None,
             },
             pending_dialogs: VecDeque::new(),

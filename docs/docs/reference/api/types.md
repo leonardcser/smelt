@@ -729,6 +729,32 @@ Transcript-shaped streaming renderer for plugin-owned buffers. Append model text
 | --- | --- | --- | --- |
 | `width` | `integer` |  | Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters. |
 
+### `smelt.transcript.GroupSelector`
+
+Group selector declared through `smelt.transcript.groups.register`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `kind` | `string` |  | Match block kind. |
+| `name` | `string` |  | Match tool name for tool blocks. |
+| `terminal` | `boolean` |  | Match terminal/non-terminal blocks. |
+
+### `smelt.transcript.GroupSpec`
+
+Declarative transcript group registration. The host owns planning; Lua owns
+the selector metadata and the virtual-node renderer.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | yes | Unique group name. Registering the same name replaces it. |
+| `cache_key` | `string` |  | Persisted layout cache key; omit to opt out while active. |
+| `priority` | `integer` |  | Higher priority plans first. Defaults to 0. |
+| `min` | `integer` |  | Minimum adjacent matching blocks required. Defaults to 2. |
+| `default_view` | `"collapsed"|"expanded"` |  | Initial presentation when the group first appears. |
+| `selector` | [smelt.transcript.GroupSelector](types.md#smelttranscriptgroupselector) | yes | Declarative block matcher. |
+| `bucket` | `string|string[]` |  | Stable field names used to split adjacent matching runs. |
+| `render` | `fun(group: table, ctx: smelt.transcript.Context):` | yes | table Virtual group renderer. |
+
 ### `smelt.transcript.ToolOutput`
 
 Tool output snapshot passed to transcript renderers.
