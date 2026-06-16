@@ -19,15 +19,15 @@ pub mod usage;
 pub use content::{Content, ContentPart};
 pub use event::{
     AskModel, AskResponseFormat, Decision, EngineAskError, EngineAskErrorKind, EngineEvent,
-    StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags, ToolMetadata,
-    UiCommand,
+    StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags,
+    ToolMetadata, UiCommand,
 };
 pub use history::{
     apply_history_append, history_from_messages, history_item_from_user_content,
     history_item_message_count, history_to_message_positions, history_to_messages,
     message_to_history_positions, replace_last_note_kind, AssistantStep, HistoryAppend,
     HistoryAppendPolicy, HistoryAppendResult, HistoryItem, HistoryNote, HistoryNoteKind,
-    ToolInvocation,
+    ProcessStatusEvent, ToolInvocation,
 };
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
 pub use mode::{

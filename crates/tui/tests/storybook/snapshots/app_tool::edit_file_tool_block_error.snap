@@ -1,10 +1,9 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 344
 expression: frame.text()
 ---
 * edit_file src/lib.rs
-  old_string not found in src/lib.rs
+  1 removed, 1 added
 
 
 

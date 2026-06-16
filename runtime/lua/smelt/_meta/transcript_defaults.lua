@@ -7,6 +7,18 @@
 ---@class smelt.transcript.defaults
 local transcript_defaults = {}
 
+--- True when a grouped child represents a failed or denied tool result.
+---@type fun(child: table): boolean
+transcript_defaults.child_failed = nil
+
+--- Return child snapshots for a transcript group snapshot.
+---@type fun(group: table): table
+transcript_defaults.group_children = nil
+
+--- Count failed and denied tool children in a transcript group snapshot.
+---@type fun(group: table): integer, integer
+transcript_defaults.group_failure_counts = nil
+
 --- Render any semantic transcript block with the bundled default policy.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render = nil
@@ -32,6 +44,10 @@ transcript_defaults.render_exec = nil
 ---@type fun(group: table, ctx: smelt.transcript.Context, opts: table?): table
 transcript_defaults.render_group_child_list = nil
 
+--- Render all group children through the bundled default block renderer.
+---@type fun(group: table, ctx: smelt.transcript.Context): table
+transcript_defaults.render_group_children = nil
+
 --- Render a mode note.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_mode = nil
@@ -40,17 +56,23 @@ transcript_defaults.render_mode = nil
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_process_status = nil
 
---- Render thinking with the current gutter. Folding is controlled by transcript
---- presentation state, not by a separate show/hide setting.
+--- Render thinking for the current transcript view state.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_thinking = nil
+
+--- Render the full thinking block with the current gutter.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+transcript_defaults.render_thinking_full = nil
+
+--- Render a compact live preview of thinking: first line, omitted count, tail.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+transcript_defaults.render_thinking_peek = nil
 
 --- Render a compact thinking summary.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_thinking_summary = nil
 
---- Render a tool block using the current generic primitives and explicit item
---- construction.
+--- Render a tool block for the current transcript view state.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_tool = nil
 
@@ -58,6 +80,11 @@ transcript_defaults.render_tool = nil
 --- structured renderers are guttered but otherwise left uncapped.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table?
 transcript_defaults.render_tool_body = nil
+
+--- Render a full tool block using the current generic primitives and explicit item
+--- construction.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+transcript_defaults.render_tool_full = nil
 
 --- Render the default one-line tool header.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table
@@ -68,6 +95,15 @@ transcript_defaults.render_tool_header = nil
 --- by the text primitive's no-highlight fallback.
 ---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table
 transcript_defaults.render_tool_output = nil
+
+--- Render raw tool output without gutter using generic layout primitives: text and
+--- a rendered-row cap. Body renderers use this for expanded/tail previews.
+---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table
+transcript_defaults.render_tool_output_tail = nil
+
+--- Render a compact tool summary: header plus an optional detail line.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+transcript_defaults.render_tool_summary = nil
 
 --- Render unknown block kinds without failing the transcript.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
@@ -82,5 +118,9 @@ transcript_defaults.render_user = nil
 --- Render user text.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_user_text = nil
+
+--- Return a compact tool detail for collapsed tool blocks.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?
+transcript_defaults.tool_collapsed_detail = nil
 
 return transcript_defaults

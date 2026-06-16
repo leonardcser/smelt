@@ -1,4 +1,4 @@
--- `/cmd <arg>` dim placeholder - shows a hint like `[arg1|arg2|...]` when the
+-- `/cmd <arg>` dim placeholder - shows a hint like `[arg1|arg2|…]` when the
 -- prompt reads `/<cmd> ` with the cursor past the space and no argument typed
 -- yet. Replaces the old picker-based arg completer.
 
@@ -41,7 +41,7 @@ local function build_placeholder(args, max_width)
   local full = "[" .. table.concat(args, "|") .. "]"
   if #full <= max_width then return full end
   for i = #args, 1, -1 do
-    local truncated = "[" .. table.concat(args, "|", 1, i) .. "|...]"
+    local truncated = "[" .. table.concat(args, "|", 1, i) .. "|…]"
     if #truncated <= max_width then return truncated end
   end
   return nil

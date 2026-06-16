@@ -9,13 +9,14 @@ smelt.cmd.register("thinking", function(arg)
     action = "open"
   elseif action == "off" or action == "close" or action == "hide" then
     action = "close"
-  elseif action ~= "toggle" then
-    smelt.notify.error("usage: /thinking [open|close|toggle]")
+  elseif action ~= "toggle" and action ~= "peek" then
+    smelt.notify.error("usage: /thinking [open|close|peek|toggle]")
     return
   end
   local changed = smelt.transcript.fold_kind("thinking", action)
-  smelt.notify("thinking blocks: " .. (changed and action or "unchanged"))
-end, { desc = "fold or unfold thinking blocks", args = "[open|close|toggle]" })
+  local label = action == "toggle" and "toggled" or action
+  smelt.notify("thinking blocks: " .. (changed and label or "unchanged"))
+end, { desc = "set thinking block view state", args = { "open", "close", "peek", "toggle" } })
 
 -- `/reasoning` - set explicitly or show current effort.
 smelt.cmd.register("reasoning", function(arg)

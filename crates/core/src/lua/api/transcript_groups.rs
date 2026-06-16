@@ -1,6 +1,6 @@
 use crate::lua::shared::{
-    RegisteredTranscriptGroup, TranscriptGroupBucket, TranscriptGroupRegistry,
-    TranscriptGroupSelector, TranscriptGroupSpec,
+    RegisteredTranscriptGroup, TranscriptGroupBucket, TranscriptGroupFieldMatch,
+    TranscriptGroupRegistry, TranscriptGroupSelector, TranscriptGroupSpec,
 };
 use crate::lua::LuaHandle;
 use mlua::prelude::*;
@@ -40,15 +40,97 @@ fn optional_non_empty_string(
     Ok(value)
 }
 
+fn selector_match_value(value: mlua::Value, label: &str) -> LuaResult<Option<String>> {
+    match value {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::String(s) => {
+            let value = s.to_string_lossy();
+            if value.is_empty() {
+                return Err(mlua::Error::external(format!("{label} must be non-empty")));
+            }
+            Ok(Some(value))
+        }
+        mlua::Value::Integer(n) => Ok(Some(n.to_string())),
+        mlua::Value::Number(n) if n.fract() == 0.0 => Ok(Some(format!("{n:.0}"))),
+        other => Err(mlua::Error::external(format!(
+            "{label} must be a string or integer, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn canonical_selector_field(field: &str) -> &str {
+    match field {
+        "event_type" => "event",
+        other => other,
+    }
+}
+
+fn set_selector_field(
+    fields: &mut Vec<TranscriptGroupFieldMatch>,
+    field: &str,
+    value: mlua::Value,
+    label: &str,
+) -> LuaResult<()> {
+    let Some(value) = selector_match_value(value, label)? else {
+        return Ok(());
+    };
+    let field = canonical_selector_field(field);
+    if let Some(existing) = fields.iter().find(|existing| existing.field == field) {
+        if existing.value != value {
+            return Err(mlua::Error::external(format!(
+                "{label} conflicts with earlier selector.{}",
+                existing.field
+            )));
+        }
+        return Ok(());
+    }
+    fields.push(TranscriptGroupFieldMatch {
+        field: field.to_string(),
+        value,
+    });
+    Ok(())
+}
+
 fn parse_selector(table: mlua::Table) -> LuaResult<TranscriptGroupSelector> {
+    let mut fields = Vec::new();
+    for field in ["event", "event_type", "process_id", "exit_code"] {
+        set_selector_field(
+            &mut fields,
+            field,
+            table.get::<mlua::Value>(field)?,
+            &format!("selector.{field}"),
+        )?;
+    }
+    if let Some(field_table) = table.get::<Option<mlua::Table>>("fields")? {
+        for pair in field_table.pairs::<String, mlua::Value>() {
+            let (field, value) = pair?;
+            if field.is_empty() {
+                return Err(mlua::Error::external(
+                    "selector.fields keys must be non-empty",
+                ));
+            }
+            set_selector_field(
+                &mut fields,
+                &field,
+                value,
+                &format!("selector.fields.{field}"),
+            )?;
+        }
+    }
     let selector = TranscriptGroupSelector {
         kind: optional_non_empty_string(&table, "kind", "selector.kind")?,
         name: optional_non_empty_string(&table, "name", "selector.name")?,
         terminal: table.get("terminal")?,
+        fields,
     };
-    if selector.kind.is_none() && selector.name.is_none() && selector.terminal.is_none() {
+    if selector.kind.is_none()
+        && selector.name.is_none()
+        && selector.terminal.is_none()
+        && selector.fields.is_empty()
+    {
         return Err(mlua::Error::external(
-            "selector must set at least one of kind, name, or terminal",
+            "selector must set at least one of kind, name, terminal, or fields",
         ));
     }
     Ok(selector)
@@ -140,6 +222,23 @@ fn spec_to_lua(lua: &Lua, spec: &TranscriptGroupSpec) -> LuaResult<mlua::Table> 
     selector.set("kind", spec.selector.kind.clone())?;
     selector.set("name", spec.selector.name.clone())?;
     selector.set("terminal", spec.selector.terminal)?;
+    if !spec.selector.fields.is_empty() {
+        let fields = lua.create_table()?;
+        for field in &spec.selector.fields {
+            fields.set(field.field.as_str(), field.value.clone())?;
+            match field.field.as_str() {
+                "event" => {
+                    selector.set("event", field.value.clone())?;
+                    selector.set("event_type", field.value.clone())?;
+                }
+                "process_id" | "exit_code" => {
+                    selector.set(field.field.as_str(), field.value.clone())?;
+                }
+                _ => {}
+            }
+        }
+        selector.set("fields", fields)?;
+    }
     out.set("selector", selector)?;
     if let Some(bucket) = &spec.bucket {
         let fields = lua.create_table()?;

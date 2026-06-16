@@ -120,7 +120,7 @@ end
 
 local function trim_for_desc(s)
   if #s > 60 then
-    return s:sub(1, 57) .. "..."
+    return s:sub(1, 57) .. "…"
   end
   return s
 end

@@ -518,7 +518,7 @@ fn block_search_text(
             }
         }
         Block::Mode { text, icon, .. } => format!("{icon}{text}"),
-        Block::ProcessStatus { text } => text.clone(),
+        Block::ProcessStatus { text, .. } => text.clone(),
         Block::Thinking { content } | Block::Text { content } | Block::CodeLine { content, .. } => {
             content.clone()
         }

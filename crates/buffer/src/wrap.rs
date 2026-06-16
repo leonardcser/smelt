@@ -68,9 +68,12 @@ fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Ve
         let total_w = word_w + trailing;
         // If word+space doesn't fit on current line and chunk has content, emit.
         if col + total_w > width && col > 0 {
-            out.push((chunk_start, chunk_end));
-            chunk_start = word_start;
-            col = 0;
+            let current = &line[chunk_start..chunk_end];
+            if !(word_w > width && current.chars().all(|ch| ch == ' ')) {
+                out.push((chunk_start, chunk_end));
+                chunk_start = word_start;
+                col = 0;
+            }
         }
         if word_w > width {
             // Char-break the word.
@@ -163,6 +166,14 @@ mod wrap_tests {
         let r = wrap_line_ranges(s, 4);
         let chunks: Vec<&str> = r.iter().map(|(a, b)| &s[*a..*b]).collect();
         assert_eq!(chunks, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn leading_spaces_stay_with_oversized_word() {
+        let s = "  abcdef";
+        let r = wrap_line_ranges(s, 4);
+        let chunks: Vec<&str> = r.iter().map(|(a, b)| &s[*a..*b]).collect();
+        assert_eq!(chunks, vec!["  ab", "cdef"]);
     }
 
     #[test]

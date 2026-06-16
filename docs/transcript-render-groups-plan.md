@@ -14,7 +14,7 @@
 - Keep transcript history flat and semantic.
 - Add display-only grouping for repetitive adjacent transcript items.
 - Make grouping policy and group rendering live in Lua, not hard-coded Rust rules.
-- Reuse one collapse/expand model for ordinary blocks and dynamic groups.
+- Reuse one presentation-state model for ordinary blocks and dynamic groups while letting Lua render the exact layout for each view state.
 - Preserve transcript virtualization: render one display node at a time, not the whole transcript.
 - Make the grouping API simple enough that built-in tools and user config can define new groups without Rust changes.
 
@@ -30,7 +30,7 @@
 
 - `BlockHistory` stores a flat ordered list of `BlockId`s.
 - Rendering currently compiles one history block into one `LayoutIr`.
-- `ViewState` already supports `Expanded`, `Collapsed`, `TrimmedHead`, and `TrimmedTail`, but it is keyed by `BlockId`.
+- `ViewState` supports `Expanded`, `Peek`, and `Collapsed` as presentation states; output row caps live in Lua layout primitives such as `layout.cap`, not as user-facing view modes.
 - Lua already owns default transcript rendering and tool body rendering, so group rendering should follow the same pattern.
 
 ## Schema and API posture
@@ -52,7 +52,8 @@ Use migrations or cache invalidation at release boundaries where needed, but tar
 
 - `BlockHistory` stays semantic and flat. It does not contain groups or presentation-only fold state.
 - `TranscriptPresentationState` owns manual `ViewState` overrides keyed by `RenderNodeId`.
-- Thinking is modeled as ordinary collapsible transcript content: thinking block nodes render their full content, default to collapsed through presentation policy, and expand/collapse with the same node APIs and bindings as every other block/group.
+- Thinking is modeled as ordinary collapsible transcript content: thinking block nodes render their full content, default to `peek` through presentation policy, and can be collapsed to a one-line summary or expanded to full content with the same node APIs and bindings as every other block/group.
+- Lua renderers own view-state presentation for blocks and groups. Rust chooses the effective `ViewState`, passes it as `ctx.view_state`, and renders the returned layout as-is; Rust does not generically chop Lua-rendered blocks after the fact.
 - A config-driven default-view policy map replaces one-off booleans such as `show_thinking`: users can set defaults by block kind, tool name, or group name without changing semantic history.
 - Lua registers virtual group node types with `smelt.transcript.groups.register { name, selector, bucket?, default_view?, cache_key, render }`.
 - Rust stores the declarative registry fields, builds a `RenderPlan` by maximal adjacent run batching, and never asks Lua to plan the viewport.
@@ -160,19 +161,20 @@ smelt.transcript.groups.register({
   selector = {
     kind = "tool",
     name = "read_file",
-    terminal = true,
   },
   render = function(group, ctx)
     if group.view_state == "collapsed" then
       return layout.vbox({
-        layout.text("read " .. group.child_count .. " files"),
+        layout.text("* read_file ×" .. tostring(group.child_count)),
         defaults.render_group_child_list(group, ctx, {
-          field = { "args", "path" },
+          field = "args.file_path",
           max = 8,
         }),
       })
     end
-    return defaults.render_group_expanded(group, ctx)
+    -- Expanded groups are transparent: render only the real child tools with
+    -- normal inter-tool spacing, as if no group existed.
+    return defaults.render_group_children(group, ctx)
   end,
 })
 ```
@@ -190,7 +192,6 @@ smelt.transcript.groups.register({
   selector = {
     kind = "tool",
     name = { "read_file", "grep", "glob" },
-    terminal = true,
   },
   bucket = { "name" },
   render = function(group, ctx)
@@ -221,15 +222,16 @@ Possible declarative registration fields for the first pass:
 - `selector.kind`: block kind, e.g. `"tool"` or `"process_status"`;
 - `selector.name`: tool name or list of tool names for `kind = "tool"`;
 - `selector.status` / `selector.terminal`: tool status constraints;
-- `selector.event`: typed process-status event name;
+- `selector.event` / `selector.event_type`, `selector.process_id`, `selector.exit_code`: typed process-status constraints;
+- `selector.fields`: exact field matches for typed/block snapshot fields;
 - `bucket`: literal string or a list of snapshot field paths.
 
 Registry semantics:
 
 - `name` is unique. Registering the same name replaces the previous registration and renderer.
 - Built-in registrations use ordinary names and can be replaced or disabled by user config.
-- Planning order is deterministic: higher `priority` first, then registration order. Built-ins use the default priority.
-- If two rules match the same block, the winner is the first rule by that ordering.
+- Planning order is deterministic: higher `priority` first, then registration order. Built-ins use low priority so user groups can override them without naming the same rule.
+- If several rules match the same block, the first rule whose adjacent run reaches `min` wins; rules below `min` do not shadow later candidates.
 - A registration's `cache_key` covers both planner fields and renderer output. Omit or change it to opt out of persisted layout/row cache or invalidate it across restarts.
 
 ## Built-in Lua grouping rules
@@ -245,7 +247,7 @@ background processes finished: 10
   12345 ok
   12346 exited 1
   12347 ok
-  ...
+  …
 ```
 
 This is only the bundled Lua renderer's choice, not a Rust-baked view.
@@ -285,13 +287,13 @@ Group only adjacent `read_file` blocks with other `read_file` blocks.
 Collapsed summary example:
 
 ```text
-read 4 files
+* read_file ×4
   crates/core/src/transcript_model.rs
   crates/tui/src/content/display_layout.rs
-  ...
+  … 2 more
 ```
 
-Expanded view can render each child using the existing tool renderer.
+Expanded view renders only the real child tool calls, with normal spacing and no synthetic group header.
 
 ### 3. Consecutive `grep` tool calls
 
@@ -300,7 +302,7 @@ Group only adjacent `grep` blocks with other `grep` blocks.
 Collapsed summary example:
 
 ```text
-searched 3 patterns
+* grep ×3
   "RenderNode"
   "ViewState"
   "ToolCall"
@@ -313,7 +315,7 @@ Group only adjacent `glob` blocks with other `glob` blocks.
 Collapsed summary example:
 
 ```text
-matched 3 globs
+* glob ×3
   **/*.rs
   runtime/lua/**/*.lua
   docs/**/*.md
@@ -343,21 +345,33 @@ struct TranscriptPresentationState {
 
 `BlockHistory` should remain semantic transcript data. Existing `BlockHistory.view_states` should move into `TranscriptPresentationState` rather than becoming a permanent second source of truth. If manual block fold state must be migrated, represent old block ids as `RenderNodeId::Block(id)` and then remove the old storage path.
 
-Default view state has one precedence chain. Group registrations provide the default for their group nodes. User/view configuration can override registration defaults explicitly. Thinking is the canonical built-in block default: it is rendered as full thinking content and starts collapsed, rather than being hidden/replaced by a global `show_thinking` toggle.
+Default view state has one precedence chain. Group registrations provide the default for their group nodes. User/view configuration can override registration defaults explicitly. Thinking is the canonical built-in block default: it is rendered by Lua in `peek` mode by default, can be collapsed to a one-line summary, and can be expanded to full content; it is not hidden/replaced by a global `show_thinking` toggle.
+
+Supported user-facing view-state strings are `"collapsed"`, `"peek"`, and `"expanded"`. Row caps and head/tail trimming are renderer/layout concerns (`layout.cap`), not settings fields. The settings table should stay quick to edit and should not grow per-tool row budgets.
 
 The durable settings shape should be a map/table, not one boolean per block family. A concrete Lua-facing target shape is:
 
 ```lua
 smelt.settings.transcript_view = {
   blocks = {
-    thinking = "collapsed",
+    thinking = "peek",
     tool = "expanded",
   },
   tools = {
+    load_skill = "collapsed",
     read_file = "collapsed",
+    grep = "collapsed",
+    glob = "collapsed",
+    web_fetch = "collapsed",
+    write_file = "collapsed",
+    edit_file = "collapsed",
+    edit_notebook = "collapsed",
   },
   groups = {
     read_file_batch = "collapsed",
+    grep_batch = "collapsed",
+    glob_batch = "collapsed",
+    -- read_file_batch = false, -- disable this built-in group
   },
 }
 ```
@@ -373,6 +387,7 @@ smelt.transcript.groups.register({
 
 smelt.transcript.view.set_default("tool/read_file", "collapsed")
 smelt.transcript.view.set_default("group/read_file_batch", "expanded")
+smelt.transcript.view.set_default("block/thinking", "peek")
 ```
 
 Resolution order:
@@ -380,7 +395,7 @@ Resolution order:
 1. Manual override for this `RenderNodeId` in `TranscriptPresentationState`.
 2. Explicit user/view default from the settings-backed transcript view policy (`smelt.settings.transcript_view` / `smelt.transcript.view.set_default`).
 3. Group registration `default_view` for group nodes.
-4. Built-in block default for block nodes (`thinking = collapsed` initially).
+4. Built-in block/tool defaults for block nodes (`thinking = peek`, read/search/web-fetch/skill/write/edit tools collapsed initially).
 5. `Expanded`.
 
 Manual expand/collapse should apply to both block and group nodes. The initial product recommendation is session-local manual overrides plus config-driven defaults. Persist overrides only if that clearly improves the product after the node-id model is stable.
@@ -389,7 +404,7 @@ If `GroupId` remains `rule + bucket + first_child`, manual expansion survives ap
 
 ## Renderer model
 
-Keep one root transcript renderer pipeline, but make group registrations install group-specific renderers. Rust still calls Lua once per visible/needed render node; Lua dispatches group nodes to the renderer registered with `smelt.transcript.groups.register`.
+Keep one root transcript renderer pipeline, but make Lua own presentation for every effective view state. Rust resolves `ViewState`, passes it as `ctx.view_state`, compiles the returned layout, and renders it without generic post-collapse/post-trim clipping for Lua-rendered nodes. Group registrations install group-specific renderers. Rust still calls Lua once per visible/needed render node; Lua dispatches group nodes to the renderer registered with `smelt.transcript.groups.register`.
 
 Normal block snapshot:
 
@@ -424,6 +439,10 @@ Default dispatch:
 function defaults.render(node, ctx)
   if node.kind == "group" then
     return smelt.transcript.groups.render(node, ctx)
+  elseif node.kind == "thinking" then
+    return defaults.render_thinking(node, ctx) -- branches on ctx.view_state
+  elseif node.kind == "tool" then
+    return defaults.render_tool(node, ctx) -- collapsed/expanded owned by Lua
   end
   -- existing block dispatch
 end
@@ -440,8 +459,10 @@ A group registration must provide `render`; reject registrations without it. Avo
 Each registered group renderer can choose between:
 
 - summary-only layout for collapsed/default display;
-- child rendering with existing `defaults.render(child, ctx)` for expanded details;
-- a hybrid summary plus capped child list.
+- transparent child rendering for expanded details with `defaults.render_group_children(group, ctx)`, so expanded built-in tool groups look like the transcript would have looked without grouping;
+- a hybrid summary plus capped child list for custom renderers.
+
+Block renderers follow the same ownership rule. Default helpers should expose explicit pieces such as `render_thinking_summary`, `render_thinking_peek`, `render_thinking_full`, `render_tool_summary`, and `render_tool_full` so user renderers can compose or replace one state without reimplementing everything.
 
 Rust should not know how to summarize `read_file`, `grep`, `glob`, or background-process groups. It should only provide snapshots and compile the returned layout.
 
@@ -530,7 +551,7 @@ Deliverable: Lua owns group policy declarations; Rust can build a deterministic 
 - Store group children internally as `child_range: Range<usize>` and materialize child snapshots only when rendering.
 - Emit a group only when the run length is at least the rule's `min`; otherwise emit the original block nodes.
 - Only group consecutive blocks; never skip over non-matching blocks.
-- Do not group pending or confirm tool blocks by default; group terminal tool blocks first to avoid active-tool churn.
+- Built-in tool groups may include pending/confirm calls so parallel tool batches appear grouped immediately and do not flicker from expanded individual calls into a collapsed group when results arrive. The group renderer must expose aggregate pending/confirm/error state clearly.
 - If a rule no longer matches, the plan naturally falls back to individual block nodes.
 - Add group snapshots passed to Lua renderers.
 
@@ -539,61 +560,58 @@ Deliverable: Lua-defined groups appear in the transcript.
 ### Phase 4: Generalized presentation state
 
 - Replace block-only view-state lookup in projection with render-node view-state lookup.
-- Support defaults from Lua group/block policy, including built-in `thinking = collapsed` and the planned settings-backed per-kind/per-tool/per-group default-view map.
+- Support defaults from Lua group/block policy, including built-in `thinking = peek` and the settings-backed per-kind/per-tool/per-group default-view map.
 - Keep manual overrides in `TranscriptPresentationState`, separate from semantic history and default policy.
-- Retire `show_thinking` as the UX model: thinking blocks are rendered as full content and folded by presentation state, not replaced by a separate summary/hide path.
+- Retire `show_thinking` as the UX model: thinking blocks are rendered by Lua according to presentation state, not replaced by a separate summary/hide path.
 - Add toggle commands/APIs for the node at a display row.
-- Use Vim-compatible fold bindings for transcript render nodes: `za` toggles, `zo` opens, `zc` closes, `zR` opens all, and `zM` closes all. `Enter` is contextual activation: it toggles only when the focused row is an explicit fold summary/affordance, not arbitrary expanded content.
-- Mouse folding should be limited to explicit fold affordances and collapsed summaries. Fire on mouse-up only when down/up target the same node and movement stayed below drag threshold; drag selection always wins and never toggles.
+- Use Vim-compatible fold bindings for transcript render nodes: `za` toggles, `zo` opens, `zc` closes, `zR` opens all, and `zM` closes all. `Enter` is contextual activation: it toggles any row inside a group node, and toggles ordinary blocks only on explicit fold affordance rows.
+- Mouse folding is intentionally disabled; mouse remains selection/focus/yank so double-click/triple-click text selection stays simple.
 - Expose enough node metadata to Lua/UI for keymaps and mouse handlers.
 
 Deliverable: users can manually expand/collapse groups and blocks; defaults can collapse group types automatically.
 
 ### Phase 5: Typed background process status events
 
-- Replace plain-text-only process completion notes with typed `ProcessStatusEvent::BackgroundProcessCompleted` data in transcript/history snapshots.
-- Preserve the current user-visible text for readability and copy behavior, but do not preserve the old plain-text-only internal representation.
-- Expose typed event fields to Lua block snapshots so the background-completion selector can match exactly.
-- Add tests for multiple completions arriving in the same event-loop drain and rendering as one group.
+Status: implemented.
+
+- Process completion notes now carry `ProcessStatusEvent::BackgroundProcessCompleted { process_id, exit_code }` through protocol history, `StartTurnInput::Note`, session snapshots, and transcript blocks.
+- The current user-visible text is preserved for readability, provider/model compatibility, and copy behavior; legacy plain process-status notes still deserialize with no event.
+- Lua block snapshots and group child JSON snapshots expose `event`, `event_type`, `process_id`, `exit_code`, and the full `event_data` payload where available.
+- Declarative group selectors can match typed block fields (for example `selector = { kind = "process_status", event = "background_process_completed" }`) and buckets can split on the same fields.
+- Tests cover protocol serialization, engine preservation of typed current notes, TUI process completion dispatch, Lua snapshots, JSON child snapshots, and selector/bucket matching.
 
 Deliverable: background process completion grouping does not depend on parsing English status strings.
 
 ### Phase 6: Built-in Lua grouping rules and renderers
 
-Register built-in Lua rules for:
+Status: implemented.
 
-1. background process completion/status notifications, after typed process-status events exist;
-2. consecutive terminal `read_file` calls;
-3. consecutive terminal `grep` calls;
-4. consecutive terminal `glob` calls.
-
-Implement renderers in Lua using existing `smelt.layout` primitives and existing default child renderers.
-
-Built-ins should be conservative:
-
-- no default mixed read/search grouping;
-- no grouping across assistant text/user messages/thinking/mode/compacted/checkpoint marker blocks;
-- no grouping across unrelated tool kinds;
-- minimum group size of 2;
-- group errors/denials with the same tool kind only if the summary visibly surfaces the error/denied count;
-- keep pending/confirm tools separate unless a later explicit rule chooses otherwise.
+- Built-in Lua registrations now group adjacent typed background process completion notes and adjacent `read_file`, `grep`, and `glob` calls, including pending/confirm calls in active parallel batches to avoid visual flicker.
+- The registrations are conservative: each tool kind has its own rule, each rule has `min = 2`, and unrelated blocks still break runs.
+- Built-in renderers are Lua-only and use `smelt.layout` plus the default group child-list helper. Collapsed tool groups render a tool-like compact header (`* read_file ×N`) plus a meaningful child list capped with `… N more`.
+- Expanded built-in tool groups are transparent: they render only the real child tool calls with normal inter-tool spacing and no synthetic group header.
+- Tool summaries surface errors and denials, pending/confirm state affects the aggregate `*` highlight, and background process summaries surface non-zero exit counts.
 
 Deliverable: the quality-of-life improvements are visible without Rust tool-specific grouping code.
 
+Implemented tests cover the built-in process group, the built-in read/search/glob tool groups, mixed-tool boundaries, pending tools, and visible failure counts.
+
 ### Phase 7: Polish, docs, and hardening
 
-- Persist manual fold overrides if the node-id model is stable and persistence improves the product; otherwise keep them intentionally session-local and document that choice.
-- Add documentation and examples for user-defined group rules.
-- Regenerate Lua API stubs/docs after API stabilization.
-- Add storybook cases for collapsed and expanded groups.
-- Add regression tests for group planning, cache invalidation, and viewport row mapping.
-- Remove obsolete block-only cache/index names and any temporary migration code once the release boundary allows it.
+Status: implemented.
+
+- Manual fold overrides remain intentionally session-local. Render node ids are stable enough for in-session append/grow behavior, but persisting presentation state would add session schema and migration surface before there is a clear product need.
+- User-defined group rules are documented with a concrete `smelt.transcript.groups.register` example, selector/bucket guidance, cache-key guidance, and expanded/collapsed rendering patterns.
+- Lua API docs and stubs are regenerated after the group API/default-helper additions.
+- Storybook covers collapsed and expanded built-in transcript groups plus collapsed/peek/expanded thinking and collapsed/expanded noisy tool blocks.
+- Regression tests cover group planning, cache invalidation, viewport/range row mapping, built-in boundaries, pending tools, failure summaries, typed process groups, and registry behavior without depending on built-in registrations.
+- Remaining block-only names are semantic block concepts or cache-entry compatibility names. There is no temporary migration path to remove in this branch.
 
 Deliverable: stable public customization surface and a cleaned-up internal model.
 
 ## Edge cases to design/test
 
-- **Streaming tools:** default rules should group only terminal tools first. Pending and confirm states are volatile and can make row indexes churn.
+- **Streaming tools:** built-in tool rules include pending and confirm calls so active parallel batches group immediately instead of flickering from separate expanded blocks into a collapsed group after completion. Aggregate pending/confirm/error state must stay visible in collapsed headers.
 - **Errors and denied calls:** same-tool groups may include errors/denials only when the collapsed summary exposes counts and highlights failure.
 - **Boundaries:** grouping never crosses non-matching blocks, including user/assistant/thinking/mode/compacted/checkpoint markers.
 - **Config reload:** rule generation/cache key must invalidate render plans, layout cache, and row-index cache.
@@ -603,7 +621,6 @@ Deliverable: stable public customization surface and a cleaned-up internal model
 
 ## Open questions
 
-- Is declarative `selector` plus optional `bucket` enough for the desired customization surface, or is there a concrete rule that requires a separate future callback feature with a first-class cache contract?
+- Are there concrete grouping rules that exceed declarative `selector` plus optional `bucket`, and if so what explicit cache contract would a future callback API need?
 - Should manual fold state persist across session reloads as presentation state, or is session-local state the cleaner product behavior?
-- Should group renderers receive already-rendered child layouts, or only child snapshots? Initial recommendation: child snapshots only, so Lua composition stays explicit and cacheable.
 

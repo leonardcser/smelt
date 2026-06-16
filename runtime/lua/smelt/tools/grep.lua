@@ -156,8 +156,13 @@ local function run_grep_fallback(args)
   return smelt.process.run("grep", cmd_args, { timeout_secs = timeout_secs })
 end
 
-transcript_defaults.__tool_body_renderers.grep = function(block)
-  return transcript_defaults.render_display_count(block, { unit = "match" })
+transcript_defaults.__tool_body_renderers.grep = function(block, ctx)
+  if not block.output then return nil end
+  return transcript_defaults.render_tool_output_tail(block.output, ctx)
+end
+
+transcript_defaults.__tool_collapsed_details.grep = function(block)
+  return smelt.text.line_count((block.output and block.output.content) or "") .. " matches"
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({

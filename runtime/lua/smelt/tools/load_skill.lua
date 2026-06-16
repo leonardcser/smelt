@@ -1,5 +1,11 @@
 -- Built-in load_skill tool. Fetches a skill body via `smelt.skills.content`.
 
+local transcript_defaults = require("smelt.transcript.defaults")
+
+transcript_defaults.__tool_collapsed_details.load_skill = function(block)
+  return smelt.text.line_count((block.output and block.output.content) or "") .. " lines"
+end
+
 smelt.tools.register({
   name = "load_skill",
   description = "Load a skill by name to get specialized instructions and knowledge. Use this when a task matches one of the available skills listed in the system prompt.",

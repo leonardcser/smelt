@@ -1,12 +1,11 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 344
 expression: frame.text()
 ---
 * write_file src/greet.rs
-   1   pub fn greet(name: &str) -> String {
-   2       format!("hello, {name}")
-   3   }
+  wrote 3 lines
+
+
 
 
 

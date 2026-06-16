@@ -62,7 +62,7 @@ fun(row: integer, action: string, opts: table?): boolean
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Apply a fold action (`toggle`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.
+Apply a fold action (`toggle`, `peek`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.
 
 ## `smelt.transcript.fold_kind`
 
@@ -72,7 +72,17 @@ fun(kind: string, action: string): boolean
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Apply a fold action (`toggle`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`.
+Apply a fold action (`toggle`, `peek`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`. `toggle` is aggregate: open all if any matching node is folded, otherwise close all.
+
+## `smelt.transcript.fold_node`
+
+```lua
+fun(node_id: table, action: string): boolean
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node id returned by `node_at_row(...).node_id`.
 
 ## `smelt.transcript.get_renderer`
 
@@ -118,7 +128,7 @@ fun(row: integer): table?
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return render-node metadata for absolute display row `row`, including `{ kind, id, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
+Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`.
 
 ## `smelt.transcript.rows`
 
@@ -167,7 +177,7 @@ fun(): string
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
+Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).
 
 ## `smelt.transcript.visible_blocks`
 

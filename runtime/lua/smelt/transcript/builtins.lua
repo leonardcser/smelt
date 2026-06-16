@@ -1,0 +1,207 @@
+-- Built-in transcript group rules and renderers.
+
+local defaults = require("smelt.transcript.defaults")
+local layout = smelt.layout
+
+local M = {}
+local BUILTIN_GROUP_PRIORITY = -100
+local GROUP_LIST_MAX = 5
+
+local function failure_suffix(errors, denied)
+  local parts = {}
+  if errors > 0 then
+    parts[#parts + 1] = tostring(errors) .. (errors == 1 and " error" or " errors")
+  end
+  if denied > 0 then
+    parts[#parts + 1] = tostring(denied) .. " denied"
+  end
+  if #parts == 0 then return "" end
+  return " (" .. table.concat(parts, ", ") .. ")"
+end
+
+local function child_status_hl(child)
+  if defaults.child_failed(child) then return "ErrorMsg" end
+  if child.status == "pending" then return "SmeltToolPending" end
+  if child.status == "confirm" then return "SmeltAccent" end
+  return "SmeltSuccess"
+end
+
+local function aggregate_status_hl(group)
+  local has_pending = false
+  local has_confirm = false
+  for _, child in ipairs(defaults.group_children(group)) do
+    if defaults.child_failed(child) then return "ErrorMsg" end
+    has_pending = has_pending or child.status == "pending"
+    has_confirm = has_confirm or child.status == "confirm"
+  end
+  if has_pending then return "SmeltToolPending" end
+  if has_confirm then return "SmeltAccent" end
+  return "SmeltSuccess"
+end
+
+local function summary_line(text, has_failure)
+  local span = { text = text }
+  if has_failure then span.hl = "ErrorMsg" end
+  return layout.runs({ { span } })
+end
+
+local function tool_group_header(name, count, hl, suffix)
+  return layout.runs({ {
+    { text = "*", hl = hl },
+    { text = " " .. name, dim = true },
+    { text = " ×" .. tostring(count), dim = true, selectable = false },
+    { text = suffix or "", hl = suffix ~= "" and "ErrorMsg" or nil, selectable = false },
+  } })
+end
+
+local function display_path(path)
+  if type(path) ~= "string" or path == "" then return nil end
+  if smelt.path and smelt.path.display then return smelt.path.display(path) end
+  return path
+end
+
+local function read_file_label(child)
+  return display_path(child.args and child.args.file_path) or child.summary_text or child.name or "read_file"
+end
+
+local function grep_label(child)
+  local args = child.args or {}
+  local pattern = args.pattern or child.summary_text or ""
+  local label = pattern ~= "" and ('"' .. tostring(pattern) .. '"') or "grep"
+  if args.path and args.path ~= "" then
+    label = label .. " in " .. tostring(args.path)
+  elseif args.glob and args.glob ~= "" then
+    label = label .. " glob:" .. tostring(args.glob)
+  elseif args.type and args.type ~= "" then
+    label = label .. " type:" .. tostring(args.type)
+  end
+  return label
+end
+
+local function glob_label(child)
+  local args = child.args or {}
+  local label = args.pattern or child.summary_text or "glob"
+  if args.path and args.path ~= "" then label = label .. " in " .. tostring(args.path) end
+  return label
+end
+
+local function render_compact_group_list(group, label)
+  local children = defaults.group_children(group)
+  local max = math.min(#children, GROUP_LIST_MAX)
+  local lines = {}
+  for i = 1, max do
+    local child = children[i]
+    local span = { text = tostring(label(child)) }
+    local hl = child_status_hl(child)
+    if hl == "ErrorMsg" then span.hl = hl end
+    lines[#lines + 1] = { span }
+  end
+  if #children > max then
+    lines[#lines + 1] = { { text = "… " .. tostring(#children - max) .. " more", dim = true, selectable = false } }
+  end
+  if #lines == 0 then return layout.empty() end
+  return layout.gutter(layout.runs(lines), { text = "  " })
+end
+
+local function render_terminal_tool_group(group, ctx, opts)
+  local count = group.child_count or #defaults.group_children(group)
+  local errors, denied = defaults.group_failure_counts(group)
+  local header = tool_group_header(opts.name, count, aggregate_status_hl(group), failure_suffix(errors, denied))
+  if group.view_state == "expanded" then
+    return defaults.render_group_children(group, ctx)
+  end
+  return layout.vbox({
+    header,
+    render_compact_group_list(group, opts.label),
+  })
+end
+
+local function process_exit_code(child)
+  local code = child.exit_code
+  if code == nil and type(child.event_data) == "table" then code = child.event_data.exit_code end
+  return code
+end
+
+local function process_failed(child)
+  local code = tonumber(process_exit_code(child))
+  return code ~= nil and code ~= 0
+end
+
+local function render_background_process_completed_group(group, ctx)
+  local count = group.child_count or #defaults.group_children(group)
+  local failed = 0
+  for _, child in ipairs(defaults.group_children(group)) do
+    if process_failed(child) then failed = failed + 1 end
+  end
+  local text = "background processes finished: " .. tostring(count)
+  if failed > 0 then
+    text = text .. " (" .. tostring(failed) .. " failed)"
+  end
+  local header = summary_line(text, failed > 0)
+  if group.view_state ~= "expanded" then return header end
+  return layout.vbox({
+    header,
+    defaults.render_group_children(group, ctx),
+  })
+end
+
+function M.register()
+  smelt.transcript.groups.register({
+    name = "background_process_completed",
+    cache_key = "smelt.transcript.group.background_process_completed:v1",
+    priority = BUILTIN_GROUP_PRIORITY,
+    min = 2,
+    default_view = "collapsed",
+    selector = { kind = "process_status", event = "background_process_completed" },
+    render = render_background_process_completed_group,
+  })
+
+  smelt.transcript.groups.register({
+    name = "read_file_batch",
+    cache_key = "smelt.transcript.group.read_file_batch:v1",
+    priority = BUILTIN_GROUP_PRIORITY,
+    min = 2,
+    default_view = "collapsed",
+    selector = { kind = "tool", name = "read_file" },
+    render = function(group, ctx)
+      return render_terminal_tool_group(group, ctx, {
+        name = "read_file",
+        label = read_file_label,
+      })
+    end,
+  })
+
+  smelt.transcript.groups.register({
+    name = "grep_batch",
+    cache_key = "smelt.transcript.group.grep_batch:v1",
+    priority = BUILTIN_GROUP_PRIORITY,
+    min = 2,
+    default_view = "collapsed",
+    selector = { kind = "tool", name = "grep" },
+    render = function(group, ctx)
+      return render_terminal_tool_group(group, ctx, {
+        name = "grep",
+        label = grep_label,
+      })
+    end,
+  })
+
+  smelt.transcript.groups.register({
+    name = "glob_batch",
+    cache_key = "smelt.transcript.group.glob_batch:v1",
+    priority = BUILTIN_GROUP_PRIORITY,
+    min = 2,
+    default_view = "collapsed",
+    selector = { kind = "tool", name = "glob" },
+    render = function(group, ctx)
+      return render_terminal_tool_group(group, ctx, {
+        name = "glob",
+        label = glob_label,
+      })
+    end,
+  })
+end
+
+package.loaded["smelt.transcript.builtins"] = M
+
+return M

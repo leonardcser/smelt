@@ -32,6 +32,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "smelt.transcript.defaults",
         "Bundled default transcript renderers. These are ordinary Lua helpers used by the default root renderer and available for user renderers to call or compose.",
     );
+    record_module_doc(
+        "smelt.transcript.groups",
+        "Declarative transcript display grouping. Register adjacent-run group rules and group-node renderers while the host owns deterministic planning and cache invalidation.",
+    );
 
     let shared_set = Arc::clone(shared);
     m.private_fn(

@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 struct PreparedTurn {
-    content: Content,
-    display: Option<String>,
+    input: protocol::StartTurnInput,
     model: String,
     reasoning_effort: protocol::ReasoningEffort,
     api_base: String,
@@ -130,8 +129,7 @@ impl TuiApp {
         };
 
         self.dispatch_prepared_turn(PreparedTurn {
-            content,
-            display: None,
+            input: protocol::StartTurnInput::user(content, None),
             model: self.core.config.model.clone(),
             reasoning_effort: self.core.config.reasoning_effort,
             api_base: self.core.config.api_base.clone(),
@@ -162,8 +160,7 @@ impl TuiApp {
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
-                content: turn.content,
-                display: turn.display,
+                input: turn.input,
                 mode: self.core.config.mode.clone(),
                 model: turn.model,
                 reasoning_effort: turn.reasoning_effort,
@@ -186,21 +183,46 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn begin_process_status_turn(&mut self, note: String) -> TurnState {
+    pub(crate) fn begin_process_status_turn(
+        &mut self,
+        history_note: protocol::HistoryNote,
+    ) -> TurnState {
         self.invalidate_prompt_prediction();
         self.prepare_user_visible_turn();
-        self.push_block(Block::ProcessStatus { text: note.clone() });
-        let history_note = protocol::HistoryNote::process_status(note.clone());
-        let model_text = history_note.to_model_text();
-        if !note.is_empty() {
+        self.push_block(crate::app::history::history_note_to_block(
+            &self.lua,
+            &history_note,
+        ));
+        if !history_note.text().is_empty() {
             self.core
                 .session
                 .history
-                .push(HistoryItem::note(history_note));
+                .push(HistoryItem::note(history_note.clone()));
             self.sync_session_snapshot();
             self.core.session.history.pop();
         }
-        self.dispatch_turn(Content::text(model_text))
+        let api_key = match self.resolve_api_key() {
+            Some(api_key) => api_key,
+            None => {
+                self.working.finish(TurnOutcome::Done);
+                return TurnState {
+                    turn_id: 0,
+                    pending: Vec::new(),
+                    permissions: self.core.permissions.clone(),
+                    _perf: smelt_perf::perf::begin("agent:turn"),
+                };
+            }
+        };
+        self.dispatch_prepared_turn(PreparedTurn {
+            input: protocol::StartTurnInput::note(history_note),
+            model: self.core.config.model.clone(),
+            reasoning_effort: self.core.config.reasoning_effort,
+            api_base: self.core.config.api_base.clone(),
+            api_key,
+            model_config_overrides: None,
+            permission_overrides: None,
+            permissions: self.core.permissions.clone(),
+        })
     }
 
     pub(crate) fn begin_custom_command_turn(
@@ -367,8 +389,7 @@ impl TuiApp {
         }
 
         self.dispatch_prepared_turn(PreparedTurn {
-            content: Content::text(evaluated),
-            display: Some(display),
+            input: protocol::StartTurnInput::user(Content::text(evaluated), Some(display)),
             model,
             reasoning_effort: reasoning,
             api_base,
@@ -545,12 +566,8 @@ impl TuiApp {
 
     pub(crate) fn handle_process_completed(&mut self, id: String, exit_code: Option<i32>) {
         let id = display_safe_process_id(&id);
-        let status = match exit_code {
-            Some(0) => "finished successfully".to_string(),
-            Some(c) => format!("exited with code {c}"),
-            None => "exited".to_string(),
-        };
-        let note = format!("Background process {id} {status}.");
+        let event = protocol::ProcessStatusEvent::background_process_completed(id, exit_code);
+        let note = protocol::HistoryNote::process_status_event(event);
         if self.agent_is_running() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
         } else if self.prompt_input_is_busy() {
@@ -914,7 +931,7 @@ mod tests {
             .iter()
             .filter_map(|id| history.blocks.get(id))
             .filter_map(|block| match block {
-                Block::ProcessStatus { text } => Some(text.clone()),
+                Block::ProcessStatus { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -1019,8 +1036,8 @@ mod tests {
         assert_eq!(app.app.pending_history_appends.len(), 1);
         assert_eq!(
             app.app.pending_history_appends[0].history_item(),
-            protocol::HistoryItem::note(protocol::HistoryNote::process_status(
-                "Background process 4242 exited with code 9."
+            protocol::HistoryItem::note(protocol::HistoryNote::process_status_event(
+                protocol::ProcessStatusEvent::background_process_completed("4242", Some(9))
             ))
         );
     }
@@ -1028,13 +1045,14 @@ mod tests {
     #[test]
     fn queued_process_status_starts_process_status_turn() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        let note = "Background process 77 exited.".to_string();
+        let note = protocol::HistoryNote::process_status("Background process 77 exited.");
+        let text = note.text().to_string();
 
         app.app
-            .start_queued_input(crate::app::QueuedInput::ProcessStatus(note.clone()));
+            .start_queued_input(crate::app::QueuedInput::ProcessStatus(note));
 
         assert!(app.app.agent_is_running());
-        assert_eq!(process_status_blocks(&app), vec![note]);
+        assert_eq!(process_status_blocks(&app), vec![text]);
         assert!(user_blocks(&app).is_empty());
     }
 
@@ -1047,14 +1065,22 @@ mod tests {
             .app
             .active_agent_turn_id()
             .expect("process turn started");
-        let start_content = app
+        let (start_content, current_note) = app
             .drain_engine_sends()
             .into_iter()
             .find_map(|cmd| match cmd {
-                protocol::UiCommand::StartTurn(payload) => Some(payload.content),
+                protocol::UiCommand::StartTurn(payload) => Some((
+                    payload.input.provider_content(),
+                    payload.input.note_ref().cloned(),
+                )),
                 _ => None,
             })
             .expect("process turn dispatched to engine");
+        let current_note = current_note.expect("process turn carries typed note");
+        let expected_note = protocol::HistoryNote::process_status_event(
+            protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
+        );
+        assert_eq!(current_note, expected_note);
         assert_eq!(
             start_content.text_content(),
             protocol::process_status_note("Background process 751225 exited with code 1.")
@@ -1065,15 +1091,17 @@ mod tests {
                 turn_id,
                 history: vec![
                     HistoryItem::user(Content::text("previous user message")),
-                    protocol::history_item_from_user_content(start_content),
+                    HistoryItem::note(current_note.clone()),
                 ],
             },
         ));
 
         assert!(matches!(
             &app.app.core.session.history[1],
-            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text })
+            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, event })
                 if text == "Background process 751225 exited with code 1."
+                    && event.as_ref().and_then(protocol::ProcessStatusEvent::process_id) == Some("751225")
+                    && event.as_ref().and_then(|event| event.exit_code()) == Some(1)
         ));
 
         let (count, first_content, contains_marker): (i64, String, bool) = {

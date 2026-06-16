@@ -33,6 +33,17 @@ transcript_defaults.__tool_body_renderers.edit_notebook = function(block)
   return preview_layout((block.output and block.output.metadata) or {})
 end
 
+transcript_defaults.__tool_collapsed_details.edit_notebook = function(block)
+  local meta = (block.output and block.output.metadata) or block.args or {}
+  local mode = meta.edit_mode or "replace"
+  local cell_type = meta.cell_type or ""
+  local cell_label = cell_type ~= "" and (cell_type .. " cell") or "cell"
+  local lines = smelt.text.line_count(meta.new_source or "")
+  if mode == "delete" then return "deleted " .. cell_label end
+  local verb = ({ insert = "inserted", replace = "replaced" })[mode] or (mode .. "d")
+  return verb .. " " .. cell_label .. ", " .. tostring(lines) .. " lines"
+end
+
 smelt.tools.register({
   name = "edit_notebook",
   description = "Edit a Jupyter notebook (.ipynb) cell. Supports replacing, inserting, and deleting cells. Identify cells by cell_id or cell_number (0-indexed).",

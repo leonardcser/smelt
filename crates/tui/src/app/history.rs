@@ -132,6 +132,7 @@ pub(crate) fn history_note_to_block(
         protocol::HistoryNoteKind::ModeChange => lua.mode_block(note.mode(), note.text()),
         protocol::HistoryNoteKind::ProcessStatus => Block::ProcessStatus {
             text: note.text().to_string(),
+            event: note.process_status_event_ref().cloned(),
         },
     }
 }
@@ -178,6 +179,7 @@ fn push_user_block(
         transcript.push_with_origin(
             Block::ProcessStatus {
                 text: note.trim().to_string(),
+                event: None,
             },
             smelt_core::BlockOrigin::History(history_index),
         );
@@ -900,7 +902,7 @@ mod checkpoint_tests {
         let id = history.order[0];
         assert!(matches!(
             history.blocks.get(&id),
-            Some(Block::ProcessStatus { text }) if text == note
+            Some(Block::ProcessStatus { text, .. }) if text == note
         ));
     }
 

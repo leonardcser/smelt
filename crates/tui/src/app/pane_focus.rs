@@ -41,9 +41,7 @@ impl TuiApp {
             crate::app::AppFocus::Prompt => crate::app::AppFocus::Content,
             crate::app::AppFocus::Content => crate::app::AppFocus::Prompt,
         };
-        if target == crate::app::AppFocus::Content
-            && !self.has_transcript_content(self.core.config.settings.show_thinking)
-        {
+        if target == crate::app::AppFocus::Content && !self.has_transcript_content() {
             return;
         }
         self.app_focus = target;

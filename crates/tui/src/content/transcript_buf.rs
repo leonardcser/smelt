@@ -3,7 +3,8 @@ use super::display_layout::{
     DisplayRowIndexNode, MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
 use crate::content::render_plan::{
-    NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptPresentationState,
+    NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptDefaultViewPolicy,
+    TranscriptPresentationState,
 };
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
@@ -17,6 +18,7 @@ use std::sync::Arc;
 
 pub(crate) struct TranscriptProjection {
     render_plan: RenderPlan,
+    default_view_policy: TranscriptDefaultViewPolicy,
     presentation: TranscriptPresentationState,
     display_layouts: DisplayModel,
     display_layouts_generation: u64,
@@ -140,6 +142,7 @@ impl ExactRowIndex {
         &mut self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
         key: RowIndexKey,
     ) {
@@ -169,7 +172,8 @@ impl ExactRowIndex {
             let Some(id) = plan.node_id(index) else {
                 continue;
             };
-            let Some(node_key) = plan.node_key(history, presentation, index, key.base_key) else {
+            let Some(node_key) = plan.node_key(policy, history, presentation, index, key.base_key)
+            else {
                 continue;
             };
             let old_same_index = old_nodes.get(index).filter(|node| node.id == id);
@@ -224,6 +228,7 @@ impl ExactRowIndex {
         &mut self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
         key: RowIndexKey,
     ) -> bool {
@@ -252,7 +257,8 @@ impl ExactRowIndex {
             let Some(id) = plan.node_id(index) else {
                 return false;
             };
-            let Some(node_key) = plan.node_key(history, presentation, index, key.base_key) else {
+            let Some(node_key) = plan.node_key(policy, history, presentation, index, key.base_key)
+            else {
                 return false;
             };
             let node = &mut self.nodes[index];
@@ -277,7 +283,8 @@ impl ExactRowIndex {
             let Some(id) = plan.node_id(index) else {
                 return false;
             };
-            let Some(node_key) = plan.node_key(history, presentation, index, key.base_key) else {
+            let Some(node_key) = plan.node_key(policy, history, presentation, index, key.base_key)
+            else {
                 return false;
             };
             self.nodes.push(ExactNodeRow {
@@ -355,6 +362,7 @@ impl ExactRowIndex {
         &mut self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
         entry: &DisplayRowIndexEntry,
         key: RowIndexKey,
@@ -377,7 +385,8 @@ impl ExactRowIndex {
             if cached.id != id {
                 return false;
             }
-            let Some(node_key) = plan.node_key(history, presentation, index, key.base_key) else {
+            let Some(node_key) = plan.node_key(policy, history, presentation, index, key.base_key)
+            else {
                 return false;
             };
             if cached.key != node_key {
@@ -459,6 +468,7 @@ impl MeasurementIndexStore {
         &self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
         renderer_generation: Option<u64>,
         renderer_cache_key: Option<u64>,
@@ -468,13 +478,13 @@ impl MeasurementIndexStore {
             .iter()
             .filter(|entry| {
                 row_index_entry_matches_renderer(entry, renderer_generation, renderer_cache_key)
-                    && row_index_entry_matches(history, plan, presentation, entry)
+                    && row_index_entry_matches(history, plan, policy, presentation, entry)
             })
             .cloned()
             .collect();
         if let Some(current) = self.active.cache_entry() {
             if row_index_entry_matches_renderer(&current, renderer_generation, renderer_cache_key)
-                && row_index_entry_matches(history, plan, presentation, &current)
+                && row_index_entry_matches(history, plan, policy, presentation, &current)
             {
                 upsert_row_index_entry(&mut entries, current);
             }
@@ -554,6 +564,7 @@ pub(crate) struct ProjectionPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FoldAction {
     Toggle,
+    Peek,
     Open,
     Close,
 }
@@ -589,6 +600,23 @@ impl TranscriptNodeRow {
             FoldActivation::ExplicitTargetOnly => self.explicit_fold_target,
         }
     }
+}
+
+fn is_explicit_fold_target(view_state: ViewState, row_offset: RowIndex, rows: RowIndex) -> bool {
+    match view_state {
+        ViewState::Collapsed | ViewState::Peek => true,
+        ViewState::TrimmedHead { .. } => row_offset.saturating_add(1) == rows,
+        ViewState::TrimmedTail { .. } => row_offset == 0,
+        ViewState::Expanded => false,
+    }
+}
+
+fn layout_view_state(
+    _id: RenderNodeId,
+    _view_state: ViewState,
+    _history: &BlockHistory,
+) -> ViewState {
+    ViewState::Expanded
 }
 
 impl ProjectionPlan {
@@ -774,6 +802,7 @@ fn row_offset_for_display_offset(
 fn row_index_entry_matches(
     history: &BlockHistory,
     plan: &RenderPlan,
+    policy: &TranscriptDefaultViewPolicy,
     presentation: &TranscriptPresentationState,
     entry: &DisplayRowIndexEntry,
 ) -> bool {
@@ -783,7 +812,7 @@ fn row_index_entry_matches(
     let base_key = base_layout_key(entry.width, entry.show_thinking);
     entry.nodes.iter().enumerate().all(|(index, node)| {
         plan.node_id(index) == Some(node.id)
-            && plan.node_key(history, presentation, index, base_key) == Some(node.key)
+            && plan.node_key(policy, history, presentation, index, base_key) == Some(node.key)
     })
 }
 
@@ -834,7 +863,7 @@ fn render_cached_layout_to_buffer(
         layout,
         RenderCtx {
             width: key.width,
-            view_state: key.view_state,
+            view_state: layout_view_state(id, key.view_state, history),
             theme,
             history: Some(history),
         },
@@ -846,6 +875,7 @@ impl TranscriptProjection {
     pub(crate) fn new() -> Self {
         Self {
             render_plan: RenderPlan::empty(),
+            default_view_policy: TranscriptDefaultViewPolicy::default(),
             presentation: TranscriptPresentationState::default(),
             display_layouts: DisplayModel::new(),
             display_layouts_generation: u64::MAX,
@@ -865,13 +895,29 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &BlockHistory,
     ) {
+        let policy = TranscriptDefaultViewPolicy::from_lua(lua);
+        let policy_changed = policy != self.default_view_policy;
+        if policy_changed {
+            self.default_view_policy = policy;
+            self.display_layouts = DisplayModel::new();
+            self.display_layouts_generation = u64::MAX;
+            self.measurements.clear();
+            self.clear_visible_state();
+            self.visible.full_rows = None;
+            self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
+        }
         let group_generation = lua.transcript_group_generation();
         let group_cache_key = lua.transcript_group_cache_key();
-        if self.render_plan.history_generation != history.generation()
+        if policy_changed
+            || self.render_plan.history_generation != history.generation()
             || self.render_plan.group_generation != group_generation
             || self.render_plan.group_cache_key != group_cache_key
         {
-            let groups = lua.transcript_group_specs();
+            let groups: Vec<_> = lua
+                .transcript_group_specs()
+                .into_iter()
+                .filter(|spec| self.default_view_policy.group_enabled(&spec.name))
+                .collect();
             self.render_plan = RenderPlan::for_history_with_groups(
                 history,
                 &groups,
@@ -896,6 +942,7 @@ impl TranscriptProjection {
         let hydrated_layouts = self.display_layouts.hydrate_from_cache(
             history,
             &self.render_plan,
+            &self.default_view_policy,
             &self.presentation,
             display_layouts,
         );
@@ -925,6 +972,7 @@ impl TranscriptProjection {
             display_layouts: self.display_layouts.cache_entries(
                 history,
                 &self.render_plan,
+                &self.default_view_policy,
                 &self.presentation,
                 self.renderer_generation,
                 self.renderer_cache_key,
@@ -970,6 +1018,7 @@ impl TranscriptProjection {
         self.measurements.export_entries(
             history,
             &self.render_plan,
+            &self.default_view_policy,
             &self.presentation,
             self.renderer_generation,
             self.renderer_cache_key,
@@ -1038,6 +1087,7 @@ impl TranscriptProjection {
                 .collect::<Vec<_>>();
             self.display_layouts.collect_compile_jobs(
                 history,
+                &self.default_view_policy,
                 env.renderer_generation,
                 env.renderer_cache_key,
                 nodes,
@@ -1130,6 +1180,7 @@ impl TranscriptProjection {
         let hydrated = self.measurements.active.hydrate_from_cache(
             history,
             plan,
+            &self.default_view_policy,
             &self.presentation,
             &entry,
             key,
@@ -1189,6 +1240,7 @@ impl TranscriptProjection {
             || self.measurements.active.sync_stable_order_prefix(
                 history,
                 &plan,
+                &self.default_view_policy,
                 &self.presentation,
                 row_key,
             );
@@ -1198,9 +1250,13 @@ impl TranscriptProjection {
         );
         if !reused_index {
             let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
-            self.measurements
-                .active
-                .rebuild_if_stale(history, &plan, &self.presentation, row_key);
+            self.measurements.active.rebuild_if_stale(
+                history,
+                &plan,
+                &self.default_view_policy,
+                &self.presentation,
+                row_key,
+            );
         }
         if self.measurements.active.is_exact_for(&plan, row_key) {
             if reused_index {
@@ -1269,7 +1325,7 @@ impl TranscriptProjection {
             block,
             MeasureCtx {
                 width: key.width,
-                view_state: key.view_state,
+                view_state: layout_view_state(id, key.view_state, history),
             },
         ) as RowIndex;
         let gap = self
@@ -1354,15 +1410,13 @@ impl TranscriptProjection {
         let first_row = self.measurements.active.prefix_row(index);
         let rows = node.exact_height.unwrap_or(node.estimated_height);
         let row_offset = row.saturating_sub(first_row).min(rows.saturating_sub(1));
-        let view_state =
-            self.presentation
-                .effective_view_state(&self.render_plan, history, index)?;
-        let explicit_fold_target = match view_state {
-            ViewState::Collapsed => true,
-            ViewState::TrimmedHead { .. } => row_offset.saturating_add(1) == rows,
-            ViewState::TrimmedTail { .. } => row_offset == 0,
-            ViewState::Expanded => false,
-        };
+        let view_state = self.presentation.effective_view_state(
+            &self.default_view_policy,
+            &self.render_plan,
+            history,
+            index,
+        )?;
+        let explicit_fold_target = is_explicit_fold_target(view_state, row_offset, rows);
         Some(TranscriptNodeRow {
             id: node.id,
             index,
@@ -1398,15 +1452,31 @@ impl TranscriptProjection {
         action: FoldAction,
     ) -> bool {
         let changed = match action {
-            FoldAction::Toggle => self.presentation.toggle(&self.render_plan, history, id),
-            FoldAction::Open => {
+            FoldAction::Toggle => {
                 self.presentation
-                    .set(&self.render_plan, history, id, ViewState::Expanded)
+                    .toggle(&self.default_view_policy, &self.render_plan, history, id)
             }
-            FoldAction::Close => {
-                self.presentation
-                    .set(&self.render_plan, history, id, ViewState::Collapsed)
-            }
+            FoldAction::Open => self.presentation.set(
+                &self.default_view_policy,
+                &self.render_plan,
+                history,
+                id,
+                ViewState::Expanded,
+            ),
+            FoldAction::Peek => self.presentation.set(
+                &self.default_view_policy,
+                &self.render_plan,
+                history,
+                id,
+                ViewState::Peek,
+            ),
+            FoldAction::Close => self.presentation.set(
+                &self.default_view_policy,
+                &self.render_plan,
+                history,
+                id,
+                ViewState::Collapsed,
+            ),
         };
         if changed {
             self.clear_visible_state();
@@ -1418,12 +1488,16 @@ impl TranscriptProjection {
     pub(crate) fn fold_all(&mut self, history: &BlockHistory, action: FoldAction) -> bool {
         let view_state = match action {
             FoldAction::Open => ViewState::Expanded,
+            FoldAction::Peek => ViewState::Peek,
             FoldAction::Close => ViewState::Collapsed,
             FoldAction::Toggle => return false,
         };
-        let changed = self
-            .presentation
-            .set_all(&self.render_plan, history, view_state);
+        let changed = self.presentation.set_all(
+            &self.default_view_policy,
+            &self.render_plan,
+            history,
+            view_state,
+        );
         if changed {
             self.clear_visible_state();
             self.visible.full_rows = None;
@@ -1437,22 +1511,59 @@ impl TranscriptProjection {
         kind: &str,
         action: FoldAction,
     ) -> bool {
-        let ids: Vec<_> = self
+        let targets: Vec<_> = self
             .render_plan
             .nodes
             .iter()
-            .filter_map(|node| match node {
+            .enumerate()
+            .filter_map(|(index, node)| match node {
                 RenderNode::Block { id, .. } => history
                     .blocks
                     .get(id)
                     .filter(|block| block.kind() == kind)
-                    .map(|_| RenderNodeId::Block(*id)),
+                    .map(|_| (index, RenderNodeId::Block(*id))),
                 RenderNode::Group { .. } => None,
             })
             .collect();
+        if targets.is_empty() {
+            return false;
+        }
+        let view_state = match action {
+            FoldAction::Open => ViewState::Expanded,
+            FoldAction::Peek => ViewState::Peek,
+            FoldAction::Close => ViewState::Collapsed,
+            FoldAction::Toggle => {
+                let any_folded = targets.iter().any(|(index, _)| {
+                    !matches!(
+                        self.presentation.effective_view_state(
+                            &self.default_view_policy,
+                            &self.render_plan,
+                            history,
+                            *index,
+                        ),
+                        Some(ViewState::Expanded)
+                    )
+                });
+                if any_folded {
+                    ViewState::Expanded
+                } else {
+                    ViewState::Collapsed
+                }
+            }
+        };
         let mut changed = false;
-        for id in ids {
-            changed |= self.fold_node(history, id, action);
+        for (_, id) in targets {
+            changed |= self.presentation.set(
+                &self.default_view_policy,
+                &self.render_plan,
+                history,
+                id,
+                view_state,
+            );
+        }
+        if changed {
+            self.clear_visible_state();
+            self.visible.full_rows = None;
         }
         changed
     }
@@ -1974,7 +2085,7 @@ impl TranscriptProjection {
         }
     }
 
-    /// Full display rows. Cached by `(generation, width, show_thinking)`; repeat
+    /// Full display rows. Cached by transcript, renderer, width, and presentation;
     /// callers get a free `Arc::clone`.
     pub(crate) fn build_rows(
         &mut self,
@@ -2020,13 +2131,18 @@ impl TranscriptProjection {
             || self.measurements.active.sync_stable_order_prefix(
                 history,
                 &plan,
+                &self.default_view_policy,
                 &self.presentation,
                 row_key,
             );
         if !reused_index {
-            self.measurements
-                .active
-                .rebuild_if_stale(history, &plan, &self.presentation, row_key);
+            self.measurements.active.rebuild_if_stale(
+                history,
+                &plan,
+                &self.default_view_policy,
+                &self.presentation,
+                row_key,
+            );
         }
         let mut rows: Vec<String> = Vec::new();
         let block_indices = 0..self.measurements.active.nodes.len();
@@ -2329,6 +2445,62 @@ mod tests {
         parser.set_active_status(history, call_id, status, std::time::Instant::now());
     }
 
+    fn push_named_tool(
+        transcript: &mut Transcript,
+        call_id: &str,
+        name: &str,
+        summary: &str,
+        status: ToolStatus,
+        args: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        let is_error = matches!(status, ToolStatus::Err);
+        transcript.push_tool_call(
+            Block::ToolCall {
+                call_id: call_id.into(),
+                name: name.into(),
+                summary: protocol::StyledLines::from_plain(summary),
+                args,
+            },
+            ToolState {
+                status,
+                elapsed: Some(std::time::Duration::from_millis(25)),
+                output: Some(Box::new(ToolOutput {
+                    content: format!("{summary} output"),
+                    is_error,
+                    metadata: None,
+                })),
+                user_message: None,
+            },
+        );
+    }
+
+    fn tool_args(entries: &[(&str, &str)]) -> std::collections::HashMap<String, serde_json::Value> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), serde_json::json!(*value)))
+            .collect()
+    }
+
+    fn install_read_file_renderer(lua: &smelt_core::lua::runtime::LuaRuntime) {
+        lua.lua
+            .load(
+                r#"
+                smelt.text = smelt.text or {}
+                smelt.text.line_count = smelt.text.line_count or function(content)
+                  if content == nil or content == "" then return 0 end
+                  local _, n = tostring(content):gsub("\n", "")
+                  return n + 1
+                end
+                require('smelt.transcript')
+                require('smelt.tools.read_file')
+                assert(smelt.transcript.defaults.__tool_collapsed_details.read_file ~= nil)
+                assert(smelt.transcript.defaults.__tool_collapsed_details.read_file({ output = { content = "x" } }) == "1 lines")
+                "#,
+            )
+            .exec()
+            .expect("load read_file renderer");
+    }
+
     #[derive(Debug, PartialEq)]
     struct RowSnapshot {
         line: String,
@@ -2434,20 +2606,72 @@ mod tests {
             ScrollTarget::visible_row(0),
             80,
         );
-        assert_eq!(buf.line_count(), 2);
-        assert!(buf.lines().iter().any(|line| line.contains("more lines")));
+        assert_eq!(buf.line_count(), 3);
+        assert!(!buf.lines().iter().any(|line| line.contains("more lines")));
         let node = projection
             .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 1)
-            .expect("collapsed summary row");
+            .expect("collapsed block row");
         assert!(node.explicit_fold_target);
     }
 
     #[test]
-    fn thinking_blocks_default_collapsed_and_can_expand() {
+    fn collapsed_group_renderer_owns_its_rendered_rows() {
+        let lua = test_lua();
+        lua.lua
+            .load(
+                r#"
+                smelt.transcript.groups.register({
+                  name = "custom-read-group",
+                  priority = 10,
+                  selector = { kind = "tool", name = "read_file", terminal = true },
+                  min = 2,
+                  default_view = "collapsed",
+                  cache_key = "test.custom-read-group:v1",
+                  render = function(group, ctx)
+                    return smelt.layout.vbox({
+                      smelt.layout.text("custom summary " .. group.view_state),
+                      smelt.layout.text("custom detail")
+                    })
+                  end,
+                })
+                "#,
+            )
+            .exec()
+            .expect("register custom group");
+        let mut transcript = Transcript::new();
+        push_named_tool(
+            &mut transcript,
+            "read-1",
+            "read_file",
+            "a.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "a.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "read-2",
+            "read_file",
+            "b.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "b.rs")]),
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert!(rows.iter().any(|row| row == "custom summary collapsed"));
+        assert!(rows.iter().any(|row| row == "custom detail"));
+        assert!(!rows.iter().any(|row| row.contains("more lines")));
+    }
+
+    #[test]
+    fn thinking_blocks_default_peek_and_can_expand() {
         let lua = test_lua();
         let mut transcript = Transcript::new();
         transcript.push(Block::Thinking {
-            content: "first thought\nsecond thought\nthird thought".into(),
+            content: "first thought\nsecond thought\nthird thought\nfourth thought\nfifth thought"
+                .into(),
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
@@ -2462,11 +2686,14 @@ mod tests {
             ScrollTarget::visible_row(0),
             80,
         );
-        assert!(buf.lines().iter().any(|line| line.contains("more lines")));
+        assert!(buf
+            .lines()
+            .iter()
+            .any(|line| line.contains("1 line omitted")));
         assert!(!buf
             .lines()
             .iter()
-            .any(|line| line.contains("third thought")));
+            .any(|line| line.contains("second thought")));
 
         assert!(projection.fold_node_at_row(
             &lua,
@@ -2491,7 +2718,104 @@ mod tests {
         assert!(buf
             .lines()
             .iter()
-            .any(|line| line.contains("third thought")));
+            .any(|line| line.contains("second thought")));
+
+        assert!(projection.fold_node_at_row(
+            &lua,
+            &mut transcript.history,
+            80,
+            false,
+            FoldAtRow {
+                row: 1,
+                action: FoldAction::Toggle,
+                activation: FoldActivation::AnyNodeRow,
+            },
+        ));
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(0),
+            80,
+        );
+        assert!(buf
+            .lines()
+            .iter()
+            .any(|line| line.contains("1 line omitted")));
+        assert!(!buf
+            .lines()
+            .iter()
+            .any(|line| line.contains("second thought")));
+    }
+
+    #[test]
+    fn fold_kind_toggle_uses_aggregate_state() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Thinking {
+            content: "a\nb".into(),
+        });
+        transcript.push(Block::Thinking {
+            content: "c\nd".into(),
+        });
+        let mut projection = TranscriptProjection::new();
+        projection.rebuild_row_index(&lua, &mut transcript.history, 80, false);
+
+        assert!(projection.fold_block_kind(&transcript.history, "thinking", FoldAction::Toggle));
+        let first = projection
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 0)
+            .expect("first thinking node");
+        let second = projection
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, first.rows)
+            .expect("second thinking node");
+        assert_eq!(first.view_state, ViewState::Expanded);
+        assert_eq!(second.view_state, ViewState::Expanded);
+
+        assert!(projection.fold_node(&transcript.history, first.id, FoldAction::Close));
+        assert!(projection.fold_block_kind(&transcript.history, "thinking", FoldAction::Toggle));
+        let first = projection
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 0)
+            .expect("first thinking node");
+        let second = projection
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, first.rows)
+            .expect("second thinking node");
+        assert_eq!(first.view_state, ViewState::Expanded);
+        assert_eq!(second.view_state, ViewState::Expanded);
+
+        assert!(projection.fold_block_kind(&transcript.history, "thinking", FoldAction::Toggle));
+        let first = projection
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 0)
+            .expect("first thinking node");
+        assert_eq!(first.view_state, ViewState::Collapsed);
+    }
+
+    #[test]
+    fn explicit_fold_targets_are_limited_to_affordance_rows() {
+        assert!(!is_explicit_fold_target(ViewState::Expanded, 0, 3));
+        assert!(is_explicit_fold_target(ViewState::Collapsed, 0, 2));
+        assert!(is_explicit_fold_target(ViewState::Collapsed, 1, 2));
+        assert!(!is_explicit_fold_target(
+            ViewState::TrimmedHead { keep: 2 },
+            0,
+            3
+        ));
+        assert!(is_explicit_fold_target(
+            ViewState::TrimmedHead { keep: 2 },
+            2,
+            3
+        ));
+        assert!(is_explicit_fold_target(
+            ViewState::TrimmedTail { keep: 2 },
+            0,
+            3
+        ));
+        assert!(!is_explicit_fold_target(
+            ViewState::TrimmedTail { keep: 2 },
+            1,
+            3
+        ));
     }
 
     #[test]
@@ -2937,6 +3261,271 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(child_rows, vec!["  call-1", "  call-2", "  call-3"]);
+    }
+
+    #[test]
+    fn built_in_read_file_group_replaces_adjacent_terminal_calls() {
+        let lua = test_lua();
+        install_read_file_renderer(&lua);
+        let mut transcript = Transcript::new();
+        push_named_tool(
+            &mut transcript,
+            "read-1",
+            "read_file",
+            "crates/core/src/transcript_model.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "crates/core/src/transcript_model.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "read-2",
+            "read_file",
+            "crates/tui/src/content/display_layout.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "crates/tui/src/content/display_layout.rs")]),
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [crate::content::render_plan::RenderNode::Group { name, child_ids, .. }] if name == "read_file_batch" && child_ids.len() == 2
+        ));
+        assert!(
+            rows.iter().any(|line| line == "* read_file ×2"),
+            "rows: {rows:?}"
+        );
+        assert!(rows
+            .iter()
+            .any(|line| line == "  crates/core/src/transcript_model.rs"));
+        assert!(rows
+            .iter()
+            .any(|line| line == "  crates/tui/src/content/display_layout.rs"));
+
+        let group_id = projection.render_plan.nodes[0].id();
+        assert!(projection.fold_node(&transcript.history, group_id, FoldAction::Open));
+        let expanded = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        assert!(
+            expanded.iter().any(|line| line.contains("* read_file")),
+            "expanded rows: {expanded:?}"
+        );
+        assert!(
+            expanded.iter().any(|line| line.trim() == "1 lines"),
+            "expanded rows: {expanded:?}"
+        );
+        assert!(!expanded.iter().any(|line| line.contains(" output")));
+        assert!(projection.fold_node_at_row(
+            &lua,
+            &mut transcript.history,
+            80,
+            false,
+            FoldAtRow {
+                row: 2,
+                action: FoldAction::Toggle,
+                activation: FoldActivation::AnyNodeRow,
+            },
+        ));
+        let collapsed = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        assert!(collapsed.iter().any(|line| line == "* read_file ×2"));
+        assert!(!collapsed.iter().any(|line| line == "  2 lines"));
+    }
+
+    #[test]
+    fn built_in_grep_and_glob_groups_stay_separate() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        push_named_tool(
+            &mut transcript,
+            "grep-1",
+            "grep",
+            "RenderNode",
+            ToolStatus::Ok,
+            tool_args(&[("pattern", "RenderNode")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "grep-2",
+            "grep",
+            "ViewState",
+            ToolStatus::Ok,
+            tool_args(&[("pattern", "ViewState")]),
+        );
+        transcript.push(Block::Text {
+            content: "between".into(),
+        });
+        push_named_tool(
+            &mut transcript,
+            "glob-1",
+            "glob",
+            "**/*.rs",
+            ToolStatus::Ok,
+            tool_args(&[("pattern", "**/*.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "glob-2",
+            "glob",
+            "runtime/lua/**/*.lua",
+            ToolStatus::Ok,
+            tool_args(&[("pattern", "runtime/lua/**/*.lua")]),
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [
+                crate::content::render_plan::RenderNode::Group { name: first, child_ids: first_children, .. },
+                crate::content::render_plan::RenderNode::Block { .. },
+                crate::content::render_plan::RenderNode::Group { name: second, child_ids: second_children, .. },
+            ] if first == "grep_batch" && first_children.len() == 2 && second == "glob_batch" && second_children.len() == 2
+        ));
+        assert!(rows.iter().any(|line| line == "* grep ×2"));
+        assert!(rows.iter().any(|line| line == "  \"RenderNode\""));
+        assert!(rows.iter().any(|line| line == "between"));
+        assert!(rows.iter().any(|line| line == "* glob ×2"));
+        assert!(rows.iter().any(|line| line == "  **/*.rs"));
+    }
+
+    #[test]
+    fn built_in_tool_groups_include_pending_calls_without_mixing_tools() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        push_named_tool(
+            &mut transcript,
+            "read-1",
+            "read_file",
+            "a.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "a.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "grep-1",
+            "grep",
+            "needle",
+            ToolStatus::Ok,
+            tool_args(&[("pattern", "needle")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "read-pending",
+            "read_file",
+            "b.rs",
+            ToolStatus::Pending,
+            tool_args(&[("file_path", "b.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "read-2",
+            "read_file",
+            "c.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "c.rs")]),
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [
+                crate::content::render_plan::RenderNode::Block { .. },
+                crate::content::render_plan::RenderNode::Block { .. },
+                crate::content::render_plan::RenderNode::Group { name, child_ids, .. },
+            ] if name == "read_file_batch" && child_ids.len() == 2
+        ));
+        assert!(rows.iter().any(|line| line.starts_with("* read_file ×2")));
+    }
+
+    #[test]
+    fn built_in_tool_group_summary_surfaces_errors_and_denials() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        push_named_tool(
+            &mut transcript,
+            "read-1",
+            "read_file",
+            "ok.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "ok.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "read-2",
+            "read_file",
+            "err.rs",
+            ToolStatus::Err,
+            tool_args(&[("file_path", "err.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "read-3",
+            "read_file",
+            "denied.rs",
+            ToolStatus::Denied,
+            tool_args(&[("file_path", "denied.rs")]),
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [crate::content::render_plan::RenderNode::Group { name, child_ids, .. }] if name == "read_file_batch" && child_ids.len() == 3
+        ));
+        assert!(
+            rows.iter()
+                .any(|line| line == "* read_file ×3 (1 error, 1 denied)"),
+            "rows: {rows:?}"
+        );
+        assert!(rows.iter().any(|line| line == "  err.rs"));
+    }
+
+    #[test]
+    fn built_in_background_process_completion_group_uses_typed_event_fields() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        transcript.push(Block::ProcessStatus {
+            text: "Background process 1 finished successfully.".into(),
+            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+                "1",
+                Some(0),
+            )),
+        });
+        transcript.push(Block::ProcessStatus {
+            text: "Background process 2 exited with code 7.".into(),
+            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+                "2",
+                Some(7),
+            )),
+        });
+        transcript.push(Block::ProcessStatus {
+            text: "legacy process note".into(),
+            event: None,
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [
+                crate::content::render_plan::RenderNode::Group { name, child_ids, .. },
+                crate::content::render_plan::RenderNode::Block { .. },
+            ] if name == "background_process_completed" && child_ids.len() == 2
+        ));
+        assert!(rows
+            .iter()
+            .any(|line| line == "background processes finished: 2 (1 failed)"));
+        assert!(rows.iter().any(|line| line == "legacy process note"));
     }
 
     #[test]
@@ -4304,6 +4893,7 @@ mod tests {
             },
             _ => Block::ProcessStatus {
                 text: format!("process status {i}: {}", randomish_text(seed, 6)),
+                event: None,
             },
         }
     }
@@ -4576,7 +5166,7 @@ mod tests {
                 }),
                 3 => transcript.push(Block::Thinking { content: text }),
                 4 => transcript.push(Block::Compacted { summary: text }),
-                _ => transcript.push(Block::ProcessStatus { text }),
+                _ => transcript.push(Block::ProcessStatus { text, event: None }),
             }
             i += 1;
         }
@@ -5359,6 +5949,59 @@ mod tests {
 
         assert!(buf.get_line(0).unwrap_or("").contains("timeout"));
         assert_eq!(copy_first_row(&buf), "* bash echo hi");
+    }
+
+    #[test]
+    fn expanded_group_compact_child_detail_is_selectable() {
+        let lua = test_lua();
+        install_read_file_renderer(&lua);
+        let mut transcript = Transcript::new();
+        push_named_tool(
+            &mut transcript,
+            "read-1",
+            "read_file",
+            "a.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "a.rs")]),
+        );
+        push_named_tool(
+            &mut transcript,
+            "read-2",
+            "read_file",
+            "b.rs",
+            ToolStatus::Ok,
+            tool_args(&[("file_path", "b.rs")]),
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let group_id = projection.render_plan.nodes[0].id();
+        assert!(projection.fold_node(&transcript.history, group_id, FoldAction::Open));
+        let expanded = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        assert!(
+            expanded.iter().any(|line| line.trim() == "1 lines"),
+            "expanded rows: {expanded:?}"
+        );
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(8), Default::default());
+
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            false,
+            &theme,
+            ScrollTarget::visible_row(0),
+            80,
+        );
+
+        assert!(
+            buf.lines().iter().any(|line| line.trim() == "1 lines"),
+            "rows: {:?}",
+            buf.lines()
+        );
+        let copied = copy_byte_range(&buf, 0, buf.text().len());
+        assert!(copied.contains("* read_file a.rs"), "copied: {copied:?}");
+        assert!(copied.contains("1 lines"), "copied: {copied:?}");
     }
 
     #[test]

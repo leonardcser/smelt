@@ -337,6 +337,50 @@ pub enum EngineEvent {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StartTurnInput {
+    User {
+        content: Content,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        display: Option<String>,
+    },
+    Note {
+        note: crate::history::HistoryNote,
+    },
+}
+
+impl StartTurnInput {
+    pub fn user(content: Content, display: Option<String>) -> Self {
+        Self::User { content, display }
+    }
+
+    pub fn note(note: crate::history::HistoryNote) -> Self {
+        Self::Note { note }
+    }
+
+    pub fn provider_content(&self) -> Content {
+        match self {
+            Self::User { content, .. } => content.clone(),
+            Self::Note { note } => Content::text(note.to_model_text()),
+        }
+    }
+
+    pub fn display(&self) -> Option<String> {
+        match self {
+            Self::User { display, .. } => display.clone(),
+            Self::Note { .. } => None,
+        }
+    }
+
+    pub fn note_ref(&self) -> Option<&crate::history::HistoryNote> {
+        match self {
+            Self::User { .. } => None,
+            Self::Note { note } => Some(note),
+        }
+    }
+}
+
 /// Payload for [`UiCommand::StartTurn`]. Boxed at the variant so the
 /// enum stays small - the other variants are channel-frequent
 /// (`Steer`, `Cancel`, `PermissionDecision`, …) while StartTurn is
@@ -344,9 +388,7 @@ pub enum EngineEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTurnPayload {
     pub turn_id: u64,
-    pub content: Content,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub display: Option<String>,
+    pub input: StartTurnInput,
     pub mode: AgentMode,
     pub model: String,
     pub reasoning_effort: ReasoningEffort,
@@ -653,8 +695,7 @@ mod tests {
     fn start_turn_payload_omits_none_overrides_on_serialize() {
         let p = StartTurnPayload {
             turn_id: 1,
-            content: Content::text("hi"),
-            display: None,
+            input: StartTurnInput::user(Content::text("hi"), None),
             mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,
@@ -669,6 +710,7 @@ mod tests {
             tools: vec![],
         };
         let v = serde_json::to_value(&p).unwrap();
+        assert!(v["input"].get("display").is_none());
         assert!(v.get("model_config_overrides").is_none());
         assert!(v.get("permission_overrides").is_none());
         assert!(v.get("system_prompt").is_none());

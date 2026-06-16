@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+│ Inspecting the renderer (4 lines)
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────
+
+────────────────────────────────────────────────────────
+ ○ normal                                       1:1 100%

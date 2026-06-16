@@ -6,6 +6,30 @@
 
 Bundled default transcript renderers. These are ordinary Lua helpers used by the default root renderer and available for user renderers to call or compose.
 
+## `smelt.transcript.defaults.child_failed`
+
+```lua
+fun(child: table): boolean
+```
+
+True when a grouped child represents a failed or denied tool result.
+
+## `smelt.transcript.defaults.group_children`
+
+```lua
+fun(group: table): table
+```
+
+Return child snapshots for a transcript group snapshot.
+
+## `smelt.transcript.defaults.group_failure_counts`
+
+```lua
+fun(group: table): integer, integer
+```
+
+Count failed and denied tool children in a transcript group snapshot.
+
 ## `smelt.transcript.defaults.render`
 
 ```lua
@@ -67,6 +91,16 @@ Types: [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 Render a compact ordered child list for collapsed group nodes. Failed children
 stay in place and use a plain error highlight; expand the group for details.
 
+## `smelt.transcript.defaults.render_group_children`
+
+```lua
+fun(group: table, ctx: smelt.transcript.Context): table
+```
+
+Types: [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+
+Render all group children through the bundled default block renderer.
+
 ## `smelt.transcript.defaults.render_mode`
 
 ```lua
@@ -95,8 +129,27 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
-Render thinking with the current gutter. Folding is controlled by transcript
-presentation state, not by a separate show/hide setting.
+Render thinking for the current transcript view state.
+
+## `smelt.transcript.defaults.render_thinking_full`
+
+```lua
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+```
+
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+
+Render the full thinking block with the current gutter.
+
+## `smelt.transcript.defaults.render_thinking_peek`
+
+```lua
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+```
+
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+
+Render a compact live preview of thinking: first line, omitted count, tail.
 
 ## `smelt.transcript.defaults.render_thinking_summary`
 
@@ -116,8 +169,7 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
-Render a tool block using the current generic primitives and explicit item
-construction.
+Render a tool block for the current transcript view state.
 
 ## `smelt.transcript.defaults.render_tool_body`
 
@@ -129,6 +181,17 @@ Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transc
 
 Render a tool body. Raw output is capped by the safe tail-output helper;
 structured renderers are guttered but otherwise left uncapped.
+
+## `smelt.transcript.defaults.render_tool_full`
+
+```lua
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+```
+
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+
+Render a full tool block using the current generic primitives and explicit item
+construction.
 
 ## `smelt.transcript.defaults.render_tool_header`
 
@@ -151,6 +214,27 @@ Types: [`smelt.transcript.ToolOutput`](types.md#smelttranscripttooloutput), [`sm
 Render raw tool output using generic layout primitives: text, gutter, and a
 rendered-row cap. Error output uses `ErrorMsg`; success output remains dimmed
 by the text primitive's no-highlight fallback.
+
+## `smelt.transcript.defaults.render_tool_output_tail`
+
+```lua
+fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table
+```
+
+Types: [`smelt.transcript.ToolOutput`](types.md#smelttranscripttooloutput), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+
+Render raw tool output without gutter using generic layout primitives: text and
+a rendered-row cap. Body renderers use this for expanded/tail previews.
+
+## `smelt.transcript.defaults.render_tool_summary`
+
+```lua
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+```
+
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+
+Render a compact tool summary: header plus an optional detail line.
 
 ## `smelt.transcript.defaults.render_unknown`
 
@@ -183,4 +267,14 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
 Render user text.
+
+## `smelt.transcript.defaults.tool_collapsed_detail`
+
+```lua
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?
+```
+
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+
+Return a compact tool detail for collapsed tool blocks.
 

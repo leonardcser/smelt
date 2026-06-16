@@ -5,6 +5,9 @@
 use crate::app::{EventOutcome, TuiApp};
 use crate::content::transcript_buf::{FoldAction, FoldActivation};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use std::time::Duration;
+
+const TRANSCRIPT_FOLD_CHORD_WINDOW: Duration = Duration::from_millis(750);
 
 impl TuiApp {
     fn transcript_cursor_row(&self) -> Option<crate::smelt_edit::RowIndex> {
@@ -28,7 +31,12 @@ impl TuiApp {
             self.timers.pending_transcript_fold_chord = None;
             return None;
         }
-        let pending = self.timers.pending_transcript_fold_chord.take().is_some();
+        let now = self.core.clock.instant_now();
+        let pending = self
+            .timers
+            .pending_transcript_fold_chord
+            .take()
+            .is_some_and(|started| now.duration_since(started) < TRANSCRIPT_FOLD_CHORD_WINDOW);
         if pending {
             let action = match k.code {
                 KeyCode::Char('a') => Some(FoldAction::Toggle),
@@ -64,7 +72,7 @@ impl TuiApp {
 
         match k.code {
             KeyCode::Char('z') => {
-                self.timers.pending_transcript_fold_chord = Some(self.core.clock.instant_now());
+                self.timers.pending_transcript_fold_chord = Some(now);
                 Some(EventOutcome::Noop)
             }
             KeyCode::Enter => {
@@ -73,7 +81,7 @@ impl TuiApp {
                     if self.fold_transcript_node_at_row(
                         row,
                         FoldAction::Toggle,
-                        FoldActivation::ExplicitTargetOnly,
+                        FoldActivation::AnyNodeRow,
                     ) {
                         EventOutcome::Redraw
                     } else {

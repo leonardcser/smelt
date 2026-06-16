@@ -13,6 +13,10 @@ transcript_defaults.__tool_body_renderers.write_file = function(block)
   return file_view(block.args or {})
 end
 
+transcript_defaults.__tool_collapsed_details.write_file = function(block)
+  return "wrote " .. smelt.text.line_count((block.args and block.args.content) or "") .. " lines"
+end
+
 smelt.tools.register({
   name = "write_file",
   description = "Writes a file to the local filesystem. This tool will overwrite the existing file if there is one at the provided path.",

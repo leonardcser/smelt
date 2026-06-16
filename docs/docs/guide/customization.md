@@ -123,6 +123,86 @@ end)
 Built-in chords are listed in the [Keybindings
 Reference](../reference/keybindings.md).
 
+## Transcript grouping
+
+Transcript history stays flat, but the display can group adjacent matching
+blocks. Built-ins group adjacent `read_file`, `grep`, and `glob` calls as soon as
+parallel calls appear, plus typed background-process completion notes. Manual
+fold state is session-local: closing or opening a group affects the current UI
+only and is not written to the session file.
+
+Set quick default view preferences from `init.lua` with
+`smelt.settings.transcript_view`. Values are `"collapsed"`, `"peek"`, or
+`"expanded"`; for built-in groups, `false` disables that grouping rule.
+
+```lua
+smelt.settings.transcript_view = {
+  blocks = {
+    thinking = "peek",
+  },
+  tools = {
+    load_skill = "collapsed",
+    read_file = "collapsed",
+    grep = "collapsed",
+    glob = "collapsed",
+    web_fetch = "collapsed",
+    write_file = "collapsed",
+    edit_file = "collapsed",
+    edit_notebook = "collapsed",
+  },
+  groups = {
+    read_file_batch = "collapsed",
+    grep_batch = "collapsed",
+    glob_batch = "collapsed",
+    background_process_completed = "collapsed",
+    -- read_file_batch = false,
+  },
+}
+```
+
+Expanded tool blocks use their normal renderer. Collapsed tool blocks use a
+compact header/summary; override the tool renderer if you want different body
+trimming or formatting.
+
+Register your own display-only group from `init.lua` or a plugin with
+`smelt.transcript.groups.register`. Selectors are declarative so Rust can plan
+adjacent runs without calling Lua for every block; the renderer is ordinary Lua
+layout code.
+
+```lua
+local layout = smelt.layout
+local defaults = require("smelt.transcript.defaults")
+
+smelt.transcript.groups.register({
+  name = "cargo-test-batch",
+  cache_key = "my.cargo-test-batch:v1",
+  min = 2,
+  default_view = "collapsed",
+  selector = {
+    kind = "tool",
+    name = "bash",
+    terminal = true,
+    fields = { ["args.description"] = "Run cargo tests" },
+  },
+  render = function(group, ctx)
+    local summary = layout.text("ran " .. tostring(group.child_count) .. " test commands")
+    if group.view_state ~= "expanded" then return summary end
+    return layout.vbox({
+      summary,
+      defaults.render_group_children(group, ctx),
+    })
+  end,
+})
+```
+
+Use `defaults.render_group_child_list(group, ctx, { field = "args.command" })`
+when you want a compact ordered child list inside an expanded group renderer.
+
+Use `bucket = "args.package"` or `bucket = { "name", "args.package" }` when one
+rule matches several categories but should split adjacent runs by field value.
+Omit `cache_key` only for renderers whose output is intentionally uncached; for
+normal config, bump it whenever the renderer output changes across restarts.
+
 ## Custom Commands
 
 ### Markdown commands

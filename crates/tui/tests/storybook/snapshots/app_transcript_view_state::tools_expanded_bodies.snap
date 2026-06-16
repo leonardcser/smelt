@@ -1,0 +1,34 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* load_skill customize
+  # customize
+  Change themes and keymaps.
+  Register commands and tools.
+
+* write_file src/new.rs
+   1   pub fn new() -> bool {
+   2       true
+   3   }
+
+* edit_file src/lib.rs
+   1 - pub fn old() {}
+   1 + pub fn new() {}
+
+* edit_notebook analysis.ipynb
+   1 - print('todo')
+   1 + print('done')
+
+
+
+
+
+
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                     1:1 100%

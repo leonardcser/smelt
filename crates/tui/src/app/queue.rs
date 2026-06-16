@@ -210,7 +210,7 @@ impl QueuedRequest {
 #[derive(Clone)]
 pub(crate) enum QueuedInput {
     Request(Box<QueuedRequest>),
-    ProcessStatus(String),
+    ProcessStatus(protocol::HistoryNote),
 }
 
 impl QueuedInput {
@@ -236,7 +236,7 @@ impl QueuedInput {
     pub(crate) fn display(&self) -> String {
         match self {
             QueuedInput::Request(req) => req.display.clone(),
-            QueuedInput::ProcessStatus(text) => text.clone(),
+            QueuedInput::ProcessStatus(note) => note.text().to_string(),
         }
     }
 

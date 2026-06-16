@@ -1,3 +1,4 @@
+use mlua::{Lua, Table, Value};
 use smelt_core::lua::TranscriptGroupSpec;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
 use std::collections::{HashMap, HashSet};
@@ -45,6 +46,170 @@ impl RenderNode {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptDefaultViewPolicy {
+    block_kinds: HashMap<String, ViewState>,
+    tools: HashMap<String, ViewState>,
+    groups: HashMap<String, ViewState>,
+    disabled_groups: HashSet<String>,
+}
+
+impl Default for TranscriptDefaultViewPolicy {
+    fn default() -> Self {
+        let mut policy = Self {
+            block_kinds: HashMap::new(),
+            tools: HashMap::new(),
+            groups: HashMap::new(),
+            disabled_groups: HashSet::new(),
+        };
+        policy
+            .block_kinds
+            .insert("thinking".to_string(), ViewState::Peek);
+        for tool in [
+            "load_skill",
+            "read_file",
+            "grep",
+            "glob",
+            "web_fetch",
+            "write_file",
+            "edit_file",
+            "edit_notebook",
+        ] {
+            policy.tools.insert(tool.to_string(), ViewState::Collapsed);
+        }
+        policy
+    }
+}
+
+impl TranscriptDefaultViewPolicy {
+    pub(crate) fn from_lua(lua: &smelt_core::lua::runtime::LuaRuntime) -> Self {
+        let mut policy = Self::default();
+        if let Err(err) = policy.apply_lua_config(&lua.lua) {
+            lua.record_error(format!("smelt.settings.transcript_view: {err}"));
+        }
+        policy
+    }
+
+    fn apply_lua_config(&mut self, lua: &Lua) -> mlua::Result<()> {
+        let globals = lua.globals();
+        let smelt = globals.get::<Option<Table>>("smelt")?;
+        let Some(smelt) = smelt else { return Ok(()) };
+        let settings = smelt.get::<Option<Table>>("settings")?;
+        let Some(settings) = settings else {
+            return Ok(());
+        };
+        let config = settings.get::<Option<Table>>("transcript_view")?;
+        let Some(config) = config else { return Ok(()) };
+
+        apply_view_section(&config, "blocks", &mut self.block_kinds)?;
+        apply_view_section(&config, "tools", &mut self.tools)?;
+        apply_group_view_section(&config, &mut self.groups, &mut self.disabled_groups)?;
+        Ok(())
+    }
+
+    pub(crate) fn group_enabled(&self, name: &str) -> bool {
+        !self.disabled_groups.contains(name)
+    }
+
+    pub(crate) fn node_default_view_state(
+        &self,
+        history: &BlockHistory,
+        node: &RenderNode,
+    ) -> ViewState {
+        match node {
+            RenderNode::Block { id, .. } => history
+                .blocks
+                .get(id)
+                .map(|block| self.block_default_view_state(block))
+                .unwrap_or(ViewState::Expanded),
+            RenderNode::Group {
+                name,
+                default_view_state,
+                ..
+            } => self
+                .groups
+                .get(name)
+                .copied()
+                .unwrap_or(*default_view_state),
+        }
+    }
+
+    fn block_default_view_state(&self, block: &Block) -> ViewState {
+        tool_name(block)
+            .and_then(|name| self.tools.get(name).copied())
+            .or_else(|| self.block_kinds.get(block_kind(block)).copied())
+            .unwrap_or(ViewState::Expanded)
+    }
+}
+
+fn apply_view_section(
+    config: &Table,
+    name: &str,
+    target: &mut HashMap<String, ViewState>,
+) -> mlua::Result<()> {
+    let section = config.get::<Option<Table>>(name)?;
+    let Some(section) = section else {
+        return Ok(());
+    };
+    for pair in section.pairs::<String, Value>() {
+        let (key, value) = pair?;
+        if let Some(view_state) = lua_view_state(value)? {
+            target.insert(key, view_state);
+        }
+    }
+    Ok(())
+}
+
+fn apply_group_view_section(
+    config: &Table,
+    groups: &mut HashMap<String, ViewState>,
+    disabled: &mut HashSet<String>,
+) -> mlua::Result<()> {
+    let section = config.get::<Option<Table>>("groups")?;
+    let Some(section) = section else {
+        return Ok(());
+    };
+    for pair in section.pairs::<String, Value>() {
+        let (key, value) = pair?;
+        if matches!(value, Value::Boolean(false) | Value::Nil) {
+            groups.remove(&key);
+            disabled.insert(key);
+            continue;
+        }
+        if let Some(view_state) = lua_view_state(value)? {
+            disabled.remove(&key);
+            groups.insert(key, view_state);
+        }
+    }
+    Ok(())
+}
+
+fn lua_view_state(value: Value) -> mlua::Result<Option<ViewState>> {
+    match value {
+        Value::String(s) => parse_lua_view_state(s.to_str()?.as_ref()).map(Some),
+        Value::Table(t) => match t.get::<Option<String>>("default_view")?.as_deref() {
+            Some(value) => parse_lua_view_state(value).map(Some),
+            None => Ok(None),
+        },
+        Value::Nil | Value::Boolean(false) => Ok(None),
+        other => Err(mlua::Error::external(format!(
+            "expected \"collapsed\", \"peek\", or \"expanded\", got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn parse_lua_view_state(value: &str) -> mlua::Result<ViewState> {
+    match value {
+        "collapsed" => Ok(ViewState::Collapsed),
+        "peek" => Ok(ViewState::Peek),
+        "expanded" => Ok(ViewState::Expanded),
+        other => Err(mlua::Error::external(format!(
+            "unknown view state `{other}`; expected \"collapsed\", \"peek\", or \"expanded\""
+        ))),
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TranscriptPresentationState {
     overrides: HashMap<RenderNodeId, ViewState>,
@@ -58,6 +223,7 @@ impl TranscriptPresentationState {
 
     pub(crate) fn effective_view_state(
         &self,
+        policy: &TranscriptDefaultViewPolicy,
         plan: &RenderPlan,
         history: &BlockHistory,
         index: usize,
@@ -66,11 +232,12 @@ impl TranscriptPresentationState {
         self.overrides
             .get(&id)
             .copied()
-            .or_else(|| plan.node_default_view_state(history, index))
+            .or_else(|| plan.node_default_view_state(policy, history, index))
     }
 
     pub(crate) fn set(
         &mut self,
+        policy: &TranscriptDefaultViewPolicy,
         plan: &RenderPlan,
         history: &BlockHistory,
         id: RenderNodeId,
@@ -79,7 +246,7 @@ impl TranscriptPresentationState {
         if !plan.contains_id(id) {
             return false;
         }
-        let Some(default) = plan.node_default_view_state_by_id(history, id) else {
+        let Some(default) = plan.node_default_view_state_by_id(policy, history, id) else {
             return false;
         };
         let changed = if view_state == default {
@@ -98,6 +265,7 @@ impl TranscriptPresentationState {
 
     pub(crate) fn toggle(
         &mut self,
+        policy: &TranscriptDefaultViewPolicy,
         plan: &RenderPlan,
         history: &BlockHistory,
         id: RenderNodeId,
@@ -105,26 +273,34 @@ impl TranscriptPresentationState {
         let Some(index) = plan.index_of(id) else {
             return false;
         };
-        let Some(current) = self.effective_view_state(plan, history, index) else {
+        let Some(current) = self.effective_view_state(policy, plan, history, index) else {
+            return false;
+        };
+        let Some(default) = plan.node_default_view_state(policy, history, index) else {
             return false;
         };
         let next = if matches!(current, ViewState::Expanded) {
-            ViewState::Collapsed
+            if matches!(default, ViewState::Expanded) {
+                ViewState::Collapsed
+            } else {
+                default
+            }
         } else {
             ViewState::Expanded
         };
-        self.set(plan, history, id, next)
+        self.set(policy, plan, history, id, next)
     }
 
     pub(crate) fn set_all(
         &mut self,
+        policy: &TranscriptDefaultViewPolicy,
         plan: &RenderPlan,
         history: &BlockHistory,
         view_state: ViewState,
     ) -> bool {
         let mut changed = false;
         for id in plan.ids().collect::<Vec<_>>() {
-            changed |= self.set(plan, history, id, view_state);
+            changed |= self.set(policy, plan, history, id, view_state);
         }
         changed
     }
@@ -219,57 +395,40 @@ impl RenderPlan {
 
     pub(crate) fn node_default_view_state(
         &self,
+        policy: &TranscriptDefaultViewPolicy,
         history: &BlockHistory,
         index: usize,
     ) -> Option<ViewState> {
-        match self.nodes.get(index)? {
-            RenderNode::Block { id, .. } => {
-                let semantic = history.resolve_key(
-                    *id,
-                    LayoutKey {
-                        width: 0,
-                        show_thinking: false,
-                        view_state: ViewState::Expanded,
-                        content_hash: 0,
-                        sidecar_hash: 0,
-                    },
-                );
-                if semantic.view_state != ViewState::Expanded {
-                    return Some(semantic.view_state);
-                }
-                match history.blocks.get(id) {
-                    Some(Block::Thinking { .. }) => Some(ViewState::Collapsed),
-                    _ => Some(ViewState::Expanded),
-                }
-            }
-            RenderNode::Group {
-                default_view_state, ..
-            } => Some(*default_view_state),
-        }
+        self.nodes
+            .get(index)
+            .map(|node| policy.node_default_view_state(history, node))
     }
 
     pub(crate) fn node_default_view_state_by_id(
         &self,
+        policy: &TranscriptDefaultViewPolicy,
         history: &BlockHistory,
         id: RenderNodeId,
     ) -> Option<ViewState> {
         self.index_of(id)
-            .and_then(|index| self.node_default_view_state(history, index))
+            .and_then(|index| self.node_default_view_state(policy, history, index))
     }
 
     pub(crate) fn node_key(
         &self,
+        policy: &TranscriptDefaultViewPolicy,
         history: &BlockHistory,
         presentation: &TranscriptPresentationState,
         index: usize,
         base_key: LayoutKey,
     ) -> Option<NodeLayoutKey> {
-        let view_state = presentation.effective_view_state(self, history, index)?;
-        self.node_key_with_view_state(history, index, base_key, view_state)
+        let view_state = presentation.effective_view_state(policy, self, history, index)?;
+        self.node_key_with_view_state(policy, history, index, base_key, view_state)
     }
 
     pub(crate) fn node_key_with_view_state(
         &self,
+        policy: &TranscriptDefaultViewPolicy,
         history: &BlockHistory,
         index: usize,
         base_key: LayoutKey,
@@ -305,6 +464,16 @@ impl RenderPlan {
                     group_cache_key: self.group_cache_key,
                     view_state,
                     child_ids,
+                    child_view_states: child_range
+                        .clone()
+                        .filter_map(|block_index| {
+                            let id = *history.order.get(block_index)?;
+                            Some(policy.node_default_view_state(
+                                history,
+                                &RenderNode::Block { id, block_index },
+                            ))
+                        })
+                        .collect(),
                     child_hashes: child_range
                         .clone()
                         .filter_map(|block_index| {
@@ -371,6 +540,7 @@ struct GroupContentKey<'a> {
     group_cache_key: Option<u64>,
     view_state: ViewState,
     child_ids: &'a [BlockId],
+    child_view_states: Vec<ViewState>,
     child_hashes: Vec<u64>,
 }
 
@@ -388,7 +558,7 @@ fn build_nodes(history: &BlockHistory, groups: &[TranscriptGroupSpec]) -> Vec<Re
     let mut nodes = Vec::new();
     let mut index = 0usize;
     while index < history.order.len() {
-        let Some((spec, bucket)) = matching_group(history, groups, index) else {
+        let Some((spec, bucket, end)) = matching_group_run(history, groups, index) else {
             nodes.push(RenderNode::Block {
                 id: history.order[index],
                 block_index: index,
@@ -396,23 +566,8 @@ fn build_nodes(history: &BlockHistory, groups: &[TranscriptGroupSpec]) -> Vec<Re
             index += 1;
             continue;
         };
-        let start = index;
-        index += 1;
-        while index < history.order.len()
-            && matching_group(history, groups, index).as_ref().is_some_and(
-                |(next_spec, next_bucket)| next_spec.name == spec.name && next_bucket == &bucket,
-            )
-        {
-            index += 1;
-        }
-        if index - start < spec.min {
-            nodes.extend((start..index).map(|block_index| RenderNode::Block {
-                id: history.order[block_index],
-                block_index,
-            }));
-            continue;
-        }
-        let child_ids = history.order[start..index].to_vec();
+
+        let child_ids = history.order[index..end].to_vec();
         let id = smelt_core::utils::hash_serializable(&GroupIdKey {
             name: &spec.name,
             bucket: &bucket,
@@ -422,25 +577,33 @@ fn build_nodes(history: &BlockHistory, groups: &[TranscriptGroupSpec]) -> Vec<Re
             id,
             name: spec.name.clone(),
             bucket,
-            child_range: start..index,
+            child_range: index..end,
             child_ids,
             default_view_state: view_state(spec.default_view.as_deref()),
         });
+        index = end;
     }
     nodes
 }
 
-fn matching_group<'a>(
+fn matching_group_run<'a>(
     history: &BlockHistory,
     groups: &'a [TranscriptGroupSpec],
-    block_index: usize,
-) -> Option<(&'a TranscriptGroupSpec, String)> {
+    start: usize,
+) -> Option<(&'a TranscriptGroupSpec, String, usize)> {
     groups.iter().find_map(|spec| {
-        selector_matches(history, spec, block_index).then(|| {
-            let bucket =
-                group_bucket(history, spec, block_index).unwrap_or_else(|| spec.name.clone());
-            (spec, bucket)
-        })
+        if !selector_matches(history, spec, start) {
+            return None;
+        }
+        let bucket = group_bucket(history, spec, start).unwrap_or_else(|| spec.name.clone());
+        let mut end = start + 1;
+        while end < history.order.len()
+            && selector_matches(history, spec, end)
+            && group_bucket(history, spec, end).unwrap_or_else(|| spec.name.clone()) == bucket
+        {
+            end += 1;
+        }
+        (end - start >= spec.min).then_some((spec, bucket, end))
     })
 }
 
@@ -482,6 +645,12 @@ fn selector_matches(
             return false;
         }
     }
+    for field in &spec.selector.fields {
+        if block_field(history, block_index, &field.field).as_deref() != Some(field.value.as_str())
+        {
+            return false;
+        }
+    }
     true
 }
 
@@ -509,6 +678,12 @@ fn block_field(history: &BlockHistory, block_index: usize, field: &str) -> Optio
             Block::ToolCall { call_id, .. } => history
                 .tool_state(call_id)
                 .map(|state| state.status.label().to_string()),
+            _ => None,
+        },
+        "event" | "event_type" | "process_id" | "exit_code" => match block {
+            Block::ProcessStatus {
+                event: Some(event), ..
+            } => event.field_value(field),
             _ => None,
         },
         field => field.strip_prefix("args.").and_then(|arg| match block {
@@ -568,8 +743,194 @@ fn block_kind(block: &Block) -> &'static str {
 fn view_state(value: Option<&str>) -> ViewState {
     match value {
         Some("collapsed") => ViewState::Collapsed,
+        Some("peek") => ViewState::Peek,
         Some("trimmed_head") => ViewState::TrimmedHead { keep: 1 },
         Some("trimmed_tail") => ViewState::TrimmedTail { keep: 1 },
         _ => ViewState::Expanded,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_view_policy_peeks_thinking_blocks() {
+        let policy = TranscriptDefaultViewPolicy::default();
+        assert_eq!(
+            policy.block_default_view_state(&Block::Thinking {
+                content: "preview".into(),
+            }),
+            ViewState::Peek
+        );
+        assert_eq!(
+            policy.block_default_view_state(&Block::Text {
+                content: "shown".into(),
+            }),
+            ViewState::Expanded
+        );
+        for tool in ["load_skill", "read_file", "grep", "glob", "web_fetch"] {
+            assert_eq!(
+                policy.block_default_view_state(&Block::ToolCall {
+                    call_id: format!("call-{tool}"),
+                    name: tool.into(),
+                    summary: protocol::StyledLines::default(),
+                    args: HashMap::new(),
+                }),
+                ViewState::Collapsed
+            );
+        }
+    }
+
+    #[test]
+    fn default_view_policy_specific_tool_overrides_block_kind() {
+        let mut policy = TranscriptDefaultViewPolicy::default();
+        policy
+            .block_kinds
+            .insert("tool".to_string(), ViewState::Collapsed);
+        policy
+            .tools
+            .insert("read_file".to_string(), ViewState::Expanded);
+
+        assert_eq!(
+            policy.block_default_view_state(&Block::ToolCall {
+                call_id: "call".into(),
+                name: "read_file".into(),
+                summary: protocol::StyledLines::default(),
+                args: HashMap::new(),
+            }),
+            ViewState::Expanded
+        );
+    }
+
+    #[test]
+    fn process_status_typed_fields_match_selectors_and_buckets() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(Block::ProcessStatus {
+            text: "Background process 1 finished successfully.".into(),
+            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+                "1",
+                Some(0),
+            )),
+        });
+        transcript.push(Block::ProcessStatus {
+            text: "Background process 2 finished successfully.".into(),
+            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+                "2",
+                Some(0),
+            )),
+        });
+        transcript.push(Block::ProcessStatus {
+            text: "legacy process status".into(),
+            event: None,
+        });
+        let spec = TranscriptGroupSpec {
+            name: "background-processes".into(),
+            cache_key: None,
+            priority: 0,
+            registration_order: 0,
+            min: 2,
+            default_view: None,
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("process_status".into()),
+                name: None,
+                terminal: None,
+                fields: vec![smelt_core::lua::TranscriptGroupFieldMatch {
+                    field: "event".into(),
+                    value: "background_process_completed".into(),
+                }],
+            },
+            bucket: Some(smelt_core::lua::TranscriptGroupBucket {
+                fields: vec!["exit_code".into()],
+            }),
+        };
+
+        let plan = RenderPlan::for_history_with_groups(&transcript.history, &[spec], 1, None);
+
+        assert_eq!(plan.nodes.len(), 2);
+        assert!(matches!(
+            &plan.nodes[0],
+            RenderNode::Group {
+                name,
+                bucket,
+                child_range,
+                ..
+            } if name == "background-processes" && bucket == "0" && child_range == &(0..2)
+        ));
+        assert!(matches!(
+            plan.nodes[1],
+            RenderNode::Block { block_index: 2, .. }
+        ));
+    }
+    #[test]
+    fn lower_priority_group_can_match_when_higher_priority_run_is_below_min() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(Block::Text {
+            content: "first".into(),
+        });
+        transcript.push(Block::Text {
+            content: "second".into(),
+        });
+
+        let high_min = TranscriptGroupSpec {
+            name: "high-min".into(),
+            cache_key: None,
+            priority: 10,
+            registration_order: 0,
+            min: 3,
+            default_view: None,
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("assistant".into()),
+                name: None,
+                terminal: None,
+                fields: Vec::new(),
+            },
+            bucket: None,
+        };
+        let low_min = TranscriptGroupSpec {
+            name: "low-min".into(),
+            cache_key: None,
+            priority: 0,
+            registration_order: 1,
+            min: 2,
+            default_view: None,
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("assistant".into()),
+                name: None,
+                terminal: None,
+                fields: Vec::new(),
+            },
+            bucket: None,
+        };
+
+        let plan =
+            RenderPlan::for_history_with_groups(&transcript.history, &[high_min, low_min], 1, None);
+
+        assert!(matches!(
+            plan.nodes.as_slice(),
+            [RenderNode::Group { name, child_range, .. }] if name == "low-min" && child_range == &(0..2)
+        ));
+    }
+
+    #[test]
+    fn default_view_policy_group_setting_overrides_registration_default() {
+        let mut policy = TranscriptDefaultViewPolicy::default();
+        policy
+            .groups
+            .insert("tools".to_string(), ViewState::Expanded);
+        let transcript = smelt_core::content::transcript::Transcript::new();
+        let node = RenderNode::Group {
+            id: 1,
+            name: "tools".into(),
+            bucket: "tools".into(),
+            child_range: 0..0,
+            child_ids: Vec::new(),
+            default_view_state: ViewState::Collapsed,
+        };
+
+        assert_eq!(
+            policy.node_default_view_state(&transcript.history, &node),
+            ViewState::Expanded
+        );
     }
 }

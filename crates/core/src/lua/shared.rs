@@ -89,6 +89,13 @@ pub struct TranscriptGroupSelector {
     pub kind: Option<String>,
     pub name: Option<String>,
     pub terminal: Option<bool>,
+    pub fields: Vec<TranscriptGroupFieldMatch>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptGroupFieldMatch {
+    pub field: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]

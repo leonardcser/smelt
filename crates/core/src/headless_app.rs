@@ -92,8 +92,7 @@ impl HeadlessApp {
             .engine
             .send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
                 turn_id,
-                content: Content::text(content),
-                display: None,
+                input: protocol::StartTurnInput::user(Content::text(content), None),
                 mode: self.core.config.mode.clone(),
                 model: self.core.config.model.clone(),
                 reasoning_effort: self.core.config.reasoning_effort,

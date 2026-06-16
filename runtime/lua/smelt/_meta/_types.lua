@@ -488,31 +488,32 @@
 ---@field thinking_summary? string Folded thinking summary text.
 ---@field user_message? string Tool user-facing status message.
 ---@field output? smelt.transcript.ToolOutput Tool output snapshot.
+---@field event? string Process status event type, e.g. `"background_process_completed"`.
+---@field event_type? string Alias for `event`.
+---@field event_data? table Full typed process status event payload.
+---@field process_id? string Background process id for process status events.
+---@field exit_code? integer Background process exit code when known.
 ---@field command? string Exec command.
 ---@field command_spans? table Exec command as one styled span line, including the `!` accent.
 
 --- Renderer context. Width, theme, and scroll state are intentionally absent.
 ---@class smelt.transcript.Context
----@field show_thinking boolean Whether thinking blocks should render expanded.
+---@field show_thinking boolean Legacy renderer hint; folding is controlled by transcript presentation state.
+---@field view_state "collapsed"|"peek"|"expanded"|"trimmed_head"|"trimmed_tail" Effective view state for the node currently being rendered.
 ---@field renderer_generation integer Current renderer generation used for cache invalidation.
 ---@field surface string Rendering surface name, currently `"transcript"`.
 ---@field limits table Numeric product row budgets such as `tool_output_rows`.
-
---- Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.
----@class smelt.transcript.Stream
----@field append fun(delta: string): nil Append one assistant text delta and re-render the target buffer.
----@field finish fun(final_text: string?): nil Finalize the streaming block. If `final_text` is provided and differs from the streamed text, the final text is rendered instead.
----@field reset fun(): nil Clear the stream and the target buffer.
----@field width fun(width: integer?): integer? Read or set the render width in terminal cells.
-
----@class smelt.transcript.StreamOpts
----@field width? integer Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters.
 
 --- Group selector declared through `smelt.transcript.groups.register`.
 ---@class smelt.transcript.GroupSelector
 ---@field kind? string Match block kind.
 ---@field name? string Match tool name for tool blocks.
 ---@field terminal? boolean Match terminal/non-terminal blocks.
+---@field event? string Match typed process status event type.
+---@field event_type? string Alias for `event`.
+---@field process_id? string Match typed background process id.
+---@field exit_code? integer|string Match typed background process exit code.
+---@field fields? table<string,string|integer> Exact block-field matches such as `{ event = "background_process_completed" }`.
 
 --- Declarative transcript group registration. The host owns planning; Lua owns
 --- the selector metadata and the virtual-node renderer.
@@ -525,6 +526,16 @@
 ---@field selector smelt.transcript.GroupSelector Declarative block matcher.
 ---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
 ---@field render fun(group: table, ctx: smelt.transcript.Context): table Virtual group renderer.
+
+--- Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.
+---@class smelt.transcript.Stream
+---@field append fun(delta: string): nil Append one assistant text delta and re-render the target buffer.
+---@field finish fun(final_text: string?): nil Finalize the streaming block. If `final_text` is provided and differs from the streamed text, the final text is rendered instead.
+---@field reset fun(): nil Clear the stream and the target buffer.
+---@field width fun(width: integer?): integer? Read or set the render width in terminal cells.
+
+---@class smelt.transcript.StreamOpts
+---@field width? integer Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters.
 
 --- Tool output snapshot passed to transcript renderers.
 ---@class smelt.transcript.ToolOutput

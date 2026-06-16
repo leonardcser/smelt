@@ -54,8 +54,13 @@ local function format_text_window(content, offset, limit)
   return table.concat(out, "\n")
 end
 
-transcript_defaults.__tool_body_renderers.read_file = function(block)
-  return smelt.layout.text(smelt.text.line_count((block.output and block.output.content) or "") .. " lines")
+transcript_defaults.__tool_body_renderers.read_file = function(block, ctx)
+  if not block.output then return nil end
+  return transcript_defaults.render_tool_output_tail(block.output, ctx)
+end
+
+transcript_defaults.__tool_collapsed_details.read_file = function(block)
+  return smelt.text.line_count((block.output and block.output.content) or "") .. " lines"
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({

@@ -66,11 +66,12 @@ pub(crate) async fn engine_task(
                 match cmd {
                     UiCommand::StartTurn(payload) => {
                         let protocol::StartTurnPayload {
-                            turn_id, content: input_content, display, mode, model, reasoning_effort,
+                            turn_id, input, mode, model, reasoning_effort,
                             history, api_base, api_key, session_id, session_dir: _,
                             model_config_overrides, permission_overrides,
                             system_prompt: tui_system_prompt, tools,
                         } = *payload;
+                        let display = input.display();
 
                         let provider = build_provider(
                             &config.api, &client,
@@ -112,7 +113,7 @@ pub(crate) async fn engine_task(
                             tps_samples: Vec::new(),
                             tool_elapsed: HashMap::new(),
                         };
-                        turn.run(input_content, history).await;
+                        turn.run(input, history).await;
                     }
                     UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                         config.api.base = api_base;
@@ -1084,15 +1085,24 @@ impl<'a> Turn<'a> {
         }
     }
 
-    async fn run(&mut self, content: Content, history: Vec<HistoryItem>) {
+    fn push_current_turn_input(&mut self, input: protocol::StartTurnInput) {
+        match input {
+            protocol::StartTurnInput::User { content, .. } if !content.is_empty() => {
+                self.push_turn_content(content, self.display.clone());
+            }
+            protocol::StartTurnInput::Note { note } => {
+                self.history.push(HistoryItem::note(note));
+            }
+            protocol::StartTurnInput::User { .. } => {}
+        }
+    }
+
+    async fn run(&mut self, input: protocol::StartTurnInput, history: Vec<HistoryItem>) {
         self.provider.reset_turn_state();
         self.history = Vec::with_capacity(history.len() + 2);
         self.history.push(HistoryItem::system(&self.system_prompt));
         self.history.extend(history);
-
-        if !content.is_empty() {
-            self.push_turn_content(content, self.display.clone());
-        }
+        self.push_current_turn_input(input);
         self.emit_messages_snapshot();
 
         let mut first = true;
@@ -2465,7 +2475,7 @@ mod tests {
 
         assert!(matches!(
             &turn.history[1],
-            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text })
+            HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, .. })
                 if text == "Background process 751225 exited with code 1."
         ));
         assert!(matches!(
@@ -2473,6 +2483,78 @@ mod tests {
             HistoryItem::Note(protocol::HistoryNote::ModeChange { text, .. })
                 if text == "now in apply mode."
         ));
+        let typed_note = protocol::HistoryNote::process_status_event(
+            protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
+        );
+        turn.push_current_turn_input(protocol::StartTurnInput::note(typed_note.clone()));
+
+        assert!(matches!(
+            &turn.history[3],
+            HistoryItem::Note(note) if note == &typed_note
+        ));
+    }
+
+    #[tokio::test]
+    async fn start_turn_note_input_emits_typed_note_snapshot() {
+        let note = protocol::HistoryNote::process_status_event(
+            protocol::ProcessStatusEvent::background_process_completed("751225", Some(1)),
+        );
+        let config = EngineConfig {
+            api: api_cfg(),
+            model: "m".into(),
+            instructions: None,
+            system_prompt_override: Some("sys".into()),
+            cwd: std::path::PathBuf::from("/tmp"),
+            skill_section: None,
+            redact_secrets: false,
+            cache_ttl_long: false,
+            clock: std::sync::Arc::new(crate::clock::RealClock),
+        };
+        let mut handle = crate::start(config, Box::new(crate::tools::EmptyDispatcher::new()));
+        drop(handle.take_host_rx());
+
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), handle.recv())
+                .await
+                .expect("engine ready")
+            {
+                Some(EngineEvent::Ready) => break,
+                Some(_) => continue,
+                None => panic!("engine closed before Ready"),
+            }
+        }
+
+        handle.send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
+            turn_id: 1,
+            input: protocol::StartTurnInput::note(note.clone()),
+            mode: AgentMode::normal(),
+            model: "m".into(),
+            reasoning_effort: ReasoningEffort::Off,
+            history: Vec::new(),
+            api_base: None,
+            api_key: None,
+            session_id: "s".into(),
+            session_dir: std::path::PathBuf::from("/tmp"),
+            model_config_overrides: None,
+            permission_overrides: None,
+            system_prompt: Some("sys".into()),
+            tools: Vec::new(),
+        })));
+
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), handle.recv())
+                .await
+                .expect("history snapshot")
+            {
+                Some(EngineEvent::HistoryUpdated { history, .. }) => {
+                    assert_eq!(history, vec![HistoryItem::note(note)]);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("engine closed before HistoryUpdated"),
+            }
+        }
+        handle.send(UiCommand::Cancel);
     }
 
     // ---- next_request_id ----

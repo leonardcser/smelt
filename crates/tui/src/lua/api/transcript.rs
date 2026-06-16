@@ -268,7 +268,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "text",
-        "Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).",
+        "Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).",
         &[],
         |_, ()| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
@@ -348,7 +348,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "node_at_row",
-        "Return render-node metadata for absolute display row `row`, including `{ kind, id, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.",
+        r#"Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`."#,
         &["row"],
         |lua, row: crate::smelt_edit::RowIndex| -> LuaResult<Option<mlua::Table>> {
             let snap = crate::lua::try_with_app(|app| app.transcript_node_at_row(row)).flatten();
@@ -357,14 +357,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "fold_at_row",
-        "Apply a fold action (`toggle`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.",
+        "Apply a fold action (`toggle`, `peek`, `open`, `close`) to the render node at absolute display row `row`. Pass `{ explicit = true }` to require a collapsed summary/elision affordance row.",
         &["row", "action", "opts"],
         |_, (row, action, opts): (crate::smelt_edit::RowIndex, String, Option<mlua::Table>)| -> LuaResult<bool> {
-            let action = match action.as_str() {
-                "toggle" => crate::content::transcript_buf::FoldAction::Toggle,
-                "open" => crate::content::transcript_buf::FoldAction::Open,
-                "close" => crate::content::transcript_buf::FoldAction::Close,
-                _ => return Ok(false),
+            let Some(action) = fold_action(action.as_str()) else {
+                return Ok(false);
             };
             let explicit = opts
                 .as_ref()
@@ -379,6 +376,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 app.fold_transcript_node_at_row(row, action, activation)
             })
             .unwrap_or(false))
+        },
+    )?;
+    m.fn_(
+        "fold_node",
+        "Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node id returned by `node_at_row(...).node_id`.",
+        &["node_id", "action"],
+        |_, (node_id, action): (mlua::Table, String)| -> LuaResult<bool> {
+            let Some(id) = render_node_id_from_table(node_id)? else {
+                return Ok(false);
+            };
+            let Some(action) = fold_action(action.as_str()) else {
+                return Ok(false);
+            };
+            Ok(crate::lua::try_with_app(|app| app.fold_transcript_node(id, action))
+                .unwrap_or(false))
         },
     )?;
     m.fn_(
@@ -399,14 +411,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "fold_kind",
-        "Apply a fold action (`toggle`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`.",
+        "Apply a fold action (`toggle`, `peek`, `open`, or `close`) to every current block node with the given kind, e.g. `thinking`. `toggle` is aggregate: open all if any matching node is folded, otherwise close all.",
         &["kind", "action"],
         |_, (kind, action): (String, String)| -> LuaResult<bool> {
-            let action = match action.as_str() {
-                "toggle" => crate::content::transcript_buf::FoldAction::Toggle,
-                "open" => crate::content::transcript_buf::FoldAction::Open,
-                "close" => crate::content::transcript_buf::FoldAction::Close,
-                _ => return Ok(false),
+            let Some(action) = fold_action(action.as_str()) else {
+                return Ok(false);
             };
             Ok(crate::lua::try_with_app(|app| app.fold_transcript_block_kind(&kind, action))
                 .unwrap_or(false))

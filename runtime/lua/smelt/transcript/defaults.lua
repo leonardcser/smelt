@@ -3,6 +3,7 @@ smelt.transcript.defaults = smelt.transcript.defaults or {}
 
 local M = smelt.transcript.defaults
 M.__tool_body_renderers = M.__tool_body_renderers or {}
+M.__tool_collapsed_details = M.__tool_collapsed_details or {}
 
 local layout = smelt.layout
 
@@ -64,10 +65,34 @@ function smelt.transcript.defaults.render(block, ctx)
   return M.render_unknown(block, ctx)
 end
 
---- Render a tool block using the current generic primitives and explicit item
---- construction.
+--- Render a tool block for the current transcript view state.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_tool(block, ctx)
+  if ctx and ctx.view_state == "collapsed" then
+    return M.render_tool_summary(block, ctx)
+  end
+  return M.render_tool_full(block, ctx)
+end
+
+--- Render a compact tool summary: header plus an optional detail line.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+function smelt.transcript.defaults.render_tool_summary(block, ctx)
+  local header = M.render_tool_header(block, ctx)
+  local detail = M.tool_collapsed_detail(block, ctx)
+  if not detail or detail == "" then return header end
+  return layout.vbox({
+    header,
+    layout.gutter(
+      layout.runs({ { { text = tostring(detail), dim = true } } }),
+      { text = "  " }
+    ),
+  })
+end
+
+--- Render a full tool block using the current generic primitives and explicit item
+--- construction.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+function smelt.transcript.defaults.render_tool_full(block, ctx)
   local items = {}
   items[#items + 1] = M.render_tool_header(block, ctx)
 
@@ -250,6 +275,14 @@ function tool_header_lines(block, status, hl)
   return lines
 end
 
+--- Return a compact tool detail for collapsed tool blocks.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?
+function smelt.transcript.defaults.tool_collapsed_detail(block, ctx)
+  local renderer = M.__tool_collapsed_details[block.name or ""]
+  if not renderer then return nil end
+  return renderer(block, ctx)
+end
+
 --- Render a tool body. Raw output is capped by the safe tail-output helper;
 --- structured renderers are guttered but otherwise left uncapped.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table?
@@ -273,11 +306,10 @@ function smelt.transcript.defaults.render_tool_body(block, ctx, opts)
   return M.render_tool_output(block.output, ctx, opts)
 end
 
---- Render raw tool output using generic layout primitives: text, gutter, and a
---- rendered-row cap. Error output uses `ErrorMsg`; success output remains dimmed
---- by the text primitive's no-highlight fallback.
+--- Render raw tool output without gutter using generic layout primitives: text and
+--- a rendered-row cap. Body renderers use this for expanded/tail previews.
 ---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table
-function smelt.transcript.defaults.render_tool_output(output, ctx, opts)
+function smelt.transcript.defaults.render_tool_output_tail(output, ctx, opts)
   opts = opts or {}
   ctx = ctx or {}
   local limits = ctx.limits or {}
@@ -287,18 +319,27 @@ function smelt.transcript.defaults.render_tool_output(output, ctx, opts)
   local hl = opts.hl or opts.hl_group
   if not hl and is_error then hl = "ErrorMsg" end
 
+  return layout.cap(
+    layout.text(content, {
+      hl_group = hl,
+      ansi = true,
+    }),
+    {
+      rows = rows,
+      keep = opts.keep or "tail",
+      marker = opts.marker or "above",
+    }
+  )
+end
+
+--- Render raw tool output using generic layout primitives: text, gutter, and a
+--- rendered-row cap. Error output uses `ErrorMsg`; success output remains dimmed
+--- by the text primitive's no-highlight fallback.
+---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table
+function smelt.transcript.defaults.render_tool_output(output, ctx, opts)
+  opts = opts or {}
   return layout.gutter(
-    layout.cap(
-      layout.text(content, {
-        hl_group = hl,
-        ansi = true,
-      }),
-      {
-        rows = rows,
-        keep = opts.keep or "tail",
-        marker = opts.marker or "above",
-      }
-    ),
+    M.render_tool_output_tail(output, ctx, opts),
     { text = opts.gutter or "  " }
   )
 end
@@ -328,13 +369,58 @@ function smelt.transcript.defaults.render_assistant(block, ctx)
   return layout.markdown(block.content or "")
 end
 
---- Render thinking with the current gutter. Folding is controlled by transcript
---- presentation state, not by a separate show/hide setting.
+--- Render thinking for the current transcript view state.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_thinking(block, ctx)
+  if ctx and ctx.view_state == "collapsed" then
+    return M.render_thinking_summary(block, ctx)
+  elseif ctx and ctx.view_state == "peek" then
+    return M.render_thinking_peek(block, ctx)
+  end
+  return M.render_thinking_full(block, ctx)
+end
+
+--- Render the full thinking block with the current gutter.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+function smelt.transcript.defaults.render_thinking_full(block, ctx)
   local _ = ctx
   return layout.gutter(
     layout.markdown(block.content or "", {
+      dim = true,
+      italic = true,
+      inline = true,
+    }),
+    { text = "│ ", styled = true }
+  )
+end
+
+local function thinking_preview_lines(content)
+  local lines = {}
+  for line in ((content or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if trimmed ~= "" then lines[#lines + 1] = trimmed end
+  end
+  if #lines <= 4 then return lines end
+
+  local omitted = #lines - 4
+  local label = omitted == 1 and "line" or "lines"
+  return {
+    lines[1],
+    "… " .. tostring(omitted) .. " " .. label .. " omitted …",
+    lines[#lines - 2],
+    lines[#lines - 1],
+    lines[#lines],
+  }
+end
+
+--- Render a compact live preview of thinking: first line, omitted count, tail.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+function smelt.transcript.defaults.render_thinking_peek(block, ctx)
+  local _ = ctx
+  local lines = thinking_preview_lines(block.content or "")
+  if #lines == 0 then lines[1] = block.thinking_summary or "thinking (0 lines)" end
+  return layout.gutter(
+    layout.markdown(table.concat(lines, "\n"), {
       dim = true,
       italic = true,
       inline = true,
@@ -435,7 +521,13 @@ function smelt.transcript.defaults.render_unknown(block, ctx)
 end
 
 local function field_path_value(item, field)
-  if type(field) == "string" then field = { field } end
+  if type(field) == "string" then
+    local path = {}
+    for part in string.gmatch(field, "[^.]+") do
+      path[#path + 1] = part
+    end
+    field = path
+  end
   if type(field) ~= "table" then return nil end
   local value = item
   for _, key in ipairs(field) do
@@ -446,8 +538,48 @@ local function field_path_value(item, field)
   return value
 end
 
-local function child_failed(child)
-  return child.status == "err" or (child.output and child.output.is_error == true)
+--- Return child snapshots for a transcript group snapshot.
+---@type fun(group: table): table
+function smelt.transcript.defaults.group_children(group)
+  return group.children or group.blocks or {}
+end
+
+--- True when a grouped child represents a failed or denied tool result.
+---@type fun(child: table): boolean
+function smelt.transcript.defaults.child_failed(child)
+  return child.status == "err"
+    or child.status == "denied"
+    or (child.output and child.output.is_error == true)
+end
+
+--- Count failed and denied tool children in a transcript group snapshot.
+---@type fun(group: table): integer, integer
+function smelt.transcript.defaults.group_failure_counts(group)
+  local errors = 0
+  local denied = 0
+  for _, child in ipairs(M.group_children(group)) do
+    if child.status == "denied" then
+      denied = denied + 1
+    elseif M.child_failed(child) then
+      errors = errors + 1
+    end
+  end
+  return errors, denied
+end
+
+--- Render all group children through the bundled default block renderer.
+---@type fun(group: table, ctx: smelt.transcript.Context): table
+function smelt.transcript.defaults.render_group_children(group, ctx)
+  local items = {}
+  for _, child in ipairs(M.group_children(group)) do
+    if #items > 0 then items[#items + 1] = layout.line("") end
+    local child_ctx = {}
+    for k, v in pairs(ctx or {}) do child_ctx[k] = v end
+    child_ctx.view_state = child.view_state or child_ctx.view_state
+    items[#items + 1] = M.render(child, child_ctx)
+  end
+  if #items == 0 then return layout.empty() end
+  return layout.vbox(items)
 end
 
 --- Render a compact ordered child list for collapsed group nodes. Failed children
@@ -456,7 +588,7 @@ end
 function smelt.transcript.defaults.render_group_child_list(group, ctx, opts)
   local _ = ctx
   opts = opts or {}
-  local children = group.children or group.blocks or {}
+  local children = M.group_children(group)
   local max = opts.max or #children
   local lines = {}
   for i, child in ipairs(children) do
@@ -464,7 +596,7 @@ function smelt.transcript.defaults.render_group_child_list(group, ctx, opts)
     local value = field_path_value(child, opts.field) or child.summary_text or child.name or child.text or child.content or ""
     local text = tostring(value)
     local span = { text = (opts.prefix or "  ") .. text }
-    if child_failed(child) then
+    if M.child_failed(child) then
       span.hl = opts.error_hl or "ErrorMsg"
       span.dim = opts.error_dim ~= false
     elseif opts.dim ~= false then

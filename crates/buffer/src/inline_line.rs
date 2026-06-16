@@ -240,8 +240,8 @@ fn append_normal_fragments<T: Clone>(
         let has_space = word_end < text.len();
         let space_end = word_end + usize::from(has_space);
         let segment_width = text_width(&text[word_start..space_end]);
-
         let word_width = text_width(&text[word_start..word_end]);
+
         let word_overflows_current_row =
             state.col + segment_width > state.max_cells() && state.col > 0;
         if word_overflows_current_row && word_width <= state.max_cells() {
@@ -369,6 +369,15 @@ mod tests {
                 vec![String::from("[\"long/path.rs")],
                 vec![String::from("\"]}")]
             ]
+        );
+    }
+
+    #[test]
+    fn break_on_spaces_keeps_indent_with_oversized_word() {
+        let line = InlineLine::plain("  abcdef", ());
+        assert_eq!(
+            texts(line.wrap_ranges(4)),
+            vec![vec![String::from("  ab")], vec![String::from("cdef")]]
         );
     }
 

@@ -199,6 +199,20 @@ impl TranscriptView {
         )
     }
 
+    pub(crate) fn fold_node(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        show_thinking: bool,
+        id: crate::content::render_plan::RenderNodeId,
+        action: crate::content::transcript_buf::FoldAction,
+    ) -> bool {
+        self.projection
+            .rebuild_row_index(lua, &mut self.transcript.history, width, show_thinking);
+        self.projection
+            .fold_node(&self.transcript.history, id, action)
+    }
+
     pub(crate) fn fold_all(
         &mut self,
         lua: &LuaRuntime,
@@ -499,12 +513,12 @@ impl TuiApp {
         );
     }
 
-    pub(crate) fn has_transcript_content(&mut self, _show_thinking: bool) -> bool {
+    pub(crate) fn has_transcript_content(&mut self) -> bool {
         !self.transcript.is_empty()
     }
 
     /// Full transcript as one string per display row. Result is cached as an
-    /// `Arc<Vec<String>>` until the generation, width, or `show_thinking` changes.
+    /// `Arc<Vec<String>>` until the transcript, width, renderer, or presentation changes.
     pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
         let _perf = smelt_perf::perf::begin("transcript:materialize_rows_full");
         self.sync_transcript_renderer_generation();
@@ -577,6 +591,22 @@ impl TuiApp {
             row,
             action,
             activation,
+        )
+    }
+
+    pub(crate) fn fold_transcript_node(
+        &mut self,
+        id: crate::content::render_plan::RenderNodeId,
+        action: crate::content::transcript_buf::FoldAction,
+    ) -> bool {
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        self.transcript.fold_node(
+            &self.lua,
+            width,
+            self.core.config.settings.show_thinking,
+            id,
+            action,
         )
     }
 

@@ -11,8 +11,13 @@ local function describe(args)
   return pattern .. " in " .. path
 end
 
-transcript_defaults.__tool_body_renderers.glob = function(block)
-  return transcript_defaults.render_display_count(block, { unit = "file" })
+transcript_defaults.__tool_body_renderers.glob = function(block, ctx)
+  if not block.output then return nil end
+  return transcript_defaults.render_tool_output_tail(block.output, ctx)
+end
+
+transcript_defaults.__tool_collapsed_details.glob = function(block)
+  return smelt.text.line_count((block.output and block.output.content) or "") .. " files"
 end
 
 smelt.tools.register(smelt.tools._with_watchdog({

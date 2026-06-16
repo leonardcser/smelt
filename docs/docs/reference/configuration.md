@@ -248,6 +248,33 @@ Unknown keys raise at the access site; type mismatches raise on assignment.
 | `autoupgrade_channel`   | `string`  | `"stable"` | `"stable"` downloads tagged prebuilt tarballs (any tag, including `alpha`/`beta` prereleases); `"unstable"` follows `main` HEAD via `cargo install` |
 | `autoupgrade_interval`  | `number`  | `3600`  | Seconds between background autoupgrade checks. Clamped to a 60 s minimum to avoid hammering GitHub |
 
+`smelt.settings.transcript_view` is an additional Lua table for transcript fold
+defaults. It is not a scalar `--set` key. Use `"collapsed"`, `"peek"`, or
+`"expanded"` for block kinds, tool names, and group names; use `false` to disable a built-in
+group.
+
+```lua
+smelt.settings.transcript_view = {
+  blocks = { thinking = "peek" },
+  tools = {
+    load_skill = "collapsed",
+    read_file = "collapsed",
+    grep = "collapsed",
+    glob = "collapsed",
+    web_fetch = "collapsed",
+    write_file = "collapsed",
+    edit_file = "collapsed",
+    edit_notebook = "collapsed",
+  },
+  groups = {
+    read_file_batch = "collapsed",
+    grep_batch = "collapsed",
+    glob_batch = "collapsed",
+    -- read_file_batch = false,
+  },
+}
+```
+
 Override any setting from the CLI with `--set KEY=VALUE`. Boolean values
 must be `true`/`false`; numeric values are parsed as floats; string
 values are passed through as-is and validated against the schema's

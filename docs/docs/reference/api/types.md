@@ -698,6 +698,11 @@ Semantic transcript block snapshot passed to the root renderer.
 | `thinking_summary` | `string` |  | Folded thinking summary text. |
 | `user_message` | `string` |  | Tool user-facing status message. |
 | `output` | [smelt.transcript.ToolOutput](types.md#smelttranscripttooloutput) |  | Tool output snapshot. |
+| `event` | `string` |  | Process status event type, e.g. `"background_process_completed"`. |
+| `event_type` | `string` |  | Alias for `event`. |
+| `event_data` | `table` |  | Full typed process status event payload. |
+| `process_id` | `string` |  | Background process id for process status events. |
+| `exit_code` | `integer` |  | Background process exit code when known. |
 | `command` | `string` |  | Exec command. |
 | `command_spans` | `table` |  | Exec command as one styled span line, including the `!` accent. |
 
@@ -707,10 +712,42 @@ Renderer context. Width, theme, and scroll state are intentionally absent.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `show_thinking` | `boolean` | yes | Whether thinking blocks should render expanded. |
+| `show_thinking` | `boolean` | yes | Legacy renderer hint; folding is controlled by transcript presentation state. |
+| `view_state` | `"collapsed"|"peek"|"expanded"|"trimmed_head"|"trimmed_tail"` | yes | Effective view state for the node currently being rendered. |
 | `renderer_generation` | `integer` | yes | Current renderer generation used for cache invalidation. |
 | `surface` | `string` | yes | Rendering surface name, currently `"transcript"`. |
 | `limits` | `table` | yes | Numeric product row budgets such as `tool_output_rows`. |
+
+### `smelt.transcript.GroupSelector`
+
+Group selector declared through `smelt.transcript.groups.register`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `kind` | `string` |  | Match block kind. |
+| `name` | `string` |  | Match tool name for tool blocks. |
+| `terminal` | `boolean` |  | Match terminal/non-terminal blocks. |
+| `event` | `string` |  | Match typed process status event type. |
+| `event_type` | `string` |  | Alias for `event`. |
+| `process_id` | `string` |  | Match typed background process id. |
+| `exit_code` | `integer|string` |  | Match typed background process exit code. |
+| `fields` | `table<string,string|integer>` |  | Exact block-field matches such as `{ event = "background_process_completed" }`. |
+
+### `smelt.transcript.GroupSpec`
+
+Declarative transcript group registration. The host owns planning; Lua owns
+the selector metadata and the virtual-node renderer.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | yes | Unique group name. Registering the same name replaces it. |
+| `cache_key` | `string` |  | Persisted layout cache key; omit to opt out while active. |
+| `priority` | `integer` |  | Higher priority plans first. Defaults to 0. |
+| `min` | `integer` |  | Minimum adjacent matching blocks required. Defaults to 2. |
+| `default_view` | `"collapsed"|"expanded"` |  | Initial presentation when the group first appears. |
+| `selector` | [smelt.transcript.GroupSelector](types.md#smelttranscriptgroupselector) | yes | Declarative block matcher. |
+| `bucket` | `string|string[]` |  | Stable field names used to split adjacent matching runs. |
+| `render` | `fun(group: table, ctx: smelt.transcript.Context):` | yes | table Virtual group renderer. |
 
 ### `smelt.transcript.Stream`
 
@@ -728,32 +765,6 @@ Transcript-shaped streaming renderer for plugin-owned buffers. Append model text
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `width` | `integer` |  | Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters. |
-
-### `smelt.transcript.GroupSelector`
-
-Group selector declared through `smelt.transcript.groups.register`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `kind` | `string` |  | Match block kind. |
-| `name` | `string` |  | Match tool name for tool blocks. |
-| `terminal` | `boolean` |  | Match terminal/non-terminal blocks. |
-
-### `smelt.transcript.GroupSpec`
-
-Declarative transcript group registration. The host owns planning; Lua owns
-the selector metadata and the virtual-node renderer.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `name` | `string` | yes | Unique group name. Registering the same name replaces it. |
-| `cache_key` | `string` |  | Persisted layout cache key; omit to opt out while active. |
-| `priority` | `integer` |  | Higher priority plans first. Defaults to 0. |
-| `min` | `integer` |  | Minimum adjacent matching blocks required. Defaults to 2. |
-| `default_view` | `"collapsed"|"expanded"` |  | Initial presentation when the group first appears. |
-| `selector` | [smelt.transcript.GroupSelector](types.md#smelttranscriptgroupselector) | yes | Declarative block matcher. |
-| `bucket` | `string|string[]` |  | Stable field names used to split adjacent matching runs. |
-| `render` | `fun(group: table, ctx: smelt.transcript.Context):` | yes | table Virtual group renderer. |
 
 ### `smelt.transcript.ToolOutput`
 

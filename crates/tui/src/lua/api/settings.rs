@@ -66,9 +66,12 @@ pub(super) fn register(
         lua,
         smelt,
         "settings",
-        "Metatable-backed proxy table for preferences. Read and write keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. UiHost-only.",
+        "Metatable-backed proxy table for preferences. Read and write scalar keys directly (`settings.foo = true`, `settings.compact_threshold = 0.65`) or iterate with `pairs`. Values are typed per the schema; type mismatches raise. `settings.transcript_view` is a Lua table for transcript default fold state. UiHost-only.",
         Tier::UiHost,
     )?;
+    settings_tbl
+        .tbl
+        .raw_set("transcript_view", lua.create_table()?)?;
     let mt_tbl = lua.create_table()?;
     let mt = LuaMod::extend(lua, mt_tbl.clone(), "smelt.settings", Tier::UiHost);
 

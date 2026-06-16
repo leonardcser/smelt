@@ -9,6 +9,8 @@ pub mod app_notify;
 pub mod app_prompt;
 pub mod app_status;
 pub mod app_tool;
+pub mod app_transcript_group;
+pub mod app_transcript_view_state;
 pub mod buffer;
 pub mod overlays;
 pub mod sequences;

@@ -475,7 +475,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `show_prediction` | `bool` | `true` | Ghost-text input predictions in the prompt. |
 | `show_tips` | `bool` | `true` | Curated discovery tips in the start banner and prompt chrome. |
 | `show_slug` | `bool` | `true` | Task-slug label in status bar. |
-| `show_thinking` | `bool` | `true` | Show full thinking/reasoning blocks (false shows a single summary). |
+| `show_thinking` | `bool` | `true` | Legacy renderer hint for custom/fallback thinking renderers; presentation folding controls the UI. |
 | `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
 | `redact_secrets` | `bool` | `true` | Scrub detected secrets from user input and tool results before they reach the LLM. |
 | `auto_reload` | `bool` | `false` | Watch on-disk config inputs (init.lua, plugins/, commands/,  skills/, AGENTS.md, `--system-prompt` file) and dispatch  `/reload` when any of them changes. |
@@ -1055,6 +1055,12 @@ Register, unregister, and resolve plugin tools for the engine.
 
 Bundled default transcript renderers.
 
+- `smelt.transcript.defaults.child_failed` :: `fun(child: table): boolean`
+  True when a grouped child represents a failed or denied tool result.
+- `smelt.transcript.defaults.group_children` :: `fun(group: table): table`
+  Return child snapshots for a transcript group snapshot.
+- `smelt.transcript.defaults.group_failure_counts` :: `fun(group: table): integer, integer`
+  Count failed and denied tool children in a transcript group snapshot.
 - `smelt.transcript.defaults.render` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render any semantic transcript block with the bundled default policy.
 - `smelt.transcript.defaults.render_assistant` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
@@ -1067,30 +1073,46 @@ Bundled default transcript renderers.
   Render an exec block.
 - `smelt.transcript.defaults.render_group_child_list` :: `fun(group: table, ctx: smelt.transcript.Context, opts: table?): table`
   Render a compact ordered child list for collapsed group nodes.
+- `smelt.transcript.defaults.render_group_children` :: `fun(group: table, ctx: smelt.transcript.Context): table`
+  Render all group children through the bundled default block renderer.
 - `smelt.transcript.defaults.render_mode` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a mode note.
 - `smelt.transcript.defaults.render_process_status` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a process-status note.
 - `smelt.transcript.defaults.render_thinking` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
-  Render thinking with the current gutter.
+  Render thinking for the current transcript view state.
+- `smelt.transcript.defaults.render_thinking_full` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render the full thinking block with the current gutter.
+- `smelt.transcript.defaults.render_thinking_peek` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a compact live preview of thinking: first line, omitted count, tail.
 - `smelt.transcript.defaults.render_thinking_summary` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a compact thinking summary.
 - `smelt.transcript.defaults.render_tool` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
-  Render a tool block using the current generic primitives and explicit item construction.
+  Render a tool block for the current transcript view state.
 - `smelt.transcript.defaults.render_tool_body` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table?`
   Render a tool body.
+- `smelt.transcript.defaults.render_tool_full` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a full tool block using the current generic primitives and explicit item construction.
 - `smelt.transcript.defaults.render_tool_header` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table`
   Render the default one-line tool header.
 - `smelt.transcript.defaults.render_tool_output` :: `fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table`
   Render raw tool output using generic layout primitives: text, gutter, and a rendered-row cap.
+- `smelt.transcript.defaults.render_tool_output_tail` :: `fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table`
+  Render raw tool output without gutter using generic layout primitives: text and a rendered-row cap.
+- `smelt.transcript.defaults.render_tool_summary` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
+  Render a compact tool summary: header plus an optional detail line.
 - `smelt.transcript.defaults.render_unknown` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render unknown block kinds without failing the transcript.
 - `smelt.transcript.defaults.render_user` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a user block.
 - `smelt.transcript.defaults.render_user_text` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render user text.
+- `smelt.transcript.defaults.tool_collapsed_detail` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?`
+  Return a compact tool detail for collapsed tool blocks.
 
 #### `smelt.transcript.groups`
+
+Declarative transcript display grouping.
 
 - `smelt.transcript.groups.cache_key` :: `fun(): integer?`
   Current group-registry cache key, or nil when any active group opted out of persisted planning/layout caches.
@@ -1610,9 +1632,11 @@ Transcript display policy and rendered transcript inspection.
 - `smelt.transcript.fold_all` (UiHost) :: `fun(action: string): boolean`
   Apply a fold action (`open` or `close`) to every current transcript render node.
 - `smelt.transcript.fold_at_row` (UiHost) :: `fun(row: integer, action: string, opts: table?): boolean`
-  Apply a fold action (`toggle`, `open`, `close`) to the render node at absolute display row `row`.
+  Apply a fold action (`toggle`, `peek`, `open`, `close`) to the render node at absolute display row `row`.
 - `smelt.transcript.fold_kind` (UiHost) :: `fun(kind: string, action: string): boolean`
-  Apply a fold action (`toggle`, `open`, or `close`) to every current block node with the given kind, e.g.
+  Apply a fold action (`toggle`, `peek`, `open`, or `close`) to every current block node with the given kind, e.g.
+- `smelt.transcript.fold_node` (UiHost) :: `fun(node_id: table, action: string): boolean`
+  Apply a fold action (`toggle`, `peek`, `open`, `close`) to a typed render node id returned by `node_at_row(...).node_id`.
 - `smelt.transcript.get_renderer` (Host) :: `fun(): (fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?)?`
   Return the current composed root transcript renderer, or nil before the default renderer has been installed.
 - `smelt.transcript.invalidate_renderer` (Host) :: `fun(): integer`
@@ -1620,7 +1644,7 @@ Transcript display policy and rendered transcript inspection.
 - `smelt.transcript.is_empty` (UiHost) :: `fun(): boolean`
   Return `true` when the transcript history holds no blocks (user, assistant, thinking, tool, exec, code, compacted).
 - `smelt.transcript.node_at_row` (UiHost) :: `fun(row: integer): table?`
-  Return render-node metadata for absolute display row `row`, including `{ kind, id, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
+  Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript.
 - `smelt.transcript.rows` (UiHost) :: `fun(start: integer, count: integer): table`
   Return rendered transcript display rows in `[start, start + count)`.
 - `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil`
@@ -1628,7 +1652,7 @@ Transcript display policy and rendered transcript inspection.
 - `smelt.transcript.stream` (UiHost) :: `fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream`
   Create a transcript-shaped streaming renderer for `buf`.
 - `smelt.transcript.text` (UiHost) :: `fun(): string`
-  Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
+  Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).
 - `smelt.transcript.visible_blocks` (UiHost) :: `fun(): table`
   Return the transcript blocks materialized in the current visible projection as `{ idx, role, first_row, rows, first_line }` entries.
 

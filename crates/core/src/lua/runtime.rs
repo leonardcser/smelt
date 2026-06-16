@@ -137,6 +137,7 @@ fn keymap_mode_matches(binding_mode: &str, active_mode: &str) -> bool {
 /// Context passed to the root transcript renderer.
 pub struct TranscriptRenderCtx {
     pub show_thinking: bool,
+    pub view_state: crate::transcript_model::ViewState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1504,6 +1505,7 @@ impl LuaRuntime {
         let ctx_table = match transcript_render_ctx_to_lua_table(
             &self.lua,
             ctx.show_thinking,
+            ctx.view_state,
             self.transcript_renderer_generation(),
         ) {
             Ok(t) => t,
@@ -1567,6 +1569,7 @@ impl LuaRuntime {
         let ctx_table = match transcript_render_ctx_to_lua_table(
             &self.lua,
             ctx.show_thinking,
+            ctx.view_state,
             self.transcript_renderer_generation(),
         ) {
             Ok(t) => t,
@@ -1927,6 +1930,16 @@ fn transcript_block_kind(block: &Block) -> &'static str {
     block.kind()
 }
 
+fn view_state_label(view_state: crate::transcript_model::ViewState) -> &'static str {
+    match view_state {
+        crate::transcript_model::ViewState::Expanded => "expanded",
+        crate::transcript_model::ViewState::Peek => "peek",
+        crate::transcript_model::ViewState::Collapsed => "collapsed",
+        crate::transcript_model::ViewState::TrimmedHead { .. } => "trimmed_head",
+        crate::transcript_model::ViewState::TrimmedTail { .. } => "trimmed_tail",
+    }
+}
+
 fn tool_status_label(status: ToolStatus) -> &'static str {
     status.label()
 }
@@ -1934,10 +1947,12 @@ fn tool_status_label(status: ToolStatus) -> &'static str {
 fn transcript_render_ctx_to_lua_table(
     lua: &Lua,
     show_thinking: bool,
+    view_state: crate::transcript_model::ViewState,
     renderer_generation: u64,
 ) -> LuaResult<mlua::Table> {
     let ctx = lua.create_table()?;
     ctx.set("show_thinking", show_thinking)?;
+    ctx.set("view_state", view_state_label(view_state))?;
     ctx.set("renderer_generation", renderer_generation)?;
     ctx.set("surface", "transcript")?;
 
@@ -2038,8 +2053,9 @@ fn transcript_block_to_lua_table(
             t.set("icon", icon.as_str())?;
             t.set("hl_group", hl_group.as_str())?;
         }
-        Block::ProcessStatus { text } => {
+        Block::ProcessStatus { text, event } => {
             t.set("text", text.as_str())?;
+            set_process_status_event_lua_fields(lua, &t, event.as_ref())?;
         }
         Block::Thinking { content } => {
             t.set("content", content.as_str())?;
@@ -2101,6 +2117,20 @@ fn transcript_block_to_lua_table(
     }
 
     Ok(t)
+}
+
+fn set_process_status_event_lua_fields(
+    lua: &Lua,
+    table: &mlua::Table,
+    event: Option<&protocol::ProcessStatusEvent>,
+) -> LuaResult<()> {
+    let Some(event) = event else {
+        return Ok(());
+    };
+    for (field, value) in event.snapshot_json_fields() {
+        table.set(field, crate::lua::json_to_lua(lua, &value)?)?;
+    }
+    Ok(())
 }
 
 fn args_to_lua_table(
@@ -2277,7 +2307,7 @@ fn fallback_transcript_layout(
             icon,
             hl_group,
         } => layout_text(format!("{icon}{text}"), Some(hl_group), false),
-        Block::ProcessStatus { text } => layout_text(text.clone(), Some("SmeltProcess"), false),
+        Block::ProcessStatus { text, .. } => layout_text(text.clone(), Some("SmeltProcess"), false),
         Block::Thinking { content } => {
             if show_thinking {
                 BlockLayout::Gutter {
@@ -2807,6 +2837,56 @@ mod tests {
         assert!(rt.flush_persistent_state().is_none());
     }
 
+    fn runtime_without_builtin_groups() -> LuaRuntime {
+        let rt = LuaRuntime::new();
+        {
+            let mut registry = rt
+                .shared
+                .transcript_groups
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            registry.entries.clear();
+            registry.next_order = 0;
+        }
+        rt.shared
+            .transcript_groups_cache_key
+            .store(0, std::sync::atomic::Ordering::Release);
+        rt.shared
+            .transcript_groups_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        rt
+    }
+
+    #[test]
+    fn process_status_block_table_exposes_typed_event_fields() {
+        let lua = Lua::new();
+        let block = Block::ProcessStatus {
+            text: "Background process 42 exited with code 7.".into(),
+            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+                "42",
+                Some(7),
+            )),
+        };
+
+        let table = transcript_block_to_lua_table(&lua, BlockId::new(9), 3, &block, None).unwrap();
+
+        assert_eq!(table.get::<String>("kind").unwrap(), "process_status");
+        assert_eq!(
+            table.get::<String>("event").unwrap(),
+            "background_process_completed"
+        );
+        assert_eq!(
+            table.get::<String>("event_type").unwrap(),
+            "background_process_completed"
+        );
+        assert_eq!(table.get::<String>("process_id").unwrap(), "42");
+        assert_eq!(table.get::<i32>("exit_code").unwrap(), 7);
+        let event_data: mlua::Table = table.get("event_data").unwrap();
+        assert_eq!(
+            event_data.get::<String>("event").unwrap(),
+            "background_process_completed"
+        );
+    }
     #[test]
     fn host_runtime_installs_transcript_renderer_api() {
         let rt = LuaRuntime::new();
@@ -2820,6 +2900,8 @@ mod tests {
                   and type(smelt.transcript.groups.register) == "function"
                   and type(smelt.transcript.defaults.render) == "function"
                   and type(smelt.transcript.defaults.render_group_child_list) == "function"
+                  and type(smelt.transcript.defaults.render_group_children) == "function"
+                  and type(smelt.transcript.defaults.group_failure_counts) == "function"
                   and smelt.transcript.get_renderer() ~= nil
             "#,
             )
@@ -2830,8 +2912,7 @@ mod tests {
 
     #[test]
     fn transcript_group_registry_orders_and_replaces_specs() {
-        let rt = LuaRuntime::new();
-        assert!(rt.load_error.is_none(), "load error: {:?}", rt.load_error);
+        let rt = runtime_without_builtin_groups();
         rt.lua
             .load(
                 r#"
@@ -2877,8 +2958,32 @@ mod tests {
     }
 
     #[test]
-    fn transcript_group_registration_remove_is_token_scoped() {
+    fn transcript_group_selector_rejects_conflicting_field_aliases() {
         let rt = LuaRuntime::new();
+        let err = rt
+            .lua
+            .load(
+                r#"
+                smelt.transcript.groups.register({
+                  name = "processes",
+                  selector = {
+                    kind = "process_status",
+                    event = "background_process_completed",
+                    fields = { event_type = "other_event" },
+                  },
+                  render = function(group, ctx) return smelt.layout.empty() end,
+                })
+                "#,
+            )
+            .exec()
+            .expect_err("conflicting selector fields should fail");
+
+        assert!(err.to_string().contains("conflicts"));
+    }
+
+    #[test]
+    fn transcript_group_registration_remove_is_token_scoped() {
+        let rt = runtime_without_builtin_groups();
         rt.lua
             .load(
                 r#"
@@ -2906,7 +3011,7 @@ mod tests {
 
     #[test]
     fn transcript_group_without_cache_key_opts_out_of_cache() {
-        let rt = LuaRuntime::new();
+        let rt = runtime_without_builtin_groups();
         rt.lua
             .load(
                 r#"
@@ -2946,6 +3051,7 @@ mod tests {
             &serde_json::json!({ "count": 3 }),
             TranscriptRenderCtx {
                 show_thinking: true,
+                view_state: crate::transcript_model::ViewState::Expanded,
             },
         );
         match layout {

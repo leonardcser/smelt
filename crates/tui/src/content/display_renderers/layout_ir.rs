@@ -930,7 +930,7 @@ fn render_cap_marker(
         out.print_gutter(&gutter.text);
     }
     out.print(&format!(
-        "... {} {direction}",
+        "… {} {direction}",
         pluralize(skipped as usize, "line", "lines")
     ));
     out.pop_style();

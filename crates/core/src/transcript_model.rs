@@ -137,6 +137,8 @@ pub enum Block {
     },
     ProcessStatus {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        event: Option<protocol::ProcessStatusEvent>,
     },
     Thinking {
         content: String,
@@ -204,7 +206,7 @@ impl Block {
         match self {
             Block::User { text, .. } => Some(text.clone()),
             Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
-            Block::ProcessStatus { text } => Some(text.clone()),
+            Block::ProcessStatus { text, .. } => Some(text.clone()),
             Block::Text { content } | Block::Thinking { content } => Some(content.clone()),
             Block::Compacted { summary } => Some(summary.clone()),
             Block::CodeLine { content, .. } => Some(content.clone()),
@@ -253,6 +255,10 @@ impl BlockId {
     pub const fn new(id: u64) -> Self {
         Self(id)
     }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -271,6 +277,8 @@ pub enum ViewState {
     /// Full content - default.
     #[default]
     Expanded,
+    /// A compact live preview; renderers decide exact rows.
+    Peek,
     /// One summary line only.
     Collapsed,
     /// Show the first `keep` rows of the block's content, elide the rest.
@@ -282,7 +290,7 @@ pub enum ViewState {
 impl ViewState {
     pub fn measured_height(self, total_rows: u64) -> u64 {
         match self {
-            Self::Expanded => total_rows,
+            Self::Expanded | Self::Peek => total_rows,
             Self::Collapsed => {
                 if total_rows > 1 {
                     2
@@ -303,7 +311,7 @@ impl ViewState {
 
     pub fn elides_rows(self, total_rows: u64) -> bool {
         match self {
-            Self::Expanded => false,
+            Self::Expanded | Self::Peek => false,
             Self::Collapsed => total_rows > 1,
             Self::TrimmedHead { keep } | Self::TrimmedTail { keep } => total_rows > keep as u64,
         }

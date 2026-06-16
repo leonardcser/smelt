@@ -1,5 +1,6 @@
 use crate::content::render_plan::{
-    NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptPresentationState,
+    NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptDefaultViewPolicy,
+    TranscriptPresentationState,
 };
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_core::content::block_layout::{
@@ -11,7 +12,7 @@ use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 7;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
@@ -51,7 +52,7 @@ impl DisplayCacheKey {
             key.sidecar_hash,
             renderer_generation,
             renderer_cache_key,
-            u64::from(key.show_thinking),
+            smelt_core::utils::hash_serializable(&(key.show_thinking, key.view_state)),
         )
     }
 }
@@ -118,6 +119,7 @@ pub(crate) enum CompileJob {
         block_id: BlockId,
         index: usize,
         key: DisplayCacheKey,
+        view_state: ViewState,
         block: Block,
         state: Option<ToolState>,
     },
@@ -125,6 +127,7 @@ pub(crate) enum CompileJob {
         id: RenderNodeId,
         name: String,
         key: DisplayCacheKey,
+        view_state: ViewState,
         snapshot: serde_json::Value,
     },
 }
@@ -140,19 +143,25 @@ impl CompileJob {
                 block_id,
                 index,
                 key,
+                view_state,
                 block,
                 state,
             } => (
                 id,
                 key,
-                compile_block_with_lua(env, block_id, index, &block, state.as_ref()),
+                compile_block_with_lua(env, block_id, index, &block, state.as_ref(), view_state),
             ),
             Self::Group {
                 id,
                 name,
                 key,
+                view_state,
                 snapshot,
-            } => (id, key, compile_group_with_lua(env, &name, &snapshot)),
+            } => (
+                id,
+                key,
+                compile_group_with_lua(env, &name, &snapshot, view_state),
+            ),
         }
     }
 }
@@ -221,8 +230,13 @@ impl DisplayModel {
                         )
                     })
             });
-        let jobs =
-            self.collect_compile_jobs(history, renderer_generation, renderer_cache_key, blocks);
+        let jobs = self.collect_compile_jobs(
+            history,
+            &TranscriptDefaultViewPolicy::default(),
+            renderer_generation,
+            renderer_cache_key,
+            blocks,
+        );
         let compiled = jobs.len();
         let blocks = jobs.into_iter().map(|job| job.compile(env)).collect();
         self.insert_compiled_blocks(blocks);
@@ -235,6 +249,7 @@ impl DisplayModel {
     pub(crate) fn collect_compile_jobs(
         &mut self,
         history: &BlockHistory,
+        policy: &TranscriptDefaultViewPolicy,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
         nodes: impl IntoIterator<Item = (usize, RenderNode, NodeLayoutKey)>,
@@ -270,16 +285,19 @@ impl DisplayModel {
                         block_id,
                         index,
                         key: display_key,
+                        view_state: key.view_state,
                         block,
                         state,
                     });
                 }
                 RenderNode::Group { ref name, .. } => {
-                    let snapshot = group_snapshot_json(history, index, &node, key.view_state);
+                    let snapshot =
+                        group_snapshot_json(history, policy, index, &node, key.view_state);
                     jobs.push(CompileJob::Group {
                         id,
                         name: name.clone(),
                         key: display_key,
+                        view_state: key.view_state,
                         snapshot,
                     });
                 }
@@ -294,12 +312,13 @@ impl DisplayModel {
         &mut self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
         entries: Vec<DisplayLayoutCacheEntry>,
     ) -> usize {
         let mut hydrated = 0usize;
         for entry in entries {
-            if !display_layout_entry_matches_history(history, plan, presentation, &entry) {
+            if !display_layout_entry_matches_history(history, plan, policy, presentation, &entry) {
                 continue;
             }
             self.blocks.insert(
@@ -319,6 +338,7 @@ impl DisplayModel {
         &self,
         history: &BlockHistory,
         plan: &RenderPlan,
+        policy: &TranscriptDefaultViewPolicy,
         presentation: &TranscriptPresentationState,
         renderer_generation: Option<u64>,
         renderer_cache_key: Option<u64>,
@@ -349,7 +369,7 @@ impl DisplayModel {
                 key: cached.key,
                 layout: cached.layout.clone(),
             };
-            if display_layout_entry_matches_history(history, plan, presentation, &entry) {
+            if display_layout_entry_matches_history(history, plan, policy, presentation, &entry) {
                 entries.push(entry);
             }
         }
@@ -389,6 +409,7 @@ impl DisplayModel {
 fn display_layout_entry_matches_history(
     history: &BlockHistory,
     plan: &RenderPlan,
+    policy: &TranscriptDefaultViewPolicy,
     presentation: &TranscriptPresentationState,
     entry: &DisplayLayoutCacheEntry,
 ) -> bool {
@@ -424,6 +445,7 @@ fn display_layout_entry_matches_history(
             .position(|node| node.id() == entry.id)
             .and_then(|index| {
                 plan.node_key(
+                    policy,
                     history,
                     presentation,
                     index,
@@ -452,6 +474,7 @@ pub(crate) fn compile_block_with_show(block: &Block, show_thinking: bool) -> Lay
         0,
         block,
         None,
+        ViewState::Expanded,
     )
 }
 
@@ -459,12 +482,14 @@ fn compile_group_with_lua(
     env: TranscriptRenderEnv<'_>,
     name: &str,
     snapshot: &serde_json::Value,
+    view_state: ViewState,
 ) -> LayoutIr {
     let layout = env.lua.render_transcript_group_layout(
         name,
         snapshot,
         smelt_core::lua::runtime::TranscriptRenderCtx {
             show_thinking: env.show_thinking,
+            view_state,
         },
     );
     match compile_layout_ir(&layout) {
@@ -484,6 +509,7 @@ fn compile_group_with_lua(
 
 fn group_snapshot_json(
     history: &BlockHistory,
+    policy: &TranscriptDefaultViewPolicy,
     node_index: usize,
     node: &RenderNode,
     view_state: ViewState,
@@ -501,7 +527,12 @@ fn group_snapshot_json(
     };
     let children: Vec<_> = child_range
         .clone()
-        .filter_map(|block_index| block_snapshot_json(history, block_index))
+        .filter_map(|block_index| {
+            let id = *history.order.get(block_index)?;
+            let child_view_state =
+                policy.node_default_view_state(history, &RenderNode::Block { id, block_index });
+            block_snapshot_json(history, block_index, Some(child_view_state))
+        })
         .collect();
     serde_json::json!({
         "kind": "group",
@@ -517,13 +548,33 @@ fn group_snapshot_json(
     })
 }
 
-fn block_snapshot_json(history: &BlockHistory, block_index: usize) -> Option<serde_json::Value> {
+fn insert_process_status_event_json_fields(
+    value: &mut serde_json::Map<String, serde_json::Value>,
+    event: Option<&protocol::ProcessStatusEvent>,
+) {
+    let Some(event) = event else {
+        return;
+    };
+    value.extend(event.snapshot_json_fields());
+}
+
+fn block_snapshot_json(
+    history: &BlockHistory,
+    block_index: usize,
+    view_state: Option<ViewState>,
+) -> Option<serde_json::Value> {
     let id = *history.order.get(block_index)?;
     let block = history.blocks.get(&id)?;
     let mut value = serde_json::Map::new();
     value.insert("id".into(), serde_json::to_value(id).ok()?);
     value.insert("index".into(), serde_json::json!(block_index));
     value.insert("kind".into(), serde_json::json!(block_kind(block)));
+    if let Some(view_state) = view_state {
+        value.insert(
+            "view_state".into(),
+            serde_json::json!(view_state_label(view_state)),
+        );
+    }
     match block {
         Block::User { text, image_labels } => {
             value.insert("text".into(), serde_json::json!(text));
@@ -538,8 +589,9 @@ fn block_snapshot_json(history: &BlockHistory, block_index: usize) -> Option<ser
             value.insert("icon".into(), serde_json::json!(icon));
             value.insert("hl_group".into(), serde_json::json!(hl_group));
         }
-        Block::ProcessStatus { text } => {
+        Block::ProcessStatus { text, event } => {
             value.insert("text".into(), serde_json::json!(text));
+            insert_process_status_event_json_fields(&mut value, event.as_ref());
         }
         Block::Thinking { content } | Block::Text { content } => {
             value.insert("content".into(), serde_json::json!(content));
@@ -584,6 +636,7 @@ fn block_snapshot_json(history: &BlockHistory, block_index: usize) -> Option<ser
 fn view_state_label(view_state: ViewState) -> &'static str {
     match view_state {
         ViewState::Expanded => "expanded",
+        ViewState::Peek => "peek",
         ViewState::Collapsed => "collapsed",
         ViewState::TrimmedHead { .. } => "trimmed_head",
         ViewState::TrimmedTail { .. } => "trimmed_tail",
@@ -603,6 +656,7 @@ fn compile_block_with_lua(
     index: usize,
     block: &Block,
     state: Option<&ToolState>,
+    view_state: ViewState,
 ) -> LayoutIr {
     let kind = block_kind(block);
     let layout = env.lua.render_transcript_layout(
@@ -612,6 +666,7 @@ fn compile_block_with_lua(
         state,
         smelt_core::lua::runtime::TranscriptRenderCtx {
             show_thinking: env.show_thinking,
+            view_state,
         },
     );
     match compile_layout_ir(&layout) {
@@ -771,7 +826,7 @@ fn apply_view_state(
     let target_total = state.measured_height(total as u64) as usize;
     let start = buf.line_count().saturating_sub(total);
     match state {
-        ViewState::Expanded => outcome,
+        ViewState::Expanded | ViewState::Peek => outcome,
         ViewState::Collapsed => {
             if state.elides_rows(total as u64) {
                 let hidden = total - 1;
@@ -946,6 +1001,30 @@ mod tests {
     }
 
     #[test]
+    fn block_snapshot_json_exposes_process_status_event_fields() {
+        let mut transcript = Transcript::new();
+        transcript.push(Block::ProcessStatus {
+            text: "Background process 42 exited with code 7.".into(),
+            event: Some(protocol::ProcessStatusEvent::background_process_completed(
+                "42",
+                Some(7),
+            )),
+        });
+
+        let snapshot = block_snapshot_json(&transcript.history, 0, None).expect("snapshot");
+
+        assert_eq!(snapshot["kind"], "process_status");
+        assert_eq!(snapshot["event"], "background_process_completed");
+        assert_eq!(snapshot["event_type"], "background_process_completed");
+        assert_eq!(
+            snapshot["event_data"]["event"],
+            "background_process_completed"
+        );
+        assert_eq!(snapshot["event_data"]["process_id"], "42");
+        assert_eq!(snapshot["process_id"], "42");
+        assert_eq!(snapshot["exit_code"], 7);
+    }
+    #[test]
     fn static_block_measurement_matches_rendered_rows() {
         let blocks = [
             Block::Text {
@@ -959,6 +1038,7 @@ mod tests {
             },
             Block::ProcessStatus {
                 text: "running a long process status that wraps on narrow terminals".into(),
+                event: None,
             },
             Block::Thinking {
                 content: "**Plan**\nThink through a long line that wraps in expanded thinking mode.".into(),

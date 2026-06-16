@@ -36,6 +36,88 @@ pub enum HistoryItem {
     Note(HistoryNote),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ProcessStatusEvent {
+    BackgroundProcessCompleted {
+        process_id: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        exit_code: Option<i32>,
+    },
+}
+
+impl ProcessStatusEvent {
+    pub fn background_process_completed(
+        process_id: impl Into<String>,
+        exit_code: Option<i32>,
+    ) -> Self {
+        Self::BackgroundProcessCompleted {
+            process_id: process_id.into(),
+            exit_code,
+        }
+    }
+
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            Self::BackgroundProcessCompleted { .. } => "background_process_completed",
+        }
+    }
+
+    pub fn process_id(&self) -> Option<&str> {
+        match self {
+            Self::BackgroundProcessCompleted { process_id, .. } => Some(process_id),
+        }
+    }
+
+    pub fn exit_code(&self) -> Option<i32> {
+        match self {
+            Self::BackgroundProcessCompleted { exit_code, .. } => *exit_code,
+        }
+    }
+
+    pub fn field_value(&self, field: &str) -> Option<String> {
+        match field {
+            "event" | "event_type" => Some(self.event_type().to_string()),
+            "process_id" => self.process_id().map(str::to_string),
+            "exit_code" => self.exit_code().map(|code| code.to_string()),
+            _ => None,
+        }
+    }
+
+    pub fn snapshot_json_fields(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut fields = serde_json::Map::new();
+        let event_type = self.event_type();
+        fields.insert("event".into(), serde_json::json!(event_type));
+        fields.insert("event_type".into(), serde_json::json!(event_type));
+        if let Ok(event_data) = serde_json::to_value(self) {
+            fields.insert("event_data".into(), event_data);
+        }
+        if let Some(process_id) = self.process_id() {
+            fields.insert("process_id".into(), serde_json::json!(process_id));
+        }
+        if let Some(exit_code) = self.exit_code() {
+            fields.insert("exit_code".into(), serde_json::json!(exit_code));
+        }
+        fields
+    }
+
+    pub fn display_text(&self) -> String {
+        match self {
+            Self::BackgroundProcessCompleted {
+                process_id,
+                exit_code,
+            } => {
+                let status = match exit_code {
+                    Some(0) => "finished successfully".to_string(),
+                    Some(code) => format!("exited with code {code}"),
+                    None => "exited".to_string(),
+                };
+                format!("Background process {process_id} {status}.")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "note_kind", rename_all = "snake_case")]
 pub enum HistoryNote {
@@ -46,6 +128,8 @@ pub enum HistoryNote {
     },
     ProcessStatus {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        event: Option<ProcessStatusEvent>,
     },
 }
 
@@ -131,7 +215,24 @@ impl HistoryNote {
     }
 
     pub fn process_status(text: impl Into<String>) -> Self {
-        Self::ProcessStatus { text: text.into() }
+        Self::ProcessStatus {
+            text: text.into(),
+            event: None,
+        }
+    }
+
+    pub fn process_status_event(event: ProcessStatusEvent) -> Self {
+        Self::ProcessStatus {
+            text: event.display_text(),
+            event: Some(event),
+        }
+    }
+
+    pub fn process_status_with_event(text: impl Into<String>, event: ProcessStatusEvent) -> Self {
+        Self::ProcessStatus {
+            text: text.into(),
+            event: Some(event),
+        }
     }
 
     pub fn kind(&self) -> HistoryNoteKind {
@@ -143,7 +244,7 @@ impl HistoryNote {
 
     pub fn text(&self) -> &str {
         match self {
-            HistoryNote::ModeChange { text, .. } | HistoryNote::ProcessStatus { text } => text,
+            HistoryNote::ModeChange { text, .. } | HistoryNote::ProcessStatus { text, .. } => text,
         }
     }
 
@@ -154,10 +255,17 @@ impl HistoryNote {
         }
     }
 
+    pub fn process_status_event_ref(&self) -> Option<&ProcessStatusEvent> {
+        match self {
+            HistoryNote::ProcessStatus { event, .. } => event.as_ref(),
+            HistoryNote::ModeChange { .. } => None,
+        }
+    }
+
     pub fn to_model_text(&self) -> String {
         match self {
             HistoryNote::ModeChange { text, .. } => crate::mode::mode_change_note(text),
-            HistoryNote::ProcessStatus { text } => crate::mode::process_status_note(text),
+            HistoryNote::ProcessStatus { text, .. } => crate::mode::process_status_note(text),
         }
     }
 }
@@ -816,6 +924,26 @@ mod tests {
         assert_eq!(back, item);
     }
 
+    #[test]
+    fn process_status_note_serializes_typed_event() {
+        let item = HistoryItem::note(HistoryNote::process_status_event(
+            ProcessStatusEvent::background_process_completed("751225", Some(1)),
+        ));
+
+        let json = serde_json::to_value(&item).expect("serialize note item");
+
+        assert_eq!(json["kind"], "note");
+        assert_eq!(json["note_kind"], "process_status");
+        assert_eq!(
+            json["text"],
+            "Background process 751225 exited with code 1."
+        );
+        assert_eq!(json["event"]["event"], "background_process_completed");
+        assert_eq!(json["event"]["process_id"], "751225");
+        assert_eq!(json["event"]["exit_code"], 1);
+        let back: HistoryItem = serde_json::from_value(json).expect("deserialize note item");
+        assert_eq!(back, item);
+    }
     #[test]
     fn orphan_tool_use_in_legacy_session_is_repaired_with_interrupted_result() {
         // Mimic the broken state from issue #8: assistant with tool_calls

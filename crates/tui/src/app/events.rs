@@ -2001,7 +2001,7 @@ mod tests {
         )));
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.content.text_content() == "run now")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().text_content() == "run now")
         )));
     }
 
@@ -2094,7 +2094,7 @@ mod tests {
         assert!(app.actions().iter().any(|action| matches!(
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload)
-                if payload.content.text_content() == "override body"
+                if payload.input.provider_content().text_content() == "override body"
                     && payload.reasoning_effort == protocol::ReasoningEffort::High)
         )));
     }
@@ -2122,16 +2122,19 @@ mod tests {
     fn empty_enter_does_not_interrupt_for_turn_only_status_item() {
         let mut app = TestApp::builder().build();
         app.start_turn(1);
-        let note = "Background process 42 exited.".to_string();
+        let note = protocol::HistoryNote::process_status("Background process 42 exited.");
         app.app
             .queued_inputs
-            .try_push_turn(crate::app::QueuedInput::ProcessStatus(note.clone()));
+            .try_push_turn(crate::app::QueuedInput::ProcessStatus(note));
 
         app.clear_actions();
         app.press(KeyCode::Enter);
 
         assert!(app.agent_running());
-        assert_eq!(app.state().queued_inputs, vec![note]);
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["Background process 42 exited.".to_string()]
+        );
         assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
         assert!(!app.actions().iter().any(|action| matches!(
             action,
@@ -2212,7 +2215,7 @@ mod tests {
         assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.content.text_content() == "run first")
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().text_content() == "run first")
         )));
     }
 
@@ -2244,7 +2247,7 @@ mod tests {
         assert!(users.is_empty());
         assert!(app.actions().iter().any(|action| matches!(
             action,
-            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.content.is_empty())
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(payload) if payload.input.provider_content().is_empty())
         )));
     }
 

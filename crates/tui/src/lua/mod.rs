@@ -974,6 +974,7 @@ mod tests {
             state,
             TranscriptRenderCtx {
                 show_thinking: true,
+                view_state: smelt_core::transcript_model::ViewState::Expanded,
             },
         )
     }
