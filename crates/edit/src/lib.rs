@@ -64,7 +64,8 @@ pub use callback::{
 pub use event::{Event, Status};
 use overlay::OverlayHitTarget;
 pub use overlay::{
-    BodyDrag, ChromeAction, DragConfig, HitTarget, Overlay, OverlayId, ResizeConfig, ResizeEdges,
+    BodyDrag, ChromeAction, Decoration, DecorationId, DragConfig, HitTarget, Overlay, OverlayId,
+    ResizeConfig, ResizeEdges,
 };
 pub use row::{
     row_to_usize, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition, DocRange,
@@ -155,6 +156,10 @@ pub struct Ui {
     /// Insertion order is the secondary z-order sort key; see [`Self::overlays_in_z_order`].
     overlays: Vec<(OverlayId, Overlay)>,
     next_overlay_id: u32,
+    /// Window-owned decorations paint with their owner pane, below later split
+    /// leaves and below global overlays.
+    decorations: Vec<(DecorationId, Decoration)>,
+    next_decoration_id: u32,
     /// Stable-name ↔ resource-id maps for the hot-reload path. Plugins
     /// that pass `opts.name = "foo"` to `buf_create` / `win_open_*` /
     /// `overlay_open` get the same id back on every (re-)load, so
@@ -215,6 +220,8 @@ impl Ui {
             callbacks: Callbacks::new(),
             overlays: Vec::new(),
             next_overlay_id: 1,
+            decorations: Vec::new(),
+            next_decoration_id: 1,
             named_bufs: NamedSlots::new(),
             named_wins: NamedSlots::new(),
             named_overlays: NamedSlots::new(),
@@ -398,7 +405,10 @@ impl Ui {
     pub fn set_layout(&mut self, tree: LayoutTree) {
         self.surface.set_layout(tree);
         if let Some(focus) = self.focus {
-            if !self.splits().contains_leaf(focus) && self.overlay_for_leaf(focus).is_none() {
+            if !self.splits().contains_leaf(focus)
+                && self.overlay_for_leaf(focus).is_none()
+                && self.decoration_for_leaf(focus).is_none()
+            {
                 self.focus = None;
             }
         }
@@ -542,9 +552,14 @@ impl Ui {
             .filter_map(|(_, ov)| ov.layout.leaves_in_order().into_iter().next())
             .map(|p| WinId(p.0))
             .collect();
+        let doomed_decorations: Vec<DecorationId> =
+            self.decorations.iter().map(|(id, _)| *id).collect();
         let mut ids = Vec::new();
         for leaf in doomed {
             ids.extend(self.win_close(leaf));
+        }
+        for decoration in doomed_decorations {
+            ids.extend(self.decoration_close_tree(decoration));
         }
         let referenced: std::collections::HashSet<BufId> =
             self.wins.values().map(|w| w.buf).collect();
@@ -622,7 +637,9 @@ impl Ui {
             if removed.layout.contains_leaf(focused) {
                 self.focus = None;
                 while let Some(prior) = self.focus_history.pop() {
-                    if self.overlay_for_leaf(prior).is_some() {
+                    if self.overlay_for_leaf(prior).is_some()
+                        || self.decoration_for_leaf(prior).is_some()
+                    {
                         self.focus = Some(prior);
                         return Some(removed);
                     }
@@ -653,6 +670,100 @@ impl Ui {
 
     pub fn overlay_count(&self) -> usize {
         self.overlays.len()
+    }
+
+    /// Register a window-owned decoration. Decorations paint inside `owner`'s
+    /// rect with owner-local z ordering instead of in the global overlay plane.
+    pub fn decoration_open(&mut self, decoration: Decoration) -> DecorationId {
+        let id = DecorationId(self.next_decoration_id);
+        self.next_decoration_id += 1;
+        self.decorations.push((id, decoration));
+        id
+    }
+
+    /// Close a decoration and every window callback registered inside it.
+    /// Window leaves are removed; paint leaves only lose their leaf-scoped callbacks.
+    #[must_use]
+    pub fn decoration_close_tree(&mut self, id: DecorationId) -> Vec<u64> {
+        let Some(pos) = self.decorations.iter().position(|(did, _)| *did == id) else {
+            return Vec::new();
+        };
+        let (_, removed) = self.decorations.remove(pos);
+        if let Some(cap) = self.capture {
+            let owned = match cap {
+                HitTarget::Chrome { .. } => false,
+                HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
+                    removed.layout.contains_leaf(w)
+                }
+                HitTarget::Paint(p) => removed.layout.contains_leaf(p),
+            };
+            if owned {
+                self.capture = None;
+                self.drag_autoscroll_since = None;
+                self.chrome_drag = None;
+            }
+        }
+        if let Some(focused) = self.focus {
+            if removed.layout.contains_leaf(focused) {
+                self.focus = None;
+                while let Some(prior) = self.focus_history.pop() {
+                    if self.overlay_for_leaf(prior).is_some()
+                        || self.decoration_for_leaf(prior).is_some()
+                    {
+                        self.focus = Some(prior);
+                        break;
+                    }
+                    if self.splits().contains_leaf(prior)
+                        && self.wins.get(&prior).is_some_and(|w| w.accepts_focus())
+                    {
+                        self.focus = Some(prior);
+                        break;
+                    }
+                }
+            }
+        }
+        let mut all_ids = Vec::new();
+        for leaf in removed.layout.leaves_in_order() {
+            let win = WinId(leaf.0);
+            all_ids.extend(self.callbacks.clear_all(win));
+            self.named_wins.unbind_by_id(win);
+            self.wins.remove(&win);
+        }
+        all_ids
+    }
+
+    pub fn decoration(&self, id: DecorationId) -> Option<&Decoration> {
+        self.decorations
+            .iter()
+            .find_map(|(did, dec)| (*did == id).then_some(dec))
+    }
+
+    pub fn decoration_for_leaf(&self, win: WinId) -> Option<DecorationId> {
+        for (id, dec) in &self.decorations {
+            if dec.layout.contains_leaf(win) {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
+    pub fn decoration_for_paint(&self, paint: PaintId) -> Option<DecorationId> {
+        for (id, dec) in &self.decorations {
+            if dec.layout.contains_leaf(paint) {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
+    fn decorations_in_z_order(&self) -> Vec<(DecorationId, &Decoration)> {
+        let mut entries: Vec<(DecorationId, &Decoration)> = self
+            .decorations
+            .iter()
+            .map(|(id, dec)| (*id, dec))
+            .collect();
+        entries.sort_by_key(|(_, dec)| dec.z);
+        entries
     }
 
     fn overlays_in_z_order(&self) -> Vec<(OverlayId, &Overlay)> {
@@ -757,6 +868,9 @@ impl Ui {
                 OverlayHitTarget::Chrome(action) => HitTarget::Chrome { owner: id, action },
             });
         }
+        if let Some(target) = self.decoration_hit_test(row, col) {
+            return Some(target);
+        }
         let split_rects = self.resolve_splits();
         for paint_id in self.splits().leaves_in_order() {
             let win = WinId(paint_id.0);
@@ -778,6 +892,40 @@ impl Ui {
                     return Some(HitTarget::Window(win));
                 }
                 return Some(HitTarget::Paint(paint_id));
+            }
+        }
+        None
+    }
+
+    fn decoration_hit_test(&self, row: u16, col: u16) -> Option<HitTarget> {
+        let mut resolved = self.resolve_decorations();
+        resolved.reverse(); // owner-local topmost first
+        let sizer = UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        };
+        for (_id, _owner, rect, decoration) in resolved {
+            if !rect.contains(row, col) {
+                continue;
+            }
+            let leaf_rects = layout::resolve_layout_with(&decoration.layout, rect, &sizer);
+            for (paint_id, leaf_rect) in &leaf_rects {
+                if leaf_rect.contains(row, col) {
+                    let win = WinId(paint_id.0);
+                    if self
+                        .wins
+                        .get(&win)
+                        .and_then(|w| w.viewport)
+                        .and_then(|vp| vp.scrollbar.map(|bar| (vp, bar)))
+                        .is_some_and(|(vp, bar)| bar.contains(vp.rect, row, col))
+                    {
+                        return Some(HitTarget::Scrollbar { owner: win });
+                    }
+                    if self.wins.contains_key(&win) {
+                        return Some(HitTarget::Window(win));
+                    }
+                    return Some(HitTarget::Paint(*paint_id));
+                }
             }
         }
         None
@@ -866,6 +1014,32 @@ impl Ui {
         out
     }
 
+    /// Returns owner-local z-ordered decoration rects. Decorations are skipped
+    /// when their owner is not present in the main split layout.
+    fn resolve_decorations(&self) -> Vec<(DecorationId, WinId, Rect, &Decoration)> {
+        let split_rects = self.resolve_splits();
+        let sizer = UiLeafSizer {
+            wins: &self.wins,
+            bufs: &self.bufs,
+        };
+        let mut out = Vec::with_capacity(self.decorations.len());
+        for (id, dec) in self.decorations_in_z_order() {
+            let Some(owner_rect) = split_rects.get(&dec.owner).copied() else {
+                continue;
+            };
+            let size = resolve_decoration_size(dec, owner_rect, &sizer);
+            let rect = overlay::resolve_owner_anchor(
+                owner_rect,
+                size,
+                dec.align,
+                dec.row_offset,
+                dec.col_offset,
+            );
+            out.push((id, dec.owner, rect, dec));
+        }
+        out
+    }
+
     pub fn win_open_split(&mut self, buf: BufId, config: SplitConfig) -> Option<WinId> {
         if !self.bufs.contains_key(&buf) {
             return None;
@@ -914,6 +1088,9 @@ impl Ui {
     pub fn win_close(&mut self, id: WinId) -> Vec<u64> {
         if let Some(overlay_id) = self.overlay_for_leaf(id) {
             return self.overlay_close_tree(overlay_id);
+        }
+        if let Some(decoration_id) = self.decoration_for_leaf(id) {
+            return self.decoration_close_tree(decoration_id);
         }
         self.named_wins.unbind_by_id(id);
         self.wins.remove(&id);
@@ -1153,7 +1330,9 @@ impl Ui {
         let is_split_leaf = self.splits().contains_leaf(win)
             && self.wins.get(&win).is_some_and(|w| w.accepts_focus());
         let is_overlay_leaf = self.overlay_for_leaf(win).is_some();
-        if !is_split_leaf && !is_overlay_leaf {
+        let is_decoration_leaf = self.decoration_for_leaf(win).is_some()
+            && self.wins.get(&win).is_some_and(|w| w.accepts_focus());
+        if !is_split_leaf && !is_overlay_leaf && !is_decoration_leaf {
             return false;
         }
         if let Some(p) = prior {
@@ -1366,10 +1545,14 @@ impl Ui {
     fn capture_target_alive(&self, target: HitTarget) -> bool {
         match target {
             HitTarget::Window(w) | HitTarget::Scrollbar { owner: w } => {
-                self.splits().contains_leaf(w) || self.overlay_for_leaf(w).is_some()
+                self.splits().contains_leaf(w)
+                    || self.overlay_for_leaf(w).is_some()
+                    || self.decoration_for_leaf(w).is_some()
             }
             HitTarget::Paint(p) => {
-                self.splits().contains_leaf(p) || self.overlay_for_paint(p).is_some()
+                self.splits().contains_leaf(p)
+                    || self.overlay_for_paint(p).is_some()
+                    || self.decoration_for_paint(p).is_some()
             }
             HitTarget::Chrome { owner, .. } => self.overlays.iter().any(|(id, _)| *id == owner),
         }
@@ -1396,6 +1579,15 @@ impl Ui {
         self.refresh_overlay_viewports(&resolved);
     }
 
+    pub fn prime_decoration_viewports(&mut self) {
+        let resolved: Vec<(DecorationId, WinId, Rect, Decoration)> = self
+            .resolve_decorations()
+            .into_iter()
+            .map(|(id, owner, rect, dec)| (id, owner, rect, dec.clone()))
+            .collect();
+        self.refresh_decoration_viewports_with_prepare(&resolved, &mut |_, _| {});
+    }
+
     fn refresh_overlay_viewports(&mut self, resolved: &[(OverlayId, Rect, Overlay)]) {
         self.refresh_overlay_viewports_with_prepare(resolved, &mut |_, _| {});
     }
@@ -1413,6 +1605,25 @@ impl Ui {
                 bufs: &self.bufs,
             };
             let leaf_rects = layout::resolve_layout_with(&overlay.layout, *rect, &sizer);
+            for (paint_id, leaf_rect) in leaf_rects {
+                self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare);
+            }
+        }
+    }
+
+    fn refresh_decoration_viewports_with_prepare<P>(
+        &mut self,
+        resolved: &[(DecorationId, WinId, Rect, Decoration)],
+        prepare: &mut P,
+    ) where
+        P: FnMut(&mut Ui, MaterializeRequest),
+    {
+        for (_id, _owner, rect, decoration) in resolved {
+            let sizer = UiLeafSizer {
+                wins: &self.wins,
+                bufs: &self.bufs,
+            };
+            let leaf_rects = layout::resolve_layout_with(&decoration.layout, *rect, &sizer);
             for (paint_id, leaf_rect) in leaf_rects {
                 self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare);
             }
@@ -1531,6 +1742,12 @@ impl Ui {
             .into_iter()
             .map(|(id, rect, ov)| (id, rect, ov.clone()))
             .collect();
+        let resolved_decorations = self.resolve_decorations();
+        let resolved_decorations: Vec<(DecorationId, WinId, Rect, Decoration)> =
+            resolved_decorations
+                .into_iter()
+                .map(|(id, owner, rect, dec)| (id, owner, rect, dec.clone()))
+                .collect();
         let split_rects = self.resolve_splits();
         let painted_splits: Vec<(WinId, Rect)> = self
             .splits()
@@ -1542,6 +1759,7 @@ impl Ui {
             })
             .collect();
         self.refresh_overlay_viewports_with_prepare(&resolved, &mut prepare);
+        self.refresh_decoration_viewports_with_prepare(&resolved_decorations, &mut prepare);
         for (win_id, rect) in &painted_splits {
             self.prepare_window_for_render(*win_id, *rect, &mut prepare);
         }
@@ -1603,13 +1821,17 @@ impl Ui {
                     paint(id, &mut slice, &ctx);
                 };
                 let sizer = UiLeafSizer { wins, bufs };
-                smelt_term::paint_layout_tree_with(
+                let tree_ctx = LayoutPaintCtx {
+                    term_size,
+                    sizer: &sizer,
+                    decorations: &resolved_decorations,
+                };
+                paint_layout_tree_with_decorations(
                     grid,
                     theme,
                     &splits_tree,
                     Rect::new(0, 0, term_w, term_h),
-                    term_size,
-                    &sizer,
+                    &tree_ctx,
                     &mut dispatch,
                 );
                 for (_id, rect, overlay) in &resolved {
@@ -1646,8 +1868,10 @@ impl Ui {
             wins: &self.wins,
             bufs: &self.bufs,
         };
-        for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
-            if let Some(rect) = layout::resolve_layout_with(&ov.layout, ov_rect, &sizer).get(&id) {
+        for (_did, _owner, decoration_rect, decoration) in self.resolve_decorations() {
+            if let Some(rect) =
+                layout::resolve_layout_with(&decoration.layout, decoration_rect, &sizer).get(&id)
+            {
                 return Some(*rect);
             }
         }
@@ -2583,6 +2807,39 @@ fn resolve_overlay_size(
     (w, h)
 }
 
+fn resolve_decoration_size(
+    decoration: &Decoration,
+    owner: Rect,
+    sizer: &dyn layout::LeafSizer,
+) -> (u16, u16) {
+    use layout::Constraint::*;
+    let cap = (owner.width, owner.height);
+    let needs_natural = matches!(
+        (decoration.width, decoration.height),
+        (Fit, _) | (_, Fit) | (Max(_), _) | (_, Max(_)) | (Min(_), _) | (_, Min(_)),
+    );
+    let natural = if needs_natural {
+        decoration.layout.natural_size_with(cap, sizer)
+    } else {
+        (0, 0)
+    };
+    let mut w = resolve_overlay_constraint_value(decoration.width, cap.0, natural.0);
+    let mut h = resolve_overlay_constraint_value(decoration.height, cap.1, natural.1);
+    if let Some(cap_w) = decoration.max_width {
+        w = w.min(resolve_overlay_constraint_value(cap_w, cap.0, natural.0));
+    }
+    if let Some(cap_h) = decoration.max_height {
+        h = h.min(resolve_overlay_constraint_value(cap_h, cap.1, natural.1));
+    }
+    if let Some(floor_w) = decoration.min_width {
+        w = w.max(resolve_overlay_constraint_value(floor_w, cap.0, natural.0));
+    }
+    if let Some(floor_h) = decoration.min_height {
+        h = h.max(resolve_overlay_constraint_value(floor_h, cap.1, natural.1));
+    }
+    (w.min(cap.0), h.min(cap.1))
+}
+
 /// Paint one resolved overlay: clear the rect (overlays are opaque) then walk its layout tree.
 fn paint_overlay(
     grid: &mut Grid,
@@ -2595,6 +2852,72 @@ fn paint_overlay(
 ) {
     grid.clear(area);
     smelt_term::paint_layout_tree_with(grid, theme, &overlay.layout, area, term_size, sizer, paint);
+}
+
+fn paint_decoration(
+    grid: &mut Grid,
+    theme: &std::sync::Arc<Theme>,
+    area: Rect,
+    decoration: &Decoration,
+    term_size: (u16, u16),
+    sizer: &dyn layout::LeafSizer,
+    paint: &mut PaintDispatch,
+) {
+    grid.clear(area);
+    smelt_term::paint_layout_tree_with(
+        grid,
+        theme,
+        &decoration.layout,
+        area,
+        term_size,
+        sizer,
+        paint,
+    );
+}
+
+struct LayoutPaintCtx<'a> {
+    term_size: (u16, u16),
+    sizer: &'a dyn layout::LeafSizer,
+    decorations: &'a [(DecorationId, WinId, Rect, Decoration)],
+}
+
+fn paint_layout_tree_with_decorations(
+    grid: &mut Grid,
+    theme: &std::sync::Arc<Theme>,
+    node: &LayoutTree,
+    area: Rect,
+    ctx: &LayoutPaintCtx<'_>,
+    paint: &mut PaintDispatch,
+) {
+    match node {
+        LayoutTree::Leaf { id, chrome, .. } => {
+            layout::paint_chrome(grid, area, chrome, theme);
+            let inner = layout::inset_for_chrome(area, chrome);
+            paint(*id, inner, grid, theme, ctx.term_size);
+            let owner = WinId(id.0);
+            for (_decoration_id, decoration_owner, decoration_rect, decoration) in ctx.decorations {
+                if *decoration_owner == owner {
+                    paint_decoration(
+                        grid,
+                        theme,
+                        *decoration_rect,
+                        decoration,
+                        ctx.term_size,
+                        ctx.sizer,
+                        paint,
+                    );
+                }
+            }
+        }
+        LayoutTree::Vbox { items, chrome } | LayoutTree::Hbox { items, chrome } => {
+            layout::paint_chrome(grid, area, chrome, theme);
+            let vertical = matches!(node, LayoutTree::Vbox { .. });
+            let (_, rects) = layout::layout_box_children(items, chrome, area, vertical, ctx.sizer);
+            for ((_, child), &rect) in items.iter().zip(rects.iter()) {
+                paint_layout_tree_with_decorations(grid, theme, child, rect, ctx, paint);
+            }
+        }
+    }
 }
 
 /// Looks up each window leaf's natural size from its buffer's current

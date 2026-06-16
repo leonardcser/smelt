@@ -785,6 +785,32 @@ Shareable natural-size handle returned by `smelt.ui.layout.measure`.
 | `set` | `fun(w: integer, h: integer): nil` | yes | Update the measured natural size. |
 | `get` | `fun(): integer, integer` | yes | Return the current measured width and height. |
 
+### `smelt.win.Decoration`
+
+Handle returned by `Win:decorate(opts)` for a window-owned decoration.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `close` | `fun(): nil` | yes | Remove the decoration and any window leaves it owns. |
+
+### `smelt.win.DecorationOpts`
+
+Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.layout` tree. `align` is one of `nw|n|ne|w|center|e|sw|s|se` and defaults to `center`. Width/height constraints use the same vocabulary as overlays but resolve against the owner window rect.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `layout` | `smelt.ui.layout.Layout` | yes | Decoration layout tree. |
+| `align` | `string` |  | Owner-relative alignment point; default `center`. |
+| `row_offset` | `integer` |  | Rows to offset after alignment. |
+| `col_offset` | `integer` |  | Columns to offset after alignment. |
+| `z` | `integer` |  | Owner-local stacking order. |
+| `width` | `any` |  | Width constraint; defaults to `fit`. |
+| `height` | `any` |  | Height constraint; defaults to `fit`. |
+| `max_width` | `any` |  | Optional width cap. |
+| `max_height` | `any` |  | Optional height cap. |
+| `min_width` | `any` |  | Optional width floor. |
+| `min_height` | `any` |  | Optional height floor. |
+
 ### `smelt.win.Win`
 
 Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.
@@ -796,6 +822,7 @@ Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the
 | `buf` | `fun(): smelt.buf.Buf?` | yes | Return the backing Buf handle, or `nil` if the window is gone. |
 | `rect` | `fun(): any` | yes | Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out. |
 | `content_width` | `fun(): any` | yes | Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget. |
+| `decorate` | `fun(opts: table): smelt.win.Decoration` | yes | Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays. |
 | `cursor` | `fun(row: integer?): any` | yes | Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
 | `move_cursor` | `fun(delta: integer): smelt.win.Win` | yes | Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |
 | `reveal` | `fun(row: integer, opts: table?): smelt.win.Win` | yes | Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.cursor = false` scrolls without moving the cursor. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control. |

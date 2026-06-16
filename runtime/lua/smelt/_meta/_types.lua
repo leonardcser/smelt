@@ -548,6 +548,24 @@
 ---@field set fun(w: integer, h: integer): nil Update the measured natural size.
 ---@field get fun(): integer, integer Return the current measured width and height.
 
+--- Handle returned by `Win:decorate(opts)` for a window-owned decoration.
+---@class smelt.win.Decoration
+---@field close fun(): nil Remove the decoration and any window leaves it owns.
+
+--- Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.layout` tree. `align` is one of `nw|n|ne|w|center|e|sw|s|se` and defaults to `center`. Width/height constraints use the same vocabulary as overlays but resolve against the owner window rect.
+---@class smelt.win.DecorationOpts
+---@field layout smelt.ui.layout.Layout Decoration layout tree.
+---@field align? string Owner-relative alignment point; default `center`.
+---@field row_offset? integer Rows to offset after alignment.
+---@field col_offset? integer Columns to offset after alignment.
+---@field z? integer Owner-local stacking order.
+---@field width? any Width constraint; defaults to `fit`.
+---@field height? any Height constraint; defaults to `fit`.
+---@field max_width? any Optional width cap.
+---@field max_height? any Optional height cap.
+---@field min_width? any Optional width floor.
+---@field min_height? any Optional height floor.
+
 --- Window handle returned by `smelt.win.new(buf, opts?)`. Setter methods return the same handle for chaining.
 ---@class smelt.win.Win
 ---@field close fun(): nil Close the overlay leaf. No-op if the window is already closed.
@@ -555,6 +573,7 @@
 ---@field buf fun(): smelt.buf.Buf? Return the backing Buf handle, or `nil` if the window is gone.
 ---@field rect fun(): any Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.
 ---@field content_width fun(): any Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget.
+---@field decorate fun(opts: table): smelt.win.Decoration Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.
 ---@field cursor fun(row: integer?): any Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field move_cursor fun(delta: integer): smelt.win.Win Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.
 ---@field reveal fun(row: integer, opts: table?): smelt.win.Win Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.cursor = false` scrolls without moving the cursor. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.

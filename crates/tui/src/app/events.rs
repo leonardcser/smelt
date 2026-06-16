@@ -1021,6 +1021,13 @@ impl TuiApp {
         }
     }
 
+    /// Close a window-owned decoration and clean up leaf Lua callbacks.
+    pub(crate) fn close_decoration(&mut self, decoration_id: crate::smelt_edit::DecorationId) {
+        for id in self.ui.decoration_close_tree(decoration_id) {
+            self.lua.remove_callback(id);
+        }
+    }
+
     /// Close the focused overlay if it doesn't block the agent.
     /// Fires `WinEvent::Dismiss` so callbacks can flush pending state before close.
     pub(crate) fn close_focused_non_blocking_overlay(&mut self) {

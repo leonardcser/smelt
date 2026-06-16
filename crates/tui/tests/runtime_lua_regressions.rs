@@ -113,6 +113,7 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
               return {
                 rect = function() return { height = 100 } end,
                 on = function() end,
+                decorate = function() return { close = function() end } end,
               }
             end,
           },

@@ -462,6 +462,64 @@ fn empty_banner_returns_to_startup_position_after_resize_round_trip() {
 }
 
 #[test]
+fn empty_banner_stays_inside_transcript_when_prompt_grows() {
+    fn rects_intersect(a: crate::smelt_edit::Rect, b: crate::smelt_edit::Rect) -> bool {
+        a.left < b.right() && a.right() > b.left && a.top < b.bottom() && a.bottom() > b.top
+    }
+
+    fn banner_label_rect(app: &TestApp) -> crate::smelt_edit::Rect {
+        let win = app
+            .app
+            .ui
+            .named_win("smelt.banner.label.win")
+            .expect("banner label window");
+        app.app
+            .ui
+            .win(win)
+            .and_then(|win| win.viewport.map(|vp| vp.rect))
+            .expect("banner label viewport")
+    }
+
+    fn paint_and_emit_resize(app: &mut TestApp) {
+        app.render_silent();
+        crate::lua::with_app_ptr(&mut app.app, |app| {
+            app.dispatch_ui_window_events(false);
+        });
+    }
+
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    crate::lua::with_app_ptr(&mut app.app, |app| {
+        let err = app.bring_up_lua("launch");
+        assert_eq!(err, None);
+    });
+
+    app.type_text("one\ntwo\nthree\nfour\nfive\nsix");
+    paint_and_emit_resize(&mut app);
+
+    let label = banner_label_rect(&app);
+    let transcript = app
+        .app
+        .ui
+        .split_rect(crate::app::TRANSCRIPT_WIN)
+        .expect("transcript rect");
+    let prompt = app
+        .app
+        .ui
+        .split_rect(crate::app::PROMPT_WIN)
+        .expect("prompt rect");
+
+    assert!(
+        label.top >= transcript.top && label.bottom() <= transcript.bottom(),
+        "banner label should stay inside transcript: label={label:?} transcript={transcript:?}"
+    );
+    assert!(
+        !rects_intersect(label, prompt),
+        "banner label must not overlap prompt: label={label:?} prompt={prompt:?}"
+    );
+}
+
+#[test]
 fn win_rect_prefers_current_layout_after_resize_before_paint() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);

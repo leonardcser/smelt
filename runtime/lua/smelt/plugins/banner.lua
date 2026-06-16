@@ -1,7 +1,7 @@
--- Empty-state logo overlay + shutdown logo/resume-hint banner.
+-- Empty-state logo decoration + shutdown logo/resume-hint banner.
 --
--- The splash is a non-focusable overlay centered over the transcript on
--- zero-message sessions; it tears down on the first turn. On clean shutdown
+-- The splash is a non-focusable transcript decoration centered inside the
+-- transcript on zero-message sessions; it tears down on the first turn. On clean shutdown
 -- the same logo + dimmed version + resume hint print to the scrollback.
 --
 -- The version label is a real buffer so users can select / copy it. Art
@@ -12,7 +12,7 @@
 local banner = require("smelt.banner")
 
 local state = {
-	overlay = nil,
+	decoration = nil,
 	paint = nil,
 	version_buf = nil,
 	version_win = nil,
@@ -20,8 +20,6 @@ local state = {
 	sim = nil,
 	fire_pixels = nil,
 	held = false,
-	term_width = nil,
-	term_height = nil,
 }
 
 local FIRE_HEADROOM = 4
@@ -221,13 +219,13 @@ end
 local function teardown()
 	cancel_animation()
 	state.held = false
-	if state.overlay then
-		state.overlay:close()
+	if state.decoration then
+		state.decoration:close()
 	end
 	if state.paint then
 		state.paint:remove()
 	end
-	state.overlay = nil
+	state.decoration = nil
 	state.paint = nil
 	state.version_buf = nil
 	state.version_win = nil
@@ -250,7 +248,7 @@ end
 -- canonical until the fire snaps back, then drops the sim.
 local function tick_animation()
 	state.timer = nil
-	if not state.overlay or not state.sim then
+	if not state.decoration or not state.sim then
 		return
 	end
 	if state.held then
@@ -315,33 +313,13 @@ local function ensure_label_window(lines, width)
 	return win
 end
 
-local function terminal_size()
-	local size = smelt.ui.size()
-	return size.width or 80, size.height or 24
-end
-
 local function transcript_rect()
 	local transcript = smelt.win.transcript()
 	return transcript and transcript:rect() or nil
 end
 
-local function splash_position(w, h)
-	local term_w, term_h = terminal_size()
-	state.term_width = term_w
-	state.term_height = term_h
-
-	local rect = transcript_rect()
-	if not rect then
-		return nil, nil
-	end
-
-	local row = (rect.row or 0) + math.floor((rect.height or 0) / 2) - math.floor(h / 2)
-	local col = (rect.col or 0) + math.floor((rect.width or 0) / 2) - math.floor(w / 2)
-	return math.max(0, row), math.max(0, col)
-end
-
 local function open_splash()
-	if state.overlay then
+	if state.decoration then
 		return
 	end
 	state.fire_pixels = nil
@@ -378,28 +356,16 @@ local function open_splash()
 			height = label_h,
 		},
 	})
-	local row, col = splash_position(w, paint_h + label_h)
-	if not row or not col then
-		return
-	end
-	state.overlay = smelt.overlay.new({
-		name = "smelt.banner.splash",
-		anchor = "screen_at",
-		corner = "nw",
-		row = row,
-		col = col,
-		-- Sits behind dialogs and plugin overlays (default z = 50).
+	state.decoration = smelt.win.transcript():decorate({
+		align = "center",
 		z = 0,
-		modal = false,
-		blocks_agent = false,
-		border = "none",
 		layout = sized,
 	})
 end
 
 -- The splash is sized to the logo + version + plugin subtitles. Suppress it
--- when the current transcript is too short at open time; once open, ordinary
--- prompt chrome height changes leave the screen-anchored banner in place.
+-- when the current transcript is too short; owner-scoped decorations follow
+-- transcript geometry automatically when prompt chrome changes.
 local function transcript_fits_banner()
 	local rect = transcript_rect()
 	if not rect or not rect.height then
@@ -416,25 +382,14 @@ local function transcript_fits_banner()
 end
 
 local function refresh(force_reopen)
-	state.term_width, state.term_height = terminal_size()
 	if smelt.transcript.is_empty() and transcript_fits_banner() then
-		if force_reopen == true and state.overlay then
+		if force_reopen == true and state.decoration then
 			teardown()
 		end
 		open_splash()
 	else
 		teardown()
 	end
-end
-
-local function refresh_on_terminal_resize()
-	local w, h = terminal_size()
-	if state.term_width == w and state.term_height == h then
-		return
-	end
-	state.term_width = w
-	state.term_height = h
-	refresh(true)
 end
 
 -- session_started covers /reset, /fork, /resume; input_submit covers
@@ -447,11 +402,11 @@ smelt.cell("input_submit"):subscribe(teardown)
 smelt.cell("turn_start"):subscribe(teardown)
 smelt.cell("history"):subscribe(refresh)
 smelt.lifecycle.on_ready(function()
-	-- Transcript resizes also happen when prompt chrome changes. Only rebuild the
-	-- screen-anchored splash when the terminal size itself changed.
+	-- The decoration is transcript-owned, so any transcript resize can make it fit
+	-- or stop fitting without needing screen-position bookkeeping.
 	local t = smelt.win.transcript()
 	if t and t.on then
-		t:on("resized", refresh_on_terminal_resize)
+		t:on("resized", refresh)
 	end
 	refresh()
 end)

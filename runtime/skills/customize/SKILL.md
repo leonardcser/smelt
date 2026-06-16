@@ -436,7 +436,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 
 | Plugin | Summary |
 | --- | --- |
-| `smelt.plugins.banner` | Empty-state logo overlay + shutdown logo/resume-hint banner. |
+| `smelt.plugins.banner` | Empty-state logo decoration + shutdown logo/resume-hint banner. |
 | `smelt.plugins.compact` | Compaction plugin. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
 | `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |

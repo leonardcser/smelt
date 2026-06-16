@@ -8,6 +8,11 @@ use std::collections::HashMap;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OverlayId(pub u32);
 
+/// Stable handle for a window-owned decoration. Decorations are rendered inside
+/// their owner pane instead of in the global overlay plane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DecorationId(pub u32);
+
 /// Edges affected by a resize drag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResizeEdges {
@@ -158,6 +163,92 @@ pub enum HitTarget {
         owner: OverlayId,
         action: ChromeAction,
     },
+}
+
+#[derive(Clone, Debug)]
+pub struct Decoration {
+    pub owner: WinId,
+    pub layout: LayoutTree,
+    /// Alignment point inside the owner rect. `Center` centers the decoration;
+    /// edge/corner values pin the matching edge/corner inside the owner.
+    pub align: Align,
+    pub row_offset: i32,
+    pub col_offset: i32,
+    /// Width/height constraints are resolved against the owner rect, not the
+    /// terminal. `Fit` reads the decoration layout's natural size.
+    pub width: Constraint,
+    pub height: Constraint,
+    pub max_width: Option<Constraint>,
+    pub max_height: Option<Constraint>,
+    pub min_width: Option<Constraint>,
+    pub min_height: Option<Constraint>,
+    /// Stacking order relative to other decorations on the same owner.
+    pub z: u16,
+}
+
+impl Decoration {
+    pub fn new(owner: WinId, layout: LayoutTree) -> Self {
+        Self {
+            owner,
+            layout,
+            align: Align::Center,
+            row_offset: 0,
+            col_offset: 0,
+            width: Constraint::Fit,
+            height: Constraint::Fit,
+            max_width: None,
+            max_height: None,
+            min_width: None,
+            min_height: None,
+            z: 0,
+        }
+    }
+
+    pub fn with_align(mut self, align: Align) -> Self {
+        self.align = align;
+        self
+    }
+
+    pub fn with_offset(mut self, row: i32, col: i32) -> Self {
+        self.row_offset = row;
+        self.col_offset = col;
+        self
+    }
+
+    pub fn with_z(mut self, z: u16) -> Self {
+        self.z = z;
+        self
+    }
+
+    pub fn with_width(mut self, width: Constraint) -> Self {
+        self.width = width;
+        self
+    }
+
+    pub fn with_height(mut self, height: Constraint) -> Self {
+        self.height = height;
+        self
+    }
+
+    pub fn with_max_width(mut self, max_width: Option<Constraint>) -> Self {
+        self.max_width = max_width;
+        self
+    }
+
+    pub fn with_max_height(mut self, max_height: Option<Constraint>) -> Self {
+        self.max_height = max_height;
+        self
+    }
+
+    pub fn with_min_width(mut self, min_width: Option<Constraint>) -> Self {
+        self.min_width = min_width;
+        self
+    }
+
+    pub fn with_min_height(mut self, min_height: Option<Constraint>) -> Self {
+        self.min_height = min_height;
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -384,6 +475,34 @@ pub fn resolve_anchor(anchor: &Anchor, size: (u16, u16), ctx: &AnchorContext<'_>
         }
     };
     Some(Rect::new(top, left, w, h))
+}
+
+/// Resolve a decoration size to a rect fully contained by `owner`.
+pub fn resolve_owner_anchor(
+    owner: Rect,
+    size: (u16, u16),
+    align: Align,
+    row_offset: i32,
+    col_offset: i32,
+) -> Rect {
+    let w = size.0.min(owner.width);
+    let h = size.1.min(owner.height);
+    let target_x = owner.left as i32 + align_x(align, owner.width);
+    let target_y = owner.top as i32 + align_y(align, owner.height);
+    let row = target_y - align_y(align, h) + row_offset;
+    let col = target_x - align_x(align, w) + col_offset;
+    Rect::new(
+        clamp_within(row, owner.top, owner.height, h),
+        clamp_within(col, owner.left, owner.width, w),
+        w,
+        h,
+    )
+}
+
+fn clamp_within(v: i32, origin: u16, extent: u16, len: u16) -> u16 {
+    let min = origin as i32;
+    let max = origin as i32 + extent.saturating_sub(len) as i32;
+    v.clamp(min, max) as u16
 }
 
 /// X-axis offset from a rect's left edge to the alignment point. `Center`

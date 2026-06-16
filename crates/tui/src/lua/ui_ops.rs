@@ -12,8 +12,8 @@
 use crate::app::TuiApp;
 use crate::smelt_edit::layout::{Align, Anchor, Corner, PaintId};
 use crate::smelt_edit::{
-    BodyDrag, Callback, CallbackResult, DragConfig, KeyBind, Overlay, Payload, ResizeConfig,
-    RowIndex, WinEvent, WinId,
+    BodyDrag, Callback, CallbackResult, Decoration, DragConfig, KeyBind, Overlay, Payload,
+    ResizeConfig, RowIndex, WinEvent, WinId,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -123,6 +123,66 @@ pub(crate) fn open_overlay(app: &mut TuiApp, opts: mlua::Table) -> Result<u64, S
     }
     app.ui.prime_overlay_viewports();
     Ok(id.0 as u64)
+}
+
+pub(crate) fn open_decoration(
+    app: &mut TuiApp,
+    owner: WinId,
+    opts: mlua::Table,
+) -> Result<crate::smelt_edit::DecorationId, String> {
+    let layout_ud: mlua::AnyUserData = opts
+        .get("layout")
+        .map_err(|_| "win:decorate: missing `layout = <smelt.ui.layout.* userdata>`".to_string())?;
+    let layout_node = {
+        let borrowed = layout_ud
+            .borrow::<crate::lua::api::overlay_layout::LuaUiLayout>()
+            .map_err(|e| format!("win:decorate: `layout` must be a smelt.ui.layout node: {e}"))?;
+        borrowed.0.clone()
+    };
+    let align = crate::lua::parse::align(
+        opts.get::<String>("align").ok().as_deref(),
+        crate::smelt_edit::Align::Center,
+    )?;
+    let row_offset: i32 = opts.get("row_offset").unwrap_or(0);
+    let col_offset: i32 = opts.get("col_offset").unwrap_or(0);
+    let z: u16 = opts.get("z").unwrap_or(0);
+    let width = parse_overlay_constraint(&opts, "width", "decoration.width")?;
+    let height = parse_overlay_constraint(&opts, "height", "decoration.height")?;
+    let max_width = parse_overlay_constraint_opt(&opts, "max_width", "decoration.max_width")?;
+    let max_height = parse_overlay_constraint_opt(&opts, "max_height", "decoration.max_height")?;
+    let min_width = parse_overlay_constraint_opt(&opts, "min_width", "decoration.min_width")?;
+    let min_height = parse_overlay_constraint_opt(&opts, "min_height", "decoration.min_height")?;
+
+    let mut window_leaves = Vec::new();
+    let (_root_constraint, layout) =
+        crate::lua::api::overlay_layout::build_layout_tree(app, &layout_node, &mut window_leaves)?;
+    let (term_w, _) = app.ui.terminal_size();
+    for &win_id in &window_leaves {
+        let content_w = app
+            .ui
+            .win(win_id)
+            .map(|w| w.config.gutters.content_width(term_w))
+            .unwrap_or(term_w);
+        if let Some(buf_id) = app.ui.win(win_id).map(|w| w.buf) {
+            if let Some(buf) = app.ui.buf_mut(buf_id) {
+                buf.ensure_rendered_at(content_w);
+            }
+        }
+    }
+
+    let decoration = Decoration::new(owner, layout)
+        .with_align(align)
+        .with_offset(row_offset, col_offset)
+        .with_z(z)
+        .with_width(width)
+        .with_height(height)
+        .with_max_width(max_width)
+        .with_max_height(max_height)
+        .with_min_width(min_width)
+        .with_min_height(min_height);
+    let id = app.ui.decoration_open(decoration);
+    app.ui.prime_decoration_viewports();
+    Ok(id)
 }
 
 fn parse_drag_config(raw: Option<mlua::Value>) -> Result<DragConfig, String> {

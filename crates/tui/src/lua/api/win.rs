@@ -11,7 +11,7 @@ use crate::lua::{parse_keybind, LuaShared};
 use lua_doc_derive::LuaAlias;
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, Tier};
-use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaType};
+use smelt_core::lua::lua_type::{LuaCallback, LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::reg::LuaReg;
 use smelt_core::lua::LuaHandle;
@@ -126,6 +126,30 @@ fn is_builtin_win(id: crate::smelt_edit::WinId) -> bool {
     matches!(id, crate::app::TRANSCRIPT_WIN | crate::app::PROMPT_WIN)
 }
 
+/// Lua-side handle for a window-owned decoration.
+#[derive(Clone, Copy, Debug)]
+pub struct LuaDecoration {
+    pub(crate) id: crate::smelt_edit::DecorationId,
+}
+
+impl LuaType for LuaDecoration {
+    fn lua_type() -> String {
+        "smelt.win.Decoration".into()
+    }
+}
+
+impl mlua::UserData for LuaDecoration {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
+            Ok(format!("Decoration#{}", this.id.0))
+        });
+        methods.add_method("close", |_, this, ()| -> LuaResult<()> {
+            crate::lua::with_app(|app| app.close_decoration(this.id));
+            Ok(())
+        });
+    }
+}
+
 impl mlua::UserData for LuaWin {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
@@ -210,6 +234,18 @@ impl mlua::UserData for LuaWin {
                 None => mlua::Value::Nil,
             })
         });
+
+        // ── decorate(opts) - owner-scoped surface ─────────────────────
+        methods.add_method(
+            "decorate",
+            |_, this, opts: mlua::Table| -> LuaResult<LuaDecoration> {
+                let id = crate::lua::with_app(|app| {
+                    crate::lua::ui_ops::open_decoration(app, this.id, opts)
+                })
+                .map_err(|e| LuaError::RuntimeError(format!("win:decorate: {e}")))?;
+                Ok(LuaDecoration { id })
+            },
+        );
 
         // ── cursor: get / set ──────────────────────────────────────
         methods.add_function(
@@ -658,6 +694,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "buf" => fn() -> Option<super::buf::LuaBuf>, "Return the backing Buf handle, or `nil` if the window is gone.",
             "rect" => fn() -> mlua::Value, "Return the window's current viewport rect as `{ row, col, width, height }`, or `nil` until the first render lays it out.",
             "content_width" => fn() -> mlua::Value, "Return the inner-content width in cells (gutter and pad_left/pad_right already subtracted), or `nil` until the first render lays the window out. Use this instead of `rect().width` when fitting text into the window's actual content budget.",
+            "decorate" => fn(opts: mlua::Table) -> LuaDecoration, "Attach a decoration to this window. Decorations are clipped to and painted with their owner pane, below later layout leaves and below global overlays.",
             "cursor" => fn(row: Option<u64>) -> mlua::Value, "Read or write the cursor row (0-based). Without arg returns the row; with arg sets and returns the handle for chaining. The built-in prompt window ignores row-cursor writes; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "move_cursor" => fn(delta: i64) -> LuaWin, "Move the cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. The built-in prompt window ignores row-cursor moves; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
             "reveal" => fn(row: u64, opts: Option<mlua::Table>) -> LuaWin, "Reveal row `row` (0-based) and return the handle for chaining. By default this also moves the row cursor there. `opts.top_padding` reserves rows above the target after the jump; `opts.cursor = false` scrolls without moving the cursor. The built-in prompt window ignores row reveals; use `smelt.prompt.cursor(byte_offset)` for prompt text cursor control.",
@@ -669,6 +706,32 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             "link_scroll" => fn(others: mlua::Variadic<LuaWin>) -> LuaWin, "Link `scroll_top` between this window and the variadic `others`. Closing any member auto-removes it. Returns the handle for chaining.",
             "scroll" => fn(arg: mlua::Value) -> mlua::Value, "Read or write the window's scroll state. No arg returns `{ top, follow, total, viewport, max, overflow, at_top, at_bottom }` (`total` is the buffer's line count; `viewport` is the leaf's height; `max` is the largest valid `top`). An integer sets `scroll_top` and clears the pin-to-tail flag. The literal string `\"tail\"` jumps the viewport to the buffer's tail while keeping the cursor on the same screen row, then enables tail-follow.",
         },
+    });
+
+    record_class(LuaClassDecl {
+        name: "smelt.win.Decoration",
+        doc: "Handle returned by `Win:decorate(opts)` for a window-owned decoration.",
+        fields: smelt_core::class_methods! {
+            "close" => fn() -> (), "Remove the decoration and any window leaves it owns.",
+        },
+    });
+
+    record_class(LuaClassDecl {
+        name: "smelt.win.DecorationOpts",
+        doc: "Options accepted by `Win:decorate(opts)`. The required `layout` is a `smelt.ui.layout` tree. `align` is one of `nw|n|ne|w|center|e|sw|s|se` and defaults to `center`. Width/height constraints use the same vocabulary as overlays but resolve against the owner window rect.",
+        fields: vec![
+            LuaClassField { name: "layout", ty: "smelt.ui.layout.Layout".into(), optional: false, doc: "Decoration layout tree." },
+            LuaClassField { name: "align", ty: "string".into(), optional: true, doc: "Owner-relative alignment point; default `center`." },
+            LuaClassField { name: "row_offset", ty: "integer".into(), optional: true, doc: "Rows to offset after alignment." },
+            LuaClassField { name: "col_offset", ty: "integer".into(), optional: true, doc: "Columns to offset after alignment." },
+            LuaClassField { name: "z", ty: "integer".into(), optional: true, doc: "Owner-local stacking order." },
+            LuaClassField { name: "width", ty: "any".into(), optional: true, doc: "Width constraint; defaults to `fit`." },
+            LuaClassField { name: "height", ty: "any".into(), optional: true, doc: "Height constraint; defaults to `fit`." },
+            LuaClassField { name: "max_width", ty: "any".into(), optional: true, doc: "Optional width cap." },
+            LuaClassField { name: "max_height", ty: "any".into(), optional: true, doc: "Optional height cap." },
+            LuaClassField { name: "min_width", ty: "any".into(), optional: true, doc: "Optional width floor." },
+            LuaClassField { name: "min_height", ty: "any".into(), optional: true, doc: "Optional height floor." },
+        ],
     });
 
     // Doc text is built at registration time so per-opt defaults stay in
