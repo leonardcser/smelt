@@ -629,7 +629,7 @@ pub fn print_diff_ir_with_width(
                     out.print(&blank_prefix);
                 }
                 out.set_fg(Color::DarkGrey);
-                out.print("...");
+                out.print("⋮");
                 out.reset_style();
                 out.newline();
                 emitted = emitted.saturating_add(1);
@@ -1522,7 +1522,7 @@ mod tests {
         assert!(joined.contains("ctx"));
         assert!(joined.contains("old"));
         assert!(joined.contains("new"));
-        assert!(joined.contains("..."));
+        assert!(joined.contains("⋮"));
         assert!(joined.contains('-'));
         assert!(joined.contains('+'));
     }
