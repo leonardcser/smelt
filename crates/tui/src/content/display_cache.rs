@@ -280,7 +280,6 @@ mod tests {
     fn row_index() -> DisplayRowIndexEntry {
         DisplayRowIndexEntry {
             width: 80,
-            show_thinking: false,
             renderer_generation: 1,
             renderer_cache_key: Some(1),
             nodes: vec![DisplayRowIndexNode {
@@ -288,7 +287,6 @@ mod tests {
                 key: LayoutKey {
                     view_state: ViewState::Expanded,
                     width: 80,
-                    show_thinking: false,
                     content_hash: 1,
                     sidecar_hash: 2,
                 },

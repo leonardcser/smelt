@@ -69,13 +69,11 @@ struct CachedRows {
     renderer_cache_key: Option<u64>,
     presentation_generation: u64,
     width: u16,
-    show_thinking: bool,
 }
 
 #[derive(Clone, Copy)]
 struct RowIndexKey {
     width: u16,
-    show_thinking: bool,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
     presentation_generation: u64,
@@ -85,18 +83,16 @@ struct RowIndexKey {
 impl RowIndexKey {
     fn new(
         width: u16,
-        show_thinking: bool,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
         presentation_generation: u64,
     ) -> Self {
         Self {
             width,
-            show_thinking,
             renderer_generation,
             renderer_cache_key,
             presentation_generation,
-            base_key: base_layout_key(width, show_thinking),
+            base_key: base_layout_key(width),
         }
     }
 }
@@ -111,7 +107,6 @@ struct ExactRowIndex {
     renderer_cache_key: Option<u64>,
     presentation_generation: u64,
     width: u16,
-    show_thinking: bool,
 }
 
 struct ExactNodeRow {
@@ -141,7 +136,6 @@ impl ExactRowIndex {
             && self.renderer_cache_key == key.renderer_cache_key
             && self.presentation_generation == key.presentation_generation
             && self.width == key.width
-            && self.show_thinking == key.show_thinking
             && self.nodes.len() == plan.len()
     }
 
@@ -159,15 +153,13 @@ impl ExactRowIndex {
             && self.renderer_cache_key == key.renderer_cache_key
             && self.presentation_generation == key.presentation_generation
             && self.width == key.width
-            && self.show_thinking == key.show_thinking
         {
             return;
         }
 
         let keep_measurements = self.renderer_generation == key.renderer_generation
             && self.renderer_cache_key == key.renderer_cache_key
-            && self.width == key.width
-            && self.show_thinking == key.show_thinking;
+            && self.width == key.width;
         let old_nodes = if keep_measurements {
             std::mem::take(&mut self.nodes)
         } else {
@@ -213,7 +205,6 @@ impl ExactRowIndex {
         self.renderer_cache_key = key.renderer_cache_key;
         self.presentation_generation = key.presentation_generation;
         self.width = key.width;
-        self.show_thinking = key.show_thinking;
         self.rebuild_prefix_rows();
     }
 
@@ -254,7 +245,6 @@ impl ExactRowIndex {
             && self.renderer_cache_key == key.renderer_cache_key
             && self.presentation_generation == key.presentation_generation
             && self.width == key.width
-            && self.show_thinking == key.show_thinking
         {
             return true;
         }
@@ -306,7 +296,6 @@ impl ExactRowIndex {
         self.renderer_cache_key = key.renderer_cache_key;
         self.presentation_generation = key.presentation_generation;
         self.width = key.width;
-        self.show_thinking = key.show_thinking;
         self.prefix_dirty |= prefix_dirty;
         true
     }
@@ -336,7 +325,6 @@ impl ExactRowIndex {
             self.renderer_cache_key,
             self.presentation_generation,
             self.width,
-            self.show_thinking,
             self.nodes
                 .iter()
                 .map(|node| SemanticLayoutNodeKey {
@@ -396,7 +384,6 @@ impl ExactRowIndex {
         if entry.renderer_generation != key.renderer_generation
             || entry.renderer_cache_key != key.renderer_cache_key
             || entry.width != key.width
-            || entry.show_thinking != key.show_thinking
         {
             return false;
         }
@@ -431,7 +418,6 @@ impl ExactRowIndex {
         self.renderer_cache_key = key.renderer_cache_key;
         self.presentation_generation = key.presentation_generation;
         self.width = key.width;
-        self.show_thinking = key.show_thinking;
         self.rebuild_prefix_rows();
         true
     }
@@ -442,7 +428,6 @@ impl ExactRowIndex {
         }
         Some(DisplayRowIndexEntry {
             width: self.width,
-            show_thinking: self.show_thinking,
             renderer_generation: self.renderer_generation,
             renderer_cache_key: self.renderer_cache_key,
             nodes: self
@@ -521,13 +506,11 @@ impl MeasurementIndexStore {
     fn find_entry(
         &self,
         width: u16,
-        show_thinking: bool,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
     ) -> Option<&DisplayRowIndexEntry> {
         self.entries.iter().find(|entry| {
             entry.width == width
-                && entry.show_thinking == show_thinking
                 && entry.renderer_generation == renderer_generation
                 && entry.renderer_cache_key == renderer_cache_key
         })
@@ -575,7 +558,6 @@ pub(crate) struct TranscriptSearchLayoutEntry {
 struct ProjectKey {
     generation: u64,
     width: u16,
-    show_thinking: bool,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
     presentation_generation: u64,
@@ -749,11 +731,10 @@ struct MaterializedTranscriptRange {
     row_anchors: Vec<Option<RenderedRowAnchor>>,
 }
 
-fn base_layout_key(width: u16, show_thinking: bool) -> LayoutKey {
+fn base_layout_key(width: u16) -> LayoutKey {
     LayoutKey {
         view_state: ViewState::Expanded,
         width,
-        show_thinking,
         content_hash: 0,
         sidecar_hash: 0,
     }
@@ -850,7 +831,7 @@ fn row_index_entry_matches(
     if entry.nodes.len() != plan.len() {
         return false;
     }
-    let base_key = base_layout_key(entry.width, entry.show_thinking);
+    let base_key = base_layout_key(entry.width);
     entry.nodes.iter().enumerate().all(|(index, node)| {
         plan.node_id(index) == Some(node.id)
             && plan.node_key(policy, history, presentation, index, base_key) == Some(node.key)
@@ -878,7 +859,6 @@ fn row_index_entry_matches_renderer(
 fn upsert_row_index_entry(entries: &mut Vec<DisplayRowIndexEntry>, entry: DisplayRowIndexEntry) {
     if let Some(existing) = entries.iter_mut().find(|existing| {
         existing.width == entry.width
-            && existing.show_thinking == entry.show_thinking
             && existing.renderer_generation == entry.renderer_generation
             && existing.renderer_cache_key == entry.renderer_cache_key
     }) {
@@ -1207,12 +1187,7 @@ impl TranscriptProjection {
         }
         let Some(entry) = self
             .measurements
-            .find_entry(
-                key.width,
-                key.show_thinking,
-                key.renderer_generation,
-                key.renderer_cache_key,
-            )
+            .find_entry(key.width, key.renderer_generation, key.renderer_cache_key)
             .cloned()
         else {
             smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
@@ -1242,9 +1217,8 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
     ) {
-        let env = TranscriptRenderEnv::new(lua, show_thinking);
+        let env = TranscriptRenderEnv::new(lua);
         self.rebuild_row_index_with_env(env, history, width);
     }
 
@@ -1263,7 +1237,6 @@ impl TranscriptProjection {
             "transcript:rebuild_row_index:generation",
             history.generation(),
         );
-        let show_thinking = env.show_thinking;
         let renderer_generation = env.renderer_generation;
         let renderer_cache_key = env.renderer_cache_key;
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
@@ -1271,7 +1244,6 @@ impl TranscriptProjection {
         let plan = self.render_plan.clone();
         let row_key = RowIndexKey::new(
             width,
-            show_thinking,
             renderer_generation,
             renderer_cache_key,
             self.presentation.generation(),
@@ -1476,9 +1448,8 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
     ) -> RowIndex {
-        self.rebuild_row_index(lua, history, width, show_thinking);
+        self.rebuild_row_index(lua, history, width);
         self.measurements.active.total_rows()
     }
 
@@ -1487,10 +1458,9 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         row: RowIndex,
     ) -> Option<TranscriptNodeRow> {
-        self.rebuild_row_index(lua, history, width, show_thinking);
+        self.rebuild_row_index(lua, history, width);
         self.node_at_prepared_row(history, row)
     }
 
@@ -1527,10 +1497,9 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         request: FoldAtRow,
     ) -> bool {
-        let Some(node) = self.node_at_row(lua, history, width, show_thinking, request.row) else {
+        let Some(node) = self.node_at_row(lua, history, width, request.row) else {
             return false;
         };
         if !node.can_activate(request.activation) {
@@ -1667,10 +1636,9 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         row: RowIndex,
     ) -> Option<TranscriptNodeRow> {
-        self.node_at_row(lua, history, width, show_thinking, row)
+        self.node_at_row(lua, history, width, row)
     }
 
     fn resize_anchor_for(&self, width: u16, scroll_target: ScrollTarget) -> Option<ResizeAnchor> {
@@ -1707,19 +1675,17 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
     ) -> ProjectionPlan {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
-        let env = TranscriptRenderEnv::new(lua, show_thinking);
+        let env = TranscriptRenderEnv::new(lua);
         self.rebuild_row_index_with_env(env, history, width);
         let key = ProjectKey {
             generation: self.render_plan.fingerprint,
             width,
-            show_thinking,
             renderer_generation: env.renderer_generation,
             renderer_cache_key: env.renderer_cache_key,
             presentation_generation: self.presentation.generation(),
@@ -1828,7 +1794,6 @@ impl TranscriptProjection {
         buf: &mut Buffer,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
@@ -1838,7 +1803,6 @@ impl TranscriptProjection {
             &lua,
             history,
             width,
-            show_thinking,
             theme,
             scroll_target,
             viewport_rows,
@@ -1856,7 +1820,7 @@ impl TranscriptProjection {
     ) -> MaterializedRows {
         let _perf = smelt_perf::perf::begin("transcript:project_planned");
         let mut plan = plan;
-        let current_env = TranscriptRenderEnv::new(lua, plan.key.show_thinking);
+        let current_env = TranscriptRenderEnv::new(lua);
         if self.render_plan.history_generation != history.generation()
             || self.render_plan.group_generation != lua.transcript_group_generation()
             || self.render_plan.group_cache_key != lua.transcript_group_cache_key()
@@ -1869,7 +1833,6 @@ impl TranscriptProjection {
             let key = ProjectKey {
                 generation: self.render_plan.fingerprint,
                 width: plan.key.width,
-                show_thinking: plan.key.show_thinking,
                 renderer_generation: current_env.renderer_generation,
                 renderer_cache_key: current_env.renderer_cache_key,
                 presentation_generation: self.presentation.generation(),
@@ -1911,7 +1874,6 @@ impl TranscriptProjection {
         let prev = self.last_project_key()?;
         if prev.generation != key.generation
             || prev.width != key.width
-            || prev.show_thinking != key.show_thinking
             || prev.renderer_generation != key.renderer_generation
             || prev.renderer_cache_key != key.renderer_cache_key
             || prev.presentation_generation != key.presentation_generation
@@ -1957,7 +1919,6 @@ impl TranscriptProjection {
         let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
                 lua,
-                plan.key.show_thinking,
                 plan.key.renderer_generation,
                 plan.key.renderer_cache_key,
             ),
@@ -2139,9 +2100,8 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
     ) -> Vec<(BlockId, RowIndex, RowIndex)> {
-        self.rebuild_row_index(lua, history, width, show_thinking);
+        self.rebuild_row_index(lua, history, width);
         self.exact_block_layout(history)
             .into_iter()
             .map(|e| (e.id, e.start, e.rows))
@@ -2153,9 +2113,8 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
     ) -> TranscriptSearchLayout {
-        self.rebuild_row_index(lua, history, width, show_thinking);
+        self.rebuild_row_index(lua, history, width);
         let generation = self.measurements.active.semantic_layout_hash();
         self.exact_search_layout(generation, history)
     }
@@ -2170,14 +2129,12 @@ impl TranscriptProjection {
         buf: &mut Buffer,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
     ) {
-        self.rebuild_row_index(lua, history, width, show_thinking);
+        self.rebuild_row_index(lua, history, width);
         let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
                 lua,
-                show_thinking,
                 self.measurements.active.renderer_generation,
                 self.measurements.active.renderer_cache_key,
             ),
@@ -2198,11 +2155,10 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
     ) -> Arc<Vec<String>> {
         let _perf = smelt_perf::perf::begin("transcript:build_rows");
-        let env = TranscriptRenderEnv::new(lua, show_thinking);
+        let env = TranscriptRenderEnv::new(lua);
         let renderer_generation = env.renderer_generation;
         let renderer_cache_key = env.renderer_cache_key;
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
@@ -2214,7 +2170,6 @@ impl TranscriptProjection {
                 && c.renderer_cache_key == renderer_cache_key
                 && c.presentation_generation == self.presentation.generation()
                 && c.width == width
-                && c.show_thinking == show_thinking
             {
                 return Arc::clone(&c.rows);
             }
@@ -2227,7 +2182,6 @@ impl TranscriptProjection {
         let plan = self.render_plan.clone();
         let row_key = RowIndexKey::new(
             width,
-            show_thinking,
             renderer_generation,
             renderer_cache_key,
             self.presentation.generation(),
@@ -2289,7 +2243,6 @@ impl TranscriptProjection {
             renderer_cache_key,
             presentation_generation: self.presentation.generation(),
             width,
-            show_thinking,
         });
         rows
     }
@@ -2299,7 +2252,6 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
         rows: std::ops::Range<RowIndex>,
     ) -> DisplayRows {
@@ -2312,7 +2264,7 @@ impl TranscriptProjection {
             return DisplayRows::empty();
         }
 
-        self.rebuild_row_index(lua, history, width, show_thinking);
+        self.rebuild_row_index(lua, history, width);
         let total_rows = self.measurements.active.total_rows();
         if total_rows == 0 || start >= total_rows {
             return DisplayRows::empty();
@@ -2326,7 +2278,6 @@ impl TranscriptProjection {
         let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
                 lua,
-                show_thinking,
                 self.measurements.active.renderer_generation,
                 self.measurements.active.renderer_cache_key,
             ),
@@ -2387,7 +2338,6 @@ impl TranscriptProjection {
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
         range: DocRange,
     ) -> CopyOutput {
@@ -2395,7 +2345,7 @@ impl TranscriptProjection {
         if (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col) {
             return CopyOutput::default();
         }
-        self.rebuild_row_index(lua, history, width, show_thinking);
+        self.rebuild_row_index(lua, history, width);
         let total_rows = self.measurements.active.total_rows();
         if total_rows == 0 || range.start.row >= total_rows {
             return CopyOutput::default();
@@ -2413,7 +2363,6 @@ impl TranscriptProjection {
         let materialized = self.collect_nodes_range(
             TranscriptRenderEnv::with_renderer(
                 lua,
-                show_thinking,
                 self.measurements.active.renderer_generation,
                 self.measurements.active.renderer_cache_key,
             ),
@@ -2632,7 +2581,6 @@ mod tests {
             &mut buf,
             history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -2654,7 +2602,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -2680,7 +2627,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -2691,23 +2637,19 @@ mod tests {
             &lua,
             &mut transcript.history,
             80,
-            false,
             FoldAtRow {
                 row: 0,
                 action: FoldAction::Close,
                 activation: FoldActivation::AnyNodeRow,
             },
         ));
-        let history_key = transcript
-            .history
-            .resolve_key(id, base_layout_key(80, false));
+        let history_key = transcript.history.resolve_key(id, base_layout_key(80));
         assert_eq!(history_key.view_state, ViewState::Expanded);
 
         projection.project(
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -2715,7 +2657,7 @@ mod tests {
         assert_eq!(buf.line_count(), 3);
         assert!(!buf.lines().iter().any(|line| line.contains("more lines")));
         let node = projection
-            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 1)
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, 1)
             .expect("collapsed block row");
         assert!(node.explicit_fold_target);
     }
@@ -2764,7 +2706,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert!(rows.iter().any(|row| row == "custom summary collapsed"));
         assert!(rows.iter().any(|row| row == "custom detail"));
@@ -2787,7 +2729,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -2805,7 +2746,6 @@ mod tests {
             &lua,
             &mut transcript.history,
             80,
-            false,
             FoldAtRow {
                 row: 1,
                 action: FoldAction::Open,
@@ -2816,7 +2756,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -2830,7 +2769,6 @@ mod tests {
             &lua,
             &mut transcript.history,
             80,
-            false,
             FoldAtRow {
                 row: 1,
                 action: FoldAction::Toggle,
@@ -2841,7 +2779,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -2867,14 +2804,14 @@ mod tests {
             content: "c\nd".into(),
         });
         let mut projection = TranscriptProjection::new();
-        projection.rebuild_row_index(&lua, &mut transcript.history, 80, false);
+        projection.rebuild_row_index(&lua, &mut transcript.history, 80);
 
         assert!(projection.fold_block_kind(&transcript.history, "thinking", FoldAction::Toggle));
         let first = projection
-            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 0)
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, 0)
             .expect("first thinking node");
         let second = projection
-            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, first.rows)
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, first.rows)
             .expect("second thinking node");
         assert_eq!(first.view_state, ViewState::Expanded);
         assert_eq!(second.view_state, ViewState::Expanded);
@@ -2882,17 +2819,17 @@ mod tests {
         assert!(projection.fold_node(&transcript.history, first.id, FoldAction::Close));
         assert!(projection.fold_block_kind(&transcript.history, "thinking", FoldAction::Toggle));
         let first = projection
-            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 0)
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, 0)
             .expect("first thinking node");
         let second = projection
-            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, first.rows)
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, first.rows)
             .expect("second thinking node");
         assert_eq!(first.view_state, ViewState::Expanded);
         assert_eq!(second.view_state, ViewState::Expanded);
 
         assert!(projection.fold_block_kind(&transcript.history, "thinking", FoldAction::Toggle));
         let first = projection
-            .node_metadata_at_row(&lua, &mut transcript.history, 80, false, 0)
+            .node_metadata_at_row(&lua, &mut transcript.history, 80, 0)
             .expect("first thinking node");
         assert_eq!(first.view_state, ViewState::Collapsed);
     }
@@ -2992,7 +2929,6 @@ mod tests {
             &lua,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             10,
@@ -3037,7 +2973,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -3048,7 +2983,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -3083,7 +3017,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -3101,7 +3034,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -3138,12 +3070,12 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let before_group = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let before_group = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
         assert!(before_group.iter().any(|line| line.contains("bash")));
         assert!(!before_group.iter().any(|line| line.starts_with("group:")));
 
         register_terminal_tool_group(&lua, 2);
-        let grouped = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let grouped = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
@@ -3184,7 +3116,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert_eq!(projection.render_plan.nodes.len(), 2);
         assert!(projection
@@ -3222,7 +3154,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert_eq!(projection.render_plan.nodes.len(), 3);
         assert!(projection
@@ -3273,7 +3205,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
         let cache = projection.display_cache_data(&lua, &transcript.history);
 
         assert!(rows.iter().any(|line| line == "uncached group"));
@@ -3317,7 +3249,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert_eq!(
             rows.as_ref(),
@@ -3355,7 +3287,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
@@ -3393,7 +3325,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
@@ -3412,7 +3344,7 @@ mod tests {
 
         let group_id = projection.render_plan.nodes[0].id();
         assert!(projection.fold_node(&transcript.history, group_id, FoldAction::Open));
-        let expanded = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let expanded = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
         assert!(
             expanded.iter().any(|line| line.contains("* read_file")),
             "expanded rows: {expanded:?}"
@@ -3426,14 +3358,13 @@ mod tests {
             &lua,
             &mut transcript.history,
             80,
-            false,
             FoldAtRow {
                 row: 2,
                 action: FoldAction::Toggle,
                 activation: FoldActivation::AnyNodeRow,
             },
         ));
-        let collapsed = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let collapsed = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
         assert!(collapsed.iter().any(|line| line == "* read_file ×2"));
         assert!(!collapsed.iter().any(|line| line == "  2 lines"));
     }
@@ -3463,9 +3394,8 @@ mod tests {
         let second = transcript.history.order[1];
         let mut projection = TranscriptProjection::new();
 
-        let layout = projection.materialize_block_layout(&lua, &mut transcript.history, 80, false);
-        let search_layout =
-            projection.materialize_search_layout(&lua, &mut transcript.history, 80, false);
+        let layout = projection.materialize_block_layout(&lua, &mut transcript.history, 80);
+        let search_layout = projection.materialize_search_layout(&lua, &mut transcript.history, 80);
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
@@ -3525,7 +3455,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
@@ -3581,7 +3511,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
@@ -3625,7 +3555,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
@@ -3664,7 +3594,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
 
         assert!(matches!(
             projection.render_plan.nodes.as_slice(),
@@ -3692,7 +3622,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
 
-        let rows = projection.build_rows(&test_lua(), &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&test_lua(), &mut transcript.history, 80, &theme);
 
         assert!(rows.iter().any(|line| line == "line 99"));
         assert!(rows.iter().any(|line| line == "line 0"));
@@ -3702,7 +3632,7 @@ mod tests {
         assert_eq!(counters.exact_height_measured_blocks, 100);
 
         projection.reset_counters();
-        let cached = projection.build_rows(&test_lua(), &mut transcript.history, 80, false, &theme);
+        let cached = projection.build_rows(&test_lua(), &mut transcript.history, 80, &theme);
         assert_eq!(cached.len(), rows.len());
         assert_eq!(
             projection.counters(),
@@ -3720,7 +3650,7 @@ mod tests {
         }
         let mut projection = TranscriptProjection::new();
 
-        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
 
         assert_eq!(total, 199);
         let counters = projection.counters();
@@ -3730,7 +3660,7 @@ mod tests {
 
         projection.reset_counters();
         assert_eq!(
-            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false),
+            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80),
             total
         );
         assert_eq!(
@@ -3753,8 +3683,7 @@ mod tests {
             std::time::Instant::now(),
         );
         let mut projection = TranscriptProjection::new();
-        let pending_total =
-            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        let pending_total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
 
         parser.append_active_output(&mut transcript.history, "call-1", "first\nsecond\nthird");
         parser.set_active_status(
@@ -3765,8 +3694,7 @@ mod tests {
         );
         projection.reset_counters();
 
-        let finished_total =
-            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        let finished_total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
 
         assert!(
             finished_total > pending_total,
@@ -3789,7 +3717,7 @@ mod tests {
         }
         let mut projection = TranscriptProjection::new();
 
-        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 10, false);
+        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 10);
 
         assert_eq!(total, 12);
         assert_eq!(projection.display_layouts_len(), 3);
@@ -3810,7 +3738,7 @@ mod tests {
             });
         }
 
-        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
 
         assert_eq!(total, (block_count as RowIndex).saturating_mul(2) - 1);
         assert_eq!(projection.display_layouts_len(), block_count);
@@ -3820,8 +3748,7 @@ mod tests {
         assert_eq!(counters.exact_height_measured_blocks, block_count);
 
         projection.reset_counters();
-        let total_narrow =
-            projection.exact_total_rows(&test_lua(), &mut transcript.history, 40, false);
+        let total_narrow = projection.exact_total_rows(&test_lua(), &mut transcript.history, 40);
         assert!(total_narrow >= total);
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
@@ -3846,13 +3773,13 @@ mod tests {
             });
         }
 
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 40, false);
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 40);
         assert!(total > 0);
         projection.reset_counters();
 
         projection.invalidate_theme();
         assert_eq!(
-            projection.exact_total_rows(&lua, &mut transcript.history, 40, false),
+            projection.exact_total_rows(&lua, &mut transcript.history, 40),
             total
         );
         assert_eq!(
@@ -3873,13 +3800,13 @@ mod tests {
             });
         }
 
-        let wide_total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
-        let narrow_total = projection.exact_total_rows(&lua, &mut transcript.history, 40, false);
+        let wide_total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
+        let narrow_total = projection.exact_total_rows(&lua, &mut transcript.history, 40);
         assert!(narrow_total >= wide_total);
         projection.reset_counters();
 
         assert_eq!(
-            projection.exact_total_rows(&lua, &mut transcript.history, 80, false),
+            projection.exact_total_rows(&lua, &mut transcript.history, 80),
             wide_total
         );
         assert_eq!(
@@ -3899,7 +3826,7 @@ mod tests {
         }
         let lua = test_lua();
         let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
         assert_eq!(total, 199);
         let cache = projection.display_cache_data(&lua, &transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
@@ -3918,7 +3845,7 @@ mod tests {
         hydrated.reset_counters();
 
         assert_eq!(
-            hydrated.exact_total_rows(&test_lua(), &mut transcript.history, 80, false),
+            hydrated.exact_total_rows(&test_lua(), &mut transcript.history, 80),
             total
         );
         assert_eq!(
@@ -3938,7 +3865,7 @@ mod tests {
             });
         }
         let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
         let mut cache = projection.display_cache_data(&lua, &transcript.history);
         assert_eq!(cache.display_layouts.len(), 100);
         cache.row_indexes.clear();
@@ -3949,7 +3876,7 @@ mod tests {
         hydrated.reset_counters();
 
         assert_eq!(
-            hydrated.exact_total_rows(&lua, &mut transcript.history, 80, false),
+            hydrated.exact_total_rows(&lua, &mut transcript.history, 80),
             total
         );
         let counters = hydrated.counters();
@@ -3985,7 +3912,7 @@ mod tests {
         });
         let mut projection = TranscriptProjection::new();
         assert_eq!(
-            projection.exact_total_rows(&lua, &mut transcript.history, 80, false),
+            projection.exact_total_rows(&lua, &mut transcript.history, 80),
             1
         );
         assert_eq!(projection.display_layouts_len(), 1);
@@ -4005,7 +3932,7 @@ mod tests {
             });
         }
         let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
         let mut cache = projection.display_cache_data(&lua, &transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
         assert_eq!(cache.display_layouts.len(), 20);
@@ -4022,7 +3949,7 @@ mod tests {
         hydrated.reset_counters();
 
         assert_eq!(
-            hydrated.exact_total_rows(&lua, &mut transcript.history, 80, false),
+            hydrated.exact_total_rows(&lua, &mut transcript.history, 80),
             total
         );
         let counters = hydrated.counters();
@@ -4046,7 +3973,7 @@ mod tests {
             });
         }
         let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
         let mut cache = projection.display_cache_data(&lua, &transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
         assert_eq!(cache.display_layouts.len(), 20);
@@ -4062,7 +3989,7 @@ mod tests {
         hydrated.reset_counters();
 
         assert_eq!(
-            hydrated.exact_total_rows(&lua, &mut transcript.history, 80, false),
+            hydrated.exact_total_rows(&lua, &mut transcript.history, 80),
             total
         );
         let counters = hydrated.counters();
@@ -4086,7 +4013,7 @@ mod tests {
             });
         }
 
-        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
         assert_eq!(total, 99);
         let first_counters = projection.counters();
         assert_eq!(first_counters.exact_height_measured_blocks, 50);
@@ -4097,8 +4024,7 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        let total_after =
-            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        let total_after = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
         assert_eq!(total_after, 199);
         let second_counters = projection.counters();
         assert_eq!(
@@ -4120,7 +4046,7 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
         projection.reset_counters();
 
         transcript.history.rewrite(
@@ -4129,7 +4055,7 @@ mod tests {
                 content: "rewritten block with different height".into(),
             },
         );
-        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
 
         let counters = projection.counters();
         assert_eq!(
@@ -4148,12 +4074,12 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
         projection.reset_counters();
 
         transcript.history.order.remove(10);
         transcript.history.invalidate_display_cache();
-        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
 
         let counters = projection.counters();
         assert!(
@@ -4173,7 +4099,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
         assert_eq!(
-            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false),
+            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80),
             199
         );
 
@@ -4182,7 +4108,6 @@ mod tests {
             &test_lua(),
             &mut transcript.history,
             80,
-            false,
             &theme,
             150..153,
         );
@@ -4213,7 +4138,6 @@ mod tests {
             &test_lua(),
             &mut transcript.history,
             80,
-            false,
             &theme,
             DocRange {
                 start: crate::smelt_edit::DocPosition {
@@ -4242,7 +4166,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
         assert_eq!(
-            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false),
+            projection.exact_total_rows(&test_lua(), &mut transcript.history, 80),
             199
         );
 
@@ -4251,7 +4175,6 @@ mod tests {
             &test_lua(),
             &mut transcript.history,
             80,
-            false,
             &theme,
             DocRange {
                 start: crate::smelt_edit::DocPosition {
@@ -4293,7 +4216,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4329,7 +4251,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             viewport_rows,
@@ -4344,7 +4265,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             viewport_rows,
@@ -4375,7 +4295,6 @@ mod tests {
             &mut full_buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             10,
@@ -4387,7 +4306,6 @@ mod tests {
             &test_lua(),
             &mut transcript.history,
             80,
-            false,
             &theme,
             5..12,
         );
@@ -4412,7 +4330,6 @@ mod tests {
             &mut full_buf,
             &mut transcript.history,
             18,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             20,
@@ -4422,7 +4339,6 @@ mod tests {
             &test_lua(),
             &mut transcript.history,
             18,
-            false,
             &theme,
             0..full_buf.line_count() as RowIndex,
         );
@@ -4446,7 +4362,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
         let full_rows = projection
-            .build_rows(&test_lua(), &mut transcript.history, 80, false, &theme)
+            .build_rows(&test_lua(), &mut transcript.history, 80, &theme)
             .len() as RowIndex;
         let mut buf = Buffer::new(crate::smelt_edit::BufId(5), Default::default());
 
@@ -4454,7 +4370,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4488,7 +4403,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             10,
@@ -4502,7 +4416,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(target),
             10,
@@ -4542,7 +4455,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(scroll_top),
             8,
@@ -4575,7 +4487,7 @@ mod tests {
         let mut projection = TranscriptProjection::new();
         let mut buf = Buffer::new(crate::smelt_edit::BufId(16), Default::default());
         let after_start = projection
-            .materialize_block_layout(&test_lua(), &mut transcript.history, 80, false)
+            .materialize_block_layout(&test_lua(), &mut transcript.history, 80)
             .into_iter()
             .find(|(id, _, _)| *id == after_id)
             .map(|(_, start, _)| start)
@@ -4587,7 +4499,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(scroll_top),
             viewport_rows,
@@ -4620,7 +4531,7 @@ mod tests {
         let mut buf = Buffer::new(crate::smelt_edit::BufId(13), Default::default());
         let anchor_id = transcript.history.order[10];
         let anchor_row = projection
-            .materialize_block_layout(&test_lua(), &mut transcript.history, 80, false)
+            .materialize_block_layout(&test_lua(), &mut transcript.history, 80)
             .into_iter()
             .find(|(id, _, _)| *id == anchor_id)
             .map(|(_, start, _)| start)
@@ -4630,7 +4541,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(anchor_row),
             5,
@@ -4648,7 +4558,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(anchor_row),
             5,
@@ -4674,7 +4583,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4685,7 +4593,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4710,7 +4617,6 @@ mod tests {
             &mut first_buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4722,7 +4628,6 @@ mod tests {
             &mut second_buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4758,7 +4663,6 @@ mod tests {
             &mut shared,
             &mut first.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4767,7 +4671,6 @@ mod tests {
             &mut shared,
             &mut second.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4777,7 +4680,6 @@ mod tests {
             &mut shared,
             &mut first.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4806,7 +4708,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4814,8 +4715,7 @@ mod tests {
         let visible_count = projection.visible_block_layout().count();
         assert!(visible_count < transcript.history.order.len());
 
-        let layout =
-            projection.materialize_block_layout(&test_lua(), &mut transcript.history, 80, false);
+        let layout = projection.materialize_block_layout(&test_lua(), &mut transcript.history, 80);
         assert_eq!(layout.len(), transcript.history.order.len());
         assert_eq!(layout.first().map(|(_, start, _)| *start), Some(0));
         assert_eq!(layout.last().map(|(_, _, rows)| *rows), Some(1));
@@ -4834,8 +4734,7 @@ mod tests {
         }
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let full_rows =
-            projection.build_rows(&test_lua(), &mut transcript.history, 80, false, &theme);
+        let full_rows = projection.build_rows(&test_lua(), &mut transcript.history, 80, &theme);
         assert_eq!(full_rows.len() as RowIndex, 439);
         let mut buf = Buffer::new(crate::smelt_edit::BufId(7), Default::default());
 
@@ -4843,7 +4742,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             5,
@@ -4860,7 +4758,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             5,
@@ -4891,13 +4788,8 @@ mod tests {
         let old_width = 30;
         let new_width = 14;
         let viewport_rows = 5;
-        let old_rows = projection.build_rows(
-            &test_lua(),
-            &mut transcript.history,
-            old_width,
-            false,
-            &theme,
-        );
+        let old_rows =
+            projection.build_rows(&test_lua(), &mut transcript.history, old_width, &theme);
         let anchor_row = old_rows
             .iter()
             .position(|line| line.contains("ANCHOR"))
@@ -4907,7 +4799,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             old_width,
-            false,
             &theme,
             ScrollTarget::visible_row(anchor_row),
             viewport_rows,
@@ -4921,7 +4812,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             new_width,
-            false,
             &theme,
             ScrollTarget::visible_row(anchor_row),
             viewport_rows,
@@ -4939,7 +4829,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             old_width,
-            false,
             &theme,
             ScrollTarget::visible_row(after.clamped_scroll),
             viewport_rows,
@@ -4968,7 +4857,7 @@ mod tests {
 
         let anchor_id = transcript.history.order[10];
         let anchor_row = projection
-            .materialize_block_layout(&test_lua(), &mut transcript.history, 80, false)
+            .materialize_block_layout(&test_lua(), &mut transcript.history, 80)
             .into_iter()
             .find(|(id, _, _)| *id == anchor_id)
             .map(|(_, start, _)| start)
@@ -4978,7 +4867,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(anchor_row),
             5,
@@ -4989,7 +4877,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             24,
-            false,
             &theme,
             ScrollTarget::visible_row(anchor_row),
             5,
@@ -5067,17 +4954,15 @@ mod tests {
 
             let theme = Theme::default();
             let mut projection = TranscriptProjection::new();
-            let measured =
-                projection.exact_total_rows(&test_lua(), &mut transcript.history, width, true);
+            let measured = projection.exact_total_rows(&test_lua(), &mut transcript.history, width);
             let full_rows =
-                projection.build_rows(&test_lua(), &mut transcript.history, width, true, &theme);
+                projection.build_rows(&test_lua(), &mut transcript.history, width, &theme);
             assert_eq!(measured as usize, full_rows.len(), "width {width}");
 
             let range_rows = projection.display_rows_for_range(
                 &test_lua(),
                 &mut transcript.history,
                 width,
-                true,
                 &theme,
                 0..measured,
             );
@@ -5213,7 +5098,6 @@ mod tests {
         buf: &mut Buffer,
         history: &mut BlockHistory,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
@@ -5222,7 +5106,6 @@ mod tests {
             lua,
             history,
             width,
-            show_thinking,
             theme,
             scroll_target,
             viewport_rows,
@@ -5547,7 +5430,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             100,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             40,
@@ -5577,7 +5459,6 @@ mod tests {
             &mut resumed_buf,
             &mut resumed.history,
             100,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             40,
@@ -5623,7 +5504,6 @@ mod tests {
             &mut cold_buf,
             &mut transcript.history,
             100,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             40,
@@ -5641,7 +5521,6 @@ mod tests {
             &mut cold_buf,
             &mut transcript.history,
             72,
-            false,
             &theme,
             ScrollTarget::visible_row(first.clamped_scroll),
             40,
@@ -5658,7 +5537,6 @@ mod tests {
             &mut cold_buf,
             &mut transcript.history,
             72,
-            false,
             &theme,
             ScrollTarget::visible_row(resized.clamped_scroll),
             40,
@@ -5679,7 +5557,6 @@ mod tests {
                 &mut cold_buf,
                 &mut transcript.history,
                 72,
-                false,
                 &theme,
                 ScrollTarget::visible_row(row),
                 40,
@@ -5693,14 +5570,8 @@ mod tests {
         cold.reset_counters();
         let visible_start = std::time::Instant::now();
         let mid = resized.total_rows / 2;
-        let visible = cold.display_rows_for_range(
-            &lua,
-            &mut transcript.history,
-            72,
-            false,
-            &theme,
-            mid..mid + 80,
-        );
+        let visible =
+            cold.display_rows_for_range(&lua, &mut transcript.history, 72, &theme, mid..mid + 80);
         let visible_ms = elapsed_ms(visible_start.elapsed());
         let visible_counters = cold.counters();
 
@@ -5716,7 +5587,6 @@ mod tests {
             &mut hydrated_full_buf,
             &mut transcript.history,
             100,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             40,
@@ -5738,7 +5608,6 @@ mod tests {
             &mut hydrated_ir_buf,
             &mut transcript.history,
             100,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             40,
@@ -5755,7 +5624,6 @@ mod tests {
             &mut no_cache_buf,
             &mut transcript.history,
             100,
-            false,
             &theme,
             ScrollTarget::visible_tail(),
             40,
@@ -6057,7 +5925,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -6127,10 +5994,10 @@ mod tests {
         );
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        projection.build_rows(&lua, &mut transcript.history, 80, &theme);
         let group_id = projection.render_plan.nodes[0].id();
         assert!(projection.fold_node(&transcript.history, group_id, FoldAction::Open));
-        let expanded = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let expanded = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
         assert!(
             expanded.iter().any(|line| line.trim() == "1 lines"),
             "expanded rows: {expanded:?}"
@@ -6141,7 +6008,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             80,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -6176,7 +6042,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             40,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -6186,7 +6051,6 @@ mod tests {
             &test_lua(),
             &mut transcript.history,
             40,
-            false,
             &theme,
             0..buf.line_count() as RowIndex,
         );
@@ -6234,13 +6098,12 @@ mod tests {
         });
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
-        let rows = projection.build_rows(&test_lua(), &mut transcript.history, 80, false, &theme);
+        let rows = projection.build_rows(&test_lua(), &mut transcript.history, 80, &theme);
 
         let display = projection.display_rows_for_range(
             &test_lua(),
             &mut transcript.history,
             80,
-            false,
             &theme,
             0..rows.len() as RowIndex,
         );
@@ -6267,7 +6130,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             40,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -6292,7 +6154,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             40,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,
@@ -6335,7 +6196,6 @@ mod tests {
             &mut buf,
             &mut transcript.history,
             24,
-            false,
             &theme,
             ScrollTarget::visible_row(0),
             80,

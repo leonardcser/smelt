@@ -4,17 +4,12 @@ use crate::transcript_model::ViewState;
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutContext {
     pub width: u16,
-    pub show_thinking: bool,
     pub view_state: ViewState,
 }
 
 impl LayoutContext {
-    pub fn new(width: u16, show_thinking: bool, view_state: ViewState) -> Self {
-        Self {
-            width,
-            show_thinking,
-            view_state,
-        }
+    pub fn new(width: u16, view_state: ViewState) -> Self {
+        Self { width, view_state }
     }
 }
 
@@ -24,16 +19,16 @@ mod tests {
 
     #[test]
     fn new_records_all_fields() {
-        let ctx = LayoutContext::new(120, true, ViewState::default());
+        let ctx = LayoutContext::new(120, ViewState::default());
         assert_eq!(ctx.width, 120);
-        assert!(ctx.show_thinking);
+        assert_eq!(ctx.view_state, ViewState::default());
     }
 
     #[test]
     fn copy_clone_yields_equal_data() {
-        let ctx = LayoutContext::new(80, false, ViewState::default());
+        let ctx = LayoutContext::new(80, ViewState::default());
         let copy = ctx;
         assert_eq!(copy.width, ctx.width);
-        assert_eq!(copy.show_thinking, ctx.show_thinking);
+        assert_eq!(copy.view_state, ctx.view_state);
     }
 }

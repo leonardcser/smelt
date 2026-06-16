@@ -648,7 +648,6 @@ mod tests {
         BlockLayout, CapKeep, CapMarker, Constraint, LuaLeaf, TextSpec,
     };
     use smelt_core::lua::api::lua_table_to_json;
-    use smelt_core::lua::runtime::TranscriptRenderCtx;
     use smelt_core::transcript_model::{Block, BlockId, ToolOutput, ToolState, ToolStatus};
 
     /// Stub `smelt.notify` / `smelt.notify.error` to push into `_G.test_log` / `_G.test_err`.
@@ -972,10 +971,7 @@ mod tests {
             0,
             block,
             state,
-            TranscriptRenderCtx {
-                show_thinking: true,
-                view_state: smelt_core::transcript_model::ViewState::Expanded,
-            },
+            smelt_core::transcript_model::ViewState::Expanded,
         )
     }
 

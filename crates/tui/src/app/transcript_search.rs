@@ -40,7 +40,6 @@ struct TranscriptSearchEntry {
 pub(super) struct TranscriptSearchKey {
     layout_generation: u64,
     width: u16,
-    show_thinking: bool,
 }
 
 impl TranscriptSearchIndex {
@@ -50,7 +49,7 @@ impl TranscriptSearchIndex {
         layout: &TranscriptSearchLayout,
         history: &BlockHistory,
     ) -> Option<Self> {
-        if self.key.width != key.width || self.key.show_thinking != key.show_thinking {
+        if self.key.width != key.width {
             return None;
         }
         let old_len = self.entries.len();
@@ -180,18 +179,15 @@ impl TuiApp {
         TranscriptSearchKey {
             layout_generation,
             width: self.transcript_width() as u16,
-            show_thinking: self.core.config.settings.show_thinking,
         }
     }
 
     fn ensure_transcript_search_index(&mut self) -> Option<&TranscriptSearchIndex> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        let show_thinking = self.core.config.settings.show_thinking;
         let layout = {
             let _perf = smelt_perf::perf::begin("search:transcript:index_layout");
-            self.transcript
-                .materialize_search_layout(&self.lua, width, show_thinking)
+            self.transcript.materialize_search_layout(&self.lua, width)
         };
         let key = self.transcript_search_key(layout.generation);
         if self
@@ -443,11 +439,7 @@ impl TuiApp {
         if rows == 0 {
             return;
         }
-        let display = self.transcript_rows_and_breaks_range(
-            self.core.config.settings.show_thinking,
-            first_row,
-            rows,
-        );
+        let display = self.transcript_rows_and_breaks_range(first_row, rows);
         let mut found = Vec::new();
         for (offset, row) in display.rows.iter().enumerate() {
             let row_index = first_row.saturating_add(offset as RowIndex);

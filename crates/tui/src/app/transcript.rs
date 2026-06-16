@@ -59,58 +59,41 @@ impl TranscriptView {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
     ) -> Arc<Vec<String>> {
-        self.projection.build_rows(
-            lua,
-            &mut self.transcript.history,
-            width,
-            show_thinking,
-            theme,
-        )
+        self.projection
+            .build_rows(lua, &mut self.transcript.history, width, theme)
     }
 
     pub(crate) fn exact_total_rows(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
     ) -> crate::smelt_edit::RowIndex {
         self.projection
-            .exact_total_rows(lua, &mut self.transcript.history, width, show_thinking)
+            .exact_total_rows(lua, &mut self.transcript.history, width)
     }
 
     pub(crate) fn materialize_block_layout(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
     ) -> Vec<(
         BlockId,
         crate::smelt_edit::RowIndex,
         crate::smelt_edit::RowIndex,
     )> {
-        self.projection.materialize_block_layout(
-            lua,
-            &mut self.transcript.history,
-            width,
-            show_thinking,
-        )
+        self.projection
+            .materialize_block_layout(lua, &mut self.transcript.history, width)
     }
 
     pub(crate) fn materialize_search_layout(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
     ) -> crate::content::transcript_buf::TranscriptSearchLayout {
-        self.projection.materialize_search_layout(
-            lua,
-            &mut self.transcript.history,
-            width,
-            show_thinking,
-        )
+        self.projection
+            .materialize_search_layout(lua, &mut self.transcript.history, width)
     }
 
     pub(crate) fn visible_block_layout(
@@ -129,7 +112,6 @@ impl TranscriptView {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
@@ -138,7 +120,6 @@ impl TranscriptView {
             lua,
             &mut self.transcript.history,
             width,
-            show_thinking,
             theme,
             scroll_target,
             viewport_rows,
@@ -160,7 +141,6 @@ impl TranscriptView {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
@@ -169,7 +149,6 @@ impl TranscriptView {
             lua,
             &mut self.transcript.history,
             width,
-            show_thinking,
             theme,
             start..start.saturating_add(count),
         )
@@ -179,23 +158,16 @@ impl TranscriptView {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
-        self.projection.node_metadata_at_row(
-            lua,
-            &mut self.transcript.history,
-            width,
-            show_thinking,
-            row,
-        )
+        self.projection
+            .node_metadata_at_row(lua, &mut self.transcript.history, width, row)
     }
 
     pub(crate) fn fold_node_at_row(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         row: crate::smelt_edit::RowIndex,
         action: crate::content::transcript_buf::FoldAction,
         activation: crate::content::transcript_buf::FoldActivation,
@@ -204,7 +176,6 @@ impl TranscriptView {
             lua,
             &mut self.transcript.history,
             width,
-            show_thinking,
             crate::content::transcript_buf::FoldAtRow {
                 row,
                 action,
@@ -217,12 +188,11 @@ impl TranscriptView {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         id: crate::content::render_plan::RenderNodeId,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.projection
-            .rebuild_row_index(lua, &mut self.transcript.history, width, show_thinking);
+            .rebuild_row_index(lua, &mut self.transcript.history, width);
         self.projection
             .fold_node(&self.transcript.history, id, action)
     }
@@ -231,11 +201,10 @@ impl TranscriptView {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.projection
-            .rebuild_row_index(lua, &mut self.transcript.history, width, show_thinking);
+            .rebuild_row_index(lua, &mut self.transcript.history, width);
         self.projection.fold_all(&self.transcript.history, action)
     }
 
@@ -243,12 +212,11 @@ impl TranscriptView {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         kind: &str,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
         self.projection
-            .rebuild_row_index(lua, &mut self.transcript.history, width, show_thinking);
+            .rebuild_row_index(lua, &mut self.transcript.history, width);
         self.projection
             .fold_block_kind(&self.transcript.history, kind, action)
     }
@@ -257,18 +225,11 @@ impl TranscriptView {
         &mut self,
         lua: &LuaRuntime,
         width: u16,
-        show_thinking: bool,
         theme: &Theme,
         range: crate::smelt_edit::DocRange,
     ) -> crate::smelt_edit::CopyOutput {
-        self.projection.copy_range(
-            lua,
-            &mut self.transcript.history,
-            width,
-            show_thinking,
-            theme,
-            range,
-        )
+        self.projection
+            .copy_range(lua, &mut self.transcript.history, width, theme, range)
     }
 
     pub(crate) fn history(&self) -> &BlockHistory {
@@ -533,29 +494,23 @@ impl TuiApp {
 
     /// Full transcript as one string per display row. Result is cached as an
     /// `Arc<Vec<String>>` until the transcript, width, renderer, or presentation changes.
-    pub(crate) fn full_transcript_display_text(&mut self, show_thinking: bool) -> Arc<Vec<String>> {
+    pub(crate) fn full_transcript_display_text(&mut self) -> Arc<Vec<String>> {
         let _perf = smelt_perf::perf::begin("transcript:materialize_rows_full");
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        self.transcript
-            .build_rows(&self.lua, tw, show_thinking, &theme)
+        self.transcript.build_rows(&self.lua, tw, &theme)
     }
 
-    pub(crate) fn transcript_total_rows(
-        &mut self,
-        show_thinking: bool,
-    ) -> crate::smelt_edit::RowIndex {
+    pub(crate) fn transcript_total_rows(&mut self) -> crate::smelt_edit::RowIndex {
         let _perf = smelt_perf::perf::begin("transcript:measure_rows_exact");
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
-        self.transcript
-            .exact_total_rows(&self.lua, tw, show_thinking)
+        self.transcript.exact_total_rows(&self.lua, tw)
     }
 
     pub(crate) fn transcript_rows_and_breaks_range(
         &mut self,
-        show_thinking: bool,
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
@@ -564,7 +519,7 @@ impl TuiApp {
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
         self.transcript
-            .display_rows_for_range(&self.lua, tw, show_thinking, &theme, start, count)
+            .display_rows_for_range(&self.lua, tw, &theme, start, count)
     }
 
     pub(crate) fn transcript_visible_rows(
@@ -572,7 +527,7 @@ impl TuiApp {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> Vec<String> {
-        self.transcript_rows_and_breaks_range(self.core.config.settings.show_thinking, start, count)
+        self.transcript_rows_and_breaks_range(start, count)
             .into_text_rows()
     }
 
@@ -582,12 +537,7 @@ impl TuiApp {
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript.node_metadata_at_row(
-            &self.lua,
-            width,
-            self.core.config.settings.show_thinking,
-            row,
-        )
+        self.transcript.node_metadata_at_row(&self.lua, width, row)
     }
 
     pub(crate) fn fold_transcript_node_at_row(
@@ -598,14 +548,8 @@ impl TuiApp {
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript.fold_node_at_row(
-            &self.lua,
-            width,
-            self.core.config.settings.show_thinking,
-            row,
-            action,
-            activation,
-        )
+        self.transcript
+            .fold_node_at_row(&self.lua, width, row, action, activation)
     }
 
     pub(crate) fn fold_transcript_node(
@@ -615,13 +559,7 @@ impl TuiApp {
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript.fold_node(
-            &self.lua,
-            width,
-            self.core.config.settings.show_thinking,
-            id,
-            action,
-        )
+        self.transcript.fold_node(&self.lua, width, id, action)
     }
 
     pub(crate) fn fold_all_transcript_nodes(
@@ -630,12 +568,7 @@ impl TuiApp {
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript.fold_all(
-            &self.lua,
-            width,
-            self.core.config.settings.show_thinking,
-            action,
-        )
+        self.transcript.fold_all(&self.lua, width, action)
     }
 
     pub(crate) fn fold_transcript_block_kind(
@@ -645,21 +578,11 @@ impl TuiApp {
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript.fold_block_kind(
-            &self.lua,
-            width,
-            self.core.config.settings.show_thinking,
-            kind,
-            action,
-        )
+        self.transcript
+            .fold_block_kind(&self.lua, width, kind, action)
     }
 
-    pub(crate) fn snap_cpos_to_selectable(
-        &mut self,
-        rows: &[String],
-        cpos: usize,
-        _show_thinking: bool,
-    ) -> usize {
+    pub(crate) fn snap_cpos_to_selectable(&mut self, rows: &[String], cpos: usize) -> usize {
         let buf_id = self.transcript_win().buf;
         let Some(buf) = self.ui.buf(buf_id) else {
             return cpos;
@@ -695,11 +618,7 @@ impl TuiApp {
     pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
-        let layout = self.transcript.materialize_block_layout(
-            &self.lua,
-            tw,
-            self.core.config.settings.show_thinking,
-        );
+        let layout = self.transcript.materialize_block_layout(&self.lua, tw);
         self.transcript_block_snapshots_from_layout(layout.into_iter())
     }
 

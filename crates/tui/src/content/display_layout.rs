@@ -52,7 +52,7 @@ impl DisplayCacheKey {
             key.sidecar_hash,
             renderer_generation,
             renderer_cache_key,
-            smelt_core::utils::hash_serializable(&(key.show_thinking, key.view_state)),
+            smelt_core::utils::hash_serializable(&key.view_state),
         )
     }
 }
@@ -60,16 +60,14 @@ impl DisplayCacheKey {
 #[derive(Clone, Copy)]
 pub(crate) struct TranscriptRenderEnv<'a> {
     pub(crate) lua: &'a LuaRuntime,
-    pub(crate) show_thinking: bool,
     pub(crate) renderer_generation: u64,
     pub(crate) renderer_cache_key: Option<u64>,
 }
 
 impl<'a> TranscriptRenderEnv<'a> {
-    pub(crate) fn new(lua: &'a LuaRuntime, show_thinking: bool) -> Self {
+    pub(crate) fn new(lua: &'a LuaRuntime) -> Self {
         Self {
             lua,
-            show_thinking,
             renderer_generation: lua.transcript_renderer_generation(),
             renderer_cache_key: lua.transcript_renderer_cache_key(),
         }
@@ -77,13 +75,11 @@ impl<'a> TranscriptRenderEnv<'a> {
 
     pub(crate) fn with_renderer(
         lua: &'a LuaRuntime,
-        show_thinking: bool,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
     ) -> Self {
         Self {
             lua,
-            show_thinking,
             renderer_generation,
             renderer_cache_key,
         }
@@ -93,7 +89,6 @@ impl<'a> TranscriptRenderEnv<'a> {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayRowIndexEntry {
     pub(crate) width: u16,
-    pub(crate) show_thinking: bool,
     pub(crate) renderer_generation: u64,
     pub(crate) renderer_cache_key: Option<u64>,
     pub(crate) nodes: Vec<DisplayRowIndexNode>,
@@ -451,7 +446,6 @@ fn display_layout_entry_matches_history(
                     index,
                     LayoutKey {
                         width: 0,
-                        show_thinking: false,
                         view_state: ViewState::Expanded,
                         content_hash: 0,
                         sidecar_hash: 0,
@@ -466,24 +460,15 @@ fn display_layout_entry_matches_history(
 }
 
 #[cfg(test)]
-pub(crate) fn compile_block_with_show(block: &Block, show_thinking: bool) -> LayoutIr {
-    compile_block_with_view_state(block, show_thinking, ViewState::Expanded)
-}
-
-#[cfg(test)]
-pub(crate) fn compile_block_with_view_state(
-    block: &Block,
-    show_thinking: bool,
-    view_state: ViewState,
-) -> LayoutIr {
+pub(crate) fn compile_block(block: &Block) -> LayoutIr {
     let lua = LuaRuntime::new();
     compile_block_with_lua(
-        TranscriptRenderEnv::new(&lua, show_thinking),
+        TranscriptRenderEnv::new(&lua),
         BlockId::new(0),
         0,
         block,
         None,
-        view_state,
+        ViewState::Expanded,
     )
 }
 
@@ -493,14 +478,9 @@ fn compile_group_with_lua(
     snapshot: &serde_json::Value,
     view_state: ViewState,
 ) -> LayoutIr {
-    let layout = env.lua.render_transcript_group_layout(
-        name,
-        snapshot,
-        smelt_core::lua::runtime::TranscriptRenderCtx {
-            show_thinking: env.show_thinking,
-            view_state,
-        },
-    );
+    let layout = env
+        .lua
+        .render_transcript_group_layout(name, snapshot, view_state);
     match compile_layout_ir(&layout) {
         Ok(layout) => layout,
         Err(e) => {
@@ -668,16 +648,9 @@ fn compile_block_with_lua(
     view_state: ViewState,
 ) -> LayoutIr {
     let kind = block_kind(block);
-    let layout = env.lua.render_transcript_layout(
-        id,
-        index,
-        block,
-        state,
-        smelt_core::lua::runtime::TranscriptRenderCtx {
-            show_thinking: env.show_thinking,
-            view_state,
-        },
-    );
+    let layout = env
+        .lua
+        .render_transcript_layout(id, index, block, state, view_state);
     match compile_layout_ir(&layout) {
         Ok(layout) => layout,
         Err(e) => {
@@ -975,7 +948,6 @@ mod tests {
             id,
             LayoutKey {
                 width: 80,
-                show_thinking: false,
                 view_state: ViewState::Expanded,
                 content_hash: 0,
                 sidecar_hash: 0,
@@ -1067,14 +1039,12 @@ mod tests {
         ];
 
         for block in blocks {
-            for show_thinking in [false, true] {
-                let display = compile_block_with_show(&block, show_thinking);
-                assert_eq!(
-                    measured_rows(&display, 36),
-                    rendered_rows(&display, 36),
-                    "measurement mismatch for {block:?}, show_thinking={show_thinking}"
-                );
-            }
+            let display = compile_block(&block);
+            assert_eq!(
+                measured_rows(&display, 36),
+                rendered_rows(&display, 36),
+                "measurement mismatch for {block:?}"
+            );
         }
     }
 
@@ -1116,7 +1086,7 @@ mod tests {
         let mut model = DisplayModel::new();
         assert_eq!(
             model.ensure_many(
-                TranscriptRenderEnv::new(&lua, key.show_thinking),
+                TranscriptRenderEnv::new(&lua),
                 &transcript.history,
                 &[id],
                 &[key],
@@ -1125,7 +1095,7 @@ mod tests {
         );
         assert_eq!(
             model.ensure_many(
-                TranscriptRenderEnv::new(&lua, narrow.show_thinking),
+                TranscriptRenderEnv::new(&lua),
                 &transcript.history,
                 &[id],
                 &[narrow],

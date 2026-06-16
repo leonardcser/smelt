@@ -10,9 +10,7 @@ pub(crate) use markdown::render_markdown_inner;
 
 #[cfg(test)]
 mod tests {
-    use crate::content::display_layout::{
-        compile_block_with_show, compile_block_with_view_state, render_block_into, RenderCtx,
-    };
+    use crate::content::display_layout::{compile_block, render_block_into, RenderCtx};
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
     use smelt_core::content::LayoutContext;
@@ -60,11 +58,7 @@ mod tests {
         _body: Option<()>,
         ctx: LayoutContext,
     ) -> u16 {
-        let display = if matches!(ctx.view_state, ViewState::Expanded) {
-            compile_block_with_show(block, ctx.show_thinking)
-        } else {
-            compile_block_with_view_state(block, ctx.show_thinking, ctx.view_state)
-        };
+        let display = compile_block(block);
         render_block_into(
             buf,
             &display,
@@ -150,7 +144,7 @@ mod tests {
             block,
             st.as_ref(),
             None,
-            LayoutContext::new(W as u16, true, ViewState::Expanded),
+            LayoutContext::new(W as u16, ViewState::Expanded),
         )
     }
 
@@ -178,7 +172,7 @@ mod tests {
                     &blocks[i],
                     st.as_ref(),
                     None,
-                    LayoutContext::new(W as u16, true, ViewState::Expanded),
+                    LayoutContext::new(W as u16, ViewState::Expanded),
                 )
             };
             total += gap + rows;
@@ -204,7 +198,7 @@ mod tests {
                     &blocks[i],
                     st.as_ref(),
                     None,
-                    LayoutContext::new(W as u16, true, ViewState::Expanded),
+                    LayoutContext::new(W as u16, ViewState::Expanded),
                 )
             };
             block_rows_total += gap + rows;
@@ -230,7 +224,7 @@ mod tests {
                     &blocks[i],
                     st.as_ref(),
                     None,
-                    LayoutContext::new(W as u16, true, ViewState::Expanded),
+                    LayoutContext::new(W as u16, ViewState::Expanded),
                 )
             };
             cumulative += gap + rows;
@@ -381,7 +375,7 @@ mod tests {
                         &blocks[i],
                         st.as_ref(),
                         None,
-                        LayoutContext::new(W as u16, true, ViewState::Expanded),
+                        LayoutContext::new(W as u16, ViewState::Expanded),
                     )
                 };
                 frame_block_rows += gap + rows;
@@ -465,7 +459,7 @@ mod tests {
         let rows = layout_block_test(
             &user("a\0\tb\nc\r"),
             None,
-            &LayoutContext::new(40, true, ViewState::Expanded),
+            &LayoutContext::new(40, ViewState::Expanded),
         );
         let text = rows
             .iter()
@@ -488,7 +482,7 @@ mod tests {
                     .into(),
             },
             None,
-            &LayoutContext::new(W as u16, true, ViewState::default()),
+            &LayoutContext::new(W as u16, ViewState::default()),
         );
         let text = rows
             .iter()
@@ -516,7 +510,7 @@ mod tests {
             &block,
             None,
             None,
-            LayoutContext::new(107, true, ViewState::Expanded),
+            LayoutContext::new(107, ViewState::Expanded),
         ) as usize;
 
         assert!(rows > 3, "long command should wrap inside chrome");
@@ -608,7 +602,6 @@ mod tests {
         let chrome_pad: String = " ".repeat(CHROME_INNER_PAD);
         let ctx = LayoutContext {
             width: W as u16,
-            show_thinking: false,
             view_state: ViewState::Expanded,
         };
         let render = |b: &Block, st: Option<&ToolState>| layout_block_test(b, st, &ctx);
@@ -654,25 +647,13 @@ mod tests {
         }
 
         // Thinking expanded: every row prefixed with the thinking gutter.
-        let expanded_ctx = LayoutContext {
-            show_thinking: true,
-            ..ctx
-        };
-        let lines = layout_block_test(&thinking("**title**\nbody line"), None, &expanded_ctx);
+        let lines = layout_block_test(&thinking("**title**\nbody line"), None, &ctx);
         for line in &lines {
             assert!(
                 line.text.starts_with(THINKING_GUTTER),
                 "thinking expanded row missing gutter: {:?}",
                 line.text
             );
-        }
-
-        // Thinking rendering is independent of the old show/hide flag; folding is
-        // applied by transcript presentation state.
-        let lines = render(&thinking("**title**\nbody"), None);
-        assert_eq!(lines.len(), 2);
-        for line in &lines {
-            assert!(line.text.starts_with(THINKING_GUTTER));
         }
 
         // Text/markdown: renderer emits no left indent.

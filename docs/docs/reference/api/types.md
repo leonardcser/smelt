@@ -712,7 +712,6 @@ Renderer context. Width, theme, and scroll state are intentionally absent.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `show_thinking` | `boolean` | yes | Legacy renderer hint; folding is controlled by transcript presentation state. |
 | `view_state` | `"collapsed"|"peek"|"expanded"|"trimmed_head"|"trimmed_tail"` | yes | Effective view state for the node currently being rendered. |
 | `renderer_generation` | `integer` | yes | Current renderer generation used for cache invalidation. |
 | `surface` | `string` | yes | Rendering surface name, currently `"transcript"`. |

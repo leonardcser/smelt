@@ -135,17 +135,17 @@ fn lua_model_settings_metrics_and_render_contracts_are_available() {
             local max_tokens = smelt.model.max_tokens()
             assert(max_tokens == nil or type(max_tokens) == "number")
 
-            local original = smelt.settings.show_thinking
+            local original = smelt.settings.show_slug
             assert(type(original) == "boolean")
-            smelt.settings.show_thinking = not original
-            assert(smelt.settings.show_thinking == not original)
-            smelt.settings.show_thinking = original
+            smelt.settings.show_slug = not original
+            assert(smelt.settings.show_slug == not original)
+            smelt.settings.show_slug = original
             local schema = smelt.settings.schema()
             assert(#schema > 0)
             assert(type(schema[1].key) == "string")
             assert(type(schema[1].kind) == "string")
             assert(not pcall(function() return smelt.settings.not_a_real_setting end))
-            assert(not pcall(function() smelt.settings.show_thinking = "bad" end))
+            assert(not pcall(function() smelt.settings.show_slug = "bad" end))
 
             smelt.metrics.perf.clear()
             smelt.metrics.perf.set_enabled(true)
@@ -591,7 +591,7 @@ fn reload_recompiles_transcript_renderer_extensions_and_rejects_stale_ir() {
     fn transcript_rows(app: &mut TestApp) -> Vec<String> {
         let _guard = crate::lua::install_app_ptr(&mut app.app);
         app.app
-            .full_transcript_display_text(false)
+            .full_transcript_display_text()
             .iter()
             .cloned()
             .collect()

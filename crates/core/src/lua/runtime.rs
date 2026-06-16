@@ -134,12 +134,6 @@ fn keymap_mode_matches(binding_mode: &str, active_mode: &str) -> bool {
     binding_mode.is_empty() || binding_mode == active_mode
 }
 
-/// Context passed to the root transcript renderer.
-pub struct TranscriptRenderCtx {
-    pub show_thinking: bool,
-    pub view_state: crate::transcript_model::ViewState,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BootstrapMode {
     Host,
@@ -1471,7 +1465,7 @@ impl LuaRuntime {
         &self,
         name: &str,
         group: &serde_json::Value,
-        ctx: TranscriptRenderCtx,
+        view_state: crate::transcript_model::ViewState,
     ) -> BlockLayout {
         let render_fn = {
             let registry = self
@@ -1504,8 +1498,7 @@ impl LuaRuntime {
         };
         let ctx_table = match transcript_render_ctx_to_lua_table(
             &self.lua,
-            ctx.show_thinking,
-            ctx.view_state,
+            view_state,
             self.transcript_renderer_generation(),
         ) {
             Ok(t) => t,
@@ -1539,7 +1532,7 @@ impl LuaRuntime {
         index: usize,
         block: &Block,
         state: Option<&ToolState>,
-        ctx: TranscriptRenderCtx,
+        view_state: crate::transcript_model::ViewState,
     ) -> BlockLayout {
         let render_fn = {
             let slot = self
@@ -1548,13 +1541,13 @@ impl LuaRuntime {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let Some(handle) = slot.as_ref() else {
-                return fallback_transcript_layout(block, state, ctx.show_thinking);
+                return fallback_transcript_layout(block, state, view_state);
             };
             match self.lua.registry_value::<mlua::Function>(&handle.key) {
                 Ok(f) => f,
                 Err(e) => {
                     self.record_error(format!("transcript render: renderer handle: {e}"));
-                    return fallback_transcript_layout(block, state, ctx.show_thinking);
+                    return fallback_transcript_layout(block, state, view_state);
                 }
             }
         };
@@ -1563,19 +1556,18 @@ impl LuaRuntime {
             Ok(t) => t,
             Err(e) => {
                 self.record_error(format!("transcript render: build block: {e}"));
-                return fallback_transcript_layout(block, state, ctx.show_thinking);
+                return fallback_transcript_layout(block, state, view_state);
             }
         };
         let ctx_table = match transcript_render_ctx_to_lua_table(
             &self.lua,
-            ctx.show_thinking,
-            ctx.view_state,
+            view_state,
             self.transcript_renderer_generation(),
         ) {
             Ok(t) => t,
             Err(e) => {
                 self.record_error(format!("transcript render: build ctx: {e}"));
-                return fallback_transcript_layout(block, state, ctx.show_thinking);
+                return fallback_transcript_layout(block, state, view_state);
             }
         };
 
@@ -1586,7 +1578,7 @@ impl LuaRuntime {
                     "transcript render `{}` #{index}: {e}",
                     transcript_block_kind(block)
                 ));
-                return fallback_transcript_layout(block, state, ctx.show_thinking);
+                return fallback_transcript_layout(block, state, view_state);
             }
         };
 
@@ -1595,7 +1587,7 @@ impl LuaRuntime {
             transcript_block_kind(block)
         );
         transcript_layout_from_lua_value(self, result, &label, || {
-            fallback_transcript_layout(block, state, ctx.show_thinking)
+            fallback_transcript_layout(block, state, view_state)
         })
     }
 
@@ -1946,12 +1938,10 @@ fn tool_status_label(status: ToolStatus) -> &'static str {
 
 fn transcript_render_ctx_to_lua_table(
     lua: &Lua,
-    show_thinking: bool,
     view_state: crate::transcript_model::ViewState,
     renderer_generation: u64,
 ) -> LuaResult<mlua::Table> {
     let ctx = lua.create_table()?;
-    ctx.set("show_thinking", show_thinking)?;
     ctx.set("view_state", view_state_label(view_state))?;
     ctx.set("renderer_generation", renderer_generation)?;
     ctx.set("surface", "transcript")?;
@@ -2298,7 +2288,7 @@ fn fallback_transcript_group_layout(name: &str) -> BlockLayout {
 fn fallback_transcript_layout(
     block: &Block,
     state: Option<&ToolState>,
-    show_thinking: bool,
+    view_state: crate::transcript_model::ViewState,
 ) -> BlockLayout {
     match block {
         Block::User { text, .. } => layout_text(text.clone(), None, false),
@@ -2309,7 +2299,9 @@ fn fallback_transcript_layout(
         } => layout_text(format!("{icon}{text}"), Some(hl_group), false),
         Block::ProcessStatus { text, .. } => layout_text(text.clone(), Some("SmeltProcess"), false),
         Block::Thinking { content } => {
-            if show_thinking {
+            if matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
+                layout_text(thinking_fallback_summary(content), None, false)
+            } else {
                 BlockLayout::Gutter {
                     child: Box::new(layout_text(content.clone(), None, false)),
                     spec: crate::content::block_layout::GutterSpec {
@@ -2317,8 +2309,6 @@ fn fallback_transcript_layout(
                         styled: true,
                     },
                 }
-            } else {
-                layout_text(thinking_fallback_summary(content), None, false)
             }
         }
         Block::Text { content } | Block::CodeLine { content, .. } => {
@@ -3046,7 +3036,7 @@ mod tests {
                   cache_key = "v1",
                   selector = { kind = "tool" },
                   render = function(group, ctx)
-                    return smelt.layout.text(group.name .. ":" .. tostring(group.count) .. ":" .. tostring(ctx.show_thinking))
+                    return smelt.layout.text(group.name .. ":" .. tostring(group.count) .. ":" .. tostring(ctx.view_state))
                   end,
                 })
                 "#,
@@ -3057,13 +3047,10 @@ mod tests {
         let layout = rt.render_transcript_group_layout(
             "batch",
             &serde_json::json!({ "count": 3 }),
-            TranscriptRenderCtx {
-                show_thinking: true,
-                view_state: crate::transcript_model::ViewState::Expanded,
-            },
+            crate::transcript_model::ViewState::Expanded,
         );
         match layout {
-            BlockLayout::Leaf(LuaLeaf::Text(spec)) => assert_eq!(spec.content, "batch:3:true"),
+            BlockLayout::Leaf(LuaLeaf::Text(spec)) => assert_eq!(spec.content, "batch:3:expanded"),
             other => panic!("unexpected layout: {other:?}"),
         }
     }

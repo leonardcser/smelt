@@ -438,7 +438,6 @@ impl RenderPlan {
         match self.nodes.get(index)? {
             RenderNode::Block { id, .. } => Some(LayoutKey {
                 width: base_key.width,
-                show_thinking: base_key.show_thinking,
                 view_state,
                 content_hash: history.content_hash(*id),
                 sidecar_hash: block_sidecar_hash(history, *id),
@@ -452,7 +451,6 @@ impl RenderPlan {
                 ..
             } => Some(LayoutKey {
                 width: base_key.width,
-                show_thinking: base_key.show_thinking,
                 view_state,
                 content_hash: smelt_core::utils::hash_serializable(&GroupContentKey {
                     id: *id,

@@ -151,8 +151,7 @@ support thinking ignore this setting.
 `off,low,medium,high`; everything else adds `max`. The currently active
 effort is always included in the cycle.
 
-Toggle full thinking blocks at runtime with `/thinking` (or the
-`show_thinking` setting).
+Set thinking block presentation at runtime with `/thinking [open|close|peek|toggle]`.
 
 ### Defaults vs. last-used
 
@@ -239,7 +238,6 @@ Unknown keys raise at the access site; type mismatches raise on assignment.
 | `show_cost`             | `boolean` | `true`  | Session cost in status bar                                                        |
 | `show_prediction`       | `boolean` | `true`  | Ghost-text input predictions                                                      |
 | `show_slug`             | `boolean` | `true`  | Task-slug label in status bar                                                     |
-| `show_thinking`         | `boolean` | `true`  | Show full thinking/reasoning blocks (false shows a single summary)                |
 | `restrict_to_workspace` | `boolean` | `true`  | Downgrade Allow to Ask for paths outside the workspace                            |
 | `redact_secrets`        | `boolean` | `true`  | Scrub detected secrets from user input and tool results before they reach the LLM |
 | `auto_reload`           | `boolean` | `false` | Watch `~/.config/smelt/`, `.smelt/`, `AGENTS.md`, and `--system-prompt` and fire `/reload` on change |

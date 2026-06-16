@@ -49,11 +49,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
         count: crate::smelt_edit::RowIndex,
     ) -> Option<crate::smelt_edit::DisplayRows> {
         if win == crate::app::TRANSCRIPT_WIN {
-            Some(self.transcript_rows_and_breaks_range(
-                self.core.config.settings.show_thinking,
-                start,
-                count,
-            ))
+            Some(self.transcript_rows_and_breaks_range(start, count))
         } else {
             crate::smelt_edit::UiHost::display_rows_for_range(&mut self.ui, win, start, count)
         }
@@ -64,7 +60,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
         win: crate::smelt_edit::WinId,
     ) -> Option<crate::smelt_edit::RowIndex> {
         if win == crate::app::TRANSCRIPT_WIN {
-            Some(self.transcript_total_rows(self.core.config.settings.show_thinking))
+            Some(self.transcript_total_rows())
         } else {
             crate::smelt_edit::UiHost::document_total_rows(&mut self.ui, win)
         }
@@ -78,13 +74,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
         if win == crate::app::TRANSCRIPT_WIN {
             let tw = self.transcript_width() as u16;
             let theme = self.ui.theme().clone();
-            Some(self.transcript.copy_range(
-                &self.lua,
-                tw,
-                self.core.config.settings.show_thinking,
-                &theme,
-                range,
-            ))
+            Some(self.transcript.copy_range(&self.lua, tw, &theme, range))
         } else {
             crate::smelt_edit::UiHost::copy_document_range(&mut self.ui, win, range)
         }

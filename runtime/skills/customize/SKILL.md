@@ -291,7 +291,7 @@ or wrong type raises at the call site.
 smelt.settings.vim = true
 smelt.settings.auto_compact = true
 smelt.settings.compact_threshold = 0.65
-smelt.settings.show_thinking = true
+smelt.settings.show_tps = true
 ```
 
 The full table of settings (key, type, default, description) is in the
@@ -476,7 +476,6 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `show_prediction` | `bool` | `true` | Ghost-text input predictions in the prompt. |
 | `show_tips` | `bool` | `true` | Curated discovery tips in the start banner and prompt chrome. |
 | `show_slug` | `bool` | `true` | Task-slug label in status bar. |
-| `show_thinking` | `bool` | `true` | Legacy renderer hint for custom/fallback thinking renderers; presentation folding controls the UI. |
 | `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
 | `redact_secrets` | `bool` | `true` | Scrub detected secrets from user input and tool results before they reach the LLM. |
 | `auto_reload` | `bool` | `false` | Watch on-disk config inputs (init.lua, plugins/, commands/,  skills/, AGENTS.md, `--system-prompt` file) and dispatch  `/reload` when any of them changes. |

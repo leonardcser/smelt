@@ -332,7 +332,6 @@ pub enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LayoutKey {
     pub width: u16,
-    pub show_thinking: bool,
     pub view_state: ViewState,
     pub content_hash: u64,
     pub sidecar_hash: u64,
@@ -1035,7 +1034,6 @@ mod tests {
         });
         let base = LayoutKey {
             width: 80,
-            show_thinking: true,
             view_state: ViewState::Collapsed,
             content_hash: 0,
             sidecar_hash: 0,
@@ -1045,7 +1043,6 @@ mod tests {
         assert_eq!(resolved.content_hash, history.content_hash(id));
         assert_eq!(resolved.sidecar_hash, 0);
         assert_eq!(resolved.width, 80);
-        assert!(resolved.show_thinking);
     }
 
     // ── gap_between coverage ──────────────────────────────────────────

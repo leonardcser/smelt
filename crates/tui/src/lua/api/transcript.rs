@@ -88,14 +88,8 @@ impl LuaTranscriptStream {
             let Some(buf) = app.ui.buf_mut(self.buf.id) else {
                 return;
             };
-            self.projection.project_all(
-                &app.lua,
-                buf,
-                &mut self.transcript.history,
-                width,
-                false,
-                &theme,
-            );
+            self.projection
+                .project_all(&app.lua, buf, &mut self.transcript.history, width, &theme);
         });
     }
 }
@@ -272,8 +266,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |_, ()| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
-                app.full_transcript_display_text(app.core.config.settings.show_thinking)
-                    .join("\n")
+                app.full_transcript_display_text().join("\n")
             })
             .unwrap_or_default())
         },

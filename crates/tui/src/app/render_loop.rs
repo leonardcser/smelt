@@ -138,7 +138,6 @@ impl TuiApp {
         // Split-borrow app fields so the render-prep hook can materialize the
         // transcript through the generic `Ui` path while paint callbacks still
         // invoke Lua without borrowing all of `self`.
-        let show_thinking = self.core.config.settings.show_thinking;
         let transcript = &mut self.transcript;
         let paint_registry = &self.paint_registry;
         let lua = &self.lua;
@@ -178,7 +177,6 @@ impl TuiApp {
                     let plan = transcript.plan_projection_measured(
                         lua,
                         width,
-                        show_thinking,
                         &theme,
                         scroll_target,
                         viewport_rows,

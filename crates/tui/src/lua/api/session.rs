@@ -520,7 +520,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "render_preview_into",
-        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided; `opts.show_thinking` defaults to the current UI setting. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.",
+        "Render persisted session `id` into `opts.buf` using the same styled transcript projection as the live UI. `opts.width` controls wrapping; `opts.height` is the preview viewport height; `opts.scroll_top` renders an existing preview at that absolute row, otherwise the preview opens at the tail; `opts.updated_at_ms` lets cached previews render without reloading the session; `opts.win` receives the matching row materialization state when provided. Returns `{ total_rows, scroll_top }`, or `nil` when the session is missing.",
         &["id", "opts"],
         |lua, (id, opts): (String, mlua::Table)| -> LuaResult<Option<mlua::Table>> {
             let _perf = smelt_perf::perf::begin("session:render_preview_into");
@@ -536,7 +536,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .ok()
                 .filter(|h| *h > 0)
                 .unwrap_or(1);
-            let show_thinking_opt = opts.get::<bool>("show_thinking").ok();
             let scroll_top = opts.get::<u64>("scroll_top").ok();
             let cache_key_hint = opts
                 .get::<u64>("updated_at_ms")
@@ -545,8 +544,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
             let rendered = crate::lua::with_app(|app| {
                 let _perf = smelt_perf::perf::begin("session:render_preview_into:app");
-                let show_thinking =
-                    show_thinking_opt.unwrap_or(app.core.config.settings.show_thinking);
                 let mut cached_key = cache_key_hint.clone();
                 let mut cached_view = cached_key
                     .as_deref()
@@ -584,7 +581,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let plan = view.plan_projection_measured(
                     &app.lua,
                     width,
-                    show_thinking,
                     &theme,
                     scroll_target,
                     height,

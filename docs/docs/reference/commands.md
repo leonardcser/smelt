@@ -16,7 +16,7 @@ Type `/` to open the command picker with fuzzy search.
 | `/color [name]`           | Set session color                                          |
 | `/stats`                  | Show token usage statistics                                |
 | `/usage`, `/cost`         | Show session cost and active-provider usage limits         |
-| `/thinking`               | Toggle display of thinking blocks for this session         |
+| `/thinking [open|close|peek|toggle]` | Set thinking block presentation for this session            |
 | `/reasoning [off|low|medium|high|max]` | Set or show reasoning effort                    |
 | `/permissions`            | Manage saved permissions                                   |
 | `/ps`                     | Manage background processes                                |

@@ -256,7 +256,6 @@ smelt.cmd.register("resume", function()
         tostring(width),
         tostring(height),
         tostring(scroll_top or "tail"),
-        tostring(smelt.settings.show_thinking),
       }, ":")
       active_preview_key = key
       rendering_preview = true
@@ -267,7 +266,6 @@ smelt.cmd.register("resume", function()
         height = height,
         scroll_top = scroll_top,
         updated_at_ms = e.updated_at_ms,
-        show_thinking = smelt.settings.show_thinking,
       })
       rendering_preview = false
       if active_preview_key == key then

@@ -11,7 +11,6 @@ smelt.transcript = smelt.transcript or {}
 
 --- Renderer context. Width, theme, and scroll state are intentionally absent.
 ---@class smelt.transcript.Context
----@field show_thinking boolean Legacy renderer hint; folding is controlled by transcript presentation state.
 ---@field view_state "collapsed"|"peek"|"expanded"|"trimmed_head"|"trimmed_tail" Effective view state for the node currently being rendered.
 ---@field renderer_generation integer Current renderer generation used for cache invalidation.
 ---@field surface string Rendering surface name, currently `"transcript"`.

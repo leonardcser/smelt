@@ -1086,13 +1086,12 @@ impl TuiApp {
             return;
         }
         let cpos = self.transcript_win().cpos();
-        let show_thinking = self.core.config.settings.show_thinking;
         let rows: Vec<String> = self
             .ui
             .buf(buf_id)
             .map(|b| b.lines().to_vec())
             .unwrap_or_default();
-        let snapped = self.snap_cpos_to_selectable(&rows, cpos, show_thinking);
+        let snapped = self.snap_cpos_to_selectable(&rows, cpos);
         if snapped != cpos {
             self.transcript_win_mut().set_cpos(snapped);
             let viewport = self.viewport_rows_estimate();

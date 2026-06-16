@@ -204,8 +204,6 @@ settings! {
     show_tips:             Bool   = true;
     /// Task-slug label in status bar.
     show_slug:             Bool   = true;
-    /// Legacy renderer hint for custom/fallback thinking renderers; presentation folding controls the UI.
-    show_thinking:         Bool   = true;
     /// Downgrade `Allow` to `Ask` for paths outside the workspace.
     restrict_to_workspace: Bool   = true;
     /// Scrub detected secrets from user input and tool results before they reach the LLM.
