@@ -20,6 +20,29 @@ impl TuiApp {
         ((term_h as u32 * 7) / 10).max(1) as u16
     }
 
+    pub(crate) fn refresh_main_layout(&mut self) -> (layout::Rect, u16) {
+        let (term_w, term_h) = self.ui.terminal_size();
+        let width = term_w as usize;
+        let ghost = self
+            .placeholders
+            .get(&crate::app::PROMPT_WIN)
+            .map(String::as_str);
+        let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width, ghost);
+        // Auto-height keeps the transcript usable; a deliberate manual resize
+        // can claim more room for prompt review without taking the full screen.
+        let input_rows = match self.prompt_input_rows_override {
+            Some(rows) => rows.clamp(1, Self::max_manual_prompt_input_rows_for(term_h)),
+            None => wrapped_rows.clamp(1, Self::max_auto_prompt_input_rows_for(term_h)),
+        };
+        self.prompt_input_rows = input_rows;
+        let tree = self
+            .invoke_lua_layout_composer(term_w, term_h, input_rows)
+            .unwrap_or_else(|| layout::seed_layout_tree(input_rows));
+        self.ui.set_layout(tree);
+        self.layout = layout::LayoutState::from_ui(&self.ui);
+        (self.layout.prompt, self.layout.viewport_rows())
+    }
+
     /// Render variant parameterised by the output sink. Production passes
     /// `std::io::stdout()`; the fuzz harness passes `std::io::sink()` so
     /// every code path under `content/*` and `compositor:*` runs without
@@ -28,8 +51,6 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
 
-        let (term_w, term_h) = self.ui.terminal_size();
-        let width = term_w as usize;
         let show_queued = self.prompt_input_is_busy();
 
         self.ui.resolve_tail_scrolls();
@@ -51,24 +72,7 @@ impl TuiApp {
         // ── Layout ──
         let (prompt_rect, _viewport_rows) = {
             let _p = smelt_perf::perf::begin("compositor:layout");
-            let ghost = self
-                .placeholders
-                .get(&crate::app::PROMPT_WIN)
-                .map(String::as_str);
-            let wrapped_rows = self.measure_prompt_input_rows(self.prompt_buf(), width, ghost);
-            // Auto-height keeps the transcript usable; a deliberate manual resize
-            // can claim more room for prompt review without taking the full screen.
-            let input_rows = match self.prompt_input_rows_override {
-                Some(rows) => rows.clamp(1, Self::max_manual_prompt_input_rows_for(term_h)),
-                None => wrapped_rows.clamp(1, Self::max_auto_prompt_input_rows_for(term_h)),
-            };
-            self.prompt_input_rows = input_rows;
-            let tree = self
-                .invoke_lua_layout_composer(term_w, term_h, input_rows)
-                .unwrap_or_else(|| layout::seed_layout_tree(input_rows));
-            self.ui.set_layout(tree);
-            self.layout = layout::LayoutState::from_ui(&self.ui);
-            (self.layout.prompt, self.layout.viewport_rows())
+            self.refresh_main_layout()
         };
 
         // Freeze timer/spinner while a blocking dialog is up. Done before

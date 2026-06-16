@@ -966,6 +966,9 @@ impl TuiApp {
         let _ = self
             .ui
             .dispatch_event(crate::smelt_edit::Event::Resize(w, h), &mut |_, _, _| {});
+        crate::lua::with_app_ptr(self, |app| {
+            app.refresh_main_layout();
+        });
         if width_changed {
             self.ui.cancel_pointer_interaction();
             self.invalidate_for_width(w);

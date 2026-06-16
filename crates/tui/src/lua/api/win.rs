@@ -168,16 +168,15 @@ impl mlua::UserData for LuaWin {
         );
 
         // ── rect - current layout-resolved bounds ──────────────────
-        // Reads `split_rect` when the leaf has been placed in the
-        // current layout tree, so renderers running BEFORE the first
-        // paint already see the correct width (no startup width flash).
+        // Prefer `split_rect` from the current layout tree so renderers and
+        // resize handlers don't observe the previous painted viewport for one
+        // frame after a layout change.
         methods.add_method("rect", |lua, this, ()| -> LuaResult<mlua::Value> {
             let rect = crate::lua::try_with_app(|app| {
-                app.ui.win(this.id).and_then(|w| {
-                    w.viewport
-                        .map(|vp| vp.rect)
-                        .or_else(|| app.ui.split_rect(this.id))
-                })
+                let win = app.ui.win(this.id)?;
+                app.ui
+                    .split_rect(this.id)
+                    .or_else(|| win.viewport.map(|vp| vp.rect))
             })
             .flatten();
             match rect {

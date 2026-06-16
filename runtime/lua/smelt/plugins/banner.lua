@@ -20,6 +20,8 @@ local state = {
 	sim = nil,
 	fire_pixels = nil,
 	held = false,
+	term_width = nil,
+	term_height = nil,
 }
 
 local FIRE_HEADROOM = 4
@@ -313,6 +315,31 @@ local function ensure_label_window(lines, width)
 	return win
 end
 
+local function terminal_size()
+	local size = smelt.ui.size()
+	return size.width or 80, size.height or 24
+end
+
+local function transcript_rect()
+	local transcript = smelt.win.transcript()
+	return transcript and transcript:rect() or nil
+end
+
+local function splash_position(w, h)
+	local term_w, term_h = terminal_size()
+	state.term_width = term_w
+	state.term_height = term_h
+
+	local rect = transcript_rect()
+	if not rect then
+		return nil, nil
+	end
+
+	local row = (rect.row or 0) + math.floor((rect.height or 0) / 2) - math.floor(h / 2)
+	local col = (rect.col or 0) + math.floor((rect.width or 0) / 2) - math.floor(w / 2)
+	return math.max(0, row), math.max(0, col)
+end
+
 local function open_splash()
 	if state.overlay then
 		return
@@ -351,14 +378,16 @@ local function open_splash()
 			height = label_h,
 		},
 	})
+	local row, col = splash_position(w, paint_h + label_h)
+	if not row or not col then
+		return
+	end
 	state.overlay = smelt.overlay.new({
 		name = "smelt.banner.splash",
-		anchor = "win",
-		target = smelt.win.transcript(),
-		attach = "center",
-		-- The transcript's bottom gap row pulls integer-center math half a
-		-- row above true center on odd heights; nudge down by 1.
-		row_offset = 1,
+		anchor = "screen_at",
+		corner = "nw",
+		row = row,
+		col = col,
 		-- Sits behind dialogs and plugin overlays (default z = 50).
 		z = 0,
 		modal = false,
@@ -368,17 +397,13 @@ local function open_splash()
 	})
 end
 
--- The splash is sized to the logo + version + plugin subtitles. When the
--- terminal is too short for that block, the overlay rect spills past the
--- transcript's bottom edge and bleeds over the prompt chrome (which sits
--- at the same z-layer in the main layout). Suppress the splash entirely
--- in that case - `refresh()` re-evaluates on resize via the
--- transcript window's `resized` event so it pops back as soon as the
--- terminal grows large enough.
+-- The splash is sized to the logo + version + plugin subtitles. Suppress it
+-- when the current transcript is too short at open time; once open, ordinary
+-- prompt chrome height changes leave the screen-anchored banner in place.
 local function transcript_fits_banner()
-	local rect = smelt.win.transcript() and smelt.win.transcript():rect()
+	local rect = transcript_rect()
 	if not rect or not rect.height then
-		return true
+		return false
 	end
 	local _, logo_h = banner.logo_mark_size()
 	local label_h = 1 -- version line, always present
@@ -390,12 +415,26 @@ local function transcript_fits_banner()
 	return rect.height >= logo_h + FIRE_HEADROOM + label_h
 end
 
-local function refresh()
+local function refresh(force_reopen)
+	state.term_width, state.term_height = terminal_size()
 	if smelt.transcript.is_empty() and transcript_fits_banner() then
+		if force_reopen == true and state.overlay then
+			teardown()
+		end
 		open_splash()
 	else
 		teardown()
 	end
+end
+
+local function refresh_on_terminal_resize()
+	local w, h = terminal_size()
+	if state.term_width == w and state.term_height == h then
+		return
+	end
+	state.term_width = w
+	state.term_height = h
+	refresh(true)
 end
 
 -- session_started covers /reset, /fork, /resume; input_submit covers
@@ -408,14 +447,13 @@ smelt.cell("input_submit"):subscribe(teardown)
 smelt.cell("turn_start"):subscribe(teardown)
 smelt.cell("history"):subscribe(refresh)
 smelt.lifecycle.on_ready(function()
-	refresh()
-	-- React to terminal resize: when the transcript window shrinks below
-	-- the banner's footprint, suppress the splash to keep the prompt
-	-- chrome and statusline unobscured; when it grows back, re-open.
+	-- Transcript resizes also happen when prompt chrome changes. Only rebuild the
+	-- screen-anchored splash when the terminal size itself changed.
 	local t = smelt.win.transcript()
 	if t and t.on then
-		t:on("resized", refresh)
+		t:on("resized", refresh_on_terminal_resize)
 	end
+	refresh()
 end)
 
 smelt.lifecycle.on_shutdown(function(ctx)

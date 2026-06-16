@@ -15,7 +15,7 @@ expression: frame.text()
     │  enter  send / queue for later                  │
     │  ctrl+enter / ctrl+q  steer current response    │
     │  ctrl+j / shift+enter  insert newline           │
-    │  ctrl+c  cancel / interrupt / quit              │
+    │  ctrl+c  clear / cancel / quit                  │
 ────└─────────────────────────────────────────────────┘─────
 
 ────────────────────────────────────────────────────────────

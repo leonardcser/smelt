@@ -115,6 +115,10 @@ impl TuiApp {
         }
         self.refresh_agent_inputs();
         self.reconcile_mcp_servers();
+        // Make layout geometry current before `ready` hooks open overlays or
+        // query `Win:rect()`. Without this, cold-start hooks see the seed layout
+        // until the first render, while resize/reload paths see the Lua layout.
+        self.refresh_main_layout();
         let hook_errors = self.lua.drain_lifecycle_hooks("ready", move |lua| {
             let t = lua.create_table()?;
             t.set("kind", kind)?;
