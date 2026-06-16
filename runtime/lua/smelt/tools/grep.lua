@@ -66,7 +66,7 @@ end
 
 local function count_unit_for_mode(mode)
   if mode == "files_with_matches" then return "file" end
-  if mode == "content" then return "output line" end
+  if mode == "content" then return "line" end
   return "match"
 end
 
