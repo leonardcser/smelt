@@ -106,11 +106,22 @@ function M.prompt_tip()
   if #visible == 0 then return nil end
 
   local now = 0
-  if smelt.cell then
-    local ok, value = pcall(function() return smelt.cell("now"):get() end)
-    if ok and type(value) == "number" then now = value end
+  local have_source = false
+  if smelt.clock and smelt.clock.unix_ms then
+    local ok, value = pcall(smelt.clock.unix_ms)
+    if ok and type(value) == "number" then
+      now = math.floor(value / 1000)
+      have_source = true
+    end
   end
-  if now <= 0 and os and os.time then now = os.time() end
+  if not have_source and smelt.cell then
+    local ok, value = pcall(function() return smelt.cell("now"):get() end)
+    if ok and type(value) == "number" then
+      now = value
+      have_source = true
+    end
+  end
+  if not have_source and os and os.time then now = os.time() end
 
   if not current_idx then current_idx = 1 end
   if not last_tip_at or now < last_tip_at or now - last_tip_at > ROTATE_SECS * 2 then
