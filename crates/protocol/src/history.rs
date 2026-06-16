@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(json["note_kind"], "process_status");
         assert_eq!(
             json["text"],
-            "Background process 751225 exited with code 1."
+            "background process 751225 exited with code 1."
         );
         assert_eq!(json["event"]["event"], "background_process_completed");
         assert_eq!(json["event"]["process_id"], "751225");
