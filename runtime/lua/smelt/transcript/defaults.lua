@@ -218,6 +218,7 @@ function tool_header_prefix(block, hl, tail, has_summary)
 end
 
 function tool_header_indent(block)
+  if block.name == "bash" then return 2 end
   local _, width = tool_header_prefix(block, nil, true, false)
   return width
 end
@@ -247,13 +248,13 @@ function tool_header_lines(block, status, hl)
   local first = lines[1]
   local has_summary = has_text(first)
   local tail = has_summary or #suffix > 0
-  local prefix, prefix_width = tool_header_prefix(block, hl, tail, has_summary)
+  local prefix = tool_header_prefix(block, hl, tail, has_summary)
   for i = #prefix, 1, -1 do
     table.insert(first, 1, prefix[i])
   end
 
   if has_summary and #lines > 1 then
-    local indent = string.rep(" ", prefix_width)
+    local indent = string.rep(" ", tool_header_indent(block))
     for i = 2, #lines do
       table.insert(lines[i], 1, { text = indent, selectable = false, dim = true })
     end

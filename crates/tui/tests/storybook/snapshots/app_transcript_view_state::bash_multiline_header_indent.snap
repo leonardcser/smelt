@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* bash set -euo pipefail
+  rm -rf /tmp/smelt-fuzzy-check
+  mkdir -p /tmp/smelt-fuzzy-check/src
+  done
+
+
+
+
+
+
+
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                     1:1 100%

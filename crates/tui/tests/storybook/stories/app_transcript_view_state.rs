@@ -43,6 +43,20 @@ app_story!(thinking_block_expanded, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(bash_multiline_header_indent, |ctx| {
+    ctx.set_viewport(86, 18);
+    ctx.tool_call(
+        "bash",
+        &[(
+            "command",
+            json!("set -euo pipefail\nrm -rf /tmp/smelt-fuzzy-check\nmkdir -p /tmp/smelt-fuzzy-check/src"),
+        )],
+        "done",
+        Some(28_000),
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(tools_collapsed_summaries, |ctx| {
     ctx.set_viewport(86, 18);
     ctx.tool_call(
