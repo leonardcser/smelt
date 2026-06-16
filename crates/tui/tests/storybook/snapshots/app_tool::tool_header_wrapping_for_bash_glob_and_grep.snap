@@ -3,8 +3,8 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * bash cargo test -p smelt-tui content::display_renderers::la
-       yout_ir::tests::runs_continuation_indent_aligns_soft_w
-       rapped_rows
+  yout_ir::tests::runs_continuation_indent_aligns_soft_wrappe
+  d_rows
   test result: ok
 
 * glob crates/tui/tests/storybook/snapshots/app_tool::*.snap

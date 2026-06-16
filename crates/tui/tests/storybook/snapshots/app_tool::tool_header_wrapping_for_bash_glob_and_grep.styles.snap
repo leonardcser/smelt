@@ -8,8 +8,8 @@ dim: 62 18
   0   7  10 fg=Rgb { r: 255, g: 255, b: 255 }
   0  17   3 fg=Rgb { r: 253, g: 151, b: 31 }
   0  20  41 fg=Rgb { r: 255, g: 255, b: 255 }
-  1   7  54 fg=Rgb { r: 255, g: 255, b: 255 }
-  2   7  11 fg=Rgb { r: 255, g: 255, b: 255 }
+  1   2  59 fg=Rgb { r: 255, g: 255, b: 255 }
+  2   2   6 fg=Rgb { r: 255, g: 255, b: 255 }
   3   2  15 attrs=dim
   5   0   1 fg=AnsiValue(77)
   5   1   5 attrs=dim
