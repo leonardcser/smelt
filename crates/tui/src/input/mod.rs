@@ -271,6 +271,13 @@ impl PromptState {
         // Stash and store are intentionally preserved.
     }
 
+    pub(crate) fn clear_with_undo(&mut self, ctx: &mut PromptCtx<'_>) {
+        if !ctx.buf.source().is_empty() || !ctx.buf.attachment_ids.is_empty() {
+            self.save_undo_force(ctx);
+        }
+        self.clear(ctx);
+    }
+
     /// Wholesale buffer swap from user-supplied plain text (no attachments).
     /// Snapshots undo, installs new source with empty `attachment_ids`,
     /// cursor at end.
@@ -555,7 +562,7 @@ impl PromptState {
 
             // ── TuiApp control ─────────────────────────────────────────────
             KeyAction::ClearBuffer => {
-                self.clear(ctx);
+                self.clear_with_undo(ctx);
                 Action::Redraw
             }
             // Intercepted by the global chord layer; these arms are unreachable in practice.
@@ -814,6 +821,10 @@ impl PromptState {
             }
             KeyAction::Undo => {
                 self.undo(ctx);
+                Action::Redraw
+            }
+            KeyAction::Redo => {
+                self.redo(ctx);
                 Action::Redraw
             }
 

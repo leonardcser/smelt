@@ -21,6 +21,10 @@ impl PromptState {
         if ctx.win.vim_enabled() && ctx.win.vim_mode() == VimMode::Insert {
             return; // insert session groups all edits into one undo step
         }
+        self.save_undo_force(ctx);
+    }
+
+    pub(crate) fn save_undo_force(&mut self, ctx: &mut PromptCtx<'_>) {
         ctx.buf.history.save(crate::smelt_edit::UndoEntry::snapshot(
             ctx.buf.source(),
             ctx.win.cpos(),
@@ -252,6 +256,17 @@ impl PromptState {
             &ctx.buf.attachment_ids,
         );
         if let Some(entry) = ctx.buf.history.undo(current) {
+            self.install_source(ctx, entry.buf, entry.cpos, entry.attachments);
+        }
+    }
+
+    pub(super) fn redo(&mut self, ctx: &mut PromptCtx<'_>) {
+        let current = crate::smelt_edit::UndoEntry::snapshot(
+            ctx.buf.source(),
+            ctx.win.cpos(),
+            &ctx.buf.attachment_ids,
+        );
+        if let Some(entry) = ctx.buf.history.redo(current) {
             self.install_source(ctx, entry.buf, entry.cpos, entry.attachments);
         }
     }

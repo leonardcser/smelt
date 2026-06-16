@@ -772,6 +772,9 @@ fn parse_modifier(s: &str) -> Option<KeyModifiers> {
     if bits & 4 != 0 {
         out |= KeyModifiers::CONTROL;
     }
+    if bits & 8 != 0 {
+        out |= KeyModifiers::SUPER;
+    }
     Some(out)
 }
 
@@ -910,6 +913,29 @@ mod tests {
                 modifiers,
                 ..
             })] if modifiers.contains(KeyModifiers::CONTROL)
+        ));
+    }
+
+    #[test]
+    fn csi_u_cmd_z_and_cmd_shift_z_preserve_super() {
+        let mut p = Parser::new();
+        assert!(matches!(
+            p.advance(b"\x1b[122;9u").as_slice(),
+            [Event::Key(KeyEvent {
+                code: KeyCode::Char('z'),
+                modifiers,
+                ..
+            })] if modifiers.contains(KeyModifiers::SUPER)
+                && !modifiers.contains(KeyModifiers::SHIFT)
+        ));
+        assert!(matches!(
+            p.advance(b"\x1b[122;10u").as_slice(),
+            [Event::Key(KeyEvent {
+                code: KeyCode::Char('z'),
+                modifiers,
+                ..
+            })] if modifiers.contains(KeyModifiers::SUPER)
+                && modifiers.contains(KeyModifiers::SHIFT)
         ));
     }
 

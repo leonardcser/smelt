@@ -11,7 +11,7 @@
 | `Ctrl+J` / `Shift+Enter`        | Insert newline                          |
 | `Ctrl+R`                        | Fuzzy search input history              |
 | `Ctrl+S`                        | Stash / unstash input                   |
-| `Ctrl+C`                        | Clear input / cancel agent / quit       |
+| `Ctrl+C`                        | Clear input (undoable) / cancel agent / quit |
 | `Ctrl+L`                        | Redraw screen                           |
 | `Ctrl+T`                        | Cycle reasoning effort                  |
 | `Shift+Tab`                     | Cycle mode (normal → plan → apply → yolo) |
@@ -31,14 +31,20 @@ the running turn.
 ### Terminal setup
 
 Some terminals and multiplexers need a little configuration for modified Enter
-keys such as `Shift+Enter` and `Ctrl+Enter`.
+keys and Command-key bindings.
 
 Ghostty:
 
 ```conf
 keybind = shift+enter=csi:13;2u
 keybind = ctrl+enter=csi:13;5u
+keybind = cmd+z=csi:122;9u
+keybind = cmd+shift+z=csi:122;10u
 ```
+
+The `cmd+z` bindings send CSI-u sequences that preserve the Command/Super and
+Shift modifiers. Without them, terminals may send `Esc z`, which Smelt cannot
+distinguish from `Alt+Z`.
 
 tmux:
 
@@ -78,7 +84,8 @@ set -s extended-keys-format csi-u
 | `Alt+U`                                       | Uppercase word             |
 | `Alt+L`                                       | Lowercase word             |
 | `Alt+C`                                       | Capitalize word            |
-| `Ctrl+_`                                      | Undo                       |
+| `Ctrl+_` / `Cmd+Z`                           | Undo                       |
+| `Alt+_` / `Cmd+Shift+Z`                      | Redo                       |
 | `Ctrl+X Ctrl+E`                               | Edit in `$EDITOR`          |
 
 `Ctrl+Y` and the vim `p` / `P` commands share the system clipboard with the

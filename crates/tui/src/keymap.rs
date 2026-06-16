@@ -50,6 +50,7 @@ pub(crate) enum KeyAction {
     LowercaseWord,
     CapitalizeWord,
     Undo,
+    Redo,
 
     // Page motion (shared between vim normal and emacs/arrow-key contexts).
     PageUp,
@@ -438,6 +439,30 @@ static BINDINGS: &[Binding] = &[
         when().not_vim_non_insert(),
         KeyAction::Undo,
     ),
+    bind(
+        KeyCode::Char('z'),
+        SUPER.union(SHIFT),
+        when().not_vim_non_insert(),
+        KeyAction::Redo,
+    ),
+    bind(
+        KeyCode::Char('Z'),
+        SUPER,
+        when().not_vim_non_insert(),
+        KeyAction::Redo,
+    ),
+    bind(
+        KeyCode::Char('z'),
+        SUPER,
+        when().not_vim_non_insert(),
+        KeyAction::Undo,
+    ),
+    bind(
+        KeyCode::Char('_'),
+        ALT,
+        when().not_vim_non_insert(),
+        KeyAction::Redo,
+    ),
     // ── Selection (shift+movement) ────────────────────────────────────────
     // More-specific combos (shift+alt, shift+ctrl) before plain shift.
     // Cmd (SUPER) omitted: macOS terminals intercept those.
@@ -567,7 +592,7 @@ pub(crate) mod hints {
         ("enter", "send / queue for later"),
         ("ctrl+enter / ctrl+q", "steer current response"),
         ("ctrl+j / shift+enter", "insert newline"),
-        ("ctrl+c", "cancel / interrupt / quit"),
+        ("ctrl+c", "clear / cancel / quit"),
         ("ctrl+r", "search input history"),
         ("ctrl+t", "cycle reasoning effort"),
         ("ctrl+s", "stash / unstash input"),
@@ -588,7 +613,8 @@ pub(crate) mod hints {
             "alt+u / alt+l / alt+c",
             "uppercase / lowercase / capitalize word",
         ),
-        ("ctrl+_", "undo"),
+        ("ctrl+_ / cmd+z", "undo"),
+        ("alt+_ / cmd+shift+z", "redo"),
         ("ctrl+x ctrl+e", "edit in $EDITOR"),
         (
             "shift+\u{2190}/\u{2192}",
@@ -781,6 +807,29 @@ mod tests {
             lookup(KeyCode::Char('u'), CTRL, &c),
             Some(KeyAction::KillToStartOfLine)
         );
+    }
+
+    #[test]
+    fn undo_redo_bindings() {
+        let c = ctx();
+        assert_eq!(lookup(KeyCode::Char('_'), CTRL, &c), Some(KeyAction::Undo));
+        assert_eq!(lookup(KeyCode::Char('z'), SUPER, &c), Some(KeyAction::Undo));
+        assert_eq!(lookup(KeyCode::Char('_'), ALT, &c), Some(KeyAction::Redo));
+        assert_eq!(
+            lookup(KeyCode::Char('z'), SUPER.union(SHIFT), &c),
+            Some(KeyAction::Redo)
+        );
+        assert_eq!(lookup(KeyCode::Char('Z'), SUPER, &c), Some(KeyAction::Redo));
+    }
+
+    #[test]
+    fn cmd_z_does_not_override_vim_normal_undo() {
+        let c = KeyContext {
+            vim_non_insert: true,
+            vim_enabled: true,
+            ..ctx()
+        };
+        assert_eq!(lookup(KeyCode::Char('z'), SUPER, &c), None);
     }
 
     #[test]

@@ -557,7 +557,7 @@ impl TuiApp {
                     KeyAction::ClearBuffer => {
                         self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                        self.input.clear(&mut pctx);
+                        self.input.clear_with_undo(&mut pctx);
                         return EventOutcome::Redraw;
                     }
                     _ => {}
@@ -603,7 +603,7 @@ impl TuiApp {
                     KeyAction::ClearBuffer => {
                         self.timers.last_ctrlc = Some(self.core.clock.instant_now());
                         let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-                        self.input.clear(&mut pctx);
+                        self.input.clear_with_undo(&mut pctx);
                         return EventOutcome::Noop;
                     }
                     _ => {}
@@ -1797,6 +1797,37 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn ctrl_c_clear_is_undoable_and_redoable() {
+        let mut app = TestApp::builder().build();
+        app.type_text("hello");
+
+        app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.state().prompt_text, "");
+
+        app.press_mod(KeyCode::Char('_'), KeyModifiers::CONTROL);
+        assert_eq!(app.state().prompt_text, "hello");
+
+        app.press_mod(KeyCode::Char('_'), KeyModifiers::ALT);
+        assert_eq!(app.state().prompt_text, "");
+    }
+
+    #[test]
+    fn cmd_z_and_cmd_shift_z_undo_redo_prompt_edits() {
+        let mut app = TestApp::builder().build();
+        app.type_text("hello");
+        app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        app.press_mod(KeyCode::Char('z'), KeyModifiers::SUPER);
+        assert_eq!(app.state().prompt_text, "hello");
+
+        app.press_mod(
+            KeyCode::Char('z'),
+            KeyModifiers::SUPER.union(KeyModifiers::SHIFT),
+        );
+        assert_eq!(app.state().prompt_text, "");
     }
 
     #[test]
