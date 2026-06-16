@@ -17,7 +17,10 @@ The conversation above is becoming long. Stop the current task and instead produ
 Reply in this exact Markdown structure. Omit a section only if the conversation truly contains nothing for it; never invent details. Respond with ONLY the Markdown document - no preamble, no apology. Under no circumstances use tools; any tool call will be denied and you must answer with the Markdown summary only.
 
 # Goal
-What the user is trying to accomplish (one or two sentences).
+Overall objective the user ultimately wants accomplished. Distinguish this from the narrower current focus when they differ.
+
+# Current focus
+What the assistant is currently working on, including whether it is complete and how it relates to the overall objective.
 
 # Constraints
 Hard limits, style rules, environment facts, anything the next instance must respect.
@@ -29,7 +32,7 @@ What has already been done. Concrete, specific, in completion order.
 Choices that were made and the rationale, when the rationale matters for what comes next.
 
 # Next steps
-Ordered, concrete actions the next instance should take.
+Ordered, concrete actions the next instance should take. If the current focus is complete, explicitly return to the overall objective.
 
 # Critical context
 File contents, error messages, command output, exact identifiers, etc. that the next instance will need verbatim. Quote precisely.
@@ -54,6 +57,12 @@ local MAX_EMPTY_RETRIES = 2
 local MAX_TOOL_CALL_RESTARTS = 2
 
 local TOOL_DENIED_MESSAGE = "Tool use is not allowed during compaction. Respond with text only."
+
+-- Byte caps keep the extra intent anchors bounded without adding token-estimation
+-- plumbing to the Lua compaction path.
+local RECENT_USER_MESSAGE_LIMIT = 3
+local RECENT_USER_MESSAGE_BYTE_BUDGET = 12000
+local RECENT_USER_MESSAGE_MAX_BYTES = 6000
 
 -- Circuit breaker. After this many consecutive failed compactions, the
 -- plugin stops auto-firing for the rest of the session to avoid burning
@@ -92,12 +101,87 @@ end
 
 -- ── helpers ────────────────────────────────────────────────────────────
 
+local function trim(s)
+	return (s or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function combine_instructions(a, b)
+	a = trim(a)
+	b = trim(b)
+	if a == "" then
+		return b ~= "" and b or nil
+	end
+	if b == "" then
+		return a
+	end
+	return a .. "\n\n" .. b
+end
+
+local function content_text(content)
+	if type(content) == "string" then
+		return content
+	end
+	if type(content) ~= "table" then
+		return nil
+	end
+
+	local parts = {}
+	for _, item in ipairs(content) do
+		if type(item) == "table" and type(item.text) == "string" then
+			table.insert(parts, item.text)
+		end
+	end
+
+	if #parts == 0 then
+		return nil
+	end
+	return table.concat(parts, "\n")
+end
+
+local function is_checkpoint_summary(text)
+	return text:find(SUMMARY_PREFIX, 1, true) == 1
+end
+
+local function recent_user_intent_instructions(history)
+	local selected = {}
+	local remaining = RECENT_USER_MESSAGE_BYTE_BUDGET
+
+	for i = #(history or {}), 1, -1 do
+		if #selected >= RECENT_USER_MESSAGE_LIMIT or remaining <= 0 then
+			break
+		end
+
+		local msg = history[i]
+		if msg.role == "user" then
+			local text = trim(content_text(msg.content))
+			if text ~= "" and not is_checkpoint_summary(text) then
+				local limit = math.min(RECENT_USER_MESSAGE_MAX_BYTES, remaining)
+				local clipped = smelt.text.truncate(text, limit, "\n[truncated]")
+				table.insert(selected, 1, clipped)
+				remaining = remaining - #clipped
+			end
+		end
+	end
+
+	if #selected == 0 then
+		return nil
+	end
+
+	local out = {
+		"Recent user intent anchors, verbatim. These may include completed requests. Use them as evidence for task priority and return/resume instructions, while distinguishing completed work, the current focus, and the overall objective. Do not assume the latest user message replaces the overall objective.",
+	}
+	for i, text in ipairs(selected) do
+		table.insert(out, string.format("<user_message index=\"%d\">\n%s\n</user_message>", i, text))
+	end
+	return table.concat(out, "\n\n")
+end
+
 -- Compose the trailing user message. Folds optional per-call instructions
 -- into the structured-summary spec.
 local function build_summary_task(instructions)
-	local task = SUMMARY_TASK:gsub("^%s+", ""):gsub("%s+$", "")
+	local task = trim(SUMMARY_TASK)
 	if instructions then
-		local extra = instructions:gsub("^%s+", ""):gsub("%s+$", "")
+		local extra = trim(instructions)
 		if extra ~= "" then
 			task = task .. "\n\n" .. INSTRUCTIONS_PREAMBLE .. "\n" .. extra
 		end
@@ -279,6 +363,7 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 
 	local min_postponed_groups = math.max(0, math.floor(smelt.settings.compact_keep_recent_groups or 1))
 	local suffix_start_group = math.max(1, (#groups + 1) - math.min(min_postponed_groups, #groups))
+	local summary_instructions = combine_instructions(instructions, recent_user_intent_instructions(history))
 	local finished = false
 
 	local function finish(summary, err, first_live_message_index)
@@ -300,7 +385,7 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 		end
 
 		local prefix_messages = slice_group_prefix(history, groups, prefix_last_group)
-		summarize_messages(prefix_messages, instructions, function(summary, err)
+		summarize_messages(prefix_messages, summary_instructions, function(summary, err)
 			if summary then
 				finish(summary, nil, suffix_first_live_message_index(history, groups, suffix_start_group))
 				return
