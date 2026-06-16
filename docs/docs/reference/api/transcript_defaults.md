@@ -149,7 +149,7 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
-Render a compact live preview of thinking: first line, omitted count, tail.
+Render a compact live preview of thinking: first rendered row, omitted rows, tail.
 
 ## `smelt.transcript.defaults.render_thinking_summary`
 

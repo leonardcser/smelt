@@ -152,8 +152,9 @@ pub type LayoutIr = BlockLayout<LayoutLeaf>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapKeep {
-    Head,
-    Tail,
+    Head { marker: Option<CapMarker> },
+    Tail { marker: Option<CapMarker> },
+    HeadTail { head: u16, marker: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +167,6 @@ pub enum CapMarker {
 pub struct CapSpec {
     pub rows: u16,
     pub keep: CapKeep,
-    pub marker: Option<CapMarker>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

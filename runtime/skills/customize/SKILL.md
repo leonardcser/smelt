@@ -1084,7 +1084,7 @@ Bundled default transcript renderers.
 - `smelt.transcript.defaults.render_thinking_full` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render the full thinking block with the current gutter.
 - `smelt.transcript.defaults.render_thinking_peek` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
-  Render a compact live preview of thinking: first line, omitted count, tail.
+  Render a compact live preview of thinking: first rendered row, omitted rows, tail.
 - `smelt.transcript.defaults.render_thinking_summary` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`
   Render a compact thinking summary.
 - `smelt.transcript.defaults.render_tool` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table`

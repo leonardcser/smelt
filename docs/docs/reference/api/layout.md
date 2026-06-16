@@ -12,7 +12,7 @@ Declarative, width-independent content layout primitives for transcript/tool dis
 fun(child: any, opts: table): table
 ```
 
-Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head` or `tail`; `opts.marker` is `above`, `below`, or nil.
+Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head`, `tail`, or `head_tail`; edge caps accept `opts.marker = "above" | "below"`; `head_tail` uses `opts.head_rows` and accepts `opts.marker = "middle"`.
 
 ## `smelt.layout.code`
 

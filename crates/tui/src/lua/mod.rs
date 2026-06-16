@@ -1033,8 +1033,12 @@ mod tests {
         let BlockLayout::Cap { child, spec } = child.as_ref() else {
             panic!("expected raw output cap, got {child:?}");
         };
-        assert_eq!(spec.keep, CapKeep::Tail);
-        assert_eq!(spec.marker, Some(CapMarker::Above));
+        assert_eq!(
+            spec.keep,
+            CapKeep::Tail {
+                marker: Some(CapMarker::Above)
+            }
+        );
         assert_text_layout(child, expected);
     }
 

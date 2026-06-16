@@ -64,7 +64,7 @@ transcript_defaults.render_thinking = nil
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_thinking_full = nil
 
---- Render a compact live preview of thinking: first line, omitted count, tail.
+--- Render a compact live preview of thinking: first rendered row, omitted rows, tail.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 transcript_defaults.render_thinking_peek = nil
 

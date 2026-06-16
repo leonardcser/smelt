@@ -171,6 +171,27 @@ fn elapsed_spec_from_value(
     })
 }
 
+fn cap_edge_marker(value: Option<&str>) -> LuaResult<Option<CapMarker>> {
+    match value {
+        None => Ok(None),
+        Some("above") => Ok(Some(CapMarker::Above)),
+        Some("below") => Ok(Some(CapMarker::Below)),
+        Some(other) => Err(mlua::Error::external(format!(
+            "smelt.layout.cap: invalid marker `{other}` for edge cap (expected `above`, `below`, or nil)"
+        ))),
+    }
+}
+
+fn cap_middle_marker(value: Option<&str>) -> LuaResult<bool> {
+    match value {
+        None => Ok(false),
+        Some("middle") => Ok(true),
+        Some(other) => Err(mlua::Error::external(format!(
+            "smelt.layout.cap: invalid marker `{other}` for head_tail cap (expected `middle` or nil)"
+        ))),
+    }
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -401,37 +422,35 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "cap",
-        "Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head` or `tail`; `opts.marker` is `above`, `below`, or nil.",
+        "Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head`, `tail`, or `head_tail`; edge caps accept `opts.marker = \"above\" | \"below\"`; `head_tail` uses `opts.head_rows` and accepts `opts.marker = \"middle\"`.",
         &["child", "opts"],
         |_, (child, opts): (mlua::Value, mlua::Table)| -> LuaResult<LuaBlockLayout> {
             let child = layout_from_value(child, "cap")?;
             let rows = opts.get::<Option<u16>>("rows")?.unwrap_or(20);
-            let keep = match opts
+            let keep_label = opts
                 .get::<Option<String>>("keep")?
-                .unwrap_or_else(|| "head".to_string())
-                .as_str()
-            {
-                "head" => CapKeep::Head,
-                "tail" => CapKeep::Tail,
+                .unwrap_or_else(|| "head".to_string());
+            let marker_label = opts.get::<Option<String>>("marker")?;
+            let keep = match keep_label.as_str() {
+                "head" => CapKeep::Head {
+                    marker: cap_edge_marker(marker_label.as_deref())?,
+                },
+                "tail" => CapKeep::Tail {
+                    marker: cap_edge_marker(marker_label.as_deref())?,
+                },
+                "head_tail" => CapKeep::HeadTail {
+                    head: opts.get::<Option<u16>>("head_rows")?.unwrap_or(1),
+                    marker: cap_middle_marker(marker_label.as_deref())?,
+                },
                 other => {
                     return Err(mlua::Error::external(format!(
-                        "smelt.layout.cap: invalid keep `{other}` (expected `head` or `tail`)"
-                    )))
-                }
-            };
-            let marker = match opts.get::<Option<String>>("marker")?.as_deref() {
-                None => None,
-                Some("above") => Some(CapMarker::Above),
-                Some("below") => Some(CapMarker::Below),
-                Some(other) => {
-                    return Err(mlua::Error::external(format!(
-                        "smelt.layout.cap: invalid marker `{other}` (expected `above`, `below`, or nil)"
+                        "smelt.layout.cap: invalid keep `{other}` (expected `head`, `tail`, or `head_tail`)"
                     )))
                 }
             };
             Ok(LuaBlockLayout(BlockLayout::Cap {
                 child: Box::new(child),
-                spec: CapSpec { rows, keep, marker },
+                spec: CapSpec { rows, keep },
             }))
         },
     )?;

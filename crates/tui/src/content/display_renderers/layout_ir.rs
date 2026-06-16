@@ -156,9 +156,7 @@ fn measure_layout_ir_full_with_gutter(layout: &LayoutIr, width: u16, gutter_cell
         }
         BlockLayout::Cap { child, spec } => {
             let child_rows = measure_layout_ir_full_with_gutter(child, width, gutter_cells);
-            let kept = child_rows.min(spec.rows);
-            let marker = u16::from(spec.marker.is_some() && child_rows > spec.rows);
-            kept.saturating_add(marker)
+            cap_rows(child_rows, spec).len().min(u16::MAX as usize) as u16
         }
     }
 }
@@ -862,6 +860,73 @@ fn panel_child_width(width: u16, padding: u16) -> u16 {
     width.saturating_sub(padding.saturating_mul(2)).max(1)
 }
 
+#[derive(Clone, Copy)]
+enum CapRow {
+    Child(u16),
+    Marker {
+        skipped: u16,
+        direction: &'static str,
+    },
+}
+
+fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) -> Vec<CapRow> {
+    use smelt_core::content::block_layout::{CapKeep, CapMarker};
+
+    let truncated = child_rows > spec.rows;
+    let mut rows = Vec::new();
+    match spec.keep {
+        CapKeep::Head { marker } => {
+            let kept = child_rows.min(spec.rows);
+            if truncated && marker == Some(CapMarker::Above) {
+                rows.push(CapRow::Marker {
+                    skipped: child_rows.saturating_sub(kept),
+                    direction: "above",
+                });
+            }
+            rows.extend((0..kept).map(CapRow::Child));
+            if truncated && marker == Some(CapMarker::Below) {
+                rows.push(CapRow::Marker {
+                    skipped: child_rows.saturating_sub(kept),
+                    direction: "below",
+                });
+            }
+        }
+        CapKeep::Tail { marker } => {
+            let kept = child_rows.min(spec.rows);
+            if truncated && marker == Some(CapMarker::Above) {
+                rows.push(CapRow::Marker {
+                    skipped: child_rows.saturating_sub(kept),
+                    direction: "above",
+                });
+            }
+            rows.extend((child_rows.saturating_sub(kept)..child_rows).map(CapRow::Child));
+            if truncated && marker == Some(CapMarker::Below) {
+                rows.push(CapRow::Marker {
+                    skipped: child_rows.saturating_sub(kept),
+                    direction: "below",
+                });
+            }
+        }
+        CapKeep::HeadTail { head, marker } => {
+            if !truncated {
+                rows.extend((0..child_rows).map(CapRow::Child));
+            } else {
+                let head_rows = head.min(spec.rows);
+                let tail_rows = spec.rows.saturating_sub(head_rows);
+                rows.extend((0..head_rows).map(CapRow::Child));
+                if marker {
+                    rows.push(CapRow::Marker {
+                        skipped: child_rows.saturating_sub(spec.rows),
+                        direction: "omitted",
+                    });
+                }
+                rows.extend((child_rows.saturating_sub(tail_rows)..child_rows).map(CapRow::Child));
+            }
+        }
+    }
+    rows
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_ir_cap(
     out: &mut LineBuilder,
@@ -873,45 +938,31 @@ fn render_ir_cap(
     gutter: Option<&GutterSpec>,
     history: Option<&BlockHistory>,
 ) -> u16 {
-    use smelt_core::content::block_layout::{CapKeep, CapMarker};
-
     let child_rows = measure_layout_ir_full_with_gutter(child, width, gutter_width(gutter));
-    let kept = child_rows.min(spec.rows);
-    let truncated = child_rows > spec.rows;
-    let marker = spec.marker.filter(|_| truncated);
-    let total = kept.saturating_add(u16::from(marker.is_some()));
-    let end = row_start.saturating_add(row_count).min(total);
+    let rows = cap_rows(child_rows, spec);
     let mut written = 0u16;
-    for row in row_start..end {
-        let marker_above = marker == Some(CapMarker::Above);
-        let marker_below = marker == Some(CapMarker::Below);
-        if marker_above && row == 0 {
-            render_cap_marker(out, child_rows.saturating_sub(kept), "above", gutter);
-            written = written.saturating_add(1);
-            continue;
+    for row in rows
+        .into_iter()
+        .skip(row_start as usize)
+        .take(row_count as usize)
+    {
+        match row {
+            CapRow::Child(child_start) => {
+                written = written.saturating_add(render_layout_ir_range(
+                    out,
+                    child,
+                    width,
+                    child_start,
+                    1,
+                    gutter,
+                    history,
+                ));
+            }
+            CapRow::Marker { skipped, direction } => {
+                render_cap_marker(out, skipped, direction, gutter);
+                written = written.saturating_add(1);
+            }
         }
-        if marker_below && row == kept {
-            render_cap_marker(out, child_rows.saturating_sub(kept), "below", gutter);
-            written = written.saturating_add(1);
-            continue;
-        }
-        let kept_row = row.saturating_sub(u16::from(marker_above));
-        if kept_row >= kept {
-            continue;
-        }
-        let child_start = match spec.keep {
-            CapKeep::Head => kept_row,
-            CapKeep::Tail => child_rows.saturating_sub(kept).saturating_add(kept_row),
-        };
-        written = written.saturating_add(render_layout_ir_range(
-            out,
-            child,
-            width,
-            child_start,
-            1,
-            gutter,
-            history,
-        ));
     }
     written
 }
@@ -929,10 +980,18 @@ fn render_cap_marker(
     if let Some(gutter) = gutter.filter(|g| g.styled) {
         out.print_gutter(&gutter.text);
     }
-    out.print(&format!(
-        "… {} {direction}",
-        pluralize(skipped as usize, "line", "lines")
-    ));
+    let text = if direction == "omitted" {
+        format!(
+            "… {} omitted …",
+            pluralize(skipped as usize, "line", "lines")
+        )
+    } else {
+        format!(
+            "… {} {direction}",
+            pluralize(skipped as usize, "line", "lines")
+        )
+    };
+    out.print(&text);
     out.pop_style();
     out.newline();
 }

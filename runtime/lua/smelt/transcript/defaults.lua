@@ -394,36 +394,26 @@ function smelt.transcript.defaults.render_thinking_full(block, ctx)
   )
 end
 
-local function thinking_preview_lines(content)
-  local lines = {}
-  for line in ((content or "") .. "\n"):gmatch("([^\n]*)\n") do
-    local trimmed = line:gsub("^%s+", ""):gsub("%s+$", "")
-    if trimmed ~= "" then lines[#lines + 1] = trimmed end
-  end
-  if #lines <= 4 then return lines end
-
-  local omitted = #lines - 4
-  local label = omitted == 1 and "line" or "lines"
-  return {
-    lines[1],
-    "… " .. tostring(omitted) .. " " .. label .. " omitted …",
-    lines[#lines - 2],
-    lines[#lines - 1],
-    lines[#lines],
-  }
+local function thinking_content_layout(content)
+  return layout.markdown(content or "", {
+    dim = true,
+    italic = true,
+    inline = true,
+  })
 end
 
---- Render a compact live preview of thinking: first line, omitted count, tail.
+--- Render a compact live preview of thinking: first rendered row, omitted rows, tail.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_thinking_peek(block, ctx)
   local _ = ctx
-  local lines = thinking_preview_lines(block.content or "")
-  if #lines == 0 then lines[1] = block.thinking_summary or "thinking (0 lines)" end
+  local content = block.content or ""
+  if content == "" then content = block.thinking_summary or "thinking (0 lines)" end
   return layout.gutter(
-    layout.markdown(table.concat(lines, "\n"), {
-      dim = true,
-      italic = true,
-      inline = true,
+    layout.cap(thinking_content_layout(content), {
+      rows = 4,
+      keep = "head_tail",
+      head_rows = 1,
+      marker = "middle",
     }),
     { text = "│ ", styled = true }
   )

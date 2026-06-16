@@ -7,7 +7,7 @@
 ---@class smelt.layout
 local layout = {}
 
---- Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head` or `tail`; `opts.marker` is `above`, `below`, or nil.
+--- Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head`, `tail`, or `head_tail`; edge caps accept `opts.marker = "above" | "below"`; `head_tail` uses `opts.head_rows` and accepts `opts.marker = "middle"`.
 ---@type fun(child: any, opts: table): table
 layout.cap = nil
 

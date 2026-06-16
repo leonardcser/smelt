@@ -12,7 +12,7 @@ use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 8;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DisplayCacheKey {
@@ -467,6 +467,15 @@ fn display_layout_entry_matches_history(
 
 #[cfg(test)]
 pub(crate) fn compile_block_with_show(block: &Block, show_thinking: bool) -> LayoutIr {
+    compile_block_with_view_state(block, show_thinking, ViewState::Expanded)
+}
+
+#[cfg(test)]
+pub(crate) fn compile_block_with_view_state(
+    block: &Block,
+    show_thinking: bool,
+    view_state: ViewState,
+) -> LayoutIr {
     let lua = LuaRuntime::new();
     compile_block_with_lua(
         TranscriptRenderEnv::new(&lua, show_thinking),
@@ -474,7 +483,7 @@ pub(crate) fn compile_block_with_show(block: &Block, show_thinking: bool) -> Lay
         0,
         block,
         None,
-        ViewState::Expanded,
+        view_state,
     )
 }
 

@@ -10,7 +10,9 @@ pub(crate) use markdown::render_markdown_inner;
 
 #[cfg(test)]
 mod tests {
-    use crate::content::display_layout::{compile_block_with_show, render_block_into, RenderCtx};
+    use crate::content::display_layout::{
+        compile_block_with_show, compile_block_with_view_state, render_block_into, RenderCtx,
+    };
     use smelt_core::buffer::{BufCreateOpts, BufId, Buffer};
     use smelt_core::content::builder::test_util::{read_buffer, TestLine};
     use smelt_core::content::LayoutContext;
@@ -58,7 +60,11 @@ mod tests {
         _body: Option<()>,
         ctx: LayoutContext,
     ) -> u16 {
-        let display = compile_block_with_show(block, ctx.show_thinking);
+        let display = if matches!(ctx.view_state, ViewState::Expanded) {
+            compile_block_with_show(block, ctx.show_thinking)
+        } else {
+            compile_block_with_view_state(block, ctx.show_thinking, ctx.view_state)
+        };
         render_block_into(
             buf,
             &display,
@@ -525,6 +531,38 @@ mod tests {
                 "row {row} overflowed transcript width: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn thinking_peek_caps_tail_by_rendered_rows() {
+        let content = concat!(
+            "first\n",
+            "middle line that should be hidden once the rendered-row preview is capped\n",
+            "tail words tail words tail words tail words tail words tail words tail words tail words tail words"
+        );
+        let rows = layout_block_test(
+            &thinking(content),
+            None,
+            &LayoutContext::new(32, true, ViewState::Peek),
+        );
+
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].text, "│ first");
+        assert!(rows[1].text.starts_with("│ … "));
+        assert!(rows[1].text.contains("omitted"));
+        assert!(rows[2..].iter().all(|row| row.text.starts_with("│ ")));
+        assert!(!rows.iter().any(|row| row.text.contains("middle line")));
+    }
+
+    #[test]
+    fn thinking_peek_does_not_duplicate_short_blocks() {
+        let rows = layout_block_test(
+            &thinking("one\ntwo\nthree"),
+            None,
+            &LayoutContext::new(80, true, ViewState::Peek),
+        );
+        let text: Vec<_> = rows.into_iter().map(|row| row.text).collect();
+        assert_eq!(text, vec!["│ one", "│ two", "│ three"]);
     }
 
     #[test]
