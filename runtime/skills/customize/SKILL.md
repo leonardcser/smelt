@@ -1602,6 +1602,8 @@ Transcript display policy and rendered transcript inspection.
   Return rendered transcript display rows in `[start, start + count)`.
 - `smelt.transcript.set_renderer` (Host) :: `fun(renderer: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): nil`
   Replace the base transcript renderer used when the host asks Lua for a transcript block layout.
+- `smelt.transcript.stream` (UiHost) :: `fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream`
+  Create a transcript-shaped streaming renderer for `buf`.
 - `smelt.transcript.text` (UiHost) :: `fun(): string`
   Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 - `smelt.transcript.visible_blocks` (UiHost) :: `fun(): table`

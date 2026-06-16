@@ -107,6 +107,18 @@ value; return `smelt.layout.empty()` to hide a block. Omit `opts.cache_key`
 to opt out of persisted DisplayIR, or bump it whenever renderer output changes
 across process restarts.
 
+## `smelt.transcript.stream`
+
+```lua
+fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream
+```
+
+Types: [`smelt.buf.Buf`](types.md#smeltbufbuf), [`smelt.transcript.StreamOpts`](types.md#smelttranscriptstreamopts), [`smelt.transcript.Stream`](types.md#smelttranscriptstream)
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Create a transcript-shaped streaming renderer for `buf`. The returned object feeds deltas through the same incremental markdown parser and renderer used by the main transcript.
+
 ## `smelt.transcript.text`
 
 ```lua

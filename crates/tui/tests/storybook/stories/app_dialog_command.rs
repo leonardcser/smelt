@@ -98,8 +98,8 @@ app_story!(btw_dialog_with_answer, |ctx| {
     // `smelt.dialog.open`. With no real engine task, the ask sits
     // pending. We harvest the pending ask id from `ask_callbacks` and
     // synthesise an `EngineAskResponse` so the dialog body renders the
-    // markdown answer instead of the spinner - the steady state users
-    // see once the side question completes.
+    // completed markdown answer - the steady state users see once the side
+    // question completes.
     ctx.push_user_turn("how do I render a buffer?");
     ctx.push_assistant_text("Call `buf:lines(...)` or set `buf:source(text)`.");
     ctx.run_command("btw what is the difference between source and lines?");
@@ -114,6 +114,43 @@ app_story!(btw_dialog_with_answer, |ctx| {
                     + "`source` for markdown/code where formatting depends on the whole text, "
                     + "`lines` for list/picker buffers that are already shaped row-by-row.",
             )),
+            None,
+            None,
+        )),
+        error: None,
+    });
+    ctx.assert_snapshot();
+});
+
+app_story!(btw_dialog_streaming_answer, |ctx| {
+    ctx.set_viewport(70, 22);
+    // EngineAskDelta -> Lua on_delta -> smelt.transcript.stream -> dialog buffer.
+    ctx.push_user_turn("how do I render a buffer?");
+    ctx.push_assistant_text("Call `buf:lines(...)` or set `buf:source(text)`.");
+    ctx.run_command("btw show me a tiny rust example");
+    ctx.assert_snapshot();
+
+    let ask_id = ctx.pending_ask_id().expect("/btw registered ask callback");
+    ctx.engine(EngineEvent::EngineAskDelta {
+        id: ask_id,
+        delta: "Here is `".into(),
+    });
+    ctx.engine(EngineEvent::EngineAskDelta {
+        id: ask_id,
+        delta: "inline".into(),
+    });
+    ctx.engine(EngineEvent::EngineAskDelta {
+        id: ask_id,
+        delta: "` and a block:\n\n```rust\nfn main() {\n".into(),
+    });
+    ctx.assert_snapshot();
+
+    let final_text =
+        "Here is `inline` and a block:\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```";
+    ctx.engine(EngineEvent::EngineAskResponse {
+        id: ask_id,
+        message: Some(protocol::Message::assistant(
+            Some(protocol::Content::text(final_text)),
             None,
             None,
         )),

@@ -238,8 +238,9 @@ Spec for `smelt.engine.ask`.
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
-| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires. |
+| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires. |
 | `visible_retries` | `boolean` |  | Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction. |
+| `on_delta` | `fun(value: string)` |  | Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message. |
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.CommandOverrides`
@@ -271,8 +272,9 @@ Spec for `smelt.engine.ask_inherited`.
 | `model` | `string` |  | Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model. |
 | `response_format` | [smelt.engine.AskResponseFormat](types.md#smeltengineaskresponseformat) |  | JSON-schema response constraint. |
 | `reasoning_effort` | [smelt.reasoning.Effort](types.md#smeltreasoningeffort) |  | Reasoning effort for the request; defaults to `"off"`. |
-| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires. |
+| `guard` | `table` |  | Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires. |
 | `visible_retries` | `boolean` |  | Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction. |
+| `on_delta` | `fun(value: string)` |  | Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message. |
 | `on_response` | `fun(arg1: any, arg2: smelt.engine.AskError?)` |  | Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table. |
 
 ### `smelt.engine.PrepareContextEstimate`
@@ -709,6 +711,23 @@ Renderer context. Width, theme, and scroll state are intentionally absent.
 | `renderer_generation` | `integer` | yes | Current renderer generation used for cache invalidation. |
 | `surface` | `string` | yes | Rendering surface name, currently `"transcript"`. |
 | `limits` | `table` | yes | Numeric product row budgets such as `tool_output_rows`. |
+
+### `smelt.transcript.Stream`
+
+Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `append` | `fun(delta: string): nil` | yes | Append one assistant text delta and re-render the target buffer. |
+| `finish` | `fun(final_text: string?): nil` | yes | Finalize the streaming block. If `final_text` is provided and differs from the streamed text, the final text is rendered instead. |
+| `reset` | `fun(): nil` | yes | Clear the stream and the target buffer. |
+| `width` | `fun(width: integer?): integer?` | yes | Read or set the render width in terminal cells. |
+
+### `smelt.transcript.StreamOpts`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `width` | `integer` |  | Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters. |
 
 ### `smelt.transcript.ToolOutput`
 

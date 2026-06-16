@@ -19,8 +19,8 @@ pub use runtime::{
     load_bootstrap_chunks, LuaRuntime, OPTIONAL_PLUGINS,
 };
 pub use shared::{
-    CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink, LuaShared, Phase,
-    RegisteredCommand, RegisteredKeymap, ToolHandles, LUA_BUF_ID_BASE,
+    AskCallbacks, CliFlagKind, CliFlagSpec, CliFlagValue, DefaultShell, Hooks, LuaResumeSink,
+    LuaShared, Phase, RegisteredCommand, RegisteredKeymap, ToolHandles, LUA_BUF_ID_BASE,
 };
 pub(crate) use task::step_task_owned;
 pub use task::{

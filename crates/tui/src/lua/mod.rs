@@ -436,14 +436,17 @@ impl LuaRuntime {
         message: Option<&protocol::Message>,
         error: Option<protocol::EngineAskError>,
     ) {
-        let handle = {
+        let callbacks = {
             let Ok(mut cbs) = self.shared.ask_callbacks.lock() else {
                 return;
             };
-            match cbs.remove(&id) {
-                Some(h) => h,
-                None => return,
-            }
+            cbs.remove(&id)
+        };
+        let Some(callbacks) = callbacks else {
+            return;
+        };
+        let Some(handle) = callbacks.response else {
+            return;
         };
         let Ok(func) = self.core.lua.registry_value::<mlua::Function>(&handle.key) else {
             return;
@@ -468,6 +471,28 @@ impl LuaRuntime {
         let _perf = smelt_perf::perf::begin("lua:ask_cb");
         if let Err(e) = func.call::<()>((response_value, err_value)) {
             self.record_error(format!("ask callback: {e}"));
+        }
+    }
+
+    pub(crate) fn fire_ask_delta_callback(&self, id: u64, delta: &str) {
+        let func = {
+            let Ok(cbs) = self.shared.ask_callbacks.lock() else {
+                return;
+            };
+            let Some(callbacks) = cbs.get(&id) else {
+                return;
+            };
+            let Some(handle) = callbacks.delta.as_ref() else {
+                return;
+            };
+            let Ok(func) = self.core.lua.registry_value::<mlua::Function>(&handle.key) else {
+                return;
+            };
+            func
+        };
+        let _perf = smelt_perf::perf::begin("lua:ask_delta_cb");
+        if let Err(e) = func.call::<()>(delta.to_string()) {
+            self.record_error(format!("ask delta callback: {e}"));
         }
     }
 
@@ -817,6 +842,33 @@ mod tests {
 
         let fired: u64 = rt.lua.load("return _G.fired").eval().unwrap();
         assert_eq!(fired, 0, "non-ask handle must not fire on ask response");
+    }
+
+    #[test]
+    fn fire_ask_delta_callback_streams_until_final_response() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load("_G.delta = ''; _G.cb = function(d) _G.delta = _G.delta .. d end")
+            .exec()
+            .unwrap();
+        let func: mlua::Function = rt.lua.load("cb").eval().unwrap();
+        let handle = LuaHandle::from_func(&rt.lua, func).unwrap();
+        rt.shared.ask_callbacks.lock().unwrap().insert(
+            7,
+            smelt_core::lua::AskCallbacks {
+                response: None,
+                delta: Some(handle),
+            },
+        );
+
+        rt.fire_ask_delta_callback(7, "hel");
+        rt.fire_ask_delta_callback(7, "lo");
+        let delta: String = rt.lua.load("return _G.delta").eval().unwrap();
+        assert_eq!(delta, "hello");
+
+        let msg = protocol::Message::assistant(Some(protocol::Content::text("hello")), None, None);
+        rt.fire_ask_callback(7, Some(&msg), None);
+        assert!(rt.shared.ask_callbacks.lock().unwrap().is_empty());
     }
 
     // Theme role-mapping and error logic are tested in `lua::api::tests`.

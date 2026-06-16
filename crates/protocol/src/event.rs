@@ -266,6 +266,10 @@ pub enum EngineEvent {
     /// A background process has finished.
     ProcessCompleted { id: String, exit_code: Option<i32> },
 
+    /// Incremental text token from a background `UiCommand::EngineAsk` request.
+    /// The final `EngineAskResponse` still carries the full assistant message.
+    EngineAskDelta { id: u64, delta: String },
+
     /// Response to a `UiCommand::EngineAsk` request. On success
     /// `error` is `None` and `message` is the assistant reply in the
     /// normal `protocol::Message` shape. On failure `error` carries a
@@ -451,6 +455,9 @@ pub enum UiCommand {
         /// cache shard as the main turn.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         session_id: String,
+        /// Emit incremental text deltas as `EngineAskDelta` events.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        stream: bool,
         /// Surface provider retry events on the main work indicator.
         /// Intended for foreground auxiliary work such as compaction.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

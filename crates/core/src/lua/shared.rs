@@ -106,7 +106,7 @@ pub struct LuaShared {
     /// paint/win/overlay handler that happens to share an id namespace:
     /// the two maps allocate ids from the same `next_id` counter but each
     /// call_id only ever lands in one of them.
-    pub ask_callbacks: Mutex<HashMap<u64, LuaHandle>>,
+    pub ask_callbacks: Mutex<HashMap<u64, AskCallbacks>>,
     pub next_id: AtomicU64,
     /// Starts at `LUA_BUF_ID_BASE` so Lua-allocated `BufId`s never collide with Rust-side buffers.
     pub next_buf_id: AtomicU64,
@@ -161,6 +161,14 @@ pub struct LuaShared {
     /// the runtime promotes it to `Init` before autoload and `Running` once
     /// the agent loop is live.
     phase: AtomicU8,
+}
+
+/// Registry entry for one `smelt.engine.ask` request. Response and
+/// streaming callbacks share a lifecycle: deltas may fire many times, and
+/// the final response removes the whole entry.
+pub struct AskCallbacks {
+    pub response: Option<LuaHandle>,
+    pub delta: Option<LuaHandle>,
 }
 
 /// Every hook-registry surface bundled into one struct. New middleware

@@ -325,6 +325,14 @@ if smelt.engine and smelt.lifecycle then
           end
         end
       end
+      local on_delta = spec.on_delta
+      if type(on_delta) == "function" then
+        wrapped.on_delta = function(...)
+          if guard:alive() then
+            return on_delta(...)
+          end
+        end
+      end
       spec = wrapped
     end
     return raw(spec)

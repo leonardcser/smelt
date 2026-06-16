@@ -1644,6 +1644,37 @@ impl TranscriptProjection {
             .collect()
     }
 
+    /// Render the full transcript history into a regular buffer. This is for
+    /// small transcript-shaped surfaces outside the main transcript viewport
+    /// (for example a streaming `/btw` dialog) that still want the exact same
+    /// block parser, markdown layout, and highlights.
+    pub(crate) fn project_all(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        buf: &mut Buffer,
+        history: &mut BlockHistory,
+        width: u16,
+        show_thinking: bool,
+        theme: &Theme,
+    ) {
+        self.rebuild_row_index(lua, history, width, show_thinking);
+        let materialized = self.collect_blocks_range(
+            TranscriptRenderEnv::with_renderer(
+                lua,
+                show_thinking,
+                self.measurements.active.renderer_generation,
+                self.measurements.active.renderer_cache_key,
+            ),
+            history,
+            theme,
+            0..self.measurements.active.nodes.len(),
+        );
+        buf.set_all_lines(materialized.texts);
+        for p in materialized.pending {
+            apply_row_highlights(buf, p.row, p.highlights);
+        }
+    }
+
     /// Full display rows. Cached by `(generation, width, show_thinking)`; repeat
     /// callers get a free `Arc::clone`.
     pub(crate) fn build_rows(

@@ -1,0 +1,26 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+ how do I render a buffer?
+
+
+
+
+
+
+
+
+
+
+
+
+
+─ show me a tiny rust example ────────────────────────────────────────
+ Here is inline and a block:
+
+ fn main() {
+
+
+ ○ normal                                                       1:1 0%

@@ -137,13 +137,18 @@ fn stub_btw_ui(app: &mut TestApp) {
                 smelt.buf.new = function()
                   return {
                     source = function() end,
+                    styled = function() end,
                   }
                 end
-                smelt.timer.set = function() end
+                smelt.transcript.stream = function()
+                  return {
+                    append = function() end,
+                    finish = function() end,
+                    reset = function() end,
+                  }
+                end
                 smelt.dialog.content = function() return {} end
                 smelt.dialog.open = function() end
-                smelt.spinner.glyph = function() return "*" end
-                smelt.spinner.period_ms = function() return 1 end
                 "#,
         )
         .exec()

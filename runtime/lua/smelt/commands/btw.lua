@@ -4,6 +4,8 @@
 
 local MAX_TOOL_CALL_RESTARTS = 2
 local TOOL_DENIED_MESSAGE = "Tool use is not allowed for /btw. Respond with text only."
+local WAITING_FRAMES = { ".  ", ".. ", "..." }
+local WAITING_FRAME_MS = 350
 
 local function build_question(question)
   return "The user is asking a quick side question while working on something else. "
@@ -48,58 +50,88 @@ smelt.cmd.register("btw", function(args)
   end
 
   smelt.spawn(function()
-    local buf = smelt.buf.new({ mode = "markdown", readonly = true })
-    local done = false
+    local buf = smelt.buf.new({ readonly = true })
+    local stream = smelt.transcript.stream(buf)
+    local waiting = false
+    local waiting_frame = 0
+    local waiting_timer
 
-    local function tick()
-      if done then return end
-      buf:source(smelt.spinner.glyph() .. " working")
-      smelt.timer.set(smelt.spinner.period_ms(), tick)
+    local function render_waiting()
+      if not waiting then return end
+      waiting_frame = waiting_frame % #WAITING_FRAMES + 1
+      buf:styled({ {
+        { text = WAITING_FRAMES[waiting_frame], style = { dim = true, italic = true } },
+      } })
     end
-    tick()
+
+    local function stop_waiting()
+      waiting = false
+      if waiting_timer then
+        waiting_timer:remove()
+        waiting_timer = nil
+      end
+    end
+
+    local function start_waiting()
+      stop_waiting()
+      waiting = true
+      waiting_frame = 0
+      render_waiting()
+      waiting_timer = smelt.timer.every(WAITING_FRAME_MS, render_waiting)
+    end
 
     local base_messages = build_base_messages(question)
     local restarts = 0
 
     local function send(messages, retrying_after_tool_denial)
+      start_waiting()
       smelt.engine.ask_inherited({
         messages = messages,
         model = smelt.model.preferred("btw"),
+        on_delta = function(delta)
+          if delta ~= "" then
+            stop_waiting()
+            stream:append(delta)
+          end
+        end,
         on_response = function(response, err)
+          stop_waiting()
           if err then
-            done = true
+            stream:reset()
             buf:source("error (" .. err.kind .. "): " .. err.message)
             return
           end
           if response and response.tool_calls and #response.tool_calls > 0 then
             if not retrying_after_tool_denial then
+              stream:reset()
               send(append_tool_denials(messages, response), true)
               return
             end
             if restarts < MAX_TOOL_CALL_RESTARTS then
               restarts = restarts + 1
+              stream:reset()
               send(base_messages, false)
               return
             end
-            done = true
+            stream:reset()
             buf:source("error (invalid_response): model kept requesting tools")
             return
           end
-          done = true
-          buf:source((response and response.content) or "")
+          stream:finish((response and response.content) or "")
         end,
       })
     end
 
     send(base_messages, false)
 
-    local leaf = smelt.dialog.content({ buf = buf, interactive = true })
+    local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
 
     smelt.dialog.open({
       title      = question,
       min_height = "30%",
       max_height = "70%",
       panels     = { { leaf = leaf, height = "fill" } },
+      on_close   = stop_waiting,
       keymaps = {
         { key = "q", on_press = function(ctx) ctx.close() end },
       },

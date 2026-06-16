@@ -265,6 +265,10 @@ impl TuiApp {
                 self.handle_process_completed(id, exit_code);
                 SessionControl::Continue
             }
+            EngineEvent::EngineAskDelta { id, delta } => {
+                self.lua.fire_ask_delta_callback(id, &delta);
+                SessionControl::Continue
+            }
             EngineEvent::EngineAskResponse { id, message, error } => {
                 self.lua.fire_ask_callback(id, message.as_ref(), error);
                 SessionControl::Continue
@@ -378,6 +382,9 @@ impl TuiApp {
         {
             self.set_history(history);
             self.save_session();
+        }
+        EngineEvent::EngineAskDelta { id, delta } => {
+            self.lua.fire_ask_delta_callback(id, &delta);
         }
         EngineEvent::EngineAskResponse { id, message, error } => {
             self.lua.fire_ask_callback(id, message.as_ref(), error);

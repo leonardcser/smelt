@@ -105,8 +105,13 @@ impl TestApp {
             }
         }
         if let Ok(asks) = core.ask_callbacks.lock() {
-            for (id, h) in asks.iter() {
-                check(&format!("ask_callbacks[{id}]"), h);
+            for (id, callbacks) in asks.iter() {
+                if let Some(h) = &callbacks.response {
+                    check(&format!("ask_callbacks[{id}].response"), h);
+                }
+                if let Some(h) = &callbacks.delta {
+                    check(&format!("ask_callbacks[{id}].delta"), h);
+                }
             }
         }
         if let Ok(cmds) = core.commands.lock() {

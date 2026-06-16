@@ -58,6 +58,11 @@ transcript.rows = nil
 transcript.set_renderer = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Create a transcript-shaped streaming renderer for `buf`. The returned object feeds deltas through the same incremental markdown parser and renderer used by the main transcript.
+---@type fun(buf: smelt.buf.Buf, opts: smelt.transcript.StreamOpts?): smelt.transcript.Stream
+transcript.stream = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return the full transcript as a single newline-joined string (post-render display text, with thinking blocks visible according to the `show_thinking` setting).
 ---@type fun(): string
 transcript.text = nil

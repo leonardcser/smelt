@@ -167,8 +167,9 @@
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
----@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires.
+---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
 ---@field visible_retries? boolean Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction.
+---@field on_delta? fun(value: string) Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message.
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Front-matter override block accepted by `smelt.engine.submit_command`. Mirrors what plugin commands set in their markdown header. Tool-name keys (e.g. `bash`, `edit`) become per-subcommand pattern buckets.
@@ -192,8 +193,9 @@
 ---@field model? string Model reference (`"provider/model"` or a bare name resolved against the configured providers). When `nil`, falls back to the primary model.
 ---@field response_format? smelt.engine.AskResponseFormat JSON-schema response constraint.
 ---@field reasoning_effort? smelt.reasoning.Effort Reasoning effort for the request; defaults to `"off"`.
----@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_response` after the guard expires.
+---@field guard? table Lifecycle guard returned by `smelt.lifecycle.guard(...)`. When provided, the Lua bootstrap suppresses `on_delta` and `on_response` after the guard expires.
 ---@field visible_retries? boolean Surface provider retry events on the main work indicator. Intended for foreground auxiliary work such as compaction.
+---@field on_delta? fun(value: string) Fires for each streamed assistant text delta when provided. The final `on_response` still fires once with the full assistant message.
 ---@field on_response? fun(arg1: any, arg2: smelt.engine.AskError?) Fires once with `(response, err)`. On success `err` is `nil` and `response` is a full assistant message table; on failure `response` is `nil` and `err` is a `smelt.engine.AskError` table.
 
 --- Token accounting breakdown passed inside `smelt.engine.PrepareRequest`.
@@ -495,6 +497,16 @@
 ---@field renderer_generation integer Current renderer generation used for cache invalidation.
 ---@field surface string Rendering surface name, currently `"transcript"`.
 ---@field limits table Numeric product row budgets such as `tool_output_rows`.
+
+--- Transcript-shaped streaming renderer for plugin-owned buffers. Append model text deltas and it renders through the same incremental markdown block pipeline as the main transcript.
+---@class smelt.transcript.Stream
+---@field append fun(delta: string): nil Append one assistant text delta and re-render the target buffer.
+---@field finish fun(final_text: string?): nil Finalize the streaming block. If `final_text` is provided and differs from the streamed text, the final text is rendered instead.
+---@field reset fun(): nil Clear the stream and the target buffer.
+---@field width fun(width: integer?): integer? Read or set the render width in terminal cells.
+
+---@class smelt.transcript.StreamOpts
+---@field width? integer Rendering width in terminal cells. Defaults to the target window's content width when the buffer is visible, then falls back to the current terminal width minus dialog gutters.
 
 --- Tool output snapshot passed to transcript renderers.
 ---@class smelt.transcript.ToolOutput

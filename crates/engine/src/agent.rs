@@ -186,6 +186,9 @@ pub(crate) struct AskTask {
     /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
     /// the EngineAsk hits the same cache shard as the main turn.
     pub session_id: String,
+    /// Whether text deltas for this auxiliary request should be forwarded
+    /// as `EngineAskDelta` events.
+    pub stream: bool,
     /// Whether provider retries for this auxiliary request should update the
     /// visible work state.
     pub visible_retries: bool,
@@ -224,6 +227,7 @@ pub(crate) fn dispatch_background_cmd(
             reasoning_effort,
             tools,
             session_id,
+            stream,
             visible_retries,
         } => {
             spawn_engine_ask(
@@ -239,6 +243,7 @@ pub(crate) fn dispatch_background_cmd(
                     reasoning_effort,
                     tools,
                     session_id,
+                    stream,
                     visible_retries,
                 },
                 ctx.event_tx,
@@ -267,6 +272,7 @@ fn spawn_engine_ask(
         reasoning_effort,
         tools: supplied_tools,
         session_id,
+        stream,
         visible_retries,
     } = task;
 
@@ -333,6 +339,17 @@ fn spawn_engine_ask(
             };
             if visible_retries {
                 opts.on_retry = Some(&on_retry);
+            }
+            let on_delta = |delta: provider::StreamDelta| {
+                if let provider::StreamDelta::Text(text) = delta {
+                    let _ = tx.send(EngineEvent::EngineAskDelta {
+                        id,
+                        delta: text.to_string(),
+                    });
+                }
+            };
+            if stream {
+                opts.on_delta = Some(&on_delta);
             }
             provider
                 .chat(&messages, &tool_defs, &model_name, reasoning_effort, &opts)
