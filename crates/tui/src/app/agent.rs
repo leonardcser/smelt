@@ -1078,7 +1078,7 @@ mod tests {
         assert_eq!(user_blocks(&app), Vec::<String>::new());
         assert_eq!(
             process_status_blocks(&app),
-            vec!["Background process 1234 finished successfully."]
+            vec!["background process 1234 finished successfully."]
         );
     }
 
@@ -1165,7 +1165,7 @@ mod tests {
         assert_eq!(current_note, expected_note);
         assert_eq!(
             start_content.text_content(),
-            protocol::process_status_note("Background process 751225 exited with code 1.")
+            protocol::process_status_note("background process 751225 exited with code 1.")
         );
 
         app.feed_one(crate::app::test_harness::SourceEvent::Engine(
@@ -1181,7 +1181,7 @@ mod tests {
         assert!(matches!(
             &app.app.core.session.history[1],
             HistoryItem::Note(protocol::HistoryNote::ProcessStatus { text, event })
-                if text == "Background process 751225 exited with code 1."
+                if text == "background process 751225 exited with code 1."
                     && event.as_ref().and_then(protocol::ProcessStatusEvent::process_id) == Some("751225")
                     && event.as_ref().and_then(|event| event.exit_code()) == Some(1)
         ));

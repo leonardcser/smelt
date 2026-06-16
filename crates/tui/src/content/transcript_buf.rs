@@ -3673,9 +3673,11 @@ mod tests {
                 crate::content::render_plan::RenderNode::Block { .. },
             ] if name == "background_process_completed" && child_ids.len() == 2
         ));
-        assert!(rows
-            .iter()
-            .any(|line| line == "background processes finished: 2 (1 failed)"));
+        assert!(
+            rows.iter()
+                .any(|line| line
+                    == "background processes finished: 2, 1 failed: 2 exited with code 7")
+        );
         assert!(rows.iter().any(|line| line == "legacy process note"));
     }
 
