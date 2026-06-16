@@ -750,6 +750,13 @@ fn shell_words(cmd: &str) -> Vec<String> {
                 }
                 i += 1;
             }
+            b'(' | b')' => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+                out.push((b as char).to_string());
+                i += 1;
+            }
             b'&' if i + 1 < bytes.len() && bytes[i + 1] == b'>' => {
                 if !current.is_empty() {
                     out.push(std::mem::take(&mut current));

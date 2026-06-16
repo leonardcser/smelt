@@ -1046,6 +1046,36 @@ fn workspace_allows_relative_path() {
 }
 
 #[test]
+fn workspace_bash_ignores_dev_null_redirect_in_command_substitution() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let state_dir = temp.path().join("state/agent-mux");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let sock = state_dir.join("daemon.sock");
+    let lock = state_dir.join("watch.lock");
+    std::fs::write(&lock, "1234").unwrap();
+
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let command = format!(
+        "lsof {} {} 2>/dev/null | head -20; ps -p $(cat {} 2>/dev/null) -o pid=,command= 2>/dev/null || true",
+        sock.display(),
+        lock.display(),
+        lock.display(),
+    );
+    let args = args_with("command", &command);
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: canonicalize_path_or_parent(&state_dir)
+        }]
+    );
+}
+
+#[test]
 fn workspace_downgrades_bash_outside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "rm -rf /tmp/foo");
