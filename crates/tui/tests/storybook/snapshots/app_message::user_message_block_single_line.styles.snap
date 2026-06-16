@@ -10,9 +10,9 @@ dim: 50 8
   1   0  49 bg=AnsiValue(236)
   1  49   1 bg=AnsiValue(243)
   3   0   6 fg=AnsiValue(208) attrs=bold
-  3   6  10 fg=AnsiValue(244)
-  3  16   2 fg=AnsiValue(244) attrs=dim
-  3  18  30 fg=AnsiValue(244)
+  3   6  19 fg=AnsiValue(244)
+  3  25   2 fg=AnsiValue(244) attrs=dim
+  3  27  21 fg=AnsiValue(244)
   4   0  50 fg=AnsiValue(237)
   5   1   1 fg=Black bg=White
   6   0  50 fg=AnsiValue(237)

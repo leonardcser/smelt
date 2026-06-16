@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 396
 expression: frame.text()
 ---
 
@@ -15,7 +16,7 @@ expression: frame.text()
      │   12.1K 5m      └─ investigate parser regression          │
      └───────────────────────────────────────────────────────────┘
      ┌ filter ───────────────────────────────────────────────────┐
-  tip│ filter sessions…                  ⌥d: delete · workspace  │t t…
+  tip│ filter sessions…                  ⌥d: delete · workspace  │ing…
 ─────└───────────────────────────────────────────────────────────┘──────
 
 ────────────────────────────────────────────────────────────────────────

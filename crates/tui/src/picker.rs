@@ -79,7 +79,6 @@ pub(crate) struct PickerState {
     pub(crate) overlay: OverlayId,
     pub(crate) placement: PickerPlacement,
     pub(crate) reversed: bool,
-    pub(crate) max_rows: u16,
     pub(crate) items: Vec<PickerItem>,
     pub(crate) selected: usize,
     pub(crate) materialized: std::ops::Range<RowIndex>,
@@ -101,10 +100,6 @@ pub(crate) fn open(
     blocks_agent: bool,
     z: u16,
 ) -> Option<WinId> {
-    let max_rows = match placement {
-        PickerPlacement::PromptDocked { max_rows } => max_rows,
-        _ => 32,
-    };
     let reversed = matches!(placement, PickerPlacement::PromptDocked { .. });
     let total = items.len();
     let selected = clamp_selected(selected, total);
@@ -121,7 +116,7 @@ pub(crate) fn open(
             },
         },
     )?;
-    let height = picker_height(total, max_rows);
+    let height = picker_height(total, placement, &app.ui);
     let overlay = Overlay::new(
         layout_for(leaf, height),
         anchor_for(&app.ui, placement, height),
@@ -136,7 +131,6 @@ pub(crate) fn open(
             overlay: overlay_id,
             placement,
             reversed,
-            max_rows,
             max_label: max_label_chars(&items),
             items,
             selected,
@@ -164,7 +158,7 @@ pub(crate) fn set_items(app: &mut TuiApp, leaf: WinId, items: Vec<PickerItem>, s
     state.items = items;
     state.selected = clamp_selected(selected, state.items.len());
     state.materialized = 0..0;
-    let height = picker_height(state.items.len(), state.max_rows);
+    let height = picker_height(state.items.len(), state.placement, &app.ui);
     let new_anchor = anchor_for(&app.ui, state.placement, height);
     let overlay = state.overlay;
     app.picker_state.insert(leaf, state);
@@ -220,6 +214,31 @@ pub(crate) fn sync_scrolled(app: &mut TuiApp) {
     }
 }
 
+/// Recompute prompt-docked picker sizes after the main layout changes.
+/// Called from `refresh_main_layout` so pickers shrink or grow as the
+/// available headroom above the prompt changes.
+pub(crate) fn sync_layouts(app: &mut TuiApp) {
+    let leaves: Vec<WinId> = app.picker_state.keys().copied().collect();
+    for leaf in leaves {
+        let Some(state) = app.picker_state.get(&leaf) else {
+            continue;
+        };
+        if !matches!(state.placement, PickerPlacement::PromptDocked { .. }) {
+            continue;
+        }
+        let total = state.items.len();
+        let height = picker_height(total, state.placement, &app.ui);
+        let new_anchor = anchor_for(&app.ui, state.placement, height);
+        if let Some(ov) = app.ui.overlay_mut(state.overlay) {
+            ov.layout = layout_for(leaf, height);
+            ov.anchor = new_anchor;
+        }
+        // Re-materialize with the new height while keeping the current
+        // logical selection visible.
+        sync_selected(app, leaf, state.selected);
+    }
+}
+
 /// Remove picker state when its leaf closes. The overlay itself is removed
 /// by `Ui::win_close → overlay_close`.
 pub(crate) fn forget(app: &mut TuiApp, leaf: WinId) {
@@ -248,7 +267,7 @@ fn sync_to_view(app: &mut TuiApp, leaf: WinId, selected: usize, anchor: SyncAnch
     };
     let total = state.items.len();
     state.selected = clamp_selected(selected, total);
-    let height = picker_height(total, state.max_rows);
+    let height = picker_height(total, state.placement, &app.ui);
     let selected_visual = visual_cursor(state.selected, total, state.reversed);
     let prev_scroll = app.ui.win(leaf).map(|w| w.scroll_top()).unwrap_or(0);
     let scroll = match anchor {
@@ -302,9 +321,26 @@ fn clamp_selected(selected: usize, total: usize) -> usize {
     selected.min(total.saturating_sub(1))
 }
 
-fn picker_height(item_count: usize, max_rows: u16) -> u16 {
+/// Effective row cap for a prompt-docked picker, limited by the available
+/// headroom above the prompt chrome so the overlay never overlaps the
+/// prompt block. Non-docked placements simply use the requested cap.
+fn effective_max_rows(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> u16 {
+    let desired = match placement {
+        PickerPlacement::PromptDocked { max_rows } => max_rows,
+        _ => 32,
+    };
+    if !matches!(placement, PickerPlacement::PromptDocked { .. }) {
+        return desired.max(1);
+    }
+    let headroom = crate::content::layout::available_rows_above_prompt_chrome(ui);
+    // Always keep at least one row so the picker remains usable even when
+    // the prompt block fills the entire terminal.
+    desired.max(1).min(headroom.max(1))
+}
+
+fn picker_height(item_count: usize, placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> u16 {
     let n = item_count.max(1) as u16;
-    n.min(max_rows.max(1))
+    n.min(effective_max_rows(placement, ui))
 }
 
 fn logical_from_visual(visual: RowIndex, n: usize, reversed: bool) -> usize {
@@ -439,24 +475,75 @@ mod tests {
 
     #[test]
     fn picker_height_uses_item_count_when_below_cap() {
-        assert_eq!(picker_height(3, 10), 3);
+        let ui = fresh_ui();
+        assert_eq!(picker_height(3, PickerPlacement::ScreenCenter, &ui), 3);
     }
 
     #[test]
     fn picker_height_clamps_to_max_rows_when_items_exceed_cap() {
-        assert_eq!(picker_height(50, 8), 8);
+        let ui = fresh_ui();
+        assert_eq!(picker_height(50, PickerPlacement::ScreenCenter, &ui), 32);
     }
 
     #[test]
     fn picker_height_is_at_least_one_for_empty_lists() {
         // An empty picker still needs a row to show "(no matches)".
-        assert_eq!(picker_height(0, 10), 1);
+        let ui = fresh_ui();
+        assert_eq!(picker_height(0, PickerPlacement::ScreenCenter, &ui), 1);
     }
 
     #[test]
     fn picker_height_treats_a_zero_cap_as_one() {
         // `max_rows = 0` is meaningless; fall back to a one-row picker.
-        assert_eq!(picker_height(5, 0), 1);
+        let ui = fresh_ui();
+        assert_eq!(
+            picker_height(5, PickerPlacement::PromptDocked { max_rows: 0 }, &ui),
+            1
+        );
+    }
+
+    #[test]
+    fn picker_height_prompt_docked_clamps_to_headroom() {
+        let mut ui = ui_with_prompt_layout(80, 24);
+        // With an 80x24 terminal and a one-row prompt at the bottom, the
+        // transcript occupies rows 0..21 and headroom above the prompt is 22.
+        let placement = PickerPlacement::PromptDocked { max_rows: 8 };
+        assert_eq!(picker_height(50, placement, &ui), 8);
+
+        // Shrink terminal so only three rows sit above the one-row prompt
+        // (seed layout: transcript + gap + prompt).
+        ui.set_terminal_size(80, 4);
+        ui.set_layout(crate::content::layout::seed_layout_tree(1));
+        assert_eq!(picker_height(50, placement, &ui), 3);
+    }
+
+    fn ui_with_prompt_layout(term_w: u16, term_h: u16) -> crate::smelt_edit::Ui {
+        let mut ui = crate::smelt_edit::Ui::new();
+        ui.set_terminal_size(term_w, term_h);
+        let tbuf = ui.buf_create(crate::smelt_edit::BufCreateOpts::default());
+        assert!(ui.win_open_split_at(
+            crate::app::TRANSCRIPT_WIN,
+            tbuf,
+            crate::smelt_edit::SplitConfig {
+                region: "transcript".into(),
+                gutters: crate::smelt_edit::Gutters::default(),
+            },
+        ));
+        let pbuf = ui.buf_create(crate::smelt_edit::BufCreateOpts::default());
+        assert!(ui.win_open_split_at(
+            crate::app::PROMPT_WIN,
+            pbuf,
+            crate::smelt_edit::SplitConfig {
+                region: "prompt".into(),
+                gutters: crate::smelt_edit::Gutters {
+                    pad_left: 1,
+                    pad_right: 1,
+                    ..Default::default()
+                },
+            },
+        ));
+        ui.set_layout(crate::content::layout::seed_layout_tree(1));
+        ui
     }
 
     // ── visual_cursor ────────────────────────────────────────────────────

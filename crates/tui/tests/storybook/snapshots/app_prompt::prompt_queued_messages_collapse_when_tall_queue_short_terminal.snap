@@ -1,13 +1,15 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 396
+assertion_line: 382
 expression: frame.text()
 ---
- refactor the parser into its own module
 
 
-  tip ctrl+enter / ctrl+q, steer the current re…
-──────────────────────────────────────────────────
+  › follow-up 9
+  › follow-up 10
+  › follow-up 11
+  › follow-up 12
+  +8 more queued
 
 ──────────────────────────────────────────────────
  ○ normal                                 1:1 100%

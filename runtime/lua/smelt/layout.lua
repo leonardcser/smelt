@@ -20,10 +20,20 @@
 local prompt_bar = require("smelt.prompt_bar")
 local statusline = require("smelt.statusline")
 
+-- Minimum rows kept for the transcript even when the prompt block wants
+-- to grow.
+local MIN_TRANSCRIPT_ROWS = 2
+
 smelt.ui.layout.set(function(state)
-  local top_rows = prompt_bar.top_rows()
+  local term_h = state.term_h or 24
   local input_rows = state.prompt_input_rows or 1
-  local block_height = top_rows + input_rows + 1 + 1
+
+  -- prompt block = top_bar + input_rows + bottom_bar(1) + statusline(1)
+  local chrome_except_top = input_rows + 2
+  local max_top_rows = math.max(1, term_h - MIN_TRANSCRIPT_ROWS - chrome_except_top)
+  local top_rows = prompt_bar.top_rows(max_top_rows)
+  local block_height = top_rows + chrome_except_top
+
   return smelt.ui.layout.vbox({
     {
       height = "fill",

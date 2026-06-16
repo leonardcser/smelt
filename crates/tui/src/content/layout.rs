@@ -3,12 +3,11 @@ pub(crate) use crate::smelt_edit::Rect;
 use crate::smelt_edit::layout::Anchor;
 use crate::smelt_edit::{Align, Ui};
 
-/// Anchor that floats an overlay `height` rows above the prompt block.
+/// Resolve the window that represents the top edge of the prompt chrome
+/// stack. Used by overlays that want to float above the prompt block.
 ///
-/// Pickers / notifications / completer popups that want to sit above
-/// all prompt chrome (queued messages, stash, working indicator) use
-/// this. The resolved target is the Lua-allocated top bar window when
-/// the default `prompt_bar.lua` is loaded, otherwise the engine-owned
+/// The resolved target is the Lua-allocated top bar window when the
+/// default `prompt_bar.lua` is loaded, otherwise the engine-owned
 /// `PROMPT_WIN`. The host knows the *name* of the default top bar but
 /// not its layout shape: a plugin that replaces the bar with a wider
 /// or differently-named window will fall through to the `PROMPT_WIN`
@@ -18,10 +17,22 @@ use crate::smelt_edit::{Align, Ui};
 /// chrome window by name. The statusline is *not* referenced from Rust;
 /// plugins that need a screen-bottom overlay to clear the statusline
 /// anchor against `require("smelt.statusline").win` directly from Lua.
+pub(crate) fn prompt_chrome_top_win(ui: &Ui) -> crate::smelt_edit::WinId {
+    ui.named_win("smelt.prompt_bar.top")
+        .unwrap_or(crate::app::PROMPT_WIN)
+}
+
+/// Rows between the top of the screen and the top edge of the prompt
+/// chrome stack. Prompt-docked pickers use this to avoid requesting
+/// more rows than fit without overlapping the prompt block.
+pub(crate) fn available_rows_above_prompt_chrome(ui: &Ui) -> u16 {
+    let target = prompt_chrome_top_win(ui);
+    ui.split_rect(target).map(|r| r.top).unwrap_or(0)
+}
+
+/// Anchor that floats an overlay `height` rows above the prompt block.
 pub(crate) fn anchor_above_prompt_chrome(ui: &Ui, height: u16) -> Anchor {
-    let target = ui
-        .named_win("smelt.prompt_bar.top")
-        .unwrap_or(crate::app::PROMPT_WIN);
+    let target = prompt_chrome_top_win(ui);
     Anchor::Win {
         target: target.into(),
         attach: Align::NW,

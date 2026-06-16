@@ -25,33 +25,29 @@ local OPTIONAL_PRIORITY = 4
 
 -- ── helpers ─────────────────────────────────────────────────────────
 
-local function queued_message_rows(queued, width)
+local function queued_message_row(row, width)
   width = math.max(width or 0, 0)
-  local rows = {}
-  for _, row in ipairs(queued) do
-    local kind = row.kind or "turn"
-    local marker = kind == "request" and "»" or "›"
-    local prefix = "  " .. marker .. " "
-    local text, body_end = bar.truncate_right_padded(prefix .. (row.text or ""), width)
-    local prefix_end = math.min(#prefix, body_end)
-    rows[#rows + 1] = {
-      text = text,
-      highlights = {
-        {
-          bytes_start = 0,
-          bytes_end = prefix_end,
-          style = { fg = "Comment" },
-          selectable = false,
-        },
-        {
-          bytes_start = prefix_end,
-          bytes_end = body_end,
-          style = { fg = "Comment" },
-        },
+  local kind = row.kind or "turn"
+  local marker = kind == "request" and "»" or "›"
+  local prefix = "  " .. marker .. " "
+  local text, body_end = bar.truncate_right_padded(prefix .. (row.text or ""), width)
+  local prefix_end = math.min(#prefix, body_end)
+  return {
+    text = text,
+    highlights = {
+      {
+        bytes_start = 0,
+        bytes_end = prefix_end,
+        style = { fg = "Comment" },
+        selectable = false,
       },
-    }
-  end
-  return rows
+      {
+        bytes_start = prefix_end,
+        bytes_end = body_end,
+        style = { fg = "Comment" },
+      },
+    },
+  }
 end
 
 local function stash_row(width)
@@ -66,6 +62,22 @@ local function stash_row(width)
         bytes_start = math.min(#indent, body_end),
         bytes_end = body_end,
         style = { fg = "Comment" },
+      },
+    },
+  }
+end
+
+local function more_row(hidden, width)
+  width = math.max(width or 0, 0)
+  local text, body_end = bar.truncate_right_padded(
+    "  +" .. hidden .. " more queued", width)
+  return {
+    text = text,
+    highlights = {
+      {
+        bytes_start = 0,
+        bytes_end = body_end,
+        style = { fg = "Comment", dim = true },
       },
     },
   }
@@ -316,8 +328,27 @@ local function render_top(win)
   local width = win:content_width() or 80
   local rows = {}
   local queued = smelt.prompt.queued_rows()
-  for _, row in ipairs(queued_message_rows(queued, width)) do
-    rows[#rows + 1] = row
+
+  -- The layout composer already capped our window height; trim from the
+  -- oldest queued messages inward when the queue does not all fit.
+  local win_height = (win:rect() or {}).height
+  -- During the very first frame a renderer can run before the window has
+  -- a resolved rect; in that case use the natural row count as a fallback.
+  local natural_rows = M.top_rows()
+  local reserved = 1 -- indicator bar row
+  if smelt.prompt.has_stash() then reserved = reserved + 1 end
+  if should_show_tip(queued) then reserved = reserved + 1 end
+  local max_queued = math.max(0, (win_height or natural_rows) - reserved)
+  local hidden = math.max(0, #queued - max_queued)
+  local start_idx = 1
+  if hidden > 0 then
+    start_idx = #queued - max_queued + 1
+  end
+  for i = start_idx, #queued do
+    rows[#rows + 1] = queued_message_row(queued[i], width)
+  end
+  if hidden > 0 then
+    rows[#rows + 1] = more_row(hidden, width)
   end
   if smelt.prompt.has_stash() then
     rows[#rows + 1] = stash_row(width)
@@ -361,11 +392,17 @@ end
 
 -- Expose helper for the layout composer so it can compute the top bar's
 -- row count from current state (queued messages, stash row, bar row).
-function M.top_rows()
+-- `max_top_rows` is an optional cap; when omitted the natural row count is
+-- returned. The default layout composer passes a cap that preserves at
+-- least two transcript rows.
+function M.top_rows(max_top_rows)
   local queued = smelt.prompt.queued()
   local rows = 1 + #queued
   if smelt.prompt.has_stash() then rows = rows + 1 end
   if should_show_tip(queued) then rows = rows + 1 end
+  if type(max_top_rows) == "number" then
+    return math.min(rows, math.max(1, max_top_rows))
+  end
   return rows
 end
 

@@ -339,6 +339,18 @@ impl AppStoryCtx {
         self.app.pending_ask_id()
     }
 
+    /// Show a notification toast via `smelt.notify` and pump the render
+    /// so the toast overlay is created before the next snapshot.
+    pub fn notify(&mut self, body: &str, source: Option<&str>) {
+        let source = source.unwrap_or("story");
+        let snippet = format!("smelt.notify({body:?}, {source:?})");
+        self.run_lua(&snippet);
+        for _ in 0..2 {
+            self.app
+                .feed_one(tui::app::test_harness::SourceEvent::LuaWakeup);
+        }
+    }
+
     /// Run a slash command as if the user typed it in the cmdline.
     /// Goes through the real `smelt.cmd.run` path → command handler →
     /// `smelt.spawn` → `smelt.dialog.open` (yielding coroutine). After

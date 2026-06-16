@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 396
 expression: frame.text()
 ---
  let's plan this out.
@@ -8,7 +9,7 @@ expression: frame.text()
  step 3: ship
 
 
-  tip ctrl+enter, steer the current response wi…
+  tip ctrl+enter / ctrl+q, steer the current re…
 ──────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────

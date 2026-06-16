@@ -118,6 +118,41 @@ fn stale_prompt_prediction_response_after_submit_is_ignored() {
 }
 
 #[test]
+fn queued_messages_collapse_to_keep_transcript_visible() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 10);
+    app.start_turn(1);
+
+    for i in 0..12 {
+        app.push_queued_message(format!("follow-up {i}"));
+    }
+    app.app.render_normal();
+
+    let transcript_rect = app
+        .app
+        .ui
+        .split_rect(crate::app::TRANSCRIPT_WIN)
+        .expect("transcript has a rect");
+    assert!(
+        transcript_rect.height >= 2,
+        "transcript should keep at least 2 rows, got {}",
+        transcript_rect.height
+    );
+
+    let top_win = app
+        .app
+        .ui
+        .named_win("smelt.prompt_bar.top")
+        .expect("top bar exists");
+    let top_rect = app.app.ui.split_rect(top_win).expect("top bar has a rect");
+    assert!(
+        top_rect.height <= 5,
+        "top bar should be capped on a short terminal, got {}",
+        top_rect.height
+    );
+}
+
+#[test]
 fn stale_prompt_prediction_response_after_custom_command_is_ignored() {
     let mut app = TestApp::builder().build();
     app.app

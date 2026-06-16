@@ -132,6 +132,107 @@ fn picker_filter_workflow_via_set_items() {
 }
 
 #[test]
+fn prompt_docked_picker_clamps_height_to_headroom() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 6);
+
+    let items: Vec<crate::picker::PickerItem> = (0..40)
+        .map(|i| crate::picker::PickerItem::new(format!("item {i}")))
+        .collect();
+    let _guard = crate::lua::install_app_ptr(&mut app.app);
+    let leaf = crate::picker::open(
+        &mut app.app,
+        items,
+        0,
+        crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
+        false,
+        false,
+        30,
+    )
+    .expect("picker leaf created");
+    drop(_guard);
+
+    app.app.render_normal();
+
+    let picker_rect = app
+        .app
+        .ui
+        .paint_rect(crate::smelt_edit::PaintId::from(leaf))
+        .expect("picker has a rect");
+    let prompt_rect = app
+        .app
+        .ui
+        .split_rect(crate::app::PROMPT_WIN)
+        .expect("prompt has a rect");
+
+    assert!(
+        picker_rect.top + picker_rect.height <= prompt_rect.top,
+        "picker at {picker_rect:?} overlaps prompt at {prompt_rect:?}"
+    );
+
+    // The picker should be clamped below its 8-row desired cap when the
+    // terminal is short; the exact height depends on chrome, so the real
+    // invariant is the non-overlap check above.
+    assert!(
+        picker_rect.height <= 8,
+        "picker height {} should not exceed the requested cap",
+        picker_rect.height
+    );
+}
+
+#[test]
+fn prompt_docked_picker_relayouts_on_resize() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+
+    let items: Vec<crate::picker::PickerItem> = (0..40)
+        .map(|i| crate::picker::PickerItem::new(format!("item {i}")))
+        .collect();
+    let _guard = crate::lua::install_app_ptr(&mut app.app);
+    let leaf = crate::picker::open(
+        &mut app.app,
+        items,
+        0,
+        crate::picker::PickerPlacement::PromptDocked { max_rows: 8 },
+        false,
+        false,
+        30,
+    )
+    .expect("picker leaf created");
+    drop(_guard);
+
+    app.app.render_normal();
+    let tall_rect = app
+        .app
+        .ui
+        .paint_rect(crate::smelt_edit::PaintId::from(leaf))
+        .expect("picker has a rect");
+    assert_eq!(tall_rect.height, 8);
+
+    app.set_terminal_size(80, 6);
+    app.app.render_normal();
+    let short_rect = app
+        .app
+        .ui
+        .paint_rect(crate::smelt_edit::PaintId::from(leaf))
+        .expect("picker has a rect");
+
+    assert!(
+        short_rect.height < tall_rect.height,
+        "picker should shrink after resize: tall={tall_rect:?}, short={short_rect:?}"
+    );
+    let prompt_rect = app
+        .app
+        .ui
+        .split_rect(crate::app::PROMPT_WIN)
+        .expect("prompt has a rect");
+    assert!(
+        short_rect.top + short_rect.height <= prompt_rect.top,
+        "shrunk picker at {short_rect:?} overlaps prompt at {prompt_rect:?}"
+    );
+}
+
+#[test]
 fn prompt_picker_custom_rank_uses_returned_indices() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(

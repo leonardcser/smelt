@@ -40,6 +40,9 @@ impl TuiApp {
             .unwrap_or_else(|| layout::seed_layout_tree(input_rows));
         self.ui.set_layout(tree);
         self.layout = layout::LayoutState::from_ui(&self.ui);
+        // Prompt-docked pickers size themselves to the headroom above the
+        // prompt chrome; recompute them whenever the main layout changes.
+        crate::picker::sync_layouts(self);
         (self.layout.prompt, self.layout.viewport_rows())
     }
 

@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 396
 expression: frame.text()
 ---
 
@@ -9,7 +10,7 @@ expression: frame.text()
   main.rs
   parser.rs
 
-  tip ctrl+enter, steer the current response wi…
+  tip ctrl+enter / ctrl+q, steer the current re…
 ──────────────────────────────────────────────────
 
 ──────────────────────────────────────────────────

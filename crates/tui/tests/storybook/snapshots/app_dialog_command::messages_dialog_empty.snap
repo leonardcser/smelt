@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 396
 expression: frame.text()
 ---
 
@@ -9,7 +10,7 @@ expression: frame.text()
 
 
 
-  tip ctrl+enter, steer the current response without waiting for it…
+  tip ctrl+enter / ctrl+q, steer the current response without waiti…
 ─ messages (0) ───────────────────────────────────────────────────────
    (no messages)
 

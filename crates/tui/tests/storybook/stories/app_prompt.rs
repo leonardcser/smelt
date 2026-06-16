@@ -31,6 +31,22 @@ app_story!(prompt_slash_command_completion, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_slash_completion_shrinks_for_short_terminal, |ctx| {
+    // When the terminal is very short the prompt-docked picker must
+    // shrink so it never overlaps the prompt input.
+    ctx.set_viewport(50, 8);
+    ctx.type_prompt("/");
+    ctx.assert_snapshot();
+});
+
+app_story!(prompt_slash_completion_two_rows_when_cramped, |ctx| {
+    // Extreme height: the picker collapses to just a couple of rows
+    // rather than painting over the prompt chrome.
+    ctx.set_viewport(50, 6);
+    ctx.type_prompt("/");
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_shell_escape_prefix, |ctx| {
     // `!cmd` switches the prompt into shell-escape rendering: accent
     // `!` prefix, panel chrome shared with the exec block.
@@ -60,6 +76,74 @@ app_story!(prompt_queued_messages, |ctx| {
     ctx.promote_next_queued_message();
     ctx.assert_snapshot();
 });
+
+app_story!(
+    prompt_queued_messages_collapse_when_tall_queue_short_terminal,
+    |ctx| {
+        // A large queue on a short terminal must collapse oldest messages
+        // into a "+N more" row so the transcript keeps at least two rows.
+        ctx.set_viewport(50, 10);
+        for i in 1..=12 {
+            ctx.push_queued_message(&format!("follow-up {}", i));
+        }
+        ctx.assert_snapshot();
+    }
+);
+
+app_story!(
+    prompt_queued_messages_with_stash_collapse_on_short_terminal,
+    |ctx| {
+        // Stash plus a tall queue on a short terminal: the stash row must
+        // stay visible and the queue still collapses to "+N more".
+        ctx.set_viewport(50, 10);
+        ctx.type_prompt("draft note");
+        ctx.stash_prompt();
+        for i in 1..=10 {
+            ctx.push_queued_message(&format!("follow-up {}", i));
+        }
+        ctx.assert_snapshot();
+    }
+);
+
+app_story!(
+    prompt_slash_completion_with_stash_shrinks_for_short_terminal,
+    |ctx| {
+        // A prompt-docked picker must still avoid overlapping the prompt
+        // when the top bar has grown by an extra stash row.
+        ctx.set_viewport(50, 8);
+        ctx.type_prompt("draft note");
+        ctx.stash_prompt();
+        ctx.type_prompt("/");
+        ctx.assert_snapshot();
+    }
+);
+
+app_story!(
+    prompt_queued_messages_with_notification_collapse_on_short_terminal,
+    |ctx| {
+        // A notification hides the tip and reserves its own row above the
+        // prompt; the queue still collapses and the stash/indicator rows
+        // stay visible on a short terminal.
+        ctx.set_viewport(50, 10);
+        ctx.notify("this is a notification", None);
+        for i in 1..=10 {
+            ctx.push_queued_message(&format!("follow-up {}", i));
+        }
+        ctx.assert_snapshot();
+    }
+);
+
+app_story!(
+    prompt_slash_completion_with_notification_shrinks_for_short_terminal,
+    |ctx| {
+        // A prompt-docked picker must still avoid overlapping the prompt
+        // when a notification is taking a row above the top bar.
+        ctx.set_viewport(50, 8);
+        ctx.notify("this is a notification", None);
+        ctx.type_prompt("/");
+        ctx.assert_snapshot();
+    }
+);
 
 app_story!(prompt_turn_queue_row_truncates, |ctx| {
     // Long next-turn queue entries stay on one prompt-above row, truncate with

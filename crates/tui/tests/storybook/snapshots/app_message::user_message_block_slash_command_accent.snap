@@ -1,11 +1,12 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 396
 expression: frame.text()
 ---
  /permissions
 
 
-  tip ctrl+enter, steer the current r…
+  tip ctrl+enter / ctrl+q, steer the …
 ────────────────────────────────────────
 
 ────────────────────────────────────────
