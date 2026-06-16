@@ -11,6 +11,17 @@ fn generic_win_cursor_setter_cannot_repark_prompt_cursor() {
 }
 
 #[test]
+fn generic_win_reveal_cannot_repark_prompt_cursor() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    assert!(app.run_lua(r#"smelt.prompt.set_text("hel\nlo")"#));
+    let before = app.app.prompt_win().cpos();
+
+    assert!(app.run_lua("smelt.prompt.win():reveal(0)"));
+
+    assert_eq!(app.app.prompt_win().cpos(), before);
+}
+
+#[test]
 fn prompt_bottom_chrome_click_focuses_prompt() {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 

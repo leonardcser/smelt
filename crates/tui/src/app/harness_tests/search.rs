@@ -83,6 +83,17 @@ fn transcript_search_jump_keeps_match_below_top_overlay() {
 }
 
 #[test]
+fn transcript_reveal_api_keeps_cursor_below_top_padding() {
+    let mut app = row_document_transcript_app(100, true);
+    app.type_char('G');
+
+    assert!(app.run_lua("smelt.win.transcript():reveal(10, { top_padding = 1 })"));
+
+    assert_eq!(transcript_row_cursor_row(&app), 10);
+    assert_eq!(app.app.transcript_win().scroll_top(), 9);
+}
+
+#[test]
 fn transcript_search_paints_visible_matches_and_esc_clears() {
     let mut app = row_document_transcript_app(20, true);
     app.type_char('g');

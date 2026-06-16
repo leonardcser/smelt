@@ -443,7 +443,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `present_plan` tool. |
 | `smelt.plugins.predict` | Input prediction plugin. |
-| `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
+| `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click reveals it with one row of gap so repeated clicks walk back. |
 | `smelt.plugins.title` | Session title plugin. |
 | `smelt.plugins.upgrade` | Autoupgrade plugin. |
 | `smelt.plugins.version` | /version - surface the running smelt build identity as a notification. |

@@ -14,6 +14,7 @@ pub(crate) mod mouse;
 pub(crate) mod pane_focus;
 pub(crate) mod queue;
 pub(crate) mod render_loop;
+pub(crate) mod reveal;
 pub(crate) mod search;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;

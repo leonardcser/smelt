@@ -1,7 +1,7 @@
 -- Scroll-pill overlays for transcript navigation:
 --   * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail.
 --   * Top pill    - first line of the nearest user message above the viewport;
---     click scrolls to it with one row of gap so repeated clicks walk back.
+--     click reveals it with one row of gap so repeated clicks walk back.
 -- Disable via `smelt.builtins.disable({ plugins = { "scroll_pills" } })`.
 
 local ns_bottom = smelt.ns("smelt.scroll_pills.bottom")
@@ -9,6 +9,7 @@ local ns_top = smelt.ns("smelt.scroll_pills.top")
 
 local PILL_BG = "SmeltScrollPillBg"
 local PILL_FG = "Comment"
+local TOP_PILL_ROW = 0
 
 local state = {
   transcript_win = nil,
@@ -133,8 +134,7 @@ local function open_top(width)
       local blocks = smelt.transcript.blocks()
       for _, b in ipairs(blocks) do
         if b.idx == state.top_target_idx then
-          -- One row of gap above the target so the previous user turn peeks in.
-          state.transcript_win:scroll(math.max(0, b.first_row - 1))
+          state.transcript_win:reveal(b.first_row, { top_padding = 1, cursor = true })
           return
         end
       end
@@ -147,7 +147,7 @@ local function open_top(width)
     name = "smelt.scroll_pills.top",
     anchor = "screen_at",
     corner = "nw",
-    row = 0,
+    row = TOP_PILL_ROW,
     col = 0,
     z = 5,
     modal = false,
@@ -171,6 +171,14 @@ local function paint_top_row(width, label)
   })
 end
 
+local function cursor_under_top_pill(scroll)
+  if smelt.focus() ~= "transcript" or not state.transcript_win then return false end
+  local row = state.transcript_win:cursor()
+  local rect = state.transcript_win:rect()
+  if row == nil or scroll == nil or rect == nil then return false end
+  return rect.row + row - scroll.top == TOP_PILL_ROW
+end
+
 local function refresh_top(scroll)
   local rect = state.transcript_win:rect()
   -- Leave the transcript's scrollbar column uncovered.
@@ -178,7 +186,7 @@ local function refresh_top(scroll)
   if width <= 0 then close_top(); return end
 
   local target = user_block_for_top_pill(scroll)
-  if not target then close_top(); return end
+  if not target or cursor_under_top_pill(scroll) then close_top(); return end
 
   if state.top_overlay and state.top_width ~= width then close_top() end
   if not state.top_overlay then open_top(width) end
