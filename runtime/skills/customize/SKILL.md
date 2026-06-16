@@ -473,6 +473,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `show_tokens` | `bool` | `true` | Context token count in status bar. |
 | `show_cost` | `bool` | `true` | Session cost in status bar. |
 | `show_prediction` | `bool` | `true` | Ghost-text input predictions in the prompt. |
+| `show_tips` | `bool` | `true` | Curated discovery tips in the start banner and prompt chrome. |
 | `show_slug` | `bool` | `true` | Task-slug label in status bar. |
 | `show_thinking` | `bool` | `true` | Show full thinking/reasoning blocks (false shows a single summary). |
 | `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |

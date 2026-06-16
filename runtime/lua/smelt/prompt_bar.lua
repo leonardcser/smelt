@@ -11,6 +11,7 @@
 -- composer.
 
 local bar = require("smelt._bar")
+local tips = require("smelt.tips")
 
 local M = {}
 
@@ -68,6 +69,55 @@ local function stash_row(width)
       },
     },
   }
+end
+
+local function should_show_tip(queued)
+  if not tips.enabled() then return false end
+  if #queued > 0 or smelt.prompt.has_stash() then return false end
+  if (smelt.prompt.text() or "") ~= "" then return false end
+  local work_state = smelt.cell("work_state"):get()
+  return not work_state or work_state == "idle"
+end
+
+local function tip_row(width)
+  width = math.max(width or 0, 0)
+  local tip = tips.prompt_tip()
+  if not tip then return nil end
+  local prefix = "  tip "
+  local key = tip.key or ""
+  local separator = key ~= "" and ", " or ""
+  local body = key .. separator .. (tip.text or "")
+  local text, body_end = bar.truncate_right_padded(prefix .. body, width)
+  local prefix_end = math.min(#prefix, body_end)
+  local key_end = math.min(prefix_end + #key, body_end)
+  local desc_start = math.min(key_end + #separator, body_end)
+  local highlights = {
+    {
+      bytes_start = 0,
+      bytes_end = prefix_end,
+      style = { fg = "SmeltAccent", bold = true },
+      selectable = false,
+    },
+  }
+  if key ~= "" then
+    highlights[#highlights + 1] = {
+      bytes_start = prefix_end,
+      bytes_end = key_end,
+      style = { fg = "Comment" },
+    }
+    highlights[#highlights + 1] = {
+      bytes_start = key_end,
+      bytes_end = desc_start,
+      style = { fg = "Comment", dim = true },
+      selectable = false,
+    }
+  end
+  highlights[#highlights + 1] = {
+    bytes_start = desc_start,
+    bytes_end = body_end,
+    style = { fg = "Comment" },
+  }
+  return { text = text, highlights = highlights }
 end
 
 -- ── working indicator (top bar left spans) ───────────────────────────
@@ -271,6 +321,10 @@ local function render_top(win)
   if smelt.prompt.has_stash() then
     rows[#rows + 1] = stash_row(width)
   end
+  if should_show_tip(queued) then
+    local row = tip_row(width)
+    if row then rows[#rows + 1] = row end
+  end
   rows[#rows + 1] = bar.compose(width, indicator_spans(), right_spans())
   bar.write_rows(buf, rows, TOP_NS)
 end
@@ -308,7 +362,10 @@ end
 -- row count from current state (queued messages, stash row, bar row).
 function M.top_rows()
   local queued = smelt.prompt.queued()
-  return 1 + #queued + (smelt.prompt.has_stash() and 1 or 0)
+  local rows = 1 + #queued
+  if smelt.prompt.has_stash() then rows = rows + 1 end
+  if should_show_tip(queued) then rows = rows + 1 end
+  return rows
 end
 
 return M

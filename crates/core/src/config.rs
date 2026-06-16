@@ -200,6 +200,8 @@ settings! {
     show_cost:             Bool   = true;
     /// Ghost-text input predictions in the prompt.
     show_prediction:       Bool   = true;
+    /// Curated discovery tips in the start banner and prompt chrome.
+    show_tips:             Bool   = true;
     /// Task-slug label in status bar.
     show_slug:             Bool   = true;
     /// Show full thinking/reasoning blocks (false shows a single summary).

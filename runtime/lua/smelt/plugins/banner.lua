@@ -306,6 +306,7 @@ local function ensure_label_window(lines, width)
 	local win = smelt.win.new(buf, {
 		name = "smelt.banner.label.win",
 		surface = "selectable_text",
+		scrollbar = false,
 	})
 	state.version_buf = buf
 	state.version_win = win
@@ -329,7 +330,7 @@ local function open_splash()
 	for _, entry in ipairs(label_lines) do
 		if #entry.text > max_label_w then max_label_w = #entry.text end
 	end
-	local w = math.max(logo_w, max_label_w)
+	local w = math.max(logo_w, max_label_w) + 2
 	-- Reserve FIRE_HEADROOM cells above the wordmark inside the paint
 	-- leaf so the fire animation grows upward without painting outside the
 	-- overlay rect (which would bleed under higher-z modals like /help).
