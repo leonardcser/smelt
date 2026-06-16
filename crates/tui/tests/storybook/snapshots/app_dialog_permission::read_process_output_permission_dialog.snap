@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+ read_process_output: 4242
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow read_process_output for this session
+  4. allow read_process_output in ~/cwd
+
+  press tab to add a reason…
+ ○ normal                                                       1:1 0%

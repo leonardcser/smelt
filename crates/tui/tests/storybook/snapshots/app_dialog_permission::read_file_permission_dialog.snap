@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+ read_file: crates/tui/src/app.rs
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow read_file for this session
+  4. allow read_file in ~/cwd
+
+  press tab to add a reason…
+ ○ normal                                                       1:1 0%

@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+ grep: confirm_dialog in crates/tui/src
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow grep for this session
+  4. allow grep in ~/cwd
+
+  press tab to add a reason…
+ ○ normal                                                       1:1 0%

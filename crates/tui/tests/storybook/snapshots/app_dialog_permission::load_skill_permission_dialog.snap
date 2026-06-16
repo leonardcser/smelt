@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+ load_skill: customize
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow load_skill for this session
+  4. allow load_skill in ~/cwd
+
+  press tab to add a reason…
+ ○ normal                                                       1:1 0%

@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+ smelt_reload: schedule end-of-turn reload
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow smelt_reload for this session
+  4. allow smelt_reload in ~/cwd
+
+  press tab to add a reason…
+ ○ normal                                                       1:1 0%

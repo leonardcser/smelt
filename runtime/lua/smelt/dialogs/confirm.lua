@@ -161,6 +161,7 @@ function smelt.confirm.open(handle_id)
   local handle = smelt.dialog.open_handle({
     blocks_agent = true,
     max_height   = "fill",
+    min_height   = 0,
     panels = {
       { leaf = header_leaf,  height = "fit"                              },
       { leaf = preview_leaf, height = "fit", collapse_when_empty = true,

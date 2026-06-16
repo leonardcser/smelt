@@ -1,0 +1,22 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────
+ stop_process: 4242
+
+ Allow?
+  1. allow once
+  2. deny
+  3. allow stop_process for this session
+  4. allow stop_process in ~/cwd
+
+  press tab to add a reason…
+ ○ normal                                                       1:1 0%

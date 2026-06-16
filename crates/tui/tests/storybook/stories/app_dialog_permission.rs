@@ -6,6 +6,8 @@
 //! layout (diff, file_view, notebook preview, …) through the live
 //! tool-body IR preview pipeline.
 
+use std::collections::HashMap;
+
 use serde_json::json;
 
 use crate::app_story;
@@ -13,6 +15,19 @@ use crate::storybook::args;
 
 app_story!(bash_permission_dialog, |ctx| {
     ctx.set_viewport(80, 22);
+    ctx.request_permission(
+        "bash",
+        args([
+            ("command", json!("ls -la /tmp/foo")),
+            ("description", json!("List files in /tmp/foo")),
+        ]),
+        vec!["ls *".into()],
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(bash_permission_dialog_tall_terminal, |ctx| {
+    ctx.set_viewport(80, 36);
     ctx.request_permission(
         "bash",
         args([
@@ -182,8 +197,109 @@ app_story!(web_fetch_permission_dialog_no_preview, |ctx| {
     // preview panel and shows summary + options.
     ctx.request_permission(
         "web_fetch",
-        args([("url", json!("https://example.com/page"))]),
+        args([
+            ("url", json!("https://example.com/page")),
+            ("prompt", json!("Extract the main heading.")),
+        ]),
         vec!["https://example.com/*".into()],
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(web_search_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission(
+        "web_search",
+        args([("query", json!("rust terminal tui snapshots"))]),
+        vec!["rust terminal *".into()],
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(grep_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission(
+        "grep",
+        args([
+            ("pattern", json!("confirm_dialog")),
+            ("path", json!("crates/tui/src")),
+            ("output_mode", json!("content")),
+        ]),
+        vec!["confirm_*".into()],
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(glob_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission(
+        "glob",
+        args([
+            ("pattern", json!("**/*.rs")),
+            ("path", json!("crates/tui/tests")),
+        ]),
+        vec!["**/*.rs".into()],
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(read_file_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission(
+        "read_file",
+        args([
+            ("file_path", json!("crates/tui/src/app.rs")),
+            ("offset", json!(120)),
+            ("limit", json!(40)),
+        ]),
+        vec![],
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(read_process_output_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission("read_process_output", args([("id", json!("4242"))]), vec![]);
+    ctx.assert_snapshot();
+});
+
+app_story!(stop_process_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission("stop_process", args([("id", json!("4242"))]), vec![]);
+    ctx.assert_snapshot();
+});
+
+app_story!(load_skill_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission("load_skill", args([("name", json!("customize"))]), vec![]);
+    ctx.assert_snapshot();
+});
+
+app_story!(smelt_reload_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission("smelt_reload", HashMap::new(), vec![]);
+    ctx.assert_snapshot();
+});
+
+app_story!(ask_user_question_permission_dialog, |ctx| {
+    ctx.set_viewport(70, 24);
+    ctx.request_permission(
+        "ask_user_question",
+        args([(
+            "questions",
+            json!([
+                {
+                    "header": "Approach",
+                    "question": "Which implementation should I use?",
+                    "multiSelect": false,
+                    "options": [
+                        { "label": "Minimal", "description": "Small targeted change." },
+                        { "label": "Rewrite", "description": "Replace the component." }
+                    ]
+                }
+            ]),
+        )]),
+        vec![],
     );
     ctx.assert_snapshot();
 });
