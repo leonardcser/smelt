@@ -104,8 +104,8 @@
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
 ---@field panels smelt.dialog.Panel[] Ordered list of body panels.
----@field bottom_panels? smelt.dialog.Panel[] Panels pinned to the bottom with at least one blank row between them and `panels`. Extra height is placed in that gap.
----@field bottom_gap? integer Minimum blank rows between `panels` and `bottom_panels` (default 1).
+---@field bottom_panels? smelt.dialog.Panel[] Panels pinned to the bottom when the dialog has surplus height; extra height is placed between them and `panels`.
+---@field bottom_gap? integer Minimum blank rows between `panels` and `bottom_panels` (default 0).
 ---@field focus? smelt.win.Win Leaf that should receive initial focus.
 ---@field height? any Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`.
 ---@field max_height? any Shrink-to-content cap that pairs with `min_height`.

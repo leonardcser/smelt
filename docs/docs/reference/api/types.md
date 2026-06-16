@@ -151,8 +151,8 @@ and `"fit"` pass through verbatim. Pick one of `height` or
 | --- | --- | --- | --- |
 | `title` | `string` |  | Title rendered in the chrome row. |
 | `panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) | yes | Ordered list of body panels. |
-| `bottom_panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) |  | Panels pinned to the bottom with at least one blank row between them and `panels`. Extra height is placed in that gap. |
-| `bottom_gap` | `integer` |  | Minimum blank rows between `panels` and `bottom_panels` (default 1). |
+| `bottom_panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) |  | Panels pinned to the bottom when the dialog has surplus height; extra height is placed between them and `panels`. |
+| `bottom_gap` | `integer` |  | Minimum blank rows between `panels` and `bottom_panels` (default 0). |
 | `focus` | [smelt.win.Win](types.md#smeltwinwin) |  | Leaf that should receive initial focus. |
 | `height` | `any` |  | Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`. |
 | `max_height` | `any` |  | Shrink-to-content cap that pairs with `min_height`. |

@@ -14,9 +14,9 @@ expression: frame.text()
 
 
 
+
 ─ Auth method ──────────────────────────────────────────────────────────────────
  Which authentication method should I use?
-
   1. OAuth
      redirect to provider login
   2. API key
