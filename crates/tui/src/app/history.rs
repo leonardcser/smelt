@@ -586,6 +586,7 @@ impl TuiApp {
         let display_cache = crate::content::display_cache::read_for_session(&self.core.session);
         let persisted_fingerprints = persist_fingerprints(&self.core.session, &display_cache);
         self.transcript.replace_transcript_with_display_cache(
+            &self.lua,
             build_transcript_from_session(&self.lua, &self.core.session),
             display_cache,
         );
@@ -626,7 +627,7 @@ impl TuiApp {
             return;
         }
         let session = self.session_snapshot_for_persist();
-        let display_cache = self.transcript.display_cache_data();
+        let display_cache = self.transcript.display_cache_data(&self.lua);
         let fingerprints = persist_fingerprints(&session, &display_cache);
         if fingerprints.is_some()
             && self.persisted_fingerprints.as_ref() == fingerprints.as_ref()

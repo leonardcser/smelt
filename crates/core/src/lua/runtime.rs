@@ -1924,27 +1924,11 @@ impl LuaRuntime {
 }
 
 fn transcript_block_kind(block: &Block) -> &'static str {
-    match block {
-        Block::User { .. } => "user",
-        Block::Mode { .. } => "mode",
-        Block::ProcessStatus { .. } => "process_status",
-        Block::Thinking { .. } => "thinking",
-        Block::Text { .. } => "assistant",
-        Block::CodeLine { .. } => "code",
-        Block::ToolCall { .. } => "tool",
-        Block::Exec { .. } => "exec",
-        Block::Compacted { .. } => "compacted",
-    }
+    block.kind()
 }
 
 fn tool_status_label(status: ToolStatus) -> &'static str {
-    match status {
-        ToolStatus::Pending => "pending",
-        ToolStatus::Confirm => "confirm",
-        ToolStatus::Ok => "ok",
-        ToolStatus::Err => "err",
-        ToolStatus::Denied => "denied",
-    }
+    status.label()
 }
 
 fn transcript_render_ctx_to_lua_table(
@@ -2373,12 +2357,7 @@ fn fallback_transcript_layout(
 }
 
 fn tool_status_hl(status: ToolStatus) -> &'static str {
-    match status {
-        ToolStatus::Pending => "SmeltToolPending",
-        ToolStatus::Ok => "SmeltSuccess",
-        ToolStatus::Err | ToolStatus::Denied => "ErrorMsg",
-        ToolStatus::Confirm => "SmeltAccent",
-    }
+    status.hl_group()
 }
 
 fn tool_elapsed_text(status: ToolStatus, secs: u64) -> Option<String> {

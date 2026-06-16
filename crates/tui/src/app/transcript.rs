@@ -32,21 +32,23 @@ impl TranscriptView {
     }
 
     pub(crate) fn from_transcript_with_display_cache(
+        lua: &LuaRuntime,
         transcript: Transcript,
         display_cache: crate::content::display_cache::DisplayCacheData,
     ) -> Self {
         let mut view = Self::from_transcript(transcript);
         view.projection
-            .hydrate_display_cache(&view.transcript.history, display_cache);
+            .hydrate_display_cache(lua, &view.transcript.history, display_cache);
         view
     }
 
     pub(crate) fn replace_transcript_with_display_cache(
         &mut self,
+        lua: &LuaRuntime,
         transcript: Transcript,
         display_cache: crate::content::display_cache::DisplayCacheData,
     ) {
-        *self = Self::from_transcript_with_display_cache(transcript, display_cache);
+        *self = Self::from_transcript_with_display_cache(lua, transcript, display_cache);
     }
 
     pub(crate) fn invalidate_theme(&mut self) {
@@ -185,8 +187,12 @@ impl TranscriptView {
         &mut self.transcript.history
     }
 
-    pub(crate) fn display_cache_data(&mut self) -> crate::content::display_cache::DisplayCacheData {
-        self.projection.display_cache_data(&self.transcript.history)
+    pub(crate) fn display_cache_data(
+        &mut self,
+        lua: &LuaRuntime,
+    ) -> crate::content::display_cache::DisplayCacheData {
+        self.projection
+            .display_cache_data(lua, &self.transcript.history)
     }
 
     pub(crate) fn display_cache_generation(&self) -> u64 {

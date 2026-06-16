@@ -567,10 +567,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         let display_cache = crate::content::display_cache::read_for_session(&session);
                         cached_view = Some(
                             crate::app::transcript::TranscriptView::from_transcript_with_display_cache(
-                                crate::app::history::build_transcript_from_session(
-                                    &app.lua,
-                                    &session,
-                                ),
+                                &app.lua,
+                                crate::app::history::build_transcript_from_session(&app.lua, &session),
                                 display_cache,
                             ),
                         );

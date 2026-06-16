@@ -784,18 +784,34 @@ impl TranscriptProjection {
         }
     }
 
-    fn refresh_render_plan(&mut self, history: &BlockHistory) {
-        if self.render_plan.history_generation != history.generation() {
-            self.render_plan = RenderPlan::for_history(history);
+    fn refresh_render_plan(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &BlockHistory,
+    ) {
+        let group_generation = lua.transcript_group_generation();
+        let group_cache_key = lua.transcript_group_cache_key();
+        if self.render_plan.history_generation != history.generation()
+            || self.render_plan.group_generation != group_generation
+            || self.render_plan.group_cache_key != group_cache_key
+        {
+            let groups = lua.transcript_group_specs();
+            self.render_plan = RenderPlan::for_history_with_groups(
+                history,
+                &groups,
+                group_generation,
+                group_cache_key,
+            );
         }
     }
 
     pub(crate) fn hydrate_display_cache(
         &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &BlockHistory,
         data: crate::content::display_cache::DisplayCacheData,
     ) -> usize {
-        self.refresh_render_plan(history);
+        self.refresh_render_plan(lua, history);
         let crate::content::display_cache::DisplayCacheData {
             row_indexes,
             display_layouts,
@@ -817,9 +833,13 @@ impl TranscriptProjection {
 
     pub(crate) fn display_cache_data(
         &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &BlockHistory,
     ) -> crate::content::display_cache::DisplayCacheData {
-        self.refresh_render_plan(history);
+        self.refresh_render_plan(lua, history);
+        if !self.persisted_display_cache_enabled() {
+            return crate::content::display_cache::DisplayCacheData::default();
+        }
         crate::content::display_cache::DisplayCacheData {
             row_indexes: self.row_index_cache_entries(history),
             display_layouts: self.display_layouts.cache_entries(
@@ -833,6 +853,10 @@ impl TranscriptProjection {
 
     pub(crate) fn display_cache_generation(&self) -> u64 {
         self.display_cache_generation
+    }
+
+    fn persisted_display_cache_enabled(&self) -> bool {
+        self.render_plan.group_generation == 0 || self.render_plan.group_cache_key.is_some()
     }
 
     pub(crate) fn invalidate_renderer_if_changed(
@@ -859,7 +883,9 @@ impl TranscriptProjection {
     }
 
     fn row_index_cache_entries(&mut self, history: &BlockHistory) -> Vec<DisplayRowIndexEntry> {
-        self.refresh_render_plan(history);
+        if !self.persisted_display_cache_enabled() {
+            return Vec::new();
+        }
         self.measurements.export_entries(
             history,
             &self.render_plan,
@@ -916,15 +942,23 @@ impl TranscriptProjection {
         indices: impl IntoIterator<Item = usize>,
     ) {
         let jobs = {
-            let nodes = &self.measurements.active.nodes;
-            let blocks = indices
+            let row_nodes = &self.measurements.active.nodes;
+            let nodes = indices
                 .into_iter()
-                .filter_map(|index| nodes.get(index).map(|node| (index, node.id, node.key)));
+                .filter_map(|index| {
+                    row_nodes.get(index).and_then(|row| {
+                        self.render_plan
+                            .node(index)
+                            .cloned()
+                            .map(|node| (index, node, row.key))
+                    })
+                })
+                .collect::<Vec<_>>();
             self.display_layouts.collect_compile_jobs(
                 history,
                 env.renderer_generation,
                 env.renderer_cache_key,
-                blocks,
+                nodes,
             )
         };
         self.finish_compile_jobs(env, jobs);
@@ -945,8 +979,13 @@ impl TranscriptProjection {
         self.visible.full_rows = None;
     }
 
-    fn gc_if_stale(&mut self, history: &BlockHistory, width: u16) {
-        self.refresh_render_plan(history);
+    fn gc_if_stale(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &BlockHistory,
+        width: u16,
+    ) {
+        self.refresh_render_plan(lua, history);
         let fingerprint = self.render_plan.fingerprint;
         if self.display_layouts_generation != fingerprint {
             self.display_layouts.retain_nodes(self.render_plan.ids());
@@ -1051,7 +1090,7 @@ impl TranscriptProjection {
         let renderer_generation = env.renderer_generation;
         let renderer_cache_key = env.renderer_cache_key;
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
-        self.gc_if_stale(history, width);
+        self.gc_if_stale(env.lua, history, width);
         let plan = self.render_plan.clone();
         let row_key = RowIndexKey::new(
             width,
@@ -1145,7 +1184,9 @@ impl TranscriptProjection {
                 view_state: key.view_state,
             },
         ) as RowIndex;
-        let gap = history.rendered_block_gap(index, rows as usize) as RowIndex;
+        let gap = self
+            .render_plan
+            .rendered_node_gap(history, index, rows as usize) as RowIndex;
         self.set_exact_height(index, gap.saturating_add(rows));
         true
     }
@@ -1172,13 +1213,16 @@ impl TranscriptProjection {
             let Some(exact_height) = node.exact_height else {
                 continue;
             };
-            let gap = if exact_height == 0 {
-                0
-            } else {
-                (history.block_gap(i) as RowIndex).min(exact_height)
-            };
+            let gap = (self
+                .render_plan
+                .rendered_node_gap(history, i, exact_height as usize)
+                as RowIndex)
+                .min(exact_height);
             running_total = running_total.saturating_add(gap);
-            let RenderNodeId::Block(block_id) = node.id;
+            let Some(block_id) = node.id.as_block_id() else {
+                running_total = running_total.saturating_add(exact_height.saturating_sub(gap));
+                continue;
+            };
             layout.push(LayoutEntry {
                 id: block_id,
                 start: running_total,
@@ -1244,7 +1288,7 @@ impl TranscriptProjection {
         let env = TranscriptRenderEnv::new(lua, show_thinking);
         self.rebuild_row_index_with_env(env, history, width);
         let key = ProjectKey {
-            generation: history.generation(),
+            generation: self.render_plan.fingerprint,
             width,
             show_thinking,
             renderer_generation: env.renderer_generation,
@@ -1271,7 +1315,11 @@ impl TranscriptProjection {
         let index = self.measurements.active.block_index(anchor.id)?;
         let node = self.measurements.active.nodes.get(index)?;
         let exact_height = node.exact_height?;
-        let gap = (history.block_gap(index) as RowIndex).min(exact_height);
+        let gap = (self
+            .render_plan
+            .rendered_node_gap(history, index, exact_height as usize)
+            as RowIndex)
+            .min(exact_height);
         let block_rows = exact_height.saturating_sub(gap);
         let offset = anchor
             .display_offset
@@ -1379,13 +1427,16 @@ impl TranscriptProjection {
         let _perf = smelt_perf::perf::begin("transcript:project_planned");
         let mut plan = plan;
         let current_env = TranscriptRenderEnv::new(lua, plan.key.show_thinking);
-        if history.generation() != plan.key.generation
+        if self.render_plan.history_generation != history.generation()
+            || self.render_plan.group_generation != lua.transcript_group_generation()
+            || self.render_plan.group_cache_key != lua.transcript_group_cache_key()
+            || self.render_plan.fingerprint != plan.key.generation
             || current_env.renderer_generation != plan.key.renderer_generation
             || current_env.renderer_cache_key != plan.key.renderer_cache_key
         {
             self.rebuild_row_index_with_env(current_env, history, plan.key.width);
             let key = ProjectKey {
-                generation: history.generation(),
+                generation: self.render_plan.fingerprint,
                 width: plan.key.width,
                 show_thinking: plan.key.show_thinking,
                 renderer_generation: current_env.renderer_generation,
@@ -1566,22 +1617,9 @@ impl TranscriptProjection {
         key: NodeLayoutKey,
         rows: &mut ProjectRows<'_>,
     ) {
-        let RenderNodeId::Block(_) = id;
-        self.append_projected_block(history, theme, block_index, id, key, rows);
-    }
-
-    fn append_projected_block(
-        &mut self,
-        history: &BlockHistory,
-        theme: &Theme,
-        block_index: usize,
-        id: RenderNodeId,
-        key: NodeLayoutKey,
-        rows: &mut ProjectRows<'_>,
-    ) {
         let renderer_generation = self.measurements.active.renderer_generation;
         let renderer_cache_key = self.measurements.active.renderer_cache_key;
-        let Some((block_buf, block_rows)) = render_cached_layout_to_buffer(
+        let Some((node_buf, node_rows)) = render_cached_layout_to_buffer(
             &self.display_layouts,
             id,
             key,
@@ -1592,24 +1630,27 @@ impl TranscriptProjection {
         ) else {
             return;
         };
-        let gap = history.rendered_block_gap(block_index, block_rows);
-        let RenderNodeId::Block(block_id) = id;
+        let gap = self
+            .render_plan
+            .rendered_node_gap(history, block_index, node_rows);
         self.set_exact_height(
             block_index,
-            (gap as usize).saturating_add(block_rows) as RowIndex,
+            (gap as usize).saturating_add(node_rows) as RowIndex,
         );
         for _ in 0..gap {
             rows.texts.push(String::new());
             rows.row_anchors.push(None);
         }
-        let block_anchors = rendered_row_anchors(&block_buf, block_id, block_rows);
+
+        let block_id = id.as_block_id();
+        let block_anchors = block_id.map(|id| rendered_row_anchors(&node_buf, id, node_rows));
         let local_start = rows.texts.len() as RowIndex;
-        for (r, anchor) in block_anchors.iter().copied().enumerate() {
+        for r in 0..node_rows {
             let row_idx = rows.texts.len();
             rows.texts
-                .push(block_buf.get_line(r).unwrap_or("").to_string());
-            let h = block_buf.highlights_at(r);
-            let dec = block_buf.decoration_at(r).clone();
+                .push(node_buf.get_line(r).unwrap_or("").to_string());
+            let h = node_buf.highlights_at(r);
+            let dec = node_buf.decoration_at(r).clone();
             if !h.is_empty() || dec != LineDecoration::default() {
                 rows.pending.push(PendingRow {
                     row: row_idx,
@@ -1617,13 +1658,16 @@ impl TranscriptProjection {
                     decoration: dec,
                 });
             }
-            rows.row_anchors.push(Some(anchor));
+            rows.row_anchors
+                .push(block_anchors.as_ref().map(|anchors| anchors[r]));
         }
-        rows.layout.push(LayoutEntry {
-            id: block_id,
-            start: rows.row_base.saturating_add(local_start),
-            rows: block_rows as RowIndex,
-        });
+        if let Some(block_id) = block_id {
+            rows.layout.push(LayoutEntry {
+                id: block_id,
+                start: rows.row_base.saturating_add(local_start),
+                rows: node_rows as RowIndex,
+            });
+        }
     }
 
     /// Map an absolute row to its `(BlockId, row_offset_within_block)`. Gap
@@ -1713,12 +1757,12 @@ impl TranscriptProjection {
         theme: &Theme,
     ) -> Arc<Vec<String>> {
         let _perf = smelt_perf::perf::begin("transcript:build_rows");
-        let gen = history.generation();
         let env = TranscriptRenderEnv::new(lua, show_thinking);
         let renderer_generation = env.renderer_generation;
         let renderer_cache_key = env.renderer_cache_key;
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
-        self.gc_if_stale(history, width);
+        self.gc_if_stale(env.lua, history, width);
+        let gen = self.render_plan.fingerprint;
         if let Some(c) = &self.visible.full_rows {
             if c.generation == gen
                 && c.renderer_generation == renderer_generation
@@ -1772,7 +1816,7 @@ impl TranscriptProjection {
             ) else {
                 continue;
             };
-            let gap = history.rendered_block_gap(i, block_rows);
+            let gap = self.render_plan.rendered_node_gap(history, i, block_rows);
             self.set_exact_height(i, (gap as usize).saturating_add(block_rows) as RowIndex);
             for _ in 0..gap {
                 rows.push(String::new());
@@ -2011,6 +2055,45 @@ mod tests {
 
     fn test_lua() -> smelt_core::lua::runtime::LuaRuntime {
         smelt_core::lua::runtime::LuaRuntime::new()
+    }
+
+    fn register_terminal_tool_group(lua: &smelt_core::lua::runtime::LuaRuntime, min: usize) {
+        let chunk = r#"
+            local defaults = require("smelt.transcript.defaults")
+            smelt.transcript.groups.register({
+              name = "terminal-tools",
+              selector = { kind = "tool", terminal = true },
+              min = __MIN__,
+              default_view = "expanded",
+              cache_key = "test.terminal-tools:v1",
+              render = function(group, ctx)
+                return smelt.layout.vbox({
+                  smelt.layout.text("group:" .. group.name .. ":" .. tostring(group.child_count) .. ":" .. group.view_state),
+                  defaults.render_group_child_list(group, ctx, { field = "call_id" }),
+                })
+              end,
+            })
+        "#
+        .replace("__MIN__", &min.to_string());
+        lua.lua.load(chunk.as_str()).exec().expect("register group");
+    }
+
+    fn push_tool(
+        parser: &mut StreamParser,
+        history: &mut BlockHistory,
+        call_id: &str,
+        summary: &str,
+        status: ToolStatus,
+    ) {
+        parser.start_tool(
+            history,
+            call_id.into(),
+            "bash".into(),
+            protocol::StyledLines::from_plain(summary),
+            std::collections::HashMap::new(),
+            std::time::Instant::now(),
+        );
+        parser.set_active_status(history, call_id, status, std::time::Instant::now());
     }
 
     #[derive(Debug, PartialEq)]
@@ -2260,6 +2343,262 @@ mod tests {
     }
 
     #[test]
+    fn lua_registered_groups_replace_adjacent_terminal_tools() {
+        let lua = test_lua();
+        let mut transcript = Transcript::new();
+        let mut parser = StreamParser::new();
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-1",
+            "first",
+            ToolStatus::Ok,
+        );
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-2",
+            "second failed",
+            ToolStatus::Err,
+        );
+        transcript.push(Block::Text {
+            content: "after".into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let before_group = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        assert!(before_group.iter().any(|line| line.contains("bash")));
+        assert!(!before_group.iter().any(|line| line.starts_with("group:")));
+
+        register_terminal_tool_group(&lua, 2);
+        let grouped = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [crate::content::render_plan::RenderNode::Group { child_ids, .. }, crate::content::render_plan::RenderNode::Block { .. }] if child_ids.len() == 2
+        ));
+        assert!(grouped
+            .iter()
+            .any(|line| line == "group:terminal-tools:2:expanded"));
+        assert!(
+            grouped.iter().any(|line| line == "  call-1"),
+            "grouped rows: {grouped:?}"
+        );
+        assert!(grouped.iter().any(|line| line == "  call-2"));
+        assert!(grouped.iter().any(|line| line == "after"));
+        assert!(!grouped.iter().any(|line| line.contains("bash")));
+    }
+
+    #[test]
+    fn group_min_threshold_keeps_original_blocks() {
+        let lua = test_lua();
+        register_terminal_tool_group(&lua, 3);
+        let mut transcript = Transcript::new();
+        let mut parser = StreamParser::new();
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-1",
+            "first",
+            ToolStatus::Ok,
+        );
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-2",
+            "second",
+            ToolStatus::Ok,
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert_eq!(projection.render_plan.nodes.len(), 2);
+        assert!(projection
+            .render_plan
+            .nodes
+            .iter()
+            .all(|node| matches!(node, crate::content::render_plan::RenderNode::Block { .. })));
+        assert!(!rows.iter().any(|line| line.starts_with("group:")));
+        assert_eq!(rows.iter().filter(|line| line.contains("bash")).count(), 2);
+    }
+
+    #[test]
+    fn non_matching_block_breaks_registered_groups() {
+        let lua = test_lua();
+        register_terminal_tool_group(&lua, 2);
+        let mut transcript = Transcript::new();
+        let mut parser = StreamParser::new();
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-1",
+            "first",
+            ToolStatus::Ok,
+        );
+        transcript.push(Block::Text {
+            content: "between".into(),
+        });
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-2",
+            "second",
+            ToolStatus::Ok,
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert_eq!(projection.render_plan.nodes.len(), 3);
+        assert!(projection
+            .render_plan
+            .nodes
+            .iter()
+            .all(|node| matches!(node, crate::content::render_plan::RenderNode::Block { .. })));
+        assert!(!rows.iter().any(|line| line.starts_with("group:")));
+        assert!(rows.iter().any(|line| line == "between"));
+    }
+
+    #[test]
+    fn group_without_cache_key_skips_persisted_display_cache() {
+        let lua = test_lua();
+        lua.lua
+            .load(
+                r#"
+                smelt.transcript.groups.register({
+                  name = "uncached-tools",
+                  selector = { kind = "tool", terminal = true },
+                  min = 2,
+                  render = function(group, ctx)
+                    local _ = group
+                    local _ = ctx
+                    return smelt.layout.text("uncached group")
+                  end,
+                })
+                "#,
+            )
+            .exec()
+            .expect("register uncached group");
+        let mut transcript = Transcript::new();
+        let mut parser = StreamParser::new();
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-1",
+            "first",
+            ToolStatus::Ok,
+        );
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-2",
+            "second",
+            ToolStatus::Ok,
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+        let cache = projection.display_cache_data(&lua, &transcript.history);
+
+        assert!(rows.iter().any(|line| line == "uncached group"));
+        assert!(cache.row_indexes.is_empty());
+        assert!(cache.display_layouts.is_empty());
+    }
+
+    #[test]
+    fn grouped_node_gap_uses_semantic_child_boundary() {
+        let lua = test_lua();
+        lua.lua
+            .load(
+                r#"
+                smelt.transcript.groups.register({
+                  name = "assistant-pair",
+                  selector = { kind = "assistant" },
+                  min = 2,
+                  default_view = "expanded",
+                  cache_key = "test.assistant-pair:v1",
+                  render = function(group, ctx)
+                    local _ = group
+                    local _ = ctx
+                    return smelt.layout.text("assistant group")
+                  end,
+                })
+                "#,
+            )
+            .exec()
+            .expect("register assistant group");
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "first".into(),
+        });
+        transcript.push(Block::Text {
+            content: "## heading".into(),
+        });
+        transcript.push(Block::CodeLine {
+            content: "x".into(),
+            lang: "rust".into(),
+        });
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert_eq!(
+            rows.as_ref(),
+            &vec!["assistant group".to_string(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn terminal_group_keeps_failed_child_in_order() {
+        let lua = test_lua();
+        register_terminal_tool_group(&lua, 2);
+        let mut transcript = Transcript::new();
+        let mut parser = StreamParser::new();
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-1",
+            "ok child",
+            ToolStatus::Ok,
+        );
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-2",
+            "failed child",
+            ToolStatus::Err,
+        );
+        push_tool(
+            &mut parser,
+            &mut transcript.history,
+            "call-3",
+            "later ok",
+            ToolStatus::Ok,
+        );
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, false, &theme);
+
+        assert!(matches!(
+            projection.render_plan.nodes.as_slice(),
+            [crate::content::render_plan::RenderNode::Group { child_ids, .. }] if child_ids.len() == 3
+        ));
+        let child_rows: Vec<_> = rows
+            .iter()
+            .filter(|line| line.starts_with("  "))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(child_rows, vec!["  call-1", "  call-2", "  call-3"]);
+    }
+
+    #[test]
     fn build_rows_materializes_full_transcript() {
         let mut transcript = Transcript::new();
         for i in 0..100 {
@@ -2475,10 +2814,11 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
+        let lua = test_lua();
         let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80, false);
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
         assert_eq!(total, 199);
-        let cache = projection.display_cache_data(&transcript.history);
+        let cache = projection.display_cache_data(&lua, &transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
         assert_eq!(cache.display_layouts.len(), 100);
         assert!(cache
@@ -2491,7 +2831,7 @@ mod tests {
             .all(|entry| entry.key.renderer_cache_key.is_some()));
 
         let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&transcript.history, cache);
+        hydrated.hydrate_display_cache(&lua, &transcript.history, cache);
         hydrated.reset_counters();
 
         assert_eq!(
@@ -2516,12 +2856,12 @@ mod tests {
         }
         let mut projection = TranscriptProjection::new();
         let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
-        let mut cache = projection.display_cache_data(&transcript.history);
+        let mut cache = projection.display_cache_data(&lua, &transcript.history);
         assert_eq!(cache.display_layouts.len(), 100);
         cache.row_indexes.clear();
 
         let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&transcript.history, cache);
+        hydrated.hydrate_display_cache(&lua, &transcript.history, cache);
         assert_eq!(hydrated.display_layouts_len(), 100);
         hydrated.reset_counters();
 
@@ -2567,7 +2907,7 @@ mod tests {
         );
         assert_eq!(projection.display_layouts_len(), 1);
 
-        let cache = projection.display_cache_data(&transcript.history);
+        let cache = projection.display_cache_data(&lua, &transcript.history);
         assert!(cache.row_indexes.is_empty());
         assert!(cache.display_layouts.is_empty());
     }
@@ -2583,7 +2923,7 @@ mod tests {
         }
         let mut projection = TranscriptProjection::new();
         let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
-        let mut cache = projection.display_cache_data(&transcript.history);
+        let mut cache = projection.display_cache_data(&lua, &transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
         assert_eq!(cache.display_layouts.len(), 20);
         for entry in &mut cache.row_indexes {
@@ -2595,7 +2935,7 @@ mod tests {
         }
 
         let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&transcript.history, cache);
+        hydrated.hydrate_display_cache(&lua, &transcript.history, cache);
         hydrated.reset_counters();
 
         assert_eq!(
@@ -2624,7 +2964,7 @@ mod tests {
         }
         let mut projection = TranscriptProjection::new();
         let total = projection.exact_total_rows(&lua, &mut transcript.history, 80, false);
-        let mut cache = projection.display_cache_data(&transcript.history);
+        let mut cache = projection.display_cache_data(&lua, &transcript.history);
         assert_eq!(cache.row_indexes.len(), 1);
         assert_eq!(cache.display_layouts.len(), 20);
         for entry in &mut cache.row_indexes {
@@ -2635,7 +2975,7 @@ mod tests {
         }
 
         let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&transcript.history, cache);
+        hydrated.hydrate_display_cache(&lua, &transcript.history, cache);
         hydrated.reset_counters();
 
         assert_eq!(
@@ -4129,7 +4469,7 @@ mod tests {
             40,
         );
         let first_ms = elapsed_ms(first_start.elapsed());
-        let cache = projection.display_cache_data(&transcript.history);
+        let cache = projection.display_cache_data(&lua, &transcript.history);
         smelt_core::session::save_with_blobs(&session, &std::collections::HashMap::new());
         crate::content::display_cache::write_for_session(&session, &cache);
 
@@ -4144,7 +4484,7 @@ mod tests {
         let rebuild_ms = elapsed_ms(rebuild_start.elapsed());
         let mut resumed_projection = TranscriptProjection::new();
         let hydrated_rows =
-            resumed_projection.hydrate_display_cache(&resumed.history, loaded_cache);
+            resumed_projection.hydrate_display_cache(&lua, &resumed.history, loaded_cache);
         let mut resumed_buf = Buffer::new(crate::smelt_edit::BufId(92), Default::default());
         let render_start = std::time::Instant::now();
         let resumed_rows = project_with_lua(
@@ -4207,7 +4547,7 @@ mod tests {
         let first_ms = elapsed_ms(first_start.elapsed());
         let first_alloc = smelt_perf::alloc::delta(alloc_start, smelt_perf::alloc::snapshot());
         let first_counters = cold.counters();
-        let cache = cold.display_cache_data(&transcript.history);
+        let cache = cold.display_cache_data(&lua, &transcript.history);
 
         cold.reset_counters();
         let resize_start = std::time::Instant::now();
@@ -4282,7 +4622,7 @@ mod tests {
 
         let mut hydrated_full = TranscriptProjection::new();
         let hydrated_full_loaded_rows =
-            hydrated_full.hydrate_display_cache(&transcript.history, cache.clone());
+            hydrated_full.hydrate_display_cache(&lua, &transcript.history, cache.clone());
         hydrated_full.reset_counters();
         let mut hydrated_full_buf = Buffer::new(crate::smelt_edit::BufId(78), Default::default());
         let hydrated_full_start = std::time::Instant::now();
@@ -4304,7 +4644,7 @@ mod tests {
         ir_only_cache.row_indexes.clear();
         let mut hydrated_ir = TranscriptProjection::new();
         let hydrated_ir_loaded_rows =
-            hydrated_ir.hydrate_display_cache(&transcript.history, ir_only_cache);
+            hydrated_ir.hydrate_display_cache(&lua, &transcript.history, ir_only_cache);
         hydrated_ir.reset_counters();
         let mut hydrated_ir_buf = Buffer::new(crate::smelt_edit::BufId(79), Default::default());
         let hydrated_ir_start = std::time::Instant::now();

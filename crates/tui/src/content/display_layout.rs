@@ -1,4 +1,4 @@
-use crate::content::render_plan::{NodeLayoutKey, RenderNodeId, RenderPlan};
+use crate::content::render_plan::{NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan};
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_core::content::block_layout::{
     BlockLayout, HboxItem, IrLeaf, LayoutIr, LuaLeaf, SourceViewIr, TextSpec,
@@ -6,7 +6,7 @@ use smelt_core::content::block_layout::{
 use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::theme::intern;
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, ToolState, ViewState};
+use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 7;
@@ -119,6 +119,12 @@ pub(crate) enum CompileJob {
         block: Block,
         state: Option<ToolState>,
     },
+    Group {
+        id: RenderNodeId,
+        name: String,
+        key: DisplayCacheKey,
+        snapshot: serde_json::Value,
+    },
 }
 
 impl CompileJob {
@@ -139,6 +145,12 @@ impl CompileJob {
                 key,
                 compile_block_with_lua(env, block_id, index, &block, state.as_ref()),
             ),
+            Self::Group {
+                id,
+                name,
+                key,
+                snapshot,
+            } => (id, key, compile_group_with_lua(env, &name, &snapshot)),
         }
     }
 }
@@ -196,7 +208,16 @@ impl DisplayModel {
                     .order
                     .iter()
                     .position(|candidate| *candidate == id)
-                    .map(|index| (index, RenderNodeId::Block(id), key))
+                    .map(|index| {
+                        (
+                            index,
+                            RenderNode::Block {
+                                id,
+                                block_index: index,
+                            },
+                            key,
+                        )
+                    })
             });
         let jobs =
             self.collect_compile_jobs(history, renderer_generation, renderer_cache_key, blocks);
@@ -214,14 +235,15 @@ impl DisplayModel {
         history: &BlockHistory,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
-        blocks: impl IntoIterator<Item = (usize, RenderNodeId, NodeLayoutKey)>,
+        nodes: impl IntoIterator<Item = (usize, RenderNode, NodeLayoutKey)>,
     ) -> Vec<CompileJob> {
         let _perf = smelt_perf::perf::begin("transcript:display_model:ensure_many");
 
         let mut jobs = Vec::new();
         let mut requested = 0;
-        for (index, id, key) in blocks {
+        for (index, node, key) in nodes {
             requested += 1;
+            let id = node.id();
             let display_key =
                 DisplayCacheKey::from_node_key(key, renderer_generation, renderer_cache_key);
             if self
@@ -231,23 +253,35 @@ impl DisplayModel {
             {
                 continue;
             }
-            let RenderNodeId::Block(block_id) = id;
-            let Some(block) = history.blocks.get(&block_id).cloned() else {
-                self.blocks.remove(&id);
-                continue;
-            };
-            let state = match &block {
-                Block::ToolCall { call_id, .. } => history.tool_state(call_id).cloned(),
-                _ => None,
-            };
-            jobs.push(CompileJob::Block {
-                id,
-                block_id,
-                index,
-                key: display_key,
-                block,
-                state,
-            });
+            match node {
+                RenderNode::Block { id: block_id, .. } => {
+                    let Some(block) = history.blocks.get(&block_id).cloned() else {
+                        self.blocks.remove(&id);
+                        continue;
+                    };
+                    let state = match &block {
+                        Block::ToolCall { call_id, .. } => history.tool_state(call_id).cloned(),
+                        _ => None,
+                    };
+                    jobs.push(CompileJob::Block {
+                        id,
+                        block_id,
+                        index,
+                        key: display_key,
+                        block,
+                        state,
+                    });
+                }
+                RenderNode::Group { ref name, .. } => {
+                    let snapshot = group_snapshot_json(history, index, &node);
+                    jobs.push(CompileJob::Group {
+                        id,
+                        name: name.clone(),
+                        key: display_key,
+                        snapshot,
+                    });
+                }
+            }
         }
         smelt_perf::perf::record_value("transcript:display_model:requested", requested);
         smelt_perf::perf::record_value("transcript:display_model:compiled", jobs.len() as u64);
@@ -362,21 +396,45 @@ fn display_layout_entry_matches_history(
     if !plan.contains_id(entry.id) {
         return false;
     }
-    let RenderNodeId::Block(block_id) = entry.id;
-    let Some(block) = history.blocks.get(&block_id) else {
-        return false;
-    };
-    if history.content_hash(block_id) != entry.key.content_hash {
-        return false;
+    match entry.id {
+        RenderNodeId::Block(block_id) => {
+            let Some(block) = history.blocks.get(&block_id) else {
+                return false;
+            };
+            if history.content_hash(block_id) != entry.key.content_hash {
+                return false;
+            }
+            let sidecar_hash = match block {
+                Block::ToolCall { call_id, .. } => history
+                    .tool_state(call_id)
+                    .map(ToolState::display_hash)
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            sidecar_hash == entry.key.sidecar_hash
+        }
+        RenderNodeId::Group(_) => plan
+            .nodes
+            .iter()
+            .position(|node| node.id() == entry.id)
+            .and_then(|index| {
+                plan.node_key(
+                    history,
+                    index,
+                    LayoutKey {
+                        width: 0,
+                        show_thinking: false,
+                        view_state: ViewState::Expanded,
+                        content_hash: 0,
+                        sidecar_hash: 0,
+                    },
+                )
+            })
+            .is_some_and(|key| {
+                key.content_hash == entry.key.content_hash
+                    && key.sidecar_hash == entry.key.sidecar_hash
+            }),
     }
-    let sidecar_hash = match block {
-        Block::ToolCall { call_id, .. } => history
-            .tool_state(call_id)
-            .map(ToolState::display_hash)
-            .unwrap_or(0),
-        _ => 0,
-    };
-    sidecar_hash == entry.key.sidecar_hash
 }
 
 #[cfg(test)]
@@ -389,6 +447,147 @@ pub(crate) fn compile_block_with_show(block: &Block, show_thinking: bool) -> Lay
         block,
         None,
     )
+}
+
+fn compile_group_with_lua(
+    env: TranscriptRenderEnv<'_>,
+    name: &str,
+    snapshot: &serde_json::Value,
+) -> LayoutIr {
+    let layout = env.lua.render_transcript_group_layout(
+        name,
+        snapshot,
+        smelt_core::lua::runtime::TranscriptRenderCtx {
+            show_thinking: env.show_thinking,
+        },
+    );
+    match compile_layout_ir(&layout) {
+        Ok(layout) => layout,
+        Err(e) => {
+            env.lua.record_error(format!(
+                "transcript group render `{name}`: compile layout IR: {e}"
+            ));
+            BlockLayout::Leaf(IrLeaf::Text(TextSpec {
+                content: format!("{name} group render error"),
+                hl_group: Some("ErrorMsg".into()),
+                ansi: false,
+            }))
+        }
+    }
+}
+
+fn group_snapshot_json(
+    history: &BlockHistory,
+    node_index: usize,
+    node: &RenderNode,
+) -> serde_json::Value {
+    let RenderNode::Group {
+        id,
+        name,
+        bucket,
+        child_range,
+        child_ids,
+        view_state,
+    } = node
+    else {
+        return serde_json::Value::Null;
+    };
+    let children: Vec<_> = child_range
+        .clone()
+        .filter_map(|block_index| block_snapshot_json(history, block_index))
+        .collect();
+    serde_json::json!({
+        "kind": "group",
+        "id": id,
+        "index": node_index,
+        "group_kind": name,
+        "name": name,
+        "bucket": bucket,
+        "view_state": view_state_label(*view_state),
+        "children": children,
+        "child_ids": child_ids,
+        "child_count": child_ids.len(),
+    })
+}
+
+fn block_snapshot_json(history: &BlockHistory, block_index: usize) -> Option<serde_json::Value> {
+    let id = *history.order.get(block_index)?;
+    let block = history.blocks.get(&id)?;
+    let mut value = serde_json::Map::new();
+    value.insert("id".into(), serde_json::to_value(id).ok()?);
+    value.insert("index".into(), serde_json::json!(block_index));
+    value.insert("kind".into(), serde_json::json!(block_kind(block)));
+    match block {
+        Block::User { text, image_labels } => {
+            value.insert("text".into(), serde_json::json!(text));
+            value.insert("image_labels".into(), serde_json::json!(image_labels));
+        }
+        Block::Mode {
+            text,
+            icon,
+            hl_group,
+        } => {
+            value.insert("text".into(), serde_json::json!(text));
+            value.insert("icon".into(), serde_json::json!(icon));
+            value.insert("hl_group".into(), serde_json::json!(hl_group));
+        }
+        Block::ProcessStatus { text } => {
+            value.insert("text".into(), serde_json::json!(text));
+        }
+        Block::Thinking { content } | Block::Text { content } => {
+            value.insert("content".into(), serde_json::json!(content));
+        }
+        Block::CodeLine { content, lang } => {
+            value.insert("content".into(), serde_json::json!(content));
+            value.insert("lang".into(), serde_json::json!(lang));
+        }
+        Block::ToolCall {
+            call_id,
+            name,
+            summary,
+            args,
+        } => {
+            value.insert("call_id".into(), serde_json::json!(call_id));
+            value.insert("name".into(), serde_json::json!(name));
+            value.insert("args".into(), serde_json::json!(args));
+            value.insert("summary".into(), serde_json::to_value(summary).ok()?);
+            value.insert(
+                "summary_text".into(),
+                serde_json::json!(summary.as_plain_text()),
+            );
+            let status = state_status(history, call_id);
+            value.insert("status".into(), serde_json::json!(status.label()));
+            value.insert("status_hl".into(), serde_json::json!(status.hl_group()));
+            if let Some(state) = history.tool_state(call_id) {
+                value.insert("output".into(), serde_json::to_value(&state.output).ok()?);
+                value.insert("user_message".into(), serde_json::json!(state.user_message));
+            }
+        }
+        Block::Exec { command, output } => {
+            value.insert("command".into(), serde_json::json!(command));
+            value.insert("output".into(), serde_json::json!(output));
+        }
+        Block::Compacted { summary } => {
+            value.insert("summary".into(), serde_json::json!(summary));
+        }
+    }
+    Some(serde_json::Value::Object(value))
+}
+
+fn view_state_label(view_state: ViewState) -> &'static str {
+    match view_state {
+        ViewState::Expanded => "expanded",
+        ViewState::Collapsed => "collapsed",
+        ViewState::TrimmedHead { .. } => "trimmed_head",
+        ViewState::TrimmedTail { .. } => "trimmed_tail",
+    }
+}
+
+fn state_status(history: &BlockHistory, call_id: &str) -> smelt_core::ToolStatus {
+    history
+        .tool_state(call_id)
+        .map(|state| state.status)
+        .unwrap_or(smelt_core::ToolStatus::Pending)
 }
 
 fn compile_block_with_lua(
@@ -424,17 +623,7 @@ fn compile_block_with_lua(
 }
 
 fn block_kind(block: &Block) -> &'static str {
-    match block {
-        Block::User { .. } => "user",
-        Block::Mode { .. } => "mode",
-        Block::ProcessStatus { .. } => "process_status",
-        Block::Thinking { .. } => "thinking",
-        Block::Text { .. } => "assistant",
-        Block::CodeLine { .. } => "code",
-        Block::ToolCall { .. } => "tool",
-        Block::Exec { .. } => "exec",
-        Block::Compacted { .. } => "compacted",
-    }
+    block.kind()
 }
 
 pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {

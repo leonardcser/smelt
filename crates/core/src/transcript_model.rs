@@ -58,6 +58,27 @@ pub enum ToolStatus {
     Denied,
 }
 
+impl ToolStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolStatus::Pending => "pending",
+            ToolStatus::Confirm => "confirm",
+            ToolStatus::Ok => "ok",
+            ToolStatus::Err => "err",
+            ToolStatus::Denied => "denied",
+        }
+    }
+
+    pub fn hl_group(self) -> &'static str {
+        match self {
+            ToolStatus::Pending => "SmeltToolPending",
+            ToolStatus::Ok => "SmeltSuccess",
+            ToolStatus::Err | ToolStatus::Denied => "ErrorMsg",
+            ToolStatus::Confirm => "SmeltAccent",
+        }
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolOutput {
     pub content: String,
@@ -146,6 +167,20 @@ pub enum Block {
 }
 
 impl Block {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Block::User { .. } => "user",
+            Block::Mode { .. } => "mode",
+            Block::ProcessStatus { .. } => "process_status",
+            Block::Thinking { .. } => "thinking",
+            Block::Text { .. } => "assistant",
+            Block::CodeLine { .. } => "code",
+            Block::ToolCall { .. } => "tool",
+            Block::Exec { .. } => "exec",
+            Block::Compacted { .. } => "compacted",
+        }
+    }
+
     /// Stable content hash of this block. Two blocks with the same
     /// content hash produce identical `LayoutIr` for the same
     /// `LayoutKey` and `ToolState`. For `ToolCall`, `ToolState` (status

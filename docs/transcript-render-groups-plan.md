@@ -521,6 +521,8 @@ Deliverable: Lua-defined groups appear in the transcript.
 - Support defaults from Lua group/block policy.
 - Keep manual overrides in `TranscriptPresentationState`, separate from semantic history and default policy.
 - Add toggle commands/APIs for the node at a display row.
+- Use Vim-compatible fold bindings for transcript render nodes: `za` toggles, `zo` opens, `zc` closes, `zR` opens all, and `zM` closes all. `Enter` is contextual activation: it toggles only when the focused row is an explicit fold summary/affordance, not arbitrary expanded content.
+- Mouse folding should be limited to explicit fold affordances and collapsed summaries. Fire on mouse-up only when down/up target the same node and movement stayed below drag threshold; drag selection always wins and never toggles.
 - Expose enough node metadata to Lua/UI for keymaps and mouse handlers.
 
 Deliverable: users can manually expand/collapse groups and blocks; defaults can collapse group types automatically.
