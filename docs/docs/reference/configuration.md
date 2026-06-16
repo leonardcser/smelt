@@ -36,7 +36,7 @@ Register a provider with `smelt.provider.register`:
 smelt.provider.register("ollama", {
   type = "openai-compatible",
   api_base = "http://localhost:11434/v1",
-  models = { "glm-5", "qwen3.5:27b" },
+  models = { "glm-5", "qwen3.6:27b" },
 })
 
 smelt.provider.register("openai", {
@@ -79,7 +79,7 @@ smelt.provider.register("ollama", {
   api_base = "http://localhost:11434/v1",
   models = {
     "glm-5",
-    { name = "qwen3.5:27b", temperature = 0.8, top_p = 0.95, top_k = 40, min_p = 0.01, repeat_penalty = 1.0 },
+    { name = "qwen3.6:27b", temperature = 0.8, top_p = 0.95, top_k = 40, min_p = 0.01, repeat_penalty = 1.0 },
     { name = "llama3:8b", tool_calling = false },
     { name = "custom-model", input_cost = 2.0, output_cost = 8.0, cache_read_cost = 0.5, cache_write_cost = 0.0 },
   },

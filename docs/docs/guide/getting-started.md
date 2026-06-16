@@ -25,16 +25,44 @@ Just run `smelt`. The first launch opens a wizard that picks a provider, logs
 you into ChatGPT, GitHub Copilot, or Kimi Code if needed, and writes
 `~/.config/smelt/init.lua` for API-key providers.
 
-To skip the wizard, pass connection flags directly:
+### Subscription providers
 
-=== "Ollama (local)"
+These use your existing subscription and require no API key. Run `smelt auth`
+once, then start smelt with no extra flags:
+
+=== ":fontawesome-brands-openai: ChatGPT (Codex)"
 
     ```bash
-    ollama pull qwen3.5:0.8b
-    smelt --model qwen3.5:0.8b --api-base http://localhost:11434/v1
+    smelt auth                # one-time browser or device-code login
+    smelt
     ```
 
-    Any OpenAI-compatible server works (Ollama, vLLM, SGLang, llama.cpp).
+=== ":simple-moonshotai: Kimi Code"
+
+    ```bash
+    smelt auth                # device-code login
+    smelt
+    ```
+
+    The login flow stores OAuth credentials in Smelt's state directory and
+    registers the `kimi-code` provider automatically. Kimi Code uses the
+    Anthropic messages API with Smelt-owned OAuth credentials; it does not read
+    Kimi CLI credential storage. `/usage` reads Kimi Code subscription usage
+    from the Kimi API.
+
+=== ":simple-github: GitHub Copilot"
+
+    ```bash
+    smelt auth                # device-code login
+    smelt
+    ```
+
+    Every model your Copilot account exposes (Claude, GPT, Grok, …) is
+    available immediately.
+
+### API-key providers
+
+These need `--model` and an environment variable or config file:
 
 === ":fontawesome-brands-openai: OpenAI / OpenRouter"
 
@@ -52,46 +80,19 @@ To skip the wizard, pass connection flags directly:
 
     ```bash
     export ANTHROPIC_API_KEY=...
-    smelt --model claude-opus-4-7 \
+    smelt --model claude-opus-4-8 \
           --api-base https://api.anthropic.com/v1 \
           --api-key-env ANTHROPIC_API_KEY
     ```
 
-=== ":fontawesome-brands-openai: ChatGPT (Codex)"
-
-    No API key; uses your ChatGPT subscription.
+=== ":simple-ollama: Ollama (local)"
 
     ```bash
-    smelt auth                # one-time browser or device-code login
-    smelt --model gpt-5.4
+    ollama pull qwen3.6:27b
+    smelt --model qwen3.6:27b --api-base http://localhost:11434/v1
     ```
 
-=== ":simple-github: GitHub Copilot"
-
-    No API key; uses your Copilot subscription.
-
-    ```bash
-    smelt auth                # device-code login
-    smelt --model claude-sonnet-4-6
-    ```
-
-    Every model your Copilot account exposes (Claude, GPT, Grok, …) is
-    available immediately.
-
-=== ":simple-moonshotai: Kimi Code"
-
-    No API key; uses your Kimi Code subscription.
-
-    ```bash
-    smelt auth                # device-code login
-    smelt --model kimi-for-coding
-    ```
-
-    The login flow stores OAuth credentials in Smelt's state directory and
-    registers the `kimi-code` provider automatically. Kimi Code uses the
-    Anthropic messages API with Smelt-owned OAuth credentials; it does not read
-    Kimi CLI credential storage. `/usage` reads Kimi Code subscription usage
-    from the Kimi API.
+    Any OpenAI-compatible server works (Ollama, vLLM, SGLang, llama.cpp).
 
 ## Save your config
 
@@ -104,7 +105,7 @@ across machines — no need to remember a long CLI invocation every time.
 smelt.provider.register("ollama", {
   type = "openai-compatible",
   api_base = "http://localhost:11434/v1",
-  models = { "qwen3.5:27b" },
+  models = { "qwen3.6:27b" },
 })
 
 smelt.provider.register("openai", {

@@ -10,7 +10,7 @@ smelt.provider.register("ollama", {
   api_base = "http://localhost:11434/v1",
   models = {
     "glm-5",
-    { name = "qwen3.5:27b", temperature = 0.8, top_p = 0.95 },
+    { name = "qwen3.6:27b", temperature = 0.8, top_p = 0.95 },
   },
 })
 
@@ -18,7 +18,7 @@ smelt.provider.register("openai", {
   type = "openai",
   api_base = "https://api.openai.com/v1",
   api_key_env = "OPENAI_API_KEY",
-  models = { "gpt-5.4" },
+  models = { "gpt-5.5" },
 })
 
 -- MCP servers
