@@ -1235,10 +1235,6 @@ Single-line input handle constructor.
 
 Local session introspection web UI.
 
-- `smelt.inspect.start` :: `fun(): any`
-  Start the local session-inspector web server on an ephemeral loopback port and return its URL.
-- `smelt.inspect.stop` :: `fun(): nil`
-  Stop the running session-inspector web server, if any.
 - `smelt.inspect.url` :: `fun(): any`
   Return the URL of the running inspector server, or nil if it is not running.
 

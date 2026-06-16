@@ -4,23 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Local session introspection web UI. `smelt.inspect.start()` opens a browser-ready server; `smelt.inspect.url()` and `smelt.inspect.stop()` query and close it.
-
-## `smelt.inspect.start`
-
-```lua
-fun(): any
-```
-
-Start the local session-inspector web server on an ephemeral loopback port and return its URL. If a server is already running, returns the existing URL.
-
-## `smelt.inspect.stop`
-
-```lua
-fun(): nil
-```
-
-Stop the running session-inspector web server, if any.
+Local session introspection web UI. `smelt.inspect.url()` reads the running server URL; the optional `inspect` plugin adds `smelt.inspect.start()` and `smelt.inspect.stop()`.
 
 ## `smelt.inspect.url`
 

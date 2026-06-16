@@ -1490,6 +1490,28 @@ mod tests {
     }
 
     #[test]
+    fn inspect_command_notifies_with_scoped_notify() {
+        let rt = LuaRuntime::new();
+        install_test_notify(&rt);
+        rt.lua
+            .load(
+                r#"
+                    require("smelt.plugins.inspect")
+                    smelt.inspect.url = function() return "http://127.0.0.1:1234" end
+                "#,
+            )
+            .exec()
+            .expect("load inspect plugin");
+
+        assert!(rt.run_command("inspect", None));
+        assert_eq!(
+            drain_notifications(&rt),
+            vec!["UI: http://127.0.0.1:1234".to_string()]
+        );
+        assert!(drain_errors(&rt).is_empty());
+    }
+
+    #[test]
     fn upgrade_background_check_stays_quiet_when_fetch_fails() {
         let rt = LuaRuntime::new();
         install_test_notify(&rt);

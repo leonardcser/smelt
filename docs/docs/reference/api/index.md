@@ -64,7 +64,7 @@ Requires a terminal UI; calling these from headless mode raises.
 - [`smelt.engine`](engine.md) - 10 function(s)
 - [`smelt.history`](history.md) - 2 function(s)
 - [`smelt.input`](input.md) - 1 function(s)
-- [`smelt.inspect`](inspect.md) - 3 function(s)
+- [`smelt.inspect`](inspect.md) - 1 function(s)
 - [`smelt.keymap`](keymap.md) - 7 function(s)
 - [`smelt.list`](list.md) - 1 function(s)
 - [`smelt.metrics`](metrics.md) - 1 function(s)
