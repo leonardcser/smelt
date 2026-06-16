@@ -395,6 +395,18 @@ pub(crate) enum SessionControl {
     Continue,
     NeedsConfirm(Box<ConfirmRequest>),
     Done,
+    Error,
+}
+
+/// How the active turn is ending. Drives whether queued inputs are preserved
+/// and whether the next queued turn is auto-started.
+pub(crate) enum TurnEnd {
+    /// Clean completion: queue may chain into the next turn.
+    Complete,
+    /// User cancelled: queue is drained back to the prompt.
+    Cancelled,
+    /// Provider/engine error: queue is preserved so the user can retry.
+    Errored,
 }
 
 pub(crate) struct PendingTool {
@@ -1767,7 +1779,7 @@ impl TuiApp {
         'main: loop {
             let _app_guard = crate::lua::install_app_ptr(self);
             if self.pending_quit {
-                self.discard_turn(true);
+                self.discard_turn(TurnEnd::Cancelled);
                 break 'main;
             }
             self.tick_timers();
@@ -1806,7 +1818,7 @@ impl TuiApp {
                                 "source": "try_recv_drain",
                             }),
                         );
-                        self.discard_turn(false);
+                        self.discard_turn(TurnEnd::Errored);
                         break;
                     }
                 };
@@ -1852,10 +1864,16 @@ impl TuiApp {
                     let taken = self.agent.take();
                     let pending_ref: &[PendingTool] =
                         taken.as_ref().map(|a| a.pending.as_slice()).unwrap_or(&[]);
-                    let action = self.dispatch_control(ctrl, pending_ref);
+                    let end = self.dispatch_control(ctrl, pending_ref);
                     self.agent = taken;
-                    if !action {
-                        self.discard_turn(false);
+                    match end {
+                        SessionControl::Continue | SessionControl::NeedsConfirm(_) => {}
+                        SessionControl::Done => {
+                            self.discard_turn(TurnEnd::Complete);
+                        }
+                        SessionControl::Error => {
+                            self.discard_turn(TurnEnd::Errored);
+                        }
                     }
                 }
                 self.pending_dialog = !self.pending_dialogs.is_empty();
@@ -2063,7 +2081,7 @@ impl TuiApp {
 
         crate::lua::with_app_ptr(self, |app| {
             if app.agent.is_some() {
-                app.finish_turn(true);
+                app.finish_turn(crate::app::TurnEnd::Cancelled);
             }
             app.core
                 .cells

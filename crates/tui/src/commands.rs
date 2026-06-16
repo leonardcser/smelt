@@ -516,7 +516,7 @@ mod tests {
         app.start_turn(1);
 
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        app.app.discard_turn(false);
+        app.app.discard_turn(crate::app::TurnEnd::Complete);
 
         assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
     }

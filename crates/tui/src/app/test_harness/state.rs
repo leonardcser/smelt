@@ -206,7 +206,7 @@ impl TestApp {
                 &req.tool_name,
             );
             if cancel {
-                self.app.discard_turn(false);
+                self.app.discard_turn(crate::app::TurnEnd::Complete);
             }
         }
         self.drain_cmd();

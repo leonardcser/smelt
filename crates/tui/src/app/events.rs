@@ -144,7 +144,7 @@ impl TuiApp {
         match outcome {
             EventOutcome::Noop | EventOutcome::Redraw => false,
             EventOutcome::Quit => {
-                self.discard_turn(true);
+                self.discard_turn(crate::app::TurnEnd::Cancelled);
                 true
             }
             EventOutcome::CancelAgent => {
@@ -155,7 +155,7 @@ impl TuiApp {
                         "reason": "user_cancel",
                     }),
                 );
-                self.discard_turn(true);
+                self.discard_turn(crate::app::TurnEnd::Cancelled);
                 false
             }
             EventOutcome::InterruptWithQueued => {
@@ -769,7 +769,7 @@ impl TuiApp {
                 count: unsteer_count,
             });
         }
-        self.discard_turn(true);
+        self.discard_turn(crate::app::TurnEnd::Cancelled);
         self.queued_inputs = remaining;
         if let Some(queued) = next {
             self.start_queued_input(queued);

@@ -274,7 +274,7 @@ impl TuiApp {
     ) {
         let should_cancel = self.resolve_confirm((choice, message), call_id, request_id, tool_name);
         if should_cancel {
-            self.finish_turn(true);
+            self.finish_turn(crate::app::TurnEnd::Cancelled);
             self.agent = None;
         }
     }

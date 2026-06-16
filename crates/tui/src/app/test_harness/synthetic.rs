@@ -155,7 +155,7 @@ impl TestApp {
     /// Cancel the active turn (or idle background tasks). Mirrors
     /// `EventOutcome::CancelAgent` → `discard_turn(true)`.
     pub fn cancel(&mut self) {
-        self.app.discard_turn(true);
+        self.app.discard_turn(crate::app::TurnEnd::Cancelled);
         self.drain_cmd();
     }
 

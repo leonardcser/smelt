@@ -661,8 +661,31 @@ impl<'a> Turn<'a> {
         let _ = self.event_tx.send(event);
     }
 
+    /// True for commands that inject or remove user messages from the
+    /// current turn. These are speculative until the operation that
+    /// received them succeeds; callers decide whether to apply them.
+    fn is_turn_injection(cmd: &UiCommand) -> bool {
+        matches!(cmd, UiCommand::Steer { .. } | UiCommand::Unsteer { .. })
+    }
+
+    /// Drain `deferred` back through `handle_turn_cmd`.
+    fn apply_deferred_turn_cmds(&mut self, deferred: Vec<UiCommand>) {
+        for cmd in deferred {
+            self.handle_turn_cmd(cmd);
+        }
+    }
+
     /// Fire a `HostCall` and await its `oneshot::Sender<Reply>`.
-    async fn host_call<Reply, F>(&mut self, build: F) -> HostCallResult<Reply>
+    ///
+    /// Commands received while waiting are handled immediately except for
+    /// `Steer`/`Unsteer` injections, which are collected and applied only
+    /// if the host replies successfully. This keeps speculative user messages
+    /// from surviving an error or cancellation.
+    async fn host_call<Reply, F>(
+        &mut self,
+        build: F,
+        mut apply_on_success: impl FnMut(&mut Self, Vec<UiCommand>),
+    ) -> HostCallResult<Reply>
     where
         F: FnOnce(tokio::sync::oneshot::Sender<Reply>) -> crate::host::HostCall,
     {
@@ -671,14 +694,25 @@ impl<'a> Turn<'a> {
             return HostCallResult::Dropped;
         }
         tokio::pin!(rx);
+        let mut deferred: Vec<UiCommand> = Vec::new();
         loop {
             tokio::select! {
-                res = &mut rx => return match res {
-                    Ok(reply) => HostCallResult::Replied(reply),
-                    Err(_) => HostCallResult::Dropped,
-                },
+                res = &mut rx => {
+                    let result = match res {
+                        Ok(reply) => HostCallResult::Replied(reply),
+                        Err(_) => HostCallResult::Dropped,
+                    };
+                    if matches!(result, HostCallResult::Replied(_)) {
+                        apply_on_success(self, deferred);
+                    }
+                    return result;
+                }
                 Some(cmd) = self.cmd_rx.recv() => {
-                    self.handle_turn_cmd(cmd);
+                    if Self::is_turn_injection(&cmd) {
+                        deferred.push(cmd);
+                    } else {
+                        self.handle_turn_cmd(cmd);
+                    }
                     if self.cancel.is_cancelled() {
                         return HostCallResult::Cancelled;
                     }
@@ -693,10 +727,13 @@ impl<'a> Turn<'a> {
     /// any hook produced one; otherwise the original.
     async fn apply_response_hooks(&mut self, message: Message) -> Message {
         match self
-            .host_call(|reply| crate::host::HostCall::ProviderResponse {
-                message: message.clone(),
-                reply,
-            })
+            .host_call(
+                |reply| crate::host::HostCall::ProviderResponse {
+                    message: message.clone(),
+                    reply,
+                },
+                |this, deferred| this.apply_deferred_turn_cmds(deferred),
+            )
             .await
         {
             HostCallResult::Replied(Some(replacement)) => replacement,
@@ -921,12 +958,18 @@ impl<'a> Turn<'a> {
         let request_view = protocol::history_to_messages(&history_without_system);
         let estimated_tokens =
             estimate_prompt_tokens(&self.system_prompt, &request_view, tool_defs);
+        let apply_deferred = |this: &mut Self, deferred: Vec<UiCommand>| {
+            this.apply_deferred_turn_cmds(deferred);
+        };
         let decision = self
-            .host_call(|reply| crate::host::HostCall::PrepareRequest {
-                messages: request_view,
-                estimated_tokens,
-                reply,
-            })
+            .host_call(
+                |reply| crate::host::HostCall::PrepareRequest {
+                    messages: request_view,
+                    estimated_tokens,
+                    reply,
+                },
+                apply_deferred,
+            )
             .await;
         let replacement = match decision {
             HostCallResult::Replied(crate::host::HostRequestDecision::Continue)
@@ -1175,10 +1218,13 @@ impl<'a> Turn<'a> {
                             &self.history.iter().skip(1).cloned().collect::<Vec<_>>(),
                         );
                         let recovery_decision = self
-                            .host_call(|reply| crate::host::HostCall::RecoverFromContextLimit {
-                                messages: recovery_view,
-                                reply,
-                            })
+                            .host_call(
+                                |reply| crate::host::HostCall::RecoverFromContextLimit {
+                                    messages: recovery_view,
+                                    reply,
+                                },
+                                |this, deferred| this.apply_deferred_turn_cmds(deferred),
+                            )
                             .await;
                         match recovery_decision {
                             HostCallResult::Cancelled => {
@@ -1582,6 +1628,7 @@ impl<'a> Turn<'a> {
             bg_cancel: self.bg_cancel.clone(),
         };
         let mut deferred: Vec<UiCommand> = Vec::new();
+        let mut speculative: Vec<UiCommand> = Vec::new();
         let mut tool_results: Vec<(String, ToolOutcome, Option<u64>)> = Vec::new();
 
         let cancelled = loop {
@@ -1819,10 +1866,13 @@ impl<'a> Turn<'a> {
                             });
                         }
                     }
-                    UiCommand::Steer { .. }
-                    | UiCommand::Unsteer { .. }
-                    | UiCommand::AppendHistoryItem { .. }
-                    | UiCommand::SetReasoningEffort { .. }
+                    UiCommand::Steer { .. } | UiCommand::Unsteer { .. } => {
+                        speculative.push(cmd)
+                    }
+                    UiCommand::AppendHistoryItem { append } => {
+                        deferred.push(UiCommand::AppendHistoryItem { append });
+                    }
+                    UiCommand::SetReasoningEffort { .. }
                     | UiCommand::SetMode { .. }
                     | UiCommand::SetModel { .. } => deferred.push(cmd),
                     other => { let _ = dispatch_background_cmd(other, &bg_ctx); }
@@ -1879,7 +1929,16 @@ impl<'a> Turn<'a> {
             }
         }
 
-        (cancelled, deferred, tool_results)
+        if !cancelled {
+            for cmd in speculative {
+                self.handle_turn_cmd(cmd);
+            }
+        }
+        for cmd in deferred {
+            self.handle_turn_cmd(cmd);
+        }
+
+        (cancelled, Vec::new(), tool_results)
     }
 
     /// Populate `completed[i]` with a synthetic `cancelled` outcome for any
@@ -2043,7 +2102,13 @@ impl<'a> Turn<'a> {
         // The chat future borrows self.provider and self.model, so model
         // changes received mid-request are deferred until the future resolves.
         let mut pending_model: Option<(String, String, String, String)> = None;
+        // Speculative steer/unsteer commands received while the request is
+        // in flight. Applied only if the request succeeds so the app can
+        // preserve its queue on failure.
         let mut deferred_turn_cmds: Vec<UiCommand> = Vec::new();
+        // History appends (e.g. process status) are factual and are applied
+        // regardless of whether the request succeeds or fails.
+        let mut deferred_appends: Vec<protocol::HistoryAppend> = Vec::new();
 
         let partial_text = std::sync::Mutex::new(String::new());
         let partial_reasoning = std::sync::Mutex::new(String::new());
@@ -2130,9 +2195,12 @@ impl<'a> Turn<'a> {
                         UiCommand::SetModel { model, api_base, api_key, provider_type } => {
                             pending_model = Some((model, api_base, api_key, provider_type));
                         }
-                        UiCommand::AppendHistoryItem { .. }
-                        | UiCommand::Steer { .. }
-                        | UiCommand::Unsteer { .. } => deferred_turn_cmds.push(cmd),
+                        UiCommand::AppendHistoryItem { append } => {
+                            deferred_appends.push(append);
+                        }
+                        UiCommand::Steer { .. } | UiCommand::Unsteer { .. } => {
+                            deferred_turn_cmds.push(cmd)
+                        }
                         other => {
                             let _ = dispatch_background_cmd(other, &self.bg_ctx());
                         }
@@ -2147,11 +2215,16 @@ impl<'a> Turn<'a> {
         if let Some((model, api_base, api_key, provider_type)) = pending_model {
             self.apply_model_change(model, api_base, api_key, provider_type);
         }
+        for append in deferred_appends {
+            self.queue_history_item(append);
+        }
         let had_injected = deferred_turn_cmds
             .iter()
             .any(|c| matches!(c, UiCommand::Steer { .. }));
-        for cmd in deferred_turn_cmds {
-            self.handle_turn_cmd(cmd);
+        if result.is_ok() {
+            for cmd in deferred_turn_cmds {
+                self.handle_turn_cmd(cmd);
+            }
         }
         (result.map(|r| (r, had_injected)), pt, pr)
     }

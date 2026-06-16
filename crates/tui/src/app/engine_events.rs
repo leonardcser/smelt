@@ -16,13 +16,20 @@ impl TuiApp {
         if let Some(mut ag) = self.agent.take() {
             let prev_dispatching_turn_id = self.dispatching_turn_id.replace(ag.turn_id);
             let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);
-            let cont = self.dispatch_control(ctrl, &ag.pending);
+            let end = self.dispatch_control(ctrl, &ag.pending);
             self.dispatching_turn_id = prev_dispatching_turn_id;
             self.agent = Some(ag);
-            if !cont {
-                self.discard_turn(false);
+            match end {
+                SessionControl::Continue | SessionControl::NeedsConfirm(_) => true,
+                SessionControl::Done => {
+                    self.discard_turn(crate::app::TurnEnd::Complete);
+                    false
+                }
+                SessionControl::Error => {
+                    self.discard_turn(crate::app::TurnEnd::Errored);
+                    false
+                }
             }
-            cont
         } else {
             self.handle_idle_engine_event(ev);
             true
@@ -305,7 +312,7 @@ impl TuiApp {
             }
             EngineEvent::TurnError { message } => {
                 {
-                    self.working.finish(TurnOutcome::Done);
+                    self.working.finish(TurnOutcome::Interrupted);
                 };
                 self.core.cells.set_dyn(
                     "turn_error",
@@ -314,7 +321,7 @@ impl TuiApp {
                     }),
                 );
                 self.notify_error(message);
-                SessionControl::Done
+                SessionControl::Error
             }
             EngineEvent::Shutdown { .. } => SessionControl::Done,
             EngineEvent::ToolDispatch {
@@ -393,8 +400,7 @@ impl TuiApp {
             self.handle_process_completed(id, exit_code);
         }
         EngineEvent::TurnError { message } => {
-            self.working
-                        .finish(TurnOutcome::Done);
+            self.working.finish(TurnOutcome::Interrupted);
             self.notify_error(message);
         }
         _ => {}

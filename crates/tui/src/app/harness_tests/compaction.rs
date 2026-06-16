@@ -13,7 +13,7 @@ fn cancelled_turn_without_usage_preserves_context_token_baseline() {
     app.app.core.session.context_tokens_history_len = Some(app.app.core.session.history.len());
     app.start_turn(7);
 
-    app.app.discard_turn(true);
+    app.app.discard_turn(crate::app::TurnEnd::Cancelled);
 
     assert_eq!(app.app.core.session.context_tokens, Some(500));
     assert_eq!(app.app.core.session.context_tokens_history_len, Some(2));

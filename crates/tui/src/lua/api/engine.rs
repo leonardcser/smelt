@@ -301,7 +301,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
                 if app.queued_inputs.is_empty() {
-                    app.discard_turn(true);
+                    app.discard_turn(crate::app::TurnEnd::Cancelled);
                 } else {
                     app.drain_queued_inputs_into_prompt();
                 }

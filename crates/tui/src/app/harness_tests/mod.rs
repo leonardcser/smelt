@@ -7,6 +7,7 @@ use std::time::Duration;
 
 mod compaction;
 mod dialogs;
+mod error_queue;
 mod lua_reload;
 mod misc;
 mod mouse;

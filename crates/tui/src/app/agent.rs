@@ -400,14 +400,15 @@ impl TuiApp {
         self.queued_inputs.clear();
     }
 
-    pub(crate) fn discard_turn(&mut self, cancelled: bool) {
-        if self.agent.is_some() {
-            let start_queued = self.finish_turn(cancelled);
+    pub(crate) fn discard_turn(&mut self, end: crate::app::TurnEnd) {
+        let was_running = self.agent.is_some();
+        if was_running {
+            let start_queued = self.finish_turn(end);
             self.agent = None;
             if start_queued {
                 self.start_next_queued_input_if_idle();
             }
-        } else if cancelled {
+        } else if matches!(end, crate::app::TurnEnd::Cancelled) {
             // No active turn but user requested cancel - still notify the
             // engine and kill any stale turn-owned Lua tasks (tool calls,
             // bash executions, etc.). App-scoped background work survives.
@@ -421,48 +422,65 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn finish_turn(&mut self, cancelled: bool) -> bool {
+    pub(crate) fn finish_turn(&mut self, end: crate::app::TurnEnd) -> bool {
+        use crate::app::TurnEnd;
+
         self.sleep_inhibit.release();
-        if cancelled {
-            self.core.engine.send(UiCommand::Cancel);
-            self.lua.cancel_turn_tasks();
-            self.cancel_generation = self.cancel_generation.wrapping_add(1);
-            self.busy_stack.clear();
+        match end {
+            TurnEnd::Cancelled => {
+                self.core.engine.send(UiCommand::Cancel);
+                self.lua.cancel_turn_tasks();
+                self.cancel_generation = self.cancel_generation.wrapping_add(1);
+                self.busy_stack.clear();
+            }
+            TurnEnd::Complete | TurnEnd::Errored => {}
         }
+
+        let interrupted = !matches!(end, TurnEnd::Complete);
         self.core.cells.set_dyn(
             "turn_end",
-            std::rc::Rc::new(smelt_core::cells::TurnEnd { cancelled }),
+            std::rc::Rc::new(smelt_core::cells::TurnEnd {
+                cancelled: interrupted,
+            }),
         );
         self.pump_lua();
         self.flush_streaming_thinking();
         self.flush_streaming_text();
         self.finish_transcript_turn();
-        if cancelled {
-            self.pending_history_appends.clear();
-        }
-        let start_queued =
-            !cancelled && !self.queued_inputs.is_empty() && !self.busy_stack.is_busy();
-        let finished_meta = if cancelled {
-            let meta = self.working.finish(TurnOutcome::Interrupted);
-            self.drain_queued_inputs_into_prompt();
-            meta
-        } else {
-            let meta = if start_queued {
-                self.working
-                    .finish_and_continue(TurnOutcome::Done, TurnPhase::Working)
-            } else {
-                self.working.finish(TurnOutcome::Done)
-            };
-            self.clear_prompt_prediction();
-            meta
+
+        let (meta, start_queued) = match end {
+            TurnEnd::Complete => {
+                let start_queued = !self.queued_inputs.is_empty() && !self.busy_stack.is_busy();
+                let meta = if start_queued {
+                    self.working
+                        .finish_and_continue(TurnOutcome::Done, TurnPhase::Working)
+                } else {
+                    self.working.finish(TurnOutcome::Done)
+                };
+                self.clear_prompt_prediction();
+                (meta, start_queued)
+            }
+            TurnEnd::Cancelled => {
+                self.pending_history_appends.clear();
+                let meta = self.working.finish(TurnOutcome::Interrupted);
+                self.drain_queued_inputs_into_prompt();
+                (meta, false)
+            }
+            TurnEnd::Errored => {
+                self.pending_history_appends.clear();
+                let meta = self.working.finish(TurnOutcome::Interrupted);
+                // On error the queue is preserved so the user can resubmit.
+                (meta, false)
+            }
         };
-        let meta = self.pending_turn_meta.take().unwrap_or(finished_meta);
+
+        let meta = self.pending_turn_meta.take().unwrap_or(meta);
         self.session_dirty = true;
         self.core
             .session
             .turn_metas
             .push((self.core.session.history.len(), meta));
-        if !cancelled {
+        if matches!(end, TurnEnd::Complete) {
             self.apply_pending_history_appends_for_request();
         }
         self.snapshot_accounting();
@@ -708,12 +726,14 @@ impl TuiApp {
         }
     }
 
-    /// Dispatches one engine-event control signal; returns `true` to continue draining, `false` on turn end.
+    /// Dispatches one engine-event control signal; returns the same
+    /// `SessionControl` variant so callers can decide whether to continue
+    /// draining, end the turn, or surface an error.
     pub(crate) fn dispatch_control(
         &mut self,
         ctrl: SessionControl,
         pending: &[PendingTool],
-    ) -> bool {
+    ) -> SessionControl {
         let should_queue = self
             .timers
             .last_keypress
@@ -721,8 +741,9 @@ impl TuiApp {
             && !self.prompt_buf().source().is_empty();
 
         match ctrl {
-            SessionControl::Continue => true,
-            SessionControl::Done => false,
+            SessionControl::Continue => SessionControl::Continue,
+            SessionControl::Done => SessionControl::Done,
+            SessionControl::Error => SessionControl::Error,
             SessionControl::NeedsConfirm(mut req) => {
                 if req.tool_name.is_empty() {
                     req.tool_name = pending.last().map(|p| p.name.clone()).unwrap_or_default();
@@ -738,14 +759,14 @@ impl TuiApp {
                 );
                 if outcome.decision == Decision::Allow {
                     self.send_permission_decision(req.request_id, true, None);
-                    return true;
+                    return SessionControl::Continue;
                 }
 
                 if should_queue {
                     self.set_active_status(&req.call_id, ToolStatus::Confirm);
                     self.pending_dialog = true;
                     self.pending_dialogs.push_back(DeferredDialog::Confirm(req));
-                    return true;
+                    return SessionControl::Continue;
                 }
 
                 let options = permissions.approval_options(
@@ -774,7 +795,7 @@ impl TuiApp {
                     }),
                 );
                 self.lua.fire_confirm_open(handle_id);
-                true
+                SessionControl::Continue
             }
         }
     }
