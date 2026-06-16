@@ -222,15 +222,19 @@ configuration reference for how to create and organize skills.
 
 Tools that only appear in certain modes.
 
-### `exit_plan_mode`
+### `present_plan`
 
-Plan mode only. Provided by the [`plan_mode`
-plugin](../guide/plugins.md#bundled-plugins) (opt-in — enable with
-`require("smelt.plugins.plan_mode")` in `init.lua`). Called by the agent when
-its plan is finalized and ready for your review. The confirm dialog renders
-the plan as markdown; approving either keeps the current mode or switches to
-Apply.
+Plan mode only. Built in and autoloaded by default. Called by the agent to
+present a written plan after discussion. The review dialog renders the proposed
+plan as markdown and lets you choose `save draft`, `approve` (switch to Normal),
+or `approve and apply` (switch to Apply). The transcript only shows the plan body
+after one of those options is accepted, using the same line-numbered file view as
+`write_file`. Existing drafts should be revised with file tools against the full
+saved `plan.md` path, then presented again with `plan_path`.
 
-| Parameter      | Description                                                            |
-| -------------- | ---------------------------------------------------------------------- |
-| `plan_summary` | Concise summary of the implementation plan for you to approve (required) |
+| Parameter   | Description                                                                 |
+| ----------- | --------------------------------------------------------------------------- |
+| `title`     | Human-readable plan title; required for a new artifact                      |
+| `slug`      | Kebab-case filename slug; required for a new artifact                       |
+| `plan`      | Markdown plan body; required for a new artifact                             |
+| `plan_path` | Full path to an existing saved `plan.md` to present after editing/refinement |

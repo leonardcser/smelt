@@ -1629,16 +1629,23 @@ fn hot_reload_reconciles_plan_mode_cycle_and_permissions() {
 
     assert!(app.app.core.config.mode_cycle.contains(&plan));
     let outcome = app.app.core.permissions.evaluate_tool(
-        plan,
+        plan.clone(),
         smelt_core::permissions::ToolOrigin::Lua,
         "smelt_reload",
         &std::collections::HashMap::new(),
     );
     assert_eq!(outcome.decision, protocol::Decision::Deny);
+    let outcome = app.app.core.permissions.evaluate_tool(
+        plan,
+        smelt_core::permissions::ToolOrigin::Lua,
+        "present_plan",
+        &std::collections::HashMap::new(),
+    );
+    assert_eq!(outcome.decision, protocol::Decision::Allow);
 }
 
 #[test]
-fn plan_mode_reload_registers_exit_tool_when_already_in_plan() {
+fn plan_mode_reload_registers_present_plan_when_already_in_plan() {
     let tmp = tempfile::tempdir().unwrap();
     let init = tmp.path().join("init.lua");
     std::fs::write(&init, "require(\"smelt.plugins.plan_mode\")\n").unwrap();
@@ -1650,7 +1657,7 @@ fn plan_mode_reload_registers_exit_tool_when_already_in_plan() {
         .build();
     let tools = app.app.lua.tool_defs(plan);
     assert!(
-        tools.iter().any(|t| t.name == "exit_plan_mode"),
-        "exit_plan_mode should be present after reload while already in plan"
+        tools.iter().any(|t| t.name == "present_plan"),
+        "present_plan should be present after reload while already in plan"
     );
 }

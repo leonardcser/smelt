@@ -12,10 +12,28 @@ use std::sync::Arc;
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.permissions.SessionEntry")]
 pub struct LuaPermissionSessionEntry {
-    /// Tool name the rule applies to (e.g. `"shell"`).
+    /// Tool name the rule applies to (e.g. `"bash"`). Special value `"directory"` grants generic path access.
     pub tool: String,
     /// Pattern matched against the tool's argument bucket.
     pub pattern: String,
+}
+
+/// A mode/tool-specific session path grant. Grants are in-memory only and can
+/// satisfy workspace path checks for the matching tool. Write grants also allow
+/// that tool to write under `path_prefix` in read-only modes.
+#[derive(Debug, LuaOpts)]
+#[lua(name = "smelt.permissions.SessionPathGrant")]
+pub struct LuaPermissionSessionPathGrant {
+    /// Grant kind. Currently only `"path"` is supported.
+    pub kind: String,
+    /// Mode the grant applies in, e.g. `"plan"`.
+    pub mode: String,
+    /// Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`.
+    pub tool: String,
+    /// Path access granted: `"read"` or `"write"`.
+    pub access: String,
+    /// Directory prefix covered by the grant.
+    pub path_prefix: String,
 }
 
 /// A workspace permission rule (one tool with N patterns, persisted to disk).
@@ -35,6 +53,9 @@ pub struct LuaPermissionSyncSpec {
     /// Session entries; applied for this run only.
     #[lua(default)]
     pub session: Vec<LuaPermissionSessionEntry>,
+    /// Mode/tool-specific session path grants; applied for this run only.
+    #[lua(default)]
+    pub path_grants: Vec<LuaPermissionSessionPathGrant>,
     /// Workspace rules; persisted to disk under the current cwd.
     #[lua(default)]
     pub workspace: Vec<LuaPermissionWorkspaceRule>,
@@ -118,16 +139,16 @@ pub(super) fn register(
     )?;
     m.fn_(
         "list",
-        "Return current permission rules as `{ session = { { tool, pattern } }, workspace = { { tool, patterns } } }`. Session entries come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
+        "Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = \"path\", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let (session_entries, cwd) = crate::lua::try_with_app(|app| {
+            let (session_entries, path_grants, cwd) = crate::lua::try_with_app(|app| {
                 let entries = app
                     .session_permission_entries()
                     .into_iter()
                     .map(|e| (e.tool, e.pattern))
                     .collect::<Vec<_>>();
-                (entries, app.cwd.clone())
+                (entries, app.session_path_grants(), app.cwd.clone())
             })
             .unwrap_or_default();
             let out = lua.create_table()?;
@@ -139,6 +160,17 @@ pub(super) fn register(
                 session_arr.set(i + 1, row)?;
             }
             out.set("session", session_arr)?;
+            let path_grants_arr = lua.create_table()?;
+            for (i, grant) in path_grants.into_iter().enumerate() {
+                let row = lua.create_table()?;
+                row.set("kind", "path")?;
+                row.set("mode", grant.mode.as_str())?;
+                row.set("tool", grant.tool)?;
+                row.set("access", path_access_label(&grant.access))?;
+                row.set("path_prefix", grant.dir.display().to_string())?;
+                path_grants_arr.set(i + 1, row)?;
+            }
+            out.set("path_grants", path_grants_arr)?;
             let workspace_arr = lua.create_table()?;
             for (i, rule) in crate::permissions::store::load(&cwd)
                 .into_iter()
@@ -159,7 +191,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "sync",
-        "Replace runtime + workspace permission entries with `spec.session` and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.",
+        "Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.",
         &["spec"],
         |_, spec: LuaPermissionSyncSpec| -> LuaResult<()> {
             let session_entries: Vec<smelt_core::PermissionEntry> = spec
@@ -170,6 +202,11 @@ pub(super) fn register(
                     pattern: e.pattern,
                 })
                 .collect();
+            let session_path_grants = spec
+                .path_grants
+                .into_iter()
+                .map(lua_path_grant_to_runtime)
+                .collect::<LuaResult<Vec<_>>>()?;
             let workspace_rules: Vec<crate::permissions::store::Rule> = spec
                 .workspace
                 .into_iter()
@@ -178,7 +215,21 @@ pub(super) fn register(
                     patterns: r.patterns,
                 })
                 .collect();
-            crate::lua::with_app(|app| app.sync_permissions(session_entries, workspace_rules));
+            crate::lua::with_app(|app| {
+                app.sync_permissions(session_entries, session_path_grants, workspace_rules)
+            });
+            Ok(())
+        },
+    )?;
+    m.fn_(
+        "grant_session",
+        "Add one session-scoped grant. Currently supports `{ kind = \"path\", mode, tool, access = \"read\"|\"write\", path_prefix }` for mode/tool-specific path access.",
+        &["grant"],
+        |_, grant: LuaPermissionSessionPathGrant| -> LuaResult<()> {
+            let grant = lua_path_grant_to_runtime(grant)?;
+            crate::lua::with_app(|app| {
+                app.grant_session_path(grant.mode, grant.tool, grant.access, grant.dir)
+            });
             Ok(())
         },
     )?;
@@ -234,6 +285,56 @@ pub(super) fn register(
     )?;
 
     Ok(())
+}
+
+fn lua_path_grant_to_runtime(
+    grant: LuaPermissionSessionPathGrant,
+) -> LuaResult<smelt_core::permissions::SessionPathGrant> {
+    if grant.kind != "path" {
+        return Err(LuaError::RuntimeError(format!(
+            "unsupported session grant kind `{}`",
+            grant.kind
+        )));
+    }
+    if grant.tool.is_empty() {
+        return Err(LuaError::RuntimeError(
+            "session path grant requires tool".to_string(),
+        ));
+    }
+    if grant.path_prefix.is_empty() {
+        return Err(LuaError::RuntimeError(
+            "session path grant requires path_prefix".to_string(),
+        ));
+    }
+    Ok(smelt_core::permissions::SessionPathGrant {
+        mode: parse_grant_mode(&grant.mode)?,
+        tool: grant.tool,
+        access: parse_path_access(&grant.access)?,
+        dir: std::path::PathBuf::from(grant.path_prefix),
+    })
+}
+
+fn parse_grant_mode(mode: &str) -> LuaResult<protocol::AgentMode> {
+    protocol::AgentMode::parse(mode)
+        .ok_or_else(|| LuaError::RuntimeError(format!("invalid session grant mode `{mode}`")))
+}
+
+fn parse_path_access(access: &str) -> LuaResult<smelt_core::permissions::PathAccess> {
+    match access {
+        "read" => Ok(smelt_core::permissions::PathAccess::Read),
+        "write" => Ok(smelt_core::permissions::PathAccess::Write),
+        _ => Err(LuaError::RuntimeError(format!(
+            "unsupported session path grant access `{access}`"
+        ))),
+    }
+}
+
+fn path_access_label(access: &smelt_core::permissions::PathAccess) -> &'static str {
+    match access {
+        smelt_core::permissions::PathAccess::Read => "read",
+        smelt_core::permissions::PathAccess::Write => "write",
+        smelt_core::permissions::PathAccess::Unknown => "unknown",
+    }
 }
 
 fn parse_mode(s: &str) -> protocol::AgentMode {

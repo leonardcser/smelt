@@ -7,7 +7,7 @@
 ---@class smelt.ui.layout
 local ui_layout = {}
 
---- Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `padding` (uniform inner inset on all sides, inside any border).
+--- Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `justify = "space-between"`, `padding` (uniform inner inset on all sides, inside any border).
 ---@type fun(items: table, opts: table?): smelt.ui.layout
 ui_layout.hbox = nil
 
@@ -24,7 +24,7 @@ ui_layout.measure = nil
 ---@type fun(composer: function?): nil
 ui_layout.set = nil
 
---- Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children), `padding` (uniform inner inset on all sides, inside any border).
+--- Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (minimum cells between children), `justify = "space-between"` (put surplus cells into gaps), `padding` (uniform inner inset on all sides, inside any border).
 ---@type fun(items: table, opts: table?): smelt.ui.layout
 ui_layout.vbox = nil
 

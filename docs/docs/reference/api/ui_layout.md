@@ -12,7 +12,7 @@ Composable layout-tree primitives (set/vbox/hbox/leaf) for the main TUI layout. 
 fun(items: table, opts: table?): smelt.ui.layout
 ```
 
-Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `padding` (uniform inner inset on all sides, inside any border).
+Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `justify = "space-between"`, `padding` (uniform inner inset on all sides, inside any border).
 
 ## `smelt.ui.layout.leaf`
 
@@ -46,5 +46,5 @@ Register the main layout composer. The callback receives a state table (`term_w`
 fun(items: table, opts: table?): smelt.ui.layout
 ```
 
-Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children), `padding` (uniform inner inset on all sides, inside any border).
+Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (minimum cells between children), `justify = "space-between"` (put surplus cells into gaps), `padding` (uniform inner inset on all sides, inside any border).
 

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 enum TaskWait {
     Ready(LuaMultiValue),
     Sleep(Instant),
-    External(u64),
+    External { id: u64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +59,7 @@ impl TaskCompletion {
 pub(crate) struct TaskDeadline {
     pub at: Instant,
     pub label_ms: u64,
+    pub(crate) paused_at: Option<Instant>,
 }
 
 pub(crate) struct LuaTask {
@@ -168,7 +169,7 @@ impl LuaTaskRuntime {
     /// Resolve a `TaskWait::External(id)` wait; returns `true` if found.
     pub fn resolve_external(&mut self, external_id: u64, value: LuaValue) -> bool {
         for task in &mut self.tasks {
-            if matches!(&task.wait, TaskWait::External(id) if *id == external_id) {
+            if matches!(&task.wait, TaskWait::External { id, .. } if *id == external_id) {
                 let mut mv = LuaMultiValue::new();
                 mv.push_back(value);
                 task.wait = TaskWait::Ready(mv);
@@ -187,7 +188,7 @@ impl LuaTaskRuntime {
         for task in &mut self.tasks {
             if task.id == id {
                 task.cancel.cancel();
-                if matches!(&task.wait, TaskWait::Sleep(_) | TaskWait::External(_)) {
+                if matches!(&task.wait, TaskWait::Sleep(_) | TaskWait::External { .. }) {
                     let mut mv = LuaMultiValue::new();
                     mv.push_back(marker);
                     task.wait = TaskWait::Ready(mv);
@@ -214,7 +215,7 @@ impl LuaTaskRuntime {
             }
             task.cancel.cancel();
             match &task.wait {
-                TaskWait::Sleep(_) | TaskWait::External(_) => {
+                TaskWait::Sleep(_) | TaskWait::External { .. } => {
                     let mut mv = LuaMultiValue::new();
                     mv.push_back(marker.clone());
                     task.wait = TaskWait::Ready(mv);
@@ -248,14 +249,8 @@ impl LuaTaskRuntime {
     /// that re-enters the runtime (e.g. `smelt.spawn` from inside a coroutine)
     /// can acquire the lock synchronously instead of deadlocking.
     pub(crate) fn take_next_ready(&mut self, now: Instant) -> Option<LuaTask> {
-        let idx = self.tasks.iter().position(|t| {
-            t.timed_out(now)
-                || match &t.wait {
-                    TaskWait::Ready(_) => true,
-                    TaskWait::Sleep(deadline) => t.cancel.is_cancelled() || *deadline <= now,
-                    TaskWait::External(_) => false,
-                }
-        })?;
+        let idx = self.tasks.iter().position(|t| t.ready_at(now))?;
+        self.tasks[idx].resume_deadline_if_paused(now);
         Some(self.tasks.swap_remove(idx))
     }
 
@@ -284,7 +279,33 @@ impl LuaTaskRuntime {
 
 impl LuaTask {
     fn timed_out(&self, now: Instant) -> bool {
-        self.deadline.is_some_and(|deadline| deadline.at <= now)
+        self.deadline
+            .is_some_and(|deadline| deadline.paused_at.is_none() && deadline.at <= now)
+    }
+
+    fn ready_at(&self, now: Instant) -> bool {
+        self.timed_out(now)
+            || match &self.wait {
+                TaskWait::Ready(_) => true,
+                TaskWait::Sleep(deadline) => self.cancel.is_cancelled() || *deadline <= now,
+                TaskWait::External { .. } => false,
+            }
+    }
+
+    fn pause_deadline(&mut self, now: Instant) {
+        if let Some(deadline) = &mut self.deadline {
+            if deadline.paused_at.is_none() {
+                deadline.paused_at = Some(now);
+            }
+        }
+    }
+
+    fn resume_deadline_if_paused(&mut self, now: Instant) {
+        if let Some(deadline) = &mut self.deadline {
+            if let Some(paused_at) = deadline.paused_at.take() {
+                deadline.at += now.saturating_duration_since(paused_at);
+            }
+        }
     }
 
     fn timeout_message(&self) -> String {
@@ -313,7 +334,7 @@ pub(crate) fn step_task_owned(
     {
         TaskWait::Ready(mv) => mv,
         TaskWait::Sleep(_) => LuaMultiValue::new(),
-        TaskWait::External(_) => LuaMultiValue::new(),
+        TaskWait::External { .. } => LuaMultiValue::new(),
     };
     let cancel = task.cancel.clone();
     let queue_target = task.completion.command_queue_target();
@@ -357,13 +378,19 @@ pub(crate) fn step_task_owned(
                     }
                     Some(task)
                 }
-                Ok(Yield::External(id)) => {
+                Ok(Yield::External {
+                    id,
+                    pauses_deadline,
+                }) => {
                     if task.cancel.is_cancelled() {
                         let mut mv = LuaMultiValue::new();
                         mv.push_back(cancelled_marker(lua));
                         task.wait = TaskWait::Ready(mv);
                     } else {
-                        task.wait = TaskWait::External(id);
+                        if pauses_deadline {
+                            task.pause_deadline(now);
+                        }
+                        task.wait = TaskWait::External { id };
                     }
                     Some(task)
                 }
@@ -479,7 +506,7 @@ impl Default for LuaTaskRuntime {
 
 enum Yield {
     Sleep(Duration),
-    External(u64),
+    External { id: u64, pauses_deadline: bool },
 }
 
 fn decode_yield(_lua: &Lua, v: LuaValue) -> Result<Yield, String> {
@@ -499,7 +526,16 @@ fn decode_yield(_lua: &Lua, v: LuaValue) -> Result<Yield, String> {
         }
         "external" => {
             let id: u64 = table.get("id").map_err(|e| format!("external: {e}"))?;
-            Ok(Yield::External(id))
+            let pauses_deadline = table
+                .get::<Option<bool>>("pauses_deadline")
+                .ok()
+                .flatten()
+                .or_else(|| table.get::<Option<bool>>("interactive").ok().flatten())
+                .unwrap_or(false);
+            Ok(Yield::External {
+                id,
+                pauses_deadline,
+            })
         }
         other => Err(format!("unknown yield kind: {other}")),
     }
@@ -562,6 +598,88 @@ mod tests {
         let out = rt.drive(&lua, Instant::now());
         assert!(out.is_empty());
         assert_eq!(rt.tasks.len(), 0);
+    }
+
+    #[test]
+    fn noninteractive_external_wait_counts_against_deadline() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        let func: mlua::Function = lua
+            .load(
+                r#"function()
+                coroutine.yield({__yield = "external", id = 7})
+                return "done"
+              end"#,
+            )
+            .eval()
+            .unwrap();
+        let t0 = Instant::now();
+        rt.spawn_scoped(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+            TaskScope::Turn,
+            Some(TaskDeadline {
+                at: t0 + Duration::from_millis(100),
+                label_ms: 100,
+                paused_at: None,
+            }),
+        )
+        .unwrap();
+
+        assert!(rt.drive(&lua, t0).is_empty());
+        assert_eq!(rt.tasks.len(), 1);
+        assert!(matches!(rt.tasks[0].wait, TaskWait::External { id: 7, .. }));
+
+        let out = rt.drive(&lua, t0 + Duration::from_millis(101));
+        assert!(
+            matches!(out.as_slice(), [TaskDriveOutput::Error(msg)] if msg.contains("timed out"))
+        );
+        assert!(rt.tasks.is_empty());
+    }
+
+    #[test]
+    fn interactive_external_wait_pauses_deadline() {
+        let lua = lua_with_sleep();
+        let mut rt = LuaTaskRuntime::new();
+        let func: mlua::Function = lua
+            .load(
+                r#"function()
+                coroutine.yield({__yield = "external", id = 7, interactive = true})
+                return "done"
+              end"#,
+            )
+            .eval()
+            .unwrap();
+        let t0 = Instant::now();
+        rt.spawn_scoped(
+            &lua,
+            func,
+            LuaMultiValue::new(),
+            TaskCompletion::FireAndForget,
+            TaskScope::Turn,
+            Some(TaskDeadline {
+                at: t0 + Duration::from_millis(100),
+                label_ms: 100,
+                paused_at: None,
+            }),
+        )
+        .unwrap();
+
+        assert!(rt.drive(&lua, t0).is_empty());
+        assert_eq!(rt.tasks.len(), 1);
+        assert!(rt.tasks[0]
+            .deadline
+            .is_some_and(|deadline| deadline.paused_at == Some(t0)));
+
+        assert!(rt.drive(&lua, t0 + Duration::from_millis(1_000)).is_empty());
+        assert_eq!(rt.tasks.len(), 1);
+
+        assert!(rt.resolve_external(7, LuaValue::Nil));
+        let out = rt.drive(&lua, t0 + Duration::from_millis(1_000));
+        assert!(out.is_empty());
+        assert!(rt.tasks.is_empty());
     }
 
     #[test]
@@ -762,7 +880,10 @@ mod tests {
         let out = rt.drive(&lua, Instant::now());
         assert!(out.is_empty());
         assert_eq!(rt.tasks.len(), 1);
-        assert!(matches!(rt.tasks[0].wait, TaskWait::External(42)));
+        assert!(matches!(
+            rt.tasks[0].wait,
+            TaskWait::External { id: 42, .. }
+        ));
 
         // Cancel all tasks.
         rt.cancel_all(&lua);

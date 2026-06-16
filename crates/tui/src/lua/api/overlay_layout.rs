@@ -11,7 +11,7 @@
 //! `"min:N"`, `"max:N"`, `"pct:N"`, `"ratio:N/M"`, or the long table form
 //! `{ kind = "...", n = N }`.
 
-use crate::smelt_edit::layout::Border;
+use crate::smelt_edit::layout::{Border, Justify};
 use crate::smelt_edit::{Constraint, LayoutTree, Natural, NaturalRef, StaticNatural};
 use mlua::prelude::*;
 use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
@@ -118,6 +118,7 @@ pub(crate) struct NodeChrome {
     pub border: Option<Border>,
     pub title: Option<Line<'static>>,
     pub padding: u16,
+    pub justify: Justify,
 }
 
 /// One slot inside a `Container`. `constraint` sizes the slot along the
@@ -216,10 +217,20 @@ fn parse_node_chrome(opts: Option<&mlua::Table>, ctx: &str) -> Result<NodeChrome
     let title = crate::lua::parse::title(t.get::<mlua::Value>("title").ok())
         .map_err(|e| format!("{ctx}.title: {e}"))?;
     let padding = t.get::<u16>("padding").unwrap_or(0);
+    let justify = match t.get::<Option<String>>("justify").ok().flatten().as_deref() {
+        None | Some("start") => Justify::Start,
+        Some("space-between") | Some("space_between") => Justify::SpaceBetween,
+        Some(other) => {
+            return Err(format!(
+                "{ctx}.justify: unknown value '{other}' (expected start|space-between)"
+            ))
+        }
+    };
     Ok(NodeChrome {
         border,
         title,
         padding,
+        justify,
     })
 }
 
@@ -286,7 +297,7 @@ pub(crate) fn register_layout_constructors(m: &LuaMod) -> LuaResult<()> {
 
     m.fn_(
         "vbox",
-        "Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (cells between children), `padding` (uniform inner inset on all sides, inside any border).",
+        "Vertical container. `items` is an array of `{ child_layout, height = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap` (minimum cells between children), `justify = \"space-between\"` (put surplus cells into gaps), `padding` (uniform inner inset on all sides, inside any border).",
         &["items", "opts"],
         |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let items = parse_items(&items_tbl, "height", CTX)?;
@@ -306,7 +317,7 @@ pub(crate) fn register_layout_constructors(m: &LuaMod) -> LuaResult<()> {
 
     m.fn_(
         "hbox",
-        "Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `padding` (uniform inner inset on all sides, inside any border).",
+        "Horizontal container. `items` is an array of `{ child_layout, width = <constraint>, collapse_when_empty = bool? }`. `opts` accepts `border`, `title`, `gap`, `justify = \"space-between\"`, `padding` (uniform inner inset on all sides, inside any border).",
         &["items", "opts"],
         |_, (items_tbl, opts): (mlua::Table, Option<mlua::Table>)| -> LuaResult<LuaUiLayout> {
             let items = parse_items(&items_tbl, "width", CTX)?;
@@ -401,6 +412,7 @@ pub(crate) fn build_layout_tree(
             if *gap > 0 {
                 tree = tree.with_gap(*gap);
             }
+            tree = tree.with_justify(chrome.justify);
             if chrome.padding > 0 {
                 tree = tree.with_padding(chrome.padding);
             }

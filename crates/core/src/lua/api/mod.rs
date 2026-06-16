@@ -24,6 +24,7 @@ mod grep;
 mod html;
 mod http;
 mod image;
+mod json;
 pub mod layout;
 mod lifecycle;
 mod log;
@@ -101,7 +102,7 @@ pub fn lua_table_to_json(lua: &Lua, table: &mlua::Table) -> serde_json::Value {
     }
 }
 
-fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
+pub fn lua_value_to_json(lua: &Lua, val: &mlua::Value) -> serde_json::Value {
     match val {
         mlua::Value::Nil => serde_json::Value::Null,
         mlua::Value::Boolean(b) => serde_json::Value::Bool(*b),
@@ -145,6 +146,7 @@ pub fn register_host_api(
     html::register(lua, smelt)?;
     http::register(lua, smelt, shared)?;
     image::register(lua, smelt, shared)?;
+    json::register(lua, smelt)?;
     layout::register(lua, smelt)?;
     lifecycle::register(lua, smelt, shared)?;
     log::register(lua, smelt)?;

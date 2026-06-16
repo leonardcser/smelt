@@ -15,7 +15,11 @@ permissions.check = nil
 ---@type fun(mode_str: string, name: string): string
 permissions.check_tool = nil
 
---- Return current permission rules as `{ session = { { tool, pattern } }, workspace = { { tool, patterns } } }`. Session entries come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.
+--- Add one session-scoped grant. Currently supports `{ kind = "path", mode, tool, access = "read"|"write", path_prefix }` for mode/tool-specific path access.
+---@type fun(grant: smelt.permissions.SessionPathGrant): nil
+permissions.grant_session = nil
+
+--- Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.
 ---@type fun(): table
 permissions.list = nil
 
@@ -24,7 +28,7 @@ permissions.list = nil
 ---@type fun(spec: smelt.permissions.RulesSpec): nil
 permissions.set_rules = nil
 
---- Replace runtime + workspace permission entries with `spec.session` and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.
+--- Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.
 ---@type fun(spec: smelt.permissions.SyncSpec): nil
 permissions.sync = nil
 

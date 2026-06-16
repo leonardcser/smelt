@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* present_plan Parser refactor
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                               1:1 100%

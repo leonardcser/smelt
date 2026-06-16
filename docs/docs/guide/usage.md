@@ -13,20 +13,18 @@ The agent streams its response and may call tools along the way.
 
 ## Modes
 
-Smelt ships with three modes by default, each with different permission defaults. Press
+Smelt ships with four modes by default, each with different permission defaults. Press
 `Shift+Tab` to cycle through them. Modes let you change the agent's
-behaviour to match the task: stay cautious in Normal mode, speed through
-routine edits in Apply mode, or stay hands-off on a trusted codebase in Yolo mode.
+behaviour to match the task: stay cautious in Normal mode, draft a durable plan
+without code changes in Plan mode, speed through routine edits in Apply mode, or
+stay hands-off on a trusted codebase in Yolo mode.
 
 | Mode       | What it does                                                                                 |
 | ---------- | -------------------------------------------------------------------------------------------- |
 | **Normal** | Default. Asks before editing files or running commands. Read tools are auto-allowed.         |
+| **Plan**   | Read-only planning mode. Saves drafts with `present_plan`; writes are denied except saved plan drafts. |
 | **Apply**  | File edits are auto-approved. Bash still asks.                                               |
 | **Yolo**   | Everything auto-approved. You can still deny specific patterns via config.                   |
-
-Plan mode is available as an optional plugin. Add `require("smelt.plugins.plan_mode")`
-to `~/.config/smelt/init.lua` to register the `plan` mode after Normal, enable its
-read-only prompt behavior, and add the `exit_plan_mode` tool.
 
 The current mode is shown in the status bar. Set the starting mode with
 `--mode`, and customize which modes appear in the cycle with `--mode-cycle`.

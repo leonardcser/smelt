@@ -1,5 +1,219 @@
 use super::*;
 
+fn tool_result<'a>(app: &'a TestApp, call_id: &str) -> Option<(&'a str, bool)> {
+    app.actions().iter().rev().find_map(|action| match action {
+        Action::EngineSend(cmd) => match cmd.as_ref() {
+            protocol::UiCommand::ToolResult {
+                call_id: id,
+                content,
+                is_error,
+                ..
+            } if id == call_id => Some((content.as_str(), *is_error)),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+#[test]
+fn present_plan_save_draft_writes_artifact_and_manifest() {
+    let home_guard = test_home_guard();
+    let mut app = TestApp::builder()
+        .with_vim(false)
+        .build_with_test_home_guard(&home_guard);
+    app.start_turn(1);
+
+    let mut args = std::collections::HashMap::new();
+    args.insert("title".into(), serde_json::json!("Parser plan"));
+    args.insert("slug".into(), serde_json::json!("parser-plan"));
+    args.insert(
+        "plan".into(),
+        serde_json::json!("# Goal\nShip the parser change.\n"),
+    );
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+        request_id: 91,
+        call_id: "plan-draft".into(),
+        tool_name: "present_plan".into(),
+        args,
+    }));
+    assert!(app.state().focused_overlay.is_some());
+
+    assert!(app.run_lua(r#"smelt.dialog.current().resolve("draft")"#));
+    drive_lua_tasks(&mut app);
+
+    let (content, is_error) = tool_result(&app, "plan-draft").expect("present_plan result");
+    assert!(!is_error, "{content}");
+    let plan_path = content
+        .lines()
+        .find_map(|line| line.strip_prefix("Wrote plan to "))
+        .expect("result includes plan path");
+    assert!(plan_path.ends_with("/plan.md"));
+    assert_eq!(
+        std::fs::read_to_string(plan_path).unwrap(),
+        "# Goal\nShip the parser change.\n"
+    );
+
+    let artifact_dir = std::path::Path::new(plan_path).parent().unwrap();
+    let artifact_dir = std::fs::canonicalize(artifact_dir).unwrap();
+    let grants = app.app.session_path_grants();
+    assert!(grants.iter().any(|grant| {
+        grant.mode.as_str() == "plan"
+            && grant.tool == "read_file"
+            && grant.access == smelt_core::permissions::PathAccess::Read
+            && grant.dir == artifact_dir
+    }));
+    assert!(grants.iter().any(|grant| {
+        grant.mode.as_str() == "plan"
+            && grant.tool == "edit_file"
+            && grant.access == smelt_core::permissions::PathAccess::Write
+            && grant.dir == artifact_dir
+    }));
+
+    let manifest_path = artifact_dir.join("manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["kind"], "smelt.plan");
+    assert_eq!(manifest["status"], "draft");
+    assert_eq!(manifest["title"], "Parser plan");
+    assert_eq!(manifest["slug"], "parser-plan");
+}
+
+#[test]
+fn present_plan_existing_path_approves_without_overwriting_plan_body() {
+    let home_guard = test_home_guard();
+    let mut app = TestApp::builder()
+        .with_vim(false)
+        .build_with_test_home_guard(&home_guard);
+    app.start_turn(1);
+
+    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let artifact_dir = session_dir.join("plans/20260101-000000-parser-plan");
+    std::fs::create_dir_all(&artifact_dir).unwrap();
+    let plan_path = artifact_dir.join("plan.md");
+    std::fs::write(&plan_path, "# Revised\nUse the existing draft.\n").unwrap();
+    std::fs::write(
+        artifact_dir.join("manifest.json"),
+        serde_json::json!({
+            "version": 1,
+            "kind": "smelt.plan",
+            "title": "Parser plan",
+            "slug": "parser-plan",
+            "status": "draft",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "plan_path": "plan.md"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let mut args = std::collections::HashMap::new();
+    args.insert(
+        "plan_path".into(),
+        serde_json::json!(plan_path.to_string_lossy().to_string()),
+    );
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+        request_id: 92,
+        call_id: "plan-approve".into(),
+        tool_name: "present_plan".into(),
+        args,
+    }));
+    assert!(app.state().focused_overlay.is_some());
+
+    app.press(KeyCode::Char('2'));
+    drive_lua_tasks(&mut app);
+
+    let (content, is_error) = tool_result(&app, "plan-approve").expect("present_plan result");
+    assert!(!is_error, "{content}");
+    assert!(content.contains("Wrote plan to "));
+    assert_eq!(
+        std::fs::read_to_string(&plan_path).unwrap(),
+        "# Revised\nUse the existing draft.\n"
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(artifact_dir.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["status"], "approved");
+    assert_eq!(manifest["created_at"], "2026-01-01T00:00:00Z");
+}
+
+#[test]
+fn present_plan_dismiss_does_not_echo_plan_body() {
+    let home_guard = test_home_guard();
+    let mut app = TestApp::builder()
+        .with_vim(false)
+        .build_with_test_home_guard(&home_guard);
+    app.start_turn(1);
+
+    let mut args = std::collections::HashMap::new();
+    args.insert("title".into(), serde_json::json!("Parser plan"));
+    args.insert("slug".into(), serde_json::json!("parser-plan"));
+    args.insert(
+        "plan".into(),
+        serde_json::json!("# Secret draft\nDo not keep this transcript copy.\n"),
+    );
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+        request_id: 94,
+        call_id: "plan-dismiss".into(),
+        tool_name: "present_plan".into(),
+        args,
+    }));
+    assert!(app.state().focused_overlay.is_some());
+
+    app.press(KeyCode::Esc);
+    drive_lua_tasks(&mut app);
+
+    let (content, is_error) = tool_result(&app, "plan-dismiss").expect("present_plan result");
+    assert!(is_error);
+    assert!(content.contains("Plan dismissed"));
+    assert!(!content.contains("Secret draft"));
+    assert!(!content.contains("Do not keep this transcript copy"));
+}
+
+#[test]
+fn present_plan_dialog_tracks_terminal_width_on_resize() {
+    let home_guard = test_home_guard();
+    let mut app = TestApp::builder()
+        .with_vim(false)
+        .build_with_test_home_guard(&home_guard);
+    app.start_turn(1);
+
+    let mut args = std::collections::HashMap::new();
+    args.insert("title".into(), serde_json::json!("Parser plan"));
+    args.insert("slug".into(), serde_json::json!("parser-plan"));
+    args.insert(
+        "plan".into(),
+        serde_json::json!("# Goal\nShip the parser change.\n"),
+    );
+
+    app.feed_one(SourceEvent::Engine(EngineEvent::ToolDispatch {
+        request_id: 93,
+        call_id: "plan-resize".into(),
+        tool_name: "present_plan".into(),
+        args,
+    }));
+    assert!(app.state().focused_overlay.is_some());
+
+    let before = app.render_to_frame();
+    assert!(before
+        .text()
+        .lines()
+        .any(|line| line.starts_with("─ plan ")));
+
+    app.set_terminal_size(100, 24);
+    let after = app.render_to_frame();
+    let text = after.text();
+    let title_row = text
+        .lines()
+        .find(|line| line.starts_with("─ plan "))
+        .expect("dialog title row after resize");
+    assert_eq!(title_row.chars().count(), 100);
+}
+
 #[test]
 fn ask_user_question_multiple_questions_wakes_between_dialogs() {
     let mut app = TestApp::builder().with_vim(false).build();

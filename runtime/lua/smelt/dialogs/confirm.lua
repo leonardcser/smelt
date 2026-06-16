@@ -165,6 +165,8 @@ function smelt.confirm.open(handle_id)
       { leaf = header_leaf,  height = "fit"                              },
       { leaf = preview_leaf, height = "fit", collapse_when_empty = true,
         border = has_preview and { style = "dashed", top = "Comment", bottom = "Comment" } or nil },
+    },
+    bottom_panels = {
       { leaf = allow_leaf,   height = "fit"                              },
       { leaf = options_leaf, height = "fit"                              },
       { leaf = spacer_leaf,  height = "fit"                              },

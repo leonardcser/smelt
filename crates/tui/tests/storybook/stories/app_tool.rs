@@ -25,6 +25,42 @@ app_story!(tool_call_then_result_pair, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(present_plan_tool_pending_title_only, |ctx| {
+    ctx.set_viewport(80, 10);
+    ctx.tool_started(
+        "present_plan",
+        &[
+            ("title", json!("Parser refactor")),
+            ("slug", json!("parser-refactor")),
+            (
+                "plan",
+                json!("# Goal\nRefactor parser state.\n\n# Verification\nRun parser tests."),
+            ),
+        ],
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(present_plan_tool_block, |ctx| {
+    // The built-in `plan_mode` plugin renders accepted `present_plan` results as
+    // the saved `plan.md` file, matching the line-numbered `write_file` chrome.
+    ctx.set_viewport(80, 20);
+    ctx.tool_call(
+        "present_plan",
+        &[
+            ("title", json!("Parser refactor")),
+            ("slug", json!("parser-refactor")),
+            (
+                "plan",
+                json!("# Goal\nRefactor parser state.\n\n```rust\nfn parse(input: &str) -> Ast {\n    todo!()\n}\n```\n\n# Verification\nRun parser tests."),
+            ),
+        ],
+        "Wrote plan to /tmp/smelt/sessions/sess/plans/20260101-000000-parser-refactor/plan.md",
+        Some(9),
+    );
+    ctx.assert_snapshot();
+});
+
 // ── edit_file ─────────────────────────────────────────────────────
 
 app_story!(edit_file_tool_block_with_diff_gutter, |ctx| {

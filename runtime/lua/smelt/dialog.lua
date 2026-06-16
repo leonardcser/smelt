@@ -105,11 +105,14 @@ local GUTTER = 1
 ---@class smelt.dialog.Opts
 ---@field title? string Title rendered in the chrome row.
 ---@field panels smelt.dialog.Panel[] Ordered list of body panels.
+---@field bottom_panels? smelt.dialog.Panel[] Panels pinned to the bottom with at least one blank row between them and `panels`. Extra height is placed in that gap.
+---@field bottom_gap? integer Minimum blank rows between `panels` and `bottom_panels` (default 1).
 ---@field focus? smelt.win.Win Leaf that should receive initial focus.
 ---@field height? any Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`.
 ---@field max_height? any Shrink-to-content cap that pairs with `min_height`.
 ---@field min_height? any Floor for the body size (defaults to `"30%"` in fit mode).
 ---@field blocks_agent? boolean Block the agent loop while the dialog is open. Defaults to `false`.
+---@field border? table Top border style override; defaults to `{ top = "SmeltAccent" }`.
 ---@field resizable? boolean Set `false` to disable the default top-edge resize handle.
 ---@field keymaps? smelt.dialog.Keymap[] Dialog-level key bindings (merged with built-ins).
 ---@field on_submit? fun(ctx: any): any Handler invoked on Enter; default resolves with the focused leaf.
@@ -250,11 +253,9 @@ local function normalize_items(items)
     if type(it) == "string" then
       entry = { label = it }
     elseif type(it) == "table" then
-      entry = {
-        label       = it.label or "",
-        description = it.description,
-        key         = it.key,
-      }
+      entry = {}
+      for k, v in pairs(it) do entry[k] = v end
+      entry.label = entry.label or ""
       if entry.description and entry.description ~= "" then
         has_descriptions = true
       end
@@ -578,25 +579,32 @@ local function open_overlay(opts)
   -- out entirely).
   local default_min_height = fit_mode and "30%" or nil
 
-  local panels = opts.panels or {}
-  if #panels == 0 then
-    error("smelt.dialog: panels must be non-empty", 3)
+  local top_panels = opts.panels or {}
+  local bottom_panels = opts.bottom_panels or {}
+  if #top_panels == 0 and #bottom_panels == 0 then
+    error("smelt.dialog: panels or bottom_panels must be non-empty", 3)
   end
 
   local leaves = {}
-  local layout_items = {}
-  for i, p in ipairs(panels) do
-    if type(p) ~= "table" or p.leaf == nil then
-      error("smelt.dialog: panel " .. i .. " requires a `leaf`", 3)
+  local function build_layout_items(panels, start_index)
+    local layout_items = {}
+    for i, p in ipairs(panels) do
+      if type(p) ~= "table" or p.leaf == nil then
+        error("smelt.dialog: panel " .. (start_index + i - 1) .. " requires a `leaf`", 3)
+      end
+      leaves[#leaves + 1] = p.leaf
+      local leaf_node = smelt.ui.layout.leaf(p.leaf, {
+        border              = p.border,
+        title               = p.title,
+        collapse_when_empty = p.collapse_when_empty or false,
+      })
+      layout_items[i] = { leaf_node, height = p.height or default_panel_height }
     end
-    leaves[i] = p.leaf
-    local leaf_node = smelt.ui.layout.leaf(p.leaf, {
-      border              = p.border,
-      title               = p.title,
-      collapse_when_empty = p.collapse_when_empty or false,
-    })
-    layout_items[i] = { leaf_node, height = p.height or default_panel_height }
+    return layout_items
   end
+
+  local top_items = build_layout_items(top_panels, 1)
+  local bottom_items = build_layout_items(bottom_panels, #top_panels + 1)
 
   -- The wrapper is responsible for the single-cell gutter on each side of the
   -- title content. Callers MUST NOT pad - pass `"messages"` not `" messages "`,
@@ -619,7 +627,15 @@ local function open_overlay(opts)
     end
   end
 
-  local panel_vbox = smelt.ui.layout.vbox(layout_items)
+  local panel_vbox
+  if #top_items > 0 and #bottom_items > 0 then
+    panel_vbox = smelt.ui.layout.vbox({
+      { smelt.ui.layout.vbox(top_items),    height = "fit" },
+      { smelt.ui.layout.vbox(bottom_items), height = "fit" },
+    }, { gap = opts.bottom_gap or 1, justify = "space-between" })
+  else
+    panel_vbox = smelt.ui.layout.vbox(#top_items > 0 and top_items or bottom_items)
+  end
 
   -- fixed: width = "100%", height = opts.height (or "60%" default)
   -- fit:   width = "100%", height = "fit", max_height = opts.max_height
@@ -640,7 +656,7 @@ local function open_overlay(opts)
     title        = title,
     anchor       = "dock_bottom",
     above_rows   = statusline.rows or 0,
-    border       = { top = "SmeltAccent" },
+    border       = opts.border or { top = "SmeltAccent" },
     modal        = true,
     blocks_agent = opts.blocks_agent or false,
     draggable    = false,
@@ -807,7 +823,7 @@ function smelt.dialog.open(opts)
   setup_lifecycle(opts, leaves, overlay, function(value)
     smelt.task.resume(task_id, value)
   end)
-  return smelt.task.wait(task_id)
+  return smelt.task.wait(task_id, { interactive = true })
 end
 
 -- ── Picker preset ─────────────────────────────────────────────────────

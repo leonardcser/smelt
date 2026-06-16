@@ -83,8 +83,11 @@ unwinds). Must run inside a yielding context.
 ## `smelt.task.wait`
 
 ```lua
-fun(id: integer): any
+fun(id: integer, opts?: table): any
 ```
 
 Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
+Pass `{ interactive = true }` (or `{ pauses_deadline = true }`) for user-facing
+waits such as dialogs; tool watchdog deadlines do not count wall time spent
+waiting for the user.
 

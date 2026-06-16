@@ -25,6 +25,16 @@ pub(crate) fn color_opt(v: Option<mlua::Value>) -> Result<Option<Color>, String>
             color_str(&raw).map(Some)
         }
         Some(mlua::Value::Table(t)) => {
+            if let Ok(Some(ansi)) = t.get::<Option<u8>>("ansi") {
+                return Ok(Some(Color::AnsiValue(ansi)));
+            }
+            if let Ok(Some(rgb)) = t.get::<Option<[u8; 3]>>("rgb") {
+                return Ok(Some(Color::Rgb {
+                    r: rgb[0],
+                    g: rgb[1],
+                    b: rgb[2],
+                }));
+            }
             let r: u8 = t.get("r").map_err(|e| format!("color.r: {e}"))?;
             let g: u8 = t.get("g").map_err(|e| format!("color.g: {e}"))?;
             let b: u8 = t.get("b").map_err(|e| format!("color.b: {e}"))?;

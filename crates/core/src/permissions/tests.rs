@@ -1099,6 +1099,42 @@ fn session_dir_approval_covers_resolved_bash_cd_paths() {
 }
 
 #[test]
+fn session_path_grant_covers_matching_outside_workspace_tool_path() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with("file_path", "/tmp/plan.md");
+
+    let before = p.evaluate_tool(normal(), ToolOrigin::Lua, "read_file", &args);
+    assert_eq!(before.decision, Decision::Ask);
+
+    p.approvals.write().unwrap().add_session_path_grant(
+        normal(),
+        "read_file",
+        PathAccess::Read,
+        PathBuf::from("/tmp"),
+    );
+
+    let after = p.evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "read_file", &args);
+    assert_eq!(after.decision, Decision::Allow);
+    assert!(after.missing_requirements.is_empty());
+}
+
+#[test]
+fn session_path_grant_does_not_cover_other_outside_workspace_tools() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with("file_path", "/tmp/plan.md");
+
+    p.approvals.write().unwrap().add_session_path_grant(
+        normal(),
+        "edit_file",
+        PathAccess::Read,
+        PathBuf::from("/tmp"),
+    );
+
+    let outcome = p.evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "read_file", &args);
+    assert_eq!(outcome.decision, Decision::Ask);
+}
+
+#[test]
 fn yolo_outside_workspace_dialog_offers_dir_not_command_pattern() {
     let p = perms_with_workspace("/home/user/project");
     let command = "rm -rf /tmp/foo";
@@ -1490,6 +1526,113 @@ fn read_only_mode_classifies_mcp_by_name() {
             "tool={tool}"
         );
     }
+}
+
+#[test]
+fn read_only_mode_allows_session_approved_path_grant_edits() {
+    let p = read_only_permissions();
+    let temp = tempfile::tempdir().unwrap();
+    let artifact_dir = temp.path().join("session/plans/20260101-000000-demo");
+    std::fs::create_dir_all(&artifact_dir).unwrap();
+    let plan_path = artifact_dir.join("plan.md");
+    std::fs::write(&plan_path, "# Plan\n").unwrap();
+    let args = args_with("file_path", plan_path.to_str().unwrap());
+
+    assert_eq!(decide(&p, plan(), "edit_file", &args), Decision::Deny);
+
+    p.approvals.write().unwrap().add_session_path_grant(
+        plan(),
+        "edit_file",
+        PathAccess::Write,
+        artifact_dir.clone(),
+    );
+
+    let outcome = p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args);
+    assert_eq!(outcome.decision, Decision::Allow);
+    assert!(outcome.missing_requirements.is_empty());
+}
+
+#[test]
+fn read_only_mode_generic_directory_approval_does_not_allow_writes() {
+    let p = read_only_permissions();
+    let temp = tempfile::tempdir().unwrap();
+    let approved_dir = temp.path().join("approved");
+    std::fs::create_dir_all(&approved_dir).unwrap();
+    let args = args_with("file_path", approved_dir.join("notes.md").to_str().unwrap());
+
+    p.approvals
+        .write()
+        .unwrap()
+        .add_session_dir(approved_dir.clone());
+
+    let outcome = p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args);
+    assert_eq!(outcome.decision, Decision::Deny);
+}
+
+#[test]
+fn read_only_mode_path_grants_are_mode_and_tool_scoped() {
+    let p = read_only_permissions();
+    let temp = tempfile::tempdir().unwrap();
+    let approved_dir = temp.path().join("approved");
+    std::fs::create_dir_all(&approved_dir).unwrap();
+    let args = args_with("file_path", approved_dir.join("notes.md").to_str().unwrap());
+
+    p.approvals.write().unwrap().add_session_path_grant(
+        normal(),
+        "edit_file",
+        PathAccess::Write,
+        approved_dir.clone(),
+    );
+    assert_eq!(
+        p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args)
+            .decision,
+        Decision::Deny
+    );
+
+    p.approvals.write().unwrap().add_session_path_grant(
+        plan(),
+        "write_file",
+        PathAccess::Write,
+        approved_dir.clone(),
+    );
+    assert_eq!(
+        p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args)
+            .decision,
+        Decision::Deny
+    );
+}
+
+#[test]
+fn read_only_mode_keeps_unapproved_or_shell_writes_denied() {
+    let p = read_only_permissions();
+    let temp = tempfile::tempdir().unwrap();
+    let artifact_dir = temp.path().join("session/plans/20260101-000000-demo");
+    let sibling_dir = temp.path().join("session/plans/20260101-000000-other");
+    std::fs::create_dir_all(&artifact_dir).unwrap();
+    std::fs::create_dir_all(&sibling_dir).unwrap();
+    p.approvals.write().unwrap().add_session_path_grant(
+        plan(),
+        "edit_file",
+        PathAccess::Write,
+        artifact_dir.clone(),
+    );
+
+    let sibling_args = args_with("file_path", sibling_dir.join("plan.md").to_str().unwrap());
+    assert_eq!(
+        p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &sibling_args)
+            .decision,
+        Decision::Deny
+    );
+
+    let shell_args = args_with(
+        "command",
+        &format!("echo hi > {}", artifact_dir.join("plan.md").display()),
+    );
+    assert_eq!(
+        p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "bash", &shell_args)
+            .decision,
+        Decision::Deny
+    );
 }
 
 // --- output redirection escalation ---
@@ -2237,7 +2380,7 @@ fn approvals_set_session_replaces_existing_session_entries() {
     rt.add_session_tool("bash", vec![pat("a *")]);
     let mut tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
     tools.insert("bash".into(), vec![pat("z *")]);
-    rt.set_session(tools, vec![PathBuf::from("/srv")]);
+    rt.set_session(tools, vec![PathBuf::from("/srv")], vec![]);
     assert!(rt.has_pattern("bash", "z *"));
     assert!(!rt.has_pattern("bash", "a *"));
 }
@@ -2281,6 +2424,47 @@ fn approvals_dirs_approved_checks_parent_prefix_match() {
 }
 
 #[test]
+fn approvals_session_path_grants_are_specific_to_mode_tool_access() {
+    let mut rt = RuntimeApprovals::new();
+    rt.add_session_path_grant(
+        plan(),
+        "edit_file",
+        PathAccess::Write,
+        PathBuf::from("/session/plans/20260101-demo"),
+    );
+    assert!(rt.session_path_grant_approved_for_path(
+        &plan(),
+        "edit_file",
+        &PathAccess::Write,
+        Path::new("/session/plans/20260101-demo/plan.md")
+    ));
+    assert!(!rt.session_path_grant_approved_for_path(
+        &normal(),
+        "edit_file",
+        &PathAccess::Write,
+        Path::new("/session/plans/20260101-demo/plan.md")
+    ));
+    assert!(!rt.session_path_grant_approved_for_path(
+        &plan(),
+        "write_file",
+        &PathAccess::Write,
+        Path::new("/session/plans/20260101-demo/plan.md")
+    ));
+    assert!(!rt.session_path_grant_approved_for_path(
+        &plan(),
+        "edit_file",
+        &PathAccess::Read,
+        Path::new("/session/plans/20260101-demo/plan.md")
+    ));
+    assert!(!rt.session_path_grant_approved_for_path(
+        &plan(),
+        "edit_file",
+        &PathAccess::Write,
+        Path::new("/session/plans/other/plan.md")
+    ));
+}
+
+#[test]
 fn approvals_is_approved_blanket_session_overrides_pattern_check() {
     let mut rt = RuntimeApprovals::new();
     rt.add_session_tool("bash", Vec::new());
@@ -2299,7 +2483,7 @@ fn approvals_is_approved_requires_all_subcommands_match() {
     // Seed via set_session so the patterns actually persist.
     let mut seed: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
     seed.insert("bash".into(), vec![pat("ls *")]);
-    rt.set_session(seed, vec![]);
+    rt.set_session(seed, vec![], vec![]);
     // Only `ls` is approved; chained `rm` should fail.
     assert!(!rt.is_approved("bash", "ls && rm -rf /", None));
 }

@@ -44,12 +44,14 @@ to the active mode's registered default decision.
 | `read_process_output` | Allow  | Allow                   | Allow | Allow |
 | `stop_process`        | Ask    | Deny                    | Ask   | Allow |
 | `load_skill`          | Ask    | Ask                     | Ask   | Allow |
+| `present_plan`        | N/A    | Allow                   | N/A   | N/A   |
 | `smelt_reload`        | Ask    | Deny                    | Ask   | Allow |
 
-Plan mode is registered by the optional `smelt.plugins.plan_mode` plugin; when
-enabled, it enforces a read-only effect policy and adds the `exit_plan_mode` tool.
-Read-only tools stay allowed, unknown or networked tools require confirmation, and
-write-capable/process-control/config-reload effects are denied without prompting.
+Plan mode is built in. It enforces a read-only effect policy and adds the
+`present_plan` tool. Read-only tools stay allowed, unknown or networked tools
+require confirmation, and write-capable/process-control/config-reload effects
+are denied without prompting, except mode/tool-specific session path write grants
+created by `present_plan` for saved plan artifacts.
 
 ## Default Bash Patterns
 

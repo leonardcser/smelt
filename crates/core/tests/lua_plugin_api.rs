@@ -77,6 +77,35 @@ fn get_global<T: mlua::FromLua>(rt: &LuaRuntime, name: &str) -> T {
         .unwrap_or_else(|e| panic!("global `{name}`: {e}"))
 }
 
+// -- json ---------------------------------------------------------------
+
+#[test]
+fn json_api_round_trips_tables_and_reports_decode_errors() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            local encoded = smelt.json.encode({
+                kind = "smelt.plan",
+                title = "quote \" ok",
+                items = { "a", "b" },
+            }, { pretty = true })
+            assert(encoded:match('"kind"'))
+            assert(encoded:match('"items"'))
+            local decoded, err = smelt.json.decode(encoded)
+            assert(err == nil, err)
+            assert(decoded.kind == "smelt.plan")
+            assert(decoded.title == 'quote " ok')
+            assert(decoded.items[2] == "b")
+            local bad, bad_err = smelt.json.decode("{")
+            assert(bad == nil)
+            assert(type(bad_err) == "string" and #bad_err > 0)
+            "#,
+        )
+        .exec()
+        .expect("json api round trip");
+}
+
 // -- tools.register -------------------------------------------------------
 
 #[test]

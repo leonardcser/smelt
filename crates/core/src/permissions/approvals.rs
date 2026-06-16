@@ -2,7 +2,9 @@
 
 use crate::permissions::bash::split_shell_commands;
 use crate::permissions::rules::{check_ruleset, matches_rule, RuleSet};
-use crate::permissions::{workspace, PermissionGrant, PermissionRequirement, Permissions};
+use crate::permissions::{
+    workspace, PathAccess, PermissionGrant, PermissionRequirement, Permissions,
+};
 use protocol::AgentMode;
 use protocol::Decision;
 use serde_json::Value;
@@ -13,8 +15,17 @@ use std::path::{Path, PathBuf};
 pub struct RuntimeApprovals {
     session_tools: HashMap<String, Vec<glob::Pattern>>,
     session_dirs: Vec<PathBuf>,
+    session_path_grants: Vec<SessionPathGrant>,
     workspace_tools: HashMap<String, Vec<glob::Pattern>>,
     workspace_dirs: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPathGrant {
+    pub mode: AgentMode,
+    pub tool: String,
+    pub access: PathAccess,
+    pub dir: PathBuf,
 }
 
 impl RuntimeApprovals {
@@ -45,6 +56,30 @@ impl RuntimeApprovals {
         }
     }
 
+    pub fn add_session_path_grant(
+        &mut self,
+        mode: AgentMode,
+        tool: impl Into<String>,
+        access: PathAccess,
+        dir: PathBuf,
+    ) {
+        let tool = tool.into();
+        let dir = normalize_approval_dir(&dir);
+        if !self.session_path_grants.iter().any(|existing| {
+            existing.mode == mode
+                && existing.tool == tool
+                && existing.access == access
+                && workspace::paths_equivalent(&existing.dir, &dir)
+        }) {
+            self.session_path_grants.push(SessionPathGrant {
+                mode,
+                tool,
+                access,
+                dir,
+            });
+        }
+    }
+
     pub fn add_workspace_dir(&mut self, dir: PathBuf) {
         let dir = normalize_approval_dir(&dir);
         if !self
@@ -59,6 +94,7 @@ impl RuntimeApprovals {
     pub fn clear_session(&mut self) {
         self.session_tools.clear();
         self.session_dirs.clear();
+        self.session_path_grants.clear();
     }
 
     /// Load workspace approvals from pre-compiled patterns (called at startup
@@ -200,13 +236,44 @@ impl RuntimeApprovals {
         &self.session_dirs
     }
 
+    pub fn session_path_grants(&self) -> &[SessionPathGrant] {
+        &self.session_path_grants
+    }
+
     /// Rebuild session state from flattened entries (used by permissions sync UI).
-    pub fn set_session(&mut self, tools: HashMap<String, Vec<glob::Pattern>>, dirs: Vec<PathBuf>) {
+    pub fn set_session(
+        &mut self,
+        tools: HashMap<String, Vec<glob::Pattern>>,
+        dirs: Vec<PathBuf>,
+        path_grants: Vec<SessionPathGrant>,
+    ) {
         self.session_tools = tools;
         self.session_dirs = dirs
             .into_iter()
             .map(|d| normalize_approval_dir(&d))
             .collect();
+        self.session_path_grants = path_grants
+            .into_iter()
+            .map(|grant| SessionPathGrant {
+                dir: normalize_approval_dir(&grant.dir),
+                ..grant
+            })
+            .collect();
+    }
+
+    pub fn session_path_grant_approved_for_path(
+        &self,
+        mode: &AgentMode,
+        tool: &str,
+        access: &PathAccess,
+        path: &Path,
+    ) -> bool {
+        self.session_path_grants.iter().any(|grant| {
+            grant.mode == *mode
+                && grant.tool == tool
+                && grant.access == *access
+                && workspace::path_prefix_matches(&grant.dir, path)
+        })
     }
 
     fn dir_approved_for_path(&self, path: &Path) -> bool {

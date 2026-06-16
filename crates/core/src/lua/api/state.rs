@@ -4,7 +4,7 @@
 //! `smelt.state.persistent(name)` builds on.
 
 use crate::config;
-use crate::lua::api::lua_table_to_json;
+use crate::lua::api::{lua_table_to_json, lua_value_to_json};
 use crate::lua::doc::Tier;
 use crate::lua::json_to_lua;
 use crate::lua::module::LuaMod;
@@ -45,7 +45,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |lua, (name, value): (String, mlua::Value)| -> LuaResult<()> {
             let json = match &value {
                 mlua::Value::Table(t) => lua_table_to_json(lua, t),
-                other => lua_value_to_json_pub(lua, other),
+                other => lua_value_to_json(lua, other),
             };
             let serialized = serde_json::to_string(&json)
                 .map_err(|e| LuaError::RuntimeError(format!("smelt.state.__save: {e}")))?;
@@ -118,22 +118,6 @@ fn state_tmp_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|| "state.json".into());
     let id = NEXT_STATE_TMP_ID.fetch_add(1, Ordering::Relaxed);
     parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), id))
-}
-
-/// Wrapper so we can call the private `lua_value_to_json` from a sibling
-/// module. Mirrors `lua_table_to_json`'s public path.
-fn lua_value_to_json_pub(lua: &Lua, value: &mlua::Value) -> serde_json::Value {
-    // Same logic as `lua_value_to_json` in the parent module - duplicated
-    // here because that one is private.
-    match value {
-        mlua::Value::Nil => serde_json::Value::Null,
-        mlua::Value::Boolean(b) => serde_json::Value::Bool(*b),
-        mlua::Value::Integer(i) => serde_json::json!(*i),
-        mlua::Value::Number(n) => serde_json::json!(*n),
-        mlua::Value::String(s) => serde_json::Value::String(s.to_string_lossy().to_string()),
-        mlua::Value::Table(t) => lua_table_to_json(lua, t),
-        _ => serde_json::Value::Null,
-    }
 }
 
 #[cfg(test)]

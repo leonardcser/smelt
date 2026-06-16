@@ -44,10 +44,18 @@ function smelt.sleep(ms)
 end
 
 -- Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
----@type fun(id: integer): any
-function smelt.task.wait(id)
+-- Pass `{ interactive = true }` (or `{ pauses_deadline = true }`) for user-facing
+-- waits such as dialogs; tool watchdog deadlines do not count wall time spent
+-- waiting for the user.
+---@type fun(id: integer, opts?: table): any
+function smelt.task.wait(id, opts)
   require_yieldable("smelt.task.wait")
-  return yield_with_cancel({ __yield = "external", id = id })
+  opts = opts or {}
+  return yield_with_cancel({
+    __yield = "external",
+    id = id,
+    pauses_deadline = opts.pauses_deadline or opts.interactive or false,
+  })
 end
 
 -- Allocate an external task id, invoke `start(id)` to kick off whatever

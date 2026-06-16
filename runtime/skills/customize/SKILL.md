@@ -441,6 +441,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.debug_panel` | F3 debug panel. |
 | `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
+| `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `present_plan` tool. |
 | `smelt.plugins.predict` | Input prediction plugin. |
 | `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click scrolls to it with one row of gap so repeated clicks walk back. |
 | `smelt.plugins.title` | Session title plugin. |
@@ -453,7 +454,6 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 
 | Plugin | Summary |
 | --- | --- |
-| `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `exit_plan_mode` tool. |
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- PLUGINS_END -->
@@ -739,6 +739,15 @@ Image file detection and base64 data-URL loading.
 - `smelt.image.read_as_data_url_async` :: `fun(path: string): string?, string?`
   Read and base64-encode an image off the main thread.
 
+#### `smelt.json`
+
+Encode/decode JSON for Lua plugins.
+
+- `smelt.json.decode` :: `fun(text: string): any, string?`
+  Decode JSON into a Lua value.
+- `smelt.json.encode` :: `fun(value: any, opts: table?): string`
+  Encode a Lua value as JSON.
+
 #### `smelt.layout`
 
 Declarative, width-independent content layout primitives for transcript/tool display.
@@ -1001,7 +1010,7 @@ Yield-then-resume coroutine bridge: alloc and resume external tasks.
   Resume the yielded task `id` with `value`.
 - `smelt.task.timeout` :: `fun(ms: integer, fn: fun(): any): any, string?`
   Run `fn` with an `ms`-millisecond deadline.
-- `smelt.task.wait` :: `fun(id: integer): any`
+- `smelt.task.wait` :: `fun(id: integer, opts?: table): any`
   Park the running task until `smelt.task.resume(id, value)` fires.
 
 #### `smelt.tick`
@@ -1291,12 +1300,14 @@ List session/workspace rules and sync a Lua-built ruleset back through the App.
   Decide a subcommand bucket (e.g.
 - `smelt.permissions.check_tool` :: `fun(mode_str: string, name: string): string`
   Decision primitives for tool `decide` callbacks.
+- `smelt.permissions.grant_session` :: `fun(grant: smelt.permissions.SessionPathGrant): nil`
+  Add one session-scoped grant.
 - `smelt.permissions.list` :: `fun(): table`
-  Return current permission rules as `{ session = { { tool, pattern } }, workspace = { { tool, patterns } } }`.
+  Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`.
 - `smelt.permissions.set_rules` :: `fun(spec: smelt.permissions.RulesSpec): nil`
   Install the per-mode permission ruleset.
 - `smelt.permissions.sync` :: `fun(spec: smelt.permissions.SyncSpec): nil`
-  Replace runtime + workspace permission entries with `spec.session` and `spec.workspace`.
+  Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`.
 
 #### `smelt.picker`
 

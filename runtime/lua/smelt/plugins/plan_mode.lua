@@ -1,9 +1,33 @@
--- Plan-mode plugin: registers the `plan` mode and `exit_plan_mode` tool.
+-- Plan-mode plugin: registers the `plan` mode and `present_plan` tool.
 
 local transcript_defaults = require("smelt.transcript.defaults")
 
-transcript_defaults.__tool_body_renderers.exit_plan_mode = function(block)
-  return smelt.layout.text((block.args and block.args.plan_summary) or "")
+local function read_text(path)
+  local text = smelt.fs.read(path)
+  return text
+end
+
+local function output_plan_path(output)
+  local content = output and output.content or ""
+  return content:match("Wrote plan to ([^\n]+)")
+end
+
+local function plan_file_view(args, path)
+  args = args or {}
+  path = path or args.plan_path or ""
+  local content = args.plan
+  if content == nil and path ~= "" then content = read_text(path) or "" end
+  return smelt.layout.file_view({
+    content = content or "",
+    path    = path,
+    lang    = "markdown",
+  })
+end
+
+transcript_defaults.__tool_body_renderers.present_plan = function(block)
+  if block.status == "pending" or block.status == "confirm" or not block.output then return nil end
+  local args = block.args or {}
+  return plan_file_view(args, output_plan_path(block.output))
 end
 
 smelt.mode.register({
@@ -13,32 +37,41 @@ smelt.mode.register({
   hl_group = "SmeltModePlan",
   note = [[now in plan mode.
 
-Investigate and reason only. Do not modify files, write files, or run mutating commands.
+Investigate and reason only. Do not modify workspace files, write workspace files, or run mutating commands. Plan mode may only write plan artifacts under Smelt's session state.
 
 Allowed tools:
 - read_file, glob, grep, read_process_output
 - bash, but only for read-only commands
 - ask_user_question when requirements or trade-offs need user input
-- exit_plan_mode when the plan is ready for approval
+- present_plan when the user asks for a written plan, a durable draft would help, or the plan is ready to implement
+- edit_file only when revising the full saved plan.md path returned by present_plan
 
 Unavailable or forbidden:
-- edit_file, write_file, edit_notebook, stop_process, smelt_reload
+- write_file, edit_notebook, stop_process, smelt_reload
+- edit_file against workspace files or any path other than a saved plan.md draft
 - destructive shell commands, package installs, formatters, tests that write artifacts, or anything that changes the workspace
 
 Workflow:
 1. Understand the request and inspect relevant files.
-2. Reuse existing code, conventions, and utilities where possible.
-3. Compare viable approaches and pick the recommended one.
-4. Call exit_plan_mode with a concise plan_summary.
+2. Discuss trade-offs and ask questions when requirements are unclear.
+3. Draft the plan in conversation until the user is aligned.
+4. Call present_plan with title, slug, and plan markdown for a new plan, or with the full plan_path for an existing saved draft.
+5. If the user chooses save draft, continue refining in plan mode and use the full saved plan path as the reference.
+6. To revise a saved draft, use read_file and edit_file with the full saved plan path.
+7. When the revised draft is ready, call present_plan with the full plan_path.
+8. If the user chooses approve, proceed in normal mode and keep the saved plan path as the implementation reference.
+9. If the user chooses approve and apply, proceed in apply mode and keep the saved plan path as the implementation reference.
 
-The plan_summary should include:
-- context and intended outcome
-- recommended approach
-- critical files and code paths
-- existing functions/utilities to reuse
-- verification steps
+Use this plan structure unless the user asks otherwise:
+# Goal
+# Context
+# Approach
+# Sequence
+# Risks / Open Questions
+# Verification
 
-Your turn should only end with ask_user_question for clarification or exit_plan_mode with the final plan.]],
+The plan should include relevant files/code paths, important constraints, the recommended approach, practical sequencing, and verification steps.
+Your turn should only end with ask_user_question for clarification or present_plan with a written plan.]],
   permissions = {
     default_decision = "ask",
     allow_subcommands_by_default = false,
@@ -48,159 +81,312 @@ Your turn should only end with ask_user_question for clarification or exit_plan_
 })
 
 
-local ADJECTIVES = {
-  "amber", "ancient", "azure", "blazing", "bold", "brave", "bright", "broad",
-  "calm", "carved", "clear", "clever", "cold", "cool", "coral", "crisp",
-  "crystal", "dark", "deep", "deft", "dry", "eager", "endless", "fair",
-  "fallen", "fast", "fierce", "fine", "firm", "fleet", "flowing", "flying",
-  "foggy", "free", "frozen", "gentle", "gilded", "glad", "glass", "gold",
-  "grand", "green", "grey", "hidden", "hollow", "humble", "hushed", "iron",
-  "ivory", "keen", "kind", "last", "late", "lean", "light", "little", "lone",
-  "long", "lost", "lucky", "lucid", "mild", "misty", "mossy", "muted",
-}
+local PLAN_KIND = "smelt.plan"
 
-local NOUNS = {
-  "anchor", "arch", "ash", "aurora", "basin", "bay", "beacon", "beam", "bell",
-  "birch", "blade", "bloom", "bluff", "branch", "breeze", "bridge", "brook",
-  "cairn", "canyon", "cape", "cedar", "chalk", "cliff", "cloud", "coast",
-  "coral", "cove", "crane", "creek", "crest", "crown", "crystal", "dale",
-  "dawn", "delta", "dew", "dove", "drift", "dune", "dusk", "eagle", "echo",
-  "edge", "elm", "ember", "falcon", "feather", "fern", "field", "fjord",
-  "flame", "flint", "forge", "fox", "frost", "garden", "gate", "glade",
-}
-
-local VERBS = {
-  "arcing", "blazing", "bowing", "braiding", "calling", "carving", "chasing",
-  "climbing", "coiling", "crossing", "curving", "dancing", "dashing", "dipping",
-  "diving", "drifting", "ebbing", "facing", "fading", "falling", "flowing",
-  "folding", "forging", "forming", "gliding", "growing", "guiding", "holding",
-  "humming", "jumping", "keeping", "landing", "leading", "leaning", "leaping",
-}
-
-local function generate_plan_name()
-  local t = os.time()
-  local adj = ADJECTIVES[(t % #ADJECTIVES) + 1]
-  local noun = NOUNS[(math.floor(t / #ADJECTIVES) % #NOUNS) + 1]
-  local verb = VERBS[(math.floor(t / (#ADJECTIVES * #NOUNS)) % #VERBS) + 1]
-  return adj .. "-" .. noun .. "-" .. verb
+local function plan_mode_fg()
+  local style = smelt.theme and smelt.theme.get and smelt.theme.get("SmeltModePlan") or nil
+  return (style and style.fg) or 79
 end
 
-local function save_plan(summary)
-  local session_dir = smelt.session.dir()
-  if session_dir == "" then
-    return nil, "no session directory"
-  end
-  local plans_dir = session_dir .. "/plans"
-  os.execute('mkdir -p "' .. plans_dir .. '"')
+local function now_stamp()
+  return os.date("%Y%m%d-%H%M%S")
+end
 
-  local base = generate_plan_name()
-  local path = plans_dir .. "/" .. base .. ".md"
+local function iso_time()
+  return os.date("!%Y-%m-%dT%H:%M:%SZ")
+end
+
+local function trim(value)
+  return tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function slugify(value)
+  local slug = smelt.text.slugify(tostring(value or ""))
+  if slug == "" then return "plan" end
+  return slug
+end
+
+local function title_for(args, slug)
+  local title = trim(args.title)
+  if title ~= "" then return title end
+  return (slug:gsub("-", " "))
+end
+
+local function write_text(path, content)
+  return smelt.fs.write(path, content)
+end
+
+local function parent_dir(path)
+  return tostring(path or ""):match("^(.*)/[^/]*$")
+end
+
+local function session_plans_dir()
+  local session_dir = smelt.session.dir()
+  if session_dir == nil or session_dir == "" then return nil, "no session directory" end
+  return session_dir .. "/plans"
+end
+
+local function is_child_plan_dir(dir, plans_dir)
+  if type(dir) ~= "string" or dir == "" then return false end
+  if dir:find("..", 1, true) then return false end
+  local prefix = plans_dir .. "/"
+  return dir:sub(1, #prefix) == prefix
+end
+
+local function create_artifact_dir(plans_dir, slug)
+  local ok, err = smelt.fs.mkdir_all(plans_dir)
+  if not ok then return nil, err end
+
+  local base = now_stamp() .. "-" .. slug
+  local dir = plans_dir .. "/" .. base
   local n = 2
-  while io.open(path, "r") do
-    path = plans_dir .. "/" .. base .. "-" .. n .. ".md"
+  while smelt.fs.exists(dir) do
+    dir = plans_dir .. "/" .. base .. "-" .. n
     n = n + 1
   end
 
-  local f, err = io.open(path, "w")
-  if not f then
-    return nil, err
-  end
-  f:write(summary)
-  f:close()
-  return path
+  ok, err = smelt.fs.mkdir_all(dir)
+  if not ok then return nil, err end
+  return dir
 end
 
-local function register_exit_plan_mode()
+local function manifest_table(title, slug, status, created_at, updated_at)
+  return {
+    version = 1,
+    kind = PLAN_KIND,
+    title = title,
+    slug = slug,
+    status = status,
+    created_at = created_at,
+    updated_at = updated_at,
+    plan_path = "plan.md",
+  }
+end
+
+local function grant_plan_dir(dir)
+  if not smelt.permissions or not smelt.permissions.grant_session then return end
+  smelt.permissions.grant_session({
+    kind        = "path",
+    mode        = "plan",
+    tool        = "read_file",
+    access      = "read",
+    path_prefix = dir,
+  })
+  smelt.permissions.grant_session({
+    kind        = "path",
+    mode        = "plan",
+    tool        = "edit_file",
+    access      = "write",
+    path_prefix = dir,
+  })
+end
+
+local function read_manifest(path)
+  local text, read_err = smelt.fs.read(path)
+  if not text then return nil, read_err end
+  local manifest, json_err = smelt.json.decode(text)
+  if not manifest then return nil, json_err end
+  if type(manifest) ~= "table" or manifest.kind ~= PLAN_KIND then return nil, "invalid plan manifest" end
+  return manifest
+end
+
+local function rehydrate_plan_grants()
+  local plans_dir = session_plans_dir()
+  if not plans_dir or not smelt.fs.is_dir(plans_dir) then return end
+  local matches = smelt.fs.glob("*/manifest.json", plans_dir, { max = 1000 })
+  if type(matches) ~= "table" then return end
+  for _, manifest_path in ipairs(matches) do
+    local dir = parent_dir(manifest_path)
+    if dir and is_child_plan_dir(dir, plans_dir) and read_manifest(manifest_path) then
+      grant_plan_dir(dir)
+    end
+  end
+end
+
+local function validate_plan_path(path, plans_dir)
+  if type(path) ~= "string" or path == "" then return nil, nil, nil, "missing plan_path" end
+  if path:find("..", 1, true) then return nil, nil, nil, "plan_path must not contain '..'" end
+  if not path:match("/plan%.md$") then return nil, nil, nil, "plan_path must point to a plan.md file" end
+
+  local artifact_dir = parent_dir(path)
+  if not is_child_plan_dir(artifact_dir, plans_dir) then
+    return nil, nil, nil, "plan_path must be inside the current session plans directory"
+  end
+  if not smelt.fs.is_file(path) then return nil, nil, nil, "plan_path does not exist" end
+
+  local manifest, manifest_err = read_manifest(artifact_dir .. "/manifest.json")
+  if not manifest then return nil, nil, nil, "plan manifest is missing or invalid: " .. (manifest_err or "unknown") end
+  return artifact_dir, path, manifest
+end
+
+local function save_manifest(artifact_dir, title, slug, status, created_at)
+  local content = smelt.json.encode(
+    manifest_table(title, slug, status, created_at, iso_time()),
+    { pretty = true }
+  ) .. "\n"
+  local ok, err = write_text(artifact_dir .. "/manifest.json", content)
+  if not ok then return nil, nil, err end
+  grant_plan_dir(artifact_dir)
+  return artifact_dir, artifact_dir .. "/plan.md"
+end
+
+local function save_new_plan(args, status)
+  local plans_dir, dir_err = session_plans_dir()
+  if not plans_dir then return nil, nil, dir_err end
+  if trim(args.title) == "" then return nil, nil, "missing title" end
+  if trim(args.slug) == "" then return nil, nil, "missing slug" end
+  if type(args.plan) ~= "string" or args.plan == "" then return nil, nil, "missing plan" end
+
+  local slug = slugify(args.slug)
+  local title = title_for(args, slug)
+  local artifact_dir, err = create_artifact_dir(plans_dir, slug)
+  if not artifact_dir then return nil, nil, err end
+
+  local plan_path = artifact_dir .. "/plan.md"
+  local ok
+  ok, err = write_text(plan_path, args.plan)
+  if not ok then return nil, nil, err end
+  return save_manifest(artifact_dir, title, slug, status, iso_time())
+end
+
+local function update_existing_plan_status(plan_path, status)
+  local plans_dir, dir_err = session_plans_dir()
+  if not plans_dir then return nil, nil, dir_err end
+
+  local artifact_dir, path, manifest, err = validate_plan_path(plan_path, plans_dir)
+  if not artifact_dir then return nil, nil, err end
+  local title = manifest.title or "plan"
+  local slug = manifest.slug or slugify(title)
+  local created_at = manifest.created_at or iso_time()
+  local saved_dir, saved_path, save_err = save_manifest(artifact_dir, title, slug, status, created_at)
+  return saved_dir, saved_path or path, save_err
+end
+
+local function save_plan(args, status)
+  if type(args.plan_path) == "string" and args.plan_path ~= "" then
+    local artifact_dir, path, err = update_existing_plan_status(args.plan_path, status)
+    return artifact_dir, path, err
+  end
+  return save_new_plan(args, status)
+end
+
+local function register_present_plan()
   smelt.tools.register({
-    name = "exit_plan_mode",
-    description = "Signal that planning is complete and ready for user approval. Call this when your plan is finalized.",
+    name = "present_plan",
+    description = "Present a written plan for the user to save as a draft, approve with normal permissions, or approve in apply mode. Call this after discussing the plan with the user.",
     modes = { "plan" },
+    permission_defaults = { plan = "allow" },
+    effect = "user_interaction",
+    execution_mode = "sequential",
     parameters = {
       type = "object",
       properties = {
-        plan_summary = {
+        title = {
           type = "string",
-          description = "A concise summary of the implementation plan for the user to approve.",
+          description = "Short human-readable title for a new plan artifact.",
+        },
+        slug = {
+          type = "string",
+          description = "Short kebab-case filename slug for a new plan artifact.",
+        },
+        plan = {
+          type = "string",
+          description = "Markdown plan body for a new plan artifact. Omit when presenting an existing plan_path.",
+        },
+        plan_path = {
+          type = "string",
+          description = "Full path to an existing saved plan.md to present after refining it with read_file/edit_file.",
         },
       },
-      required = { "plan_summary" },
     },
-    summary = function(_) return "plan ready" end,
+    summary = function(args)
+      return tostring(args.title or args.slug or args.plan_path or "plan")
+    end,
+    preview = function(args)
+      return plan_file_view(args or {})
+    end,
     execute = function(args)
-      local summary = args.plan_summary or ""
+      args = args or {}
+      local plan = args.plan or ""
+      if type(args.plan_path) == "string" and args.plan_path ~= "" then
+        local plans_dir, dir_err = session_plans_dir()
+        if not plans_dir then return { content = dir_err, is_error = true } end
+        local _, path, _, path_err = validate_plan_path(args.plan_path, plans_dir)
+        if not path then return { content = path_err, is_error = true } end
+        plan = read_text(path) or ""
+      elseif plan == "" then
+        return { content = "present_plan requires either plan_path or title, slug, and plan", is_error = true }
+      elseif trim(args.title) == "" then
+        return { content = "present_plan requires title for a new plan", is_error = true }
+      elseif trim(args.slug) == "" then
+        return { content = "present_plan requires slug for a new plan", is_error = true }
+      end
 
       local options = {
-        { label = "yes, and auto-apply", action = "approve", on_select = function() smelt.mode("apply") end },
-        { label = "yes",                 action = "approve" },
-        { label = "no",                  action = "deny"    },
+        { label = "save draft",        action = "draft" },
+        { label = "approve",           action = "approve" },
+        { label = "approve and apply", action = "apply" },
       }
 
-      local md_leaf      = smelt.dialog.markdown(summary)
+      local md_leaf      = smelt.dialog.markdown(plan)
       local options_leaf = smelt.dialog.menu(options, {
         on_submit = function(ctx)
-          local item = ctx.item
-          if item and item.on_select then item.on_select() end
-          ctx.resolve(item and item.action or nil)
+          ctx.resolve(ctx.item and ctx.item.action or nil)
         end,
       })
 
       local action = smelt.dialog.open({
         title = {
-          { text = "plan ", fg = "yellow", bold = true },
-          { text = "(review and approve)", fg = "grey", dim = true },
+          { text = "plan", fg = plan_mode_fg(), bold = true },
         },
+        border       = { top = "SmeltModePlan" },
         blocks_agent = true,
-        min_height   = "30%",
+        focus        = options_leaf,
+        min_height   = 0,
         max_height   = "fill",
         panels = {
-          -- md `"fill"` so it absorbs the slack once `min_height` / overflow
-          -- forces the dialog past the natural fit size of (md + options).
-          { leaf = md_leaf,      height = "fill" },
-          { leaf = options_leaf, height = "fit"  },
+          { leaf = md_leaf, height = "fit" },
+        },
+        bottom_panels = {
+          { leaf = options_leaf, height = "fit" },
         },
       })
 
-      if action ~= "approve" then
-        return { content = "Plan not approved.\n\n" .. summary, is_error = true }
+      if action == nil then
+        return { content = "Plan dismissed. Continue discussing or call present_plan again when ready.", is_error = true }
       end
 
-      local path, err = save_plan(summary)
-      if path then
-        return "Plan saved to " .. path .. "\n\n" .. summary
-            .. "\n\nThe user approved this plan. Proceed with the implementation now."
+      local status = action == "draft" and "draft" or "approved"
+      local artifact_dir, path, err = save_plan(args, status)
+      if not path then
+        return { content = "Failed to save plan: " .. (err or "unknown"), is_error = true }
       end
-      return { content = "Failed to save plan: " .. (err or "unknown") .. "\n\n" .. summary, is_error = true }
+
+      if action == "approve" then
+        smelt.mode("normal")
+        return "Wrote plan to " .. path
+            .. "\nPlan artifact directory: " .. artifact_dir
+            .. "\nPlan approved.\n\nProceed with the implementation using normal-mode permissions and this saved plan as the reference."
+      end
+
+      if action == "apply" then
+        smelt.mode("apply")
+        return "Wrote plan to " .. path
+            .. "\nPlan artifact directory: " .. artifact_dir
+            .. "\nPlan approved.\n\nProceed with the implementation in apply mode, using this saved plan as the reference."
+      end
+
+      return "Wrote plan to " .. path
+          .. "\nPlan artifact directory: " .. artifact_dir
+          .. "\n\nStay in plan mode and continue refining the plan before implementation. Use read_file and edit_file with the full plan path above when revising this draft."
     end,
   })
 end
 
-local function unregister_exit_plan_mode()
-  smelt.tools.unregister("exit_plan_mode")
-end
-
-
-local function activate()
-  register_exit_plan_mode()
-end
-
-local function deactivate()
-  unregister_exit_plan_mode()
-end
-
-smelt.cell("agent_mode"):subscribe(function(mode)
-  if mode == "plan" then
-    activate()
-  else
-    deactivate()
-  end
-end)
+register_present_plan()
 
 smelt.cell("session_started"):subscribe(function()
-  if smelt.mode() == "plan" then activate() end
+  rehydrate_plan_grants()
 end)
 
-if smelt.mode() == "plan" then
-  activate()
-else
-  deactivate()
-end
+rehydrate_plan_grants()

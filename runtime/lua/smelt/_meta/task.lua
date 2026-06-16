@@ -54,7 +54,10 @@ task.resume = nil
 task.timeout = nil
 
 --- Park the running task until `smelt.task.resume(id, value)` fires. Returns the resumed value.
----@type fun(id: integer): any
+--- Pass `{ interactive = true }` (or `{ pauses_deadline = true }`) for user-facing
+--- waits such as dialogs; tool watchdog deadlines do not count wall time spent
+--- waiting for the user.
+---@type fun(id: integer, opts?: table): any
 task.wait = nil
 
 return task

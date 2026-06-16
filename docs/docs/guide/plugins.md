@@ -126,16 +126,18 @@ deferred wiring). The hook fires with `ctx = { kind = "launch" |
 | `predict` | yes | After each turn, predicts your next message and shows it as ghost text |
 | `scroll_pills` | yes | While the transcript is scrolled away from the tail, shows two click-only overlays — a "↓ jump to bottom" pill above the prompt and a one-row "jump to next message" pill at the top of the terminal |
 | `title` | yes | After each turn, generates a session title + slug if one isn't set |
-| `plan_mode` | **opt-in** | Registers the optional `plan` mode after Normal, adds `exit_plan_mode`, and injects the plan-mode system prompt |
+| `plan_mode` | yes | Registers the built-in `plan` mode after Normal, adds `present_plan`, and injects the plan-mode system prompt |
+| `which_key` | **opt-in** | Which-key style popup for pending global Lua keymaps |
 
 To enable an opt-in plugin, `require` it from `~/.config/smelt/init.lua`:
 
 ```lua
-require("smelt.plugins.plan_mode")
+require("smelt.plugins.which_key")
 ```
 
-Without `require("smelt.plugins.plan_mode")`, Plan mode is not registered and
-does not appear in the mode cycle.
+Autoloaded plugins can be disabled from `early.lua` with
+`smelt.builtins.disable({ plugins = { "plan_mode" } })` when you explicitly want
+to remove their built-in behavior.
 
 ## Host vs UiHost
 
@@ -501,23 +503,24 @@ it with `smelt.transcript.extend_renderer` when a plugin needs custom display.
 
 ```lua
 smelt.tools.register({
-  name        = "exit_plan_mode",
-  description = "Signal that planning is complete and ready for user approval.",
+  name        = "present_plan",
+  description = "Present a written plan for the user to save as a draft, approve, or approve in apply mode.",
   modes       = { "plan" },           -- only registered in plan mode
   parameters  = {
     type = "object",
     properties = {
-      plan_summary = { type = "string", description = "..." },
+      title     = { type = "string", description = "..." },
+      slug      = { type = "string", description = "..." },
+      plan      = { type = "string", description = "..." },
+      plan_path = { type = "string", description = "..." },
     },
-    required = { "plan_summary" },
   },
-  permission_defaults = { normal = "allow", plan = "allow" },
-  summary  = function(_args) return "plan ready" end,
+  permission_defaults = { plan = "allow" },
+  summary  = function(args) return args.title or args.plan_path or "plan" end,
   execute  = function(args)
-    local result = smelt.dialog.open({ ... }) -- yields, allowed inside execute
-    if result.action ~= "approve" then
-      return { content = "Plan not approved", is_error = true }
-    end
+    local action = smelt.dialog.open({ ... }) -- yields, allowed inside execute
+    if action == "approve" then smelt.mode("normal") end
+    if action == "apply" then smelt.mode("apply") end
     return "ok"
   end,
 })

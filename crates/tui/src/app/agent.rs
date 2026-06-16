@@ -570,9 +570,35 @@ impl TuiApp {
         entries
     }
 
+    pub(crate) fn session_path_grants(&self) -> Vec<smelt_core::permissions::SessionPathGrant> {
+        self.core
+            .permissions
+            .approvals
+            .read()
+            .unwrap()
+            .session_path_grants()
+            .to_vec()
+    }
+
+    pub(crate) fn grant_session_path(
+        &mut self,
+        mode: protocol::AgentMode,
+        tool: String,
+        access: smelt_core::permissions::PathAccess,
+        dir: PathBuf,
+    ) {
+        self.core
+            .permissions
+            .approvals
+            .write()
+            .unwrap()
+            .add_session_path_grant(mode, tool, access, dir);
+    }
+
     pub(crate) fn sync_permissions(
         &mut self,
         session_entries: Vec<PermissionEntry>,
+        session_path_grants: Vec<smelt_core::permissions::SessionPathGrant>,
         workspace_rules: Vec<smelt_core::permissions::store::Rule>,
     ) {
         let mut session_tools: HashMap<String, Vec<glob::Pattern>> = HashMap::new();
@@ -590,7 +616,7 @@ impl TuiApp {
         smelt_core::permissions::store::save(&self.cwd, &workspace_rules);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&workspace_rules);
         let mut rt = self.core.permissions.approvals.write().unwrap();
-        rt.set_session(session_tools, session_dirs);
+        rt.set_session(session_tools, session_dirs, session_path_grants);
         rt.load_workspace(ws_tools, ws_dirs);
     }
 

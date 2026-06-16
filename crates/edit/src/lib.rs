@@ -1061,7 +1061,47 @@ impl Ui {
     }
 
     pub fn set_terminal_size(&mut self, w: u16, h: u16) {
+        let old = self.surface.terminal_size();
+        let new = (w, h);
+        if old != new {
+            self.reflow_overlay_size_overrides(old, new);
+        }
         self.surface.set_terminal_size(w, h);
+    }
+
+    fn reflow_overlay_size_overrides(&mut self, old_term: (u16, u16), new_term: (u16, u16)) {
+        let updates: Vec<(OverlayId, (u16, u16))> = {
+            let sizer = UiLeafSizer {
+                wins: &self.wins,
+                bufs: &self.bufs,
+            };
+            self.overlays
+                .iter()
+                .filter_map(|(id, ov)| {
+                    let (override_w, override_h) = ov.size_override?;
+                    let old_declared = resolve_overlay_size(ov, old_term, &sizer);
+                    let new_declared = resolve_overlay_size(ov, new_term, &sizer);
+                    let next_w = if override_w == old_declared.0 {
+                        new_declared.0
+                    } else {
+                        override_w.min(new_term.0)
+                    };
+                    let next_h = if override_h == old_declared.1 {
+                        new_declared.1
+                    } else {
+                        override_h.min(new_term.1)
+                    };
+                    let next = (next_w, next_h);
+                    (next != (override_w, override_h)).then_some((*id, next))
+                })
+                .collect()
+        };
+
+        for (id, size) in updates {
+            if let Some((_, ov)) = self.overlays.iter_mut().find(|(oid, _)| *oid == id) {
+                ov.size_override = Some(size);
+            }
+        }
     }
 
     pub fn terminal_size(&self) -> (u16, u16) {
@@ -3216,6 +3256,48 @@ mod tests {
         assert_eq!(
             ui.resolved_overlay_rect(id).unwrap(),
             Rect::new(15, 30, 20, 9)
+        );
+    }
+
+    #[test]
+    fn terminal_resize_reflows_unmodified_axis_of_size_override() {
+        let mut ui = make_ui();
+        let id = ui.overlay_open(
+            Overlay::new(
+                LayoutTree::leaf(PaintId(900)),
+                layout::Anchor::ScreenBottom { above_rows: 0 },
+            )
+            .with_width(Constraint::Percentage(100))
+            .with_height(Constraint::Length(6))
+            .resize_config(overlay::ResizeConfig {
+                top: true,
+                right: false,
+                bottom: false,
+                left: false,
+                corners: false,
+            }),
+        );
+        let start_rect = ui.resolved_overlay_rect(id).unwrap();
+        assert_eq!(start_rect, Rect::new(18, 0, 80, 6));
+
+        ui.apply_chrome_drag(
+            ChromeDrag {
+                overlay: id,
+                action: overlay::ChromeAction::Resize(overlay::ResizeEdges::north()),
+                start_rect,
+                origin_row: 18,
+                origin_col: 0,
+            },
+            15,
+            0,
+        );
+        assert_eq!(ui.overlay(id).unwrap().size_override, Some((80, 9)));
+
+        ui.set_terminal_size(100, 24);
+        assert_eq!(ui.overlay(id).unwrap().size_override, Some((100, 9)));
+        assert_eq!(
+            ui.resolved_overlay_rect(id).unwrap(),
+            Rect::new(15, 0, 100, 9)
         );
     }
 

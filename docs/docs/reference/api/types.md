@@ -151,11 +151,14 @@ and `"fit"` pass through verbatim. Pick one of `height` or
 | --- | --- | --- | --- |
 | `title` | `string` |  | Title rendered in the chrome row. |
 | `panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) | yes | Ordered list of body panels. |
+| `bottom_panels` | [smelt.dialog.Panel[]](types.md#smeltdialogpanel) |  | Panels pinned to the bottom with at least one blank row between them and `panels`. Extra height is placed in that gap. |
+| `bottom_gap` | `integer` |  | Minimum blank rows between `panels` and `bottom_panels` (default 1). |
 | `focus` | [smelt.win.Win](types.md#smeltwinwin) |  | Leaf that should receive initial focus. |
 | `height` | `any` |  | Fixed total body size: integer cells, `"N%"`, `"fill"`, or `"fit"`. |
 | `max_height` | `any` |  | Shrink-to-content cap that pairs with `min_height`. |
 | `min_height` | `any` |  | Floor for the body size (defaults to `"30%"` in fit mode). |
 | `blocks_agent` | `boolean` |  | Block the agent loop while the dialog is open. Defaults to `false`. |
+| `border` | `table` |  | Top border style override; defaults to `{ top = "SmeltAccent" }`. |
 | `resizable` | `boolean` |  | Set `false` to disable the default top-edge resize handle. |
 | `keymaps` | [smelt.dialog.Keymap[]](types.md#smeltdialogkeymap) |  | Dialog-level key bindings (merged with built-ins). |
 | `on_submit` | `fun(ctx: any):` |  | any Handler invoked on Enter; default resolves with the focused leaf. |
@@ -458,8 +461,20 @@ A single session permission entry (one approved tool/pattern pair).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `tool` | `string` | yes | Tool name the rule applies to (e.g. `"shell"`). |
+| `tool` | `string` | yes | Tool name the rule applies to (e.g. `"bash"`). Special value `"directory"` grants generic path access. |
 | `pattern` | `string` | yes | Pattern matched against the tool's argument bucket. |
+
+### `smelt.permissions.SessionPathGrant`
+
+A mode/tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. Write grants also allow that tool to write under `path_prefix` in read-only modes.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `kind` | `string` | yes | Grant kind. Currently only `"path"` is supported. |
+| `mode` | `string` | yes | Mode the grant applies in, e.g. `"plan"`. |
+| `tool` | `string` | yes | Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`. |
+| `access` | `string` | yes | Path access granted: `"read"` or `"write"`. |
+| `path_prefix` | `string` | yes | Directory prefix covered by the grant. |
 
 ### `smelt.permissions.SyncSpec`
 
@@ -468,6 +483,7 @@ Spec for `smelt.permissions.sync`.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) |  | Session entries; applied for this run only. |
+| `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) |  | Mode/tool-specific session path grants; applied for this run only. |
 | `workspace` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) |  | Workspace rules; persisted to disk under the current cwd. |
 
 ### `smelt.permissions.WorkspaceRule`

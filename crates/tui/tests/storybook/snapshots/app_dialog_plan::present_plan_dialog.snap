@@ -1,0 +1,30 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 382
+expression: frame.text()
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+─ plan ─────────────────────────────────────────────────────────────────────────
+ # Goal
+ Refactor parser state.
+
+ # Sequence
+ 1. Add tests.
+ 2. Move state handling.
+
+  1. save draft
+  2. approve
+  3. approve and apply
+ ○ normal                                                                 1:1 0%

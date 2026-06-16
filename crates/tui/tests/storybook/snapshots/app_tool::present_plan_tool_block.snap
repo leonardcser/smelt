@@ -1,0 +1,24 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* present_plan Parser refactor
+    1   # Goal
+    2   Refactor parser state.
+    3
+    4   ```rust
+    5   fn parse(input: &str) -> Ast {
+    6       todo!()
+    7   }
+    8   ```
+    9
+   10   # Verification
+   11   Run parser tests.
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                               1:1 100%

@@ -84,7 +84,7 @@ const EARLY_DIRS: &[&str] = &["early"];
 /// calling `require("smelt.plugins.<name>")` from their `init.lua`. Exposed
 /// so the `gen-lua-docs` xtask can emit an opt-in vs autoload table in the
 /// `customize` skill.
-pub const OPTIONAL_PLUGINS: &[&str] = &["smelt.plugins.plan_mode", "smelt.plugins.which_key"];
+pub const OPTIONAL_PLUGINS: &[&str] = &["smelt.plugins.which_key"];
 
 /// Outcome of dispatching a keymap chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1759,6 +1759,7 @@ impl LuaRuntime {
         let deadline = timeout_ms.map(|ms| super::task::TaskDeadline {
             at: now + std::time::Duration::from_millis(ms),
             label_ms: ms,
+            paused_at: None,
         });
         let task_opt = {
             let mut rt = match self.shared.tasks.lock() {
@@ -2654,6 +2655,7 @@ mod tests {
         assert!(modules.contains(&"smelt.commands.btw".to_string()));
         assert!(modules.contains(&"smelt.commands.mcp".to_string()));
         assert!(modules.contains(&"smelt.plugins.esc_chord".to_string()));
+        assert!(modules.contains(&"smelt.plugins.plan_mode".to_string()));
     }
 
     #[test]

@@ -22,13 +22,23 @@ fun(mode_str: string, name: string): string
 
 Decision primitives for tool `decide` callbacks. Returns "allow"/"ask"/"deny".
 
+## `smelt.permissions.grant_session`
+
+```lua
+fun(grant: smelt.permissions.SessionPathGrant): nil
+```
+
+Types: [`smelt.permissions.SessionPathGrant`](types.md#smeltpermissionssessionpathgrant)
+
+Add one session-scoped grant. Currently supports `{ kind = "path", mode, tool, access = "read"|"write", path_prefix }` for mode/tool-specific path access.
+
 ## `smelt.permissions.list`
 
 ```lua
 fun(): table
 ```
 
-Return current permission rules as `{ session = { { tool, pattern } }, workspace = { { tool, patterns } } }`. Session entries come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.
+Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.
 
 ## `smelt.permissions.set_rules`
 
@@ -48,5 +58,5 @@ fun(spec: smelt.permissions.SyncSpec): nil
 
 Types: [`smelt.permissions.SyncSpec`](types.md#smeltpermissionssyncspec)
 
-Replace runtime + workspace permission entries with `spec.session` and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.
+Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.
 

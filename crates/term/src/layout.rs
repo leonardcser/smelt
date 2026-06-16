@@ -51,12 +51,26 @@ pub enum Constraint {
 /// A sizing `Constraint` paired with its subtree; used as `Vbox`/`Hbox` items.
 pub type Item = (Constraint, LayoutTree);
 
+/// How a container places children when its assigned rect is larger than the
+/// children's resolved sizes plus the minimum gap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Justify {
+    /// Pack children at the start of the primary axis.
+    #[default]
+    Start,
+    /// Add all surplus cells to the gaps between children, keeping the first
+    /// child at the start and the last child at the end.
+    SpaceBetween,
+}
+
 /// Container chrome (gap, border, title, padding) shared by `Vbox`, `Hbox`,
 /// and `Leaf`.
 #[derive(Clone, Debug, Default)]
 pub struct Chrome {
     /// Cells between adjacent children; `0` packs flush.
     pub gap: u16,
+    /// Surplus-space placement along the primary axis.
+    pub justify: Justify,
     /// Frame around the container; each enabled side reserves one row/col. `None` = no inset.
     pub border: Option<Border>,
     /// Title in the top border row. Requires `border = Some(_)`; renders as a styled [`Line`].
@@ -191,6 +205,11 @@ impl LayoutTree {
 
     pub fn with_gap(mut self, g: u16) -> Self {
         self.chrome_mut().gap = g;
+        self
+    }
+
+    pub fn with_justify(mut self, justify: Justify) -> Self {
+        self.chrome_mut().justify = justify;
         self
     }
 
@@ -741,7 +760,11 @@ pub fn paint_chrome(
     };
     let edge_style = |e: Option<EdgeStyle>| -> super::grid::Style {
         match e.and_then(|s| s.color) {
-            Some(hl) => theme.resolve(hl),
+            Some(hl) => {
+                let mut style = theme.resolve(hl);
+                style.bg = None;
+                style
+            }
             None => super::grid::Style::default(),
         }
     };
@@ -892,6 +915,19 @@ pub fn layout_box_children(
         .collect();
 
     let sizes = resolve_constraints_with_fit_caps(items, available, &fit_caps);
+    let used_sizes = sizes
+        .iter()
+        .fold(0u16, |acc, size| acc.saturating_add(*size));
+    let used = used_sizes.saturating_add(total_gap);
+    let extra = primary_total.saturating_sub(used);
+    let gap_count = items.len().saturating_sub(1) as u16;
+    let (extra_per_gap, mut extra_remainder) =
+        if chrome.justify == Justify::SpaceBetween && gap_count > 0 {
+            (extra / gap_count, extra % gap_count)
+        } else {
+            (0, 0)
+        };
+
     let mut rects = Vec::with_capacity(items.len());
     let mut offset = 0u16;
     for (i, &size) in sizes.iter().enumerate() {
@@ -901,9 +937,15 @@ pub fn layout_box_children(
             Rect::new(inner.top, inner.left + offset, size, inner.height)
         };
         rects.push(r);
-        offset += size;
+        offset = offset.saturating_add(size);
         if i + 1 < items.len() {
-            offset += chrome.gap;
+            offset = offset
+                .saturating_add(chrome.gap)
+                .saturating_add(extra_per_gap);
+            if extra_remainder > 0 {
+                offset = offset.saturating_add(1);
+                extra_remainder -= 1;
+            }
         }
     }
     (inner, rects)
@@ -1130,6 +1172,19 @@ mod tests {
         let result = resolve_layout(&tree, Rect::new(0, 0, 80, 24));
         assert_eq!(result[&A], Rect::new(0, 0, 80, 19));
         assert_eq!(result[&B], Rect::new(19, 0, 80, 5));
+    }
+
+    #[test]
+    fn vertical_space_between_puts_surplus_into_gap() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(2), LayoutTree::leaf(A)),
+            (Constraint::Length(3), LayoutTree::leaf(B)),
+        ])
+        .with_gap(1)
+        .with_justify(Justify::SpaceBetween);
+        let result = resolve_layout(&tree, Rect::new(0, 0, 80, 10));
+        assert_eq!(result[&A], Rect::new(0, 0, 80, 2));
+        assert_eq!(result[&B], Rect::new(7, 0, 80, 3));
     }
 
     #[test]

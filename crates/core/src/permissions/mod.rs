@@ -9,7 +9,7 @@ pub(crate) mod workspace;
 #[cfg(test)]
 mod tests;
 
-pub use approvals::RuntimeApprovals;
+pub use approvals::{RuntimeApprovals, SessionPathGrant};
 pub use bash::{split_shell_commands, split_shell_commands_with_ops};
 pub use protocol::Decision;
 pub use rules::{SubpatternParserFn, ToolDefaults, ToolEffectKind};
@@ -631,15 +631,27 @@ impl Permissions {
         tool_name: &str,
         args: &HashMap<String, Value>,
     ) -> PermissionOutcome {
-        let mut outcome = self.evaluate_tool(mode, origin, tool_name, args);
+        let effects = self.effects_for_tool(origin.clone(), tool_name, args);
+        let mut outcome = self.evaluate_request(PermissionRequest {
+            mode: mode.clone(),
+            tool_name,
+            args,
+            origin,
+            effects: effects.clone(),
+        });
+        let approvals = self.approvals.read().unwrap();
         if outcome.decision == Decision::Ask {
-            let approvals = self.approvals.read().unwrap();
-            outcome
-                .missing_requirements
-                .retain(|req| !approvals.requirement_satisfied(req));
+            outcome.missing_requirements.retain(|req| {
+                !request_requirement_satisfied(req, &mode, tool_name, &effects, &approvals)
+            });
             if outcome.missing_requirements.is_empty() {
                 outcome.decision = Decision::Allow;
             }
+        } else if outcome.decision == Decision::Deny
+            && self.mode_behavior(&mode).read_only
+            && read_only_session_write_approved(&mode, tool_name, &effects, &approvals)
+        {
+            outcome.decision = Decision::Allow;
         }
         outcome
     }
@@ -968,6 +980,95 @@ fn read_only_adjusted_decision(
         ReadOnlyDisposition::Ask if base == Decision::Allow => Decision::Ask,
         _ => base,
     }
+}
+
+fn request_requirement_satisfied(
+    requirement: &PermissionRequirement,
+    mode: &AgentMode,
+    tool_name: &str,
+    effects: &[ToolEffect],
+    approvals: &RuntimeApprovals,
+) -> bool {
+    if approvals.requirement_satisfied(requirement) {
+        return true;
+    }
+
+    let PermissionRequirement::PathPrefix { dir } = requirement else {
+        return false;
+    };
+
+    effects
+        .iter()
+        .any(|effect| effect_path_grant_satisfied(effect, mode, tool_name, dir, approvals))
+}
+
+fn effect_path_grant_satisfied(
+    effect: &ToolEffect,
+    mode: &AgentMode,
+    tool_name: &str,
+    dir: &std::path::Path,
+    approvals: &RuntimeApprovals,
+) -> bool {
+    match effect {
+        ToolEffect::Fs(path) => path_grant_satisfied(path, mode, tool_name, dir, approvals),
+        ToolEffect::Shell { paths, .. } => paths
+            .iter()
+            .any(|path| path_grant_satisfied(path, mode, tool_name, dir, approvals)),
+        _ => false,
+    }
+}
+
+fn path_grant_satisfied(
+    path: &PathEffect,
+    mode: &AgentMode,
+    tool_name: &str,
+    dir: &std::path::Path,
+    approvals: &RuntimeApprovals,
+) -> bool {
+    if path.access == PathAccess::Unknown {
+        return false;
+    }
+    let effect_dir = display_dir_for_effect(path);
+    workspace::paths_equivalent(&effect_dir, dir)
+        && approvals.session_path_grant_approved_for_path(
+            mode,
+            tool_name,
+            &path.access,
+            &effect_dir,
+        )
+}
+
+fn read_only_session_write_approved(
+    mode: &AgentMode,
+    tool_name: &str,
+    effects: &[ToolEffect],
+    approvals: &RuntimeApprovals,
+) -> bool {
+    let mut saw_write = false;
+    for effect in effects {
+        match effect {
+            ToolEffect::Fs(path) if path.access == PathAccess::Write => {
+                saw_write = true;
+                if !approvals.session_path_grant_approved_for_path(
+                    mode,
+                    tool_name,
+                    &PathAccess::Write,
+                    &display_dir_for_effect(path),
+                ) {
+                    return false;
+                }
+            }
+            ToolEffect::FsAccess(PathAccess::Write)
+            | ToolEffect::Shell {
+                risk: ShellRisk::Writes | ShellRisk::Destructive,
+                ..
+            }
+            | ToolEffect::ProcessControl
+            | ToolEffect::ConfigReload => return false,
+            _ => {}
+        }
+    }
+    saw_write
 }
 
 fn read_only_disposition(effects: &[ToolEffect]) -> ReadOnlyDisposition {
