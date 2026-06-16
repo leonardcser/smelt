@@ -61,7 +61,12 @@ local function display_path(path)
 end
 
 local function read_file_label(child)
-  return display_path(child.args and child.args.file_path) or child.summary_text or child.name or "read_file"
+  local args = child.args or {}
+  local content = child.output and child.output.content
+  if smelt.tools and smelt.tools.read_file_summary and args.file_path then
+    return smelt.tools.read_file_summary(args, content)
+  end
+  return display_path(args.file_path) or child.summary_text or child.name or "read_file"
 end
 
 local function grep_label(child)

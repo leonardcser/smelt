@@ -10,7 +10,7 @@ expression: frame.text()
 
 
 ──────────────────────────────────────────────────────────────────────
- read_file: crates/tui/src/app.rs
+ read_file: crates/tui/src/app.rs:120-159
 
  Allow?
   1. allow once

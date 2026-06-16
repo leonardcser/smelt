@@ -53,6 +53,36 @@ local function format_text_window(content, offset, limit)
   return table.concat(out, "\n")
 end
 
+local function line_count(content)
+  if content == nil or content == "" then return 0 end
+  return smelt.text.line_count(content)
+end
+
+local function range_display(args, content)
+  args = args or {}
+  local has_offset = args.offset ~= nil
+  local has_limit = args.limit ~= nil
+  local offset = math.max(1, math.floor(tonumber(args.offset) or 1))
+  local limit = tonumber(args.limit)
+  if limit and limit > 0 then
+    limit = math.floor(limit)
+  else
+    limit = DEFAULT_LINE_LIMIT
+  end
+
+  local reached_limit = content ~= nil and line_count(content) >= limit
+  if not has_offset and not has_limit and not reached_limit then return "" end
+  if limit == DEFAULT_LINE_LIMIT and not reached_limit then
+    return has_offset and (":" .. tostring(offset)) or ""
+  end
+  return ":" .. tostring(offset) .. "-" .. tostring(offset + limit - 1)
+end
+
+function smelt.tools.read_file_summary(args, content)
+  args = args or {}
+  return smelt.path.display(args.file_path or "") .. range_display(args, content)
+end
+
 transcript_defaults.__tool_body_renderers.read_file = function(block, ctx)
   if not block.output then return nil end
   return transcript_defaults.render_tool_output_tail(block.output, ctx)
@@ -91,7 +121,7 @@ smelt.tools.register(smelt.tools._with_watchdog({
     required = { "file_path" },
   },
   summary = function(args)
-    return smelt.path.display(args.file_path or "")
+    return smelt.tools.read_file_summary(args or {})
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""

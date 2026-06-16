@@ -2587,6 +2587,25 @@ mod tests {
             .expect("load read_file renderer");
     }
 
+    #[test]
+    fn read_file_summary_shows_default_limit_only_when_reached() {
+        let lua = test_lua();
+        install_read_file_renderer(&lua);
+        lua.lua
+            .load(
+                r#"
+                local short = "one\ntwo"
+                local full = string.rep("line\n", 1999) .. "line"
+                assert(smelt.tools.read_file_summary({ file_path = "a.rs" }, short) == "a.rs")
+                assert(smelt.tools.read_file_summary({ file_path = "a.rs" }, full) == "a.rs:1-2000")
+                assert(smelt.tools.read_file_summary({ file_path = "a.rs", offset = 120 }, short) == "a.rs:120")
+                assert(smelt.tools.read_file_summary({ file_path = "a.rs", offset = 120, limit = 40 }, short) == "a.rs:120-159")
+                "#,
+            )
+            .exec()
+            .expect("assert read_file summary ranges");
+    }
+
     #[derive(Debug, PartialEq)]
     struct RowSnapshot {
         line: String,
