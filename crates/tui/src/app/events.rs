@@ -1,5 +1,6 @@
 use crate::app::{
-    CommandAction, EventOutcome, InputOutcome, PendingChordPolicy, QueueStage, QueuedInput, TuiApp,
+    CommandAction, EventOutcome, InputOutcome, PendingChordPolicy, PromptWorkState, QueueStage,
+    QueuedInput, TuiApp,
 };
 
 use crate::input::Action;
@@ -44,7 +45,7 @@ impl TuiApp {
             // Skip when an overlay or cmdline is focused - they get first dibs.
             if self.ui.focused_overlay().is_none() && self.well_known.cmdline.is_none() {
                 let pctx = crate::input::prompt_ctx_ref(&self.ui);
-                let ctx = self.input.key_context(pctx, self.agent.is_some());
+                let ctx = self.input.key_context(pctx, self.turn_input_is_active());
                 match keymap::lookup(*code, *modifiers, &ctx) {
                     Some(KeyAction::ToggleMode) => {
                         self.lua.cycle_mode();
@@ -131,7 +132,7 @@ impl TuiApp {
             return false;
         }
 
-        let outcome = if self.agent.is_some() || self.busy_stack.is_busy() {
+        let outcome = if self.prompt_input_is_busy() {
             self.handle_event_running(ev)
         } else {
             self.handle_event_idle(ev)
@@ -180,27 +181,29 @@ impl TuiApp {
             } => {
                 self.clear_prompt_prediction();
                 self.redact_user_submission(&mut content, &mut display);
-                // Queue while a background plugin (compaction, etc.) has
-                // taken a `smelt.work.busy` token so messages run
-                // against the post-busy state.
-                if self.busy_stack.is_busy() {
-                    if !content.is_empty() {
-                        self.queued_inputs
-                            .try_push_turn(QueuedInput::request(display.clone(), content));
+                match self.prompt_work_state() {
+                    PromptWorkState::TurnActive | PromptWorkState::BackgroundBusy => {
+                        // Queue while an active turn or background plugin owns the
+                        // input lifecycle so messages run against the next stable state.
+                        if !content.is_empty() {
+                            self.queued_inputs
+                                .try_push_turn(QueuedInput::request(display.clone(), content));
+                        }
                     }
-                } else {
-                    let text = content.text_content();
-                    let has_images = content.image_count() > 0;
-                    if !text.is_empty() || has_images {
-                        let outcome = if has_images && text.trim().is_empty() {
-                            InputOutcome::StartAgent
+                    PromptWorkState::Idle => {
+                        let text = content.text_content();
+                        let has_images = content.image_count() > 0;
+                        if !text.is_empty() || has_images {
+                            let outcome = if has_images && text.trim().is_empty() {
+                                InputOutcome::StartAgent
+                            } else {
+                                self.process_input(&text)
+                            };
+                            self.apply_input_outcome(outcome, content, &display);
                         } else {
-                            self.process_input(&text)
-                        };
-                        self.apply_input_outcome(outcome, content, &display);
-                    } else {
-                        let outcome = self.handle_empty_submit();
-                        return self.apply_event_outcome(outcome);
+                            let outcome = self.handle_empty_submit();
+                            return self.apply_event_outcome(outcome);
+                        }
                     }
                 }
                 // Don't restore stash if a dialog opened - it restores on close.
@@ -719,20 +722,22 @@ impl TuiApp {
     }
 
     fn handle_empty_submit(&mut self) -> EventOutcome {
-        if self.agent.is_some() {
-            self.clear_prompt_prediction();
-            if self.queued_inputs.has_request() {
-                return EventOutcome::InterruptWithQueued;
+        match self.prompt_work_state() {
+            PromptWorkState::TurnActive => {
+                self.clear_prompt_prediction();
+                if self.queued_inputs.has_request() {
+                    return EventOutcome::InterruptWithQueued;
+                }
+                if self.queued_inputs.front_turn_is_request() {
+                    self.promote_next_queued_turn_to_request();
+                }
+                return EventOutcome::Noop;
             }
-            if self.queued_inputs.front_turn_is_request() {
-                self.promote_next_queued_turn_to_request();
+            PromptWorkState::BackgroundBusy => {
+                self.clear_prompt_prediction();
+                return EventOutcome::Noop;
             }
-            return EventOutcome::Noop;
-        }
-
-        if self.busy_stack.is_busy() {
-            self.clear_prompt_prediction();
-            return EventOutcome::Noop;
+            PromptWorkState::Idle => {}
         }
 
         if !self.queued_inputs.is_empty() {
@@ -1732,6 +1737,7 @@ mod tests {
     use crate::app::test_harness::{Action, TestApp};
     use crossterm::event::{KeyCode, KeyModifiers};
     use protocol::AgentMode;
+    use smelt_core::working::TurnPhase;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
@@ -1817,6 +1823,39 @@ mod tests {
         assert!(app.actions().iter().any(|action| matches!(
             action,
             Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "check this first")
+        )));
+    }
+
+    #[test]
+    fn empty_enter_promotes_turn_queue_during_compacting() {
+        let mut app = TestApp::builder().build();
+        app.app.dispatching_turn_id = Some(1);
+        app.app.working.begin(TurnPhase::Compacting);
+
+        app.type_text("check this first");
+        app.press(KeyCode::Enter);
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["check this first".to_string()]
+        );
+        assert_eq!(queue_stages(&app), vec!["turn".to_string()]);
+
+        app.clear_actions();
+        app.press(KeyCode::Enter);
+
+        assert!(app.agent_running());
+        assert_eq!(
+            app.state().queued_inputs,
+            vec!["check this first".to_string()]
+        );
+        assert_eq!(queue_stages(&app), vec!["request".to_string()]);
+        assert!(app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "check this first")
+        )));
+        assert!(!app.actions().iter().any(|action| matches!(
+            action,
+            Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(_))
         )));
     }
 

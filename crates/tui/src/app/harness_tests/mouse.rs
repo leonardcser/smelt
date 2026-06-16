@@ -4,7 +4,7 @@ use super::*;
 fn generic_win_cursor_setter_cannot_repark_prompt_cursor() {
     let mut app = TestApp::builder().with_vim(false).build();
     assert!(app.run_lua(r#"smelt.prompt.set_text("hel\nlo")"#));
-    app.app.render_normal(false);
+    app.app.render_normal();
     assert!(app.run_lua("smelt.prompt.win():cursor(0)"));
     app.type_text("!");
     assert_eq!(app.state().prompt_text, "hel\nlo!");

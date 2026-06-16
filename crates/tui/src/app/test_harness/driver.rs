@@ -82,9 +82,8 @@ impl TestApp {
     /// pipeline production uses (`TuiApp::render_normal`). The caller is
     /// responsible for terminal setup (raw mode, alternate screen).
     pub fn render(&mut self) {
-        let agent_running = self.app.agent.is_some();
         crate::lua::with_app_ptr(&mut self.app, |app| {
-            app.render_normal(agent_running);
+            app.render_normal();
         });
     }
 
@@ -97,10 +96,9 @@ impl TestApp {
     /// under fuzz without per-iteration megabytes of ANSI bytes hitting
     /// libFuzzer's log file.
     pub fn render_silent(&mut self) {
-        let agent_running = self.app.agent.is_some();
         let mut sink = std::io::sink();
         crate::lua::with_app_ptr(&mut self.app, |app| {
-            app.render_normal_to(agent_running, &mut sink);
+            app.render_normal_to(&mut sink);
         });
         self.assert_render_layout_invariants();
         self.assert_prompt_cursor_projection();
@@ -113,14 +111,13 @@ impl TestApp {
     /// ANSI bytes `render_normal` flushes to stdout are captured (and
     /// discarded) by the test harness.
     pub fn render_to_frame(&mut self) -> crate::smelt_edit::SnapshotFrame {
-        let agent_running = self.app.agent.is_some();
         let _guard = crate::lua::install_app_ptr(&mut self.app);
         // The main loop refreshes diff cells once per tick before
         // rendering; storybook drives `render_normal` directly without
         // that loop, so we have to publish here or Lua renderers see
         // stale `work_*` / `vim_mode` / `now` values.
         self.app.publish_diff_cells();
-        self.app.render_normal(agent_running);
+        self.app.render_normal();
         self.app.ui.snapshot()
     }
 

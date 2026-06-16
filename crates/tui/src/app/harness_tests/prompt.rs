@@ -307,11 +307,11 @@ fn prompt_docked_picker_does_not_get_tail_clobbered_on_first_render() {
 
     let mut app = TestApp::builder().with_init_lua(&init).build();
     app.type_text("/pick");
-    app.app.render_normal(false);
+    app.app.render_normal();
 
     app.press(KeyCode::Enter);
     app.feed_one(SourceEvent::LuaWakeup);
-    app.app.render_normal(false);
+    app.app.render_normal();
 
     // Locate the prompt-docked picker overlay (the slash completer's
     // own picker is closed on Enter).

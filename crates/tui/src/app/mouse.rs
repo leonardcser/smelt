@@ -789,7 +789,7 @@ mod tests {
         });
         app.app_focus = AppFocus::Content;
         app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let top = app
             .ui
@@ -915,7 +915,7 @@ mod tests {
     }
 
     fn prompt_resize_handle_cell(app: &mut crate::app::TuiApp) -> (u16, u16) {
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         let top = app
             .ui
             .named_win("smelt.prompt_bar.top")
@@ -953,7 +953,7 @@ mod tests {
         app.handle_mouse(left_down(row, col));
         app.handle_mouse(left_drag(row.saturating_sub(2), col));
         app.handle_mouse(left_up(row.saturating_sub(2), col));
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let expected = (start_rows + 2).min(crate::app::TuiApp::max_manual_prompt_input_rows_for(
             app.ui.terminal_size().1,
@@ -972,7 +972,7 @@ mod tests {
         app.handle_mouse(left_down(row, col));
         app.handle_mouse(left_drag(row + 2, col));
         app.handle_mouse(left_up(row + 2, col));
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         assert_eq!(app.prompt_input_rows_override, Some(2));
         assert_eq!(app.prompt_input_rows, 2);
@@ -985,7 +985,7 @@ mod tests {
         app.ui.set_terminal_size(30, 20);
         app.prompt_input_rows_override = Some(13);
 
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         assert_eq!(crate::app::TuiApp::max_auto_prompt_input_rows_for(20), 10);
         assert_eq!(crate::app::TuiApp::max_manual_prompt_input_rows_for(20), 14);
@@ -1002,7 +1002,7 @@ mod tests {
             "this prediction is deliberately long enough to need far more than six wrapped rows in a narrow prompt input viewport".into(),
         );
 
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         assert_eq!(app.prompt_input_rows, 6);
         assert_eq!(app.prompt_win().viewport.unwrap().rect.height, 6);
@@ -1036,7 +1036,7 @@ mod tests {
         app.handle_mouse(left_down(row, col));
         app.handle_mouse(left_drag(row + 20, col));
         app.handle_mouse(left_up(row + 20, col));
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         assert_eq!(app.prompt_input_rows_override, None);
         assert!(app.prompt_input_rows > 1);
@@ -1051,7 +1051,7 @@ mod tests {
             .expect("prompt buf")
             .set_source("one\ntwo\nthree".into());
 
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let viewport = app.prompt_win().viewport.expect("prompt viewport");
         assert_eq!(app.prompt_input_rows, 1);
@@ -1071,7 +1071,7 @@ mod tests {
             "this prediction is long enough to wrap across several prompt rows".into(),
         );
 
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let viewport = app.prompt_win().viewport.expect("prompt viewport");
         assert!(app.prompt_input_rows > 1);
@@ -1089,7 +1089,7 @@ mod tests {
             "this prediction is long enough to wrap across several prompt rows".into(),
         );
 
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let viewport = app.prompt_win().viewport.expect("prompt viewport");
         assert_eq!(app.prompt_input_rows, 1);
@@ -1105,7 +1105,7 @@ mod tests {
         });
         app.app_focus = AppFocus::Content;
         app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let bottom = app
             .ui
@@ -1135,7 +1135,7 @@ mod tests {
             });
         }
         app.transcript_win_mut().scroll_to_bottom();
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         let rendered_rows = app.ui.buf(app.transcript_win().buf).unwrap().lines();
         assert!(rendered_rows.iter().any(|line| line == "line 99"));
         assert!(
@@ -1161,7 +1161,7 @@ mod tests {
         };
 
         app.handle_mouse(down);
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         app.handle_mouse(up);
 
         let win = app.transcript_win();
@@ -1187,13 +1187,13 @@ mod tests {
             });
         }
         app.transcript_win_mut().scroll_to_bottom();
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         let before_top = app.transcript_win().scroll_top();
 
         app.push_block(smelt_core::Block::Text {
             content: "line 100".into(),
         });
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let win = app.transcript_win();
         let vp = win.viewport.expect("render populated transcript viewport");
@@ -1223,7 +1223,7 @@ mod tests {
             });
         }
         app.transcript_win_mut().scroll_to_bottom();
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let vp = app
             .transcript_win()
@@ -1264,9 +1264,9 @@ mod tests {
         };
 
         app.handle_mouse(down);
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         app.handle_mouse(drag);
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         app.handle_mouse(up);
 
         let yanked = app.core.clipboard.kill_ring.current();
@@ -1289,7 +1289,7 @@ mod tests {
             });
         }
         app.transcript_win_mut().scroll_to_bottom();
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let vp = app
             .transcript_win()
@@ -1310,9 +1310,9 @@ mod tests {
         };
 
         app.handle_mouse(down);
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         app.handle_mouse(drag);
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let win = app.transcript_win();
         assert_eq!(win.cursor_screen_row(vp.rect.height), Some(end_rel));
@@ -1336,7 +1336,7 @@ mod tests {
             });
         }
         app.transcript_win_mut().scroll_to_bottom();
-        app.render_normal_to(false, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
 
         let vp = app
             .transcript_win()
@@ -1380,9 +1380,9 @@ mod tests {
         app.push_block(smelt_core::Block::Text {
             content: "streamed after selection started".into(),
         });
-        app.render_normal_to(true, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         app.handle_mouse(drag);
-        app.render_normal_to(true, &mut std::io::sink());
+        app.render_normal_to(&mut std::io::sink());
         app.handle_mouse(up);
 
         let yanked = app.core.clipboard.kill_ring.current();

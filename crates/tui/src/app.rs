@@ -182,6 +182,23 @@ pub(crate) struct Notification {
     pub(crate) expires_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromptWorkState {
+    Idle,
+    BackgroundBusy,
+    TurnActive,
+}
+
+impl PromptWorkState {
+    pub(crate) fn is_busy(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+
+    pub(crate) fn turn_is_active(self) -> bool {
+        matches!(self, Self::TurnActive)
+    }
+}
+
 /// Per-window dispatch policy for a placeholder. Set via Lua's
 /// `Win:placeholder(text, opts)`; the dispatcher consults it on key events.
 #[derive(Default, Clone)]
@@ -470,12 +487,31 @@ impl TuiApp {
         self.active_agent_turn_id().is_some()
     }
 
+    pub(crate) fn prompt_work_state(&self) -> PromptWorkState {
+        let turn_active = self.agent_is_running() || self.working.is_compacting();
+        if turn_active {
+            PromptWorkState::TurnActive
+        } else if self.busy_stack.is_busy() {
+            PromptWorkState::BackgroundBusy
+        } else {
+            PromptWorkState::Idle
+        }
+    }
+
+    pub(crate) fn turn_input_is_active(&self) -> bool {
+        self.prompt_work_state().turn_is_active()
+    }
+
+    pub(crate) fn prompt_input_is_busy(&self) -> bool {
+        self.prompt_work_state().is_busy()
+    }
+
     pub(crate) fn can_continue_turn(&self) -> bool {
         !self.core.session.history.is_empty()
     }
 
     pub(crate) fn queue_input_for_request(&mut self, queued: QueuedInput) -> bool {
-        if !self.agent_is_running() {
+        if !self.turn_input_is_active() {
             return self.queued_inputs.try_push_turn(queued);
         }
         let text = queued.request_text().map(str::to_string);
@@ -664,7 +700,7 @@ impl TuiApp {
     }
 
     pub(crate) fn start_next_queued_input_if_idle(&mut self) -> bool {
-        if self.agent.is_some() || self.queued_inputs.is_empty() || self.busy_stack.is_busy() {
+        if self.prompt_input_is_busy() || self.queued_inputs.is_empty() {
             return false;
         }
         let Some(queued) = self.queued_inputs.pop_next_for_turn() else {
@@ -1749,7 +1785,7 @@ impl TuiApp {
             self.drain_host_calls();
 
             if self.drain_idle_work() {
-                self.render_normal(self.agent.is_some());
+                self.render_normal();
                 continue 'main;
             }
 
@@ -1781,7 +1817,7 @@ impl TuiApp {
             }
 
             if self.drain_idle_work() {
-                self.render_normal(self.agent.is_some());
+                self.render_normal();
                 continue 'main;
             }
 
@@ -1821,7 +1857,7 @@ impl TuiApp {
                 self.pending_dialog = !self.pending_dialogs.is_empty();
             }
 
-            self.render_normal(self.agent.is_some());
+            self.render_normal();
             let last_frame = self.core.clock.instant_now();
 
             let now = self.core.clock.instant_now();
@@ -1924,7 +1960,7 @@ impl TuiApp {
 
                     self.dispatch_ui_window_events(false);
                     self.publish_diff_cells();
-                    self.render_normal(self.agent.is_some());
+                    self.render_normal();
                 }
 
                 Some(completion) = self.process_completion_rx.recv() => {
@@ -1946,7 +1982,7 @@ impl TuiApp {
                     while self.lua_wakeup_rx.try_recv().is_ok() {}
                     self.flush_lua_callbacks();
                     self.drive_lua_tasks();
-                    self.render_normal(self.agent.is_some());
+                    self.render_normal();
                 }
 
                 Some(_) = async {
@@ -1961,12 +1997,12 @@ impl TuiApp {
                     if let Some(rx) = auto_reload_rx.as_mut() {
                         while rx.try_recv().is_ok() {}
                     }
-                    if self.agent.is_some() || self.ui.active_modal().is_some() {
+                    if self.prompt_input_is_busy() || self.ui.active_modal().is_some() {
                         self.schedule_lua_reload();
                         continue;
                     }
                     self.reload_lua();
-                    self.render_normal(self.agent.is_some());
+                    self.render_normal();
                 }
 
                 Some(ev) = async {
@@ -1998,7 +2034,7 @@ impl TuiApp {
                     if self.ui.tick_drag_autoscroll() {
                         self.dispatch_ui_window_events(false);
                     }
-                    self.render_normal(self.agent.is_some());
+                    self.render_normal();
                 }
 
                 _ = tokio::time::sleep(next_idle_delay.unwrap_or(Duration::MAX)), if next_idle_delay.is_some() => {
@@ -2007,14 +2043,14 @@ impl TuiApp {
                     self.dismiss_expired_notification();
                     self.expire_pending_keymap_chord();
                     self.publish_diff_cells();
-                    self.render_normal(self.agent.is_some());
+                    self.render_normal();
                 }
 
                 Some(_) = sigwinch.recv() => {
                     if let Ok((w, h)) = terminal::size() {
                         if w != self.last_width || h != self.last_height {
                             self.handle_resize(w, h);
-                            self.render_normal(self.agent.is_some());
+                            self.render_normal();
                         }
                     }
                 }

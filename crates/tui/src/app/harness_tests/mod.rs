@@ -222,7 +222,7 @@ fn picker_buffer_lines(app: &TestApp, leaf: WinId) -> Vec<String> {
 // ── Vim mode transitions ────────────────────────────────────────
 
 fn prompt_content_cell(app: &mut TestApp) -> (u16, u16) {
-    app.app.render_normal(false);
+    app.app.render_normal();
     let vp = app
         .app
         .ui

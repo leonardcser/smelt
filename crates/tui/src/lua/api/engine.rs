@@ -355,7 +355,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &[],
         |_, ()| -> LuaResult<()> {
             crate::lua::with_app(|app| {
-                if app.agent_is_running() {
+                if app.prompt_input_is_busy() {
                     app.notify_error("cannot reload while agent is working".into());
                     return;
                 }
@@ -394,7 +394,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     body,
                     overrides: parsed,
                 };
-                if app.agent_is_running() || app.busy_stack.is_busy() {
+                if app.prompt_input_is_busy() {
                     let text = if app.core.config.settings.redact_secrets {
                         engine::redact::redact(&cmd.body)
                     } else {

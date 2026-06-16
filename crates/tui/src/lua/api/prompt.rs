@@ -110,13 +110,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "queued",
-        "Return the queued prompt text rows. Empty when the agent is idle and no busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.",
+        "Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.",
         &[],
         |_, ()| -> LuaResult<Vec<String>> {
             Ok(crate::lua::try_with_app(|app| {
-                let agent_running = app.agent_is_running();
-                let show_queued = agent_running || app.busy_stack.is_busy();
-                if show_queued {
+                if app.prompt_input_is_busy() {
                     app.queued_inputs.display_texts()
                 } else {
                     Vec::new()
@@ -131,9 +129,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |lua, ()| -> LuaResult<Vec<mlua::Table>> {
             let rows = crate::lua::try_with_app(|app| {
-                let agent_running = app.agent_is_running();
-                let show_queued = agent_running || app.busy_stack.is_busy();
-                if show_queued {
+                if app.prompt_input_is_busy() {
                     app.queued_inputs.display_rows()
                 } else {
                     Vec::new()

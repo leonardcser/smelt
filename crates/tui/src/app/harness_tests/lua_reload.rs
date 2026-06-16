@@ -7,7 +7,7 @@ fn lua_config_session_and_transcript_contracts_are_available() {
     app.app.push_block(smelt_core::Block::Text {
         content: "assistant line".into(),
     });
-    app.app.render_normal_to(false, &mut std::io::sink());
+    app.app.render_normal_to(&mut std::io::sink());
 
     assert!(app.run_lua(
         r#"

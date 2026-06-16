@@ -69,7 +69,7 @@ impl TuiApp {
     }
 
     fn can_reload_lua_now(&self) -> bool {
-        !self.agent_is_running() && self.ui.active_modal().is_none()
+        !self.prompt_input_is_busy() && self.ui.active_modal().is_none()
     }
 
     /// Bring up (or rebuild) the Lua context. Single pipeline shared by

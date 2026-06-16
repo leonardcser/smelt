@@ -67,7 +67,7 @@ fn picker_wheel_pans_viewport_when_unfocused() {
     drop(_guard);
 
     // Render to populate the viewport.
-    app.app.render_normal(false);
+    app.app.render_normal();
     assert_eq!(app.app.ui.win(leaf).map(|w| w.scroll_top()), Some(0));
 
     let leaf_rect = app

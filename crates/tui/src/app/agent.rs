@@ -535,7 +535,7 @@ impl TuiApp {
         let note = format!("Background process {id} {status}.");
         if self.agent_is_running() {
             self.queue_history_append(crate::app::PendingHistoryAppend::process_status(note));
-        } else if self.busy_stack.is_busy() {
+        } else if self.prompt_input_is_busy() {
             self.queued_inputs
                 .try_push_turn(crate::app::QueuedInput::ProcessStatus(note));
         } else {

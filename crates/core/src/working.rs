@@ -169,6 +169,12 @@ impl WorkingState {
         self.live.is_some()
     }
 
+    pub fn is_compacting(&self) -> bool {
+        self.live
+            .as_ref()
+            .is_some_and(|live| matches!(live.phase, TurnPhase::Compacting))
+    }
+
     /// Engine-only view of the live turn. Returns `None` when no live
     /// turn is running - the caller layers the busy stack on top to
     /// decide `Idle` / `Busy` / `Done` / `Interrupted`.

@@ -603,7 +603,7 @@ impl TuiApp {
     }
 
     pub(crate) fn save_session_if_pending(&mut self) {
-        if self.session_save_pending && self.agent.is_none() && !self.busy_stack.is_busy() {
+        if self.session_save_pending && !self.prompt_input_is_busy() {
             self.save_session();
         }
     }

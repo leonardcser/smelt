@@ -6,9 +6,9 @@ use crate::app::TuiApp;
 use crate::content::{layout, prompt_buf};
 
 impl TuiApp {
-    pub(crate) fn render_normal(&mut self, agent_running: bool) {
+    pub(crate) fn render_normal(&mut self) {
         let mut stdout = std::io::stdout();
-        self.render_normal_to(agent_running, &mut stdout);
+        self.render_normal_to(&mut stdout);
         self.save_session_if_pending();
     }
 
@@ -24,13 +24,13 @@ impl TuiApp {
     /// `std::io::stdout()`; the fuzz harness passes `std::io::sink()` so
     /// every code path under `content/*` and `compositor:*` runs without
     /// dumping megabytes of ANSI per scenario into libFuzzer's log file.
-    pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, agent_running: bool, out: &mut W) {
+    pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, out: &mut W) {
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
 
         let (term_w, term_h) = self.ui.terminal_size();
         let width = term_w as usize;
-        let show_queued = agent_running || self.busy_stack.is_busy();
+        let show_queued = self.prompt_input_is_busy();
 
         self.ui.resolve_tail_scrolls();
         self.ui.sync_scroll_links();
