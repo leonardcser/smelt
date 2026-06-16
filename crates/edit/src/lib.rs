@@ -1880,7 +1880,7 @@ impl Ui {
         self.surface.render_raw(w, paint)
     }
 
-    /// Resolved screen rect for a `PaintId` leaf across splits and overlays.
+    /// Resolved screen rect for a `PaintId` leaf across splits, overlays, and decorations.
     pub fn paint_rect(&self, id: PaintId) -> Option<Rect> {
         let (term_w, term_h) = self.surface.terminal_size();
         let area = Rect::new(0, 0, term_w, term_h);
@@ -1891,6 +1891,11 @@ impl Ui {
             wins: &self.wins,
             bufs: &self.bufs,
         };
+        for (_oid, ov_rect, ov) in self.resolve_overlays(None) {
+            if let Some(rect) = layout::resolve_layout_with(&ov.layout, ov_rect, &sizer).get(&id) {
+                return Some(*rect);
+            }
+        }
         for (_did, _owner, decoration_rect, decoration) in self.resolve_decorations() {
             if let Some(rect) =
                 layout::resolve_layout_with(&decoration.layout, decoration_rect, &sizer).get(&id)
