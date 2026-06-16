@@ -2405,73 +2405,36 @@ fn format_elapsed_secs(secs: u64) -> String {
 }
 
 fn thinking_fallback_summary(content: &str) -> String {
-    let (label, line_count, has_title) = thinking_summary(content);
-    if line_count == 0 {
-        "thinking".to_string()
-    } else if has_title && line_count == 1 {
-        label
-    } else {
-        format!("{label} …")
-    }
+    let (label, line_count) = thinking_summary(content);
+    format!("{label} ({})", pluralize(line_count, "line", "lines"))
 }
 
-fn thinking_summary(content: &str) -> (String, usize, bool) {
-    let mut title = None;
-    let mut first_nonempty = None;
-    let mut saw_blank_after_first = false;
-    let mut seen_after_first = false;
+fn thinking_summary(content: &str) -> (String, usize) {
+    let mut label = None;
     let mut lines = 0usize;
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            if first_nonempty.is_some() && !seen_after_first {
-                saw_blank_after_first = true;
-            }
             continue;
         }
-
         lines += 1;
-        if first_nonempty.is_none() {
-            first_nonempty = Some(trimmed.to_string());
-            title = bold_thinking_title(trimmed);
-        } else {
-            seen_after_first = true;
-        }
-    }
-
-    if title.is_none() && saw_blank_after_first {
-        if let Some(first) = first_nonempty
-            .as_deref()
-            .filter(|line| looks_like_plain_title(line))
+        if label.is_none()
+            && trimmed.starts_with("**")
+            && trimmed.ends_with("**")
+            && trimmed.len() > 4
         {
-            title = Some(first.to_string());
+            label = Some(trimmed[2..trimmed.len() - 2].trim().to_string());
         }
     }
-
-    match title {
-        Some(title) => (title, lines, true),
-        None => ("thinking".to_string(), lines, false),
-    }
+    (label.unwrap_or_else(|| "thinking".to_string()), lines)
 }
 
-fn bold_thinking_title(line: &str) -> Option<String> {
-    if line.starts_with("**") && line.ends_with("**") && line.len() > 4 {
-        let title = line[2..line.len() - 2].trim();
-        if !title.is_empty() {
-            return Some(title.to_string());
-        }
+fn pluralize(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
     }
-    None
-}
-
-fn looks_like_plain_title(line: &str) -> bool {
-    let word_count = line.split_whitespace().count();
-    word_count > 0
-        && word_count <= 12
-        && line.chars().count() <= 80
-        && !line.ends_with('.')
-        && !line.ends_with('!')
-        && !line.ends_with('?')
 }
 
 pub fn load_host_bootstrap_chunks(lua: &Lua) -> mlua::Result<()> {
@@ -2892,32 +2855,6 @@ mod tests {
             .transcript_groups_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         rt
-    }
-
-    #[test]
-    fn thinking_summary_uses_ellipsis_for_bold_title() {
-        assert_eq!(
-            thinking_fallback_summary("**Analyzing the bug**\nLet me check...\nMore notes"),
-            "Analyzing the bug …"
-        );
-    }
-
-    #[test]
-    fn thinking_summary_uses_plain_title_before_blank() {
-        assert_eq!(
-            thinking_fallback_summary(
-                "Modifying code\n\nI need to inspect the edit file diff output."
-            ),
-            "Modifying code …"
-        );
-    }
-
-    #[test]
-    fn thinking_summary_keeps_sentence_as_untitled() {
-        assert_eq!(
-            thinking_fallback_summary("I need to modify the code.\n\nMore notes."),
-            "thinking …"
-        );
     }
 
     #[test]

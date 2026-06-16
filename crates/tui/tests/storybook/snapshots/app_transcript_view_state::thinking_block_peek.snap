@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
-│ Inspecting the renderer …
+│ Inspecting the renderer
 │ Read the transcript model first.
 │ Check the Lua defaults next.
 │ Update the stories last.

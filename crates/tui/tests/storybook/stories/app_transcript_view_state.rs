@@ -7,7 +7,6 @@ use serde_json::json;
 use crate::app_story;
 
 const THINKING: &str = "**Inspecting the renderer**\nRead the transcript model first.\nCheck the Lua defaults next.\nUpdate the stories last.";
-const THINKING_PLAIN_TITLE: &str = "Modifying code\n\nI need to modify the code and inspect the details.\nIt looks like I should check the edit file diff output.";
 
 app_story!(thinking_block_collapsed, |ctx| {
     ctx.set_viewport(56, 10);
@@ -22,14 +21,6 @@ app_story!(thinking_block_peek, |ctx| {
     ctx.set_viewport(56, 10);
     ctx.engine(EngineEvent::Thinking {
         content: THINKING.into(),
-    });
-    ctx.assert_snapshot();
-});
-
-app_story!(thinking_block_plain_title_peek, |ctx| {
-    ctx.set_viewport(70, 10);
-    ctx.engine(EngineEvent::Thinking {
-        content: THINKING_PLAIN_TITLE.into(),
     });
     ctx.assert_snapshot();
 });

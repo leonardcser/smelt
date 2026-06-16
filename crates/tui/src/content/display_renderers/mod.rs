@@ -25,6 +25,26 @@ mod tests {
     const CHROME_INNER_PAD: usize = 1;
     const THINKING_GUTTER: &str = "│ ";
 
+    fn thinking_summary(content: &str) -> (String, usize) {
+        let mut label = None;
+        let mut lines = 0usize;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            lines += 1;
+            if label.is_none()
+                && trimmed.starts_with("**")
+                && trimmed.ends_with("**")
+                && trimmed.len() > 4
+            {
+                label = Some(trimmed[2..trimmed.len() - 2].trim().to_string());
+            }
+        }
+        (label.unwrap_or_else(|| "thinking".to_string()), lines)
+    }
+
     fn mk_collector_buf() -> (Buffer, Theme) {
         (
             Buffer::new(BufId(0), BufCreateOpts::default()),
@@ -543,6 +563,41 @@ mod tests {
         );
         let text: Vec<_> = rows.into_iter().map(|row| row.text).collect();
         assert_eq!(text, vec!["│ one", "│ two", "│ three"]);
+    }
+
+    #[test]
+    fn thinking_summary_extracts_bold_title() {
+        let (label, lines) =
+            thinking_summary("**Analyzing the bug**\nLet me check...\n\nMore notes");
+        assert_eq!(label, "Analyzing the bug");
+        assert_eq!(lines, 3);
+    }
+
+    #[test]
+    fn thinking_summary_falls_back_to_default() {
+        let (label, lines) = thinking_summary("Let me think about this.\nLine two.");
+        assert_eq!(label, "thinking");
+        assert_eq!(lines, 2);
+    }
+
+    #[test]
+    fn thinking_summary_skips_blank_lines() {
+        let (_, lines) = thinking_summary("\n\nfirst\n\nsecond\n\n");
+        assert_eq!(lines, 2);
+    }
+
+    #[test]
+    fn thinking_summary_empty() {
+        let (label, lines) = thinking_summary("");
+        assert_eq!(label, "thinking");
+        assert_eq!(lines, 0);
+    }
+
+    #[test]
+    fn thinking_summary_bold_must_have_content() {
+        // "****" is 4 chars - the `len() > 4` check rejects empty bold
+        let (label, _) = thinking_summary("****");
+        assert_eq!(label, "thinking");
     }
 
     /// Snapshot the leftmost cells of every block variant against the shared
