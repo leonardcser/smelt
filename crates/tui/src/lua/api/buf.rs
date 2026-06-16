@@ -375,7 +375,7 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
             "line" => fn(idx: u64) -> Option<String>, "Read a single line by 1-based index. `nil` if out of range or the buffer is gone.",
             "styled" => fn(lines: mlua::Table) -> LuaBuf, "Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.",
             "readonly" => fn(val: Option<bool>) -> mlua::Value, "Read or write the readonly flag. With arg, returns the handle for chaining.",
-            "mark" => fn(ns: u32, row: u64, col: u64, opts: Option<LuaMarkOpts>) -> u64, "Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line - the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.",
+            "mark" => fn(ns: u32, row: u64, col: u64, opts: Option<LuaMarkOpts>) -> u64, "Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line, the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.",
             "clear_ns" => fn(ns: u32, start: Option<i64>, end_: Option<i64>) -> LuaBuf, "Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining.",
         },
     });
@@ -385,7 +385,7 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
         let s = shared.clone();
         m.fn_(
             "new",
-            "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival - repeat calls with the same name return the same handle with mutable opts re-applied. When omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned so the buffer survives `/reload` without explicit naming.",
+            "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival. Repeat calls with the same name return the same handle with mutable opts re-applied. When omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned so the buffer survives `/reload` without explicit naming.",
             &["opts"],
             move |lua, opts: Option<mlua::Table>| -> LuaResult<LuaBuf> {
                 // Auto-name from active plugin scope when caller didn't.

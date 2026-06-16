@@ -32,7 +32,7 @@ smelt.tools.register({
               type = "array",
               minItems = 2,
               maxItems = 4,
-              description = "The available choices. An 'Other' free-text entry is automatically offered alongside the options - do NOT include one yourself.",
+              description = "The available choices. An 'Other' free-text entry is added automatically. Do not include one yourself.",
               items = {
                 type = "object",
                 properties = {

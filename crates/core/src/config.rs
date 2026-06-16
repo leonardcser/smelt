@@ -355,7 +355,7 @@ impl std::fmt::Display for ResolveModelRefError {
             Self::NotFound { reference } => write!(f, "unknown model or provider: {reference}"),
             Self::Ambiguous { reference, matches } => write!(
                 f,
-                "ambiguous reference '{reference}' - use provider/model ({})",
+                "ambiguous reference '{reference}'. Use provider/model ({})",
                 matches.join(", ")
             ),
         }

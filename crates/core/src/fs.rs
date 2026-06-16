@@ -603,9 +603,7 @@ impl FileStateCache {
 /// the message for the caller tool.
 pub fn staleness_error(cache: &FileStateCache, path: &str, noun: &str) -> Option<String> {
     let Some(cached) = cache.get(path) else {
-        return Some(format!(
-            "You must use read_file before editing. Read the {noun} first."
-        ));
+        return Some(format!("Read the {noun} with read_file before editing."));
     };
     match file_mtime_ms(path) {
         Ok(current) if current == cached.mtime_ms => None,
@@ -694,7 +692,7 @@ pub fn checked_edit_file(
     }
     if count > 1 && !replace_all {
         return Err(format!(
-            "old_string found {count} times - must be unique, or set replace_all to true"
+            "old_string matched {count} times. Make it unique or set replace_all to true."
         ));
     }
 

@@ -175,7 +175,7 @@ local function fetch_raw(args)
 
   local output = truncate_output(table.concat(parts), MAX_OUTPUT_LINES, MAX_OUTPUT_BYTES)
   if was_truncated then
-    output = output .. "\n\n[Response truncated - original response exceeded 5 MB]"
+    output = output .. "\n\n[Response truncated. Original response exceeded 5 MB.]"
   end
   smelt.http.cache.write(cache_key, output)
   return output

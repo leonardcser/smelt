@@ -242,7 +242,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "set_default_shell",
-            "Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `\"/bin/zsh\"`); `opts.args` is the leading argv (e.g. `{ \"-fc\" }`) - the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.",
+            "Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `\"/bin/zsh\"`); `opts.args` is the leading argv (e.g. `{ \"-fc\" }`), and the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.",
             &["opts"],
             move |_, opts: Option<mlua::Table>| -> LuaResult<()> {
                 let Some(t) = opts else {

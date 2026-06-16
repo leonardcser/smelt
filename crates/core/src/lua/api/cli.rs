@@ -99,7 +99,7 @@ default) after the binary has parsed argv.",
         let s = shared.clone();
         m.fn_(
             "register_flag",
-            "Register a CLI flag. MUST be called from `early.lua` - the runtime errors loudly if invoked in any later phase, because clap has already parsed argv by then. `opts.kind` is `\"boolean\"`, `\"string\"`, or `\"integer\"`; `opts.default` (optional) sets the value when the flag is absent. Booleans always default to `false` when not provided. Errors if a flag with the same name was already registered.",
+            "Register a CLI flag. MUST be called from `early.lua`. The runtime errors loudly if invoked in any later phase, because clap has already parsed argv by then. `opts.kind` is `\"boolean\"`, `\"string\"`, or `\"integer\"`; `opts.default` (optional) sets the value when the flag is absent. Booleans always default to `false` when not provided. Errors if a flag with the same name was already registered.",
             &["opts"],
             move |_, opts: LuaRegisterFlagOpts| -> LuaResult<()> {
                 if s.phase() != crate::lua::Phase::Early {

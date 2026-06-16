@@ -34,7 +34,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "text",
-        "Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = \"ErrorMsg\"` for errors, `\"SmeltAccent\"` for accent, or any registered theme group - the mapping is the caller's choice, not the renderer's. `opts.width` overrides the wrapping width for tool layouts rendered into narrower panes.",
+        "Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = \"ErrorMsg\"` for errors, `\"SmeltAccent\"` for accent, or any registered theme group; the mapping is the caller's choice, not the renderer's. `opts.width` overrides the wrapping width for tool layouts rendered into narrower panes.",
         &["buf", "content", "opts"],
         |_, (buf, content, opts): (LuaBuf, String, Option<mlua::Table>)| -> LuaResult<()> {
             let hl_group = opts

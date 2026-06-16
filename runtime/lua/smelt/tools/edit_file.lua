@@ -89,7 +89,7 @@ end
 
 smelt.tools.register({
   name = "edit_file",
-  description = "Performs exact string replacements in files. The old_string must be unique in the file unless replace_all is true.",
+  description = "Perform exact string replacements in files. By default, old_string must be unique; set replace_all to replace every match.",
   override = true,
   permission_defaults = { apply = "allow" },
   execution_mode = "sequential",
@@ -107,11 +107,11 @@ smelt.tools.register({
       },
       new_string = {
         type = "string",
-        description = "The text to replace it with (must be different from old_string)",
+        description = "Replacement text. Must differ from old_string.",
       },
       replace_all = {
         type = "boolean",
-        description = "Replace all occurrences of old_string (default false)",
+        description = "Replace every old_string match. Defaults to false.",
       },
     },
     required = { "file_path", "old_string", "new_string" },
@@ -124,7 +124,7 @@ smelt.tools.register({
     if path == "" or smelt.fs.file_state.has(path) then
       return nil
     end
-    return "You must use read_file before editing. Read the file first."
+    return "Read the file with read_file before editing."
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
