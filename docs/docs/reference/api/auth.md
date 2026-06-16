@@ -6,6 +6,16 @@
 
 Authenticated provider helpers. Requests use smelt-managed credentials without exposing bearer tokens to Lua.
 
+## `smelt.auth.managed_usage`
+
+```lua
+fun(provider: string): { summary: table?, limits: table[] }?, string?
+```
+
+Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
+provider-neutral `{ summary, limits }` rows with `{ label, used, limit,
+resetHint? }`. Only providers with managed quota endpoints support this.
+
 ## `smelt.auth.request`
 
 ```lua

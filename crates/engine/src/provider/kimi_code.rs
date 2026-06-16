@@ -1,5 +1,6 @@
 use crate::paths::{cache_dir, state_dir};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -153,6 +154,251 @@ impl KimiCodeTokens {
     fn delete() {
         cred_store().delete();
     }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ManagedUsageRow {
+    pub label: String,
+    pub used: i64,
+    pub limit: i64,
+    #[serde(rename = "resetHint", skip_serializing_if = "Option::is_none")]
+    pub reset_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ManagedUsageReport {
+    pub summary: Option<ManagedUsageRow>,
+    pub limits: Vec<ManagedUsageRow>,
+}
+
+pub fn parse_managed_usage_payload(payload: &Value) -> ManagedUsageReport {
+    let Some(rec) = payload.as_object() else {
+        return ManagedUsageReport {
+            summary: None,
+            limits: Vec::new(),
+        };
+    };
+
+    let summary = to_usage_row(rec.get("usage"), "Weekly limit");
+    let mut limits = Vec::new();
+    if let Some(items) = rec.get("limits").and_then(Value::as_array) {
+        for (idx, item) in items.iter().enumerate() {
+            let Some(item_obj) = item.as_object() else {
+                continue;
+            };
+            let detail = item_obj
+                .get("detail")
+                .and_then(Value::as_object)
+                .unwrap_or(item_obj);
+            let empty = serde_json::Map::new();
+            let window = item_obj
+                .get("window")
+                .and_then(Value::as_object)
+                .unwrap_or(&empty);
+            let label = limit_label(item_obj, detail, window, idx);
+            if let Some(row) = to_usage_row(Some(&Value::Object(detail.clone())), &label) {
+                limits.push(row);
+            }
+        }
+    }
+
+    ManagedUsageReport { summary, limits }
+}
+
+fn to_usage_row(raw: Option<&Value>, default_label: &str) -> Option<ManagedUsageRow> {
+    let raw = raw?.as_object()?;
+    let limit = to_int(raw.get("limit"));
+    let mut used = to_int(raw.get("used"));
+    if used.is_none() {
+        if let (Some(remaining), Some(limit)) = (to_int(raw.get("remaining")), limit) {
+            used = Some(limit - remaining);
+        }
+    }
+    if used.is_none() && limit.is_none() {
+        return None;
+    }
+    let label = string_field(raw, "name")
+        .or_else(|| string_field(raw, "title"))
+        .unwrap_or_else(|| default_label.to_string());
+    Some(ManagedUsageRow {
+        label,
+        used: used.unwrap_or(0),
+        limit: limit.unwrap_or(0),
+        reset_hint: reset_hint_from(raw),
+    })
+}
+
+fn limit_label(
+    item: &serde_json::Map<String, Value>,
+    detail: &serde_json::Map<String, Value>,
+    window: &serde_json::Map<String, Value>,
+    idx: usize,
+) -> String {
+    for key in ["name", "title", "scope"] {
+        if let Some(value) = string_field(item, key).or_else(|| string_field(detail, key)) {
+            return value;
+        }
+    }
+    let duration = to_int(
+        window
+            .get("duration")
+            .or_else(|| item.get("duration"))
+            .or_else(|| detail.get("duration")),
+    );
+    let time_unit = window
+        .get("timeUnit")
+        .or_else(|| item.get("timeUnit"))
+        .or_else(|| detail.get("timeUnit"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(duration) = duration {
+        if time_unit.contains("MINUTE") {
+            if duration >= 60 && duration % 60 == 0 {
+                return format!("{}h limit", duration / 60);
+            }
+            return format!("{duration}m limit");
+        }
+        if time_unit.contains("HOUR") {
+            return format!("{duration}h limit");
+        }
+        if time_unit.contains("DAY") {
+            return format!("{duration}d limit");
+        }
+        return format!("{duration}s limit");
+    }
+    format!("Limit #{}", idx + 1)
+}
+
+fn reset_hint_from(raw: &serde_json::Map<String, Value>) -> Option<String> {
+    for key in ["reset_at", "resetAt", "reset_time", "resetTime"] {
+        if let Some(value) = raw
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(format_reset_time(value));
+        }
+    }
+    for key in ["reset_in", "resetIn", "ttl", "window"] {
+        if let Some(seconds) = to_int(raw.get(key)).filter(|s| *s > 0) {
+            return Some(format!("resets in {}", format_duration(seconds)));
+        }
+    }
+    None
+}
+
+fn format_reset_time(value: &str) -> String {
+    let Some(stamp) = parse_iso_time(value) else {
+        return format!("resets at {value}");
+    };
+    let diff = stamp - unix_now() as i64;
+    if diff <= 0 {
+        return "reset".to_string();
+    }
+    format!("resets in {}", format_duration(diff))
+}
+
+fn parse_iso_time(value: &str) -> Option<i64> {
+    let re = regex::Regex::new(
+        r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?",
+    )
+    .ok()?;
+    let captures = re.captures(value)?;
+    let y = captures.get(1)?.as_str().parse::<i32>().ok()?;
+    let mo = captures.get(2)?.as_str().parse::<u32>().ok()?;
+    let d = captures.get(3)?.as_str().parse::<u32>().ok()?;
+    let h = captures.get(4)?.as_str().parse::<i64>().ok()?;
+    let mi = captures.get(5)?.as_str().parse::<i64>().ok()?;
+    let s = captures.get(6)?.as_str().parse::<i64>().ok()?;
+    let offset = captures
+        .get(7)
+        .map(|m| parse_timezone_offset(m.as_str()))
+        .unwrap_or(Some(0))?;
+    Some(days_from_civil(y, mo, d)? * 86_400 + h * 3600 + mi * 60 + s - offset)
+}
+
+fn parse_timezone_offset(value: &str) -> Option<i64> {
+    if value == "Z" || value == "z" {
+        return Some(0);
+    }
+    let sign = match value.as_bytes().first().copied()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let digits: String = value[1..].chars().filter(|c| *c != ':').collect();
+    if digits.len() != 4 {
+        return None;
+    }
+    let hours = digits[0..2].parse::<i64>().ok()?;
+    let minutes = digits[2..4].parse::<i64>().ok()?;
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let y = year - i32::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = month as i32 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146097 + doe - 719468) as i64)
+}
+
+fn format_duration(total_seconds: i64) -> String {
+    if total_seconds <= 0 {
+        return "0s".to_string();
+    }
+    let days = total_seconds / 86_400;
+    let hours = (total_seconds % 86_400) / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    if seconds > 0 && parts.is_empty() {
+        parts.push(format!("{seconds}s"));
+    }
+    if parts.is_empty() {
+        "0s".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn to_int(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|n| n.trunc() as i64)),
+        Value::String(s) => s.parse::<f64>().ok().map(|n| n.trunc() as i64),
+        _ => None,
+    }
+}
+
+fn string_field(map: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn api_error_message(body: &str) -> Option<String> {
+    let payload: Value = serde_json::from_str(body).ok()?;
+    payload
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/error/message").and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 pub fn is_logged_in() -> bool {
@@ -504,6 +750,22 @@ pub async fn authenticated_request(
     authenticated_request_with_env(method, path, body, client, &KimiAuthEnv::production()).await
 }
 
+pub async fn managed_usage(client: &reqwest::Client) -> Result<ManagedUsageReport, String> {
+    let resp = authenticated_request("GET", "/usages", None, client).await?;
+    if resp.status != 200 {
+        let message = api_error_message(&resp.body).unwrap_or_else(|| match resp.status {
+            401 => "Authorization failed. Please run `smelt auth`.".to_string(),
+            403 => "Usage unavailable for this account.".to_string(),
+            404 => "Usage endpoint not available. Try Kimi For Coding.".to_string(),
+            _ => "Usage unavailable right now. Try again later.".to_string(),
+        });
+        return Err(message);
+    }
+    let payload: Value = serde_json::from_str(&resp.body)
+        .map_err(|_| "Usage response was invalid. Try again later.".to_string())?;
+    Ok(parse_managed_usage_payload(&payload))
+}
+
 async fn authenticated_request_with_env(
     method: &str,
     path: &str,
@@ -670,6 +932,48 @@ mod tests {
         assert_eq!(models[0].supports_video_in, Some(false));
         assert_eq!(models[0].supports_tool_use, Some(true));
         assert!(models[0].matches_name("Moonshot V1"));
+    }
+
+    #[test]
+    fn parse_managed_usage_payload_matches_kimi_usage_shape() {
+        let parsed = parse_managed_usage_payload(&serde_json::json!({
+            "usage": { "used": 40.9, "limit": "1000", "name": "Weekly limit" },
+            "limits": [
+                { "detail": { "used": 1.9, "limit": 100 }, "window": { "duration": 300.0, "timeUnit": "MINUTE" } },
+                { "detail": { "remaining": 10, "limit": 50 }, "window": { "duration": 24, "timeUnit": "HOUR" } },
+                { "name": "Daily cap", "detail": { "used": 5, "limit": 100 }, "window": { "duration": 1440, "timeUnit": "MINUTE" } }
+            ]
+        }));
+
+        assert_eq!(
+            parsed.summary,
+            Some(ManagedUsageRow {
+                label: "Weekly limit".into(),
+                used: 40,
+                limit: 1000,
+                reset_hint: None,
+            })
+        );
+        assert_eq!(parsed.limits[0].label, "5h limit");
+        assert_eq!(parsed.limits[0].used, 1);
+        assert_eq!(parsed.limits[1].label, "24h limit");
+        assert_eq!(parsed.limits[1].used, 40);
+        assert_eq!(parsed.limits[2].label, "Daily cap");
+    }
+
+    #[test]
+    fn parse_iso_time_honors_timezone_offsets_and_fractional_seconds() {
+        assert_eq!(parse_iso_time("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_iso_time("1970-01-01T02:00:00.123+02:00"), Some(0));
+        assert_eq!(parse_iso_time("1969-12-31T19:00:00-0500"), Some(0));
+    }
+
+    #[test]
+    fn format_duration_matches_kimi_style() {
+        assert_eq!(format_duration(45), "45s");
+        assert_eq!(format_duration(90), "1m");
+        assert_eq!(format_duration(3661), "1h 1m");
+        assert_eq!(format_duration(86_400 + 7200 + 600), "1d 2h 10m");
     }
 
     #[test]

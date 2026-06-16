@@ -514,6 +514,14 @@ function smelt.auth.request(provider, opts)
   return external_or_err(function(id) smelt.auth.__start_request(id, provider, opts or {}) end)
 end
 
+--- Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
+--- provider-neutral `{ summary, limits }` rows with `{ label, used, limit,
+--- resetHint? }`. Only providers with managed quota endpoints support this.
+---@type fun(provider: string): { summary: table?, limits: table[] }?, string?
+function smelt.auth.managed_usage(provider)
+  return external_or_err(function(id) smelt.auth.__start_managed_usage(id, provider) end)
+end
+
 -- Run ripgrep with `pattern` over `path` off the main thread. Yields the
 -- calling coroutine until the child exits; must be called from inside
 -- `smelt.spawn(fn)` or a `tool.execute`. `opts` accepts the same fields

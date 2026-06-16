@@ -149,6 +149,18 @@ pub async fn authenticated_request(
     }
 }
 
+pub async fn managed_usage(
+    provider: AuthProvider,
+    client: &reqwest::Client,
+) -> Result<provider::kimi_code::ManagedUsageReport, String> {
+    match provider {
+        AuthProvider::KimiCode => provider::kimi_code::managed_usage(client).await,
+        AuthProvider::Codex | AuthProvider::Copilot => {
+            Err("managed usage is not supported for this provider".to_string())
+        }
+    }
+}
+
 async fn codex_authenticated_request(
     method: &str,
     path: &str,

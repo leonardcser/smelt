@@ -543,6 +543,8 @@ Available in every runtime, including headless mode.
 
 Authenticated provider helpers.
 
+- `smelt.auth.managed_usage` :: `fun(provider: string): { summary: table?, limits: table[] }?, string?`
+  Fetch parsed managed-provider usage.
 - `smelt.auth.request` :: `fun(provider: string, opts: { path: string, method: string?, body: string? }): { status: integer, body: string }?, string?`
   Run an authenticated request against a provider-owned endpoint using smelt-managed credentials.
 

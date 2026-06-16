@@ -7,6 +7,12 @@
 ---@class smelt.auth
 local auth = {}
 
+--- Fetch parsed managed-provider usage. Credentials stay in Rust; Lua receives
+--- provider-neutral `{ summary, limits }` rows with `{ label, used, limit,
+--- resetHint? }`. Only providers with managed quota endpoints support this.
+---@type fun(provider: string): { summary: table?, limits: table[] }?, string?
+auth.managed_usage = nil
+
 --- Run an authenticated request against a provider-owned endpoint using
 --- smelt-managed credentials. Credentials stay in Rust; Lua receives only
 --- the HTTP status and body. `opts.path` must be an absolute path without a
