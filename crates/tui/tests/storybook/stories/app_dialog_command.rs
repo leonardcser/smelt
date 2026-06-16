@@ -19,9 +19,10 @@ use crate::storybook::args;
 app_story!(help_overlay, |ctx| {
     // `/help` opens a centered overlay (not a dialog) built from
     // `smelt.keymap.help()`. The overlay snapshot captures the
-    // production layout (label + dim detail columns, modal border,
-    // centered anchor).
+    // production layout (accented labels, section gaps, centered
+    // skills-sized overlay).
     ctx.set_viewport(60, 18);
+    ctx.run_lua("smelt.settings.show_tips = false");
     ctx.run_command("help");
     ctx.assert_snapshot();
 });

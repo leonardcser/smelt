@@ -574,9 +574,9 @@ pub(crate) fn lookup(
     None
 }
 
-// ── Help dialog ──────────────────────────────────────────────────────────────
+// ── Help overlay ─────────────────────────────────────────────────────────────
 
-/// Help dialog content sections for the Lua keymap-help binding.
+/// Help overlay content sections for the Lua keymap-help binding.
 pub(crate) mod hints {
 
     const HELP_PREFIXES: &[(&str, &str)] = &[
