@@ -442,7 +442,7 @@ end
 function smelt.transcript.defaults.render_thinking_full(block, ctx)
   local _ = ctx
   return layout.gutter(
-    M.render_llm_markdown(block.content, {
+    layout.style(M.render_llm_markdown(block.content), {
       dim = true,
       italic = true,
     }),
@@ -451,7 +451,7 @@ function smelt.transcript.defaults.render_thinking_full(block, ctx)
 end
 
 local function thinking_content_layout(content)
-  return M.render_llm_markdown(content, {
+  return layout.style(M.render_llm_markdown(content), {
     dim = true,
     italic = true,
   })
@@ -478,11 +478,15 @@ end
 function smelt.transcript.defaults.render_thinking_summary(block, ctx)
   local _ = ctx
   return layout.gutter(
-    layout.markdown(block.thinking_summary or "thinking (0 lines)", {
-      dim = true,
-      italic = true,
-      inline = true,
-    }),
+    layout.style(
+      layout.markdown(block.thinking_summary or "thinking (0 lines)", {
+        inline = true,
+      }),
+      {
+        dim = true,
+        italic = true,
+      }
+    ),
     { text = "│ ", styled = true }
   )
 end

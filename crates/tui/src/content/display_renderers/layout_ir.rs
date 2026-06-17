@@ -527,8 +527,12 @@ fn render_markdown_spec(
     }
 
     let total = measure_markdown_spec(spec, width, inline_options);
-    if row_start == 0 && row_count >= total && gutter.is_none() {
-        return render_markdown_inner_with_options(
+    out.save_style();
+    if spec.italic {
+        out.set_italic();
+    }
+    let rows = if row_start == 0 && row_count >= total && gutter.is_none() {
+        render_markdown_inner_with_options(
             out,
             &spec.content,
             width as usize,
@@ -536,20 +540,22 @@ fn render_markdown_spec(
             spec.dim,
             None,
             inline_options,
-        );
-    }
-
-    render_via_temp(out, width, row_start, row_count, gutter, |col| {
-        render_markdown_inner_with_options(
-            col,
-            &spec.content,
-            width as usize,
-            "",
-            spec.dim,
-            None,
-            inline_options,
         )
-    })
+    } else {
+        render_via_temp(out, width, row_start, row_count, gutter, |col| {
+            render_markdown_inner_with_options(
+                col,
+                &spec.content,
+                width as usize,
+                "",
+                spec.dim,
+                None,
+                inline_options,
+            )
+        })
+    };
+    out.pop_style();
+    rows
 }
 
 fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &InlineOptions) -> u16 {
@@ -783,12 +789,14 @@ fn render_via_temp(
     render: impl FnOnce(&mut LineBuilder) -> u16,
 ) -> u16 {
     let theme = out.theme().clone();
+    let inherited_style = out.current_style();
     let mut buf = smelt_core::buffer::Buffer::new(
         smelt_core::buffer::BufId(0),
         smelt_core::buffer::BufCreateOpts::default(),
     );
     let outcome = {
         let mut col = LineBuilder::new(&mut buf, &theme, width.max(1));
+        col.push(None, inherited_style);
         render(&mut col);
         col.finish()
     };
@@ -800,7 +808,7 @@ fn render_via_temp(
     let mut rows = 0u16;
     for row in row_start..end {
         if let Some(gutter) = gutter {
-            out.print_gutter(&gutter.text);
+            print_temp_gutter(out, gutter);
         }
         apply_temp_decoration(out, &buf, row as usize, true);
         emit_buffer_row_clipped(&buf, row, width, out);
@@ -808,6 +816,17 @@ fn render_via_temp(
         rows = rows.saturating_add(1);
     }
     rows
+}
+
+fn print_temp_gutter(out: &mut LineBuilder, gutter: &GutterSpec) {
+    if gutter.styled {
+        out.print_gutter(&gutter.text);
+    } else {
+        out.save_style();
+        out.reset_style();
+        out.print_gutter(&gutter.text);
+        out.pop_style();
+    }
 }
 
 fn apply_temp_decoration(

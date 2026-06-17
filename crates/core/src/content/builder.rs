@@ -312,11 +312,15 @@ impl<'a> LineBuilder<'a> {
 
     // ── Style state ─────────────────────────────────────────────────
 
-    /// Push the current (group, style) onto the stack and replace with the supplied pair.
+    /// Push the current (group, style) onto the stack and merge the supplied pair into it.
     pub fn push(&mut self, group: Option<HlGroup>, style: Style) {
         self.style_stack.push((self.cur_group, self.cur_style));
-        self.cur_group = group;
-        self.cur_style = style;
+        self.cur_group = group.or(self.cur_group);
+        self.cur_style = merge_style(self.cur_style, style);
+    }
+
+    pub fn current_style(&self) -> Style {
+        self.resolve_current()
     }
 
     /// Snapshot the current (group, style) onto the stack without changing it. Pair with
@@ -553,6 +557,19 @@ impl<'a> LineBuilder<'a> {
             crossedout: self.cur_style.crossedout,
             reverse: self.cur_style.reverse,
         }
+    }
+}
+
+fn merge_style(parent: Style, child: Style) -> Style {
+    Style {
+        fg: child.fg.or(parent.fg),
+        bg: child.bg.or(parent.bg),
+        bold: parent.bold || child.bold,
+        dim: parent.dim || child.dim,
+        italic: parent.italic || child.italic,
+        underline: parent.underline || child.underline,
+        crossedout: parent.crossedout || child.crossedout,
+        reverse: parent.reverse || child.reverse,
     }
 }
 

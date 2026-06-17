@@ -1218,8 +1218,8 @@ mod tests {
     }
 
     #[test]
-    fn gap_between_thinking_blocks_collapse() {
-        assert_eq!(gap_between(&thinking("a"), &thinking("b")), 0);
+    fn gap_between_thinking_blocks_is_one() {
+        assert_eq!(gap_between(&thinking("a"), &thinking("b")), 1);
     }
 
     #[test]
