@@ -13,7 +13,10 @@ set -o pipefail; cargo test -p smelt-tui double_esc 2>&1 | tail -120
 # format and lint
 set -o pipefail; cargo fmt && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -120
 
-# coverage (requires `cargo install cargo-llvm-cov`)
+# coverage / CI-equivalent test gate (requires `cargo install cargo-llvm-cov`)
+set -o pipefail; cargo llvm-cov nextest --workspace --fail-under-lines 65 2>&1 | tail -120
+
+# quick coverage summary (does not enforce CI's coverage floor)
 set -o pipefail; cargo llvm-cov nextest --workspace --summary-only 2>&1 | tail -120
 
 # regenerate Lua API stubs + reference docs (commit the result)
