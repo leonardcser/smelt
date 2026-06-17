@@ -31,6 +31,21 @@ pub(crate) struct Output {
     pub(crate) timed_out: bool,
 }
 
+const DEFAULT_NONINTERACTIVE_ENV: &[(&str, &str)] = &[
+    ("GIT_EDITOR", "true"),
+    ("GIT_SEQUENCE_EDITOR", "true"),
+    ("GIT_PAGER", "cat"),
+    ("PAGER", "cat"),
+    ("EDITOR", "true"),
+    ("VISUAL", "true"),
+];
+
+fn apply_default_noninteractive_env(command: &mut std::process::Command) {
+    for (key, value) in DEFAULT_NONINTERACTIVE_ENV {
+        command.env(key, value);
+    }
+}
+
 /// Spawn `cmd` with `args` and wait for completion, honoring a
 /// `CancellationToken`. The caller can short-circuit a long-running
 /// child by cancelling the token - the child starts in its own session, so
@@ -52,6 +67,7 @@ pub(crate) async fn run_async(
     if let Some(cwd) = &opts.cwd {
         command.current_dir(cwd);
     }
+    apply_default_noninteractive_env(command.as_std_mut());
     for (k, v) in &opts.env {
         command.env(k, v);
     }
@@ -243,6 +259,7 @@ pub fn spawn_shell_child(command: &str, shell: &ShellSpec) -> io::Result<Child> 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    apply_default_noninteractive_env(cmd.as_std_mut());
     configure_child_session(&mut cmd);
     cmd.spawn()
 }
@@ -803,6 +820,36 @@ mod tests {
         }
     }
 
+    fn git_available() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn run_git(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
+        let out = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("git command spawns");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    fn shell_quote_path(path: &std::path::Path) -> String {
+        let text = path.to_string_lossy();
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+
     async fn wait_for_snapshot(
         registry: &ProcessRegistry,
         id: &str,
@@ -942,6 +989,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_child_uses_git_editor_noop_by_default() {
+        if !git_available() {
+            return;
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path();
+        run_git(repo, &["init", "-q", "-b", "main"]);
+        run_git(repo, &["config", "user.name", "Smelt Test"]);
+        run_git(repo, &["config", "user.email", "smelt@example.invalid"]);
+        std::fs::write(repo.join("file.txt"), "base\n").unwrap();
+        run_git(repo, &["add", "file.txt"]);
+        run_git(repo, &["commit", "-qm", "base"]);
+
+        run_git(repo, &["checkout", "-qb", "feature"]);
+        std::fs::write(repo.join("file.txt"), "feature\n").unwrap();
+        run_git(repo, &["commit", "-am", "feature"]);
+
+        run_git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("file.txt"), "main\n").unwrap();
+        run_git(repo, &["commit", "-am", "main"]);
+
+        run_git(repo, &["checkout", "-q", "feature"]);
+        let rebase = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(["rebase", "main"])
+            .output()
+            .expect("git rebase spawns");
+        assert!(!rebase.status.success(), "rebase should stop at a conflict");
+
+        std::fs::write(repo.join("file.txt"), "resolved\n").unwrap();
+        run_git(repo, &["add", "file.txt"]);
+
+        let command = format!(
+            "EDITOR='sh -c \"echo editor-ran >&2; exit 99\"' VISUAL='sh -c \"echo visual-ran >&2; exit 99\"' git -C {} rebase --continue",
+            shell_quote_path(repo)
+        );
+        let out = run_streaming_with_shell(
+            &command,
+            StreamConfig {
+                timeout: Duration::from_secs(5),
+                shell: ShellSpec::default(),
+                cancel: None,
+                detach_on_timeout: None,
+            },
+            |_| {},
+        )
+        .await;
+
+        assert!(
+            !out.timed_out,
+            "git rebase --continue timed out: {}",
+            out.content
+        );
+        assert!(
+            !out.is_error,
+            "git rebase --continue failed: {}",
+            out.content
+        );
+        assert!(!out.content.contains("editor-ran"));
+        assert!(!out.content.contains("visual-ran"));
+        let status = run_git(repo, &["status", "--porcelain"]);
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+    }
+
+    #[tokio::test]
     async fn registry_reports_natural_completion_and_keeps_snapshot() {
         let registry = ProcessRegistry::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1052,6 +1165,32 @@ mod tests {
         };
         let out = run("sh", &["-c", "echo $SMELT_TEST_VAR"], &opts).await;
         assert!(out.stdout.contains("from_test"));
+    }
+
+    #[tokio::test]
+    async fn run_sets_noninteractive_environment_defaults() {
+        let out = run(
+            "sh",
+            &[
+                "-c",
+                "printf '%s' \"$GIT_EDITOR|$GIT_SEQUENCE_EDITOR|$GIT_PAGER|$PAGER|$EDITOR|$VISUAL\"",
+            ],
+            &Options::default(),
+        )
+        .await;
+        assert_eq!(out.stdout, "true|true|cat|cat|true|true");
+    }
+
+    #[tokio::test]
+    async fn run_custom_env_overrides_noninteractive_defaults() {
+        let mut env = HashMap::new();
+        env.insert("GIT_EDITOR".into(), "custom-editor".into());
+        let opts = Options {
+            env,
+            ..Default::default()
+        };
+        let out = run("sh", &["-c", "printf '%s' \"$GIT_EDITOR\""], &opts).await;
+        assert_eq!(out.stdout, "custom-editor");
     }
 
     #[tokio::test]
