@@ -9,6 +9,7 @@ use crate::undo::UndoHistory;
 use smelt_style::style::{Color, Style};
 use smelt_style::theme::{intern_anonymous_style, HlGroup};
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Buffer handle. IDs below `LUA_BUF_ID_BASE` are Rust-minted; IDs at
@@ -144,9 +145,20 @@ struct NamespaceRegistry {
 pub struct ExtmarkId(pub u32);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SpanAction {
+    OpenUrl(String),
+    OpenFile {
+        path: PathBuf,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpanMeta {
     pub selectable: bool,
     pub copy_as: Option<String>,
+    pub action: Option<SpanAction>,
 }
 
 impl Default for SpanMeta {
@@ -154,6 +166,30 @@ impl Default for SpanMeta {
         Self {
             selectable: true,
             copy_as: None,
+            action: None,
+        }
+    }
+}
+
+impl SpanMeta {
+    pub fn unselectable() -> Self {
+        Self {
+            selectable: false,
+            ..Default::default()
+        }
+    }
+
+    pub fn copy_as(copy_as: impl Into<String>) -> Self {
+        Self {
+            copy_as: Some(copy_as.into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn action(action: SpanAction) -> Self {
+        Self {
+            action: Some(action),
+            ..Default::default()
         }
     }
 }
@@ -1202,6 +1238,18 @@ impl Buffer {
         out
     }
 
+    pub fn action_at_cell(&self, line: usize, cell_col: usize) -> Option<SpanAction> {
+        self.highlights_at(line)
+            .into_iter()
+            .rev()
+            .find(|span| {
+                span.meta.action.is_some()
+                    && cell_col >= span.col_start as usize
+                    && cell_col < span.col_end as usize
+            })
+            .and_then(|span| span.meta.action)
+    }
+
     /// Extend `out` with all Highlight extmarks for `line`, sorted by
     /// (priority, ns-id, insertion order). Reuses the caller's buffer to
     /// avoid one allocation per call in tight render loops.
@@ -1466,19 +1514,28 @@ mod tests {
     }
 
     #[test]
+    fn action_at_cell_returns_action_span() {
+        let mut buf = make_buf();
+        buf.set_all_lines(vec!["open me".into()]);
+        let action = SpanAction::OpenUrl("https://example.test".into());
+        buf.add_highlight_group_with_meta(
+            0,
+            5,
+            7,
+            crate::theme::intern("SmeltLink"),
+            SpanMeta::action(action.clone()),
+        );
+
+        assert_eq!(buf.action_at_cell(0, 5), Some(action));
+        assert_eq!(buf.action_at_cell(0, 4), None);
+        assert_eq!(buf.action_at_cell(0, 7), None);
+    }
+
+    #[test]
     fn extract_text_skips_unselectable_spans() {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["abXYcd".into()]);
-        buf.add_highlight_with_meta(
-            0,
-            2,
-            4,
-            SpanStyle::new(),
-            SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
-        );
+        buf.add_highlight_with_meta(0, 2, 4, SpanStyle::new(), SpanMeta::unselectable());
         assert_eq!(buf.extract_text(0, 6), "abcd");
     }
 
@@ -1486,16 +1543,7 @@ mod tests {
     fn extract_text_substitutes_copy_as_once_per_span() {
         let mut buf = make_buf();
         buf.set_all_lines(vec!["abXYcd".into()]);
-        buf.add_highlight_with_meta(
-            0,
-            2,
-            4,
-            SpanStyle::new(),
-            SpanMeta {
-                selectable: true,
-                copy_as: Some("[snip]".into()),
-            },
-        );
+        buf.add_highlight_with_meta(0, 2, 4, SpanStyle::new(), SpanMeta::copy_as("[snip]"));
         assert_eq!(buf.extract_text(0, 6), "ab[snip]cd");
     }
 

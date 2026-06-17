@@ -3,7 +3,7 @@
 use crate::app::{AppFocus, EventOutcome, PromptResizeClick, PromptResizeDrag, TuiApp};
 use crate::content::layout::HitRegion;
 use crate::smelt_edit::{HitTarget, WinId};
-use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 const PROMPT_RESIZE_DOUBLE_CLICK_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(500);
@@ -569,6 +569,19 @@ impl TuiApp {
         }
 
         if self.transcript_win().has_materialized_rows() {
+            if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
+                && me.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                let action = {
+                    let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                    win.expect("transcript window")
+                        .row_action_at_mouse(buf?, me, viewport)
+                };
+                if let Some(action) = action {
+                    self.dispatch_span_action(action);
+                    return None;
+                }
+            }
             let now = self.core.clock.instant_now();
             let range = {
                 let mouse_ctx = crate::smelt_edit::MouseCtx {
@@ -820,10 +833,7 @@ mod tests {
                 3,
                 7,
                 smelt_core::theme::intern("Normal"),
-                smelt_core::buffer::SpanMeta {
-                    selectable: false,
-                    copy_as: None,
-                },
+                smelt_core::buffer::SpanMeta::unselectable(),
             );
         }
         {
@@ -933,10 +943,7 @@ mod tests {
                 0,
                 width,
                 smelt_core::theme::intern("SmeltBar"),
-                smelt_core::buffer::SpanMeta {
-                    selectable: false,
-                    copy_as: None,
-                },
+                smelt_core::buffer::SpanMeta::unselectable(),
             );
         }
         (vp.rect.top, vp.rect.left)
@@ -1405,10 +1412,7 @@ mod tests {
                 0,
                 4,
                 smelt_core::theme::intern("Normal"),
-                smelt_core::buffer::SpanMeta {
-                    selectable: false,
-                    copy_as: None,
-                },
+                smelt_core::buffer::SpanMeta::unselectable(),
             );
         }
 

@@ -455,10 +455,7 @@ fn render_runs_spec(
                 if continuation_indent > 0 {
                     out.print_with_meta(
                         &" ".repeat(continuation_indent as usize),
-                        SpanMeta {
-                            selectable: false,
-                            copy_as: None,
-                        },
+                        SpanMeta::unselectable(),
                     );
                 }
             }
@@ -708,6 +705,7 @@ fn render_elapsed_spec(
     let meta = SpanMeta {
         selectable: spec.selectable,
         copy_as: None,
+        action: None,
     };
     out.print_with_meta(&text, meta);
     out.pop_style();
@@ -877,13 +875,7 @@ fn print_styled_span_range(
             h.print_line_range(out, &span.text, range);
         }
         _ if span.selectable => out.print(piece),
-        _ => out.print_with_meta(
-            piece,
-            SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
-        ),
+        _ => out.print_with_meta(piece, SpanMeta::unselectable()),
     }
     out.pop_style();
 }
@@ -960,10 +952,7 @@ fn render_ir_panel(
         .bg
         .unwrap_or(smelt_core::style::Color::Reset);
     let pad_text = " ".repeat(spec.padding as usize);
-    let pad_meta = SpanMeta {
-        selectable: false,
-        copy_as: None,
-    };
+    let pad_meta = SpanMeta::unselectable();
     let theme = out.theme().clone();
     let mut rows = 0u16;
 
@@ -1332,10 +1321,7 @@ fn render_ir_hbox(
             if emitted < col_w {
                 out.print_with_meta(
                     &" ".repeat((col_w - emitted) as usize),
-                    SpanMeta {
-                        selectable: false,
-                        copy_as: None,
-                    },
+                    SpanMeta::unselectable(),
                 );
             }
         }

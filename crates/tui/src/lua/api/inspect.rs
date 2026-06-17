@@ -78,17 +78,17 @@ pub(super) fn register(
         &["url"],
         move |lua, url: String| -> LuaResult<mlua::Table> {
             let result = lua.create_table()?;
-            match engine::browser::open_url_if_available(&url) {
-                engine::browser::BrowserOpenResult::Opened => {
+            match engine::opener::open_url_if_available(&url) {
+                engine::opener::OpenResult::Opened => {
                     result.set("ok", true)?;
                     result.set("opened", true)?;
                 }
-                engine::browser::BrowserOpenResult::Unavailable(reason) => {
+                engine::opener::OpenResult::Unavailable(reason) => {
                     result.set("ok", false)?;
                     result.set("opened", false)?;
                     result.set("reason", reason)?;
                 }
-                engine::browser::BrowserOpenResult::Failed(err) => {
+                engine::opener::OpenResult::Failed(err) => {
                     result.set("ok", false)?;
                     result.set("opened", false)?;
                     result.set("error", err)?;

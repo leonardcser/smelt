@@ -3274,10 +3274,7 @@ mod tests {
             3,
             7,
             smelt_buffer::theme::intern("Normal"),
-            smelt_buffer::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            smelt_buffer::buffer::SpanMeta::unselectable(),
         );
         let vp = viewport(20, 1);
 
@@ -3354,10 +3351,7 @@ mod tests {
             3,
             7,
             smelt_buffer::theme::intern("Normal"),
-            smelt_buffer::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            smelt_buffer::buffer::SpanMeta::unselectable(),
         );
         let vp = viewport(20, 1);
         let soft = Vec::new();
@@ -3870,6 +3864,31 @@ mod tests {
         w.sync_row_cursor_to_local(&buf, 10);
         assert_eq!(w.cursor_abs_row(), 150);
         assert_eq!(w.cursor_row(), 10);
+    }
+
+    #[test]
+    fn row_text_action_at_cursor_uses_materialized_row() {
+        let mut w = make_win();
+        let mut buf = make_buf(vec!["zero".into(), "open link".into()]);
+        let action = smelt_buffer::buffer::SpanAction::OpenUrl("https://example.test".into());
+        buf.add_highlight_group_with_meta(
+            1,
+            5,
+            9,
+            smelt_buffer::theme::intern("SmeltLink"),
+            smelt_buffer::buffer::SpanMeta::action(action.clone()),
+        );
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 40,
+            row_base: 40,
+            total_rows: 100,
+            materialized_rows: 2,
+        });
+        let now = Instant::now();
+        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(41), 10, now);
+        w.execute_row_viewer_command(&buf, ViewerCommand::MoveCursorCol(6), 10, now);
+
+        assert_eq!(w.row_action_at_cursor(&buf), Some(action));
     }
 
     #[test]
@@ -4500,10 +4519,7 @@ mod tests {
     fn row_cursor_sync_keeps_byte_column_on_multibyte_chrome_rows() {
         let mut w = make_win();
         let mut buf = make_buf(vec!["│ hello".into()]);
-        let chrome = smelt_buffer::buffer::SpanMeta {
-            selectable: false,
-            ..Default::default()
-        };
+        let chrome = smelt_buffer::buffer::SpanMeta::unselectable();
         buf.add_highlight_with_meta(0, 0, 2, crate::SpanStyle::new(), chrome);
         w.apply_materialized_rows(MaterializedRows {
             clamped_scroll: 42,
@@ -5231,10 +5247,7 @@ mod tests {
             0,
             2,
             smelt_buffer::theme::intern("Normal"),
-            smelt_buffer::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            smelt_buffer::buffer::SpanMeta::unselectable(),
         );
 
         assert_eq!(snap_col_past_chrome(&buf, 0, 0), 2);
@@ -5253,10 +5266,7 @@ mod tests {
             0,
             2,
             smelt_buffer::theme::intern("Normal"),
-            smelt_buffer::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            smelt_buffer::buffer::SpanMeta::unselectable(),
         );
         w.set_materialized_rows(0, 3, 4);
         w.scroll_top = 0;
@@ -6178,10 +6188,7 @@ mod tests {
         // horizontally to the row's right edge. Clamp to the last selectable
         // col_end instead.
         let mut buf = make_buf(vec![" hello                          ".into()]);
-        let chrome = smelt_buffer::buffer::SpanMeta {
-            selectable: false,
-            ..Default::default()
-        };
+        let chrome = smelt_buffer::buffer::SpanMeta::unselectable();
         // Leading 1-col pad (chrome), selectable content 1..6, trailing pad 6..32.
         buf.add_highlight_with_meta(0, 0, 1, crate::SpanStyle::new(), chrome.clone());
         buf.add_highlight_with_meta(
@@ -6208,10 +6215,7 @@ mod tests {
         // pad. Wider all-chrome rows still stay at the left edge so a generic
         // non-selectable separator can't push the cursor to layout_width.
         let mut one_pad = make_buf(vec![" ".into()]);
-        let chrome = smelt_buffer::buffer::SpanMeta {
-            selectable: false,
-            ..Default::default()
-        };
+        let chrome = smelt_buffer::buffer::SpanMeta::unselectable();
         one_pad.add_highlight_with_meta(0, 0, 1, crate::SpanStyle::new(), chrome.clone());
         assert_eq!(snap_col_past_chrome(&one_pad, 0, 0), 1);
 
@@ -6232,10 +6236,7 @@ mod tests {
         // mask blocked every cell on the row and the selection visibly broke.
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["alpha".into(), " ".repeat(10), "bravo".into()]);
-        let chrome = smelt_buffer::buffer::SpanMeta {
-            selectable: false,
-            ..Default::default()
-        };
+        let chrome = smelt_buffer::buffer::SpanMeta::unselectable();
         buf.add_highlight_with_meta(1, 0, 10, crate::SpanStyle::new(), chrome);
         buf.set_range_layer(
             crate::RangeLayer::Selection,
@@ -6313,10 +6314,7 @@ mod tests {
         let line = "┃ a ┃ b ┃  ";
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec![line.into()]);
-        let chrome = smelt_buffer::buffer::SpanMeta {
-            selectable: false,
-            ..Default::default()
-        };
+        let chrome = smelt_buffer::buffer::SpanMeta::unselectable();
         buf.add_highlight_with_meta(0, 0, 2, crate::SpanStyle::new(), chrome.clone());
         buf.add_highlight_with_meta(0, 3, 6, crate::SpanStyle::new(), chrome.clone());
         buf.add_highlight_with_meta(0, 7, 11, crate::SpanStyle::new(), chrome);
@@ -6452,10 +6450,7 @@ mod tests {
         let mut w = make_win();
         let mut buf = make_buf(vec!["┃ a ┃ b ┃".into()]);
         let hl = smelt_buffer::theme::intern("Normal");
-        let unsel = smelt_buffer::buffer::SpanMeta {
-            selectable: false,
-            copy_as: None,
-        };
+        let unsel = smelt_buffer::buffer::SpanMeta::unselectable();
         buf.set_decoration(
             0,
             smelt_buffer::buffer::LineDecoration {

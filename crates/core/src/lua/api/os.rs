@@ -129,10 +129,33 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "open_url",
         "Open `url` in the system's default browser. Only `http(s)://`, `mailto:`, and `file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or `(false, err_string)` if the scheme is rejected or every launcher errored.",
         &["url"],
-        |_, url: String| Ok(match engine::browser::open_url(&url) {
+        |_, url: String| Ok(match engine::opener::open_url(&url) {
             Ok(()) => (true, None),
             Err(e) => (false, Some(e)),
         }),
+    )?;
+
+    m.fn_(
+        "open_url_if_available",
+        "Open `url` only when the host environment can auto-open a browser. Returns `{ opened = bool, error = string?, reason = string? }`.",
+        &["url"],
+        |lua, url: String| -> LuaResult<mlua::Table> {
+            let result = lua.create_table()?;
+            match engine::opener::open_url_if_available(&url) {
+                engine::opener::OpenResult::Opened => {
+                    result.set("opened", true)?;
+                }
+                engine::opener::OpenResult::Unavailable(reason) => {
+                    result.set("opened", false)?;
+                    result.set("reason", reason)?;
+                }
+                engine::opener::OpenResult::Failed(err) => {
+                    result.set("opened", false)?;
+                    result.set("error", err)?;
+                }
+            }
+            Ok(result)
+        },
     )?;
 
     Ok(())

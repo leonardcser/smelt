@@ -1,6 +1,5 @@
 mod agent;
 pub mod auth;
-pub mod browser;
 pub mod cancel;
 pub mod catalog;
 pub mod clock;
@@ -9,6 +8,7 @@ pub mod env;
 pub mod host;
 pub mod image;
 pub mod log;
+pub mod opener;
 
 pub mod paths;
 

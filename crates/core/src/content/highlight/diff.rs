@@ -664,10 +664,7 @@ pub fn print_diff_ir_with_width(
                     DiffLine::Ellipsis => unreachable!(),
                 };
                 let visual_rows = split_syntax_spans_into_rows(&mut h, text, max_content);
-                let pad_meta = SpanMeta {
-                    selectable: false,
-                    copy_as: None,
-                };
+                let pad_meta = SpanMeta::unselectable();
                 for (vi, vrow) in visual_rows.iter().enumerate() {
                     if seen_rows < skip {
                         seen_rows = seen_rows.saturating_add(1);

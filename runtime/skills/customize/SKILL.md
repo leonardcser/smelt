@@ -860,6 +860,8 @@ Environment and system primitives: getenv, setenv, platform, cwd, pid, etc.
   Return the user's home directory, or `nil` if it cannot be determined.
 - `smelt.os.open_url` :: `fun(url: string): boolean, string?`
   Open `url` in the system's default browser.
+- `smelt.os.open_url_if_available` :: `fun(url: string): table`
+  Open `url` only when the host environment can auto-open a browser.
 - `smelt.os.pid` :: `fun(): integer`
   Return the OS process id of the running smelt instance.
 - `smelt.os.platform` :: `fun(): string`

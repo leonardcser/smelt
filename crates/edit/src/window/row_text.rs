@@ -1,4 +1,5 @@
 use super::*;
+use smelt_buffer::buffer::SpanAction;
 use smelt_buffer::kill_ring::YANK_FLASH_DURATION;
 use std::ops::Range;
 use std::time::Instant;
@@ -26,6 +27,7 @@ pub enum ViewerCommand {
     CenterScroll,
     PanColumns(isize),
     MoveCursorCol(isize),
+    OpenAction,
     ClearSelection,
 }
 
@@ -138,6 +140,39 @@ impl Window {
         self.row_text_state()
             .active
             .then_some(self.row_text_state().cursor)
+    }
+
+    pub fn row_action_at_cursor(&self, buf: &Buffer) -> Option<SpanAction> {
+        let state = *self.row_text_state();
+        if !state.active {
+            return None;
+        }
+        self.row_action_at_position(buf, state.cursor)
+    }
+
+    pub fn row_action_at_mouse(
+        &mut self,
+        buf: &Buffer,
+        event: MouseEvent,
+        viewport: WindowViewport,
+    ) -> Option<SpanAction> {
+        if !self.row_text_state().active {
+            return None;
+        }
+        let pos = self.row_doc_pos_at_mouse(buf, event, viewport);
+        self.row_action_at_position(buf, pos)
+    }
+
+    fn row_action_at_position(&self, buf: &Buffer, pos: DocPosition) -> Option<SpanAction> {
+        let state = *self.row_text_state();
+        if !state.materialized.contains_abs_row(pos.row) {
+            return None;
+        }
+        let local = state.materialized.local_row(pos.row);
+        let line = buf.get_line(row_to_usize(local))?;
+        let byte_col = text::snap(line, pos.byte_col.min(line.len()));
+        let cell = text::byte_to_cell(line, byte_col);
+        buf.action_at_cell(row_to_usize(local), cell)
     }
 
     pub fn drag_active(&self) -> bool {
@@ -761,6 +796,7 @@ impl Window {
                 self.set_cpos(cpos);
                 self.resync(buf, viewport_rows);
             }
+            ViewerCommand::OpenAction => {}
             ViewerCommand::ClearSelection => {
                 self.clear_selection_anchor();
                 self.text_state_mut().drag_endpoint = None;
@@ -1036,6 +1072,7 @@ impl Window {
                     }
                 }
             }
+            ViewerCommand::OpenAction => {}
             ViewerCommand::ClearSelection => {
                 state.selection_anchor = None;
                 state.drag_endpoint = None;

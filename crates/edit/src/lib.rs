@@ -20,7 +20,7 @@ pub use named::NamedSlots;
 pub use smelt_buffer::attachment::AttachmentId;
 pub use smelt_buffer::buffer::{
     BufCreateOpts, BufId, Buffer, BufferCopy, BufferParser, CopyOutput, ExtmarkOpts,
-    ExtmarkPayload, RangeLayer, SelectionRange, SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
+    ExtmarkPayload, RangeLayer, SelectionRange, SpanAction, SpanMeta, SpanStyle, LUA_BUF_ID_BASE,
 };
 pub use smelt_buffer::clipboard::Clipboard;
 pub use smelt_buffer::undo::{UndoEntry, UndoHistory};

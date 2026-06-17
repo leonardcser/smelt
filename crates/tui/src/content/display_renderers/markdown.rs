@@ -650,13 +650,7 @@ fn render_horizontal_rule(
     }
 
     out.push_dim();
-    out.print_with_meta(
-        &hr,
-        smelt_core::buffer::SpanMeta {
-            selectable: true,
-            copy_as: Some("---".into()),
-        },
-    );
+    out.print_with_meta(&hr, smelt_core::buffer::SpanMeta::copy_as("---"));
     out.pop_style();
 
     if let Some(b) = bctx {

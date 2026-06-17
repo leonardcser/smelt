@@ -440,10 +440,7 @@ mod tests {
             0,
             2,
             crate::theme::intern("Normal"),
-            crate::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            crate::buffer::SpanMeta::unselectable(),
         );
         // "│ hello" = 9 bytes + newline + "│ " = 4 bytes + newline + "│ world" = 9 bytes
         // Total bytes = 9 + 1 + 4 + 1 + 9 = 24. Select all: 0..24.
@@ -467,10 +464,7 @@ mod tests {
             0,
             1,
             crate::theme::intern("Normal"),
-            crate::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            crate::buffer::SpanMeta::unselectable(),
         );
         // " hello " = 7 bytes + newline + " " = 1 byte + newline + " world " = 7 bytes
         // Total = 7 + 1 + 1 + 1 + 7 = 17.
@@ -493,10 +487,7 @@ mod tests {
             0,
             3,
             crate::theme::intern("Normal"),
-            crate::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            crate::buffer::SpanMeta::unselectable(),
         );
         // "│ " = 4 bytes + newline + "│ content" = 11 bytes. Total = 16.
         let ranges = byte_range_to_row_ranges(&buf, 0, 16);
@@ -527,10 +518,7 @@ mod tests {
             0,
             3,
             crate::theme::intern("Normal"),
-            crate::buffer::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            crate::buffer::SpanMeta::unselectable(),
         );
 
         let ranges = byte_range_to_row_ranges(&buf, 0, "你 \ndone".len());
@@ -540,17 +528,11 @@ mod tests {
     }
 
     fn unselectable_meta() -> SpanMeta {
-        SpanMeta {
-            selectable: false,
-            copy_as: None,
-        }
+        SpanMeta::unselectable()
     }
 
     fn copy_as_meta(s: &str) -> SpanMeta {
-        SpanMeta {
-            selectable: true,
-            copy_as: Some(s.to_string()),
-        }
+        SpanMeta::copy_as(s)
     }
 
     fn hl_for_test() -> crate::theme::HlGroup {

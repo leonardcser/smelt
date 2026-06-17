@@ -1323,7 +1323,7 @@ impl TuiApp {
         command: crate::smelt_edit::ViewerCommand,
         viewport_rows: u16,
     ) -> crate::smelt_edit::Status {
-        use crate::smelt_edit::Status;
+        use crate::smelt_edit::{Status, ViewerCommand};
 
         let command = if self
             .ui
@@ -1335,6 +1335,29 @@ impl TuiApp {
         } else {
             command
         };
+
+        if matches!(command, ViewerCommand::OpenAction) {
+            let action = {
+                let Some(win) = self.ui.win(win_id) else {
+                    return Status::Ignored;
+                };
+                let Some(buf) = self.ui.buf(buf_id) else {
+                    return Status::Ignored;
+                };
+                win.row_action_at_cursor(buf)
+            };
+            if let Some(action) = action {
+                self.dispatch_span_action(action);
+            } else {
+                self.record_notice(
+                    smelt_core::messages::MessageKind::Info,
+                    "actions".into(),
+                    "no action under cursor".into(),
+                );
+            }
+            return Status::Consumed;
+        }
+
         let now = self.core.clock.instant_now();
         let copied = {
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
@@ -1367,6 +1390,57 @@ impl TuiApp {
             }
             None => {}
         }
+    }
+
+    pub(crate) fn dispatch_span_action(&mut self, action: smelt_core::buffer::SpanAction) {
+        use smelt_core::buffer::SpanAction;
+        use smelt_core::messages::MessageKind;
+
+        let (result, fallback_text) = match action {
+            SpanAction::OpenUrl(url) => {
+                let result = engine::opener::open_url_if_available(&url);
+                (result, url)
+            }
+            SpanAction::OpenFile { path, line, col } => {
+                let target = engine::opener::FileOpenTarget::new(path, line, col);
+                let fallback_text = target.display_location();
+                let result = engine::opener::open_file_if_available(&target);
+                if result.opened() {
+                    self.record_notice(
+                        MessageKind::Info,
+                        "actions".into(),
+                        format!("opened {fallback_text}"),
+                    );
+                }
+                (result, fallback_text)
+            }
+        };
+
+        match result {
+            engine::opener::OpenResult::Opened => {}
+            engine::opener::OpenResult::Unavailable(reason) => {
+                self.record_action_open_fallback(reason, &fallback_text);
+            }
+            engine::opener::OpenResult::Failed(err) => {
+                self.record_action_open_fallback(&err, &fallback_text);
+            }
+        }
+    }
+
+    fn record_action_open_fallback(&mut self, reason: &str, text: &str) {
+        use smelt_core::messages::MessageKind;
+
+        let body = match self.core.clipboard.write(text) {
+            Ok(()) => {
+                self.core
+                    .clipboard
+                    .kill_ring
+                    .record_clipboard_write(text.to_string());
+                format!("{reason}: copied {text} to clipboard")
+            }
+            Err(err) => format!("{reason}: could not copy ({err}); open {text} manually"),
+        };
+        self.record_notice(MessageKind::Warning, "actions".into(), body);
     }
 
     fn resolve_row_viewer_command(

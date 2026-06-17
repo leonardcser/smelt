@@ -409,6 +409,7 @@ pub fn handle_viewer_key(
                         .unwrap_or(0);
                     Some(ViewerCommand::GotoRow(row as crate::RowIndex))
                 }
+                KeyCode::Char('f') => Some(ViewerCommand::OpenAction),
                 _ => None,
             };
             state.count1 = None;
@@ -2148,6 +2149,21 @@ mod tests {
             };
             handle_key(k, &mut ctx)
         }
+    }
+
+    #[test]
+    fn row_viewer_gf_opens_action() {
+        let mut mode = VimMode::Normal;
+        let mut state = VimWindowState::default();
+
+        assert_eq!(
+            handle_viewer_key(key('g'), &mut mode, &mut state),
+            ViewerKeyResult::Consumed
+        );
+        assert_eq!(
+            handle_viewer_key(key('f'), &mut mode, &mut state),
+            ViewerKeyResult::Command(ViewerCommand::OpenAction)
+        );
     }
 
     #[test]

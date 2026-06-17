@@ -1,7 +1,8 @@
 //! Inline markdown rendering: pulldown-cmark inline event lowering,
 //! inline-span wrapping, and the markdown table renderer that uses both.
 
-use crate::buffer::SpanMeta;
+use super::action_refs::{action_for_destination, inline_file_reference, url_action};
+use crate::buffer::{SpanAction, SpanMeta};
 use crate::content::builder::{display_width, LineBuilder};
 use crate::content::file_icons::{self, FileIcon, FileIconOptions};
 use crate::content::inline_line::{BreakPolicy, InlineLine, InlineRun};
@@ -10,7 +11,6 @@ use crate::style::Color;
 use crate::theme::{intern, HlGroup};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthStr;
 
 /// Render a markdown table. `alignments` may be empty (defaults to left for all
@@ -609,7 +609,7 @@ pub fn lower_inline_events_with_options<'a>(
     for (event, _) in events {
         match event {
             Event::Start(tag) => {
-                if let Some(link) = pending_link(&tag) {
+                if let Some(link) = pending_link(&tag, options) {
                     link_stack.push(link);
                 }
                 push_tag_style(&mut styles, tag);
@@ -620,14 +620,25 @@ pub fn lower_inline_events_with_options<'a>(
                 }
                 if let Some(link) = link_stack.pop() {
                     if link.emit_suffix {
-                        push_link_suffix(&mut out, &link.destination, *styles.last().unwrap());
+                        push_link_suffix(
+                            &mut out,
+                            &link.destination,
+                            *styles.last().unwrap(),
+                            options,
+                        );
                     }
                 }
             }
             Event::End(_) if styles.len() > 1 => {
                 styles.pop();
             }
-            event => lower_inline_event(event, &mut out, &styles, options),
+            event => lower_inline_event(
+                event,
+                &mut out,
+                &styles,
+                link_stack.last().and_then(|link| link.action.as_ref()),
+                options,
+            ),
         }
     }
 
@@ -659,7 +670,7 @@ pub fn lower_inline_event_lines_with_options<'a>(
         match event {
             Event::Start(tag) => {
                 let line_index = line_index_for_event(line_ranges, &range);
-                if let Some(link) = pending_link(&tag) {
+                if let Some(link) = pending_link(&tag, options) {
                     link_stack.push((link, line_index));
                 }
                 push_tag_style(&mut styles, tag);
@@ -677,6 +688,7 @@ pub fn lower_inline_event_lines_with_options<'a>(
                                 &mut out[line_index],
                                 &link.destination,
                                 *styles.last().unwrap(),
+                                options,
                             );
                         }
                     }
@@ -687,7 +699,13 @@ pub fn lower_inline_event_lines_with_options<'a>(
             }
             event => {
                 if let Some(line_index) = line_index_for_event(line_ranges, &range) {
-                    lower_inline_event(event, &mut out[line_index], &styles, options);
+                    lower_inline_event(
+                        event,
+                        &mut out[line_index],
+                        &styles,
+                        link_stack.last().and_then(|(link, _)| link.action.as_ref()),
+                        options,
+                    );
                     if let Some((_, link_line_index)) = link_stack.last_mut() {
                         *link_line_index = Some(line_index);
                     }
@@ -729,7 +747,7 @@ fn lower_inline_fragment_events<'a>(
                     &mut out,
                     *styles.last().unwrap(),
                 );
-                if let Some(link) = pending_link(&tag) {
+                if let Some(link) = pending_link(&tag, options) {
                     link_stack.push(link);
                 }
                 if fragment_tag_preserves_source_prefix(&tag) {
@@ -753,7 +771,12 @@ fn lower_inline_fragment_events<'a>(
                 }
                 if let Some(link) = link_stack.pop() {
                     if link.emit_suffix {
-                        push_link_suffix(&mut out, &link.destination, *styles.last().unwrap());
+                        push_link_suffix(
+                            &mut out,
+                            &link.destination,
+                            *styles.last().unwrap(),
+                            options,
+                        );
                     }
                 }
             }
@@ -777,7 +800,13 @@ fn lower_inline_fragment_events<'a>(
                     &mut out,
                     *styles.last().unwrap(),
                 );
-                lower_inline_event(event, &mut out, &styles, options);
+                lower_inline_event(
+                    event,
+                    &mut out,
+                    &styles,
+                    link_stack.last().and_then(|link| link.action.as_ref()),
+                    options,
+                );
             }
         }
     }
@@ -820,10 +849,11 @@ fn fragment_tag_preserves_source_prefix(tag: &Tag<'_>) -> bool {
 
 struct PendingLink {
     destination: String,
+    action: Option<SpanAction>,
     emit_suffix: bool,
 }
 
-fn pending_link(tag: &Tag<'_>) -> Option<PendingLink> {
+fn pending_link(tag: &Tag<'_>, options: &InlineOptions) -> Option<PendingLink> {
     match tag {
         Tag::Link {
             link_type,
@@ -831,15 +861,21 @@ fn pending_link(tag: &Tag<'_>) -> Option<PendingLink> {
             ..
         } => Some(PendingLink {
             destination: dest_url.to_string(),
+            action: action_for_destination(dest_url, &options.file_icons),
             emit_suffix: !matches!(link_type, LinkType::Autolink | LinkType::Email),
         }),
         _ => None,
     }
 }
 
-fn push_link_suffix(out: &mut Vec<InlineSpan>, destination: &str, style: InlineStyle) {
+fn push_link_suffix(
+    out: &mut Vec<InlineSpan>,
+    destination: &str,
+    style: InlineStyle,
+    options: &InlineOptions,
+) {
     push_inline_span(out, " (", style);
-    push_inline_span(out, destination, link_style(style));
+    push_actionable_link_span(out, destination, link_style(style), options);
     push_inline_span(out, ")", style);
 }
 
@@ -851,82 +887,88 @@ fn link_style(style: InlineStyle) -> InlineStyle {
     }
 }
 
+fn file_reference_style(style: InlineStyle) -> InlineStyle {
+    InlineStyle {
+        group: Some(intern("SmeltLink")),
+        ..style
+    }
+}
+
 fn inline_file_icon(text: &str, options: &FileIconOptions) -> Option<FileIcon> {
-    let path = inline_file_path(text, options)?;
+    let path = inline_file_reference(text, options)?.path;
     file_icons::lookup_path(&path, options)
 }
 
-fn inline_file_path(text: &str, options: &FileIconOptions) -> Option<PathBuf> {
-    if text.trim() != text || text.contains("://") {
-        return None;
+fn push_actionable_link_span(
+    out: &mut Vec<InlineSpan>,
+    text: &str,
+    style: InlineStyle,
+    options: &InlineOptions,
+) {
+    if let Some(action) = action_for_destination(text, &options.file_icons) {
+        push_inline_span_meta(out, text, style, SpanMeta::action(action));
+    } else {
+        push_inline_span(out, text, style);
     }
-    let candidate =
-        strip_location_suffix(text.trim_end_matches([',', '.', ')', ';', ':', '!', '?']));
-    if candidate.is_empty() {
-        return None;
-    }
-    let path = Path::new(candidate);
-    if path.is_absolute() {
-        return path.is_file().then(|| path.to_path_buf());
-    }
-    let cwd = options.base_dir.as_deref()?;
-    for base in cwd.ancestors() {
-        let absolute = base.join(path);
-        if absolute.is_file() {
-            return Some(absolute);
-        }
-    }
-    None
-}
-
-fn strip_location_suffix(text: &str) -> &str {
-    let Some((path, line)) = text.rsplit_once(':') else {
-        return text;
-    };
-    if !line.chars().all(|c| c.is_ascii_digit()) {
-        return text;
-    }
-    let without_line = path;
-    if let Some((path, col)) = without_line.rsplit_once(':') {
-        if col.chars().all(|c| c.is_ascii_digit()) {
-            return path;
-        }
-    }
-    without_line
 }
 
 fn lower_inline_event(
     event: Event<'_>,
     out: &mut Vec<InlineSpan>,
     styles: &[InlineStyle],
+    link_action: Option<&SpanAction>,
     options: &InlineOptions,
 ) {
     match event {
         Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
-            push_inline_span(out, text.as_ref(), *styles.last().unwrap());
+            let style = *styles.last().unwrap();
+            if let Some(action) = link_action {
+                push_inline_span_meta(out, text.as_ref(), style, SpanMeta::action(action.clone()));
+            } else if style.group == Some(intern("SmeltLink")) {
+                push_actionable_link_span(out, text.as_ref(), style, options);
+            } else {
+                push_inline_span(out, text.as_ref(), style);
+            }
         }
         Event::Code(text) => {
+            let text = text.as_ref();
             let code_style = InlineStyle {
                 group: Some(intern("SmeltAccent")),
                 ..*styles.last().unwrap()
             };
-            if let Some(icon) = inline_file_icon(text.as_ref(), &options.file_icons) {
+            if let Some(action) = link_action {
+                push_inline_span_meta(out, text, code_style, SpanMeta::action(action.clone()));
+                return;
+            }
+            if let Some(icon) = inline_file_icon(text, &options.file_icons) {
                 let mut icon_style = code_style;
                 if let Some(group) = icon.group {
                     icon_style.group = Some(group);
                 }
                 let icon_text = format!("{} ", icon.icon);
+                push_inline_span_meta(out, &icon_text, icon_style, SpanMeta::unselectable());
+            }
+            if let Some(file) = inline_file_reference(text, &options.file_icons) {
                 push_inline_span_meta(
                     out,
-                    &icon_text,
-                    icon_style,
-                    SpanMeta {
-                        selectable: false,
-                        copy_as: None,
-                    },
+                    text,
+                    file_reference_style(*styles.last().unwrap()),
+                    SpanMeta::action(SpanAction::OpenFile {
+                        path: file.path,
+                        line: file.line,
+                        col: file.col,
+                    }),
                 );
+            } else if let Some(action) = url_action(text) {
+                push_inline_span_meta(
+                    out,
+                    text,
+                    link_style(*styles.last().unwrap()),
+                    SpanMeta::action(action),
+                );
+            } else {
+                push_inline_span(out, text, code_style);
             }
-            push_inline_span(out, text.as_ref(), code_style);
         }
         Event::SoftBreak | Event::HardBreak => {
             push_inline_span(out, " ", *styles.last().unwrap());
@@ -1058,6 +1100,7 @@ mod tests {
     use super::super::super::builder::test_util::render_test;
     use super::*;
     use crate::content::BoxContext;
+    use std::path::{Path, PathBuf};
 
     fn file_icon_options(enabled: bool, base_dir: Option<PathBuf>) -> InlineOptions {
         InlineOptions {
@@ -1106,6 +1149,7 @@ mod tests {
             (true, false, false, false, true, false) => "bold+code",
             (false, true, false, false, true, false) => "italic+code",
             (true, true, false, false, true, false) => "bi+code",
+            (false, false, false, false, false, true) => "file",
             (false, false, true, false, false, true) => "link",
             _ => "mixed",
         }
@@ -1148,6 +1192,16 @@ mod tests {
         assert!(!spans[0].meta.selectable);
         assert_eq!(spans[1].text, path);
         assert!(spans[1].meta.selectable);
+        assert_eq!(
+            spans[1].meta.action,
+            Some(SpanAction::OpenFile {
+                path: file.clone(),
+                line: None,
+                col: None,
+            })
+        );
+        assert_eq!(spans[1].style.group, Some(intern("SmeltLink")));
+        assert!(!spans[1].style.underline);
     }
 
     #[test]
@@ -1178,6 +1232,14 @@ mod tests {
         assert_eq!(spans[0].text, expected_icon_text(&file, &options));
         assert!(!spans[0].meta.selectable);
         assert_eq!(spans[1].text, text);
+        assert_eq!(
+            spans[1].meta.action,
+            Some(SpanAction::OpenFile {
+                path: file,
+                line: Some(12),
+                col: Some(3),
+            })
+        );
     }
 
     #[test]
@@ -1271,7 +1333,7 @@ mod tests {
     fn markdown_link_appends_styled_destination() {
         assert_eq!(
             parse("[Google](https://www.google.com)"),
-            vec![p("Google ("), l("https://www.google.com"), p(")")]
+            vec![p("Google"), p(" ("), l("https://www.google.com"), p(")")]
         );
     }
 
@@ -1288,6 +1350,112 @@ mod tests {
         assert_eq!(
             parse("[`Google`](https://www.google.com)"),
             vec![c("Google"), p(" ("), l("https://www.google.com"), p(")")]
+        );
+
+        let spans = parse_inline_spans("[`Google`](https://www.google.com)", false);
+        assert_eq!(
+            spans[0].meta.action,
+            Some(SpanAction::OpenUrl("https://www.google.com".into()))
+        );
+    }
+
+    #[test]
+    fn inline_code_url_and_email_are_actionable_links() {
+        let url = parse_inline_spans("`https://example.test/path`", false);
+        assert_eq!(url.len(), 1);
+        assert_eq!(tag_for(&url[0].style), "link");
+        assert_eq!(
+            url[0].meta.action,
+            Some(SpanAction::OpenUrl("https://example.test/path".into()))
+        );
+
+        let email = parse_inline_spans("`dev@example.test`", false);
+        assert_eq!(email.len(), 1);
+        assert_eq!(tag_for(&email[0].style), "link");
+        assert_eq!(
+            email[0].meta.action,
+            Some(SpanAction::OpenUrl("mailto:dev@example.test".into()))
+        );
+    }
+
+    #[test]
+    fn markdown_link_destination_gets_action_metadata() {
+        let spans = parse_inline_spans("[site](https://example.test)", false);
+        let text = spans
+            .iter()
+            .find(|span| span.text == "site")
+            .expect("link text span");
+        assert_eq!(tag_for(&text.style), "plain");
+        assert_eq!(
+            text.meta.action,
+            Some(SpanAction::OpenUrl("https://example.test".into()))
+        );
+
+        let destination = spans
+            .iter()
+            .find(|span| span.text == "https://example.test")
+            .expect("link destination span");
+        assert_eq!(tag_for(&destination.style), "link");
+        assert_eq!(
+            destination.meta.action,
+            Some(SpanAction::OpenUrl("https://example.test".into()))
+        );
+    }
+
+    #[test]
+    fn markdown_local_file_destination_gets_file_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let options = file_icon_options(false, Some(dir.path().to_path_buf()));
+        let spans = parse_inline_spans_with_options("[source](lib.rs:4)", false, &options);
+        let text = spans
+            .iter()
+            .find(|span| span.text == "source")
+            .expect("file link text span");
+        assert_eq!(tag_for(&text.style), "plain");
+        assert_eq!(
+            text.meta.action,
+            Some(SpanAction::OpenFile {
+                path: file.clone(),
+                line: Some(4),
+                col: None,
+            })
+        );
+
+        let link = spans
+            .iter()
+            .find(|span| span.text == "lib.rs:4")
+            .expect("file destination span");
+        assert_eq!(tag_for(&link.style), "link");
+        assert_eq!(
+            link.meta.action,
+            Some(SpanAction::OpenFile {
+                path: file,
+                line: Some(4),
+                col: None,
+            })
+        );
+    }
+
+    #[test]
+    fn markdown_file_url_destination_gets_file_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("has space.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let destination = url::Url::from_file_path(&file).unwrap().to_string();
+        let spans = parse_inline_spans(&format!("[source]({destination}:8:2)"), false);
+        let text = spans
+            .iter()
+            .find(|span| span.text == "source")
+            .expect("file URL link text span");
+        assert_eq!(
+            text.meta.action,
+            Some(SpanAction::OpenFile {
+                path: file,
+                line: Some(8),
+                col: Some(2),
+            })
         );
     }
 

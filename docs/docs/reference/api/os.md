@@ -54,6 +54,14 @@ fun(url: string): boolean, string?
 
 Open `url` in the system's default browser. Only `http(s)://`, `mailto:`, and `file://` URLs are accepted. Returns `(true, nil)` on a successful spawn, or `(false, err_string)` if the scheme is rejected or every launcher errored.
 
+## `smelt.os.open_url_if_available`
+
+```lua
+fun(url: string): table
+```
+
+Open `url` only when the host environment can auto-open a browser. Returns `{ opened = bool, error = string?, reason = string? }`.
+
 ## `smelt.os.pid`
 
 ```lua

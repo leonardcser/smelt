@@ -31,6 +31,10 @@ os.home = nil
 ---@type fun(url: string): boolean, string?
 os.open_url = nil
 
+--- Open `url` only when the host environment can auto-open a browser. Returns `{ opened = bool, error = string?, reason = string? }`.
+---@type fun(url: string): table
+os.open_url_if_available = nil
+
 --- Return the OS process id of the running smelt instance.
 ---@type fun(): integer
 os.pid = nil

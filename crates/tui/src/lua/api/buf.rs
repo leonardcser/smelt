@@ -673,6 +673,7 @@ fn set_extmark(
         let meta = smelt_core::buffer::SpanMeta {
             selectable: opts.selectable.unwrap_or(true),
             copy_as: opts.yank_as.clone(),
+            action: None,
         };
         let mut o = ExtmarkOpts::highlight(end_col.unwrap_or(col0), style, meta);
         if opts.hl_eol == Some(true) {

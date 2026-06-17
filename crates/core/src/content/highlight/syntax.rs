@@ -105,13 +105,7 @@ pub fn render_code_block(
             if pad > 0 {
                 out.set_bg(bg);
                 if bctx.is_some() {
-                    out.print_with_meta(
-                        &" ".repeat(pad),
-                        SpanMeta {
-                            selectable: false,
-                            copy_as: None,
-                        },
-                    );
+                    out.print_with_meta(&" ".repeat(pad), SpanMeta::unselectable());
                 } else {
                     out.fill_line_bg(bg);
                 }

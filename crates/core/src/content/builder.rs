@@ -157,13 +157,7 @@ impl<'a> LineBuilder<'a> {
     }
 
     pub fn print_gutter(&mut self, text: &str) {
-        self.print_with_meta(
-            text,
-            SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
-        );
+        self.print_with_meta(text, SpanMeta::unselectable());
     }
 
     pub fn newline(&mut self) {
@@ -190,8 +184,8 @@ impl<'a> LineBuilder<'a> {
     /// the row reaches `layout_width()`. The primitive for "fill row to the
     /// right edge with the active bg" - callers don't recompute trailing
     /// widths per row, and the cells inherit whatever style is set (bg, dim,
-    /// …). Pass `SpanMeta { selectable: false, copy_as: None }` for chrome
-    /// pad so cursor/selection/copy skip it.
+    /// …). Pass `SpanMeta::unselectable()` for chrome pad so
+    /// cursor/selection/copy skip it.
     ///
     /// Use this when the row text needs the pad cells *in the buffer* (so
     /// inline highlights/selection cover them). For buffers whose text must
@@ -847,13 +841,7 @@ mod tests {
     #[test]
     fn print_with_meta_attaches_custom_copy_as() {
         let block = test_util::render_test(80, |out| {
-            out.print_with_meta(
-                "click",
-                SpanMeta {
-                    selectable: true,
-                    copy_as: Some("real".into()),
-                },
-            );
+            out.print_with_meta("click", SpanMeta::copy_as("real"));
         });
         assert_eq!(block.lines.len(), 1);
         let meta_copy = block.lines[0]

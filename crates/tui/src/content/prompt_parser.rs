@@ -268,10 +268,7 @@ impl BufferParser for PromptBufferParser {
                         0,
                         width,
                         ghost_group,
-                        SpanMeta {
-                            selectable: false,
-                            copy_as: None,
-                        },
+                        SpanMeta::unselectable(),
                     );
                 }
             }

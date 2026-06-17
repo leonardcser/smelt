@@ -1,18 +1,18 @@
 //! Authentication façade for provider login/logout and cached model lists.
 
-use crate::browser::{self, BrowserOpenResult};
+use crate::opener::{self, OpenResult};
 use crate::provider;
 
 fn present_auth_link(progress: &LoginProgress<'_>, url: &str, code: &str) {
-    present_auth_link_with_opener(progress, url, code, || browser::open_url_if_available(url));
+    present_auth_link_with_opener(progress, url, code, || opener::open_url_if_available(url));
 }
 
 fn present_auth_link_with_opener<F>(progress: &LoginProgress<'_>, url: &str, code: &str, opener: F)
 where
-    F: FnOnce() -> BrowserOpenResult,
+    F: FnOnce() -> OpenResult,
 {
     match opener() {
-        BrowserOpenResult::Opened => {
+        OpenResult::Opened => {
             if code.is_empty() {
                 (progress.on_message)("Opened authorization page in your browser.");
             } else {
@@ -22,10 +22,10 @@ where
             }
             return;
         }
-        BrowserOpenResult::Unavailable(reason) => {
+        OpenResult::Unavailable(reason) => {
             (progress.on_message)(&format!("Browser auto-open unavailable ({reason})."));
         }
-        BrowserOpenResult::Failed(err) => {
+        OpenResult::Failed(err) => {
             (progress.on_message)(&format!("Could not open browser automatically: {err}"));
         }
     }
@@ -320,7 +320,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push("https://example.test/auth".to_string());
-            BrowserOpenResult::Opened
+            OpenResult::Opened
         });
 
         assert_eq!(
@@ -351,7 +351,7 @@ mod tests {
         };
 
         present_auth_link_with_opener(&progress, "https://example.test/auth", "", || {
-            BrowserOpenResult::Unavailable("headless")
+            OpenResult::Unavailable("headless")
         });
 
         assert_eq!(
@@ -381,7 +381,7 @@ mod tests {
         };
 
         present_auth_link_with_opener(&progress, "https://example.test/auth", "CODE", || {
-            BrowserOpenResult::Failed("missing opener".to_string())
+            OpenResult::Failed("missing opener".to_string())
         });
 
         assert_eq!(

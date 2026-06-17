@@ -217,10 +217,7 @@ fn viewer_search_ignores_non_selectable_spans() {
             0,
             6,
             smelt_buffer::theme::intern("Normal"),
-            crate::smelt_edit::SpanMeta {
-                selectable: false,
-                copy_as: None,
-            },
+            crate::smelt_edit::SpanMeta::unselectable(),
         );
     }
 

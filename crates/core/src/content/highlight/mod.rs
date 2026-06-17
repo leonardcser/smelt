@@ -3,6 +3,7 @@
 use std::sync::LazyLock;
 use syntect::parsing::SyntaxSet;
 
+mod action_refs;
 pub mod diff;
 pub mod inline;
 pub mod syntax;

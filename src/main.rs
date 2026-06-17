@@ -167,20 +167,20 @@ async fn run_inspect_command(args: InspectArgs) {
     if args.no_open {
         println!("Browser auto-open disabled; press Ctrl-C to stop.");
     } else if args.open {
-        match engine::browser::open_url(&url) {
+        match engine::opener::open_url(&url) {
             Ok(()) => println!("Opened inspector in your browser."),
             Err(err) => eprintln!("warning: could not open browser: {err}"),
         }
         println!("Press Ctrl-C to stop.");
     } else {
-        match engine::browser::open_url_if_available(&url) {
-            engine::browser::BrowserOpenResult::Opened => {
+        match engine::opener::open_url_if_available(&url) {
+            engine::opener::OpenResult::Opened => {
                 println!("Opened inspector in your browser. Press Ctrl-C to stop.");
             }
-            engine::browser::BrowserOpenResult::Unavailable(reason) => {
+            engine::opener::OpenResult::Unavailable(reason) => {
                 println!("Browser auto-open unavailable ({reason}); press Ctrl-C to stop.");
             }
-            engine::browser::BrowserOpenResult::Failed(err) => {
+            engine::opener::OpenResult::Failed(err) => {
                 eprintln!("warning: could not open browser: {err}");
                 println!("Press Ctrl-C to stop.");
             }
