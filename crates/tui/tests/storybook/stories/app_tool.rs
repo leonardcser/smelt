@@ -78,7 +78,6 @@ app_story!(enter_worktree_tool_compacted, |ctx| {
         }),
         Some(1280),
     );
-    ctx.run_lua("smelt.transcript.fold_all('close')");
     ctx.assert_snapshot();
 });
 

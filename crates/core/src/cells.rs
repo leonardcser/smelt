@@ -376,6 +376,11 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "confirms_pending",
     "cursor_pos",
     "cwd",
+    "cwd_branch",
+    "cwd_managed_worktree",
+    "cwd_project",
+    "cwd_worktree",
+    "cwd_worktree_path",
     "errors",
     "history",
     "history_epoch",
@@ -651,6 +656,11 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("tokens_used", TokenUsage::default());
     cells.declare("errors", 0u32);
     cells.declare("cwd", seeds.cwd);
+    cells.declare("cwd_branch", String::new());
+    cells.declare("cwd_managed_worktree", false);
+    cells.declare("cwd_project", String::new());
+    cells.declare("cwd_worktree", String::new());
+    cells.declare("cwd_worktree_path", String::new());
     cells.declare("session_epoch", 0u64);
     cells.declare("session_title", seeds.session_title);
     cells.declare("branch", seeds.branch);

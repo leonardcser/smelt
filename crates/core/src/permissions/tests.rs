@@ -112,7 +112,12 @@ fn permissions_from_mode(
         modes,
         mode_behaviors,
         restrict_to_workspace,
-        workspace,
+        active_root: workspace.clone(),
+        allowed_roots: if workspace.as_os_str().is_empty() {
+            Vec::new()
+        } else {
+            vec![workspace]
+        },
         paths_fn: None,
         tool_effects: test_tool_effects(),
         subpattern_parsers: bash_parser_map(),
@@ -1022,6 +1027,21 @@ fn mcp_request_uses_mcp_origin_without_boolean_branch() {
         .decision,
         Decision::Allow
     );
+}
+
+#[test]
+fn workspace_allows_multiple_project_roots() {
+    let mut p = perms_with_workspace("/home/user/project/.worktrees/feature");
+    p.set_allowed_roots(
+        PathBuf::from("/home/user/project/.worktrees/feature"),
+        vec![PathBuf::from("/home/user/project")],
+    );
+
+    let base_args = args_with("command", "cd /home/user/project && git merge feature");
+    assert_eq!(decide(&p, normal(), "bash", &base_args), Decision::Allow);
+
+    let outside_args = args_with("command", "cd /home/user/other && git status");
+    assert_eq!(decide(&p, normal(), "bash", &outside_args), Decision::Ask);
 }
 
 #[test]

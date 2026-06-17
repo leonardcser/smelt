@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * read_file missing.rs
-  1 lines
+  could not read file: missing.rs
 
 
 ─ ✿ working… ───────────────────────────────────────────────

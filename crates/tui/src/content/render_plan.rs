@@ -75,6 +75,7 @@ impl Default for TranscriptDefaultViewPolicy {
             "glob",
             "web_fetch",
             "edit_notebook",
+            "enter_worktree",
         ] {
             policy.tools.insert(tool.to_string(), ViewState::Collapsed);
         }
@@ -778,7 +779,15 @@ mod tests {
             }),
             ViewState::Expanded
         );
-        for tool in ["load_skill", "read_file", "grep", "glob", "web_fetch"] {
+        for tool in [
+            "load_skill",
+            "read_file",
+            "grep",
+            "glob",
+            "web_fetch",
+            "edit_notebook",
+            "enter_worktree",
+        ] {
             assert_eq!(
                 policy.block_default_view_state(&Block::ToolCall {
                     call_id: format!("call-{tool}"),

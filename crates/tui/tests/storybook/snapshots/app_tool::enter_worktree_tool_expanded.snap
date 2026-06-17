@@ -3,10 +3,10 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * enter_worktree native-worktree-support
-  created
   branch  native-worktree-support
   base    main
   path    /repo/.worktrees/native-worktree-support
+
 
 
 

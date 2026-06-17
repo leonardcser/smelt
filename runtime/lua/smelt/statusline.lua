@@ -98,7 +98,7 @@ local function core_compose()
   local tps = cell("tps") or 0
   if smelt.settings.show_tps and tps > 0 then
     items[#items + 1] = {
-      text = string.format(" %.1f tok/s", tps),
+      text = string.format("%.1f tok/s", tps),
       style = { fg = "Comment" },
       priority = 4,
       separated = true,
@@ -132,6 +132,18 @@ local function core_compose()
       style = { fg = "SmeltProcess", italic = false },
       priority = 2,
       separated = true,
+    }
+  end
+
+  local cwd_worktree_path = cell("cwd_worktree_path")
+  if cell("cwd_managed_worktree") and cwd_worktree_path and cwd_worktree_path ~= "" then
+    items[#items + 1] = {
+      text = cwd_worktree_path,
+      style = { fg = "Comment" },
+      priority = 7,
+      separated = true,
+      truncatable = true,
+      truncate = "middle",
     }
   end
 

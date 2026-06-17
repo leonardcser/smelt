@@ -46,16 +46,33 @@ impl TuiApp {
         self.cwd = cwd.to_string_lossy().into_owned();
         self.core.env.set_cwd(cwd.clone());
         self.core.session.cwd = Some(self.cwd.clone());
+        self.refresh_cwd_status();
         self.core.cells.publish_if_changed("cwd", self.cwd.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_project", self.cwd_project.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_branch", self.cwd_branch.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_worktree", self.cwd_worktree.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_worktree_path", self.cwd_worktree_path.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_managed_worktree", self.cwd_managed_worktree);
         let branch = engine::paths::git_branch(&cwd).unwrap_or_default();
         self.core.cells.publish_if_changed("branch", branch);
         Ok(cwd)
     }
 
     fn refresh_workspace_permissions(&mut self, cwd: &std::path::Path) {
-        let workspace = engine::paths::git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+        let worktree_root = std::path::Path::new(&self.core.config.settings.worktree_root);
+        let ctx = smelt_core::worktree::project_context(cwd, Some(worktree_root));
         let mut permissions = self.core.permissions.as_ref().clone();
-        permissions.set_workspace(workspace);
+        permissions.set_allowed_roots(ctx.active_root, ctx.allowed_roots);
         let rules = smelt_core::permissions::store::load(&self.cwd);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
         permissions

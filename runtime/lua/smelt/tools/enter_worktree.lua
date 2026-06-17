@@ -32,9 +32,7 @@ local function worktree_instructions(info)
 end
 
 local function worktree_detail(info)
-  local action = info.created and "created" or "opened existing"
   return smelt.layout.runs({
-    { { text = action } },
     { { text = "branch", dim = true }, { text = "  " }, { text = info.branch or "" } },
     { { text = "base", dim = true }, { text = "    " }, { text = info.base or "" } },
     { { text = "path", dim = true }, { text = "    " }, { text = info.path or "" } },

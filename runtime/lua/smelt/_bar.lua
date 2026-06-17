@@ -9,7 +9,7 @@
 -- `format_tokens`, `format_cost`) are now in `smelt.text`.
 --
 -- A `Span` is the unit input these functions accept:
---   { text, style?, priority?, separated?, truncatable?, align_right?, selectable? }
+--   { text, style?, priority?, separated?, truncatable?, truncate?, align_right?, selectable? }
 -- where `style` is a subset of `smelt.buf.MarkOpts` (`fg`, `bg`,
 -- `hl_group`, `bold`, `dim`, `italic`). `fg` / `bg` accept either a
 -- theme group name (string) or a direct `{ r, g, b }` triple. The same
@@ -175,20 +175,78 @@ function M.compose_status(items, opts)
     working[i] = copy
   end
 
+  local function has_block_bg(s)
+    local style = s.style or {}
+    return style.bg ~= nil or style.hl_group ~= nil
+  end
+
+  local function item_gap(left, right)
+    if has_block_bg(left) and has_block_bg(right) then return 0 end
+    return 1
+  end
+
+  local function fit_middle(text, cells)
+    text = text or ""
+    cells = math.max(cells or 0, 0)
+    if smelt.text.width(text) <= cells then return text end
+    if cells == 0 then return "" end
+    if cells == 1 then return "…" end
+
+    local first, last = text:match("^([^/]+)/.+/([^/]+)$")
+    if first and last then
+      local path_mid = first .. "/…/" .. last
+      if smelt.text.width(path_mid) <= cells then return path_mid end
+    end
+
+    local chars = {}
+    for _, code in utf8.codes(text) do
+      chars[#chars + 1] = utf8.char(code)
+    end
+
+    local left_w = math.floor((cells - 1) / 2)
+    local right_w = cells - 1 - left_w
+    local left, used = {}, 0
+    for _, ch in ipairs(chars) do
+      local w = smelt.text.width(ch)
+      if used + w > left_w then break end
+      left[#left + 1] = ch
+      used = used + w
+    end
+
+    local right_rev = {}
+    used = 0
+    for i = #chars, 1, -1 do
+      local ch = chars[i]
+      local w = smelt.text.width(ch)
+      if used + w > right_w then break end
+      right_rev[#right_rev + 1] = ch
+      used = used + w
+    end
+    local right = {}
+    for i = #right_rev, 1, -1 do right[#right + 1] = right_rev[i] end
+
+    return table.concat(left) .. "…" .. table.concat(right)
+  end
+
+  local function fit_span_text(s, cells)
+    if s.truncate == "middle" then return fit_middle(s.text, cells) end
+    return smelt.text.fit(s.text, cells, { suffix = "…" })
+  end
+
   local function span_cols(spans, right)
-    local w, separated_seen, has_run = 0, false, false
+    local w, separated_seen, prev = 0, false, nil
     for _, s in ipairs(spans) do
       if (s.align_right or false) == right then
-        if s.separated then
-          if separated_seen then
+        if prev then
+          if s.separated and separated_seen then
             w = w + STATUS_SEP_LEN
-          elseif has_run then
-            w = w + 1
+          else
+            w = w + item_gap(prev, s)
           end
-          separated_seen = true
         end
+        if s.separated then separated_seen = true end
         w = w + smelt.text.width(s.text)
-        has_run = true
+        prev = s
       end
     end
     return w
@@ -218,7 +276,7 @@ function M.compose_status(items, opts)
       local total = total_width(working)
       local avail = width - (total - smelt.text.width(working[trunc_idx].text))
       if avail >= 2 then
-        working[trunc_idx].text = smelt.text.fit(working[trunc_idx].text, avail, { suffix = "…" })
+        working[trunc_idx].text = fit_span_text(working[trunc_idx], avail)
       else
         dropped = true
       end
@@ -249,18 +307,26 @@ function M.compose_status(items, opts)
 
   local left_runs, right_runs = {}, {}
   local left_separated_seen, right_separated_seen = false, false
+  local left_prev, right_prev = nil, nil
   for _, s in ipairs(working) do
     local runs = s.align_right and right_runs or left_runs
     local separated_seen = s.align_right and right_separated_seen or left_separated_seen
-    if s.separated then
-      if separated_seen then
+    local prev = s.align_right and right_prev or left_prev
+    if prev then
+      if s.separated and separated_seen then
         runs[#runs + 1] = { text = STATUS_SEP, style = sep_style, selectable = false }
-      elseif #runs > 0 then
-        runs[#runs + 1] = { text = " ", style = fill_style, selectable = false }
+      else
+        local gap = item_gap(prev, s)
+        if gap > 0 then
+          runs[#runs + 1] = { text = string.rep(" ", gap), style = fill_style, selectable = false }
+        end
       end
+    end
+    if s.separated then
       if s.align_right then right_separated_seen = true else left_separated_seen = true end
     end
     runs[#runs + 1] = { text = s.text, style = with_default_bg(s.style), selectable = s.selectable }
+    if s.align_right then right_prev = s else left_prev = s end
   end
 
   local right_w = 0

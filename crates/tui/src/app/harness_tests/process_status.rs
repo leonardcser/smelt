@@ -58,6 +58,65 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
 }
 
 #[test]
+fn statusline_can_truncate_items_in_the_middle() {
+    let mut app = TestApp::builder().build();
+    let _guard = crate::lua::install_app_ptr(&mut app.app);
+    let row: String = app
+        .app
+        .lua
+        .lua
+        .load(
+            r#"
+            local bar = require("smelt._bar")
+            local row = bar.compose_status({
+              {
+                text = "smelt/.worktrees/test",
+                style = { fg = "Comment" },
+                priority = 7,
+                truncatable = true,
+                truncate = "middle",
+              },
+            }, { width = 14, bg_group = "SmeltStatusBg", sep_group = "SmeltBar" })
+            return row.text
+            "#,
+        )
+        .eval()
+        .expect("compose statusline");
+
+    assert_eq!(row, "smelt/…/test  ");
+}
+
+#[test]
+fn statusline_spacing_respects_text_and_block_items() {
+    let mut app = TestApp::builder().build();
+    let _guard = crate::lua::install_app_ptr(&mut app.app);
+    let row: String = app
+        .app
+        .lua
+        .lua
+        .load(
+            r#"
+            local bar = require("smelt._bar")
+            local row = bar.compose_status({
+              { text = "repo", style = { fg = "Comment" } },
+              { text = "tok/s", style = { fg = "Comment" } },
+              { text = " INSERT ", style = { hl_group = "SmeltVimInsert" } },
+              { text = " ⚡yolo ", style = { hl_group = "SmeltModeDefault" } },
+              { text = "procs", style = { fg = "SmeltProcess" }, separated = true },
+            }, { width = 80, bg_group = "SmeltStatusBg", sep_group = "SmeltBar" })
+            return row.text
+            "#,
+        )
+        .eval()
+        .expect("compose statusline");
+
+    assert!(
+        row.starts_with("repo tok/s  INSERT  ⚡yolo  procs"),
+        "{row:?}"
+    );
+}
+
+#[test]
 fn statusline_separates_first_inline_indicator_after_pills() {
     let mut app = TestApp::builder().build();
     let _guard = crate::lua::install_app_ptr(&mut app.app);

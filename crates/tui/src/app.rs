@@ -64,6 +64,11 @@ pub struct TuiApp {
     pub(crate) queued_inputs: InputQueues,
     /// Current working directory (cached at startup).
     pub(crate) cwd: String,
+    pub(crate) cwd_project: String,
+    pub(crate) cwd_branch: String,
+    pub(crate) cwd_worktree: String,
+    pub(crate) cwd_worktree_path: String,
+    pub(crate) cwd_managed_worktree: bool,
     pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
     pub(crate) task_label: Option<String>,
     pub(crate) pending_dialog: bool,
@@ -672,6 +677,43 @@ impl TuiApp {
         )
     }
 
+    pub(crate) fn refresh_cwd_status(&mut self) {
+        let ctx = smelt_core::worktree::project_context(
+            std::path::Path::new(&self.cwd),
+            Some(std::path::Path::new(
+                &self.core.config.settings.worktree_root,
+            )),
+        );
+        self.cwd_worktree_path = Self::worktree_display_path(&ctx);
+        self.cwd_project = ctx.project_name;
+        self.cwd_branch = ctx.branch;
+        self.cwd_worktree = ctx.worktree_name.unwrap_or_default();
+        self.cwd_managed_worktree = ctx.managed_worktree;
+    }
+
+    fn worktree_display_path(ctx: &smelt_core::worktree::ProjectContext) -> String {
+        if !ctx.managed_worktree {
+            return String::new();
+        }
+        if let Some(base_path) = ctx.base_path.as_deref() {
+            if let Some(parent) = base_path.parent() {
+                if let Ok(suffix) = ctx.active_root.strip_prefix(parent) {
+                    return suffix.display().to_string();
+                }
+            }
+        }
+        engine::paths::collapse_tilde(&ctx.active_root)
+            .display()
+            .to_string()
+    }
+
+    fn cwd_status_context(
+        cwd: &std::path::Path,
+        worktree_root: &std::path::Path,
+    ) -> smelt_core::worktree::ProjectContext {
+        smelt_core::worktree::project_context(cwd, Some(worktree_root))
+    }
+
     fn latest_context_note_text(&self) -> Option<&str> {
         self.pending_history_appends
             .iter()
@@ -851,6 +893,15 @@ impl TuiApp {
         let vim_enabled = config.settings.vim;
 
         let cwd = env.cwd().to_string_lossy().into_owned();
+        let cwd_context = Self::cwd_status_context(
+            std::path::Path::new(&cwd),
+            std::path::Path::new(&config.settings.worktree_root),
+        );
+        let cwd_worktree_path = Self::worktree_display_path(&cwd_context);
+        let cwd_project = cwd_context.project_name;
+        let cwd_branch = cwd_context.branch;
+        let cwd_worktree = cwd_context.worktree_name.unwrap_or_default();
+        let cwd_managed_worktree = cwd_context.managed_worktree;
 
         let app_config = config;
 
@@ -1005,6 +1056,11 @@ impl TuiApp {
             host_rx,
             queued_inputs: InputQueues::default(),
             cwd,
+            cwd_project,
+            cwd_branch,
+            cwd_worktree,
+            cwd_worktree_path,
+            cwd_managed_worktree,
             shared_session,
             task_label: None,
             pending_dialog: false,
@@ -1179,6 +1235,22 @@ impl TuiApp {
 
         let tps = self.working.display_tps().unwrap_or(0.0);
         self.core.cells.publish_if_changed("tps", tps);
+
+        self.core
+            .cells
+            .publish_if_changed("cwd_project", self.cwd_project.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_branch", self.cwd_branch.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_worktree", self.cwd_worktree.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_worktree_path", self.cwd_worktree_path.clone());
+        self.core
+            .cells
+            .publish_if_changed("cwd_managed_worktree", self.cwd_managed_worktree);
 
         let task_label = self.task_label.clone().unwrap_or_default();
         self.core.cells.publish_if_changed("task_label", task_label);
@@ -2239,6 +2311,21 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_display_path_starts_at_base_checkout_name() {
+        let ctx = smelt_core::worktree::ProjectContext {
+            project_name: "smelt".into(),
+            active_root: std::path::PathBuf::from("/home/dev/dev/smelt/.worktrees/test"),
+            branch: "test".into(),
+            managed_worktree: true,
+            worktree_name: Some("test".into()),
+            base_path: Some(std::path::PathBuf::from("/home/dev/dev/smelt")),
+            allowed_roots: Vec::new(),
+        };
+
+        assert_eq!(TuiApp::worktree_display_path(&ctx), "smelt/.worktrees/test");
+    }
 
     #[test]
     fn stale_context_window_update_does_not_overwrite_current_generation() {

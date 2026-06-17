@@ -30,6 +30,17 @@ pub struct ManagedWorktreeContext {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProjectContext {
+    pub project_name: String,
+    pub active_root: PathBuf,
+    pub branch: String,
+    pub managed_worktree: bool,
+    pub worktree_name: Option<String>,
+    pub base_path: Option<PathBuf>,
+    pub allowed_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
 struct GitWorktree {
     path: PathBuf,
     branch: Option<String>,
@@ -207,6 +218,61 @@ pub fn managed_context(cwd: &Path, root: Option<&Path>) -> Option<ManagedWorktre
         base,
         base_path,
     })
+}
+
+pub fn project_context(cwd: &Path, root: Option<&Path>) -> ProjectContext {
+    let git_root = worktree_root(cwd).ok();
+    let active_root = git_root
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .unwrap_or_else(|| std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
+    let branch = current_branch(&active_root).unwrap_or_default();
+    let base = default_base_ref(&active_root);
+    let worktrees = git_worktrees(&active_root).unwrap_or_default();
+    let base_path = find_branch_worktree(&worktrees, &base)
+        .or_else(|| common_dir_repo_root(&active_root))
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+    let managed_worktree = is_managed_worktree_path(&active_root, root);
+    let project_root = base_path.as_deref().unwrap_or(active_root.as_path());
+    let project_name = path_name(project_root)
+        .or_else(|| path_name(&active_root))
+        .unwrap_or_else(|| active_root.display().to_string());
+
+    let mut allowed_roots = Vec::new();
+    for wt in worktrees {
+        push_unique_path(&mut allowed_roots, wt.path);
+    }
+    push_unique_path(&mut allowed_roots, active_root.clone());
+    if let Some(base_path) = base_path.clone() {
+        push_unique_path(&mut allowed_roots, base_path);
+    }
+
+    ProjectContext {
+        project_name,
+        active_root,
+        branch: branch.clone(),
+        managed_worktree,
+        worktree_name: managed_worktree
+            .then(|| branch.clone())
+            .filter(|name| !name.is_empty()),
+        base_path,
+        allowed_roots,
+    }
+}
+
+fn path_name(path: &Path) -> Option<String> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    let normalized = std::fs::canonicalize(&path).unwrap_or(path);
+    if !paths.iter().any(|existing| {
+        std::fs::canonicalize(existing).unwrap_or_else(|_| existing.clone()) == normalized
+    }) {
+        paths.push(normalized);
+    }
 }
 
 fn is_git_worktree(path: &Path) -> bool {
@@ -388,6 +454,27 @@ fn git_worktrees(cwd: &Path) -> Result<Vec<GitWorktree>, String> {
     }
     push(&mut worktrees, &mut path, &mut branch);
     Ok(worktrees)
+}
+
+fn common_dir_repo_root(cwd: &Path) -> Option<PathBuf> {
+    let raw = git_stdout(cwd, ["rev-parse", "--git-common-dir"]).ok()?;
+    let common = {
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    };
+    let common = std::fs::canonicalize(&common).unwrap_or(common);
+    if common.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        common
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    }
 }
 
 fn find_branch_worktree(worktrees: &[GitWorktree], branch: &str) -> Option<PathBuf> {
@@ -623,5 +710,88 @@ mod tests {
         assert_eq!(ctx.base_path.as_deref(), Some(repo_path.as_path()));
         assert!(ctx.path.ends_with(".worktrees/feature"));
         assert!(managed_context(repo.path(), None).is_none());
+    }
+
+    #[test]
+    fn project_context_for_non_git_directory_has_no_branch() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let ctx = project_context(dir.path(), None);
+
+        assert_eq!(
+            ctx.project_name,
+            dir.path().file_name().unwrap().to_string_lossy().as_ref()
+        );
+        assert_eq!(ctx.branch, "");
+        assert!(!ctx.managed_worktree);
+        assert_eq!(ctx.worktree_name, None);
+    }
+
+    #[test]
+    fn managed_project_context_uses_base_project_name() {
+        let repo = repo();
+        let info = enter_or_create(
+            repo.path(),
+            WorktreeSpec {
+                name: Some("Feature"),
+                base: Some("main"),
+                root: None,
+            },
+        )
+        .unwrap();
+
+        let ctx = project_context(&info.path, None);
+
+        assert_eq!(
+            ctx.project_name,
+            repo.path().file_name().unwrap().to_string_lossy().as_ref()
+        );
+        assert_eq!(ctx.branch, "feature");
+        assert!(ctx.managed_worktree);
+        assert_eq!(ctx.worktree_name.as_deref(), Some("feature"));
+        assert!(ctx
+            .allowed_roots
+            .iter()
+            .any(|path| path == &std::fs::canonicalize(repo.path()).unwrap()));
+        assert!(ctx
+            .allowed_roots
+            .iter()
+            .any(|path| path == &std::fs::canonicalize(&info.path).unwrap()));
+    }
+
+    #[test]
+    fn project_context_allows_non_managed_git_worktree_family() {
+        let repo = repo();
+        let sibling = tempfile::tempdir().unwrap();
+        let worktree_path = sibling.path().join("feature-tree");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                worktree_path.to_str().unwrap(),
+            ],
+        );
+
+        let ctx = project_context(&worktree_path, None);
+
+        assert_eq!(
+            ctx.project_name,
+            repo.path().file_name().unwrap().to_string_lossy().as_ref()
+        );
+        assert_eq!(ctx.branch, "feature");
+        assert!(!ctx.managed_worktree);
+        assert_eq!(ctx.worktree_name, None);
+        assert!(ctx
+            .allowed_roots
+            .iter()
+            .any(|path| path == &std::fs::canonicalize(repo.path()).unwrap()));
+        assert!(ctx
+            .allowed_roots
+            .iter()
+            .any(|path| path == &std::fs::canonicalize(&worktree_path).unwrap()));
     }
 }

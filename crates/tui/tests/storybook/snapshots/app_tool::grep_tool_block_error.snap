@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 * grep (?P<bad in crates/tui/src
-  error
+  regex parse error: unterminated group
 
 
 ─ ✿ working… ─────────────────────────────────────────────────────────

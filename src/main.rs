@@ -456,13 +456,16 @@ async fn main() {
         })
     };
 
-    let workspace = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
+    let project_context = smelt_core::worktree::project_context(
+        &cwd,
+        Some(std::path::Path::new(&settings.worktree_root)),
+    );
     let mut permissions = smelt_core::permissions::Permissions::from_raw_with_mode_behaviors(
         &lua_permission_rules.unwrap_or_default(),
         &lua_tool_defaults,
         lua_mode_behaviors,
     );
-    permissions.set_workspace(workspace);
+    permissions.set_allowed_roots(project_context.active_root, project_context.allowed_roots);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
     permissions.set_paths_fn(std::sync::Arc::new(|name, args| {
         tui::lua::try_with_app(|app| app.lua.tool_paths_for_workspace(name, args))

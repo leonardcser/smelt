@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 363
 expression: frame.text()
 ---
 Before the rule.

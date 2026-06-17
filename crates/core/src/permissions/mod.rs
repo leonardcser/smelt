@@ -283,7 +283,8 @@ pub struct Permissions {
     modes: HashMap<String, ModePerms>,
     mode_behaviors: HashMap<String, ModeBehavior>,
     restrict_to_workspace: bool,
-    workspace: PathBuf,
+    active_root: PathBuf,
+    allowed_roots: Vec<PathBuf>,
     paths_fn: Option<Arc<PathsFn>>,
     tool_effects: HashMap<String, ToolEffectKind>,
     subpattern_parsers: HashMap<String, Arc<SubpatternParserFn>>,
@@ -300,7 +301,8 @@ impl std::fmt::Debug for Permissions {
                 &self.mode_behaviors.keys().collect::<Vec<_>>(),
             )
             .field("restrict_to_workspace", &self.restrict_to_workspace)
-            .field("workspace", &self.workspace)
+            .field("active_root", &self.active_root)
+            .field("allowed_roots", &self.allowed_roots)
             .field("paths_fn", &self.paths_fn.as_ref().map(|_| "<fn>"))
             .field("tool_effects", &self.tool_effects)
             .field(
@@ -343,7 +345,8 @@ impl Permissions {
             modes,
             mode_behaviors,
             restrict_to_workspace: true,
-            workspace: PathBuf::new(),
+            active_root: PathBuf::new(),
+            allowed_roots: Vec::new(),
             paths_fn: None,
             tool_effects: tool_defaults.tool_effects.clone(),
             subpattern_parsers: tool_defaults.subpattern_parsers.clone(),
@@ -359,7 +362,8 @@ impl Permissions {
         tool_defaults: &ToolDefaults,
         cwd: &str,
     ) -> Self {
-        let perms = Self::from_raw(raw, tool_defaults);
+        let mut perms = Self::from_raw(raw, tool_defaults);
+        perms.set_workspace(PathBuf::from(cwd));
         let rules = store::load(cwd);
         let (ws_tools, ws_dirs) = store::into_approvals(&rules);
         perms
@@ -411,7 +415,22 @@ impl Permissions {
     }
 
     pub fn set_workspace(&mut self, path: PathBuf) {
-        self.workspace = path;
+        self.active_root = path.clone();
+        self.allowed_roots = vec![path];
+    }
+
+    pub fn set_allowed_roots(&mut self, active: PathBuf, roots: Vec<PathBuf>) {
+        self.active_root = active.clone();
+        self.allowed_roots.clear();
+        for root in std::iter::once(active).chain(roots) {
+            if !self
+                .allowed_roots
+                .iter()
+                .any(|existing| workspace::paths_equivalent(existing, &root))
+            {
+                self.allowed_roots.push(root);
+            }
+        }
     }
 
     pub fn set_restrict_to_workspace(&mut self, val: bool) {
@@ -429,7 +448,8 @@ impl Permissions {
     /// running app and must survive that rebuild.
     pub fn with_runtime_state_from(mut self, prev: &Self) -> Self {
         self.restrict_to_workspace = prev.restrict_to_workspace;
-        self.workspace = prev.workspace.clone();
+        self.active_root = prev.active_root.clone();
+        self.allowed_roots = prev.allowed_roots.clone();
         self.paths_fn = prev.paths_fn.clone();
         self.approvals = prev.approvals.clone();
         self
@@ -482,7 +502,7 @@ impl Permissions {
             .map(|p| {
                 ToolEffect::Fs(PathEffect::from_tool_path(
                     p,
-                    &self.workspace,
+                    &self.active_root,
                     access.clone(),
                 ))
             })
@@ -513,7 +533,7 @@ impl Permissions {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let analysis = bash::analyze_shell_command(&command, &self.workspace);
+                let analysis = bash::analyze_shell_command(&command, &self.active_root);
                 let mut effects = vec![ToolEffect::Shell {
                     command,
                     risk: analysis.risk,
@@ -543,15 +563,26 @@ impl Permissions {
     }
 
     fn outside_workspace_requirements(&self, effects: &[ToolEffect]) -> Vec<PermissionRequirement> {
-        if !self.restrict_to_workspace || self.workspace.as_os_str().is_empty() {
+        if !self.restrict_to_workspace || self.active_root.as_os_str().is_empty() {
             return vec![];
         }
-        let workspace = workspace::canonicalize_path_or_parent(&self.workspace);
+        let roots = if self.allowed_roots.is_empty() {
+            vec![self.active_root.clone()]
+        } else {
+            self.allowed_roots.clone()
+        };
+        let allowed_roots: Vec<_> = roots
+            .iter()
+            .map(|root| workspace::canonicalize_path_or_parent(root))
+            .collect();
         let mut paths = Vec::new();
         Self::effect_paths(effects, &mut paths);
         let mut out = Vec::new();
         for effect in paths {
-            if workspace::path_prefix_matches(&workspace, &effect.path) {
+            if allowed_roots
+                .iter()
+                .any(|root| workspace::path_prefix_matches(root, &effect.path))
+            {
                 continue;
             }
             let dir = display_dir_for_effect(effect);
