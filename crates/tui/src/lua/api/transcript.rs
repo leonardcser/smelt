@@ -260,6 +260,20 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(LuaTranscriptStream::new(buf, opts))
         },
     )?;
+    m.private_fn(
+        "_set_compaction_preview",
+        &["summary"],
+        |_, summary: Option<String>| -> LuaResult<()> {
+            crate::lua::with_app(|app| {
+                if let Some(summary) = summary {
+                    app.update_compaction_preview(summary);
+                } else {
+                    app.clear_compaction_preview();
+                }
+            });
+            Ok(())
+        },
+    )?;
     m.fn_(
         "text",
         "Return the full transcript as a single newline-joined string (post-render display text, using current transcript presentation state).",
@@ -281,7 +295,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "blocks",
-        "Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `\"user\"|\"assistant\"|\"thinking\"|\"tool\"|\"code\"|\"exec\"|\"compacted\"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.",
+        "Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `\"user\"|\"assistant\"|\"thinking\"|\"tool\"|\"code\"|\"exec\"|\"compacted\"|\"compaction_preview\"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let snaps = crate::lua::try_with_app(|app| app.transcript_block_snapshots())

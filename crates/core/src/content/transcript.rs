@@ -74,6 +74,15 @@ impl Transcript {
                     summary: t.to_string(),
                 }
             }
+            Block::CompactionPreview { summary } => {
+                let t = summary.trim();
+                if t.is_empty() {
+                    return None;
+                }
+                Block::CompactionPreview {
+                    summary: t.to_string(),
+                }
+            }
             other => other,
         })
     }
@@ -83,6 +92,23 @@ impl Transcript {
             return;
         };
         self.history.push(block);
+    }
+
+    pub fn push_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
+        let block = Self::normalize_block(Block::CompactionPreview { summary })?;
+        Some(self.history.push(block))
+    }
+
+    pub fn rewrite_compaction_preview(&mut self, id: BlockId, summary: String) -> bool {
+        let Some(block) = Self::normalize_block(Block::CompactionPreview { summary }) else {
+            return false;
+        };
+        self.history.rewrite(id, block);
+        true
+    }
+
+    pub fn remove_compaction_preview(&mut self, id: BlockId) {
+        self.history.remove_block(id);
     }
 
     pub fn push_with_origin(&mut self, block: Block, origin: BlockOrigin) {

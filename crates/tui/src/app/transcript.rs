@@ -19,6 +19,7 @@ use std::time::Duration;
 pub(crate) struct TranscriptView {
     transcript: Transcript,
     projection: crate::content::transcript_buf::TranscriptProjection,
+    compaction_preview_id: Option<BlockId>,
 }
 
 impl TranscriptView {
@@ -30,6 +31,7 @@ impl TranscriptView {
         Self {
             transcript,
             projection: crate::content::transcript_buf::TranscriptProjection::new(),
+            compaction_preview_id: None,
         }
     }
 
@@ -269,6 +271,35 @@ impl TranscriptView {
         self.transcript.push(block);
     }
 
+    pub(crate) fn set_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            return self.clear_compaction_preview();
+        }
+
+        if let Some(id) = self.compaction_preview_id {
+            if self.transcript.block(id).is_some() {
+                self.transcript.rewrite_compaction_preview(id, summary);
+                return Some(id);
+            }
+            self.compaction_preview_id = None;
+        }
+
+        let id = self.transcript.push_compaction_preview(summary)?;
+        self.compaction_preview_id = Some(id);
+        Some(id)
+    }
+
+    pub(crate) fn clear_compaction_preview(&mut self) -> Option<BlockId> {
+        let id = self.compaction_preview_id.take()?;
+        self.transcript.remove_compaction_preview(id);
+        Some(id)
+    }
+
+    pub(crate) fn compaction_preview_id(&self) -> Option<BlockId> {
+        self.compaction_preview_id
+    }
+
     pub(crate) fn insert_checkpoint_marker_at(&mut self, block_index: usize, block: Block) {
         self.transcript
             .insert_checkpoint_marker_at(block_index, block);
@@ -430,6 +461,7 @@ fn transcript_block_role(block: &Block) -> &'static str {
         Block::CodeLine { .. } => "code",
         Block::Exec { .. } => "exec",
         Block::Compacted { .. } => "compacted",
+        Block::CompactionPreview { .. } => "compaction_preview",
     }
 }
 
@@ -479,6 +511,27 @@ impl TuiApp {
     pub(crate) fn flush_streaming_text(&mut self) {
         self.parser
             .flush_streaming_text(self.transcript.history_mut());
+    }
+
+    pub(crate) fn update_compaction_preview(&mut self, summary: String) {
+        let existing = self.transcript.compaction_preview_id();
+        let Some(id) = self.transcript.set_compaction_preview(summary) else {
+            return;
+        };
+        if existing.is_none() {
+            let width = self.transcript_width() as u16;
+            self.transcript.fold_node(
+                &self.lua,
+                width,
+                crate::content::render_plan::RenderNodeId::Block(id),
+                crate::content::transcript_buf::FoldAction::Peek,
+            );
+        }
+        self.transcript_win_mut().follow_tail();
+    }
+
+    pub(crate) fn clear_compaction_preview(&mut self) {
+        self.transcript.clear_compaction_preview();
     }
 
     pub(crate) fn start_tool(

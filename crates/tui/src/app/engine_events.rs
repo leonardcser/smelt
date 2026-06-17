@@ -13,6 +13,11 @@ impl TuiApp {
     /// Shared by the production main loop, the test harness, and the
     /// scenario replay binary so all three drive identical state.
     pub fn dispatch_engine_event(&mut self, ev: EngineEvent) -> bool {
+        // Engine ask callbacks can call UiHost Lua APIs such as transcript updates.
+        crate::lua::with_app_ptr(self, |app| app.dispatch_engine_event_inner(ev))
+    }
+
+    fn dispatch_engine_event_inner(&mut self, ev: EngineEvent) -> bool {
         if let Some(mut ag) = self.agent.take() {
             let prev_dispatching_turn_id = self.dispatching_turn_id.replace(ag.turn_id);
             let ctrl = self.handle_engine_event(ev, ag.turn_id, &mut ag.pending);

@@ -1,0 +1,20 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+─────────────────────── compacting ────────────────────────
+
+
+
+
+
+
+
+
+
+
+  tip ctrl+enter / ctrl+q, steer the current response wit…
+────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────
+ ○ normal                                           1:1 100%

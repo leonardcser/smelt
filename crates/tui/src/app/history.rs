@@ -948,9 +948,11 @@ impl TuiApp {
             tokens_before,
         );
         if !installed {
+            self.clear_compaction_preview();
             self.notify("nothing old enough to compact".to_string());
             return false;
         }
+        self.clear_compaction_preview();
         self.refresh_compaction_marker();
         self.publish_history_delta("checkpoint");
         self.schedule_session_save();
@@ -1085,6 +1087,33 @@ mod checkpoint_tests {
             .processes
             .spawn(id.clone(), "sleep 30", child, std::time::Instant::now());
         id
+    }
+
+    #[test]
+    fn compaction_preview_rewrites_and_clears_one_block() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+
+        app.app.update_compaction_preview("one".into());
+        let id = app
+            .app
+            .transcript
+            .compaction_preview_id()
+            .expect("preview id");
+        assert!(matches!(
+            app.app.transcript.history().block(id),
+            Some(Block::CompactionPreview { summary }) if summary == "one"
+        ));
+
+        app.app.update_compaction_preview("one\ntwo".into());
+        assert_eq!(app.app.transcript.compaction_preview_id(), Some(id));
+        assert!(matches!(
+            app.app.transcript.history().block(id),
+            Some(Block::CompactionPreview { summary }) if summary == "one\ntwo"
+        ));
+
+        app.app.clear_compaction_preview();
+        assert!(app.app.transcript.compaction_preview_id().is_none());
+        assert!(app.app.transcript.history().block(id).is_none());
     }
 
     #[test]

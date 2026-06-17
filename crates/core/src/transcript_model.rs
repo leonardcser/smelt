@@ -191,6 +191,9 @@ pub enum Block {
     Compacted {
         summary: String,
     },
+    CompactionPreview {
+        summary: String,
+    },
 }
 
 impl Block {
@@ -216,6 +219,7 @@ impl Block {
             Block::ToolDraft { .. } | Block::ToolCall { .. } => "tool",
             Block::Exec { .. } => "exec",
             Block::Compacted { .. } => "compacted",
+            Block::CompactionPreview { .. } => "compaction_preview",
         }
     }
 
@@ -244,7 +248,9 @@ impl Block {
             Block::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
             Block::ProcessStatus { text, .. } => Some(text.clone()),
             Block::Text { content } | Block::Thinking { content } => Some(content.clone()),
-            Block::Compacted { summary } => Some(summary.clone()),
+            Block::Compacted { summary } | Block::CompactionPreview { summary } => {
+                Some(summary.clone())
+            }
             Block::CodeLine { content, .. } => Some(content.clone()),
             Block::Exec { command, output } => Some(format!("$ {command}\n{output}")),
             Block::ToolDraft { .. } | Block::ToolCall { .. } => None,
@@ -420,6 +426,9 @@ pub enum TranscriptBlockDescriptor {
     Compacted {
         summary: String,
     },
+    CompactionPreview {
+        summary: String,
+    },
 }
 
 impl TranscriptBlockDescriptor {
@@ -480,6 +489,7 @@ impl TranscriptBlockDescriptor {
             },
             Block::Exec { command, output } => Self::Exec { command, output },
             Block::Compacted { summary } => Self::Compacted { summary },
+            Block::CompactionPreview { summary } => Self::CompactionPreview { summary },
         }
     }
 
@@ -547,6 +557,9 @@ impl TranscriptBlockDescriptor {
             Self::Compacted { summary } => Block::Compacted {
                 summary: summary.clone(),
             },
+            Self::CompactionPreview { summary } => Block::CompactionPreview {
+                summary: summary.clone(),
+            },
         }
     }
 
@@ -562,7 +575,9 @@ impl TranscriptBlockDescriptor {
             Self::Thinking { content } | Self::Text { content } => Some(content.clone()),
             Self::CodeLine { content, .. } => Some(content.clone()),
             Self::Exec { command, output } => Some(format!("$ {command}\n{output}")),
-            Self::Compacted { summary } => Some(summary.clone()),
+            Self::Compacted { summary } | Self::CompactionPreview { summary } => {
+                Some(summary.clone())
+            }
             Self::ToolDraft { .. } | Self::ToolCall { .. } => None,
         }
     }
@@ -578,6 +593,7 @@ impl TranscriptBlockDescriptor {
             Self::ToolDraft { .. } | Self::ToolCall { .. } => "tool",
             Self::Exec { .. } => "exec",
             Self::Compacted { .. } => "compacted",
+            Self::CompactionPreview { .. } => "compaction_preview",
         }
     }
 
@@ -845,6 +861,9 @@ impl BlockHistory {
             .iter()
             .filter_map(|id| {
                 let entry = self.entries.get(id)?;
+                if entry.kind() == "compaction_preview" {
+                    return None;
+                }
                 let descriptor = entry.descriptor();
                 if matches!(descriptor, TranscriptBlockDescriptor::ToolDraft { .. }) {
                     return None;
@@ -1483,6 +1502,30 @@ mod tests {
         assert!(records.iter().all(|record| !matches!(
             record.descriptor,
             TranscriptBlockDescriptor::ToolDraft { .. }
+        )));
+        assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("before"));
+        assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("after"));
+    }
+
+    #[test]
+    fn descriptor_records_skip_compaction_previews() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "before".into(),
+        });
+        history.push(Block::CompactionPreview {
+            summary: "streaming summary".into(),
+        });
+        history.push(Block::Text {
+            content: "after".into(),
+        });
+
+        let records = history.descriptor_records();
+
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| !matches!(
+            record.descriptor,
+            TranscriptBlockDescriptor::CompactionPreview { .. }
         )));
         assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("before"));
         assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("after"));

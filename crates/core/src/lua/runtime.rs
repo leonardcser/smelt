@@ -2281,7 +2281,7 @@ fn transcript_block_to_lua_table(
             )?;
             t.set("output", output.as_str())?;
         }
-        Block::Compacted { summary } => {
+        Block::Compacted { summary } | Block::CompactionPreview { summary } => {
             t.set("summary", summary.as_str())?;
         }
     }
@@ -2572,6 +2572,13 @@ fn fallback_transcript_layout(
         }
         Block::Compacted { summary } => {
             let mut items = vec![layout_separator(" compacted ")];
+            if !matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
+                items.push(layout_text(summary.clone(), None, false));
+            }
+            BlockLayout::Vbox(items)
+        }
+        Block::CompactionPreview { summary } => {
+            let mut items = vec![layout_separator(" compacting ")];
             if !matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
                 items.push(layout_text(summary.clone(), None, false));
             }

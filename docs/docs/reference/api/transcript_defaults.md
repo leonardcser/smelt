@@ -76,6 +76,16 @@ Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transc
 
 Render a compacted-history marker.
 
+## `smelt.transcript.defaults.render_compaction_preview`
+
+```lua
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+```
+
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Render an in-flight compaction summary preview.
+
 ## `smelt.transcript.defaults.render_exec`
 
 ```lua

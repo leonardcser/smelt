@@ -573,7 +573,7 @@ fn block_snapshot_json(
             value.insert("command".into(), serde_json::json!(command));
             value.insert("output".into(), serde_json::json!(output));
         }
-        Block::Compacted { summary } => {
+        Block::Compacted { summary } | Block::CompactionPreview { summary } => {
             value.insert("summary".into(), serde_json::json!(summary));
         }
     }

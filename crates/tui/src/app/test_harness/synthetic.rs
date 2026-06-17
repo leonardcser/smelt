@@ -132,14 +132,20 @@ impl TestApp {
     }
 
     /// Push a `Block::Compacted` summary block into the transcript -
-    /// the same block the live compact plugin produces between turns.
-    /// Stories use this to snapshot the compaction chrome without
-    /// running a real `engine.ask` round-trip.
+    /// the same committed marker installed after a successful compaction
+    /// checkpoint. Stories use this to snapshot the final compaction chrome
+    /// without running a real `engine.ask` round-trip.
     pub fn push_compacted(&mut self, summary: &str) {
         self.app
             .push_block(smelt_core::transcript_model::Block::Compacted {
                 summary: summary.to_string(),
             });
+    }
+
+    /// Push or rewrite the transient compaction preview block shown while
+    /// the compact plugin streams a checkpoint summary.
+    pub fn push_compaction_preview(&mut self, summary: &str) {
+        self.app.update_compaction_preview(summary.to_string());
     }
 
     /// Push a typed process-status block into the transcript. Mirrors the

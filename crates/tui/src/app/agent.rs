@@ -426,6 +426,7 @@ impl TuiApp {
         self.flush_streaming_thinking();
         self.flush_streaming_text();
         self.clear_tool_drafts();
+        self.clear_compaction_preview();
         self.pending_history_appends.clear();
         {
             self.working.finish(TurnOutcome::Interrupted);
@@ -449,6 +450,7 @@ impl TuiApp {
             self.lua.cancel_turn_tasks();
             self.cancel_generation = self.cancel_generation.wrapping_add(1);
             self.busy_stack.clear();
+            self.clear_compaction_preview();
             // Archive an interrupted outcome so the prompt bar shows
             // "interrupted" rather than falling back to idle/done.
             self.working.finish(TurnOutcome::Interrupted);

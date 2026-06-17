@@ -76,12 +76,19 @@ impl AppStoryCtx {
             .feed_one(tui::app::test_harness::SourceEvent::Engine(ev));
     }
 
-    /// Push a `Block::Compacted` summary block - the same block the
-    /// bundled compact plugin emits between turns. Use this to
-    /// snapshot the compaction chrome without driving a real
+    /// Push a `Block::Compacted` summary block - the same committed marker
+    /// inserted after a successful compaction checkpoint. Use this to
+    /// snapshot the final compaction chrome without driving a real
     /// `engine.ask` round-trip.
     pub fn push_compacted(&mut self, summary: &str) {
         self.app.push_compacted(summary);
+    }
+
+    /// Push the transient block shown while the compact plugin streams a
+    /// checkpoint summary. The real plugin rewrites this block on each delta
+    /// and `smelt.session.checkpoint` replaces it with a compacted marker.
+    pub fn push_compaction_preview(&mut self, summary: &str) {
+        self.app.push_compaction_preview(summary);
     }
 
     /// Push a typed background-process completion status block. This drives the

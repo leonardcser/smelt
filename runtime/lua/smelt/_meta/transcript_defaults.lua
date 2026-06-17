@@ -35,6 +35,10 @@ transcript_defaults.render_code = nil
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 transcript_defaults.render_compacted = nil
 
+--- Render an in-flight compaction summary preview.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+transcript_defaults.render_compaction_preview = nil
+
 --- Render an exec block.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 transcript_defaults.render_exec = nil

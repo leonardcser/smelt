@@ -1095,6 +1095,8 @@ Bundled default transcript renderers.
   Render a code block with syntax highlighting.
 - `smelt.transcript.defaults.render_compacted` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render a compacted-history marker.
+- `smelt.transcript.defaults.render_compaction_preview` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
+  Render an in-flight compaction summary preview.
 - `smelt.transcript.defaults.render_exec` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render an exec block.
 - `smelt.transcript.defaults.render_group_child_list` :: `fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node`

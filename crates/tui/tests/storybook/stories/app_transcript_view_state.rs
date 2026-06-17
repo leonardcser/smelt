@@ -11,6 +11,12 @@ const THINKING: &str = "**Inspecting the renderer**\nRead the transcript model f
 const THINKING_UNTITLED: &str = "Read the transcript model first.\nCheck the Lua defaults next.\nCompare the rendered rows.\nUpdate the stories last.\nRun the snapshot tests.\nReview the final diff.";
 const COMPACTED_SUMMARY: &str =
     "Compacted 8 earlier turns: parser refactor, renderer wiring, three bug fixes.";
+const COMPACTION_PREVIEW_SUMMARY: &str = concat!(
+    "# Goal\nSummarize earlier turns while preserving the active task.\n\n",
+    "# Progress\n- Read the transcript model.\n- Added a streaming preview block.\n",
+    "- Kept the final checkpoint marker separate.\n\n",
+    "# Next steps\nUpdate stories and run focused tests."
+);
 
 app_story!(user_message_block_states, |ctx| {
     ctx.set_viewport(64, 14);
@@ -94,6 +100,18 @@ app_story!(compacted_block_states, |ctx| {
 
     ctx.run_lua("smelt.transcript.fold_kind('compacted', 'open')");
     ctx.assert_snapshot_named("expanded");
+});
+
+app_story!(compaction_preview_block_states, |ctx| {
+    ctx.set_viewport(60, 16);
+    ctx.push_compaction_preview(COMPACTION_PREVIEW_SUMMARY);
+    ctx.assert_snapshot_named("peek");
+
+    ctx.run_lua("smelt.transcript.fold_kind('compaction_preview', 'open')");
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.run_lua("smelt.transcript.fold_kind('compaction_preview', 'close')");
+    ctx.assert_snapshot_named("collapsed");
 });
 
 app_story!(bash_multiline_header_indent, |ctx| {

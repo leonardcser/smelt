@@ -164,6 +164,23 @@ app_story!(compacted_block_summary, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(compaction_preview_streaming_summary, |ctx| {
+    // Live compaction preview is a transient peeked block. It should show
+    // the tail of the summary as deltas arrive, then be replaced by the
+    // committed compacted marker when checkpointing succeeds.
+    ctx.set_viewport(64, 16);
+    ctx.push_compaction_preview(
+        "# Goal\nSummarize earlier turns while preserving the active task.",
+    );
+    ctx.push_compaction_preview(concat!(
+        "# Goal\nSummarize earlier turns while preserving the active task.\n\n",
+        "# Progress\n- Read the transcript model.\n- Added a streaming preview block.\n",
+        "- Kept the final checkpoint marker separate.\n\n",
+        "# Next steps\nUpdate stories and run focused tests."
+    ));
+    ctx.assert_snapshot();
+});
+
 // ── Full agent turn composite ─────────────────────────────────────
 
 app_story!(full_agent_turn_composite, |ctx| {

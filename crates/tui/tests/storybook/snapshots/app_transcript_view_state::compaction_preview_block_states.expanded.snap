@@ -1,0 +1,20 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+# Goal
+Summarize earlier turns while preserving the active task.
+
+# Progress
+- Read the transcript model.
+- Added a streaming preview block.
+- Kept the final checkpoint marker separate.
+
+# Next steps
+Update stories and run focused tests.
+
+  tip ctrl+enter / ctrl+q, steer the current response wit…
+────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────
+ ○ normal                                           1:1 100%

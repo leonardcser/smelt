@@ -99,6 +99,13 @@ local function is_terminal_provider_error(err)
 	return err and (err.kind == "quota" or err.kind == "rate_limited")
 end
 
+local function set_compaction_preview(summary)
+	local transcript = smelt.transcript
+	if transcript and transcript._set_compaction_preview then
+		transcript._set_compaction_preview(summary)
+	end
+end
+
 -- ── helpers ────────────────────────────────────────────────────────────
 
 local function trim(s)
@@ -224,18 +231,28 @@ local function summarize_messages(history, instructions, done)
 	local task = build_summary_task(instructions)
 	local empty_retries = 0
 	local boundary_restarts = 0
+	local streamed_summary = ""
 	local base_messages = clone_messages(history)
 	table.insert(base_messages, { role = "user", content = task })
 
 	local function finish(summary, err)
+		if not summary then
+			set_compaction_preview(nil)
+		end
 		done(summary, err)
 	end
 
 	local function send(messages, retrying_after_tool_denial)
+		streamed_summary = ""
+		set_compaction_preview(nil)
 		smelt.engine.ask_inherited({
 			messages = messages,
 			model = smelt.model.preferred("compact"),
 			visible_retries = true,
+			on_delta = function(delta)
+				streamed_summary = streamed_summary .. delta
+				set_compaction_preview(streamed_summary)
+			end,
 			on_response = function(response, err)
 				if err then
 					if smelt.task.is_cancelled(err) then
@@ -514,6 +531,7 @@ local function compact_live_session(before_tokens, phase, opts, done)
 	end
 	summarize_by_group_boundary_quiet(history, nil, function(summary, err, first_live_message_index)
 		if opts and opts.guard and not smelt.work.guard_current(opts.guard) then
+			set_compaction_preview(nil)
 			done(nil, nil)
 			return
 		end
@@ -605,6 +623,7 @@ smelt.engine.on_context_limit(function(messages, reply)
 	local guard = smelt.work.guard()
 	summarize_by_group_boundary_quiet(messages, nil, function(summary, err, first_live_message_index)
 		if not smelt.work.guard_current(guard) then
+			set_compaction_preview(nil)
 			reply(nil)
 			return
 		end
@@ -623,6 +642,7 @@ smelt.engine.on_context_limit(function(messages, reply)
 			return
 		end
 		local replacement = checkpointed_messages_from_boundary(messages, summary, first_live_message_index)
+		set_compaction_preview(nil)
 		record_compaction("recovery", "summarize-recovery", 0, first_live_message_index)
 		emit_event("summarize-recovery", 0, 0, {
 			first_live_message_index = first_live_message_index,

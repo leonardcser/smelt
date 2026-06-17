@@ -61,6 +61,8 @@ function smelt.transcript.defaults.render(block, ctx)
     return M.render_process_status(block, ctx)
   elseif block.kind == "compacted" then
     return M.render_compacted(block, ctx)
+  elseif block.kind == "compaction_preview" then
+    return M.render_compaction_preview(block, ctx)
   elseif block.kind == "code" then
     return M.render_code(block, ctx)
   end
@@ -539,17 +541,35 @@ function smelt.transcript.defaults.render_process_status(block, ctx)
   } })
 end
 
---- Render a compacted-history marker.
----@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
-function smelt.transcript.defaults.render_compacted(block, ctx)
-  local separator = layout.separator({ label = " compacted ", dim = true, selectable = true })
+local function render_compaction_summary(label, block, ctx)
+  local separator = layout.separator({ label = label, dim = true, selectable = true })
   if ctx and ctx.view_state == "collapsed" then return separator end
 
   local items = { separator }
   if block.summary and block.summary ~= "" then
-    items[#items + 1] = layout.markdown(block.summary, { dim = true })
+    local summary = layout.markdown(block.summary, { dim = true })
+    if ctx and ctx.view_state == "peek" then
+      summary = layout.cap(summary, {
+        rows = (ctx and ctx.limits and ctx.limits.compacted_peek_rows) or 5,
+        keep = "tail",
+        marker = "above",
+      })
+    end
+    items[#items + 1] = summary
   end
   return layout.vbox(items)
+end
+
+--- Render a compacted-history marker.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+function smelt.transcript.defaults.render_compacted(block, ctx)
+  return render_compaction_summary(" compacted ", block, ctx)
+end
+
+--- Render an in-flight compaction summary preview.
+---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
+function smelt.transcript.defaults.render_compaction_preview(block, ctx)
+  return render_compaction_summary(" compacting ", block, ctx)
 end
 
 --- Render a code block with syntax highlighting.
