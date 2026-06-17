@@ -59,11 +59,15 @@ tool surface, not just Lua:
 - `--system-prompt <file>`, when the flag pointed at a file path, is re-read
   from disk.
 
-Set `smelt.settings.auto_reload = true` to skip the manual F5: smelt watches
-`~/.config/smelt/`, `.smelt/`, the nearest `AGENTS.md`, and the
-`--system-prompt` file (if any), debounces a 250 ms window, then runs `/reload`
-for you. Edits that land while an agent turn is running or a modal dialog is
-open are deferred to the next quiet window.
+`smelt.settings.auto_reload` defaults to `true`, so Lua config edits usually
+skip the manual F5: smelt watches Lua files under `~/.config/smelt/` and
+`.smelt/`, debounces a 250 ms window, then runs `/reload` for you. Edits that
+land while an agent turn is running or a modal dialog is open are deferred to
+the next quiet window. Prompt inputs such as `AGENTS.md`, `SKILL.md`,
+`--system-prompt` files, and markdown custom-command registration still require
+manual `/reload`. Existing markdown custom commands read their file body on each
+invocation, so content edits do not need reload unless you add, remove, or rename
+the command file.
 
 ### Surviving reload smoothly
 

@@ -367,7 +367,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 
     m.fn_(
         "reload_when_idle",
-        "Schedule a Lua config reload for the next safe idle point. Returns `true` when this call queued a new reload and `false` when one was already pending.",
+        "Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`. Returns `true` when this call queued a new reload and `false` when one was already pending.",
         &[],
         |_, ()| -> LuaResult<bool> {
             Ok(crate::lua::try_with_app(|app| app.schedule_lua_reload()).unwrap_or(false))

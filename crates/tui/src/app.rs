@@ -134,6 +134,9 @@ pub struct TuiApp {
     /// Config reload requested from a busy context. Drained once the app is idle
     /// enough that wiping Lua callbacks cannot strand an active turn or modal.
     pub(crate) pending_lua_reload: bool,
+    /// Whether the pending reload should also refresh prompt inputs such as
+    /// AGENTS.md, skills, and `--system-prompt`.
+    pub(crate) pending_lua_reload_refresh_agent_inputs: bool,
     pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: crate::smelt_edit::Ui,
     pub(crate) well_known: WellKnown,
@@ -1118,6 +1121,7 @@ impl TuiApp {
             prompt_inputs: crate::prompt_inputs::PromptInputs::default(),
             auto_reload: None,
             pending_lua_reload: false,
+            pending_lua_reload_refresh_agent_inputs: false,
             prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             well_known,
@@ -1928,11 +1932,7 @@ impl TuiApp {
 
         let mut auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
         if self.core.config.settings.auto_reload {
-            let paths = crate::auto_reload::WatchPaths::discover(
-                std::path::Path::new(&self.cwd),
-                &self.prompt_inputs.skill_extra_paths,
-                self.prompt_inputs.system_prompt_path.clone(),
-            );
+            let paths = crate::auto_reload::WatchPaths::discover(std::path::Path::new(&self.cwd));
             if let Some((handle, rx)) = crate::auto_reload::spawn(paths) {
                 self.auto_reload = Some(handle);
                 auto_reload_rx = Some(rx);
@@ -1965,7 +1965,7 @@ impl TuiApp {
         // so plain `if persist().is_open then open() end` at module
         // top works in both. `lifecycle.on("ready")` hooks drain at
         // the end with `ctx.kind = "launch"`.
-        let load_err = crate::lua::with_app_ptr(self, |app| app.bring_up_lua("launch"));
+        let load_err = crate::lua::with_app_ptr(self, |app| app.bring_up_lua("launch", true));
         if let Some(err) = load_err {
             self.notify_error_sticky(format!("lua init: {err}"));
         }
@@ -2241,10 +2241,10 @@ impl TuiApp {
                         while rx.try_recv().is_ok() {}
                     }
                     if self.prompt_input_is_busy() || self.ui.active_modal().is_some() {
-                        self.schedule_lua_reload();
+                        self.schedule_lua_config_reload();
                         continue;
                     }
-                    self.reload_lua();
+                    self.reload_lua_config();
                     self.render_normal();
                 }
 

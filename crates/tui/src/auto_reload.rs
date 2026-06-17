@@ -1,7 +1,7 @@
-//! Filesystem-driven `/reload` trigger. Watches the on-disk inputs the
-//! agent depends on (init.lua, plugins, commands, skills, AGENTS.md, the
-//! `--system-prompt` file) and pushes a debounced wake-up signal into
-//! the TUI run loop, which then re-enters [`crate::app::TuiApp::reload_lua`].
+//! Filesystem-driven `/reload` trigger. Watches Lua config inputs
+//! (init.lua, plugins, commands, tools, completers, dialogs, runtime
+//! overrides) and pushes a debounced wake-up signal into the TUI run loop,
+//! which then re-enters [`crate::app::TuiApp::reload_lua`].
 //!
 //! Owned by `TuiApp` so the watcher stays alive for the session and the
 //! drop guard tears down the `notify::RecommendedWatcher` on shutdown.
@@ -23,26 +23,17 @@ pub struct AutoReloadHandle {
     _watcher: RecommendedWatcher,
 }
 
-/// Roots the auto-reloader watches. Mirrors the actual loader code paths
-/// in `crates/core/src/lua/runtime.rs` (init.lua + plugins) and
-/// `crates/tui/src/instructions.rs` (AGENTS.md walk).
+/// Roots the auto-reloader watches. This intentionally covers Lua config
+/// development only; prompt inputs (`AGENTS.md`, `SKILL.md`, and
+/// `--system-prompt`) are refreshed by manual `/reload` so instruction
+/// changes remain explicit.
 pub struct WatchPaths {
     /// `~/.config/smelt/` - recursive.
     pub global_config: Option<PathBuf>,
-    /// `.smelt/` under cwd - recursive. Optional even when the
-    /// directory does not yet exist: the watcher silently skips
-    /// missing paths so first-time project setup still wires up after
-    /// a `/reload`.
+    /// `.smelt/` under cwd - recursive when present. When missing, its
+    /// parent is watched recursively and events are filtered back to `.smelt/`
+    /// so first-time project config starts hot-reloading without a restart.
     pub project_config: Option<PathBuf>,
-    /// AGENTS.md files anywhere from cwd up to filesystem root,
-    /// plus the global `~/.config/smelt/AGENTS.md` if present.
-    pub agents_md: Vec<PathBuf>,
-    /// `--system-prompt <path>` when the flag pointed at a file.
-    pub system_prompt: Option<PathBuf>,
-    /// Out-of-tree skill roots from `cfg.skills.paths`. Watched
-    /// recursively so SKILL.md edits trigger reload even when they
-    /// live outside the global/project configs.
-    pub extra_skill_dirs: Vec<PathBuf>,
 }
 
 impl WatchPaths {
@@ -50,37 +41,22 @@ impl WatchPaths {
     /// don't exist on disk are still included - `notify` errors are
     /// logged and skipped per-path so a missing optional root never
     /// disables the entire watcher.
-    pub fn discover(cwd: &Path, skill_extra: &[PathBuf], system_prompt: Option<PathBuf>) -> Self {
-        let global_config = Some(smelt_core::config::config_dir());
-        let project_config = Some(cwd.join(".smelt"));
-
-        let mut agents = Vec::new();
-        let global_agents = smelt_core::config::config_dir().join("AGENTS.md");
-        agents.push(global_agents);
-        let mut dir: Option<&Path> = Some(cwd);
-        while let Some(d) = dir {
-            agents.push(d.join("AGENTS.md"));
-            dir = d.parent();
-        }
-        // Extra skill paths from `cfg.skills.paths` aren't covered by
-        // the global/project roots - watch them explicitly so out-of-tree
-        // SKILL.md edits also trigger reload. Strip entries already
-        // inside the global/project roots to avoid redundant subscriptions.
-        let mut extra_skill_dirs: Vec<PathBuf> = skill_extra.to_vec();
-        if let Some(g) = global_config.as_ref() {
-            extra_skill_dirs.retain(|p| !p.starts_with(g));
-        }
-        if let Some(p) = project_config.as_ref() {
-            extra_skill_dirs.retain(|q| !q.starts_with(p));
-        }
-
+    pub fn discover(cwd: &Path) -> Self {
         Self {
-            global_config,
-            project_config,
-            agents_md: agents,
-            system_prompt,
-            extra_skill_dirs,
+            global_config: Some(smelt_core::config::config_dir()),
+            project_config: Some(cwd.join(".smelt")),
         }
+    }
+
+    fn relevant_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(p) = self.global_config.as_ref() {
+            roots.push(p.clone());
+        }
+        if let Some(p) = self.project_config.as_ref() {
+            roots.push(p.clone());
+        }
+        roots
     }
 }
 
@@ -91,10 +67,12 @@ pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<(
     let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let (signal_tx, signal_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
+    let relevant_roots = paths.relevant_roots();
+
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
-            if !relevant(&event) {
+            if !relevant(&event, &relevant_roots) {
                 return;
             }
             let _ = raw_tx.send(());
@@ -117,21 +95,10 @@ pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<(
     if let Some(p) = paths.project_config.as_ref() {
         if try_watch(&mut watcher, p, RecursiveMode::Recursive) {
             subscribed_any = true;
-        }
-    }
-    for p in &paths.agents_md {
-        if try_watch(&mut watcher, p, RecursiveMode::NonRecursive) {
-            subscribed_any = true;
-        }
-    }
-    if let Some(p) = paths.system_prompt.as_ref() {
-        if try_watch(&mut watcher, p, RecursiveMode::NonRecursive) {
-            subscribed_any = true;
-        }
-    }
-    for p in &paths.extra_skill_dirs {
-        if try_watch(&mut watcher, p, RecursiveMode::Recursive) {
-            subscribed_any = true;
+        } else if let Some(parent) = p.parent() {
+            if try_watch(&mut watcher, parent, RecursiveMode::Recursive) {
+                subscribed_any = true;
+            }
         }
     }
 
@@ -156,12 +123,12 @@ fn try_watch(watcher: &mut RecommendedWatcher, path: &Path, mode: RecursiveMode)
     }
 }
 
-/// Keep only events that can plausibly change agent behaviour. Drops
+/// Keep only events that can plausibly change Lua config behavior. Drops
 /// metadata-only events (atime bumps from `cat`, permission probes from
-/// editors) and anything outside `.lua`/`.md`/`AGENTS.md`. Directory
-/// events pass through so adding/removing whole plugin or skill
-/// directories still fires.
-fn relevant(event: &notify::Event) -> bool {
+/// editors) and ignores prompt inputs (`AGENTS.md`, `SKILL.md`, markdown
+/// commands, system-prompt files) so instruction changes remain explicit
+/// through manual `/reload`.
+fn relevant(event: &notify::Event, roots: &[PathBuf]) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
         return false;
     }
@@ -173,21 +140,12 @@ fn relevant(event: &notify::Event) -> bool {
         // Rescan events carry no paths; treat as relevant.
         return true;
     }
-    event.paths.iter().any(|p| relevant_path(p))
+    event.paths.iter().any(|p| relevant_path(p, roots))
 }
 
-fn relevant_path(path: &Path) -> bool {
-    if path.is_dir() {
-        return true;
-    }
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if name == "AGENTS.md" || name == "SKILL.md" {
-        return true;
-    }
-    matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("lua") | Some("md")
-    )
+fn relevant_path(path: &Path, roots: &[PathBuf]) -> bool {
+    path.extension().and_then(|s| s.to_str()) == Some("lua")
+        && roots.iter().any(|root| path.starts_with(root))
 }
 
 /// Coalesce a burst of raw events into a single signal. After the first
@@ -217,22 +175,41 @@ mod tests {
     use notify::event::{DataChange, ModifyKind};
     use std::path::Path;
 
-    #[test]
-    fn relevant_path_accepts_lua_and_md() {
-        assert!(relevant_path(Path::new("plugins/foo.lua")));
-        assert!(relevant_path(Path::new("commands/bar.md")));
+    fn roots() -> Vec<PathBuf> {
+        vec![
+            PathBuf::from("/home/me/.config/smelt"),
+            PathBuf::from("/repo/.smelt"),
+        ]
     }
 
     #[test]
-    fn relevant_path_accepts_named_marker_files() {
-        assert!(relevant_path(Path::new("/proj/AGENTS.md")));
-        assert!(relevant_path(Path::new("skills/x/SKILL.md")));
+    fn relevant_path_accepts_lua_under_config_roots() {
+        let roots = roots();
+        assert!(relevant_path(
+            Path::new("/home/me/.config/smelt/plugins/foo.lua"),
+            &roots
+        ));
+        assert!(relevant_path(
+            Path::new("/repo/.smelt/commands/bar.lua"),
+            &roots
+        ));
     }
 
     #[test]
-    fn relevant_path_rejects_unrelated_extensions() {
-        assert!(!relevant_path(Path::new("foo.txt")));
-        assert!(!relevant_path(Path::new("notes.json")));
+    fn relevant_path_rejects_prompt_inputs_and_unrelated_paths() {
+        let roots = roots();
+        assert!(!relevant_path(
+            Path::new("/repo/.smelt/commands/bar.md"),
+            &roots
+        ));
+        assert!(!relevant_path(Path::new("/proj/AGENTS.md"), &roots));
+        assert!(!relevant_path(
+            Path::new("/repo/.smelt/skills/x/SKILL.md"),
+            &roots
+        ));
+        assert!(!relevant_path(Path::new("/repo/.smelt/foo.txt"), &roots));
+        assert!(!relevant_path(Path::new("/repo/.smelt/notes.json"), &roots));
+        assert!(!relevant_path(Path::new("/repo/src/plugin.lua"), &roots));
     }
 
     #[test]
@@ -244,14 +221,14 @@ mod tests {
             paths: vec![PathBuf::from("init.lua")],
             attrs: notify::event::EventAttributes::default(),
         };
-        assert!(!relevant(&access));
+        assert!(!relevant(&access, &roots()));
 
         let metadata = notify::Event {
             kind: EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
             paths: vec![PathBuf::from("AGENTS.md")],
             attrs: notify::event::EventAttributes::default(),
         };
-        assert!(!relevant(&metadata));
+        assert!(!relevant(&metadata, &roots()));
     }
 
     #[test]
@@ -261,14 +238,15 @@ mod tests {
             paths: Vec::new(),
             attrs: notify::event::EventAttributes::default(),
         };
-        assert!(relevant(&rescan));
+        let roots = roots();
+        assert!(relevant(&rescan, &roots));
 
         let data_change = notify::Event {
             kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
-            paths: vec![PathBuf::from("plugins/init.lua")],
+            paths: vec![PathBuf::from("/repo/.smelt/plugins/init.lua")],
             attrs: notify::event::EventAttributes::default(),
         };
-        assert!(relevant(&data_change));
+        assert!(relevant(&data_change, &roots));
     }
 
     #[tokio::test]

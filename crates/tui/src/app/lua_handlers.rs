@@ -103,8 +103,20 @@ impl TuiApp {
     /// `/reload` entry point. Wraps [`Self::bring_up_lua`] (the
     /// shared cold-start + reload pipeline) with a user-facing toast.
     pub(crate) fn reload_lua(&mut self) {
+        self.reload_lua_inner(true);
+    }
+
+    /// Auto-reload entry point for Lua config edits. Keeps prompt inputs stable
+    /// so changing AGENTS.md, skills, or `--system-prompt` only affects the
+    /// agent after a manual `/reload`.
+    pub(crate) fn reload_lua_config(&mut self) {
+        self.reload_lua_inner(false);
+    }
+
+    fn reload_lua_inner(&mut self, refresh_agent_inputs: bool) {
         self.pending_lua_reload = false;
-        let err = self.bring_up_lua("reload");
+        self.pending_lua_reload_refresh_agent_inputs = false;
+        let err = self.bring_up_lua("reload", refresh_agent_inputs);
         match err {
             Some(e) => self.notify_error_sticky(format!("lua reload: {e}")),
             None => self.notify("lua reloaded".into()),
@@ -118,14 +130,24 @@ impl TuiApp {
         self.reload_lua();
     }
 
-    /// Mark Lua config for reload at the next point where no turn or modal can
-    /// hold callbacks that the reload would wipe. Returns `true` for a new
-    /// request and `false` when one was already pending.
+    /// Mark a full reload for the next point where no turn or modal can hold
+    /// callbacks that the reload would wipe. Returns `true` for a new request
+    /// and `false` when one was already pending.
     pub(crate) fn schedule_lua_reload(&mut self) -> bool {
+        let was_pending = self.pending_lua_reload;
+        self.pending_lua_reload = true;
+        self.pending_lua_reload_refresh_agent_inputs = true;
+        !was_pending
+    }
+
+    /// Mark a Lua-config-only reload for auto-reload. If a full reload is
+    /// already pending, keep it full.
+    pub(crate) fn schedule_lua_config_reload(&mut self) -> bool {
         if self.pending_lua_reload {
             return false;
         }
         self.pending_lua_reload = true;
+        self.pending_lua_reload_refresh_agent_inputs = false;
         true
     }
 
@@ -140,8 +162,10 @@ impl TuiApp {
         if !self.pending_lua_reload || !self.can_reload_lua_now() {
             return false;
         }
+        let refresh_agent_inputs = self.pending_lua_reload_refresh_agent_inputs;
         self.pending_lua_reload = false;
-        self.reload_lua();
+        self.pending_lua_reload_refresh_agent_inputs = false;
+        self.reload_lua_inner(refresh_agent_inputs);
         true
     }
 
@@ -150,7 +174,7 @@ impl TuiApp {
     }
 
     /// Bring up (or rebuild) the Lua context. Single pipeline shared by
-    /// cold start (`kind = "launch"`) and `/reload` (`kind = "reload"`).
+    /// cold start (`kind = "launch"`), manual `/reload`, and auto-reload.
     /// Plugin module bodies always run with the host pointer live and
     /// `lifecycle.on("ready")` hooks fire on every bring-up so plugins
     /// can rehydrate from `smelt.state` once per Lua-context init.
@@ -165,10 +189,11 @@ impl TuiApp {
     ///    wins/bufs, picker state, busy stack).
     /// 3. [`LuaRuntime::reload`] wipes every `LuaShared` registry then
     ///    re-runs bootstrap → autoload → init.lua → plugins → state sweep.
-    /// 4. [`Self::refresh_agent_inputs`] re-reads AGENTS.md, rebuilds the
-    ///    [`engine::SkillLoader`], re-reads `--system-prompt` when present,
-    ///    ships the refreshed bundle via
-    ///    [`protocol::UiCommand::ReloadAgentConfig`].
+    /// 4. Manual reloads call [`Self::refresh_agent_inputs`] to re-read
+    ///    AGENTS.md, rebuild the [`engine::SkillLoader`], re-read
+    ///    `--system-prompt` when present, and ship the refreshed bundle via
+    ///    [`protocol::UiCommand::ReloadAgentConfig`]. Auto-reload skips this
+    ///    step so prompt-input edits stay explicit.
     /// 5. [`Self::reconcile_mcp_servers`] reconciles MCP server state
     ///    off-thread against the new `smelt.mcp.register` desired set.
     /// 6. `smelt.lifecycle.on("ready", fn)` hooks drain with
@@ -178,7 +203,11 @@ impl TuiApp {
     /// Must be called inside an `install_app_ptr` scope. Returns the
     /// Lua load error (if any) so the caller can render it however
     /// makes sense for the phase.
-    pub(crate) fn bring_up_lua(&mut self, kind: &'static str) -> Option<String> {
+    pub(crate) fn bring_up_lua(
+        &mut self,
+        kind: &'static str,
+        refresh_agent_inputs: bool,
+    ) -> Option<String> {
         if kind == "reload" {
             if let Some(err) = self.lua.flush_persistent_state() {
                 return Some(format!("flush persistent state: {err}"));
@@ -190,7 +219,9 @@ impl TuiApp {
         if err.is_none() {
             self.reconcile_lua_runtime_config();
         }
-        self.refresh_agent_inputs();
+        if refresh_agent_inputs {
+            self.refresh_agent_inputs();
+        }
         self.reconcile_mcp_servers();
         // Make layout geometry current before `ready` hooks open overlays or
         // query `Win:rect()`. Without this, cold-start hooks see the seed layout

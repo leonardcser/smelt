@@ -147,10 +147,10 @@ wizard does this normally, but you may be invoked when neither has happened yet.
 
 ## Hot reload
 
-Config edits don't take effect until the Lua context is reloaded. The reload
-re-runs `init.lua`, all autoloaded plugins/commands/tools, and the user's
-`plugins/`. Persistent state (`smelt.state`, `smelt.cell`) survives across the
-cycle; module-local state in plugins is reset.
+Lua config edits are hot-reloaded automatically by default. The reload re-runs
+`init.lua`, all autoloaded plugins/commands/tools, and the user's `plugins/`.
+Persistent state (`smelt.state`, `smelt.cell`) survives across the cycle;
+module-local state in plugins is reset.
 
 **You (the agent) trigger the reload by calling the `smelt_reload` tool.** Do
 this once, at the end of your turn after every set of edits to files under
@@ -158,9 +158,8 @@ this once, at the end of your turn after every set of edits to files under
 the current turn completes, so it never cancels its own in-flight call. Multiple
 calls in the same turn collapse into one reload.
 
-Do **not** silently flip `smelt.settings.auto_reload` in the user's config to
-avoid having to call the tool. That setting is the user's choice; respect
-whatever it's currently set to.
+Do **not** silently flip `smelt.settings.auto_reload` in the user's config. It is
+enabled by default, but if the user disabled it, respect that choice.
 
 For reference (don't recommend these unless the user asks):
 
@@ -169,7 +168,9 @@ For reference (don't recommend these unless the user asks):
 | `smelt_reload` tool   | You, the agent | At end of the current turn (the path you should use)           |
 | `/reload`             | User typing    | Immediately (blocks if agent is busy)                          |
 | `F5`                  | User keypress  | Immediately (blocks if agent is busy)                          |
-| `auto_reload` setting | User opts in   | Debounced filesystem watcher, deferred until the agent is idle |
+| `auto_reload` setting | User setting   | Lua-file changes, debounced and deferred until the agent is idle |
+
+Prompt inputs (`AGENTS.md`, `SKILL.md`, `--system-prompt`) and markdown custom-command registration stay manual via `/reload`. Existing markdown custom commands read their file body on each invocation, so body edits do not need reload.
 
 ## Recipes
 
@@ -481,7 +482,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `show_slug` | `bool` | `true` | Task-slug label in status bar. |
 | `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
 | `redact_secrets` | `bool` | `true` | Scrub detected secrets from user input and tool results before they reach the LLM. |
-| `auto_reload` | `bool` | `false` | Watch on-disk config inputs (init.lua, plugins/, commands/,  skills/, AGENTS.md, `--system-prompt` file) and dispatch  `/reload` when any of them changes. |
+| `auto_reload` | `bool` | `true` | Watch Lua config inputs (init.lua, plugins/, commands/,  completers/, tools/, dialogs/, runtime overrides) and dispatch  `/reload` when any of them changes. Prompt inputs such as  AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`. |
 | `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers before oversized requests. |
 | `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after  compaction. A group is a user message, a plain assistant message,  or an assistant tool-use step together with its tool outputs. |
 | `cache_ttl_long` | `bool` | `false` | Anthropic prompt cache TTL. `false` uses the 5-minute ephemeral  TTL; `true` opts into the 1-hour TTL. Has no effect on  non-Anthropic providers. |
@@ -1235,7 +1236,7 @@ LLM engine control - cancel, ask, inherited ask, submit commands, and request to
 - `smelt.engine.reload` :: `fun(): nil`
   Re-evaluate every Lua surface: clears every command, keymap, statusline source, tool, hook, timer, and cell subscriber, wipes non-stdlib `package.loaded` entries, then re-runs the bootstrap chunks (from disk overlay if present, embedded otherwise, using the same `module_overlay_roots()` lookup as `require`), bundled autoload modules, `init.lua`, global plugins, and `.smelt/init.lua` + `.smelt/plugins/*`.
 - `smelt.engine.reload_when_idle` :: `fun(): boolean`
-  Schedule a Lua config reload for the next safe idle point.
+  Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`.
 - `smelt.engine.submit_command` :: `fun(name: string, body: string, overrides: smelt.engine.CommandOverrides?, display: string?): nil`
   Start an agent turn from a Lua-defined custom command (`/name`).
 - `smelt.engine.summary_prefix` :: `fun(): string`

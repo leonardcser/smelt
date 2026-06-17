@@ -212,10 +212,11 @@ settings! {
     restrict_to_workspace: Bool   = true;
     /// Scrub detected secrets from user input and tool results before they reach the LLM.
     redact_secrets:        Bool   = true;
-    /// Watch on-disk config inputs (init.lua, plugins/, commands/,
-    /// skills/, AGENTS.md, `--system-prompt` file) and dispatch
-    /// `/reload` when any of them changes.
-    auto_reload:           Bool   = false;
+    /// Watch Lua config inputs (init.lua, plugins/, commands/,
+    /// completers/, tools/, dialogs/, runtime overrides) and dispatch
+    /// `/reload` when any of them changes. Prompt inputs such as
+    /// AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`.
+    auto_reload:           Bool   = true;
     /// Fraction of the configured context window (0, 1] at which the
     /// bundled compact plugin auto-triggers before oversized requests.
     compact_threshold:     Number = 0.80;

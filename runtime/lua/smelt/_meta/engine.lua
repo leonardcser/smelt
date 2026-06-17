@@ -37,7 +37,7 @@ engine.on_prepare_request = nil
 ---@type fun(): nil
 engine.reload = nil
 
---- Schedule a Lua config reload for the next safe idle point. Returns `true` when this call queued a new reload and `false` when one was already pending.
+--- Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`. Returns `true` when this call queued a new reload and `false` when one was already pending.
 ---@type fun(): boolean
 engine.reload_when_idle = nil
 

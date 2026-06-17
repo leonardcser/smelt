@@ -76,7 +76,7 @@ Re-evaluate every Lua surface: clears every command, keymap, statusline source, 
 fun(): boolean
 ```
 
-Schedule a Lua config reload for the next safe idle point. Returns `true` when this call queued a new reload and `false` when one was already pending.
+Schedule a full config reload for the next safe idle point, including prompt inputs such as AGENTS.md, skills, and `--system-prompt`. Returns `true` when this call queued a new reload and `false` when one was already pending.
 
 ## `smelt.engine.submit_command`
 

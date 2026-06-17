@@ -513,7 +513,7 @@ fn empty_banner_returns_to_startup_position_after_resize_round_trip() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
     crate::lua::with_app_ptr(&mut app.app, |app| {
-        let err = app.bring_up_lua("launch");
+        let err = app.bring_up_lua("launch", true);
         assert_eq!(err, None);
     });
 
@@ -556,7 +556,7 @@ fn empty_banner_stays_inside_transcript_when_prompt_grows() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(80, 24);
     crate::lua::with_app_ptr(&mut app.app, |app| {
-        let err = app.bring_up_lua("launch");
+        let err = app.bring_up_lua("launch", true);
         assert_eq!(err, None);
     });
 
@@ -1371,7 +1371,7 @@ fn reload_lua_drains_ready_hooks_with_kind_reload() {
     // covers the `kind = "launch"` drain.
     {
         let _g = crate::lua::install_app_ptr(&mut app.app);
-        let _ = app.app.bring_up_lua("launch");
+        let _ = app.app.bring_up_lua("launch", true);
     }
 
     let read = |rt: &crate::lua::LuaRuntime, k: &str| -> String {
