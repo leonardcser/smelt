@@ -1414,6 +1414,31 @@ pub(crate) fn write_generated_sidecars(dir_path: &Path, session: &Session) {
     );
 }
 
+pub(crate) fn cleanup_migrated_legacy_artifacts(dir_path: &Path) -> usize {
+    let db_path = dir_path.join("session.db");
+    let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) else {
+        return 0;
+    };
+    let Ok(Some(_)) = db.load_session_snapshot() else {
+        return 0;
+    };
+    drop(db);
+
+    let mut removed = 0usize;
+    for name in [
+        "session.json",
+        "history.jsonl",
+        "requests.jsonl",
+        "session.ir.bin",
+    ] {
+        let path = dir_path.join(name);
+        if path.is_file() && fs::remove_file(path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 pub(crate) fn import_legacy_session_to_db(
     dir_path: &Path,
     session: &Session,
@@ -1671,13 +1696,12 @@ pub(crate) fn read_legacy_json_session(
 }
 
 // COMPAT(session-json-monolith): import old monolithic sessions to SQLite as
-// soon as they are opened, then remove the monolith once SQLite and sidecars exist.
+// soon as they are opened, then write current sidecars. Legacy artifacts are
+// removed by the migration cleanup once canonical SQLite is readable.
 pub(crate) fn migrate_legacy_json_session(dir_path: &Path, session: &Session) {
     let _perf = smelt_perf::perf::begin("session:load:migrate_sqlite");
     write_generated_sidecars(dir_path, session);
-    if dir_path.join("session.db").is_file() && dir_path.join("meta.json").is_file() {
-        let _ = fs::remove_file(dir_path.join("session.json"));
-    }
+    cleanup_migrated_legacy_artifacts(dir_path);
 }
 
 /// Returns `None` when no match or prefix is ambiguous.
@@ -2167,7 +2191,7 @@ mod tests {
         assert_eq!(loaded.history.len(), 1);
         assert!(dir.path().join("session.db").is_file());
         assert!(dir.path().join("meta.json").is_file());
-        assert!(dir.path().join("history.jsonl").is_file());
+        assert!(!dir.path().join("history.jsonl").exists());
         assert!(!dir.path().join("session.json").exists());
         let migrated = load_db_session(dir.path()).expect("load migrated db session");
         assert_eq!(migrated.title.as_deref(), Some("legacy title"));
@@ -2191,11 +2215,36 @@ mod tests {
             encode_history_jsonl(&s.history).expect("encode history"),
         )
         .expect("write history");
+        fs::write(
+            dir.path().join("requests.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "request_id": 1,
+                    "kind": "turn",
+                    "timestamp_ms": 30,
+                    "provider_kind": "openai",
+                    "model": "model-a",
+                    "body": {"messages": [{"role": "user", "content": "split prompt"}]},
+                })
+            ),
+        )
+        .expect("write requests");
+        fs::write(
+            dir.path().join("session.json"),
+            serde_json::to_string(&s).expect("encode redundant legacy session"),
+        )
+        .expect("write redundant legacy session");
+        fs::write(dir.path().join("session.ir.bin"), b"obsolete cache").expect("write ir cache");
 
         let outcome = migrate_session_dir_to_db(dir.path()).expect("migrate split");
 
         assert_eq!(outcome, SessionMigrationOutcome::Migrated);
         assert!(dir.path().join("session.db").is_file());
+        assert!(!dir.path().join("history.jsonl").exists());
+        assert!(!dir.path().join("requests.jsonl").exists());
+        assert!(!dir.path().join("session.json").exists());
+        assert!(!dir.path().join("session.ir.bin").exists());
         assert!(!dir
             .path()
             .join(crate::session_migration::MIGRATION_STATUS_FILE)
@@ -2263,6 +2312,41 @@ mod tests {
         assert_eq!(report.scanned, 1);
         assert_eq!(report.skipped, 1);
         assert!(!stale.exists());
+    }
+
+    #[test]
+    fn migration_scan_cleans_legacy_artifacts_in_skipped_sessions() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let session_dir = root.path().join("existing");
+        fs::create_dir(&session_dir).expect("session dir");
+        let mut s = fixture_session();
+        s.id = "existing".into();
+        s.history.push(user_item("already migrated"));
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        db.save_session_snapshot(&session_store_snapshot(&s, 0).unwrap(), None)
+            .unwrap();
+        drop(db);
+        for name in [
+            "session.json",
+            "history.jsonl",
+            "requests.jsonl",
+            "session.ir.bin",
+        ] {
+            fs::write(session_dir.join(name), b"legacy").expect("write legacy artifact");
+        }
+
+        let report = crate::session_migration::migrate_all_sessions_in_dir(root.path());
+
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.skipped, 1);
+        for name in [
+            "session.json",
+            "history.jsonl",
+            "requests.jsonl",
+            "session.ir.bin",
+        ] {
+            assert!(!session_dir.join(name).exists(), "{name} should be removed");
+        }
     }
 
     #[test]

@@ -84,7 +84,8 @@ pub(crate) fn acquire_writer_lease(
     stale_after_secs: i64,
 ) -> Result<()> {
     if let Some(existing) = writer_lease(conn)? {
-        let stale = lease.heartbeat_at.saturating_sub(existing.heartbeat_at) > stale_after_secs;
+        let stale = lease.heartbeat_at.saturating_sub(existing.heartbeat_at) > stale_after_secs
+            || same_host_dead_writer(&existing, lease);
         let same_owner = existing.owner_id == lease.owner_id;
         if !same_owner && !stale {
             return Err(StoreError::Integrity(format!(
@@ -94,6 +95,20 @@ pub(crate) fn acquire_writer_lease(
         }
     }
     set_writer_lease(conn, lease)
+}
+
+fn same_host_dead_writer(existing: &WriterLease, lease: &WriterLease) -> bool {
+    existing.hostname == lease.hostname && !process_is_alive(existing.pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_alive(pid: u32) -> bool {
+    std::path::Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
 }
 
 pub(crate) fn clear_writer_lease(conn: &Connection) -> Result<()> {

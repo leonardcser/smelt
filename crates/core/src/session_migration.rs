@@ -136,6 +136,7 @@ fn migrate_session_dir_to_db_inner(
     crate::session::cleanup_stale_import_temp_files(dir_path);
 
     if dir_path.join("session.db").is_file() {
+        crate::session::cleanup_migrated_legacy_artifacts(dir_path);
         return Ok(SessionMigrationOutcome::Skipped);
     }
 
@@ -164,6 +165,7 @@ fn migrate_session_dir_to_db_inner(
         crate::session::migrate_legacy_json_session(dir_path, &session);
     } else {
         crate::session::write_generated_sidecars(dir_path, &session);
+        crate::session::cleanup_migrated_legacy_artifacts(dir_path);
     }
     Ok(SessionMigrationOutcome::Migrated)
 }

@@ -401,6 +401,34 @@ mod tests {
         assert_eq!(db.object_bytes(&meta.hash).unwrap().unwrap(), object.bytes);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writer_lease_allows_dead_same_host_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let existing = WriterLease {
+            owner_id: "host:4294967295".into(),
+            hostname: "host".into(),
+            pid: u32::MAX,
+            app_version: "test".into(),
+            started_at: 100,
+            heartbeat_at: 100,
+        };
+        db.set_writer_lease(&existing).unwrap();
+
+        let replacement = WriterLease {
+            owner_id: "host:1".into(),
+            hostname: "host".into(),
+            pid: 1,
+            app_version: "test".into(),
+            started_at: 200,
+            heartbeat_at: 200,
+        };
+
+        crate::meta::acquire_writer_lease(db.connection(), &replacement, 30 * 60).unwrap();
+        assert_eq!(db.writer_lease().unwrap().unwrap().owner_id, "host:1");
+    }
+
     #[test]
     fn duplicate_object_write_skips_new_kind_and_keeps_original_row() {
         let dir = tempfile::tempdir().unwrap();
