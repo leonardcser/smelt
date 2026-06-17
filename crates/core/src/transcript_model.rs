@@ -138,35 +138,6 @@ impl ToolState {
     }
 }
 
-fn append_search_line(out: &mut String, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(text);
-}
-
-fn tool_state_metadata_search_text(state: &ToolState) -> Option<String> {
-    let metadata = state.output.as_ref()?.metadata.as_ref()?;
-    let display_count = metadata.get("display_count")?;
-    let value = display_count.get("value")?;
-    let unit = display_count.get("unit")?.as_str()?;
-    let value_text = value
-        .as_i64()
-        .map(|n| n.to_string())
-        .or_else(|| value.as_u64().map(|n| n.to_string()))
-        .or_else(|| value.as_f64().map(|n| n.to_string()))
-        .or_else(|| value.as_str().map(str::to_string))?;
-    let plural = if value_text == "1" || unit.ends_with('s') {
-        unit.to_string()
-    } else {
-        format!("{unit}s")
-    };
-    Some(format!("{value_text} {plural}"))
-}
-
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Block {
     User {
@@ -531,22 +502,6 @@ impl TranscriptBlockDescriptor {
         }
     }
 
-    pub fn search_text(&self, tool_state: Option<&ToolState>) -> String {
-        let mut text = tool_state
-            .and_then(|state| state.output.as_ref())
-            .map(|output| output.content.clone())
-            .or_else(|| self.raw_text())
-            .unwrap_or_default();
-        if matches!(self, Self::Compacted { .. }) {
-            append_search_line(&mut text, "compacted");
-            append_search_line(&mut text, "─");
-        }
-        if let Some(extra) = tool_state.and_then(tool_state_metadata_search_text) {
-            append_search_line(&mut text, &extra);
-        }
-        text
-    }
-
     pub fn kind(&self) -> &'static str {
         match self {
             Self::User { .. } => "user",
@@ -696,15 +651,6 @@ impl BlockEntry {
         }
     }
 
-    fn search_text(&self, tool_state: Option<&ToolState>) -> String {
-        match self {
-            Self::Materialized(block) => {
-                TranscriptBlockDescriptor::from_block(block.clone()).search_text(tool_state)
-            }
-            Self::Descriptor(block) => block.descriptor.search_text(tool_state),
-        }
-    }
-
     fn descriptor(&self) -> TranscriptBlockDescriptor {
         match self {
             Self::Materialized(block) => TranscriptBlockDescriptor::from_block(block.clone()),
@@ -797,12 +743,8 @@ impl BlockHistory {
         self.entries.get(&id).and_then(BlockEntry::raw_text)
     }
 
-    pub fn search_text(&self, id: BlockId) -> Option<String> {
-        let entry = self.entries.get(&id)?;
-        let tool_state = entry
-            .tool_call_id()
-            .and_then(|call_id| self.tool_states.get(call_id));
-        Some(entry.search_text(tool_state))
+    pub fn descriptor(&self, id: BlockId) -> Option<TranscriptBlockDescriptor> {
+        self.entries.get(&id).map(BlockEntry::descriptor)
     }
 
     pub fn block_kind(&self, id: BlockId) -> Option<&'static str> {

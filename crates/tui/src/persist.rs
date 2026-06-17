@@ -5,6 +5,7 @@
 //! session id before writing. Call [`Persister::flush`] when the on-disk
 //! state must be current (session load, fork, shutdown).
 
+use crate::content::transcript_search_text::descriptor_search_text;
 use smelt_core::session::{self, Session};
 use smelt_core::{BlockOrigin, TranscriptBlockRecord};
 use std::path::PathBuf;
@@ -218,9 +219,10 @@ fn transcript_descriptor_row(
         .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
-    let search_text = record
-        .descriptor
-        .search_text(record.tool_state.as_ref().map(|(_, state)| state));
+    let search_text = descriptor_search_text(
+        &record.descriptor,
+        record.tool_state.as_ref().map(|(_, state)| state),
+    );
     let history_idx = match record.origin {
         Some(BlockOrigin::History(idx)) => Some(idx as u64),
         _ => None,
