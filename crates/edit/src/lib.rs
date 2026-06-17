@@ -69,7 +69,8 @@ pub use overlay::{
 };
 pub use row::{
     row_to_usize, DisplayAction, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot,
-    DocPosition, DocRange, MaterializeRequest, MaterializedRows, RowBreak, RowIndex, TextRange,
+    DocPosition, DocRange, MaterializeRequest, MaterializedRows, PreparedWindowRequest, RowBreak,
+    RowIndex, TextRange,
 };
 pub use vim::VimMode;
 pub use window::{
@@ -1637,9 +1638,11 @@ impl Ui {
         &mut self,
         resolved: &[(OverlayId, Rect, Overlay)],
         prepare: &mut P,
-    ) where
+    ) -> Vec<PreparedWindowRequest>
+    where
         P: FnMut(&mut Ui, MaterializeRequest),
     {
+        let mut requests = Vec::new();
         for (_id, rect, overlay) in resolved {
             let sizer = UiLeafSizer {
                 wins: &self.wins,
@@ -1647,18 +1650,25 @@ impl Ui {
             };
             let leaf_rects = layout::resolve_layout_with(&overlay.layout, *rect, &sizer);
             for (paint_id, leaf_rect) in leaf_rects {
-                self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare);
+                if let Some(request) =
+                    self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare)
+                {
+                    requests.push(request);
+                }
             }
         }
+        requests
     }
 
     fn refresh_decoration_viewports_with_prepare<P>(
         &mut self,
         resolved: &[(DecorationId, WinId, Rect, Decoration)],
         prepare: &mut P,
-    ) where
+    ) -> Vec<PreparedWindowRequest>
+    where
         P: FnMut(&mut Ui, MaterializeRequest),
     {
+        let mut requests = Vec::new();
         for (_id, _owner, rect, decoration) in resolved {
             let sizer = UiLeafSizer {
                 wins: &self.wins,
@@ -1666,18 +1676,26 @@ impl Ui {
             };
             let leaf_rects = layout::resolve_layout_with(&decoration.layout, *rect, &sizer);
             for (paint_id, leaf_rect) in leaf_rects {
-                self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare);
+                if let Some(request) =
+                    self.prepare_window_for_render(WinId(paint_id.0), leaf_rect, prepare)
+                {
+                    requests.push(request);
+                }
             }
         }
+        requests
     }
 
-    fn prepare_window_for_render<P>(&mut self, win_id: WinId, rect: Rect, prepare: &mut P)
+    fn prepare_window_for_render<P>(
+        &mut self,
+        win_id: WinId,
+        rect: Rect,
+        prepare: &mut P,
+    ) -> Option<PreparedWindowRequest>
     where
         P: FnMut(&mut Ui, MaterializeRequest),
     {
-        let Some(win) = self.wins.get(&win_id) else {
-            return;
-        };
+        let win = self.wins.get(&win_id)?;
         let buf_id = win.buf;
         let gutter_width = self
             .bufs
@@ -1701,9 +1719,7 @@ impl Ui {
         };
         prepare(self, request);
 
-        let Some(win) = self.wins.get(&win_id) else {
-            return;
-        };
+        let win = self.wins.get(&win_id)?;
         let buf_id = win.buf;
         let gutter_width = self
             .bufs
@@ -1750,6 +1766,13 @@ impl Ui {
                 .with_gutter_width(gutter_width),
             );
         }
+        Some(PreparedWindowRequest {
+            win: win_id,
+            buf: buf_id,
+            rect,
+            gutter_width,
+            content_width,
+        })
     }
 
     /// Render one frame, delegating non-Window `Paint(id)` leaves to `paint(id, slice, ctx)`.
@@ -1770,12 +1793,33 @@ impl Ui {
     pub fn render_with_paints_prepared<W, P, F>(
         &mut self,
         w: &mut W,
+        prepare: P,
+        paint: F,
+    ) -> std::io::Result<()>
+    where
+        W: std::io::Write,
+        P: FnMut(&mut Ui, MaterializeRequest),
+        F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
+    {
+        self.render_with_paints_prepared_and_after_layout(w, prepare, |_, _| {}, paint)
+    }
+
+    /// Render one frame with host preparation and an after-layout hook for windows.
+    ///
+    /// `prepare` runs before the backing buffer is rendered/layouted so row-backed
+    /// sources can materialize content. `after_layout` runs after each prepared
+    /// window has current buffer content, layout, and viewport metadata, but before paint.
+    pub fn render_with_paints_prepared_and_after_layout<W, P, D, F>(
+        &mut self,
+        w: &mut W,
         mut prepare: P,
+        mut after_layout: D,
         mut paint: F,
     ) -> std::io::Result<()>
     where
         W: std::io::Write,
         P: FnMut(&mut Ui, MaterializeRequest),
+        D: FnMut(&mut Ui, PreparedWindowRequest),
         F: FnMut(PaintId, &mut GridSlice<'_>, &DrawContext),
     {
         let resolved = self.resolve_overlays(None);
@@ -1799,12 +1843,21 @@ impl Ui {
                 split_rects.get(&win).map(|r| (win, *r))
             })
             .collect();
-        self.refresh_overlay_viewports_with_prepare(&resolved, &mut prepare);
-        self.refresh_decoration_viewports_with_prepare(&resolved_decorations, &mut prepare);
+        let mut prepared_windows = Vec::new();
+        prepared_windows
+            .extend(self.refresh_overlay_viewports_with_prepare(&resolved, &mut prepare));
+        prepared_windows.extend(
+            self.refresh_decoration_viewports_with_prepare(&resolved_decorations, &mut prepare),
+        );
         for (win_id, rect) in &painted_splits {
-            self.prepare_window_for_render(*win_id, *rect, &mut prepare);
+            if let Some(request) = self.prepare_window_for_render(*win_id, *rect, &mut prepare) {
+                prepared_windows.push(request);
+            }
         }
         self.resolve_tail_scrolls();
+        for request in prepared_windows {
+            after_layout(self, request);
+        }
         let focus = self.focus;
         let active_cursor = self.active_cursor_leaf();
         let cursor_shape = self.cursor_shape;

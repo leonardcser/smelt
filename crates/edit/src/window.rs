@@ -8,7 +8,7 @@ use super::{BufId, UndoHistory, WinId};
 use crate::row::{row_to_usize, DocPosition, DocRange, MaterializedRows, RowIndex};
 use crate::Theme;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use smelt_buffer::buffer::{LineCursorPolicy, VirtTextPos};
+use smelt_buffer::buffer::{LineCursorPolicy, SelectionRange, VirtTextPos};
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_term::grid::{GridSlice, Style};
 use smelt_term::layout::{Gutters, Rect};
@@ -445,6 +445,13 @@ impl WindowSurface {
     }
 }
 
+#[derive(Default)]
+struct WindowRangeLayers {
+    search: Vec<SelectionRange>,
+    selection: Vec<SelectionRange>,
+    yank_flash: Vec<SelectionRange>,
+}
+
 pub struct Window {
     pub(crate) id: WinId,
     pub buf: BufId,
@@ -483,6 +490,8 @@ pub struct Window {
     /// focus. Live dashboard panes use this so periodic text refreshes don't
     /// make a stale byte-position cursor appear to jitter across changing rows.
     pub hide_cursor: bool,
+
+    range_layers: WindowRangeLayers,
 
     /// Populated each frame by the host so scrollbar paint is available without a render-time channel.
     pub viewport: Option<WindowViewport>,
@@ -536,6 +545,7 @@ impl Window {
             cursor_line: false,
             selection_highlight: false,
             hide_cursor: false,
+            range_layers: WindowRangeLayers::default(),
             viewport: None,
             scroll_top: 0,
             scroll_anchor: None,
@@ -550,6 +560,65 @@ impl Window {
 
     pub fn id(&self) -> WinId {
         self.id
+    }
+
+    fn range_layer_slot(&self, layer: crate::RangeLayer) -> &Vec<SelectionRange> {
+        match layer {
+            crate::RangeLayer::Search => &self.range_layers.search,
+            crate::RangeLayer::Selection => &self.range_layers.selection,
+            crate::RangeLayer::YankFlash => &self.range_layers.yank_flash,
+        }
+    }
+
+    fn range_layer_slot_mut(&mut self, layer: crate::RangeLayer) -> &mut Vec<SelectionRange> {
+        match layer {
+            crate::RangeLayer::Search => &mut self.range_layers.search,
+            crate::RangeLayer::Selection => &mut self.range_layers.selection,
+            crate::RangeLayer::YankFlash => &mut self.range_layers.yank_flash,
+        }
+    }
+
+    pub fn set_range_layer(&mut self, layer: crate::RangeLayer, ranges: Vec<SelectionRange>) {
+        let slot = self.range_layer_slot_mut(layer);
+        if *slot == ranges {
+            return;
+        }
+        *slot = ranges;
+    }
+
+    pub fn range_layer(&self, layer: crate::RangeLayer) -> &[SelectionRange] {
+        self.range_layer_slot(layer)
+    }
+
+    pub fn clear_range_layer(&mut self, layer: crate::RangeLayer) {
+        self.range_layer_slot_mut(layer).clear();
+    }
+
+    fn painted_range_layer<'a>(
+        &'a self,
+        buf: &'a Buffer,
+        layer: crate::RangeLayer,
+        selection_ranges: &'a [SelectionRange],
+    ) -> &'a [SelectionRange] {
+        match layer {
+            crate::RangeLayer::Search => self.range_layer(layer),
+            crate::RangeLayer::Selection => {
+                let ranges = self.range_layer(layer);
+                if ranges.is_empty() {
+                    selection_ranges
+                } else {
+                    ranges
+                }
+            }
+            crate::RangeLayer::YankFlash => {
+                let ranges = self.range_layer(layer);
+                if ranges.is_empty() {
+                    buf.range_layer(layer)
+                } else {
+                    ranges
+                }
+            }
+        }
     }
 
     pub fn surface(&self) -> WindowSurface {
@@ -2899,11 +2968,9 @@ impl Window {
             // paint there, keeping multi-line selections visually continuous without
             // highlighting the chrome itself.
             let line_has_highlight = crate::RangeLayer::paint_order().into_iter().any(|layer| {
-                let ranges = match layer {
-                    crate::RangeLayer::Selection => selection_ranges,
-                    _ => buf.range_layer(layer),
-                };
-                ranges.iter().any(|r| r.line == logical_row)
+                self.painted_range_layer(buf, layer, selection_ranges)
+                    .iter()
+                    .any(|r| r.line == logical_row)
             });
             let any_chrome = spans_buf.iter().any(|s| !s.meta.selectable);
             let any_selectable =
@@ -2945,10 +3012,7 @@ impl Window {
                         }
                     };
                 for layer in crate::RangeLayer::paint_order() {
-                    let ranges = match layer {
-                        crate::RangeLayer::Selection => selection_ranges,
-                        _ => buf.range_layer(layer),
-                    };
+                    let ranges = self.painted_range_layer(buf, layer, selection_ranges);
                     let style =
                         merge_span_style(row_style, &ctx.theme.get(layer.highlight_group()));
                     paint_ranges(ranges, style);

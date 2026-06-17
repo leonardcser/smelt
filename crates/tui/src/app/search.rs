@@ -3,8 +3,8 @@ use crate::app::transcript_search::{
 };
 use crate::app::TuiApp;
 use crate::smelt_edit::{
-    BufId, Buffer, DisplayDocument, DocPosition, DocRange, HostDisplayDocument, RowIndex,
-    TextRange, WinId, Window,
+    BufId, Buffer, DisplayDocument, DisplayRow, DocPosition, DocRange, HostDisplayDocument,
+    RowIndex, TextRange, WinId, Window,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -27,6 +27,11 @@ impl SearchDirection {
     }
 }
 
+enum FullSearchRefresh {
+    Unchanged,
+    Changed(Option<DocRange>),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SearchSession {
     pub(crate) target: WinId,
@@ -41,6 +46,7 @@ pub(crate) enum SearchBackend {
     Full {
         matches: Vec<TextRange>,
         current: Option<usize>,
+        changedtick: u64,
     },
     Transcript(TranscriptSearchSession),
 }
@@ -48,7 +54,6 @@ pub(crate) enum SearchBackend {
 pub(crate) struct SearchRenderSession {
     pub(crate) target: WinId,
     query: String,
-    full_matches: Option<Vec<TextRange>>,
 }
 
 impl From<&SearchSession> for SearchRenderSession {
@@ -56,41 +61,27 @@ impl From<&SearchSession> for SearchRenderSession {
         Self {
             target: session.target,
             query: session.query.clone(),
-            full_matches: match &session.backend {
-                SearchBackend::Full { matches, .. } => Some(matches.clone()),
-                SearchBackend::Transcript(_) => None,
-            },
         }
     }
 }
 
 impl SearchRenderSession {
-    pub(crate) fn visible_line_matches(
-        &self,
-        win: &Window,
-        buf: &Buffer,
-        visible_rows: u16,
-    ) -> Vec<DocRange> {
-        if let Some(matches) = &self.full_matches {
-            let visible_start = win.scroll_top();
-            let visible_end = visible_start.saturating_add(visible_rows.max(1) as RowIndex);
-            matches
-                .iter()
-                .filter_map(TextRange::rows)
-                .filter(|range| range.start.row >= visible_start && range.start.row < visible_end)
-                .collect()
-        } else {
-            visible_buffer_matches(win, buf, visible_rows, &self.query)
-        }
+    pub(crate) fn apply_to_window(&self, win: &mut Window, buf: &Buffer, visible_rows: u16) {
+        let ranges = win.doc_ranges_to_row_ranges(
+            buf,
+            visible_rows,
+            visible_buffer_matches(win, buf, visible_rows, &self.query),
+        );
+        win.set_range_layer(crate::smelt_edit::RangeLayer::Search, ranges);
     }
 }
 
 impl SearchSession {
     pub(crate) fn current_range(&self) -> Option<TextRange> {
         match &self.backend {
-            SearchBackend::Full { matches, current } => {
-                current.and_then(|index| matches.get(index).cloned())
-            }
+            SearchBackend::Full {
+                matches, current, ..
+            } => current.and_then(|index| matches.get(index).cloned()),
             SearchBackend::Transcript(session) => session
                 .current
                 .and_then(|index| session.matches.get(index).copied())
@@ -126,10 +117,9 @@ impl TuiApp {
         let Some(session) = self.search.session.take() else {
             return;
         };
-        let Some(buf) = self.ui.buf_mut(session.target_buf) else {
-            return;
-        };
-        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
+        if let Some(win) = self.ui.win_mut(session.target) {
+            win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
+        }
     }
 
     pub(crate) fn handle_search_key_for_target(&mut self, target: WinId, k: KeyEvent) -> bool {
@@ -189,12 +179,21 @@ impl TuiApp {
 
         let matches = self.scan_search_matches(target, &query);
         let current = initial_match(&matches, origin, direction);
+        let changedtick = self
+            .ui
+            .buf(target_buf)
+            .map(Buffer::changedtick)
+            .unwrap_or_default();
         self.search.session = Some(SearchSession {
             target,
             target_buf,
             query,
             direction,
-            backend: SearchBackend::Full { matches, current },
+            backend: SearchBackend::Full {
+                matches,
+                current,
+                changedtick,
+            },
         });
         if let Some(range) = self
             .search
@@ -265,8 +264,20 @@ impl TuiApp {
             return true;
         }
 
+        match self.sync_full_search_session(target, direction) {
+            FullSearchRefresh::Unchanged => {}
+            FullSearchRefresh::Changed(Some(range)) => {
+                self.jump_to_search_range(range);
+                return true;
+            }
+            FullSearchRefresh::Changed(None) => return false,
+        }
+
         let Some((next, range)) = self.search.session.as_ref().and_then(|session| {
-            let SearchBackend::Full { matches, current } = &session.backend else {
+            let SearchBackend::Full {
+                matches, current, ..
+            } = &session.backend
+            else {
                 return None;
             };
             if matches.is_empty() {
@@ -303,6 +314,48 @@ impl TuiApp {
         true
     }
 
+    fn sync_full_search_session(
+        &mut self,
+        target: WinId,
+        direction: SearchDirection,
+    ) -> FullSearchRefresh {
+        let Some(session) = self.search.session.as_ref() else {
+            return FullSearchRefresh::Unchanged;
+        };
+        let SearchBackend::Full { changedtick, .. } = &session.backend else {
+            return FullSearchRefresh::Unchanged;
+        };
+        let Some(buf_tick) = self.ui.buf(session.target_buf).map(Buffer::changedtick) else {
+            return FullSearchRefresh::Unchanged;
+        };
+        if buf_tick == *changedtick {
+            return FullSearchRefresh::Unchanged;
+        }
+
+        let query = session.query.clone();
+        let origin = self.search_origin(target).unwrap_or_default();
+        let matches = self.scan_search_matches(target, &query);
+        let current = initial_match(&matches, origin, direction);
+        let range = current
+            .and_then(|index| matches.get(index))
+            .and_then(TextRange::rows);
+        if let Some(SearchSession {
+            backend:
+                SearchBackend::Full {
+                    matches: session_matches,
+                    current: session_current,
+                    changedtick,
+                },
+            ..
+        }) = self.search.session.as_mut()
+        {
+            *session_matches = matches;
+            *session_current = current;
+            *changedtick = buf_tick;
+        }
+        FullSearchRefresh::Changed(range)
+    }
+
     fn search_target(&self) -> Option<WinId> {
         let focused = self.ui.focus();
         let content =
@@ -326,15 +379,7 @@ impl TuiApp {
             let display = doc.materialize(start..start.saturating_add(count));
             for (offset, row) in display.rows.iter().enumerate() {
                 let row_index = start.saturating_add(offset as RowIndex);
-                for (byte_col, _) in row.text.match_indices(query) {
-                    let end_col = byte_col + query.len();
-                    if !row_match_is_selectable(row, byte_col, end_col) {
-                        continue;
-                    }
-                    matches.push(TextRange::Rows(doc_range_for_match(
-                        row_index, byte_col, end_col,
-                    )));
-                }
+                matches.extend(display_row_matches(row, row_index, query).map(TextRange::Rows));
             }
             start = start.saturating_add(count);
         }
@@ -401,6 +446,20 @@ pub(super) fn row_match_is_selectable(
         .any(|range| range.start <= byte_col && end_col <= range.end)
 }
 
+pub(super) fn display_row_matches<'a>(
+    row: &'a DisplayRow,
+    row_index: RowIndex,
+    query: &'a str,
+) -> impl Iterator<Item = DocRange> + 'a {
+    row.text
+        .match_indices(query)
+        .filter_map(move |(byte_col, _)| {
+            let end_col = byte_col + query.len();
+            row_match_is_selectable(row, byte_col, end_col)
+                .then(|| doc_range_for_match(row_index, byte_col, end_col))
+        })
+}
+
 pub(super) fn doc_range_for_match(row: RowIndex, byte_col: usize, end_col: usize) -> DocRange {
     DocRange {
         start: DocPosition { row, byte_col },
@@ -431,17 +490,11 @@ fn visible_buffer_matches(
         if absolute_row < visible_start || absolute_row >= visible_end {
             continue;
         }
-        let selectable_ranges =
-            crate::smelt_edit::selectable_byte_ranges_for_line(line, &buf.highlights_at(local_row));
-        for (byte_col, _) in line.match_indices(query) {
-            let end_col = byte_col + query.len();
-            if selectable_ranges
-                .iter()
-                .any(|range| range.start <= byte_col && end_col <= range.end)
-            {
-                matches.push(doc_range_for_match(absolute_row, byte_col, end_col));
-            }
-        }
+        let row = DisplayRow::new(
+            line.clone(),
+            crate::smelt_edit::selectable_byte_ranges_for_line(line, &buf.highlights_at(local_row)),
+        );
+        matches.extend(display_row_matches(&row, absolute_row, query));
     }
     matches
 }

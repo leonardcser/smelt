@@ -152,7 +152,7 @@ impl TuiApp {
             .as_ref()
             .map(crate::app::search::SearchRenderSession::from);
         let ui = &mut self.ui;
-        let _ = ui.render_with_paints_prepared(
+        let _ = ui.render_with_paints_prepared_and_after_layout(
             out,
             |ui, request| {
                 if let Some(notification) = notification
@@ -243,18 +243,16 @@ impl TuiApp {
                         }
                         win.scroll_left = 0;
                     }
-                    if let Some(search) =
-                        search_session.as_ref().filter(|s| s.target == request.win)
-                    {
-                        let ranges = win.doc_ranges_to_row_ranges(
-                            buf,
-                            viewport_rows,
-                            search.visible_line_matches(win, buf, viewport_rows),
-                        );
-                        buf.set_range_layer(crate::smelt_edit::RangeLayer::Search, ranges);
-                    } else {
-                        buf.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
-                    }
+                }
+            },
+            |ui, request| {
+                let (win, buf) = ui.win_and_buf_mut(request.win, request.buf);
+                let (Some(win), Some(buf)) = (win, buf) else {
+                    return;
+                };
+                win.clear_range_layer(crate::smelt_edit::RangeLayer::Search);
+                if let Some(search) = search_session.as_ref().filter(|s| s.target == request.win) {
+                    search.apply_to_window(win, buf, request.rect.height);
                 }
             },
             |id, slice, ctx| {

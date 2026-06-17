@@ -212,6 +212,15 @@ pub struct MaterializeRequest {
     pub follow_tail: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedWindowRequest {
+    pub win: WinId,
+    pub buf: BufId,
+    pub rect: Rect,
+    pub gutter_width: u16,
+    pub content_width: u16,
+}
+
 pub fn row_to_usize(row: RowIndex) -> usize {
     row.min(usize::MAX as RowIndex) as usize
 }

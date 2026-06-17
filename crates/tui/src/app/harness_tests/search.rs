@@ -188,9 +188,8 @@ fn transcript_search_paints_visible_matches_and_esc_clears() {
     app.render_silent();
 
     let win = app.app.transcript_win();
-    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
     assert!(
-        !buf.range_layer(crate::smelt_edit::RangeLayer::Search)
+        !win.range_layer(crate::smelt_edit::RangeLayer::Search)
             .is_empty(),
         "submitted search should paint visible matches"
     );
@@ -198,8 +197,7 @@ fn transcript_search_paints_visible_matches_and_esc_clears() {
     app.press(KeyCode::Esc);
     app.render_silent();
     let win = app.app.transcript_win();
-    let buf = app.app.ui.buf(win.buf).expect("transcript buffer");
-    assert!(buf
+    assert!(win
         .range_layer(crate::smelt_edit::RangeLayer::Search)
         .is_empty());
     assert!(app.app.search.session.is_none());
@@ -389,6 +387,48 @@ fn overlay_viewer_search_targets_focused_overlay() {
     let buf = app.app.ui.buf(win.buf).expect("overlay buffer");
     assert_eq!(buf.display_byte_pos(win.cpos()), (1, 0));
     assert_eq!(app.app.search.session.as_ref().unwrap().target, leaf);
+
+    app.render_silent();
+    let win = app.app.ui.win(leaf).expect("overlay window");
+    let buf_id = win.buf;
+    assert!(
+        win.range_layer(crate::smelt_edit::RangeLayer::Search)
+            .iter()
+            .any(|range| range.line == 1),
+        "focused overlay search should paint visible matches"
+    );
+
+    app.app
+        .ui
+        .buf_mut(buf_id)
+        .expect("overlay buffer")
+        .set_all_lines(vec!["gamma moved".into(), "no match".into()]);
+    app.render_silent();
+    let win = app.app.ui.win(leaf).expect("overlay window");
+    let ranges = win.range_layer(crate::smelt_edit::RangeLayer::Search);
+    assert!(
+        ranges.iter().any(|range| range.line == 0),
+        "search paint should follow live buffer contents"
+    );
+    assert!(
+        !ranges.iter().any(|range| range.line == 1),
+        "stale search ranges should not survive buffer rewrites"
+    );
+
+    app.app
+        .ui
+        .buf_mut(buf_id)
+        .expect("overlay buffer")
+        .set_all_lines(vec!["gamma first".into(), "gamma second".into()]);
+    app.app
+        .ui
+        .win_mut(leaf)
+        .expect("overlay window")
+        .set_cpos(0);
+    app.type_char('n');
+    let win = app.app.ui.win(leaf).expect("overlay window");
+    let buf = app.app.ui.buf(buf_id).expect("overlay buffer");
+    assert_eq!(buf.display_byte_pos(win.cpos()), (0, 0));
 }
 
 #[test]
@@ -447,6 +487,11 @@ fn viewer_search_ignores_non_selectable_spans() {
         .unwrap()
         .full_matches()
         .is_empty());
+    app.render_silent();
+    let win = app.app.ui.win(leaf).expect("overlay window");
+    assert!(win
+        .range_layer(crate::smelt_edit::RangeLayer::Search)
+        .is_empty());
 
     app.type_char('/');
     app.type_text("real");
@@ -456,5 +501,12 @@ fn viewer_search_ignores_non_selectable_spans() {
     assert_eq!(
         session.full_matches()[0].rows().unwrap().start.byte_col,
         "chrome ".len()
+    );
+    app.render_silent();
+    let win = app.app.ui.win(leaf).expect("overlay window");
+    assert!(
+        !win.range_layer(crate::smelt_edit::RangeLayer::Search)
+            .is_empty(),
+        "selectable match should paint"
     );
 }
