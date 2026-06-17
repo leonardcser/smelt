@@ -481,7 +481,7 @@ Read or write via `smelt.settings.<key>` from `init.lua`. Run `/reload` after ed
 | `file_icon_colors` | `bool` | `true` | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled. |
 | `show_slug` | `bool` | `true` | Task-slug label in status bar. |
 | `restrict_to_workspace` | `bool` | `true` | Downgrade `Allow` to `Ask` for paths outside the workspace. |
-| `redact_secrets` | `bool` | `true` | Scrub detected secrets from user input and tool results before they reach the LLM. |
+| `redact_secrets` | `bool` | `false` | Scrub detected secrets from user input and tool results before they reach the LLM. |
 | `auto_reload` | `bool` | `true` | Watch Lua config inputs (init.lua, plugins/, commands/,  completers/, tools/, dialogs/, runtime overrides) and dispatch  `/reload` when any of them changes. Prompt inputs such as  AGENTS.md, SKILL.md, and `--system-prompt` stay manual via `/reload`. |
 | `compact_threshold` | `number` | `0.8` | Fraction of the configured context window (0, 1] at which the  bundled compact plugin auto-triggers before oversized requests. |
 | `compact_keep_recent_groups` | `number` | `1` | Minimum number of trailing message groups kept verbatim after  compaction. A group is a user message, a plain assistant message,  or an assistant tool-use step together with its tool outputs. |

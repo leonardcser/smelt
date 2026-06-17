@@ -211,7 +211,7 @@ settings! {
     /// Downgrade `Allow` to `Ask` for paths outside the workspace.
     restrict_to_workspace: Bool   = true;
     /// Scrub detected secrets from user input and tool results before they reach the LLM.
-    redact_secrets:        Bool   = true;
+    redact_secrets:        Bool   = false;
     /// Watch Lua config inputs (init.lua, plugins/, commands/,
     /// completers/, tools/, dialogs/, runtime overrides) and dispatch
     /// `/reload` when any of them changes. Prompt inputs such as

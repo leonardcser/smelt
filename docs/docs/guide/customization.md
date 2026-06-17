@@ -36,7 +36,7 @@ Set preferences in `init.lua` by assigning to `smelt.settings`:
 ```lua
 smelt.settings.vim = true
 smelt.settings.auto_compact = true
-smelt.settings.redact_secrets = true
+smelt.settings.redact_secrets = false
 smelt.settings.file_icons = true
 ```
 
