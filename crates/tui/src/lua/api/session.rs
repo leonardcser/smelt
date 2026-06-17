@@ -673,18 +673,27 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 );
 
                 if cached_view.is_none() {
-                    let session = smelt_core::session::load(&id)?;
-                    let cache_key = format!("{}:{}", session.id, session.updated_at_ms);
-                    if cached_key.as_deref() != Some(cache_key.as_str()) {
-                        cached_view = app.resume_preview_cache.take(&cache_key);
-                    }
-                    cached_key = Some(cache_key);
+                    let cache_key = cache_key_hint.clone().unwrap_or_else(|| id.clone());
+                    cached_key = Some(cache_key.clone());
                     if cached_view.is_none() {
-                        let mut view = crate::app::transcript::TranscriptView::from_transcript(
-                            crate::app::history::build_transcript_from_session(&app.lua, &session),
-                        );
-                        view.set_inline_options(app.inline_options());
-                        cached_view = Some(view);
+                        if let Some(transcript) = crate::app::history::load_transcript_from_sqlite_id(&id) {
+                            let mut view = crate::app::transcript::TranscriptView::from_transcript(transcript);
+                            view.set_inline_options(app.inline_options());
+                            cached_view = Some(view);
+                        } else if let Some(session) = smelt_core::session::load(&id) {
+                            let cache_key = format!("{}:{}", session.id, session.updated_at_ms);
+                            if cached_key.as_deref() != Some(cache_key.as_str()) {
+                                cached_view = app.resume_preview_cache.take(&cache_key);
+                            }
+                            cached_key = Some(cache_key);
+                            if cached_view.is_none() {
+                                let mut view = crate::app::transcript::TranscriptView::from_transcript(
+                                    crate::app::history::build_transcript_from_session(&app.lua, &session),
+                                );
+                                view.set_inline_options(app.inline_options());
+                                cached_view = Some(view);
+                            }
+                        }
                     }
                 }
 

@@ -308,7 +308,17 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
             end,
           },
           ui = { layout = { leaf = function() return {} end } },
-          transcript = { blocks = function() return blocks end },
+          transcript = {
+            blocks = function() return blocks end,
+            block_before_or_at_row = function(row, opts)
+              local role = opts and opts.role or nil
+              for i = #blocks, 1, -1 do
+                local b = blocks[i]
+                if (role == nil or b.role == role) and b.first_row <= row then return b end
+              end
+              return nil
+            end,
+          },
           cell = function(name)
             return {
               subscribe = function(_, fn) cells[name] = fn end,

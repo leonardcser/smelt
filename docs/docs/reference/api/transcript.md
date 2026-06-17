@@ -18,6 +18,16 @@ fun(row: integer): table?
 
 Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block. This may materialize full block layout.
 
+## `smelt.transcript.block_before_or_at_row`
+
+```lua
+fun(row: integer, opts: table?): table?
+```
+
+**Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
+
+Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. Uses the row index and does not materialize the full block layout.
+
 ## `smelt.transcript.blocks`
 
 ```lua

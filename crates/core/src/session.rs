@@ -1155,7 +1155,11 @@ pub fn now_ms() -> u64 {
 // ── Save / Load / Delete ─────────────────────────────────────────────────────
 
 pub fn dir_for(session: &Session) -> PathBuf {
-    sessions_dir().join(&session.id)
+    dir_for_id(&session.id)
+}
+
+pub fn dir_for_id(id: &str) -> PathBuf {
+    sessions_dir().join(id)
 }
 
 pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
@@ -1291,6 +1295,12 @@ pub fn load(id_or_prefix: &str) -> Option<Session> {
         resolve_prefix(id_or_prefix)?
     };
     load_exact(&id)
+}
+
+pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
+    let _perf = smelt_perf::perf::begin("session:load_meta");
+    let id = resolve_prefix(id_or_prefix)?;
+    load_meta_for_dir(dir_for_id(&id))
 }
 
 fn load_exact(id: &str) -> Option<Session> {

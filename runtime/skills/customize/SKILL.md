@@ -1672,6 +1672,8 @@ Transcript display policy and rendered transcript inspection.
 
 - `smelt.transcript.block_at_row` (UiHost) :: `fun(row: integer): table?`
   Return the exact transcript block containing absolute display row `row`, or nil when the row is outside a block.
+- `smelt.transcript.block_before_or_at_row` (UiHost) :: `fun(row: integer, opts: table?): table?`
+  Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`.
 - `smelt.transcript.blocks` (UiHost) :: `fun(): table`
   Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`.
 - `smelt.transcript.extend_renderer` (Host) :: `fun(name: string, renderer: fun(next: fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, block: smelt.transcript.Block, ctx: smelt.transcript.Context): table?, opts: table?): smelt.Reg`

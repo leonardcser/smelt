@@ -13,6 +13,11 @@ local transcript = {}
 transcript.block_at_row = nil
 
 --- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
+--- Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. Uses the row index and does not materialize the full block layout.
+---@type fun(row: integer, opts: table?): table?
+transcript.block_before_or_at_row = nil
+
+--- Tier: UiHost - Requires a terminal UI; calling these from headless mode raises.
 --- Return the laid-out transcript blocks for the current frame as a list of `{ idx, role, first_row, rows, first_line }`. `idx` is 0-based into `session.messages` order (the same value `session.rewind_to(idx)` accepts). `role` is `"user"|"assistant"|"thinking"|"tool"|"code"|"exec"|"compacted"`. `first_row` is the absolute display row of the block's first visible line (compare against `win:scroll().top`). `rows` is the block's row count. `first_line` is the first non-empty line of the block's raw source text. Returns an empty list before the first frame projects.
 ---@type fun(): table
 transcript.blocks = nil

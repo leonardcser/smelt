@@ -20,7 +20,7 @@ local state = {
   top_buf = nil,
   top_win = nil,
   top_width = nil,
-  top_target_idx = nil,
+  top_target_row = nil,
 }
 
 -- ── Common lifecycle ───────────────────────────────────────────────────
@@ -38,7 +38,7 @@ local function close_top()
   state.top_buf = nil
   state.top_win = nil
   state.top_width = nil
-  state.top_target_idx = nil
+  state.top_target_row = nil
 end
 
 local function close_all()
@@ -125,15 +125,10 @@ end
 -- block sits exactly at the viewport top (already visible, click would no-op).
 local function user_block_for_top_pill(scroll)
   if not can_show_top(scroll) then return nil end
-  local blocks = smelt.transcript.blocks()
-  for i = #blocks, 1, -1 do
-    local b = blocks[i]
-    if b.role == "user" and b.first_line ~= "" and b.first_row <= scroll.top then
-      if b.first_row == scroll.top then return nil end
-      return b
-    end
-  end
-  return nil
+  local b = smelt.transcript.block_before_or_at_row(scroll.top, { role = "user" })
+  if not b or b.first_line == "" then return nil end
+  if b.first_row == scroll.top then return nil end
+  return b
 end
 
 local function open_top(width)
@@ -145,14 +140,8 @@ local function open_top(width)
     scrollbar = false,
   })
   win:on("press", function()
-    if state.top_target_idx and state.transcript_win then
-      local blocks = smelt.transcript.blocks()
-      for _, b in ipairs(blocks) do
-        if b.idx == state.top_target_idx then
-          state.transcript_win:reveal(b.first_row, { top_padding = 1, cursor = true })
-          return
-        end
-      end
+    if state.top_target_row and state.transcript_win then
+      state.transcript_win:reveal(state.top_target_row, { top_padding = 1, cursor = true })
     end
   end)
   state.top_buf = buf
@@ -202,7 +191,7 @@ local function refresh_top(scroll)
 
   if state.top_overlay and state.top_width ~= width then close_top() end
   if not state.top_overlay then open_top(width) end
-  state.top_target_idx = target.idx
+  state.top_target_row = target.first_row
   paint_top_row(width, target.first_line)
 end
 

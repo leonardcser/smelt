@@ -444,9 +444,6 @@ impl RenderPlan {
         base_key: LayoutKey,
         view_state: ViewState,
     ) -> Option<NodeLayoutKey> {
-        if history.generation() != self.history_generation {
-            return None;
-        }
         match self.nodes.get(index)? {
             RenderNode::Block { id, .. } => Some(LayoutKey {
                 width: base_key.width,

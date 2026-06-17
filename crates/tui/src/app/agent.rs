@@ -58,6 +58,7 @@ impl TuiApp {
     }
 
     fn prepare_user_visible_turn(&mut self) {
+        self.ensure_deferred_session_loaded();
         self.clear_prompt_prediction();
         self.sleep_inhibit.acquire();
         self.begin_turn();

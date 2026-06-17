@@ -97,8 +97,16 @@ pub(crate) fn build_transcript_from_session(
     transcript
 }
 
-fn load_transcript_from_sqlite(session: &session::Session) -> Option<Transcript> {
-    let db_path = session::dir_for(session).join("session.db");
+pub(crate) fn load_transcript_from_sqlite(session: &session::Session) -> Option<Transcript> {
+    load_transcript_from_sqlite_dir(session::dir_for(session))
+}
+
+pub(crate) fn load_transcript_from_sqlite_id(id: &str) -> Option<Transcript> {
+    load_transcript_from_sqlite_dir(session::dir_for_id(id))
+}
+
+fn load_transcript_from_sqlite_dir(session_dir: std::path::PathBuf) -> Option<Transcript> {
+    let db_path = session_dir.join("session.db");
     let db = smelt_store::SessionDb::open_read_only(db_path).ok()?;
     let rows = db.read_transcript_descriptor_records().ok()?;
     if rows.is_empty() {
@@ -565,6 +573,7 @@ impl TuiApp {
     }
 
     pub(crate) fn fork_session(&mut self) {
+        self.ensure_deferred_session_loaded();
         if self.core.session.history.is_empty() {
             self.notify_error("nothing to fork".into());
             return;
@@ -599,6 +608,7 @@ impl TuiApp {
 
     pub(crate) fn reset_session(&mut self) {
         let _perf = smelt_perf::perf::begin("app:reset_session");
+        self.deferred_session_load = None;
         // Reset is a hard session boundary: cancel in-flight engine work and all
         // Lua tasks before clearing state so stale events and child processes
         // don't restore old data into the new session.
@@ -647,6 +657,7 @@ impl TuiApp {
     }
 
     pub fn load_session(&mut self, loaded: session::Session) {
+        self.deferred_session_load = None;
         // Cancel any in-flight turn and Lua tasks before swapping sessions.
         if self.agent.is_some() {
             self.cancel_agent();
@@ -709,6 +720,76 @@ impl TuiApp {
         while self.core.engine.try_recv().is_ok() {}
     }
 
+    pub(crate) fn load_session_display_only(
+        &mut self,
+        loaded: session::Session,
+        transcript: Transcript,
+        full_session_id: String,
+    ) {
+        if self.agent.is_some() {
+            self.cancel_agent();
+            self.agent = None;
+        }
+        self.lua.cancel_tasks();
+        let old_id = self.core.session.id.clone();
+        self.flush_persist();
+
+        if let Some(mode) = loaded.mode.as_deref().and_then(AgentMode::parse) {
+            self.set_mode(mode, false);
+        }
+        if !self.core.config.cli_model_override
+            && !self.core.config.cli_api_base_override
+            && !self.core.config.cli_api_key_env_override
+        {
+            if let Some(ref model_key) = loaded.model {
+                let resolved_key = smelt_core::config::resolve_model_ref(
+                    &self.core.config.available_models,
+                    model_key,
+                )
+                .ok()
+                .map(|resolved| resolved.key.clone());
+                if let Some(key) = resolved_key {
+                    self.apply_model(&key, false);
+                }
+            }
+        }
+
+        self.core.session = loaded;
+        self.deferred_session_load = Some(full_session_id);
+        self.persisted_fingerprint = None;
+        self.session_dirty = false;
+        self.dirty_history_from = None;
+        self.bump_epoch("session_epoch");
+        self.reset_session_permissions();
+        self.queued_inputs.clear();
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        self.input.clear(&mut pctx);
+        self.input.store.lock().unwrap().clear();
+        self.stop_background_processes();
+        self.clear_transcript();
+        self.transcript.replace_transcript(transcript);
+        self.core
+            .cells
+            .set_dyn("session_ended", std::rc::Rc::new(old_id));
+        self.core.cells.set_dyn(
+            "session_started",
+            std::rc::Rc::new(self.core.session.id.clone()),
+        );
+        self.publish_history_delta("loaded");
+        while self.core.engine.try_recv().is_ok() {}
+    }
+
+    pub(crate) fn ensure_deferred_session_loaded(&mut self) {
+        let Some(id) = self.deferred_session_load.take() else {
+            return;
+        };
+        if let Some(loaded) = session::load(&id) {
+            self.core.session = loaded;
+            self.prune_rewindable_session_state(self.core.session.history.len());
+            self.sync_session_snapshot();
+        }
+    }
+
     // ── History / session ────────────────────────────────────────────────
 
     pub(crate) fn restore_screen(&mut self) {
@@ -739,6 +820,10 @@ impl TuiApp {
 
     pub(crate) fn save_session(&mut self) {
         let _perf = smelt_perf::perf::begin("session:save");
+        if self.deferred_session_load.is_some() {
+            self.session_save_pending = false;
+            return;
+        }
         if self.core.session.history.is_empty() {
             self.session_save_pending = false;
             return;
@@ -881,6 +966,7 @@ impl TuiApp {
         &mut self,
         block_idx: usize,
     ) -> Option<(String, Vec<(String, String)>)> {
+        self.ensure_deferred_session_loaded();
         let turns = self.user_turns();
         let turn_text = turns
             .iter()

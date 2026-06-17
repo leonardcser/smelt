@@ -3,7 +3,7 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 
-  error  /upgrade: cargo install exit…
+  error  /upgrade: cargo install exi…
 ────────────────────────────────────────
 
 ────────────────────────────────────────

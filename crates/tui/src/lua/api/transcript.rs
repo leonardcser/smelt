@@ -340,6 +340,24 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
+        "block_before_or_at_row",
+        "Return the nearest transcript block at or before absolute display row `row`, optionally filtered by `opts.role`. Uses the row index and does not materialize the full block layout.",
+        &["row", "opts"],
+        |lua, (row, opts): (crate::smelt_edit::RowIndex, Option<mlua::Table>)| -> LuaResult<Option<mlua::Table>> {
+            let role = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("role").ok().flatten());
+            let snap = crate::lua::try_with_app(|app| {
+                app.transcript_block_before_or_at_row(row, role.as_deref())
+            })
+            .flatten();
+            snap.map(|(idx, role, first_row, rows, first_line)| {
+                block_snapshot_table(lua, idx, role, first_row, rows, first_line)
+            })
+            .transpose()
+        },
+    )?;
+    m.fn_(
         "node_at_row",
         r#"Return render-node metadata for absolute display row `row`, including `{ kind, id, node_id, block_id?, group_id?, index, first_row, rows, row_offset, view_state, explicit_fold_target }`, or nil when outside the transcript. `id`/`node_id` is a stable typed table `{ kind = "block"|"group", id = number }` accepted by `fold_node`."#,
         &["row"],

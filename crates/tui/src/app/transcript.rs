@@ -156,6 +156,22 @@ impl TranscriptView {
             .node_metadata_at_row(lua, &mut self.transcript.history, width, row)
     }
 
+    pub(crate) fn block_node_before_or_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: crate::smelt_edit::RowIndex,
+        matches: impl FnMut(&BlockHistory, BlockId) -> bool,
+    ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+        self.projection.block_node_before_or_at_row(
+            lua,
+            &mut self.transcript.history,
+            width,
+            row,
+            matches,
+        )
+    }
+
     pub(crate) fn fold_node_at_row(
         &mut self,
         lua: &LuaRuntime,
@@ -422,6 +438,17 @@ fn transcript_block_first_line(block: &Block) -> String {
         .raw_text()
         .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
         .unwrap_or_default()
+}
+
+fn transcript_raw_first_line(history: &BlockHistory, id: BlockId) -> String {
+    history
+        .raw_text(id)
+        .and_then(|t| t.lines().find(|l| !l.trim().is_empty()).map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn transcript_history_role(history: &BlockHistory, id: BlockId) -> &'static str {
+    history.block_kind(id).unwrap_or_default()
 }
 
 impl TuiApp {
@@ -711,6 +738,31 @@ impl TuiApp {
                 let end = first_row.saturating_add(*rows);
                 row >= *first_row && row < end
             })
+    }
+
+    pub(crate) fn transcript_block_before_or_at_row(
+        &mut self,
+        row: crate::smelt_edit::RowIndex,
+        role: Option<&str>,
+    ) -> Option<TranscriptBlockSnapshot> {
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        let node =
+            self.transcript
+                .block_node_before_or_at_row(&self.lua, width, row, |history, id| {
+                    role.is_none_or(|role| transcript_history_role(history, id) == role)
+                        && !transcript_raw_first_line(history, id).is_empty()
+                })?;
+        let block_id = node.id.as_block_id()?;
+        let history = self.transcript.history();
+        let idx = history.order.iter().position(|id| *id == block_id)?;
+        Some((
+            idx,
+            transcript_history_role(history, block_id),
+            node.first_row,
+            node.rows,
+            transcript_raw_first_line(history, block_id),
+        ))
     }
 
     pub(crate) fn finish_transcript_turn(&mut self) {

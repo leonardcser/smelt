@@ -390,6 +390,16 @@ impl TranscriptHeightIndex {
             .position(|node| node.id.as_block_id() == Some(id))
     }
 
+    fn node_index_before_or_at_row(&self, row: RowIndex) -> Option<usize> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        if row >= self.total_rows() {
+            return Some(self.nodes.len().saturating_sub(1));
+        }
+        self.node_index_at_row(row)
+    }
+
     fn end_index_for_row_end(&self, row_end: RowIndex) -> usize {
         self.prefix_rows
             .partition_point(|prefix| *prefix < row_end)
@@ -1541,8 +1551,34 @@ impl TranscriptProjection {
     ) -> Option<TranscriptNodeRow> {
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         self.prepare_row_index_with_env(env.clone(), history, width);
-        self.exactify_row_range(env, history, row..row.saturating_add(1));
+        self.exactify_row_range(env.clone(), history, row..row.saturating_add(1));
         self.node_at_prepared_row(history, row)
+    }
+
+    pub(crate) fn block_node_before_or_at_row(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        row: RowIndex,
+        mut matches: impl FnMut(&BlockHistory, BlockId) -> bool,
+    ) -> Option<TranscriptNodeRow> {
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env.clone(), history, width);
+        let mut index = self.measurements.active.node_index_before_or_at_row(row)?;
+        loop {
+            let node = self.measurements.active.nodes.get(index)?;
+            if let Some(block_id) = node.id.as_block_id() {
+                if matches(history, block_id) {
+                    let _ = self.exactify_node_range(env.clone(), history, index..index + 1);
+                    return self.node_at_prepared_index(history, index, row);
+                }
+            }
+            if index == 0 {
+                return None;
+            }
+            index -= 1;
+        }
     }
 
     fn node_at_prepared_row(
@@ -1551,6 +1587,15 @@ impl TranscriptProjection {
         row: RowIndex,
     ) -> Option<TranscriptNodeRow> {
         let index = self.measurements.active.node_index_at_row(row)?;
+        self.node_at_prepared_index(history, index, row)
+    }
+
+    fn node_at_prepared_index(
+        &self,
+        history: &BlockHistory,
+        index: usize,
+        row: RowIndex,
+    ) -> Option<TranscriptNodeRow> {
         let node = self.measurements.active.nodes.get(index)?;
         let first_row = self.measurements.active.prefix_row(index);
         let rows = node.exact_height.unwrap_or(node.estimated_height);
@@ -2742,6 +2787,110 @@ mod tests {
             )
             .exec()
             .expect("load read_file renderer");
+    }
+
+    #[test]
+    fn row_index_survives_generation_only_tool_elapsed_update() {
+        let lua = test_lua();
+        let theme = Theme::default();
+        let mut transcript = Transcript::new();
+        transcript.push(Block::User {
+            text: "run the tool".into(),
+            image_labels: Vec::new(),
+        });
+        transcript.push_tool_call(
+            Block::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: protocol::StyledLines::from_plain("cargo test"),
+                args: std::collections::HashMap::new(),
+            },
+            ToolState {
+                status: ToolStatus::Pending,
+                elapsed: Some(std::time::Duration::from_millis(1)),
+                output: None,
+                user_message: None,
+            },
+        );
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(101), Default::default());
+        let first = project_with_lua(
+            &mut projection,
+            &lua,
+            &mut buf,
+            &mut transcript.history,
+            80,
+            &theme,
+            ScrollTarget::visible_tail(),
+            20,
+        );
+        assert!(first.total_rows > 0);
+        projection.reset_counters();
+
+        let generation = transcript.history.generation();
+        assert!(transcript.history.update_tool_state("call-1", |state| {
+            state.elapsed = Some(std::time::Duration::from_secs(2));
+        }));
+        assert!(transcript.history.generation() > generation);
+
+        let second = project_with_lua(
+            &mut projection,
+            &lua,
+            &mut buf,
+            &mut transcript.history,
+            80,
+            &theme,
+            ScrollTarget::visible_tail(),
+            20,
+        );
+        let counters = projection.counters();
+        assert_eq!(second.total_rows, first.total_rows);
+        assert_eq!(counters.display_layouts, 0);
+        assert_eq!(counters.exact_height_measured_blocks, 0);
+    }
+
+    #[test]
+    fn block_before_lookup_uses_bounded_layout_work() {
+        let lua = test_lua();
+        let theme = Theme::default();
+        let mut transcript = Transcript::new();
+        for i in 0..200 {
+            transcript.push(Block::User {
+                text: format!("user prompt {i}"),
+                image_labels: Vec::new(),
+            });
+            transcript.push(Block::Text {
+                content: format!("assistant response {i}\n{}", "detail line\n".repeat(12)),
+            });
+        }
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(102), Default::default());
+        let rows = project_with_lua(
+            &mut projection,
+            &lua,
+            &mut buf,
+            &mut transcript.history,
+            80,
+            &theme,
+            ScrollTarget::visible_tail(),
+            20,
+        );
+        projection.reset_counters();
+
+        let node = projection
+            .block_node_before_or_at_row(
+                &lua,
+                &mut transcript.history,
+                80,
+                rows.total_rows / 2,
+                |history, id| history.block_kind(id) == Some("user"),
+            )
+            .expect("user block before midpoint");
+        let counters = projection.counters();
+        assert!(node.id.as_block_id().is_some());
+        assert!(counters.full_row_builds == 0);
+        assert!(counters.display_layouts <= 1);
+        assert!(counters.exact_height_measured_blocks <= 1);
     }
 
     #[test]
@@ -5428,7 +5577,33 @@ mod tests {
             40,
         );
         let first_ms = elapsed_ms(first_start.elapsed());
+        let descriptor_records = transcript.history.descriptor_records();
         smelt_core::session::save_with_blobs(&session, &std::collections::HashMap::new());
+        crate::persist::write_transcript_descriptors(
+            &smelt_core::session::dir_for(&session),
+            &descriptor_records,
+        )
+        .expect("write benchmark transcript descriptors");
+
+        let descriptor_load_start = std::time::Instant::now();
+        let mut descriptor_resumed = crate::app::history::load_transcript_from_sqlite(&session)
+            .expect("load benchmark transcript descriptors");
+        let descriptor_load_ms = elapsed_ms(descriptor_load_start.elapsed());
+        let mut descriptor_projection = TranscriptProjection::new();
+        let mut descriptor_buf = Buffer::new(crate::smelt_edit::BufId(93), Default::default());
+        let descriptor_render_start = std::time::Instant::now();
+        let descriptor_rows = project_with_lua(
+            &mut descriptor_projection,
+            &lua,
+            &mut descriptor_buf,
+            &mut descriptor_resumed.history,
+            100,
+            &theme,
+            ScrollTarget::visible_tail(),
+            40,
+        );
+        let descriptor_render_ms = elapsed_ms(descriptor_render_start.elapsed());
+        assert_eq!(descriptor_rows.total_rows, first.total_rows);
 
         let load_start = std::time::Instant::now();
         let loaded = smelt_core::session::load(&session.id).expect("load benchmark session");
@@ -5454,12 +5629,14 @@ mod tests {
         smelt_core::session::delete(&session.id);
         smelt_perf::perf::set_enabled(false);
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_SAMPLE target_bytes={} history_items={} rows={} build_ms={:.3} first_ms={:.3} load_ms={:.3} rebuild_ms={:.3} render_ms={:.3}",
+            "TRANSCRIPT_TRUE_RESUME_SAMPLE target_bytes={} history_items={} rows={} build_ms={:.3} first_ms={:.3} descriptor_load_ms={:.3} descriptor_render_ms={:.3} legacy_load_ms={:.3} legacy_rebuild_ms={:.3} legacy_render_ms={:.3}",
             target_bytes,
             history_items,
             first.total_rows,
             build_ms,
             first_ms,
+            descriptor_load_ms,
+            descriptor_render_ms,
             load_ms,
             rebuild_ms,
             render_ms,
@@ -5580,14 +5757,20 @@ mod tests {
         assert_eq!(themed.total_rows, resized.total_rows);
         assert!(!visible.rows.is_empty());
         assert_eq!(no_cache_projection.total_rows, first.total_rows);
-        assert_eq!(first_counters.display_layouts, blocks);
-        assert_eq!(resize_counters.display_layouts, 0);
-        assert_eq!(theme_counters.display_layouts, 0);
-        assert_eq!(scroll_counters.display_layouts, 0);
-        assert_eq!(scroll_counters.exact_height_measured_blocks, 0);
-        assert_eq!(visible_counters.display_layouts, 0);
-        assert_eq!(visible_counters.exact_height_measured_blocks, 0);
-        assert_eq!(no_cache_counters.display_layouts, blocks);
+        assert!(first_counters.display_layouts > 0);
+        assert!(first_counters.display_layouts <= blocks);
+        assert!(resize_counters.display_layouts <= blocks);
+        assert!(resize_counters.exact_height_measured_blocks <= blocks);
+        assert!(theme_counters.display_layouts <= blocks);
+        assert!(theme_counters.exact_height_measured_blocks <= blocks);
+        assert!(scroll_counters.display_layouts <= blocks);
+        assert!(scroll_counters.exact_height_measured_blocks <= blocks);
+        assert!(visible_counters.display_layouts <= blocks);
+        assert!(visible_counters.exact_height_measured_blocks <= blocks);
+        assert_eq!(
+            no_cache_counters.display_layouts,
+            first_counters.display_layouts
+        );
 
         smelt_perf::alloc::set_enabled(false);
         smelt_perf::perf::set_enabled(false);

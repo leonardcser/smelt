@@ -182,7 +182,7 @@ fn write_blobs(
     Ok(url_to_blob)
 }
 
-fn write_transcript_descriptors(
+pub(crate) fn write_transcript_descriptors(
     session_dir: &std::path::Path,
     records: &[TranscriptBlockRecord],
 ) -> Result<(), smelt_store::StoreError> {
