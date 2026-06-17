@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -36,7 +36,7 @@ pub(crate) fn user_version(conn: &Connection) -> Result<i32> {
 }
 
 fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
-    let current = user_version(conn)?;
+    let mut current = user_version(conn)?;
     if current > SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchema {
             found: current,
@@ -46,6 +46,11 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     if current < 1 {
         conn.execute_batch(MIGRATION_1)?;
         set_user_version(conn, 1)?;
+        current = 1;
+    }
+    if current < 2 {
+        conn.execute_batch(MIGRATION_2)?;
+        set_user_version(conn, 2)?;
     }
     conn.execute(
         "INSERT INTO store_meta (key, value, updated_at)
@@ -203,4 +208,8 @@ CREATE TABLE IF NOT EXISTS transcript_search (
     text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS transcript_search_history_idx ON transcript_search(history_idx, block_idx);
+"#;
+
+const MIGRATION_2: &str = r#"
+ALTER TABLE request_attempts ADD COLUMN raw_json_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT;
 "#;

@@ -1,6 +1,7 @@
 mod compression;
 mod db;
 mod error;
+mod legacy;
 mod meta;
 mod object;
 mod schema;
@@ -11,6 +12,7 @@ pub use compression::{
 };
 pub use db::{OpenMode, OpenOptions, SessionDb};
 pub use error::{Result, StoreError};
+pub use legacy::{LegacyImportReport, RequestAttemptSummary};
 pub use meta::{SessionMeta, SessionState, WriterLease};
 pub use object::{ObjectCodec, ObjectMeta, StoredObject};
 pub use schema::SCHEMA_VERSION;

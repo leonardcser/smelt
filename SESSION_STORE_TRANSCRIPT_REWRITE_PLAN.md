@@ -713,6 +713,8 @@ Acceptance:
 
 ### Phase C: Legacy import/export
 
+Status: complete at the storage boundary. `smelt-store` imports current split `meta.json + history.jsonl`, legacy monolithic `session.json` with `history`, legacy monolithic `session.json` with `messages`, and current `requests.jsonl`. Import normalizes large inline `metadata` JSON values into content-addressed `objects`, stores refs in normalized history rows, generates `transcript_blocks` and `transcript_search`, stores exact request log entries plus body/response/error objects, and can export history/request JSONL with metadata rehydrated. Unit tests cover split import/export, monolithic import, legacy messages fallback, request metadata listing, exact request JSONL export, and lazy object payload retrieval. Provider-message equivalence is preserved by history JSON rehydration here; the provider-builder cutover to DB cursors remains Phase E.
+
 Deliverables:
 
 - Import legacy `session.json`.

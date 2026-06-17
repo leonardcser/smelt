@@ -1,10 +1,12 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
+use crate::legacy::{self, LegacyImportReport, RequestAttemptSummary};
 use crate::meta::{self, SessionMeta, SessionState, WriterLease};
 use crate::object::{self, ObjectMeta, StoredObject};
 use crate::schema;
@@ -189,6 +191,25 @@ impl SessionDb {
         };
         object::object_bytes(&self.conn, &meta).map(Some)
     }
+
+    pub fn import_legacy_session_dir(
+        &self,
+        session_dir: impl AsRef<Path>,
+    ) -> Result<LegacyImportReport> {
+        legacy::import_session_dir(&self.conn, session_dir.as_ref(), self.object_compression)
+    }
+
+    pub fn export_history_jsonl(&self, out: impl Write) -> Result<()> {
+        legacy::export_history_jsonl(&self.conn, out)
+    }
+
+    pub fn export_requests_jsonl(&self, out: impl Write) -> Result<()> {
+        legacy::export_requests_jsonl(&self.conn, out)
+    }
+
+    pub fn request_attempts(&self) -> Result<Vec<RequestAttemptSummary>> {
+        legacy::request_attempts(&self.conn)
+    }
 }
 
 fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
@@ -345,6 +366,177 @@ mod tests {
         assert_eq!(report.samples.len(), 2);
         assert!(report.supports_policy(DEFAULT_ZSTD_MIN_SAVINGS_PERCENT));
         assert!(report.compression_ratio_percent() < 50);
+    }
+
+    #[test]
+    fn imports_split_session_and_exports_history_and_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy-session");
+        fs::create_dir(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("meta.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "id": "s1",
+                "title": "import me",
+                "slug": "import-me",
+                "created_at_ms": 10,
+                "updated_at_ms": 20,
+                "mode": "ask",
+                "model": "model-a",
+                "cwd": "/tmp/project",
+                "session_usage": {"prompt_tokens": 1},
+                "checkpoint": {"kind": "summary"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let metadata = serde_json::json!({
+            "before": "a".repeat(5000),
+            "after": "b".repeat(5000),
+        });
+        let history_item = serde_json::json!({
+            "kind": "assistant",
+            "invocations": [{
+                "call_id": "call-1",
+                "name": "edit_file",
+                "arguments": "{}",
+                "result": {
+                    "content": "edited",
+                    "is_error": false,
+                    "metadata": metadata
+                }
+            }]
+        });
+        fs::write(
+            legacy_dir.join("history.jsonl"),
+            format!("{}\n", serde_json::to_string(&history_item).unwrap()),
+        )
+        .unwrap();
+
+        let request = serde_json::json!({
+            "request_id": 7,
+            "kind": "turn",
+            "turn_id": 7,
+            "history_len": 1,
+            "timestamp_ms": 30,
+            "provider_kind": "openai",
+            "model": "model-a",
+            "url": "https://example.test/v1/chat/completions",
+            "body": {"model": "model-a", "messages": [{"role": "user", "content": "hi"}]},
+            "response": {"content": "hello", "raw": {"id": "resp"}},
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "elapsed_ms": 40,
+            "attempt": 1,
+            "background": false
+        });
+        fs::write(
+            legacy_dir.join("requests.jsonl"),
+            format!("{}\n", serde_json::to_string(&request).unwrap()),
+        )
+        .unwrap();
+
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let report = db.import_legacy_session_dir(&legacy_dir).unwrap();
+        assert_eq!(report.history_items, 1);
+        assert_eq!(report.transcript_blocks, 1);
+        assert_eq!(report.request_attempts, 1);
+        assert!(report.objects >= 3);
+
+        let state = db.session_state().unwrap().unwrap();
+        assert_eq!(state.id, "s1");
+        assert_eq!(state.history_len, 1);
+        assert_eq!(state.model.as_deref(), Some("model-a"));
+
+        let stored_json: String = db
+            .connection()
+            .query_row("SELECT json FROM history_items WHERE idx = 0", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(stored_json.contains("$smelt_object_ref"));
+        assert!(!stored_json.contains(&"a".repeat(5000)));
+
+        let block_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM transcript_blocks", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(block_count, 1);
+
+        let mut exported_history = Vec::new();
+        db.export_history_jsonl(&mut exported_history).unwrap();
+        let exported_history_value: serde_json::Value =
+            serde_json::from_slice(exported_history.strip_suffix(b"\n").unwrap()).unwrap();
+        assert_eq!(exported_history_value, history_item);
+
+        let attempts = db.request_attempts().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].request_id.as_deref(), Some("7"));
+        assert_eq!(attempts[0].provider.as_deref(), Some("openai"));
+        assert!(attempts[0].raw_body_size > 0);
+
+        let mut exported_requests = Vec::new();
+        db.export_requests_jsonl(&mut exported_requests).unwrap();
+        let exported_request_value: serde_json::Value =
+            serde_json::from_slice(exported_requests.strip_suffix(b"\n").unwrap()).unwrap();
+        assert_eq!(exported_request_value, request);
+    }
+
+    #[test]
+    fn imports_monolithic_session_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy-session");
+        fs::create_dir(&legacy_dir).unwrap();
+        let first =
+            serde_json::json!({"kind": "user", "content": {"kind": "text", "text": "hello"}});
+        let second =
+            serde_json::json!({"kind": "assistant", "content": {"kind": "text", "text": "hi"}});
+        fs::write(
+            legacy_dir.join("session.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "id": "old1",
+                "title": "old",
+                "created_at_ms": 100,
+                "updated_at_ms": 200,
+                "history": [first, second]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let report = db.import_legacy_session_dir(&legacy_dir).unwrap();
+        assert_eq!(report.history_items, 2);
+        assert_eq!(db.session_state().unwrap().unwrap().id, "old1");
+
+        let mut exported = Vec::new();
+        db.export_history_jsonl(&mut exported).unwrap();
+        assert_eq!(exported.iter().filter(|byte| **byte == b'\n').count(), 2);
+    }
+
+    #[test]
+    fn imports_legacy_message_session_json_without_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy-session");
+        fs::create_dir(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("session.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "messages1",
+                "messages": [{"role": "user", "content": "hello"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let report = db.import_legacy_session_dir(&legacy_dir).unwrap();
+        assert_eq!(report.history_items, 1);
+        assert_eq!(db.session_state().unwrap().unwrap().id, "messages1");
     }
 
     #[test]
