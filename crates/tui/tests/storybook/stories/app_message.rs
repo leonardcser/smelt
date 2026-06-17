@@ -50,6 +50,42 @@ app_story!(text_block_code_fence_no_language, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(thinking_block_renders_full_markdown_when_expanded, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.engine(EngineEvent::Thinking {
+        content: "Plan:\n\n```rust\nfn main() {}\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |".into(),
+    });
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+
+    let frame = ctx.frame_text();
+    assert!(frame.contains("fn main()"), "frame: {frame}");
+    assert!(frame.contains("A") && frame.contains("B"), "frame: {frame}");
+    assert!(frame.contains("1") && frame.contains("2"), "frame: {frame}");
+    assert!(!frame.contains("```"), "frame: {frame}");
+    assert!(!frame.contains("---"), "frame: {frame}");
+});
+
+app_story!(thinking_streams_table_in_tiny_deltas, |ctx| {
+    ctx.set_viewport(70, 18);
+    for ch in "| A | B |\n|---|---|\n| 1 | 2 |\n".chars() {
+        ctx.engine(EngineEvent::ThinkingDelta {
+            delta: ch.to_string(),
+        });
+        ctx.run_lua("smelt.transcript.fold_all('open')");
+        let frame = ctx.frame_text();
+        let rows: Vec<&str> = frame.lines().collect();
+        assert!(
+            !rows.iter().any(|row| row.contains("---")),
+            "frame: {frame}"
+        );
+        assert!(!rows.iter().any(|row| row.trim() == "|"), "frame: {frame}");
+    }
+
+    let frame = ctx.frame_text();
+    assert!(frame.contains("A") && frame.contains("B"), "frame: {frame}");
+    assert!(frame.contains("1") && frame.contains("2"), "frame: {frame}");
+});
+
 // ── User messages ─────────────────────────────────────────────────
 
 app_story!(user_message_block_single_line, |ctx| {

@@ -203,13 +203,28 @@ local function ask_extract(content, prompt)
   return result.content
 end
 
+local function render_web_fetch_output(output, ctx)
+  ctx = ctx or {}
+  local limits = ctx.limits or {}
+  return smelt.layout.cap(
+    transcript_defaults.render_llm_markdown(output and output.content or "", {
+      dim = true,
+    }),
+    {
+      rows = limits.tool_output_rows or 20,
+      keep = "tail",
+      marker = "above",
+    }
+  )
+end
+
 transcript_defaults.__tool_body_renderers.web_fetch = function(block, ctx)
   local items = {}
   local args = block.args or {}
   if args.prompt and args.prompt ~= "" then
     items[#items + 1] = smelt.layout.text(args.prompt)
   end
-  items[#items + 1] = transcript_defaults.render_tool_output(block.output, ctx)
+  items[#items + 1] = render_web_fetch_output(block.output, ctx)
   return smelt.layout.vbox(items)
 end
 

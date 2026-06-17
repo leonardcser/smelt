@@ -517,8 +517,8 @@ app_story!(notebook_edit_tool_block_insert_cell, |ctx| {
 // ── web_fetch / web_search ────────────────────────────────────────
 
 app_story!(web_fetch_tool_block, |ctx| {
-    // `web_fetch.render` prints the prompt above the result text. The
-    // header summary is the URL + prompt via the tool's `summary` cb.
+    // `web_fetch.render` prints the prompt above the LLM-authored Markdown result.
+    // The header summary is the URL via the tool's `summary` cb.
     ctx.set_viewport(70, 12);
     ctx.tool_call(
         "web_fetch",
@@ -526,7 +526,7 @@ app_story!(web_fetch_tool_block, |ctx| {
             ("url", json!("https://example.com/release")),
             ("prompt", json!("Summarise the release notes")),
         ],
-        "0.6 ships streaming markdown and removes the legacy renderer.",
+        "## Release 0.6\n\n- Ships `MarkdownStream`.\n- Renders tables:\n\n| Feature | Status |\n|---|---|\n| streaming | done |",
         Some(820),
     );
     ctx.assert_snapshot();

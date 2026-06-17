@@ -390,11 +390,17 @@ function smelt.transcript.defaults.render_user_text(block, ctx)
   return layout.runs(block.user_lines or block.text or "")
 end
 
+--- Render LLM-authored Markdown with the shared transcript Markdown path.
+---@type fun(content: string?, opts: table?): smelt.layout.Node
+function smelt.transcript.defaults.render_llm_markdown(content, opts)
+  return layout.markdown(content or "", opts or {})
+end
+
 --- Render assistant text.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_assistant(block, ctx)
   local _ = ctx
-  return layout.markdown(block.content or "")
+  return M.render_llm_markdown(block.content)
 end
 
 --- Render thinking for the current transcript view state.
@@ -413,20 +419,18 @@ end
 function smelt.transcript.defaults.render_thinking_full(block, ctx)
   local _ = ctx
   return layout.gutter(
-    layout.markdown(block.content or "", {
+    M.render_llm_markdown(block.content, {
       dim = true,
       italic = true,
-      inline = true,
     }),
     { text = "│ ", styled = true }
   )
 end
 
 local function thinking_content_layout(content)
-  return layout.markdown(content or "", {
+  return M.render_llm_markdown(content, {
     dim = true,
     italic = true,
-    inline = true,
   })
 end
 

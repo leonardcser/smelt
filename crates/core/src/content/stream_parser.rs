@@ -3,14 +3,14 @@
 
 use super::markdown_stream::MarkdownStream;
 use crate::transcript_model::{
-    ActiveThinking, ActiveTool, Block, BlockHistory, BlockId, Status, ToolOutput, ToolOutputRef,
-    ToolState, ToolStatus,
+    ActiveTool, Block, BlockHistory, BlockId, Status, ToolOutput, ToolOutputRef, ToolState,
+    ToolStatus,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 pub struct StreamParser {
-    active_thinking: Option<ActiveThinking>,
+    active_thinking: MarkdownStream,
     active_text: MarkdownStream,
     stream_exec_id: Option<BlockId>,
     active_tools: Vec<ActiveTool>,
@@ -25,7 +25,7 @@ impl Default for StreamParser {
 impl StreamParser {
     pub fn new() -> Self {
         Self {
-            active_thinking: None,
+            active_thinking: MarkdownStream::thinking(),
             active_text: MarkdownStream::new(),
             stream_exec_id: None,
             active_tools: Vec::new(),
@@ -72,7 +72,7 @@ impl StreamParser {
     }
 
     pub fn clear(&mut self) {
-        self.active_thinking = None;
+        self.active_thinking.clear();
         self.active_text.clear();
         self.active_tools.clear();
         self.stream_exec_id = None;
@@ -87,15 +87,11 @@ impl StreamParser {
     }
 
     pub fn has_active_thinking(&self) -> bool {
-        self.active_thinking.is_some()
+        self.active_thinking.is_active()
     }
 
     pub fn has_active_text(&self) -> bool {
         self.active_text.is_active()
-    }
-
-    pub fn active_thinking(&self) -> Option<&ActiveThinking> {
-        self.active_thinking.as_ref()
     }
 
     pub fn clear_tools(&mut self) {
@@ -105,75 +101,20 @@ impl StreamParser {
     // ── Streaming thinking ──────────────────────────────────────────
 
     pub fn append_streaming_thinking(&mut self, history: &mut BlockHistory, delta: &str) {
-        let at = self.active_thinking.get_or_insert_with(|| ActiveThinking {
-            current_line: String::new(),
-            paragraph: String::new(),
-            streaming_id: None,
-        });
-
-        for ch in delta.chars() {
-            if ch == '\r' {
-                continue;
-            }
-            if ch == '\n' {
-                let line = std::mem::take(&mut at.current_line);
-                if !at.paragraph.is_empty() {
-                    at.paragraph.push('\n');
-                }
-                at.paragraph.push_str(&line);
-            } else {
-                at.current_line.push(ch);
-            }
+        if self.active_text.is_active() {
+            self.active_text.flush(history);
         }
-        let preview = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
-            (true, true) => None,
-            (true, false) => Some(at.current_line.clone()),
-            (false, true) => Some(at.paragraph.clone()),
-            (false, false) => Some(format!("{}\n{}", at.paragraph, at.current_line)),
-        };
-        if let Some(content) = preview.filter(|t| !t.trim().is_empty()) {
-            let block = Block::Thinking { content };
-            if let Some(id) = at.streaming_id {
-                history.rewrite(id, block);
-            } else {
-                let id = history.push(block);
-                history.set_status(id, Status::Streaming);
-                at.streaming_id = Some(id);
-            }
-        }
+        self.active_thinking.append(history, delta);
     }
 
     pub fn flush_streaming_thinking(&mut self, history: &mut BlockHistory) {
-        if let Some(mut at) = self.active_thinking.take() {
-            if !at.current_line.is_empty() {
-                if !at.paragraph.is_empty() {
-                    at.paragraph.push('\n');
-                }
-                at.paragraph.push_str(&at.current_line);
-            }
-            let trimmed = at.paragraph.trim().to_string();
-            if let Some(id) = at.streaming_id {
-                if trimmed.is_empty() {
-                    history.rewrite(
-                        id,
-                        Block::Thinking {
-                            content: String::new(),
-                        },
-                    );
-                } else {
-                    history.rewrite(id, Block::Thinking { content: trimmed });
-                }
-                history.set_status(id, Status::Done);
-            } else if !trimmed.is_empty() {
-                history.push(Block::Thinking { content: trimmed });
-            }
-        }
+        self.active_thinking.flush(history);
     }
 
     // ── Streaming text ──────────────────────────────────────────────
 
     pub fn append_streaming_text(&mut self, history: &mut BlockHistory, delta: &str) {
-        if self.active_thinking.is_some() {
+        if self.active_thinking.is_active() {
             self.flush_streaming_thinking(history);
         }
         self.active_text.append(history, delta);
@@ -518,6 +459,43 @@ mod tests {
             history.block_at(1),
             &Block::Text {
                 content: "text".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn streaming_thinking_opening_fence_is_not_shown_as_text() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_thinking(&mut history, "``");
+        assert_eq!(history.len(), 0);
+        parser.append_streaming_thinking(&mut history, "`rust\nfn main() {}");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history.block_at(0),
+            &Block::Thinking {
+                content: "```rust\nfn main() {}".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn streaming_thinking_table_rows_are_not_shown_until_line_commit() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_thinking(&mut history, "| a | b |");
+        assert_eq!(history.len(), 0);
+
+        for chunk in ["\n|", "---", "|", "---", "|", "\n|"] {
+            parser.append_streaming_thinking(&mut history, chunk);
+            assert_eq!(history.len(), 0);
+        }
+
+        parser.append_streaming_thinking(&mut history, " 1 | 2 |");
+        assert_eq!(history.len(), 0);
+        parser.append_streaming_thinking(&mut history, "\n");
+        assert_eq!(
+            history.block_at(0),
+            &Block::Thinking {
+                content: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
             }
         );
     }

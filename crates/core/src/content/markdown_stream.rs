@@ -38,8 +38,23 @@ enum Candidate {
     Complete,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkdownStreamKind {
+    Text,
+    Thinking,
+}
+
+impl MarkdownStreamKind {
+    fn block(self, content: String) -> Block {
+        match self {
+            Self::Text => Block::Text { content },
+            Self::Thinking => Block::Thinking { content },
+        }
+    }
+}
+
 pub struct MarkdownStream {
+    kind: MarkdownStreamKind,
     current_line: String,
     current_line_id: Option<BlockId>,
     active: Option<ActiveMarkdownBlock>,
@@ -64,9 +79,32 @@ enum ActiveMarkdownBlock {
     },
 }
 
+impl Default for MarkdownStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MarkdownStream {
     pub fn new() -> Self {
-        Self::default()
+        Self::text()
+    }
+
+    pub fn text() -> Self {
+        Self::with_kind(MarkdownStreamKind::Text)
+    }
+
+    pub fn thinking() -> Self {
+        Self::with_kind(MarkdownStreamKind::Thinking)
+    }
+
+    fn with_kind(kind: MarkdownStreamKind) -> Self {
+        Self {
+            kind,
+            current_line: String::new(),
+            current_line_id: None,
+            active: None,
+        }
     }
 
     pub fn is_active(&self) -> bool {
@@ -101,18 +139,25 @@ impl MarkdownStream {
     }
 
     fn sync(&mut self, history: &mut BlockHistory) {
+        let kind = self.kind;
         match self.active.as_mut() {
             Some(ActiveMarkdownBlock::Paragraph { content, id }) => {
                 if opening_fence_candidate(&self.current_line) != Candidate::Not {
-                    Self::sync_text(history, id, content.clone());
+                    Self::sync_text(kind, history, id, content.clone());
                 } else {
-                    Self::sync_text(history, id, joined_preview(content, &self.current_line));
+                    Self::sync_text(
+                        kind,
+                        history,
+                        id,
+                        joined_preview(content, &self.current_line),
+                    );
                 }
             }
             Some(ActiveMarkdownBlock::TableCandidate { header }) => {
                 match table_delimiter_candidate(&self.current_line) {
                     Candidate::Not => {
                         Self::sync_text(
+                            kind,
                             history,
                             &mut self.current_line_id,
                             joined_preview(header, &self.current_line),
@@ -123,14 +168,19 @@ impl MarkdownStream {
             }
             Some(ActiveMarkdownBlock::Table { rows, id }) => {
                 if rows.len() >= 3 {
-                    Self::sync_text(history, id, rows.join("\n"));
+                    Self::sync_text(kind, history, id, rows.join("\n"));
                 }
             }
             Some(ActiveMarkdownBlock::Code { content, fence, id }) => {
                 if closing_fence_candidate(&self.current_line, fence) != Candidate::Not {
-                    Self::sync_text(history, id, content.clone());
+                    Self::sync_text(kind, history, id, content.clone());
                 } else {
-                    Self::sync_text(history, id, joined_preview(content, &self.current_line));
+                    Self::sync_text(
+                        kind,
+                        history,
+                        id,
+                        joined_preview(content, &self.current_line),
+                    );
                 }
             }
             None => {
@@ -141,6 +191,7 @@ impl MarkdownStream {
                     return;
                 }
                 Self::sync_text(
+                    kind,
                     history,
                     &mut self.current_line_id,
                     self.current_line.clone(),
@@ -237,22 +288,27 @@ impl MarkdownStream {
         match active {
             ActiveMarkdownBlock::Paragraph { content, id }
             | ActiveMarkdownBlock::Code { content, id, .. } => {
-                Self::finish_text(history, id, content);
+                Self::finish_text(self.kind, history, id, content);
             }
             ActiveMarkdownBlock::TableCandidate { header } => {
-                Self::finish_text(history, None, header);
+                Self::finish_text(self.kind, history, None, header);
             }
             ActiveMarkdownBlock::Table { rows, id } => {
-                Self::finish_text(history, id, rows.join("\n"));
+                Self::finish_text(self.kind, history, id, rows.join("\n"));
             }
         }
     }
 
-    fn sync_text(history: &mut BlockHistory, id: &mut Option<BlockId>, content: String) {
+    fn sync_text(
+        kind: MarkdownStreamKind,
+        history: &mut BlockHistory,
+        id: &mut Option<BlockId>,
+        content: String,
+    ) {
         if content.trim().is_empty() {
             return;
         }
-        let block = Block::Text { content };
+        let block = kind.block(content);
         if let Some(id) = *id {
             history.rewrite(id, block);
         } else {
@@ -262,13 +318,18 @@ impl MarkdownStream {
         }
     }
 
-    fn finish_text(history: &mut BlockHistory, id: Option<BlockId>, content: String) {
+    fn finish_text(
+        kind: MarkdownStreamKind,
+        history: &mut BlockHistory,
+        id: Option<BlockId>,
+        content: String,
+    ) {
         let trimmed = content.trim().to_string();
         if let Some(id) = id {
-            history.rewrite(id, Block::Text { content: trimmed });
+            history.rewrite(id, kind.block(trimmed));
             history.set_status(id, Status::Done);
         } else if !trimmed.is_empty() {
-            history.push(Block::Text { content: trimmed });
+            history.push(kind.block(trimmed));
         }
     }
 }

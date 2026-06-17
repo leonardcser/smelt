@@ -692,13 +692,6 @@ impl BlockHistory {
     }
 }
 
-/// Completed lines are committed immediately; only the current incomplete line lives here.
-pub struct ActiveThinking {
-    pub current_line: String,
-    pub paragraph: String,
-    pub streaming_id: Option<BlockId>,
-}
-
 /// Blank row gap before `below` given the preceding block. Most block
 /// transitions are separated by one blank row. Adjacent code lines and
 /// consecutive thinking blocks collapse, and markdown headings sit directly on

@@ -3,6 +3,9 @@ const LABEL_VALUE_LUA: &str = include_str!("../../../runtime/lua/smelt/label_val
 const SESSION_LUA: &str = include_str!("../../../runtime/lua/smelt/session.lua");
 const BANNER_LUA: &str = include_str!("../../../runtime/lua/smelt/banner.lua");
 const BANNER_PLUGIN_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/banner.lua");
+const WEB_FETCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_fetch.lua");
+const TRANSCRIPT_DEFAULTS_LUA: &str =
+    include_str!("../../../runtime/lua/smelt/transcript/defaults.lua");
 
 #[test]
 fn session_tree_orders_nested_forks_and_prefixes() {
@@ -47,6 +50,76 @@ fn session_tree_orders_nested_forks_and_prefixes() {
             "   └─ nested:5",
         ]
     );
+}
+
+#[test]
+fn web_fetch_renderer_uses_shared_llm_markdown() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        smelt = {
+          transcript = { defaults = {} },
+          layout = {
+            markdown = function(content, opts)
+              return { kind = "markdown", content = content, opts = opts or {} }
+            end,
+            text = function(content, opts)
+              return { kind = "text", content = content, opts = opts or {} }
+            end,
+            cap = function(child, opts)
+              return { kind = "cap", child = child, opts = opts or {} }
+            end,
+            vbox = function(items)
+              return { kind = "vbox", items = items }
+            end,
+            gutter = function(child, opts)
+              return { kind = "gutter", child = child, opts = opts or {} }
+            end,
+            runs = function(lines, opts)
+              return { kind = "runs", lines = lines, opts = opts or {} }
+            end,
+            hbox = function(items) return { kind = "hbox", items = items } end,
+            line = function(spans) return { kind = "line", spans = spans } end,
+            panel = function(child, opts) return { kind = "panel", child = child, opts = opts or {} } end,
+            elapsed = function(value, opts) return { kind = "elapsed", value = value, opts = opts or {} } end,
+            separator = function(opts) return { kind = "separator", opts = opts or {} } end,
+            code = function(content, opts) return { kind = "code", content = content, opts = opts or {} } end,
+          },
+          tools = {
+            _with_watchdog = function(tool) return tool end,
+            register = function(tool) smelt.__registered_tool = tool end,
+          },
+        }
+        package.loaded["smelt.transcript.defaults"] = smelt.transcript.defaults
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+    lua.load(TRANSCRIPT_DEFAULTS_LUA)
+        .exec()
+        .expect("load transcript defaults");
+    lua.load(WEB_FETCH_LUA).exec().expect("load web_fetch");
+
+    let (body_kind, output_kind, child_kind, dim, rows): (String, String, String, bool, i64) = lua
+        .load(
+            r###"
+            local renderer = assert(smelt.transcript.defaults.__tool_body_renderers.web_fetch)
+            local node = renderer({
+              args = { prompt = "Summarise" },
+              output = { content = "## Title\n\n| A | B |\n|---|---|\n| 1 | 2 |", is_error = false },
+            }, { limits = { tool_output_rows = 7 } })
+            local output = node.items[2]
+            return node.kind, output.kind, output.child.kind, output.child.opts.dim, output.opts.rows
+            "###,
+        )
+        .eval()
+        .expect("render web_fetch body");
+
+    assert_eq!(body_kind, "vbox");
+    assert_eq!(output_kind, "cap");
+    assert_eq!(child_kind, "markdown");
+    assert!(dim);
+    assert_eq!(rows, 7);
 }
 
 #[test]
