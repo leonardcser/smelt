@@ -1,5 +1,27 @@
 use super::*;
 
+fn user_blocks(app: &TestApp) -> Vec<(String, Vec<String>)> {
+    let history = app.app.transcript.history();
+    history
+        .order
+        .iter()
+        .filter_map(|id| history.blocks.get(id))
+        .filter_map(|block| match block {
+            smelt_core::transcript_model::Block::User { text, image_labels } => {
+                Some((text.clone(), image_labels.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn insert_image(app: &mut TestApp, label: &str, data_url: &str) {
+    let mut ctx = crate::input::prompt_ctx_mut(&mut app.app.ui);
+    app.app
+        .input
+        .insert_image(&mut ctx, label.to_string(), data_url.to_string());
+}
+
 #[test]
 fn vim_insert_double_esc_opens_rewind_dialog_when_idle() {
     let mut app = TestApp::builder().with_vim(true).build();
@@ -199,6 +221,115 @@ fn vim_esc_from_visual_returns_to_normal() {
 
     app.press(KeyCode::Esc);
     assert_eq!(app.state().vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn vim_visual_enter_submits_selection_only() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("alpha beta gamma");
+    app.press(KeyCode::Esc);
+    app.type_char('0');
+    app.type_char('w');
+    app.type_char('v');
+    app.type_char('e');
+
+    app.press(KeyCode::Enter);
+
+    let blocks = user_blocks(&app);
+    assert_eq!(blocks, vec![("beta".to_string(), vec![])]);
+    assert_eq!(app.state().prompt_text, "alpha  gamma");
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn vim_visual_line_enter_submits_selected_lines_only() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("one\ntwo\nthree");
+    app.press(KeyCode::Esc);
+    app.type_char('k');
+    app.type_char('0');
+    app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
+
+    app.press(KeyCode::Enter);
+
+    let blocks = user_blocks(&app);
+    assert_eq!(blocks, vec![("two".to_string(), vec![])]);
+    assert_eq!(app.state().prompt_text, "one\nthree");
+    assert_eq!(app.state().vim_mode, VimMode::Normal);
+}
+
+#[test]
+fn vim_visual_line_enter_carries_only_selected_attachments() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.type_text("keep ");
+    insert_image(&mut app, "keep.png", "data:image/png;base64,KEEP");
+    app.type_text("\nsend ");
+    insert_image(&mut app, "send.png", "data:image/png;base64,SEND");
+    app.press(KeyCode::Esc);
+    app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
+
+    app.press(KeyCode::Enter);
+
+    let blocks = user_blocks(&app);
+    assert_eq!(
+        blocks,
+        vec![(
+            "send [send.png]".to_string(),
+            vec!["[send.png]".to_string()]
+        )]
+    );
+    assert_eq!(
+        app.state().prompt_text,
+        format!("keep {}", crate::input::ATTACHMENT_MARKER)
+    );
+    assert_eq!(app.app.prompt_buf().attachment_ids.len(), 1);
+}
+
+#[test]
+fn vim_visual_ctrl_q_steers_selection_only() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.start_turn(1);
+    app.drain_engine_sends();
+    app.type_text("alpha beta gamma");
+    app.press(KeyCode::Esc);
+    app.type_char('0');
+    app.type_char('w');
+    app.type_char('v');
+    app.type_char('e');
+    app.clear_actions();
+
+    app.press_mod(KeyCode::Char('q'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.state().prompt_text, "alpha  gamma");
+    assert!(app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { text } if text == "beta")
+    )));
+}
+
+#[test]
+fn vim_visual_ctrl_q_with_image_leaves_prompt_unchanged() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.start_turn(1);
+    app.drain_engine_sends();
+    app.type_text("send ");
+    insert_image(&mut app, "send.png", "data:image/png;base64,SEND");
+    let prompt = app.state().prompt_text;
+    app.press(KeyCode::Esc);
+    app.press_mod(KeyCode::Char('V'), KeyModifiers::SHIFT);
+    app.clear_actions();
+
+    app.press_mod(KeyCode::Char('q'), KeyModifiers::CONTROL);
+
+    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.state().prompt_text, prompt);
+    assert_eq!(app.app.prompt_buf().attachment_ids.len(), 1);
+    assert_eq!(app.state().vim_mode, VimMode::VisualLine);
+    assert!(!app.actions().iter().any(|action| matches!(
+        action,
+        Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::Steer { .. })
+    )));
 }
 
 #[test]

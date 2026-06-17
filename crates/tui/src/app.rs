@@ -23,7 +23,7 @@ pub(crate) mod transcript_search;
 pub(crate) mod ui_host;
 pub(crate) mod well_known;
 
-use crate::input::PromptState;
+use crate::input::{PromptState, SubmitEdit};
 use engine::EngineHandle;
 use protocol::Content;
 use smelt_core::history::History;
@@ -364,6 +364,7 @@ pub(crate) enum EventOutcome {
     Submit {
         content: Content,
         display: String,
+        edit: SubmitEdit,
     },
     Exec(crate::commands::ExecHandle),
 }

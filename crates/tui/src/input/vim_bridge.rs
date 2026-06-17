@@ -52,16 +52,7 @@ impl PromptState {
                 self.clear_selection(ctx.win);
                 VimBridgeResult::Handled(Action::Redraw)
             }
-            vim::Action::Submit => {
-                if ctx.buf.source().is_empty() && ctx.buf.attachment_ids.is_empty() {
-                    VimBridgeResult::Handled(Action::SubmitEmpty)
-                } else {
-                    let display = self.message_display_text(ctx.buf);
-                    let content = self.build_content(ctx.buf);
-                    self.clear(ctx);
-                    VimBridgeResult::Handled(Action::Submit { content, display })
-                }
-            }
+            vim::Action::Submit => VimBridgeResult::Handled(self.submit_action(ctx, false)),
             vim::Action::HistoryPrev => {
                 if let Some(entry) = history
                     .as_deref_mut()

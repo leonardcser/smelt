@@ -342,6 +342,17 @@ pub fn visual_range(
     }
 }
 
+/// Byte range removed by linewise operations for a line-content range.
+pub fn linewise_delete_range(buf: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    if range.end < buf.len() && buf.as_bytes()[range.end] == b'\n' {
+        range.start..range.end + 1
+    } else if range.start > 0 && buf.as_bytes()[range.start - 1] == b'\n' {
+        range.start - 1..range.end
+    } else {
+        range
+    }
+}
+
 /// Visual-mode anchor byte (snapped against `buf`), or `None` in Normal/Insert.
 pub fn visual_anchor(state: &VimWindowState, buf: &str, mode: VimMode) -> Option<usize> {
     match mode {
@@ -1178,6 +1189,7 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
             exit_visual(ctx);
             Action::Consumed
         }
+        KeyCode::Enter => Action::Submit,
         KeyCode::Left => {
             *ctx.cpos = move_left(ctx.buf.as_str(), *ctx.cpos);
             Action::Consumed

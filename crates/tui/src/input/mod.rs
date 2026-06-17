@@ -91,14 +91,32 @@ pub(crate) struct PromptState {
 /// What the caller should do after `handle_event`.
 pub(crate) enum Action {
     Redraw,
-    Submit { content: Content, display: String },
-    SubmitToRequestQueue { content: Content, display: String },
+    Submit {
+        content: Content,
+        display: String,
+        edit: SubmitEdit,
+    },
+    SubmitToRequestQueue {
+        content: Content,
+        display: String,
+        edit: SubmitEdit,
+    },
     SubmitEmpty,
     EditInEditor,
     CenterScroll,
     PanColumns(isize),
     NotifyError(String),
     Noop,
+}
+
+pub(crate) enum SubmitEdit {
+    Clear,
+    DeleteRange { range: std::ops::Range<usize> },
+}
+
+struct PromptSubmission {
+    content: Content,
+    display: String,
 }
 
 impl Default for PromptState {
@@ -405,41 +423,56 @@ impl PromptState {
         self.install_source(ctx, text, cpos, ids);
     }
 
-    /// Expand attachment markers to text. Image markers are stripped (data flows via `Content::Parts`).
-    pub(crate) fn expanded_text(&self, buf: &crate::smelt_edit::Buffer) -> String {
-        let mut result = String::new();
-        let mut att_idx = 0;
-        let source = buf.source().to_string();
-        for c in source.chars() {
-            if c == ATTACHMENT_MARKER {
-                if let Some(&id) = buf.attachment_ids.get(att_idx) {
-                    result.push_str(self.store.lock().unwrap().expanded_text(id));
-                }
-                att_idx += 1;
-            } else {
-                result.push(c);
-            }
-        }
-        result
-    }
+    fn submission_from_range(
+        &self,
+        buf: &crate::smelt_edit::Buffer,
+        range: std::ops::Range<usize>,
+    ) -> PromptSubmission {
+        let source = buf.source();
+        let start = smelt_buffer::text::snap(source, range.start.min(source.len()));
+        let end = smelt_buffer::text::snap(source, range.end.min(source.len()));
+        let selected = smelt_buffer::text::slice(source, start..end);
+        let mut marker_idx = smelt_buffer::text::slice(source, 0..start)
+            .chars()
+            .filter(|&c| c == ATTACHMENT_MARKER)
+            .count();
+        let mut text = String::new();
+        let mut display = String::new();
+        let mut images = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let store = self.store.lock().unwrap();
 
-    pub(crate) fn message_display_text(&self, buf: &crate::smelt_edit::Buffer) -> String {
-        let mut result = String::new();
-        let mut att_idx = 0;
-        let source = buf.source().to_string();
-        for c in source.chars() {
+        for c in selected.chars() {
             if c == ATTACHMENT_MARKER {
-                if let Some(&id) = buf.attachment_ids.get(att_idx) {
-                    if let Some(attachment) = self.store.lock().unwrap().get(id) {
-                        result.push_str(&attachment.display_label());
+                if let Some(&id) = buf.attachment_ids.get(marker_idx) {
+                    text.push_str(store.expanded_text(id));
+                    display.push_str(&store.display_label(id));
+                    if seen.insert(id) {
+                        if let Some(Attachment::Image { label, data_url }) = store.get(id) {
+                            images.push((label.clone(), data_url.clone()));
+                        }
                     }
                 }
-                att_idx += 1;
+                marker_idx += 1;
             } else {
-                result.push(c);
+                text.push(c);
+                display.push(c);
             }
         }
-        result
+
+        PromptSubmission {
+            content: Content::with_images(text, images),
+            display,
+        }
+    }
+
+    /// Expand attachment markers to text. Image markers are stripped (data flows via `Content::Parts`).
+    #[cfg(test)]
+    pub(crate) fn expanded_text(&self, buf: &crate::smelt_edit::Buffer) -> String {
+        self.submission_from_range(buf, 0..buf.source().len())
+            .content
+            .text_content()
+            .into_owned()
     }
 
     pub(crate) fn insert_image(
@@ -461,21 +494,104 @@ impl PromptState {
     }
 
     /// Build submission `Content`. Duplicate image refs are deduplicated (base64 payloads are large).
+    #[cfg(test)]
     pub(crate) fn build_content(&self, buf: &crate::smelt_edit::Buffer) -> Content {
-        let text = self.expanded_text(buf);
-        let mut seen: std::collections::HashSet<AttachmentId> = std::collections::HashSet::new();
-        let images: Vec<(String, String)> = buf
-            .attachment_ids
-            .iter()
-            .filter(|&&id| seen.insert(id))
-            .filter_map(|&id| match self.store.lock().unwrap().get(id) {
-                Some(Attachment::Image { label, data_url }) => {
-                    Some((label.clone(), data_url.clone()))
+        self.submission_from_range(buf, 0..buf.source().len())
+            .content
+    }
+
+    fn visual_submit_action(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        to_request_queue: bool,
+    ) -> Option<Action> {
+        if !ctx.win.vim_enabled() {
+            return None;
+        }
+        let mode = ctx.win.vim_mode();
+        if !matches!(mode, VimMode::Visual | VimMode::VisualLine) {
+            return None;
+        }
+        let (start, end) = self.selection_range(ctx.as_ref())?;
+        if start >= end {
+            return None;
+        }
+
+        let submit_range = start..end;
+        let delete_range = if mode == VimMode::VisualLine {
+            crate::smelt_edit::vim::linewise_delete_range(ctx.buf.source(), submit_range.clone())
+        } else {
+            submit_range.clone()
+        };
+        let submission = self.submission_from_range(ctx.buf, submit_range);
+        let edit = SubmitEdit::DeleteRange {
+            range: delete_range,
+        };
+
+        Some(if to_request_queue {
+            Action::SubmitToRequestQueue {
+                content: submission.content,
+                display: submission.display,
+                edit,
+            }
+        } else {
+            Action::Submit {
+                content: submission.content,
+                display: submission.display,
+                edit,
+            }
+        })
+    }
+
+    pub(crate) fn submit_action(
+        &mut self,
+        ctx: &mut PromptCtx<'_>,
+        to_request_queue: bool,
+    ) -> Action {
+        if let Some(action) = self.visual_submit_action(ctx, to_request_queue) {
+            return action;
+        }
+
+        let source_empty = ctx.buf.source().is_empty();
+        let no_attachments = ctx.buf.attachment_ids.is_empty();
+        if source_empty && no_attachments {
+            Action::SubmitEmpty
+        } else {
+            let submission = self.submission_from_range(ctx.buf, 0..ctx.buf.source().len());
+            if to_request_queue {
+                Action::SubmitToRequestQueue {
+                    content: submission.content,
+                    display: submission.display,
+                    edit: SubmitEdit::Clear,
                 }
-                _ => None,
-            })
-            .collect();
-        Content::with_images(text, images)
+            } else {
+                Action::Submit {
+                    content: submission.content,
+                    display: submission.display,
+                    edit: SubmitEdit::Clear,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn apply_submit_edit(&mut self, ctx: &mut PromptCtx<'_>, edit: SubmitEdit) {
+        match edit {
+            SubmitEdit::Clear => self.clear(ctx),
+            SubmitEdit::DeleteRange { range } => {
+                self.save_undo(ctx);
+                ctx.buf.text_mut().replace_range(range.clone(), "");
+                let cpos = smelt_buffer::text::snap(ctx.buf.source(), range.start);
+                ctx.win.set_cpos(cpos);
+                ctx.win.clear_selection_anchor();
+                ctx.win.clear_vim_visual_anchor();
+                if ctx.win.vim_enabled()
+                    && matches!(ctx.win.vim_mode(), VimMode::Visual | VimMode::VisualLine)
+                {
+                    ctx.win.set_vim_mode(VimMode::Normal);
+                }
+                ctx.win.clamp_anchors_to_source(ctx.buf.source());
+            }
+        }
     }
 
     pub(crate) fn key_context(&self, ctx: PromptCtxRef<'_>, agent_running: bool) -> KeyContext {
@@ -552,7 +668,10 @@ impl PromptState {
                 | KeyAction::Yank
                 | KeyAction::CutSelection
         );
-        let preserves_selection = matches!(action, KeyAction::CopySelection);
+        let preserves_selection = matches!(
+            action,
+            KeyAction::CopySelection | KeyAction::Submit | KeyAction::SubmitToRequestQueue
+        );
         if !is_select && !is_editing && !preserves_selection {
             self.clear_selection(ctx.win);
         }
@@ -574,22 +693,7 @@ impl PromptState {
 
             // ── Submit / newline ─────────────────────────────────────────
             KeyAction::Submit | KeyAction::SubmitToRequestQueue => {
-                let source_empty = ctx.buf.source().is_empty();
-                let no_attachments = ctx.buf.attachment_ids.is_empty();
-                if source_empty && no_attachments {
-                    Action::SubmitEmpty
-                } else {
-                    let display = self.message_display_text(ctx.buf);
-                    let content = self.build_content(ctx.buf);
-                    self.clear(ctx);
-                    match action {
-                        KeyAction::Submit => Action::Submit { content, display },
-                        KeyAction::SubmitToRequestQueue => {
-                            Action::SubmitToRequestQueue { content, display }
-                        }
-                        _ => unreachable!(),
-                    }
-                }
+                self.submit_action(ctx, matches!(action, KeyAction::SubmitToRequestQueue))
             }
             KeyAction::InsertNewline => {
                 if self.selection_range(ctx.as_ref()).is_some() {
@@ -1637,6 +1741,96 @@ mod tests {
     }
 
     // ── Selection tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn selected_submit_carries_only_selected_attachment_ids() {
+        let mut input = Harness::new();
+        let keep = input
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .insert_image("keep.png".into(), "data:image/png;base64,KEEP".into());
+        let send = input
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .insert_image("send.png".into(), "data:image/png;base64,SEND".into());
+        let source = format!("keep {ATTACHMENT_MARKER}\nsend {ATTACHMENT_MARKER}");
+        let start = source.find("send").expect("send line");
+        let end = source.len();
+        input.buf.text_mut().install(source, vec![keep, send]);
+        input.state.set_vim_enabled(&mut input.win, true);
+        input.win.begin_visual(VimMode::Visual, start);
+        input.win.set_cpos(end);
+
+        let action = input.state.submit_action(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            false,
+        );
+
+        let Action::Submit {
+            content,
+            display,
+            edit,
+        } = action
+        else {
+            panic!("expected selected submit");
+        };
+        assert_eq!(display, "send [send.png]");
+        match content {
+            Content::Parts(parts) => {
+                assert!(matches!(
+                    &parts[0],
+                    protocol::ContentPart::Text { text } if text == "send "
+                ));
+                assert!(matches!(
+                    &parts[1],
+                    protocol::ContentPart::ImageUrl { label: Some(label), url }
+                        if label == "send.png" && url == "data:image/png;base64,SEND"
+                ));
+                assert_eq!(parts.len(), 2);
+            }
+            other => panic!("expected multipart content, got {other:?}"),
+        }
+        assert_eq!(input.buf.attachment_ids, vec![keep, send]);
+        input.state.apply_submit_edit(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            edit,
+        );
+        assert_eq!(input.buf.attachment_ids, vec![keep]);
+    }
+
+    #[test]
+    fn shift_selection_submit_uses_whole_prompt() {
+        let mut input = Harness::new();
+        input.buf.set_source("alpha beta".to_string());
+        input.win.set_cpos(0);
+        input.test_action(KeyAction::SelectRight, VimMode::Insert);
+        input.test_action(KeyAction::SelectRight, VimMode::Insert);
+
+        let action = input.state.submit_action(
+            &mut PromptCtx {
+                buf: &mut input.buf,
+                win: &mut input.win,
+            },
+            false,
+        );
+
+        let Action::Submit { content, edit, .. } = action else {
+            panic!("expected whole prompt submit");
+        };
+        assert_eq!(content.text_content(), "alpha beta");
+        assert!(matches!(edit, SubmitEdit::Clear));
+        assert_eq!(input.buf.source(), "alpha beta");
+    }
 
     #[test]
     fn shift_select_right_creates_selection() {

@@ -174,20 +174,26 @@ impl TuiApp {
             EventOutcome::Submit {
                 mut content,
                 mut display,
+                edit,
             } => {
                 self.clear_prompt_prediction();
                 self.redact_user_submission(&mut content, &mut display);
-                match self.prompt_work_state() {
+                let mut edit = Some(edit);
+                let accepted = match self.prompt_work_state() {
                     PromptWorkState::TurnActive | PromptWorkState::BackgroundBusy => {
                         // Queue while an active turn or background plugin owns the
                         // input lifecycle so messages run against the next stable state.
-                        if !content.is_empty() {
+                        if content.is_empty() {
+                            false
+                        } else {
+                            self.commit_prompt_submission(edit.take().expect("submit edit"));
                             self.queued_inputs
                                 .try_push_turn(QueuedInput::request(display.clone(), content));
+                            true
                         }
                     }
                     PromptWorkState::Idle => {
-                        let text = content.text_content();
+                        let text = content.text_content().into_owned();
                         let has_images = content.image_count() > 0;
                         if !text.is_empty() || has_images {
                             let outcome = if has_images && text.trim().is_empty() {
@@ -195,21 +201,28 @@ impl TuiApp {
                             } else {
                                 self.process_input(&text)
                             };
+                            self.commit_prompt_submission(edit.take().expect("submit edit"));
                             self.apply_input_outcome(outcome, content, &display);
+                            true
                         } else {
                             let outcome = self.handle_empty_submit();
                             return self.apply_event_outcome(outcome);
                         }
                     }
-                }
+                };
                 // Don't restore stash if a dialog opened - it restores on close.
-                if self.ui.focused_overlay().is_none() {
+                if accepted && self.ui.focused_overlay().is_none() {
                     let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
                     self.input.restore_stash(&mut pctx);
                 }
                 false
             }
         }
+    }
+
+    fn commit_prompt_submission(&mut self, edit: crate::input::SubmitEdit) {
+        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
+        self.input.apply_submit_edit(&mut pctx, edit);
     }
 
     fn handle_focused_search_key(&mut self, k: KeyEvent) -> bool {
@@ -620,11 +633,19 @@ impl TuiApp {
 
     fn dispatch_running_input_action(&mut self, input_action: Action) -> EventOutcome {
         match input_action {
-            Action::Submit { content, display } => {
-                return self.handle_running_submit(content, display, QueueStage::Turn);
+            Action::Submit {
+                content,
+                display,
+                edit,
+            } => {
+                return self.handle_running_submit(content, display, edit, QueueStage::Turn);
             }
-            Action::SubmitToRequestQueue { content, display } => {
-                return self.handle_running_submit(content, display, QueueStage::Request);
+            Action::SubmitToRequestQueue {
+                content,
+                display,
+                edit,
+            } => {
+                return self.handle_running_submit(content, display, edit, QueueStage::Request);
             }
             Action::SubmitEmpty => {
                 return self.handle_empty_submit();
@@ -651,13 +672,15 @@ impl TuiApp {
         &mut self,
         mut content: protocol::Content,
         mut display: String,
+        edit: crate::input::SubmitEdit,
         target: QueueStage,
     ) -> EventOutcome {
         self.clear_prompt_prediction();
         self.redact_user_submission(&mut content, &mut display);
-        let text = content.text_content();
+        let text = content.text_content().into_owned();
         if content.image_count() == 0 {
             if let Some(outcome) = self.try_command_while_running(text.trim(), target) {
+                self.commit_prompt_submission(edit);
                 return outcome;
             }
         }
@@ -665,13 +688,13 @@ impl TuiApp {
             return EventOutcome::Noop;
         }
         if target == QueueStage::Request && content.image_count() > 0 {
-            self.restore_submission_to_prompt(display, &content);
             self.notify_error(
-                "cannot use image attachments to steer the current response; prompt restored"
+                "cannot use image attachments to steer the current response; prompt left unchanged"
                     .into(),
             );
             return EventOutcome::Noop;
         }
+        self.commit_prompt_submission(edit);
         let queued = QueuedInput::request(display, content);
         match target {
             QueueStage::Turn => {
@@ -682,28 +705,6 @@ impl TuiApp {
             }
         }
         EventOutcome::Noop
-    }
-
-    fn restore_submission_to_prompt(&mut self, display: String, content: &protocol::Content) {
-        let images = match content {
-            protocol::Content::Parts(parts) => parts
-                .iter()
-                .filter_map(|part| match part {
-                    protocol::ContentPart::ImageUrl { url, label } => Some((
-                        label.clone().unwrap_or_else(|| "image".to_string()),
-                        url.clone(),
-                    )),
-                    protocol::ContentPart::Text { .. } => None,
-                })
-                .collect(),
-            protocol::Content::Text(_) => Vec::new(),
-        };
-        let mut pctx = crate::input::prompt_ctx_mut(&mut self.ui);
-        if images.is_empty() {
-            self.input.replace_text(&mut pctx, display);
-        } else {
-            self.input.restore_from_rewind(&mut pctx, display, images);
-        }
     }
 
     fn handle_empty_submit(&mut self) -> EventOutcome {
@@ -878,10 +879,20 @@ impl TuiApp {
 
     fn dispatch_input_action(&mut self, action: Action) -> EventOutcome {
         match action {
-            Action::Submit { content, display }
-            | Action::SubmitToRequestQueue { content, display } => {
-                EventOutcome::Submit { content, display }
+            Action::Submit {
+                content,
+                display,
+                edit,
             }
+            | Action::SubmitToRequestQueue {
+                content,
+                display,
+                edit,
+            } => EventOutcome::Submit {
+                content,
+                display,
+                edit,
+            },
             Action::SubmitEmpty => self.handle_empty_submit(),
             Action::EditInEditor => {
                 self.edit_in_editor();
