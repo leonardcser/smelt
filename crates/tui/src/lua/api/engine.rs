@@ -549,7 +549,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                         model,
                         response_format,
                         reasoning_effort,
-                        tools: app.lua.tool_defs(app.core.config.mode.clone(), false),
+                        tools: app.lua.tool_defs(
+                            app.core.config.mode.clone(),
+                            smelt_core::lua::ToolVisibility::Interactive,
+                        ),
                         session_id,
                         session_dir,
                         stream,

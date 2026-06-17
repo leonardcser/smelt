@@ -82,7 +82,12 @@ impl HeadlessApp {
         }
         self.lua
             .as_ref()
-            .map(|lua| lua.tool_defs(self.core.config.mode.clone(), true))
+            .map(|lua| {
+                lua.tool_defs(
+                    self.core.config.mode.clone(),
+                    crate::lua::ToolVisibility::Headless,
+                )
+            })
             .unwrap_or_default()
     }
 
@@ -92,11 +97,27 @@ impl HeadlessApp {
         tool_name: String,
         args: HashMap<String, serde_json::Value>,
     ) {
-        let metadata = self
-            .lua
-            .as_ref()
-            .map(|lua| lua.evaluate_tool_metadata(&tool_name, &args))
-            .unwrap_or_default();
+        let Some(lua) = self.lua.as_ref() else {
+            self.core.engine.send(UiCommand::ToolEvaluationResponse {
+                request_id,
+                evaluation: protocol::ToolEvaluation {
+                    decision: protocol::Decision::Error(format!("tool not found: {tool_name}")),
+                    metadata: protocol::ToolMetadata::default(),
+                },
+            });
+            return;
+        };
+        if !lua.tool_available_for(&tool_name, crate::lua::ToolVisibility::Headless) {
+            self.core.engine.send(UiCommand::ToolEvaluationResponse {
+                request_id,
+                evaluation: protocol::ToolEvaluation {
+                    decision: protocol::Decision::Deny,
+                    metadata: protocol::ToolMetadata::default(),
+                },
+            });
+            return;
+        }
+        let metadata = lua.evaluate_tool_metadata(&tool_name, &args);
         let decision = if let Some(err) = metadata.preflight_error.clone() {
             protocol::Decision::Error(err)
         } else {
@@ -133,6 +154,16 @@ impl HeadlessApp {
             });
             return;
         };
+        if !lua.tool_available_for(&tool_name, crate::lua::ToolVisibility::Headless) {
+            self.core.engine.send(UiCommand::ToolResult {
+                request_id,
+                call_id,
+                content: format!("tool not available in headless mode: {tool_name}"),
+                is_error: true,
+                metadata: None,
+            });
+            return;
+        }
         let mode = self.core.config.mode.clone();
         let session_id = self.core.session.id.clone();
         let session_dir = crate::session::dir_for(&self.core.session);
@@ -540,7 +571,13 @@ mod tests {
     }
 
     fn headless_app(tool_calling: bool) -> HeadlessApp {
-        let (engine, _cmd_rx, _event_tx) = engine::EngineHandle::for_test();
+        headless_app_with_cmd_rx(tool_calling).0
+    }
+
+    fn headless_app_with_cmd_rx(
+        tool_calling: bool,
+    ) -> (HeadlessApp, tokio::sync::mpsc::UnboundedReceiver<UiCommand>) {
+        let (engine, cmd_rx, _event_tx) = engine::EngineHandle::for_test();
         let clock: Arc<dyn engine::clock::Clock> = Arc::new(engine::clock::RealClock);
         let env = Arc::new(engine::env::RuntimeEnv::snapshot());
         let core = Core::new(
@@ -553,12 +590,15 @@ mod tests {
         );
         let capabilities = engine::SystemPromptCapabilities::from_tool_calling(tool_calling);
         let lua = tool_calling.then(lua_with_probe_tools);
-        HeadlessApp::new(
-            core,
-            HeadlessSink::new(OutputFormat::Json, crate::ColorMode::Never, false),
-            "system".into(),
-            capabilities,
-            lua,
+        (
+            HeadlessApp::new(
+                core,
+                HeadlessSink::new(OutputFormat::Json, crate::ColorMode::Never, false),
+                "system".into(),
+                capabilities,
+                lua,
+            ),
+            cmd_rx,
         )
     }
 
@@ -571,5 +611,44 @@ mod tests {
         assert!(enabled_names.contains(&"headless_probe".to_string()));
         assert!(!enabled_names.contains(&"ui_only_probe".to_string()));
         assert!(disabled.tool_defs().is_empty());
+    }
+
+    #[test]
+    fn headless_denies_ui_only_tool_evaluation() {
+        let (mut app, mut cmd_rx) = headless_app_with_cmd_rx(true);
+        app.handle_tool_evaluation_request(7, "ui_only_probe".into(), HashMap::new());
+
+        match cmd_rx.try_recv().unwrap() {
+            UiCommand::ToolEvaluationResponse {
+                request_id,
+                evaluation,
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(evaluation.decision, protocol::Decision::Deny);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn headless_rejects_ui_only_tool_dispatch() {
+        let (mut app, mut cmd_rx) = headless_app_with_cmd_rx(true);
+        app.handle_tool_dispatch(7, "call-1".into(), "ui_only_probe".into(), HashMap::new());
+
+        match cmd_rx.try_recv().unwrap() {
+            UiCommand::ToolResult {
+                request_id,
+                call_id,
+                content,
+                is_error,
+                ..
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(call_id, "call-1");
+                assert!(is_error);
+                assert!(content.contains("not available in headless mode"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

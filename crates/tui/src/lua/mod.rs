@@ -1283,7 +1283,10 @@ mod tests {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let defs = rt.tool_defs(protocol::AgentMode::normal(), false);
+        let defs = rt.tool_defs(
+            protocol::AgentMode::normal(),
+            smelt_core::lua::ToolVisibility::Interactive,
+        );
         let ask = defs
             .iter()
             .find(|d| d.name == "ask_user_question")
@@ -1292,11 +1295,47 @@ mod tests {
     }
 
     #[test]
+    fn autoload_marks_ui_only_tools_unavailable_headless() {
+        let mut rt = LuaRuntime::new();
+        rt.load_autoload();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+
+        let interactive = rt.tool_defs(
+            protocol::AgentMode::normal(),
+            smelt_core::lua::ToolVisibility::Interactive,
+        );
+        let headless = rt.tool_defs(
+            protocol::AgentMode::normal(),
+            smelt_core::lua::ToolVisibility::Headless,
+        );
+        let interactive_names: Vec<_> = interactive.iter().map(|d| d.name.as_str()).collect();
+        let headless_names: Vec<_> = headless.iter().map(|d| d.name.as_str()).collect();
+
+        for name in ["ask_user_question", "enter_worktree", "switch_cwd"] {
+            assert!(
+                interactive_names.contains(&name),
+                "{name} should be available interactively"
+            );
+            assert!(
+                !headless_names.contains(&name),
+                "{name} should be unavailable headless"
+            );
+        }
+        assert!(
+            headless_names.contains(&"read_file"),
+            "ordinary bundled tools should remain available headless"
+        );
+    }
+
+    #[test]
     fn autoload_registers_conflicting_file_tools_as_sequential() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let defs = rt.tool_defs(protocol::AgentMode::normal(), false);
+        let defs = rt.tool_defs(
+            protocol::AgentMode::normal(),
+            smelt_core::lua::ToolVisibility::Interactive,
+        );
         for name in ["edit_file", "edit_notebook"] {
             let tool = defs
                 .iter()

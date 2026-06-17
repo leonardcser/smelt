@@ -147,6 +147,21 @@ enum BootstrapMode {
     Full,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolVisibility {
+    Interactive,
+    Headless,
+}
+
+impl ToolVisibility {
+    fn includes(self, headless: bool) -> bool {
+        match self {
+            Self::Interactive => true,
+            Self::Headless => headless,
+        }
+    }
+}
+
 /// Headless-safe Lua runtime.
 pub struct LuaRuntime {
     pub lua: Lua,
@@ -1182,10 +1197,29 @@ impl LuaRuntime {
             .contains_key(tool_name)
     }
 
+    pub fn tool_available_for(&self, tool_name: &str, visibility: ToolVisibility) -> bool {
+        self.has_tool(tool_name) && visibility.includes(self.tool_headless_enabled(tool_name))
+    }
+
+    fn tool_headless_enabled(&self, tool_name: &str) -> bool {
+        self.lua
+            .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
+            .ok()
+            .map(|meta| Self::meta_headless_enabled(&meta))
+            .unwrap_or(true)
+    }
+
+    fn meta_headless_enabled(meta: &mlua::Table) -> bool {
+        meta.get::<mlua::Value>("headless")
+            .ok()
+            .and_then(|v| v.as_boolean())
+            .unwrap_or(true)
+    }
+
     pub fn tool_defs(
         &self,
         _mode: protocol::AgentMode,
-        for_headless: bool,
+        visibility: ToolVisibility,
     ) -> Vec<protocol::ToolDef> {
         let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
         let mut names: Vec<String> = handlers.keys().cloned().collect();
@@ -1197,12 +1231,8 @@ impl LuaRuntime {
                 .lua
                 .named_registry_value::<mlua::Table>(&format!("__pt_meta_{name}"))
             {
-                let headless: bool = meta_table
-                    .get::<mlua::Value>("headless")
-                    .ok()
-                    .and_then(|v| v.as_boolean())
-                    .unwrap_or(true);
-                if for_headless && !headless {
+                let headless = Self::meta_headless_enabled(&meta_table);
+                if !visibility.includes(headless) {
                     continue;
                 }
                 let description: String = meta_table.get("description").unwrap_or_default();
