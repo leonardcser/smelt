@@ -8,6 +8,11 @@ expression: out.events
     "HistoryUpdated": {
       "history": [
         {
+          "kind": "note",
+          "note_kind": "context",
+          "text": "Current working directory: /."
+        },
+        {
           "content": "hi",
           "kind": "user"
         }
@@ -46,6 +51,11 @@ expression: out.events
     "HistoryUpdated": {
       "history": [
         {
+          "kind": "note",
+          "note_kind": "context",
+          "text": "Current working directory: /."
+        },
+        {
           "content": "hi",
           "kind": "user"
         },
@@ -60,6 +70,11 @@ expression: out.events
   {
     "TurnComplete": {
       "history": [
+        {
+          "kind": "note",
+          "note_kind": "context",
+          "text": "Current working directory: /."
+        },
         {
           "content": "hi",
           "kind": "user"

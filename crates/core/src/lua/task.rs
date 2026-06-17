@@ -244,6 +244,13 @@ impl LuaTaskRuntime {
         self.tasks.len()
     }
 
+    pub(crate) fn next_wakeup(&self, now: Instant) -> Option<Instant> {
+        self.tasks
+            .iter()
+            .filter_map(|task| task.next_wakeup(now))
+            .min()
+    }
+
     /// Pop a ready task out of the runtime, returning it by value. `drive_tasks`
     /// uses this to step a task without holding the `tasks` mutex - so Lua code
     /// that re-enters the runtime (e.g. `smelt.spawn` from inside a coroutine)
@@ -290,6 +297,22 @@ impl LuaTask {
                 TaskWait::Sleep(deadline) => self.cancel.is_cancelled() || *deadline <= now,
                 TaskWait::External { .. } => false,
             }
+    }
+
+    fn next_wakeup(&self, now: Instant) -> Option<Instant> {
+        if self.ready_at(now) {
+            return Some(now);
+        }
+        let wait_at = match &self.wait {
+            TaskWait::Sleep(deadline) => Some(*deadline),
+            TaskWait::Ready(_) | TaskWait::External { .. } => None,
+        };
+        match (wait_at, self.deadline) {
+            (Some(a), Some(deadline)) if deadline.paused_at.is_none() => Some(a.min(deadline.at)),
+            (Some(a), _) => Some(a),
+            (None, Some(deadline)) if deadline.paused_at.is_none() => Some(deadline.at),
+            (None, _) => None,
+        }
     }
 
     fn pause_deadline(&mut self, now: Instant) {

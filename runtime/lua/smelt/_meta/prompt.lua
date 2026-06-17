@@ -55,17 +55,9 @@ prompt.queued = nil
 ---@type fun(): table[]
 prompt.queued_rows = nil
 
---- Remove the named prompt section. No-op if the section does not exist.
----@type fun(name: string): nil
-prompt.remove_section = nil
-
 --- UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`. Endpoints are snapped to char boundaries and clamped to source length. The cursor lands at `start + #text`. Returns the new cursor offset.
 ---@type fun(start: integer, end: integer, text: string): integer
 prompt.replace_range = nil
-
---- Set the named prompt section (e.g. selection context, attached files) to `content`. Sections render above the editable text and are submitted with the next turn.
----@type fun(name: string, content: string): nil
-prompt.set_section = nil
 
 --- Replace the prompt buffer with `text`. The cursor lands at the end and undo state is reset.
 ---@type fun(text: string): nil

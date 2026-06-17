@@ -158,6 +158,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
         model: "test-model".into(),
         instructions: None,
         system_prompt_override: Some("test system".into()),
+        system_prompt_behavior: engine::SystemPromptBehavior::Interactive,
         cwd: PathBuf::from("/tmp"),
         skill_section: None,
         redact_secrets: false,

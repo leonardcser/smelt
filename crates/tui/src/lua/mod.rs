@@ -390,6 +390,10 @@ impl LuaRuntime {
         &self.core.lua
     }
 
+    pub fn into_core(self) -> smelt_core::lua::LuaRuntime {
+        self.core
+    }
+
     /// Run every bundled `runtime/lua/smelt/early/*.lua` file. Call BEFORE
     /// [`Self::load_early_init`] so user code can override flag declarations.
     pub fn load_bundled_early(&mut self) {

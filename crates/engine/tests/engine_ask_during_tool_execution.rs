@@ -144,6 +144,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         model: "test-model".into(),
         instructions: None,
         system_prompt_override: Some("test system".into()),
+        system_prompt_behavior: engine::SystemPromptBehavior::Interactive,
         cwd: PathBuf::from("/tmp"),
         skill_section: None,
         redact_secrets: false,

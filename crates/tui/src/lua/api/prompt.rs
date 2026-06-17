@@ -91,24 +91,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         },
     )?;
     m.fn_(
-        "set_section",
-        "Set the named prompt section (e.g. selection context, attached files) to `content`. Sections render above the editable text and are submitted with the next turn.",
-        &["name", "content"],
-        |_, (name, content): (String, String)| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.prompt_sections.set(&name, content));
-            Ok(())
-        },
-    )?;
-    m.fn_(
-        "remove_section",
-        "Remove the named prompt section. No-op if the section does not exist.",
-        &["name"],
-        |_, name: String| -> LuaResult<()> {
-            crate::lua::with_app(|app| app.prompt_sections.remove(&name));
-            Ok(())
-        },
-    )?;
-    m.fn_(
         "queued",
         "Return the queued prompt text rows. Empty when the prompt is idle and no active turn, compaction, or busy work is in flight. The top-bar renderer reads this each frame to surface waiting messages above the input.",
         &[],

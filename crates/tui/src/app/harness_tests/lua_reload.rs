@@ -356,8 +356,6 @@ fn lua_prompt_text_theme_work_keymap_and_vim_contracts_are_available() {
             assert(smelt.prompt.replace_range(1, 3, "X") == 2, "prompt replace cursor")
             assert(smelt.prompt.text() == "aXz", "prompt replace snaps utf8 range")
             assert(type(smelt.prompt.win()) == "userdata", "prompt win")
-            smelt.prompt.set_section("coverage", "section body")
-            smelt.prompt.remove_section("coverage")
             assert(type(smelt.prompt.queued()) == "table", "prompt queued")
             assert(smelt.prompt.has_stash() == false, "prompt stash")
 

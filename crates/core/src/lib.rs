@@ -9,6 +9,7 @@ pub mod commands;
 pub mod config;
 pub mod confirms;
 pub mod content;
+pub mod context_notes;
 pub mod custom_commands;
 pub mod engine_client;
 pub mod file_ref;

@@ -90,14 +90,6 @@ fun(): table[]
 
 Return queued prompt rows as `{ text, kind }` tables. `kind` is `request` for rows added to the current turn's next request, or `turn` for rows waiting for the next turn.
 
-## `smelt.prompt.remove_section`
-
-```lua
-fun(name: string): nil
-```
-
-Remove the named prompt section. No-op if the section does not exist.
-
 ## `smelt.prompt.replace_range`
 
 ```lua
@@ -105,14 +97,6 @@ fun(start: integer, end: integer, text: string): integer
 ```
 
 UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`. Endpoints are snapped to char boundaries and clamped to source length. The cursor lands at `start + #text`. Returns the new cursor offset.
-
-## `smelt.prompt.set_section`
-
-```lua
-fun(name: string, content: string): nil
-```
-
-Set the named prompt section (e.g. selection context, attached files) to `content`. Sections render above the editable text and are submitted with the next turn.
 
 ## `smelt.prompt.set_text`
 

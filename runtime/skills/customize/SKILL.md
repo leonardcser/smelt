@@ -1417,12 +1417,8 @@ The main editable input surface: win handle, text get/set, and cursor control.
   Return the queued prompt text rows.
 - `smelt.prompt.queued_rows` :: `fun(): table[]`
   Return queued prompt rows as `{ text, kind }` tables.
-- `smelt.prompt.remove_section` :: `fun(name: string): nil`
-  Remove the named prompt section.
 - `smelt.prompt.replace_range` :: `fun(start: integer, end: integer, text: string): integer`
   UTF-8-safe replace of the byte range `[start, end)` in the prompt with `text`.
-- `smelt.prompt.set_section` :: `fun(name: string, content: string): nil`
-  Set the named prompt section (e.g. selection context, attached files) to `content`.
 - `smelt.prompt.set_text` :: `fun(text: string): nil`
   Replace the prompt buffer with `text`.
 - `smelt.prompt.text` :: `fun(): string`

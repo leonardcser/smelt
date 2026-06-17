@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn assembled_system_prompt_uses_engine_template() {
+    let app = TestApp::builder().build();
+
+    let prompt = app.app.assemble_system_prompt();
+
+    assert!(prompt.contains("# Managed worktrees"));
+    assert!(!prompt.contains("Working directory:"));
+}
+
+#[test]
+fn system_prompt_override_replaces_tui_prompt() {
+    let mut app = TestApp::builder().build();
+    app.app.prompt_inputs.system_prompt_override = Some("custom prompt".into());
+    app.app.prompt_inputs.instructions = Some("ignored instructions".into());
+    app.app.prompt_inputs.skill_section = Some("# Skills\nignored".into());
+
+    assert_eq!(app.app.assemble_system_prompt(), "custom prompt");
+}
+
+#[test]
+fn system_prompt_omits_tool_guidance_when_tool_calling_disabled() {
+    let mut app = TestApp::builder().build();
+    app.app.core.config.model_config.tool_calling = Some(false);
+
+    let prompt = app.app.assemble_system_prompt();
+
+    assert!(!prompt.contains("# Tools"));
+    assert!(!prompt.contains("read_file"));
+    assert!(prompt.contains("# Code"));
+}
+
+#[test]
 fn stale_title_response_after_reset_is_ignored() {
     let mut app = TestApp::builder().build();
     let original_session_id = app.app.core.session.id.clone();

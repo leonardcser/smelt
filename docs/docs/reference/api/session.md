@@ -180,7 +180,7 @@ Change Smelt's process working directory and refresh session cwd, engine cwd, an
 fun(): string
 ```
 
-Currently-assembled system prompt sent on the next turn. Reflects every prompt section (base, skills, instructions). Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.
+Currently-assembled system prompt sent on the next turn. Reflects the configured base prompt, skills, and instructions. Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.
 
 ## `smelt.session.text`
 

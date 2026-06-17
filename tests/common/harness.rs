@@ -127,6 +127,7 @@ impl Harness {
             .env("XDG_CONFIG_HOME", self.config_dir.path())
             .env("SMELT_TEST_API_KEY", "stub-key")
             .env("NO_COLOR", "1")
+            .current_dir("/")
             .output()
             .expect("smelt failed to launch");
         RunOutput {

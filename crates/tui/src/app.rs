@@ -137,7 +137,6 @@ pub struct TuiApp {
     /// Whether the pending reload should also refresh prompt inputs such as
     /// AGENTS.md, skills, and `--system-prompt`.
     pub(crate) pending_lua_reload_refresh_agent_inputs: bool,
-    pub(crate) prompt_sections: crate::prompt_sections::PromptSections,
     pub ui: crate::smelt_edit::Ui,
     pub(crate) well_known: WellKnown,
     /// Timers + chord state observed and updated by event dispatch.
@@ -686,7 +685,7 @@ impl TuiApp {
     }
 
     pub(crate) fn current_context_note_text(&self) -> String {
-        crate::context_notes::cwd_note(
+        smelt_core::context_notes::cwd_note(
             std::path::Path::new(&self.cwd),
             std::path::Path::new(&self.core.config.settings.worktree_root),
         )
@@ -1122,7 +1121,6 @@ impl TuiApp {
             auto_reload: None,
             pending_lua_reload: false,
             pending_lua_reload_refresh_agent_inputs: false,
-            prompt_sections: crate::prompt_sections::PromptSections::default(),
             ui,
             well_known,
             timers: Timers {
@@ -1141,35 +1139,22 @@ impl TuiApp {
         }
     }
 
-    /// Rebuilds prompt sections from current app state and returns the assembled system prompt.
-    /// Mutates `self.prompt_sections`; call sites that just want to read
-    /// the current system prompt (Lua getters, EngineAsk inheritance)
-    /// should use [`Self::assemble_system_prompt`] instead.
+    /// Returns the system prompt that will be sent on the next turn.
     pub(crate) fn rebuild_system_prompt(&mut self) -> String {
-        let cwd = std::path::Path::new(&self.cwd);
-        self.prompt_sections = crate::prompt_sections::build_defaults(
-            cwd,
-            self.core.config.mode.clone(),
-            true, // TUI is always interactive
-            self.prompt_inputs.skill_section.as_deref(),
-            self.prompt_inputs.instructions.as_deref(),
-        );
-        self.prompt_sections.assemble()
+        self.assemble_system_prompt()
     }
 
-    /// Pure variant of [`Self::rebuild_system_prompt`]: returns the
-    /// assembled bytes without committing them to `self.prompt_sections`.
-    /// "What is the system prompt right now" reads must not mutate state.
+    /// Returns the system prompt without mutating app state.
     pub(crate) fn assemble_system_prompt(&self) -> String {
-        let cwd = std::path::Path::new(&self.cwd);
-        crate::prompt_sections::build_defaults(
-            cwd,
-            self.core.config.mode.clone(),
-            true,
-            self.prompt_inputs.skill_section.as_deref(),
+        engine::assemble_system_prompt(
+            self.prompt_inputs.system_prompt_override.as_deref(),
+            engine::SystemPromptBehavior::Interactive,
+            engine::SystemPromptCapabilities::from_tool_calling(
+                self.core.config.model_config.tool_calling.unwrap_or(true),
+            ),
             self.prompt_inputs.instructions.as_deref(),
+            self.prompt_inputs.skill_section.as_deref(),
         )
-        .assemble()
     }
 
     pub(crate) fn stop_background_processes(&mut self) {

@@ -518,6 +518,11 @@ async fn main() {
             model: model.clone(),
             instructions: prompt_inputs.instructions.clone(),
             system_prompt_override: prompt_inputs.system_prompt_override.clone(),
+            system_prompt_behavior: if args.headless {
+                engine::SystemPromptBehavior::Autonomous
+            } else {
+                engine::SystemPromptBehavior::Interactive
+            },
             cwd: cwd.clone(),
             skill_section: prompt_inputs.skill_section.clone(),
             redact_secrets: settings.redact_secrets,
@@ -555,6 +560,9 @@ async fn main() {
             settings,
             cfg.remember.clone(),
         );
+        let capabilities = engine::SystemPromptCapabilities::from_tool_calling(
+            app_config.model_config.tool_calling.unwrap_or(true),
+        );
         let mut core = smelt_core::Core::new(
             app_config,
             engine_handle,
@@ -565,8 +573,26 @@ async fn main() {
         );
         core.skills = Some(Arc::clone(&skill_loader));
         core.mcp = Some(Arc::clone(&mcp_manager));
+        let headless_system_prompt = engine::assemble_system_prompt(
+            prompt_inputs.system_prompt_override.as_deref(),
+            engine::SystemPromptBehavior::Autonomous,
+            capabilities,
+            prompt_inputs.instructions.as_deref(),
+            prompt_inputs.skill_section.as_deref(),
+        );
+        let headless_lua = if capabilities.tool_calling {
+            Some(lua_runtime.into_core())
+        } else {
+            None
+        };
         let sink = smelt_core::HeadlessSink::new(output_format, color_mode, args.verbose);
-        let mut headless = smelt_core::HeadlessApp::new(core, sink);
+        let mut headless = smelt_core::HeadlessApp::new(
+            core,
+            sink,
+            headless_system_prompt,
+            capabilities,
+            headless_lua,
+        );
         headless
             .run_oneshot(args.message.unwrap(), headless_cancel)
             .await;

@@ -92,8 +92,11 @@ pub(crate) async fn engine_task(
                         let system_prompt = tui_system_prompt
                             .or_else(|| config.system_prompt_override.clone())
                             .unwrap_or_else(|| {
-                                crate::build_system_prompt_full(
-                                    &config.cwd,
+                                crate::build_system_prompt(
+                                    config.system_prompt_behavior,
+                                    crate::SystemPromptCapabilities::from_tool_calling(
+                                        provider.tool_calling(),
+                                    ),
                                     config.instructions.as_deref(),
                                     config.skill_section.as_deref(),
                                 )
@@ -854,8 +857,11 @@ impl<'a> Turn<'a> {
             .system_prompt_override
             .clone()
             .unwrap_or_else(|| {
-                crate::build_system_prompt_full(
-                    &self.config.cwd,
+                crate::build_system_prompt(
+                    self.config.system_prompt_behavior,
+                    crate::SystemPromptCapabilities::from_tool_calling(
+                        self.provider.tool_calling(),
+                    ),
                     self.config.instructions.as_deref(),
                     self.config.skill_section.as_deref(),
                 )
@@ -2531,6 +2537,7 @@ mod tests {
             model: "m".into(),
             instructions: None,
             system_prompt_override: Some("sys".into()),
+            system_prompt_behavior: crate::SystemPromptBehavior::Interactive,
             cwd: std::path::PathBuf::from("/tmp"),
             skill_section: None,
             redact_secrets: false,
@@ -2613,6 +2620,7 @@ mod tests {
             model: "m".into(),
             instructions: None,
             system_prompt_override: Some("sys".into()),
+            system_prompt_behavior: crate::SystemPromptBehavior::Interactive,
             cwd: std::path::PathBuf::from("/tmp"),
             skill_section: None,
             redact_secrets: false,

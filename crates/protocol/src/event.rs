@@ -423,7 +423,7 @@ pub struct StartTurnPayload {
     /// Per-turn permission overrides (from custom commands or Lua).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub permission_overrides: Option<PermissionOverrides>,
-    /// Full system prompt assembled by the TUI (from prompt sections).
+    /// Full system prompt supplied by the frontend.
     /// When present the engine uses this verbatim instead of rendering
     /// its built-in template.
     #[serde(skip_serializing_if = "Option::is_none", default)]

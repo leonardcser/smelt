@@ -1114,6 +1114,17 @@ impl LuaRuntime {
         rt.cancel_scope(&self.lua, super::task::TaskScope::Turn);
     }
 
+    pub fn set_wakeup_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<()>) {
+        let _ = self.shared.wakeup_tx.set(tx);
+    }
+
+    pub fn next_task_wakeup(&self, now: Instant) -> Option<Instant> {
+        let Ok(rt) = self.shared.tasks.lock() else {
+            return None;
+        };
+        rt.next_wakeup(now)
+    }
+
     fn take_next_ready_task(&self, now: Instant) -> Result<Option<super::task::LuaTask>, ()> {
         let Ok(mut rt) = self.shared.tasks.lock() else {
             return Err(());

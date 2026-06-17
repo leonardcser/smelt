@@ -249,7 +249,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "system",
-        "Currently-assembled system prompt sent on the next turn. Reflects every prompt section (base, skills, instructions). Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.",
+        "Currently-assembled system prompt sent on the next turn. Reflects the configured base prompt, skills, and instructions. Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.",
         &[],
         |_, ()| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| app.assemble_system_prompt()).unwrap_or_default())

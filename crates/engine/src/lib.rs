@@ -46,23 +46,66 @@ pub use reqwest::Client as HttpClient;
 pub use provider::{Provider, ProviderKind};
 pub use skills::SkillLoader;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemPromptBehavior {
+    Interactive,
+    Autonomous,
+}
+
+impl SystemPromptBehavior {
+    fn as_template_value(self) -> &'static str {
+        match self {
+            SystemPromptBehavior::Interactive => "interactive",
+            SystemPromptBehavior::Autonomous => "autonomous",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemPromptCapabilities {
+    pub tool_calling: bool,
+}
+
+impl SystemPromptCapabilities {
+    pub fn from_tool_calling(tool_calling: bool) -> Self {
+        Self { tool_calling }
+    }
+}
+
 struct PromptContext<'a> {
-    cwd: &'a std::path::Path,
+    behavior: SystemPromptBehavior,
+    capabilities: SystemPromptCapabilities,
     skills_section: Option<&'a str>,
     extra_instructions: Option<&'a str>,
 }
 
-pub(crate) fn build_system_prompt_full(
-    cwd: &std::path::Path,
+pub fn build_system_prompt(
+    behavior: SystemPromptBehavior,
+    capabilities: SystemPromptCapabilities,
     extra_instructions: Option<&str>,
     skill_section: Option<&str>,
 ) -> String {
     let ctx = PromptContext {
-        cwd,
+        behavior,
+        capabilities,
         skills_section: skill_section,
         extra_instructions,
     };
     render_system_prompt(&ctx)
+}
+
+pub fn assemble_system_prompt(
+    system_prompt_override: Option<&str>,
+    behavior: SystemPromptBehavior,
+    capabilities: SystemPromptCapabilities,
+    extra_instructions: Option<&str>,
+    skill_section: Option<&str>,
+) -> String {
+    system_prompt_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            build_system_prompt(behavior, capabilities, extra_instructions, skill_section)
+        })
 }
 
 fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
@@ -74,18 +117,35 @@ fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
 
     let rendered = template
         .render(minijinja::context! {
-            cwd => ctx.cwd.display().to_string(),
+            behavior => ctx.behavior.as_template_value(),
+            tools_enabled => ctx.capabilities.tool_calling,
             skills_section => ctx.skills_section.unwrap_or(""),
             extra_instructions => ctx.extra_instructions.unwrap_or(""),
         })
         .expect("system prompt template should render");
 
-    let mut result = String::with_capacity(rendered.len());
+    let mut result = collapse_blank_lines(&rendered);
+    for section in [ctx.skills_section, ctx.extra_instructions]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|section| !section.is_empty())
+    {
+        if !result.is_empty() {
+            result.push_str("\n\n");
+        }
+        result.push_str(section);
+    }
+    result
+}
+
+fn collapse_blank_lines(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
     let mut blank_count = 0u32;
-    for line in rendered.lines() {
+    for line in text.lines() {
         if line.trim().is_empty() {
             blank_count += 1;
-            if blank_count <= 2 {
+            if blank_count <= 1 {
                 result.push('\n');
             }
         } else {
@@ -118,6 +178,7 @@ pub struct EngineConfig {
     pub instructions: Option<String>,
     /// When set, replaces the built-in system prompt template entirely.
     pub system_prompt_override: Option<String>,
+    pub system_prompt_behavior: SystemPromptBehavior,
     pub cwd: PathBuf,
     /// Pre-rendered "# Skills" block injected into the system prompt.
     /// Built once on startup from the [`SkillLoader`] and refreshed on
@@ -230,23 +291,23 @@ mod tests {
     // ---- render_system_prompt ----
 
     #[test]
-    fn render_system_prompt_includes_cwd_and_extra_instructions() {
-        let cwd = std::path::Path::new("/tmp/x");
+    fn render_system_prompt_includes_static_sections_and_extra_instructions() {
         let ctx = PromptContext {
-            cwd,
+            behavior: SystemPromptBehavior::Interactive,
+            capabilities: SystemPromptCapabilities::from_tool_calling(true),
             skills_section: None,
             extra_instructions: Some("MARK-EXTRA-7384"),
         };
         let out = render_system_prompt(&ctx);
-        assert!(out.contains("/tmp/x"));
+        assert!(out.contains("# Managed worktrees"));
         assert!(out.contains("MARK-EXTRA-7384"));
     }
 
     #[test]
     fn render_system_prompt_collapses_runs_of_blank_lines() {
-        let cwd = std::path::Path::new("/x");
         let ctx = PromptContext {
-            cwd,
+            behavior: SystemPromptBehavior::Interactive,
+            capabilities: SystemPromptCapabilities::from_tool_calling(true),
             skills_section: None,
             extra_instructions: None,
         };
@@ -256,13 +317,72 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_behavior_switches_interactive_and_autonomous_text() {
+        let interactive = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(true),
+            None,
+            None,
+        );
+        let autonomous = build_system_prompt(
+            SystemPromptBehavior::Autonomous,
+            SystemPromptCapabilities::from_tool_calling(true),
+            None,
+            None,
+        );
+
+        assert!(interactive.contains("You and the user are collaborators"));
+        assert!(!interactive.contains("You are running autonomously"));
+        assert!(autonomous.contains("You are running autonomously"));
+        assert!(!autonomous.contains("You and the user are collaborators"));
+    }
+
+    #[test]
+    fn system_prompt_omits_tool_guidance_when_tools_disabled() {
+        let with_tools = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(true),
+            None,
+            None,
+        );
+        let without_tools = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(false),
+            None,
+            None,
+        );
+
+        assert!(with_tools.contains("# Tools"));
+        assert!(with_tools.contains("read_file"));
+        assert!(!without_tools.contains("# Tools"));
+        assert!(!without_tools.contains("read_file"));
+        assert!(without_tools.contains("# Code"));
+    }
+
+    #[test]
     fn system_prompt_is_byte_stable_for_session_inputs() {
-        // The same (cwd, skills, instructions) must produce identical bytes
-        // every time so /mode switches don't bust the cache.
-        let cwd = std::path::Path::new("/x");
-        let a = build_system_prompt_full(cwd, Some("hi"), Some("# Skills\nfoo"));
-        let b = build_system_prompt_full(cwd, Some("hi"), Some("# Skills\nfoo"));
+        // The same (skills, instructions) must produce identical bytes
+        // every time so /mode and cwd switches don't bust the cache.
+        let a = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(true),
+            Some("hi"),
+            Some("# Skills\nfoo"),
+        );
+        let b = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(true),
+            Some("hi"),
+            Some("# Skills\nfoo"),
+        );
+        let c = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(true),
+            Some("hi"),
+            Some("# Skills\nfoo"),
+        );
         assert_eq!(a, b);
+        assert_eq!(a, c);
     }
 
     #[test]
@@ -271,8 +391,9 @@ mod tests {
         // timestamps) would silently rotate the cache key. pi-mono embeds
         // `Current date:`; we explicitly don't. Scan the rendered prompt
         // for tokens that would suggest a future regression sneaks one in.
-        let prompt = build_system_prompt_full(
-            std::path::Path::new("/some/cwd"),
+        let prompt = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(true),
             Some("instructions"),
             Some("# Skills\nfoo"),
         );
@@ -291,13 +412,15 @@ mod tests {
         }
         // Also pin: rendering twice produces identical bytes - the template
         // itself must not call into any time-of-day source.
-        let a = build_system_prompt_full(
-            std::path::Path::new("/some/cwd"),
+        let a = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(true),
             Some("instructions"),
             Some("# Skills\nfoo"),
         );
-        let b = build_system_prompt_full(
-            std::path::Path::new("/some/cwd"),
+        let b = build_system_prompt(
+            SystemPromptBehavior::Interactive,
+            SystemPromptCapabilities::from_tool_calling(true),
             Some("instructions"),
             Some("# Skills\nfoo"),
         );

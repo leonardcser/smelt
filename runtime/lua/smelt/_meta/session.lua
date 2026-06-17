@@ -93,7 +93,7 @@ session.set_title_for_history = nil
 ---@type fun(path: string): table
 session.switch_cwd = nil
 
---- Currently-assembled system prompt sent on the next turn. Reflects every prompt section (base, skills, instructions). Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.
+--- Currently-assembled system prompt sent on the next turn. Reflects the configured base prompt, skills, and instructions. Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.
 ---@type fun(): string
 session.system = nil
 
