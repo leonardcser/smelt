@@ -2387,6 +2387,7 @@ fn layout_separator(label: impl Into<String>) -> BlockLayout {
             ..Default::default()
         }],
         dim: true,
+        selectable: false,
     }))
 }
 

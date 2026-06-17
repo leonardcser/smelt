@@ -418,8 +418,16 @@ impl BlockHistory {
     }
 
     pub fn has_history_origin_at_or_after(&self, before_history_index: usize) -> bool {
-        self.origins.values().any(|origin| {
-            matches!(origin, BlockOrigin::History(history_index) if *history_index >= before_history_index)
+        self.first_block_index_for_history_origin_at_or_after(before_history_index)
+            .is_some()
+    }
+
+    pub fn first_block_index_for_history_origin_at_or_after(
+        &self,
+        before_history_index: usize,
+    ) -> Option<usize> {
+        self.order.iter().position(|id| {
+            matches!(self.origins.get(id), Some(BlockOrigin::History(history_index)) if *history_index >= before_history_index)
         })
     }
 
@@ -499,12 +507,35 @@ impl BlockHistory {
         block_index: usize,
         block: Block,
     ) -> BlockId {
+        let removed_before = self
+            .order
+            .iter()
+            .take(block_index)
+            .filter(|id| matches!(self.origins.get(id), Some(BlockOrigin::CheckpointMarker)))
+            .count();
         self.remove_checkpoint_marker();
         self.add_block(
-            Some(block_index),
+            Some(block_index.saturating_sub(removed_before)),
             block,
             Some(BlockOrigin::CheckpointMarker),
         )
+    }
+
+    pub(crate) fn remove_unoriginated_at(&mut self, idx: usize) -> Option<Block> {
+        let id = *self.order.get(idx)?;
+        if self.origins.contains_key(&id) {
+            return None;
+        }
+        self.order.remove(idx);
+        self.content_hashes.remove(&id);
+        self.statuses.remove(&id);
+        if let Some(Block::ToolCall { call_id, .. }) = self.blocks.get(&id) {
+            self.tool_states.remove(call_id);
+            self.tool_display_hashes.remove(call_id);
+        }
+        let block = self.blocks.remove(&id);
+        self.bump_generation();
+        block
     }
 
     fn remove_checkpoint_marker(&mut self) {
@@ -989,6 +1020,50 @@ mod tests {
         history.truncate(1);
         assert_eq!(history.len(), 1);
         assert!(!history.tool_states.contains_key("tc1"));
+    }
+
+    #[test]
+    fn remove_unoriginated_at_refuses_originated_blocks() {
+        let mut history = BlockHistory::new();
+        let a = history.push(Block::Text {
+            content: "a".into(),
+        });
+        let b = history.push_with_origin(
+            Block::Text {
+                content: "b".into(),
+            },
+            BlockOrigin::History(1),
+        );
+        let g = history.generation();
+
+        assert!(history.remove_unoriginated_at(1).is_none());
+        assert_eq!(history.order, vec![a, b]);
+        assert_eq!(history.generation(), g);
+    }
+
+    #[test]
+    fn remove_unoriginated_at_gcs_tool_state() {
+        let mut history = BlockHistory::new();
+        history.push_with_state(
+            Block::ToolCall {
+                call_id: "tc1".into(),
+                name: "x".into(),
+                summary: "s".into(),
+                args: HashMap::new(),
+            },
+            "tc1".into(),
+            pending_state(),
+        );
+        assert!(history.tool_states.contains_key("tc1"));
+        assert!(history.tool_display_hashes.contains_key("tc1"));
+
+        assert!(matches!(
+            history.remove_unoriginated_at(0),
+            Some(Block::ToolCall { call_id, .. }) if call_id == "tc1"
+        ));
+        assert!(history.is_empty());
+        assert!(!history.tool_states.contains_key("tc1"));
+        assert!(!history.tool_display_hashes.contains_key("tc1"));
     }
 
     #[test]

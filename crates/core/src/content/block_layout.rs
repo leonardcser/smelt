@@ -91,6 +91,8 @@ pub struct ElapsedSpec {
 pub struct SeparatorSpec {
     pub label: Vec<protocol::StyledSpan>,
     pub dim: bool,
+    #[serde(default)]
+    pub selectable: bool,
 }
 
 /// Full-width background panel wrapper.

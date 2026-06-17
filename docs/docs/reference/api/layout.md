@@ -134,7 +134,7 @@ fun(opts: table?): smelt.layout.Node
 
 Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Full-width horizontal separator. `opts.label` is centered in the row and accepts the same styled span shape as `smelt.layout.line`; generated line fill is chrome and is not searchable/selectable. `opts.dim` defaults to true.
+Full-width horizontal separator. `opts.label` is centered in the row and accepts the same styled span shape as `smelt.layout.line`; generated line fill is chrome and is not searchable/selectable unless `opts.selectable` is true. `opts.dim` defaults to true.
 
 ## `smelt.layout.style`
 

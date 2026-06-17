@@ -125,6 +125,10 @@ fn fallback_history_item_block_count(item: &HistoryItem) -> usize {
     }
 }
 
+fn checkpoint_suffix_blocks_match(prev: &Block, next: &Block) -> bool {
+    !matches!(prev, Block::ToolCall { .. }) && prev == next
+}
+
 pub(crate) fn history_note_to_block(
     lua: &crate::lua::LuaRuntime,
     note: &protocol::HistoryNote,
@@ -733,24 +737,45 @@ impl TuiApp {
         self.persister.flush();
     }
 
+    fn suppress_duplicate_carried_tail_before(&mut self, index: usize) -> usize {
+        let history = self.transcript.history();
+        if index == 0 || index >= history.order.len() {
+            return index;
+        }
+        let prev_id = history.order[index - 1];
+        let next_id = history.order[index];
+        let duplicate = match (history.blocks.get(&prev_id), history.blocks.get(&next_id)) {
+            (Some(prev), Some(next)) => checkpoint_suffix_blocks_match(prev, next),
+            _ => false,
+        };
+        if duplicate && self.transcript.remove_unoriginated_at(index - 1).is_some() {
+            index - 1
+        } else {
+            index
+        }
+    }
+
     fn refresh_compaction_marker(&mut self) {
         let Some(checkpoint) = self.core.session.checkpoint.as_ref() else {
             return;
         };
+        let first_live_index = checkpoint.first_live_index;
         let block = Block::Compacted {
             summary: checkpoint.summary.clone(),
         };
-        if self
+        if let Some(index) = self
             .transcript
-            .has_history_origin_at_or_after(checkpoint.first_live_index)
+            .history()
+            .first_block_index_for_history_origin_at_or_after(first_live_index)
         {
-            self.transcript
-                .insert_checkpoint_marker(checkpoint.first_live_index, block);
+            let index = self.suppress_duplicate_carried_tail_before(index);
+            self.transcript.insert_checkpoint_marker_at(index, block);
         } else {
             let index = fallback_transcript_index_for_history_index(
                 &self.core.session.history,
-                checkpoint.first_live_index,
+                first_live_index,
             );
+            let index = self.suppress_duplicate_carried_tail_before(index);
             self.transcript.insert_checkpoint_marker_at(index, block);
         }
     }
@@ -1072,6 +1097,37 @@ mod checkpoint_tests {
             history.blocks.get(&history.order[2]),
             Some(Block::Compacted { summary }) if summary == "summary"
         ));
+    }
+
+    #[test]
+    fn checkpoint_projection_suppresses_duplicate_carried_tail_block() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut transcript = Transcript::new();
+        transcript.push(Block::Text {
+            content: "old".into(),
+        });
+        transcript.push(Block::Text {
+            content: "recent".into(),
+        });
+        transcript.push_with_origin(
+            Block::Text {
+                content: "recent".into(),
+            },
+            smelt_core::BlockOrigin::History(1),
+        );
+        app.app.transcript = crate::app::transcript::TranscriptView::from_transcript(transcript);
+
+        let index = app.app.suppress_duplicate_carried_tail_before(2);
+
+        let history = app.app.transcript.history();
+        assert_eq!(index, 1);
+        assert_eq!(history.order.len(), 2);
+        assert!(
+            matches!(history.blocks.get(&history.order[0]), Some(Block::Text { content }) if content == "old")
+        );
+        assert!(
+            matches!(history.blocks.get(&history.order[1]), Some(Block::Text { content }) if content == "recent")
+        );
     }
 
     #[test]

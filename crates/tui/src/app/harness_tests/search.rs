@@ -163,7 +163,7 @@ fn transcript_search_finds_compacted_divider_label() {
 }
 
 #[test]
-fn transcript_search_excludes_compacted_separator_chrome() {
+fn transcript_search_includes_selectable_compacted_separator_chrome() {
     let mut app = searchable_transcript_app();
     app.app
         .push_block(smelt_core::transcript_model::Block::Compacted {
@@ -189,7 +189,7 @@ fn transcript_search_excludes_compacted_separator_chrome() {
         .session
         .as_ref()
         .and_then(|session| session.current_range())
-        .is_none());
+        .is_some());
 }
 
 #[test]

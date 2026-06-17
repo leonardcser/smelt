@@ -55,7 +55,7 @@ layout.panel = nil
 ---@type fun(lines: any, opts: table?): smelt.layout.Node
 layout.runs = nil
 
---- Full-width horizontal separator. `opts.label` is centered in the row and accepts the same styled span shape as `smelt.layout.line`; generated line fill is chrome and is not searchable/selectable. `opts.dim` defaults to true.
+--- Full-width horizontal separator. `opts.label` is centered in the row and accepts the same styled span shape as `smelt.layout.line`; generated line fill is chrome and is not searchable/selectable unless `opts.selectable` is true. `opts.dim` defaults to true.
 ---@see smelt.layout.line
 ---@type fun(opts: table?): smelt.layout.Node
 layout.separator = nil

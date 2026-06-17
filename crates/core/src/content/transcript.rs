@@ -92,6 +92,10 @@ impl Transcript {
         self.history.insert_checkpoint_marker_at(block_index, block);
     }
 
+    pub fn remove_unoriginated_at(&mut self, block_idx: usize) -> Option<Block> {
+        self.history.remove_unoriginated_at(block_idx)
+    }
+
     pub fn push_tool_call(&mut self, block: Block, state: ToolState) {
         debug_assert!(matches!(block, Block::ToolCall { .. }));
         let call_id = match &block {

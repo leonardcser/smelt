@@ -755,9 +755,14 @@ fn render_separator_spec(
     let remaining = (width as usize).saturating_sub(label_width);
     let left = remaining / 2;
     let right = remaining - left;
-    out.print_gutter(&"─".repeat(left));
+    let fill_meta = SpanMeta {
+        selectable: spec.selectable,
+        copy_as: None,
+        action: None,
+    };
+    out.print_with_meta(&"─".repeat(left), fill_meta.clone());
     print_styled_spans(out, &spec.label, None);
-    out.print_gutter(&"─".repeat(right));
+    out.print_with_meta(&"─".repeat(right), fill_meta);
     if spec.dim {
         out.pop_style();
     }
