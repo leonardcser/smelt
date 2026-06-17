@@ -1,0 +1,25 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 472
+expression: frame.text()
+---
+* bash cargo test -p smelt-tui app::drafts
+
+* bash sleep 5  (timeout: 2m 0s)
+
+* bash git status --short
+
+* bash cat missing.txt
+  cat: missing.txt: No such file or directory
+
+
+
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+ ○ normal                                                       1:1 100%

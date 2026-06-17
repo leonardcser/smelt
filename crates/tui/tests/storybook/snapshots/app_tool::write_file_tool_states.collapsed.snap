@@ -1,0 +1,27 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 472
+expression: frame.text()
+---
+* write_file src/greet.rs
+  wrote 3 lines
+
+* write_file src/pending.rs
+  wrote 1 lines
+
+* write_file src/greet.rs
+  wrote 3 lines
+
+* write_file /root/forbidden.rs
+  permission denied: /root/forbidden.rs
+
+
+
+
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                             1:1 100%

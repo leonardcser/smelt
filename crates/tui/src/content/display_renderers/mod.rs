@@ -348,10 +348,9 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_text_blocks_gap() {
-        // Two consecutive text blocks - gap should be 1 (paragraph spacing).
-        let gap = gap_between(&text("a"), &text("b"));
-        assert_eq!(gap, 1, "Text→Text gap = 1");
+    fn adjacent_thinking_blocks_gap() {
+        let gap = gap_between(&thinking("titled"), &thinking("untitled"));
+        assert_eq!(gap, 1, "Thinking→Thinking gap = 1");
     }
 
     fn tool_start_row(blocks: &[Block], flushed_at: &[usize]) -> u16 {

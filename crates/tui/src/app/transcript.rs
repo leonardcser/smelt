@@ -383,7 +383,7 @@ fn transcript_block_role(block: &Block) -> &'static str {
         Block::ProcessStatus { .. } => "process_status",
         Block::Text { .. } => "assistant",
         Block::Thinking { .. } => "thinking",
-        Block::ToolCall { .. } => "tool",
+        Block::ToolDraft { .. } | Block::ToolCall { .. } => "tool",
         Block::CodeLine { .. } => "code",
         Block::Exec { .. } => "exec",
         Block::Compacted { .. } => "compacted",

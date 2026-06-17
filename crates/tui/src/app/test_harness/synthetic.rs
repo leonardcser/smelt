@@ -153,6 +153,30 @@ impl TestApp {
             });
     }
 
+    /// Push a `Block::Mode` into the transcript without restoring a fixture.
+    pub fn push_mode_block(&mut self, text: &str, icon: &str, hl_group: &str) {
+        self.app
+            .push_block(smelt_core::transcript_model::Block::Mode {
+                text: text.to_string(),
+                icon: icon.to_string(),
+                hl_group: hl_group.to_string(),
+            });
+    }
+
+    /// Push a `Block::CodeLine` into the transcript.
+    pub fn push_code_line(&mut self, content: &str, lang: &str) {
+        self.app
+            .push_block(smelt_core::transcript_model::Block::CodeLine {
+                content: content.to_string(),
+                lang: lang.to_string(),
+            });
+    }
+
+    /// Push an untyped process-status block into the transcript.
+    pub fn push_process_status_text(&mut self, text: &str) {
+        self.push_process_status(text, None);
+    }
+
     /// Open a `Block::Exec` shell-escape block in the transcript with
     /// `command` as the header. Pair with
     /// `SourceEvent::ExecOutput`/`ExecDone` to stream output and close

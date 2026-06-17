@@ -1,5 +1,6 @@
-//! Transcript block/tool view-state stories. These pin the Lua-owned
-//! collapsed/peek/expanded presentations independent of the grouping stories.
+//! Transcript block view-state stories. Tool and tool-group states live in
+//! their own story modules so block-level collapsed/peek/expanded behavior is
+//! easy to inspect without duplicate tool coverage.
 
 use protocol::EngineEvent;
 use serde_json::json;
@@ -11,30 +12,63 @@ const THINKING_UNTITLED: &str = "Read the transcript model first.\nCheck the Lua
 const COMPACTED_SUMMARY: &str =
     "Compacted 8 earlier turns: parser refactor, renderer wiring, three bug fixes.";
 
-app_story!(thinking_block_collapsed, |ctx| {
-    ctx.set_viewport(56, 10);
-    ctx.engine(EngineEvent::Thinking {
-        content: THINKING.into(),
-    });
-    ctx.engine(EngineEvent::Thinking {
-        content: THINKING_UNTITLED.into(),
-    });
-    ctx.run_lua("smelt.transcript.fold_kind('thinking', 'close')");
-    ctx.assert_snapshot();
+app_story!(user_message_block_states, |ctx| {
+    ctx.set_viewport(64, 14);
+    ctx.push_user_turn("Plan the parser refactor.\nKeep the API stable.\nAdd regression tests.");
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.run_lua("smelt.transcript.fold_kind('user', 'close')");
+    ctx.assert_snapshot_named("collapsed");
 });
 
-app_story!(thinking_block_peek, |ctx| {
-    ctx.set_viewport(56, 16);
-    ctx.engine(EngineEvent::Thinking {
-        content: THINKING.into(),
+app_story!(assistant_text_block_states, |ctx| {
+    ctx.set_viewport(64, 14);
+    ctx.engine(EngineEvent::Text {
+        content: "I'll inspect the parser, update the call sites, and then run the focused regression tests.".into(),
     });
-    ctx.engine(EngineEvent::Thinking {
-        content: THINKING_UNTITLED.into(),
-    });
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.run_lua("smelt.transcript.fold_kind('assistant', 'close')");
+    ctx.assert_snapshot_named("collapsed");
 });
 
-app_story!(thinking_block_expanded, |ctx| {
+app_story!(code_line_block_states, |ctx| {
+    ctx.set_viewport(64, 10);
+    ctx.push_code_line("fn parse(input: &str) -> Result<Ast>", "rust");
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.run_lua("smelt.transcript.fold_kind('code', 'close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(mode_block_states, |ctx| {
+    ctx.set_viewport(64, 10);
+    ctx.push_mode_block("Plan mode enabled", "◆ ", "SmeltAccent");
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.run_lua("smelt.transcript.fold_kind('mode', 'close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(process_status_block_states, |ctx| {
+    ctx.set_viewport(64, 10);
+    ctx.push_process_status_text("background process 4210 completed successfully");
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.run_lua("smelt.transcript.fold_kind('process_status', 'close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(exec_block_states, |ctx| {
+    ctx.set_viewport(64, 14);
+    ctx.exec_with_output("ls -1 src", "lib.rs\nmain.rs\nparser.rs", Some(0));
+    ctx.assert_snapshot_named("expanded");
+
+    ctx.run_lua("smelt.transcript.fold_kind('exec', 'close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(thinking_block_states, |ctx| {
     ctx.set_viewport(56, 18);
     ctx.engine(EngineEvent::Thinking {
         content: THINKING.into(),
@@ -42,21 +76,24 @@ app_story!(thinking_block_expanded, |ctx| {
     ctx.engine(EngineEvent::Thinking {
         content: THINKING_UNTITLED.into(),
     });
+
+    ctx.run_lua("smelt.transcript.fold_kind('thinking', 'close')");
+    ctx.assert_snapshot_named("collapsed");
+
+    ctx.run_lua("smelt.transcript.fold_kind('thinking', 'peek')");
+    ctx.assert_snapshot_named("peek");
+
     ctx.run_lua("smelt.transcript.fold_kind('thinking', 'open')");
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("expanded");
 });
 
-app_story!(compacted_block_collapsed, |ctx| {
+app_story!(compacted_block_states, |ctx| {
     ctx.set_viewport(60, 9);
     ctx.push_compacted(COMPACTED_SUMMARY);
-    ctx.assert_snapshot();
-});
+    ctx.assert_snapshot_named("collapsed");
 
-app_story!(compacted_block_expanded, |ctx| {
-    ctx.set_viewport(60, 9);
-    ctx.push_compacted(COMPACTED_SUMMARY);
     ctx.run_lua("smelt.transcript.fold_kind('compacted', 'open')");
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("expanded");
 });
 
 app_story!(bash_multiline_header_indent, |ctx| {
@@ -70,81 +107,6 @@ app_story!(bash_multiline_header_indent, |ctx| {
         "done",
         Some(28_000),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(tools_collapsed_summaries, |ctx| {
-    ctx.set_viewport(86, 18);
-    ctx.tool_call(
-        "load_skill",
-        &[("name", json!("customize"))],
-        "# customize\nChange themes and keymaps.\nRegister commands and tools.\n",
-        Some(2),
-    );
-    ctx.tool_call(
-        "write_file",
-        &[
-            ("file_path", json!("src/new.rs")),
-            ("content", json!("pub fn new() -> bool {\n    true\n}\n")),
-        ],
-        "ok",
-        Some(4),
-    );
-    ctx.tool_call(
-        "edit_file",
-        &[
-            ("file_path", json!("src/lib.rs")),
-            ("old_string", json!("pub fn old() {}\n")),
-            ("new_string", json!("pub fn new() {}\n")),
-        ],
-        "ok",
-        Some(5),
-    );
-    ctx.tool_call_with_metadata(
-        "edit_notebook",
-        &[
-            ("notebook_path", json!("analysis.ipynb")),
-            ("cell_number", json!(1)),
-            ("new_source", json!("print('done')\n")),
-        ],
-        "ok",
-        json!({
-            "edit_mode": "replace",
-            "path": "analysis.ipynb#cell1",
-            "old_source": "print('todo')\n",
-            "new_source": "print('done')\n",
-        }),
-        Some(6),
-    );
-    ctx.run_lua("smelt.transcript.fold_kind('tool', 'close')");
-    ctx.assert_snapshot();
-});
-
-app_story!(tools_collapsed_errors, |ctx| {
-    ctx.set_viewport(86, 18);
-    ctx.tool_call_error(
-        "read_file",
-        &[("file_path", json!("missing.rs"))],
-        "No such file or directory (os error 2)",
-        Some(1),
-    );
-    ctx.tool_call_error(
-        "edit_file",
-        &[
-            ("file_path", json!("src/lib.rs")),
-            ("old_string", json!("pub fn missing() {}\n")),
-            ("new_string", json!("pub fn present() {}\n")),
-        ],
-        "old_string not found in src/lib.rs",
-        Some(2),
-    );
-    ctx.tool_call_error(
-        "grep",
-        &[("pattern", json!("[unterminated")), ("path", json!("src"))],
-        "regex parse error:\n    [unterminated\n    ^\nerror: unclosed character class",
-        Some(3),
-    );
-    ctx.run_lua("smelt.transcript.fold_kind('tool', 'close')");
     ctx.assert_snapshot();
 });
 
@@ -165,52 +127,5 @@ app_story!(transcript_settings_view_and_limits, |ctx| {
         "error: test failed\nfailures:\n    app::tests::first\n    app::tests::second",
         Some(42),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(tools_expanded_bodies, |ctx| {
-    ctx.set_viewport(86, 30);
-    ctx.tool_call(
-        "load_skill",
-        &[("name", json!("customize"))],
-        "# customize\nChange themes and keymaps.\nRegister commands and tools.\n",
-        Some(2),
-    );
-    ctx.tool_call(
-        "write_file",
-        &[
-            ("file_path", json!("src/new.rs")),
-            ("content", json!("pub fn new() -> bool {\n    true\n}\n")),
-        ],
-        "ok",
-        Some(4),
-    );
-    ctx.tool_call(
-        "edit_file",
-        &[
-            ("file_path", json!("src/lib.rs")),
-            ("old_string", json!("pub fn old() {}\n")),
-            ("new_string", json!("pub fn new() {}\n")),
-        ],
-        "ok",
-        Some(5),
-    );
-    ctx.tool_call_with_metadata(
-        "edit_notebook",
-        &[
-            ("notebook_path", json!("analysis.ipynb")),
-            ("cell_number", json!(1)),
-            ("new_source", json!("print('done')\n")),
-        ],
-        "ok",
-        json!({
-            "edit_mode": "replace",
-            "path": "analysis.ipynb#cell1",
-            "old_source": "print('todo')\n",
-            "new_source": "print('done')\n",
-        }),
-        Some(6),
-    );
-    ctx.run_lua("smelt.transcript.fold_all('open')");
     ctx.assert_snapshot();
 });

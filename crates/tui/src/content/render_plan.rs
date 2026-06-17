@@ -679,6 +679,7 @@ fn block_field(history: &BlockHistory, block_index: usize, field: &str) -> Optio
         "kind" => Some(block_kind(block).to_string()),
         "name" => tool_name(block).map(str::to_string),
         "status" => match block {
+            Block::ToolDraft { .. } => Some("drafting".to_string()),
             Block::ToolCall { call_id, .. } => history
                 .tool_state(call_id)
                 .map(|state| state.status.label().to_string()),
@@ -691,7 +692,9 @@ fn block_field(history: &BlockHistory, block_index: usize, field: &str) -> Optio
             _ => None,
         },
         field => field.strip_prefix("args.").and_then(|arg| match block {
-            Block::ToolCall { args, .. } => args.get(arg).map(json_bucket_value),
+            Block::ToolDraft { args, .. } | Block::ToolCall { args, .. } => {
+                args.get(arg).map(json_bucket_value)
+            }
             _ => None,
         }),
     }
@@ -735,7 +738,7 @@ fn block_sidecar_hash(history: &BlockHistory, id: BlockId) -> u64 {
 
 fn tool_name(block: &Block) -> Option<&str> {
     match block {
-        Block::ToolCall { name, .. } => Some(name),
+        Block::ToolDraft { name, .. } | Block::ToolCall { name, .. } => Some(name),
         _ => None,
     }
 }

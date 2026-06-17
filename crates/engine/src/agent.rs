@@ -366,8 +366,8 @@ fn spawn_engine_ask(
             if visible_retries {
                 opts.on_retry = Some(&on_retry);
             }
-            let on_delta = |delta: provider::StreamDelta| {
-                if let provider::StreamDelta::Text(text) = delta {
+            let on_delta = |delta: provider::ProviderStreamEvent| {
+                if let provider::ProviderStreamEvent::TextDelta(text) = delta {
                     let _ = tx.send(EngineEvent::EngineAskDelta {
                         id,
                         delta: text.to_string(),
@@ -2184,30 +2184,58 @@ impl<'a> Turn<'a> {
                     attempt,
                 });
             };
-            let on_delta = |delta: provider::StreamDelta| match delta {
-                provider::StreamDelta::Text(text) => {
+            let on_delta = |delta: provider::ProviderStreamEvent| match delta {
+                provider::ProviderStreamEvent::TextDelta(text) => {
                     partial_text.lock().unwrap().push_str(text);
                     let _ = self.event_tx.send(EngineEvent::TextDelta {
                         delta: text.to_string(),
                     });
                 }
-                provider::StreamDelta::Thinking(text) => {
+                provider::ProviderStreamEvent::ThinkingDelta(text) => {
                     partial_reasoning.lock().unwrap().push_str(text);
                     let _ = self.event_tx.send(EngineEvent::ThinkingDelta {
                         delta: text.to_string(),
                     });
                 }
-                provider::StreamDelta::ToolArgs {
-                    call_id,
-                    tool_name,
-                    delta,
-                } => {
-                    let _ = self.event_tx.send(EngineEvent::ToolArgsDelta {
-                        call_id: call_id.to_string(),
-                        tool_name: tool_name.to_string(),
-                        delta: delta.to_string(),
-                    });
-                }
+                provider::ProviderStreamEvent::ToolCall(tool_event) => match tool_event {
+                    provider::ToolCallStreamEvent::Started {
+                        stream_id,
+                        call_id,
+                        tool_name,
+                    } => {
+                        let _ = self.event_tx.send(EngineEvent::ToolCallDraftStarted {
+                            stream_id: stream_id.to_string(),
+                            call_id: call_id.map(str::to_string),
+                            tool_name: tool_name.map(str::to_string),
+                        });
+                    }
+                    provider::ToolCallStreamEvent::ArgsDelta {
+                        stream_id,
+                        call_id,
+                        tool_name,
+                        delta,
+                    } => {
+                        let _ = self.event_tx.send(EngineEvent::ToolCallDraftDelta {
+                            stream_id: stream_id.to_string(),
+                            call_id: call_id.map(str::to_string),
+                            tool_name: tool_name.map(str::to_string),
+                            delta: delta.to_string(),
+                        });
+                    }
+                    provider::ToolCallStreamEvent::Finished {
+                        stream_id,
+                        call_id,
+                        tool_name,
+                        arguments,
+                    } => {
+                        let _ = self.event_tx.send(EngineEvent::ToolCallDraftFinished {
+                            stream_id: stream_id.to_string(),
+                            call_id: call_id.to_string(),
+                            tool_name: tool_name.to_string(),
+                            arguments: arguments.to_string(),
+                        });
+                    }
+                },
             };
             // Resolve pricing once so the request-log sidecar can record an
             // estimated cost alongside usage on success.

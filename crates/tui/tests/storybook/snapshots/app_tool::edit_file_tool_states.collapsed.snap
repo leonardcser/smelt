@@ -1,0 +1,35 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 472
+expression: frame.text()
+---
+* edit_file src/lib.rs
+  3 old lines, 3 new lines
+
+* edit_file src/pending.rs
+  1 old line, 1 new line
+
+* edit_file src/lib.rs
+  3 old lines, 3 new lines
+
+* edit_file runtime/lua/smelt/plugins/compact.lua
+  1 old line, 1 new line
+
+* edit_file src/lib.rs
+  old_string not found in src/lib.rs
+
+
+
+
+
+
+
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                   1:1 100%

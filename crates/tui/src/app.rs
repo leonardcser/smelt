@@ -3,6 +3,7 @@ pub(crate) mod cmdline;
 pub(crate) mod cmdline_edit;
 pub(crate) mod cmdline_history;
 pub(crate) mod content_keys;
+pub(crate) mod drafts;
 pub(crate) mod engine_events;
 pub(crate) mod events;
 #[cfg(test)]
@@ -53,6 +54,7 @@ pub struct TuiApp {
     pub lua: crate::lua::LuaRuntime,
     pub(crate) transcript: crate::app::transcript::TranscriptView,
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
+    pub(crate) draft_tools: crate::app::drafts::ToolDraftController,
     pub(crate) resume_preview_cache: crate::app::transcript::ResumePreviewCache,
     pub(crate) input_history: History,
     pub(crate) input: PromptState,
@@ -1058,6 +1060,7 @@ impl TuiApp {
             lua,
             transcript,
             parser: smelt_core::content::stream_parser::StreamParser::new(),
+            draft_tools: crate::app::drafts::ToolDraftController::default(),
             resume_preview_cache,
             input_history: History::load(),
             input,

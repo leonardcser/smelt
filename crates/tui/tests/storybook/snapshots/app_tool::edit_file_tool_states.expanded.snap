@@ -1,0 +1,35 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 472
+expression: frame.text()
+---
+* edit_file src/lib.rs
+   1 - fn add(a: i32, b: i32) -> i32 {
+   2 -     a + b
+   1 + fn add(a: i64, b: i64) -> i64 {
+   2 +     a.checked_add(b).expect("overflow")
+
+* edit_file src/pending.rs
+   1 - old
+   1 + new
+
+* edit_file src/lib.rs
+   1 - fn add(a: i32, b: i32) -> i32 {
+   2 -     a + b
+   1 + fn add(a: i64, b: i64) -> i64 {
+   2 +     a.checked_add(b).expect("overflow")
+
+* edit_file runtime/lua/smelt/plugins/compact.lua
+   2 - Use them as evidence for task priority and return instructions.
+   2 + Use them as evidence for task priority and return/resume instructions.
+
+* edit_file src/lib.rs
+  old_string not found in src/lib.rs
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                   1:1 100%

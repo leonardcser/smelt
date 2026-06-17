@@ -2161,6 +2161,29 @@ fn transcript_block_to_lua_table(
             t.set("content", content.as_str())?;
             t.set("lang", lang.as_str())?;
         }
+        Block::ToolDraft {
+            stream_id,
+            call_id,
+            name,
+            summary,
+            args,
+            raw_arguments,
+            finished,
+        } => {
+            t.set("stream_id", stream_id.as_str())?;
+            if let Some(call_id) = call_id {
+                t.set("call_id", call_id.as_str())?;
+            }
+            t.set("name", name.as_str())?;
+            t.set("summary", crate::lua::serde_to_lua(lua, summary)?)?;
+            t.set("summary_text", summary.as_plain_text())?;
+            t.set("args", args_to_lua_table(lua, args)?)?;
+            t.set("raw_arguments", raw_arguments.as_str())?;
+            t.set("status", "drafting")?;
+            t.set("status_hl", "SmeltToolPending")?;
+            t.set("draft", true)?;
+            t.set("draft_finished", *finished)?;
+        }
         Block::ToolCall {
             call_id,
             name,
@@ -2427,6 +2450,16 @@ fn fallback_transcript_layout(
         }
         Block::Text { content } | Block::CodeLine { content, .. } => {
             layout_text(content.clone(), None, false)
+        }
+        Block::ToolDraft { name, summary, .. } => {
+            let mut header = format!("* {name}");
+            let summary_text = summary.as_plain_text();
+            if !summary_text.is_empty() {
+                header.push(' ');
+                header.push_str(&summary_text);
+            }
+            header.push_str(" (drafting)");
+            layout_text(header, Some("SmeltToolPending"), false)
         }
         Block::ToolCall {
             name,

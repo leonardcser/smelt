@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+fn parse(input: &str) -> Result<Ast>
+
+
+
+
+  tip ctrl+enter / ctrl+q, steer the current response without…
+────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────
+ ○ normal                                               1:1 100%

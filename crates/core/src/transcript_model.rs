@@ -150,6 +150,16 @@ pub enum Block {
         content: String,
         lang: String,
     },
+    ToolDraft {
+        stream_id: String,
+        call_id: Option<String>,
+        name: String,
+        /// Styled best-effort summary produced from partial arguments.
+        summary: protocol::StyledLines,
+        args: HashMap<String, serde_json::Value>,
+        raw_arguments: String,
+        finished: bool,
+    },
     ToolCall {
         call_id: String,
         name: String,
@@ -177,7 +187,7 @@ impl Block {
             Block::Thinking { .. } => "thinking",
             Block::Text { .. } => "assistant",
             Block::CodeLine { .. } => "code",
-            Block::ToolCall { .. } => "tool",
+            Block::ToolDraft { .. } | Block::ToolCall { .. } => "tool",
             Block::Exec { .. } => "exec",
             Block::Compacted { .. } => "compacted",
         }
@@ -211,7 +221,7 @@ impl Block {
             Block::Compacted { summary } => Some(summary.clone()),
             Block::CodeLine { content, .. } => Some(content.clone()),
             Block::Exec { command, output } => Some(format!("$ {command}\n{output}")),
-            Block::ToolCall { .. } => None,
+            Block::ToolDraft { .. } | Block::ToolCall { .. } => None,
         }
     }
 }
@@ -615,6 +625,33 @@ impl BlockHistory {
         self.bump_generation();
     }
 
+    pub(crate) fn rewrite_with_tool_state(
+        &mut self,
+        id: BlockId,
+        block: Block,
+        call_id: String,
+        state: ToolState,
+    ) {
+        self.rewrite(id, block);
+        let hash = state.display_hash();
+        self.tool_states.insert(call_id.clone(), state);
+        self.tool_display_hashes.insert(call_id, hash);
+        self.bump_generation();
+    }
+
+    pub(crate) fn remove_block(&mut self, id: BlockId) {
+        if !self.blocks.contains_key(&id) {
+            return;
+        }
+        self.order.retain(|candidate| *candidate != id);
+        self.blocks.remove(&id);
+        self.content_hashes.remove(&id);
+        self.statuses.remove(&id);
+        self.origins.remove(&id);
+        self.bump_generation();
+        self.gc_tool_states();
+    }
+
     pub fn clear(&mut self) {
         self.order.clear();
         self.blocks.clear();
@@ -693,19 +730,12 @@ impl BlockHistory {
 }
 
 /// Blank row gap before `below` given the preceding block. Most block
-/// transitions are separated by one blank row. Adjacent code lines and
-/// consecutive thinking blocks collapse, and markdown headings sit directly on
-/// top of their following content.
+/// transitions are separated by one blank row. Adjacent code lines collapse,
+/// and markdown headings sit directly on top of their following content.
 pub fn gap_between(above: &Block, below: &Block) -> u16 {
     if matches!(
         (above, below),
         (Block::CodeLine { .. }, Block::CodeLine { .. })
-    ) {
-        return 0;
-    }
-    if matches!(
-        (above, below),
-        (Block::Thinking { .. }, Block::Thinking { .. })
     ) {
         return 0;
     }

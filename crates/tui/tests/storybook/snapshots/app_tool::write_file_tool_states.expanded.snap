@@ -1,0 +1,27 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 472
+expression: frame.text()
+---
+* write_file src/greet.rs
+   1   pub fn greet(name: &str) -> String {
+   2       format!("hello, {name}")
+   3   }
+
+* write_file src/pending.rs
+   1   pending
+
+* write_file src/greet.rs
+   1   pub fn greet(name: &str) -> String {
+   2       format!("hello, {name}")
+   3   }
+
+* write_file /root/forbidden.rs
+  permission denied: /root/forbidden.rs
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                             1:1 100%

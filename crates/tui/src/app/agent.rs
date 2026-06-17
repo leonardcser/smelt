@@ -421,6 +421,7 @@ impl TuiApp {
         // sentinel that lingers past `agent = None`).
         self.flush_streaming_thinking();
         self.flush_streaming_text();
+        self.clear_tool_drafts();
         self.pending_history_appends.clear();
         {
             self.working.finish(TurnOutcome::Interrupted);
@@ -474,6 +475,7 @@ impl TuiApp {
         self.pump_lua();
         self.flush_streaming_thinking();
         self.flush_streaming_text();
+        self.clear_tool_drafts();
         self.finish_transcript_turn();
 
         let (meta, start_queued) = match end {

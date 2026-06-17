@@ -8,6 +8,7 @@ M.__tool_collapsed_details = M.__tool_collapsed_details or {}
 local layout = smelt.layout
 
 local status_hl = {
+  drafting = "SmeltToolPending",
   pending = "SmeltToolPending",
   ok = "SmeltSuccess",
   err = "ErrorMsg",

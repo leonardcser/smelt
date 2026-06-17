@@ -146,22 +146,30 @@ impl TuiApp {
                 );
                 SessionControl::Continue
             }
-            EngineEvent::ToolArgsDelta {
+            EngineEvent::ToolCallDraftStarted {
+                stream_id,
+                call_id,
+                tool_name,
+            } => {
+                self.handle_tool_draft_started(stream_id, call_id, tool_name);
+                SessionControl::Continue
+            }
+            EngineEvent::ToolCallDraftDelta {
+                stream_id,
                 call_id,
                 tool_name,
                 delta,
             } => {
-                let bytes = delta.len();
-                self.core.cells.set_dyn(
-                    "stream_delta",
-                    std::rc::Rc::new(smelt_core::cells::StreamDelta {
-                        kind: "tool_args".to_string(),
-                        bytes,
-                        text: delta,
-                        call_id: Some(call_id),
-                        tool_name: Some(tool_name),
-                    }),
-                );
+                self.handle_tool_draft_delta(stream_id, call_id, tool_name, delta);
+                SessionControl::Continue
+            }
+            EngineEvent::ToolCallDraftFinished {
+                stream_id,
+                call_id,
+                tool_name,
+                arguments,
+            } => {
+                self.handle_tool_draft_finished(stream_id, call_id, tool_name, arguments);
                 SessionControl::Continue
             }
             EngineEvent::Text { content } => {
@@ -185,7 +193,14 @@ impl TuiApp {
                 self.flush_streaming_text();
                 let summary = crate::app::history::ToolSummaryResolver::new(&self.lua)
                     .resolve(&tool_name, &args);
-                self.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
+                if !self.promote_tool_draft(
+                    call_id.clone(),
+                    tool_name.clone(),
+                    summary.clone(),
+                    args.clone(),
+                ) {
+                    self.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
+                }
                 self.core.cells.set_dyn(
                     "tool_start",
                     std::rc::Rc::new(smelt_core::cells::ToolStart {
@@ -262,6 +277,7 @@ impl TuiApp {
                 // the next attempt's stream.
                 self.flush_streaming_thinking();
                 self.flush_streaming_text();
+                self.clear_tool_drafts();
                 self.working.begin(TurnPhase::Retrying {
                     delay: Duration::from_millis(delay_ms),
                     attempt,

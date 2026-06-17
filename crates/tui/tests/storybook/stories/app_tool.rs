@@ -1,141 +1,94 @@
-//! Per-tool transcript rendering. Each story drives the real
-//! `ToolStarted` → `ToolFinished` pipeline for a tool registered
-//! under `runtime/lua/smelt/tools/`. The root transcript renderer
-//! asks the bundled Lua defaults for the full tool block, including
-//! any tool-adjacent structured body renderer (diff, file_view, "N
-//! lines", etc.), so the snapshot reflects the production block
-//! exactly as users see it. The `ctx.tool_call*` helpers hide the
-//! args/call-id/outcome boilerplate so each story stays focused on
-//! the inputs that drive the render.
+//! Per-tool transcript rendering. Each story groups one block type's
+//! lifecycle states together: drafting, pending, expanded success,
+//! expanded error, then the same transcript collapsed in a second step.
 
 use serde_json::json;
 
 use crate::app_story;
 
-// ── Generic tool call shape ───────────────────────────────────────
-
-app_story!(tool_call_then_result_pair, |ctx| {
-    ctx.set_viewport(60, 14);
+app_story!(bash_tool_states, |ctx| {
+    ctx.set_viewport(72, 20);
+    ctx.tool_draft(
+        "bash",
+        r#"{"command":"cargo test -p smelt-tui app::drafts","description":"Run draft preview tests"}"#,
+    );
+    ctx.tool_started("bash", &[("command", json!("sleep 5"))]);
     ctx.tool_call(
-        "read_file",
-        &[("path", json!("src/main.rs"))],
-        "fn main() {}",
-        Some(12),
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(present_plan_tool_pending_title_only, |ctx| {
-    ctx.set_viewport(80, 10);
-    ctx.tool_started(
-        "present_plan",
+        "bash",
         &[
-            ("title", json!("Parser refactor")),
-            ("slug", json!("parser-refactor")),
-            (
-                "plan",
-                json!("# Goal\nRefactor parser state.\n\n# Verification\nRun parser tests."),
-            ),
+            ("command", json!("git status --short")),
+            ("description", json!("Check working tree status")),
         ],
+        " M src/lib.rs\n?? src/new.rs",
+        Some(42),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(present_plan_tool_block, |ctx| {
-    // The built-in `plan_mode` plugin renders accepted `present_plan` results as
-    // the saved `plan.md` file, matching the line-numbered `write_file` chrome.
-    ctx.set_viewport(80, 20);
-    ctx.tool_call(
-        "present_plan",
+    ctx.tool_call_error(
+        "bash",
         &[
-            ("title", json!("Parser refactor")),
-            ("slug", json!("parser-refactor")),
-            (
-                "plan",
-                json!("# Goal\nRefactor parser state.\n\n```rust\nfn parse(input: &str) -> Ast {\n    todo!()\n}\n```\n\n# Verification\nRun parser tests."),
-            ),
+            ("command", json!("cat missing.txt")),
+            ("description", json!("Read a missing file")),
         ],
-        "Wrote plan to /tmp/smelt/sessions/sess/plans/20260101-000000-parser-refactor/plan.md",
-        Some(9),
+        "cat: missing.txt: No such file or directory",
+        Some(7),
     );
-    ctx.assert_snapshot();
-});
-
-// ── managed worktree / cwd tools ─────────────────────────────────
-
-app_story!(enter_worktree_tool_compacted, |ctx| {
-    ctx.set_viewport(86, 10);
-    ctx.tool_call_with_metadata(
-        "enter_worktree",
-        &[("name", json!("Native worktree support")), ("base", json!("main"))],
-        "entered managed worktree native-worktree-support\npath: /repo/.worktrees/native-worktree-support\nbranch: native-worktree-support\nbase: main",
-        json!({
-            "name": "native-worktree-support",
-            "path": "/repo/.worktrees/native-worktree-support",
-            "branch": "native-worktree-support",
-            "base": "main",
-            "created": true,
-        }),
-        Some(1280),
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(enter_worktree_tool_expanded, |ctx| {
-    ctx.set_viewport(86, 12);
-    ctx.tool_call_with_metadata(
-        "enter_worktree",
-        &[("name", json!("Native worktree support")), ("base", json!("main"))],
-        "entered managed worktree native-worktree-support\npath: /repo/.worktrees/native-worktree-support\nbranch: native-worktree-support\nbase: main",
-        json!({
-            "name": "native-worktree-support",
-            "path": "/repo/.worktrees/native-worktree-support",
-            "branch": "native-worktree-support",
-            "base": "main",
-            "created": true,
-        }),
-        Some(1280),
-    );
-    ctx.run_lua("smelt.transcript.fold_all('open')");
-    ctx.assert_snapshot();
-});
-
-app_story!(switch_cwd_tool_compacted, |ctx| {
-    ctx.set_viewport(86, 10);
-    ctx.tool_call_with_metadata(
-        "switch_cwd",
-        &[("path", json!("/repo/.worktrees/native-worktree-support"))],
-        "cwd: /repo/.worktrees/native-worktree-support",
-        json!({ "cwd": "/repo/.worktrees/native-worktree-support" }),
-        Some(85),
-    );
+    ctx.assert_snapshot_named("expanded");
     ctx.run_lua("smelt.transcript.fold_all('close')");
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("collapsed");
 });
 
-app_story!(switch_cwd_tool_expanded, |ctx| {
-    ctx.set_viewport(86, 10);
-    ctx.tool_call_with_metadata(
-        "switch_cwd",
-        &[("path", json!("/repo/.worktrees/native-worktree-support"))],
-        "cwd: /repo/.worktrees/native-worktree-support",
-        json!({ "cwd": "/repo/.worktrees/native-worktree-support" }),
-        Some(85),
+app_story!(write_file_tool_states, |ctx| {
+    ctx.set_viewport(78, 22);
+    ctx.tool_draft(
+        "write_file",
+        r#"{"file_path":"src/greet.rs","content":"pub fn greet(name: &str) -> String {\n    format!(\"hello, {name}\")\n}"}"#,
     );
-    ctx.run_lua("smelt.transcript.fold_all('open')");
-    ctx.assert_snapshot();
+    ctx.tool_started(
+        "write_file",
+        &[
+            ("file_path", json!("src/pending.rs")),
+            ("content", json!("pending\n")),
+        ],
+    );
+    ctx.tool_call(
+        "write_file",
+        &[
+            ("file_path", json!("src/greet.rs")),
+            (
+                "content",
+                json!("pub fn greet(name: &str) -> String {\n    format!(\"hello, {name}\")\n}\n"),
+            ),
+        ],
+        "ok",
+        Some(5),
+    );
+    ctx.tool_call_error(
+        "write_file",
+        &[
+            ("file_path", json!("/root/forbidden.rs")),
+            ("content", json!("ignored\n")),
+        ],
+        "permission denied: /root/forbidden.rs",
+        Some(1),
+    );
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
 });
 
-app_story!(edit_file_tool_block_with_diff_gutter, |ctx| {
-    // The dialog stories cover the gutterless preview body. In the
-    // *transcript* the same `edit_file` tool renders with the
-    // tool-block gutter chrome (2-cell indent, attached header).
-    // Driving the real `ToolStarted` + `ToolFinished` events makes
-    // the worker run the tool's `preview(args)` Lua callback, which
-    // returns a `Diff` leaf - the snapshot then captures the buffer-
-    // backed inline diff with line numbers, +/- markers, and
-    // syntax-highlighted content all sharing one render pass.
-    ctx.set_viewport(80, 16);
+app_story!(edit_file_tool_states, |ctx| {
+    ctx.set_viewport(84, 30);
+    ctx.tool_draft(
+        "edit_file",
+        r#"{"file_path":"src/lib.rs","old_string":"fn add(a: i32, b: i32) -> i32 {\n    a + b\n}","new_string":"fn add(a: i64, b: i64) -> i64 {\n    a.checked_add(b).expect(\"overflow\")\n}"}"#,
+    );
+    ctx.tool_started(
+        "edit_file",
+        &[
+            ("file_path", json!("src/pending.rs")),
+            ("old_string", json!("old")),
+            ("new_string", json!("new")),
+        ],
+    );
     ctx.tool_call(
         "edit_file",
         &[
@@ -154,23 +107,12 @@ app_story!(edit_file_tool_block_with_diff_gutter, |ctx| {
         "ok",
         Some(7),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(edit_file_tool_block_with_metadata_summary, |ctx| {
-    ctx.set_viewport(80, 10);
     ctx.tool_call_with_metadata(
         "edit_file",
         &[
             ("file_path", json!("runtime/lua/smelt/plugins/compact.lua")),
-            (
-                "old_string",
-                json!("Use them as evidence for task priority and return instructions."),
-            ),
-            (
-                "new_string",
-                json!("Use them as evidence for task priority and return/resume instructions."),
-            ),
+            ("old_string", json!("Use them as evidence for task priority and return instructions.")),
+            ("new_string", json!("Use them as evidence for task priority and return/resume instructions.")),
         ],
         "edited runtime/lua/smelt/plugins/compact.lua",
         json!({
@@ -180,14 +122,6 @@ app_story!(edit_file_tool_block_with_metadata_summary, |ctx| {
         }),
         Some(5),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(edit_file_tool_block_error, |ctx| {
-    // `edit_file.render` falls back to `layout.text(content, is_error)`
-    // when the result is an error - same fallback every tool with a
-    // structured render uses. Pins the error chrome.
-    ctx.set_viewport(70, 10);
     ctx.tool_call_error(
         "edit_file",
         &[
@@ -198,114 +132,78 @@ app_story!(edit_file_tool_block_error, |ctx| {
         "old_string not found in src/lib.rs",
         Some(4),
     );
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
 });
 
-// ── read_file ─────────────────────────────────────────────────────
+app_story!(edit_notebook_tool_states, |ctx| {
+    ctx.set_viewport(84, 22);
+    ctx.tool_draft(
+        "edit_notebook",
+        r#"{"notebook_path":"analysis.ipynb","cell_number":0,"new_source":"import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n"}"#,
+    );
+    ctx.tool_call_with_metadata(
+        "edit_notebook",
+        &[
+            ("notebook_path", json!("analysis.ipynb")),
+            ("cell_number", json!(0)),
+            (
+                "new_source",
+                json!("import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n"),
+            ),
+        ],
+        "ok",
+        json!({
+            "edit_mode": "replace",
+            "path": "analysis.ipynb#cell0",
+            "old_source": "import pandas\ndf = pandas.read_csv('data.csv')\n",
+            "new_source": "import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n",
+        }),
+        Some(6),
+    );
+    ctx.tool_call_with_metadata(
+        "edit_notebook",
+        &[
+            ("notebook_path", json!("analysis.ipynb")),
+            ("edit_mode", json!("insert")),
+            ("new_source", json!("print(\"new cell\")\n")),
+        ],
+        "ok",
+        json!({
+            "edit_mode": "insert",
+            "path": "analysis.ipynb#cell1",
+            "new_source": "print(\"new cell\")\n",
+        }),
+        Some(5),
+    );
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+});
 
-app_story!(read_file_tool_block, |ctx| {
-    ctx.set_viewport(60, 10);
+app_story!(read_file_tool_states, |ctx| {
+    ctx.set_viewport(68, 16);
+    ctx.tool_started("read_file", &[("file_path", json!("pending.rs"))]);
     ctx.tool_call(
         "read_file",
         &[("file_path", json!("src/main.rs"))],
         "fn main() {\n    println!(\"hi\");\n}\n",
         Some(3),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(read_file_tool_block_error, |ctx| {
-    // `read_file.render` falls back to `layout.text(content, is_error)`
-    // when the result carries `is_error`. Pins the "file not found"
-    // chrome users actually see.
-    ctx.set_viewport(60, 8);
     ctx.tool_call_error(
         "read_file",
         &[("file_path", json!("missing.rs"))],
         "could not read file: missing.rs",
         Some(2),
     );
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
 });
 
-// ── write_file ────────────────────────────────────────────────────
-
-app_story!(write_file_tool_block, |ctx| {
-    // `write_file.render` returns a `layout.file_view`, so the transcript
-    // body shows the freshly-written contents with line numbers and
-    // syntax highlighting (same chrome as the dialog preview).
-    ctx.set_viewport(70, 14);
-    ctx.tool_call(
-        "write_file",
-        &[
-            ("file_path", json!("src/greet.rs")),
-            (
-                "content",
-                json!("pub fn greet(name: &str) -> String {\n    format!(\"hello, {name}\")\n}\n"),
-            ),
-        ],
-        "ok",
-        Some(5),
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(write_file_tool_block_error, |ctx| {
-    // Error path: `write_file.render` skips `file_view` and renders the
-    // error message via `layout.text(content, {is_error=true})`.
-    ctx.set_viewport(60, 8);
-    ctx.tool_call_error(
-        "write_file",
-        &[
-            ("file_path", json!("/root/forbidden.rs")),
-            ("content", json!("ignored\n")),
-        ],
-        "permission denied: /root/forbidden.rs",
-        Some(1),
-    );
-    ctx.assert_snapshot();
-});
-
-// ── bash ──────────────────────────────────────────────────────────
-
-app_story!(bash_tool_block_with_output, |ctx| {
-    // `bash.render` wraps the captured output in a vbox; success path
-    // (no `is_error`) means no error chrome, just the plain text.
-    ctx.set_viewport(60, 12);
-    ctx.tool_call(
-        "bash",
-        &[
-            ("command", json!("git status --short")),
-            ("description", json!("Check working tree status")),
-        ],
-        " M src/lib.rs\n?? src/new.rs",
-        Some(42),
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(bash_tool_block_error_output, |ctx| {
-    // Error path: `is_error = true` flips `layout.text` into the error
-    // style so the body renders in the error fg group.
-    ctx.set_viewport(60, 10);
-    ctx.tool_call_error(
-        "bash",
-        &[
-            ("command", json!("cat missing.txt")),
-            ("description", json!("Read a missing file")),
-        ],
-        "cat: missing.txt: No such file or directory",
-        Some(7),
-    );
-    ctx.assert_snapshot();
-});
-
-// ── glob ──────────────────────────────────────────────────────────
-
-app_story!(glob_tool_block, |ctx| {
-    // `glob.render` returns "N files" - the header carries the pattern
-    // via `summary(args)` (`pattern` + optional `path`).
-    ctx.set_viewport(60, 10);
+app_story!(glob_tool_states, |ctx| {
+    ctx.set_viewport(72, 18);
     ctx.tool_call_with_metadata(
         "glob",
         &[
@@ -316,11 +214,6 @@ app_story!(glob_tool_block, |ctx| {
         json!({ "display_count": { "value": 3, "unit": "file" } }),
         Some(4),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(glob_tool_block_no_matches, |ctx| {
-    ctx.set_viewport(60, 8);
     ctx.tool_call_with_metadata(
         "glob",
         &[("pattern", json!("missing/**/*.rs"))],
@@ -328,29 +221,19 @@ app_story!(glob_tool_block_no_matches, |ctx| {
         json!({ "display_count": { "value": 0, "unit": "file" } }),
         Some(2),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(glob_tool_block_error, |ctx| {
-    // Error path: skip the "N files" summary and render the error
-    // message via the shared `is_error` guard.
-    ctx.set_viewport(60, 8);
     ctx.tool_call_error(
         "glob",
         &[("pattern", json!("[invalid"))],
         "invalid glob pattern: missing ]",
         Some(1),
     );
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
 });
 
-// ── grep ──────────────────────────────────────────────────────────
-
-app_story!(grep_tool_block, |ctx| {
-    // `grep.render` returns a mode-aware count - the header carries the
-    // pattern + path via `summary(args)`. `files_with_matches` reports
-    // matched files via `output.metadata.display_count`.
-    ctx.set_viewport(70, 10);
+app_story!(grep_tool_states, |ctx| {
+    ctx.set_viewport(76, 18);
     ctx.tool_call_with_metadata(
         "grep",
         &[
@@ -362,11 +245,6 @@ app_story!(grep_tool_block, |ctx| {
         json!({ "display_count": { "value": 2, "unit": "file" } }),
         Some(11),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(grep_tool_block_no_matches, |ctx| {
-    ctx.set_viewport(70, 8);
     ctx.tool_call_with_metadata(
         "grep",
         &[
@@ -378,12 +256,6 @@ app_story!(grep_tool_block_no_matches, |ctx| {
         json!({ "display_count": { "value": 0, "unit": "file" } }),
         Some(4),
     );
-    ctx.assert_snapshot();
-});
-
-app_story!(grep_tool_block_error, |ctx| {
-    // Error path: ripgrep returns non-zero with a stderr message.
-    ctx.set_viewport(70, 8);
     ctx.tool_call_error(
         "grep",
         &[
@@ -393,10 +265,97 @@ app_story!(grep_tool_block_error, |ctx| {
         "regex parse error: unterminated group",
         Some(3),
     );
-    ctx.assert_snapshot();
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
 });
 
-// ── Wrapping regressions ───────────────────────────────────────────
+app_story!(workspace_tool_states, |ctx| {
+    ctx.set_viewport(90, 18);
+    ctx.tool_call_with_metadata(
+        "enter_worktree",
+        &[("name", json!("Native worktree support")), ("base", json!("main"))],
+        "entered managed worktree native-worktree-support\npath: /repo/.worktrees/native-worktree-support\nbranch: native-worktree-support\nbase: main",
+        json!({
+            "name": "native-worktree-support",
+            "path": "/repo/.worktrees/native-worktree-support",
+            "branch": "native-worktree-support",
+            "base": "main",
+            "created": true,
+        }),
+        Some(1280),
+    );
+    ctx.tool_call_with_metadata(
+        "switch_cwd",
+        &[("path", json!("/repo/.worktrees/native-worktree-support"))],
+        "cwd: /repo/.worktrees/native-worktree-support",
+        json!({ "cwd": "/repo/.worktrees/native-worktree-support" }),
+        Some(85),
+    );
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(present_plan_tool_states, |ctx| {
+    ctx.set_viewport(84, 22);
+    ctx.tool_started(
+        "present_plan",
+        &[
+            ("title", json!("Parser refactor")),
+            ("slug", json!("parser-refactor")),
+            (
+                "plan",
+                json!("# Goal\nRefactor parser state.\n\n# Verification\nRun parser tests."),
+            ),
+        ],
+    );
+    ctx.tool_call(
+        "present_plan",
+        &[
+            ("title", json!("Parser refactor")),
+            ("slug", json!("parser-refactor")),
+            (
+                "plan",
+                json!("# Goal\nRefactor parser state.\n\n```rust\nfn parse(input: &str) -> Ast {\n    todo!()\n}\n```\n\n# Verification\nRun parser tests."),
+            ),
+        ],
+        "Wrote plan to /tmp/smelt/sessions/sess/plans/20260101-000000-parser-refactor/plan.md",
+        Some(9),
+    );
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(web_tool_states, |ctx| {
+    ctx.set_viewport(76, 18);
+    ctx.tool_call(
+        "web_fetch",
+        &[
+            ("url", json!("https://example.com/release")),
+            ("prompt", json!("Summarise the release notes")),
+        ],
+        "0.6 ships streaming markdown and removes the legacy renderer.",
+        Some(820),
+    );
+    ctx.tool_call(
+        "web_search",
+        &[("query", json!("rust unicode width crate"))],
+        "1. unicode-width - crates.io\n2. unicode-segmentation - crates.io",
+        Some(330),
+    );
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+});
+
+app_story!(parallel_pending_tool_states, |ctx| {
+    ctx.set_viewport(64, 12);
+    ctx.tool_started("read_file", &[("file_path", json!("a.rs"))]);
+    ctx.tool_started("read_file", &[("file_path", json!("b.rs"))]);
+    ctx.assert_snapshot();
+});
 
 app_story!(tool_header_wrapping_for_bash_glob_and_grep, |ctx| {
     ctx.set_viewport(62, 18);
@@ -456,111 +415,5 @@ app_story!(mcp_tool_json_args_wrap_in_header, |ctx| {
         "[]",
         Some(6000),
     );
-    ctx.assert_snapshot();
-});
-
-// ── notebook_edit ─────────────────────────────────────────────────
-
-app_story!(notebook_edit_tool_block, |ctx| {
-    // `notebook_edit.render` looks at `output.metadata` to decide
-    // between `layout.diff` (replace) and `layout.file_view` (insert).
-    // This story drives the replace path so the transcript shows the
-    // same buffer-backed diff chrome as `edit_file`, but rooted at a
-    // cell rather than a file.
-    ctx.set_viewport(80, 16);
-    ctx.tool_call_with_metadata(
-        "edit_notebook",
-        &[
-            ("notebook_path", json!("analysis.ipynb")),
-            ("cell_number", json!(0)),
-            (
-                "new_source",
-                json!("import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n"),
-            ),
-        ],
-        "ok",
-        json!({
-            "edit_mode": "replace",
-            "path": "analysis.ipynb#cell0",
-            "old_source": "import pandas\ndf = pandas.read_csv('data.csv')\n",
-            "new_source": "import pandas as pd\ndf = pd.read_csv(\"data.csv\")\n",
-        }),
-        Some(6),
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(notebook_edit_tool_block_insert_cell, |ctx| {
-    // Insert path: `edit_mode = "insert"` switches `render` to
-    // `layout.file_view` so the snapshot pins the gutter chrome shared
-    // with `write_file` (line numbers + syntax highlighting) keyed off
-    // the synthesised `.py` path.
-    ctx.set_viewport(70, 12);
-    ctx.tool_call_with_metadata(
-        "edit_notebook",
-        &[
-            ("notebook_path", json!("analysis.ipynb")),
-            ("edit_mode", json!("insert")),
-            ("new_source", json!("print(\"new cell\")\n")),
-        ],
-        "ok",
-        json!({
-            "edit_mode": "insert",
-            "path": "analysis.ipynb#cell1",
-            "new_source": "print(\"new cell\")\n",
-        }),
-        Some(5),
-    );
-    ctx.assert_snapshot();
-});
-
-// ── web_fetch / web_search ────────────────────────────────────────
-
-app_story!(web_fetch_tool_block, |ctx| {
-    // `web_fetch.render` prints the prompt above the LLM-authored Markdown result.
-    // The header summary is the URL via the tool's `summary` cb.
-    ctx.set_viewport(70, 12);
-    ctx.tool_call(
-        "web_fetch",
-        &[
-            ("url", json!("https://example.com/release")),
-            ("prompt", json!("Summarise the release notes")),
-        ],
-        "## Release 0.6\n\n- Ships `MarkdownStream`.\n- Renders tables:\n\n| Feature | Status |\n|---|---|\n| streaming | done |",
-        Some(820),
-    );
-    ctx.assert_snapshot();
-});
-
-app_story!(web_search_tool_block, |ctx| {
-    // `web_search.render` is a single `layout.text`; the header shows
-    // the query.
-    ctx.set_viewport(70, 10);
-    ctx.tool_call(
-        "web_search",
-        &[("query", json!("rust unicode width crate"))],
-        "1. unicode-width - crates.io\n2. unicode-segmentation - crates.io",
-        Some(330),
-    );
-    ctx.assert_snapshot();
-});
-
-// ── Tool block states beyond the happy path ───────────────────────
-
-app_story!(tool_block_pending_no_result, |ctx| {
-    // `ToolStarted` without a matching `ToolFinished` - the spinner /
-    // running chrome users see while a tool is in flight.
-    ctx.set_viewport(60, 8);
-    ctx.tool_started("bash", &[("command", json!("sleep 5"))]);
-    ctx.assert_snapshot();
-});
-
-app_story!(tool_block_parallel_pending, |ctx| {
-    // Two `ToolStarted` events before any `ToolFinished` - the
-    // claude-code shape where the agent fires multiple tools at once.
-    // Pins the block ordering and the per-block pending chrome.
-    ctx.set_viewport(60, 12);
-    ctx.tool_started("read_file", &[("file_path", json!("a.rs"))]);
-    ctx.tool_started("read_file", &[("file_path", json!("b.rs"))]);
     ctx.assert_snapshot();
 });

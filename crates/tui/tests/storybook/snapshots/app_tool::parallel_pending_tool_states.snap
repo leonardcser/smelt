@@ -1,0 +1,17 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 464
+expression: frame.text()
+---
+* read_file ×2
+  a.rs
+  b.rs
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────
+ ○ normal                                               1:1 100%

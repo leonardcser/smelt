@@ -93,6 +93,18 @@ impl AppStoryCtx {
         self.app.push_process_status(&text, Some(event));
     }
 
+    pub fn push_process_status_text(&mut self, text: &str) {
+        self.app.push_process_status_text(text);
+    }
+
+    pub fn push_mode_block(&mut self, text: &str, icon: &str, hl_group: &str) {
+        self.app.push_mode_block(text, icon, hl_group);
+    }
+
+    pub fn push_code_line(&mut self, content: &str, lang: &str) {
+        self.app.push_code_line(content, lang);
+    }
+
     /// Run a shell-escape (`Block::Exec`) lifecycle: open the block,
     /// stream `output` line by line, then close. Goes through the same
     /// `start_exec` / `append_exec_output` / `finish_exec` /
@@ -167,6 +179,31 @@ impl AppStoryCtx {
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
+        });
+    }
+
+    /// Emit a display-only streaming tool-call draft. The final tool
+    /// execution path is still driven by `tool_started` / `tool_finished`.
+    pub fn tool_draft(&mut self, tool_name: &str, args_json: &str) {
+        self.call_counter += 1;
+        let stream_id = format!("draft-{}", self.call_counter);
+        let call_id = format!("{tool_name}-draft-{}", self.call_counter);
+        self.engine(EngineEvent::ToolCallDraftStarted {
+            stream_id: stream_id.clone(),
+            call_id: Some(call_id.clone()),
+            tool_name: Some(tool_name.into()),
+        });
+        self.engine(EngineEvent::ToolCallDraftDelta {
+            stream_id: stream_id.clone(),
+            call_id: Some(call_id.clone()),
+            tool_name: Some(tool_name.into()),
+            delta: args_json.into(),
+        });
+        self.engine(EngineEvent::ToolCallDraftFinished {
+            stream_id,
+            call_id,
+            tool_name: tool_name.into(),
+            arguments: args_json.into(),
         });
     }
 
@@ -427,13 +464,21 @@ impl AppStoryCtx {
     }
 
     pub fn assert_snapshot(&mut self) {
-        let frame = self.frame();
         let suffix = if self.snapshot_index == 0 {
             String::new()
         } else {
             format!(".step-{}", self.snapshot_index)
         };
         self.snapshot_index += 1;
+        self.assert_snapshot_with_suffix(&suffix);
+    }
+
+    pub fn assert_snapshot_named(&mut self, name: &str) {
+        self.assert_snapshot_with_suffix(&format!(".{name}"));
+    }
+
+    fn assert_snapshot_with_suffix(&mut self, suffix: &str) {
+        let frame = self.frame();
         let text_name = format!("{}{}", self.name, suffix);
         let style_name = format!("{}{}.styles", self.name, suffix);
         with_settings!({

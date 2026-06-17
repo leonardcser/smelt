@@ -1,6 +1,8 @@
 use super::extract::extract_tool_calls_from_text;
 use super::{collect_indexed_tool_calls, non_empty, sse};
-use super::{ParsedResponse, ProviderError, StreamDelta, ToolDefinition};
+use super::{
+    ParsedResponse, ProviderError, ProviderStreamEvent, ToolCallStreamEvent, ToolDefinition,
+};
 use crate::cancel::CancellationToken;
 use crate::config::ModelConfig;
 use crate::trim::{trim_tool_output, MAX_TOOL_OUTPUT_LINES};
@@ -163,6 +165,7 @@ pub(super) struct StreamState {
     pub(super) tool_calls: HashMap<usize, (String, String, String)>,
     pub(super) usage: TokenUsage,
     pub(super) saw_finish_reason: bool,
+    pub(super) emitted_tool_finishes: bool,
 }
 
 impl StreamState {
@@ -211,7 +214,7 @@ pub(super) fn finish_stream_state(state: StreamState) -> Result<ParsedResponse, 
 #[cfg(any(test, feature = "fuzz"))]
 pub(super) fn parse_stream_events<'a>(
     events: impl IntoIterator<Item = &'a serde_json::Value>,
-    on_delta: &mut dyn FnMut(StreamDelta),
+    on_delta: &mut dyn FnMut(ProviderStreamEvent),
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
     for ev in events {
@@ -224,7 +227,7 @@ pub(super) fn parse_stream_events<'a>(
 pub(super) fn apply_sse_event(
     state: &mut StreamState,
     ev: &serde_json::Value,
-    on_delta: &mut dyn FnMut(StreamDelta),
+    on_delta: &mut dyn FnMut(ProviderStreamEvent),
 ) {
     if let Some(u) = ev.get("usage") {
         let parsed = parse_usage(u);
@@ -236,20 +239,23 @@ pub(super) fn apply_sse_event(
     }
 
     let choice = ev["choices"].get(0);
+    let mut saw_finish_reason = false;
     if let Some(reason) = choice.and_then(|c| c.get("finish_reason")) {
         if !reason.is_null() {
             state.saw_finish_reason = true;
+            saw_finish_reason = true;
         }
     }
 
     let Some(delta) = choice.and_then(|c| c.get("delta")) else {
+        emit_tool_finishes(state, on_delta, saw_finish_reason);
         return;
     };
 
     if let Some(text) = delta["content"].as_str() {
         if !text.is_empty() {
             state.content.push_str(text);
-            on_delta(StreamDelta::Text(text));
+            on_delta(ProviderStreamEvent::TextDelta(text));
         }
     }
 
@@ -260,18 +266,23 @@ pub(super) fn apply_sse_event(
     {
         if !text.is_empty() {
             state.reasoning.push_str(text);
-            on_delta(StreamDelta::Thinking(text));
+            on_delta(ProviderStreamEvent::ThinkingDelta(text));
         }
     }
 
     if let Some(tcs) = delta["tool_calls"].as_array() {
         for tc in tcs {
             let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+            let stream_id = idx.to_string();
+            let mut started = false;
             let entry = state.tool_calls.entry(idx).or_insert_with(|| {
+                started = true;
                 let id = tc["id"].as_str().unwrap_or("").to_string();
                 let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
                 (id, name, String::new())
             });
+            let old_call_id_empty = entry.0.is_empty();
+            let old_name_empty = entry.1.is_empty();
             if let Some(id) = tc["id"].as_str() {
                 if !id.is_empty() && entry.0.is_empty() {
                     entry.0 = id.to_string();
@@ -282,24 +293,64 @@ pub(super) fn apply_sse_event(
                     entry.1 = name.to_string();
                 }
             }
+            let metadata_changed = (old_call_id_empty && !entry.0.is_empty())
+                || (old_name_empty && !entry.1.is_empty());
+            if started || metadata_changed {
+                on_delta(ProviderStreamEvent::ToolCall(
+                    ToolCallStreamEvent::Started {
+                        stream_id: &stream_id,
+                        call_id: (!entry.0.is_empty()).then_some(entry.0.as_str()),
+                        tool_name: (!entry.1.is_empty()).then_some(entry.1.as_str()),
+                    },
+                ));
+            }
             if let Some(args) = tc["function"]["arguments"].as_str() {
                 if !args.is_empty() {
                     entry.2.push_str(args);
-                    on_delta(StreamDelta::ToolArgs {
-                        call_id: &entry.0,
-                        tool_name: &entry.1,
-                        delta: args,
-                    });
+                    on_delta(ProviderStreamEvent::ToolCall(
+                        ToolCallStreamEvent::ArgsDelta {
+                            stream_id: &stream_id,
+                            call_id: (!entry.0.is_empty()).then_some(entry.0.as_str()),
+                            tool_name: (!entry.1.is_empty()).then_some(entry.1.as_str()),
+                            delta: args,
+                        },
+                    ));
                 }
             }
         }
+    }
+    emit_tool_finishes(state, on_delta, saw_finish_reason);
+}
+
+fn emit_tool_finishes(
+    state: &mut StreamState,
+    on_delta: &mut dyn FnMut(ProviderStreamEvent),
+    saw_finish_reason: bool,
+) {
+    if !saw_finish_reason || state.emitted_tool_finishes {
+        return;
+    }
+    state.emitted_tool_finishes = true;
+    for (idx, (call_id, name, args)) in &state.tool_calls {
+        if call_id.is_empty() || name.is_empty() {
+            continue;
+        }
+        let stream_id = idx.to_string();
+        on_delta(ProviderStreamEvent::ToolCall(
+            ToolCallStreamEvent::Finished {
+                stream_id: &stream_id,
+                call_id,
+                tool_name: name,
+                arguments: args,
+            },
+        ));
     }
 }
 
 pub(super) async fn read_stream(
     resp: reqwest::Response,
     cancel: &CancellationToken,
-    on_delta: &(dyn Fn(StreamDelta) + Send + Sync),
+    on_delta: &(dyn Fn(ProviderStreamEvent) + Send + Sync),
 ) -> Result<ParsedResponse, ProviderError> {
     let mut state = StreamState::default();
 
@@ -646,7 +697,7 @@ mod tests {
             &mut state,
             &json!({"choices":[{"delta":{"content":"hi"}}]}),
             &mut |d| {
-                if let StreamDelta::Text(t) = d {
+                if let ProviderStreamEvent::TextDelta(t) = d {
                     got.push(t.into())
                 }
             },
@@ -676,7 +727,7 @@ mod tests {
             &mut state,
             &json!({"choices":[{"delta":{"reasoning_content":"why"}}]}),
             &mut |d| {
-                if let StreamDelta::Thinking(t) = d {
+                if let ProviderStreamEvent::ThinkingDelta(t) = d {
                     got.push(t.into())
                 }
             },
@@ -719,6 +770,110 @@ mod tests {
         assert_eq!(r.tool_calls[0].id, "c1");
         assert_eq!(r.tool_calls[0].function.name, "f");
         assert_eq!(r.tool_calls[0].function.arguments, "{\"a\":1}");
+    }
+
+    #[test]
+    fn sse_tool_call_streams_lifecycle_events() {
+        let mut state = StreamState::default();
+        let mut got = Vec::new();
+        let mut on_delta = |event: ProviderStreamEvent<'_>| {
+            if let ProviderStreamEvent::ToolCall(event) = event {
+                got.push(match event {
+                    ToolCallStreamEvent::Started {
+                        stream_id,
+                        call_id,
+                        tool_name,
+                    } => format!("start:{stream_id}:{call_id:?}:{tool_name:?}"),
+                    ToolCallStreamEvent::ArgsDelta {
+                        stream_id,
+                        call_id,
+                        tool_name,
+                        delta,
+                    } => format!("delta:{stream_id}:{call_id:?}:{tool_name:?}:{delta}"),
+                    ToolCallStreamEvent::Finished {
+                        stream_id,
+                        call_id,
+                        tool_name,
+                        arguments,
+                    } => format!("finish:{stream_id}:{call_id}:{tool_name}:{arguments}"),
+                });
+            }
+        };
+
+        apply_sse_event(
+            &mut state,
+            &json!({
+                "choices":[{"delta":{"tool_calls":[
+                    {"index":0, "id":"c1", "function":{"name":"bash", "arguments":"{\"command\":"}}
+                ]}}]
+            }),
+            &mut on_delta,
+        );
+        apply_sse_event(
+            &mut state,
+            &json!({
+                "choices":[{"delta":{"tool_calls":[
+                    {"index":0, "function":{"arguments":"\"echo hi\"}"}}
+                ]}}]
+            }),
+            &mut on_delta,
+        );
+        apply_sse_event(
+            &mut state,
+            &json!({"choices":[{"finish_reason":"tool_calls"}]}),
+            &mut on_delta,
+        );
+
+        assert_eq!(
+            got,
+            vec![
+                "start:0:Some(\"c1\"):Some(\"bash\")",
+                r#"delta:0:Some("c1"):Some("bash"):{"command":"#,
+                r#"delta:0:Some("c1"):Some("bash"):"echo hi"}"#,
+                "finish:0:c1:bash:{\"command\":\"echo hi\"}",
+            ]
+        );
+    }
+
+    #[test]
+    fn sse_tool_call_metadata_updates_after_start_emit_started_upsert() {
+        let mut state = StreamState::default();
+        let mut got = Vec::new();
+        let mut on_delta = |event: ProviderStreamEvent<'_>| {
+            if let ProviderStreamEvent::ToolCall(ToolCallStreamEvent::Started {
+                stream_id,
+                call_id,
+                tool_name,
+            }) = event
+            {
+                got.push(format!("start:{stream_id}:{call_id:?}:{tool_name:?}"));
+            }
+        };
+
+        apply_sse_event(
+            &mut state,
+            &json!({"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}),
+            &mut on_delta,
+        );
+        apply_sse_event(
+            &mut state,
+            &json!({"choices":[{"delta":{"tool_calls":[{"index":0, "function":{"name":"bash"}}]}}]}),
+            &mut on_delta,
+        );
+        apply_sse_event(
+            &mut state,
+            &json!({"choices":[{"delta":{"tool_calls":[{"index":0, "id":"c1"}]}}]}),
+            &mut on_delta,
+        );
+
+        assert_eq!(
+            got,
+            vec![
+                "start:0:None:None",
+                "start:0:None:Some(\"bash\")",
+                "start:0:Some(\"c1\"):Some(\"bash\")",
+            ]
+        );
     }
 
     #[test]

@@ -111,14 +111,32 @@ pub(crate) fn collect_indexed_tool_calls(
     vec.into_iter().map(|(_, tc)| tc).collect()
 }
 
-/// A streaming delta from the LLM.
-pub(crate) enum StreamDelta<'a> {
-    Text(&'a str),
-    Thinking(&'a str),
-    ToolArgs {
+/// A streaming event from the LLM provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderStreamEvent<'a> {
+    TextDelta(&'a str),
+    ThinkingDelta(&'a str),
+    ToolCall(ToolCallStreamEvent<'a>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolCallStreamEvent<'a> {
+    Started {
+        stream_id: &'a str,
+        call_id: Option<&'a str>,
+        tool_name: Option<&'a str>,
+    },
+    ArgsDelta {
+        stream_id: &'a str,
+        call_id: Option<&'a str>,
+        tool_name: Option<&'a str>,
+        delta: &'a str,
+    },
+    Finished {
+        stream_id: &'a str,
         call_id: &'a str,
         tool_name: &'a str,
-        delta: &'a str,
+        arguments: &'a str,
     },
 }
 
@@ -629,13 +647,13 @@ impl WireApi {
         self,
         resp: reqwest::Response,
         cancel: &CancellationToken,
-        on_delta: &(dyn Fn(StreamDelta<'_>) + Send + Sync),
+        on_event: &(dyn Fn(ProviderStreamEvent<'_>) + Send + Sync),
         now_secs: u64,
     ) -> Result<ParsedResponse, ProviderError> {
         match self {
-            Self::ChatCompletions => chat_completions::read_stream(resp, cancel, on_delta).await,
-            Self::OpenAiResponses => openai::read_stream(resp, cancel, on_delta, now_secs).await,
-            Self::AnthropicMessages => anthropic::read_stream(resp, cancel, on_delta).await,
+            Self::ChatCompletions => chat_completions::read_stream(resp, cancel, on_event).await,
+            Self::OpenAiResponses => openai::read_stream(resp, cancel, on_event, now_secs).await,
+            Self::AnthropicMessages => anthropic::read_stream(resp, cancel, on_event).await,
         }
     }
 }
@@ -786,7 +804,7 @@ pub struct RequestAttemptInfo<'a> {
 pub struct ChatOptions<'a> {
     pub(crate) cancel: &'a CancellationToken,
     pub(crate) on_retry: Option<&'a (dyn Fn(Duration, u32) + Send + Sync)>,
-    pub(crate) on_delta: Option<&'a (dyn Fn(StreamDelta<'_>) + Send + Sync)>,
+    pub(crate) on_delta: Option<&'a (dyn Fn(ProviderStreamEvent<'_>) + Send + Sync)>,
     pub(crate) on_attempt: Option<&'a (dyn Fn(RequestAttemptInfo<'_>) + Send + Sync)>,
     pub response_format: Option<ResponseFormat>,
     pub cache: CacheConfig,
@@ -1309,7 +1327,7 @@ impl Provider {
                 }
             }
 
-            let noop_delta: &(dyn Fn(StreamDelta<'_>) + Send + Sync) = &|_| {};
+            let noop_delta: &(dyn Fn(ProviderStreamEvent<'_>) + Send + Sync) = &|_| {};
             let on_delta = opts.on_delta.unwrap_or(noop_delta);
 
             let parsed_result = if use_stream {
@@ -1693,11 +1711,16 @@ fn fuzz_summary(
 }
 
 #[cfg(any(test, feature = "fuzz"))]
-fn count_delta(summary: &mut FuzzProviderSummary, delta: StreamDelta<'_>) {
-    match delta {
-        StreamDelta::Text(_) => summary.text_deltas += 1,
-        StreamDelta::Thinking(_) => summary.thinking_deltas += 1,
-        StreamDelta::ToolArgs { .. } => summary.tool_arg_deltas += 1,
+fn count_delta(summary: &mut FuzzProviderSummary, event: ProviderStreamEvent<'_>) {
+    match event {
+        ProviderStreamEvent::TextDelta(_) => summary.text_deltas += 1,
+        ProviderStreamEvent::ThinkingDelta(_) => summary.thinking_deltas += 1,
+        ProviderStreamEvent::ToolCall(ToolCallStreamEvent::ArgsDelta { .. }) => {
+            summary.tool_arg_deltas += 1
+        }
+        ProviderStreamEvent::ToolCall(
+            ToolCallStreamEvent::Started { .. } | ToolCallStreamEvent::Finished { .. },
+        ) => {}
     }
 }
 

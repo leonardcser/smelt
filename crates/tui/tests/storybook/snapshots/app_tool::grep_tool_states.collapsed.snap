@@ -1,0 +1,23 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 464
+expression: frame.text()
+---
+* grep ×3 (1 error)
+  "fn render" in crates/tui/src
+  "definitely_not_present" in crates/tui/src
+  "(?P<bad" in crates/tui/src
+
+
+
+
+
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                           1:1 100%

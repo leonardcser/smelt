@@ -188,7 +188,7 @@ pub struct ToolEvaluation {
 /// `UiCommand::PermissionDecision`.
 ///
 /// Event ordering within a turn:
-///   Ready → (Thinking* → Text* → ToolStarted → ToolOutput* → ToolFinished)*
+///   Ready → (Thinking* → Text* → ToolCallDraft* → ToolStarted → ToolOutput* → ToolFinished)*
 ///         → TurnComplete | TurnError
 ///
 /// ProcessCompleted can arrive at any time (including between turns).
@@ -209,13 +209,28 @@ pub enum EngineEvent {
     /// Incremental text token from the LLM (streaming delta).
     TextDelta { delta: String },
 
-    /// Incremental tool-call argument fragment streamed from the LLM.
-    /// Observers reassemble the JSON; the engine has already accumulated
-    /// it internally and will dispatch on the completed call.
-    ToolArgsDelta {
+    /// Provider has started streaming a speculative tool call. This is display-only;
+    /// execution still waits for the final tool call in the completed LLM response.
+    ToolCallDraftStarted {
+        stream_id: String,
+        call_id: Option<String>,
+        tool_name: Option<String>,
+    },
+
+    /// Incremental argument fragment for a speculative tool call.
+    ToolCallDraftDelta {
+        stream_id: String,
+        call_id: Option<String>,
+        tool_name: Option<String>,
+        delta: String,
+    },
+
+    /// Provider has finished streaming the speculative tool call arguments.
+    ToolCallDraftFinished {
+        stream_id: String,
         call_id: String,
         tool_name: String,
-        delta: String,
+        arguments: String,
     },
 
     /// A queued user message was consumed by the engine.

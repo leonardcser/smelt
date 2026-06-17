@@ -1,0 +1,23 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 464
+expression: frame.text()
+---
+* web_fetch https://example.com/release
+
+* web_search rust unicode width crate
+
+
+
+
+
+
+
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                           1:1 100%

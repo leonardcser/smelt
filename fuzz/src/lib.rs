@@ -332,11 +332,11 @@ pub enum FuzzOp {
     /// chord that reaches the same code path requires two keystrokes inside
     /// `PANE_CHORD_WINDOW`, which random fuzz inputs rarely hit.
     TogglePaneFocus,
-    /// Emit `ToolArgsDelta`. The TUI accumulates `delta` into a per-call
-    /// JSON-fragment buffer, then displays the reconstructed args when
-    /// the matching `ToolStarted` arrives. Exercises the streaming-arg
-    /// reassembly path against arbitrary out-of-order or orphan deltas.
-    EngineToolArgsDelta {
+    /// Emit `ToolCallDraftDelta`. The TUI accumulates `delta` into a per-stream
+    /// JSON-fragment buffer, then displays draft args until the matching
+    /// `ToolStarted` promotes the block. Exercises the streaming draft path
+    /// against arbitrary out-of-order or orphan deltas.
+    EngineToolDraftDelta {
         call_id: String,
         tool_name: String,
         delta: String,
@@ -554,7 +554,7 @@ impl FuzzOp {
             EngineShutdown { .. } => "shutdown".into(),
             InsertAttachment { label } => format!("insert attachment {label}"),
             TogglePaneFocus => "toggle pane focus".into(),
-            EngineToolArgsDelta { tool_name, .. } => format!("tool args delta {tool_name}"),
+            EngineToolDraftDelta { tool_name, .. } => format!("tool draft delta {tool_name}"),
             EngineAskResponse { id, .. } => format!("ask response {id}"),
             EngineAskError { id, kind_idx, .. } => format!("ask error {id} k={kind_idx}"),
             ReloadLua => "reload lua".into(),
@@ -816,7 +816,7 @@ const FUZZOP_BUILDERS: &[FuzzOpBuilder] = &[
     },
     |_| Ok(FuzzOp::TogglePaneFocus),
     |u| {
-        Ok(FuzzOp::EngineToolArgsDelta {
+        Ok(FuzzOp::EngineToolDraftDelta {
             call_id: u.arbitrary()?,
             tool_name: u.arbitrary()?,
             delta: u.arbitrary()?,
@@ -2065,14 +2065,15 @@ fn plan(app: &TestApp, op: FuzzOp) -> (Option<SourceEvent>, PostCheck) {
         | FuzzOp::StartExec { .. } => {
             unreachable!("side channels handled inline in apply()")
         }
-        FuzzOp::EngineToolArgsDelta {
+        FuzzOp::EngineToolDraftDelta {
             call_id,
             tool_name,
             delta,
         } => {
-            let ev = SourceEvent::Engine(EngineEvent::ToolArgsDelta {
-                call_id,
-                tool_name,
+            let ev = SourceEvent::Engine(EngineEvent::ToolCallDraftDelta {
+                stream_id: call_id.clone(),
+                call_id: Some(call_id),
+                tool_name: Some(tool_name),
                 delta,
             });
             (Some(ev), PostCheck::None)

@@ -621,6 +621,30 @@ fn block_snapshot_json(
             value.insert("content".into(), serde_json::json!(content));
             value.insert("lang".into(), serde_json::json!(lang));
         }
+        Block::ToolDraft {
+            stream_id,
+            call_id,
+            name,
+            summary,
+            args,
+            raw_arguments,
+            finished,
+        } => {
+            value.insert("stream_id".into(), serde_json::json!(stream_id));
+            value.insert("call_id".into(), serde_json::json!(call_id));
+            value.insert("name".into(), serde_json::json!(name));
+            value.insert("args".into(), serde_json::json!(args));
+            value.insert("raw_arguments".into(), serde_json::json!(raw_arguments));
+            value.insert("summary".into(), serde_json::to_value(summary).ok()?);
+            value.insert(
+                "summary_text".into(),
+                serde_json::json!(summary.as_plain_text()),
+            );
+            value.insert("status".into(), serde_json::json!("drafting"));
+            value.insert("status_hl".into(), serde_json::json!("SmeltToolPending"));
+            value.insert("draft".into(), serde_json::json!(true));
+            value.insert("draft_finished".into(), serde_json::json!(finished));
+        }
         Block::ToolCall {
             call_id,
             name,
