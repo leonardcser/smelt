@@ -75,7 +75,7 @@ pub use vim::VimMode;
 pub use window::{
     clamp_scroll, materialized_row_range, scroll_to_show, CursorShape, DrawContext, EventCtx,
     MouseCtx, RowTextState, RowYankFlash, ScrollbarState, SplitConfig, VerticalScroll,
-    ViewerCommand, Window, WindowSurface, WindowViewport,
+    ViewerCommand, ViewerCopy, ViewerKeyResult, Window, WindowSurface, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.

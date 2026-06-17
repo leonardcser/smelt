@@ -1,5 +1,33 @@
 use super::*;
 
+#[test]
+fn vim_readonly_dialog_arrows_use_viewer_navigation() {
+    let mut app = TestApp::builder().with_vim(true).build();
+    assert!(app.run_lua(
+        r#"
+        local buf = smelt.buf.new({ readonly = true })
+        buf:lines({ "one", "two", "three", "four", "five", "six" })
+        local leaf = smelt.dialog.content({ buf = buf, interactive = true, wrap = false })
+        smelt.dialog.open_handle({
+          title = "viewer",
+          height = 4,
+          panels = { { leaf = leaf, height = "fill" } },
+        })
+        "#
+    ));
+    app.render_silent();
+
+    let win_id = app.app.ui.focus().expect("dialog leaf focused");
+    let before = app.app.ui.win(win_id).expect("window").cursor_row();
+
+    app.press(KeyCode::Down);
+
+    let after = app.app.ui.win(win_id).expect("window").cursor_row();
+    assert!(
+        after > before,
+        "Down should move within readonly viewer, before={before}, after={after}"
+    );
+}
 fn tool_result<'a>(app: &'a TestApp, call_id: &str) -> Option<(&'a str, bool)> {
     app.actions().iter().rev().find_map(|action| match action {
         Action::EngineSend(cmd) => match cmd.as_ref() {

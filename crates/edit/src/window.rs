@@ -15,7 +15,7 @@ use smelt_term::layout::{Gutters, Rect};
 use std::sync::Arc;
 
 mod row_text;
-pub use row_text::{RowTextState, RowYankFlash, ViewerCommand};
+pub use row_text::{RowTextState, RowYankFlash, ViewerCommand, ViewerCopy, ViewerKeyResult};
 
 /// Per-frame paint context for `Window::render`.
 #[derive(Default, Clone)]
@@ -426,6 +426,10 @@ impl WindowSurface {
     }
 
     pub fn supports_search(self) -> bool {
+        matches!(self.kind, WindowSurfaceKind::ReadonlyText)
+    }
+
+    pub fn is_readonly_text(self) -> bool {
         matches!(self.kind, WindowSurfaceKind::ReadonlyText)
     }
 
@@ -4434,7 +4438,7 @@ mod tests {
         let mut mode = VimMode::Normal;
         let mut state = VimWindowState::default();
 
-        let up = vim::handle_row_viewer_key(
+        let up = vim::handle_viewer_key(
             KeyEvent {
                 code: KeyCode::Char('u'),
                 modifiers: KeyModifiers::CONTROL,
@@ -4444,9 +4448,12 @@ mod tests {
             &mut mode,
             &mut state,
         );
-        assert_eq!(up, Some(ViewerCommand::HalfPageRows(-1)));
+        assert_eq!(
+            up,
+            ViewerKeyResult::Command(ViewerCommand::HalfPageRows(-1))
+        );
 
-        let down = vim::handle_row_viewer_key(
+        let down = vim::handle_viewer_key(
             KeyEvent {
                 code: KeyCode::Char('d'),
                 modifiers: KeyModifiers::CONTROL,
@@ -4456,9 +4463,12 @@ mod tests {
             &mut mode,
             &mut state,
         );
-        assert_eq!(down, Some(ViewerCommand::HalfPageRows(1)));
+        assert_eq!(
+            down,
+            ViewerKeyResult::Command(ViewerCommand::HalfPageRows(1))
+        );
 
-        let back = vim::handle_row_viewer_key(
+        let back = vim::handle_viewer_key(
             KeyEvent {
                 code: KeyCode::Char('b'),
                 modifiers: KeyModifiers::CONTROL,
@@ -4468,9 +4478,9 @@ mod tests {
             &mut mode,
             &mut state,
         );
-        assert_eq!(back, Some(ViewerCommand::PageRows(-1)));
+        assert_eq!(back, ViewerKeyResult::Command(ViewerCommand::PageRows(-1)));
 
-        let forward = vim::handle_row_viewer_key(
+        let forward = vim::handle_viewer_key(
             KeyEvent {
                 code: KeyCode::Char('f'),
                 modifiers: KeyModifiers::CONTROL,
@@ -4480,7 +4490,10 @@ mod tests {
             &mut mode,
             &mut state,
         );
-        assert_eq!(forward, Some(ViewerCommand::PageRows(1)));
+        assert_eq!(
+            forward,
+            ViewerKeyResult::Command(ViewerCommand::PageRows(1))
+        );
     }
 
     #[test]
@@ -5115,24 +5128,34 @@ mod tests {
 
         // Enter visual mode.
         let now = std::time::Instant::now();
-        let cmd = w.handle_row_viewer_key(crossterm::event::KeyEvent {
+        let command = |result| match result {
+            crate::ViewerKeyResult::Command(cmd) => cmd,
+            other => panic!("expected viewer command, got {other:?}"),
+        };
+        let cmd = w.handle_viewer_key(crossterm::event::KeyEvent {
             code: crossterm::event::KeyCode::Char('v'),
             modifiers: crossterm::event::KeyModifiers::empty(),
             kind: crossterm::event::KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         });
-        assert_eq!(cmd, Some(crate::ViewerCommand::StartVisual));
-        w.execute_row_viewer_command(&buf, cmd.unwrap(), 10, now);
+        assert_eq!(
+            cmd,
+            crate::ViewerKeyResult::Command(crate::ViewerCommand::StartVisual)
+        );
+        w.execute_row_viewer_command(&buf, command(cmd), 10, now);
 
         // Move down to the short row 2; byte_col should clamp to line width.
-        let cmd = w.handle_row_viewer_key(crossterm::event::KeyEvent {
+        let cmd = w.handle_viewer_key(crossterm::event::KeyEvent {
             code: crossterm::event::KeyCode::Char('j'),
             modifiers: crossterm::event::KeyModifiers::empty(),
             kind: crossterm::event::KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         });
-        assert_eq!(cmd, Some(crate::ViewerCommand::MoveRows(1)));
-        w.execute_row_viewer_command(&buf, cmd.unwrap(), 10, now);
+        assert_eq!(
+            cmd,
+            crate::ViewerKeyResult::Command(crate::ViewerCommand::MoveRows(1))
+        );
+        w.execute_row_viewer_command(&buf, command(cmd), 10, now);
         assert_eq!(w.row_text_state().cursor.row, 2);
         assert_eq!(
             w.row_text_state().cursor.byte_col,
@@ -5142,14 +5165,17 @@ mod tests {
 
         // Move down to the longer row 3; byte_col should recover toward the
         // original column, not get stuck at the clamped short-line width.
-        let cmd = w.handle_row_viewer_key(crossterm::event::KeyEvent {
+        let cmd = w.handle_viewer_key(crossterm::event::KeyEvent {
             code: crossterm::event::KeyCode::Char('j'),
             modifiers: crossterm::event::KeyModifiers::empty(),
             kind: crossterm::event::KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         });
-        assert_eq!(cmd, Some(crate::ViewerCommand::MoveRows(1)));
-        w.execute_row_viewer_command(&buf, cmd.unwrap(), 10, now);
+        assert_eq!(
+            cmd,
+            crate::ViewerKeyResult::Command(crate::ViewerCommand::MoveRows(1))
+        );
+        w.execute_row_viewer_command(&buf, command(cmd), 10, now);
         assert_eq!(w.row_text_state().cursor.row, 3);
         assert_eq!(
             w.row_text_state().cursor.byte_col,
@@ -5160,14 +5186,17 @@ mod tests {
         // Move right to the end of the long line with 'l'.
         let line3_len = rows[3].len();
         for _ in 0..(line3_len - 5) {
-            let cmd = w.handle_row_viewer_key(crossterm::event::KeyEvent {
+            let cmd = w.handle_viewer_key(crossterm::event::KeyEvent {
                 code: crossterm::event::KeyCode::Char('l'),
                 modifiers: crossterm::event::KeyModifiers::empty(),
                 kind: crossterm::event::KeyEventKind::Press,
                 state: crossterm::event::KeyEventState::NONE,
             });
-            assert_eq!(cmd, Some(crate::ViewerCommand::MoveCursorCol(1)));
-            w.execute_row_viewer_command(&buf, cmd.unwrap(), 10, now);
+            assert_eq!(
+                cmd,
+                crate::ViewerKeyResult::Command(crate::ViewerCommand::MoveCursorCol(1))
+            );
+            w.execute_row_viewer_command(&buf, command(cmd), 10, now);
         }
         assert_eq!(
             w.row_text_state().cursor.byte_col,
@@ -5176,14 +5205,17 @@ mod tests {
         );
 
         // Pressing 'l' again at the end should be a no-op.
-        let cmd = w.handle_row_viewer_key(crossterm::event::KeyEvent {
+        let cmd = w.handle_viewer_key(crossterm::event::KeyEvent {
             code: crossterm::event::KeyCode::Char('l'),
             modifiers: crossterm::event::KeyModifiers::empty(),
             kind: crossterm::event::KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         });
-        assert_eq!(cmd, Some(crate::ViewerCommand::MoveCursorCol(1)));
-        w.execute_row_viewer_command(&buf, cmd.unwrap(), 10, now);
+        assert_eq!(
+            cmd,
+            crate::ViewerKeyResult::Command(crate::ViewerCommand::MoveCursorCol(1))
+        );
+        w.execute_row_viewer_command(&buf, command(cmd), 10, now);
         assert_eq!(
             w.row_text_state().cursor.byte_col,
             line3_len,

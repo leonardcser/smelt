@@ -1254,24 +1254,11 @@ impl TuiApp {
         )
     }
 
-    fn sync_viewer_clipboard_from_kill_ring(
-        &mut self,
-        buf_id: crate::smelt_edit::BufId,
-        yank_tick_before: u64,
-    ) {
-        if self.core.clipboard.kill_ring.yank_tick() == yank_tick_before {
-            return;
-        }
-        if let Some(buf) = self.ui.buf(buf_id) {
-            buf.sync_clipboard_from_kill_ring(&mut self.core.clipboard);
-        }
-    }
-
     /// Unified viewer-key dispatcher shared between transcript, overlay leaves,
-    /// and any future scrollable window. Resolution order:
-    ///   1. Vim engine (when `vim_enabled`) - handles motions, operators,
-    ///      and yanks; falls through with `Passthrough` for chords vim
-    ///      doesn't claim (e.g. Shift+Arrow selection-extend).
+    /// and any future scrollable read-only window. Resolution order:
+    ///   1. Viewer Vim engine for `readonly_text` surfaces - handles motions,
+    ///      counts, visual selection, and yanks as viewer commands. Prompt/editor
+    ///      actions such as history never run for read-only viewers.
     ///   2. Shared keymap dispatch via [`Self::dispatch_buffer_action`].
     ///      The keymap uses the window's actual `vim_enabled`/`vim_mode`
     ///      context so vim-Normal-only chords (Ctrl-U/D, Ctrl-B/F page
@@ -1291,9 +1278,10 @@ impl TuiApp {
         if self.handle_search_key_for_target(win_id, k) {
             return Status::Consumed;
         }
-        let (vim_enabled, buf_id, viewport_rows) = match self.ui.win(win_id) {
+        let (vim_enabled, readonly_text, buf_id, viewport_rows) = match self.ui.win(win_id) {
             Some(w) => (
                 w.vim_enabled(),
+                w.surface().is_readonly_text(),
                 w.buf,
                 w.viewport.map(|v| v.rect.height).unwrap_or(0),
             ),
@@ -1311,55 +1299,74 @@ impl TuiApp {
             return Status::Ignored;
         }
 
-        if vim_enabled {
-            let has_materialized_rows = self
-                .ui
-                .win(win_id)
-                .is_some_and(|win| win.has_materialized_rows());
-            if has_materialized_rows {
-                let command = {
-                    let win = self.ui.win_mut(win_id).expect("window");
-                    win.handle_row_viewer_key(k)
-                };
-                if let Some(command) = command {
-                    let command = self
-                        .resolve_row_viewer_command(win_id, command)
-                        .unwrap_or(command);
-                    let now = self.core.clock.instant_now();
-                    let copied = {
-                        let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-                        let win = win.expect("window");
-                        let buf = buf.expect("buffer");
-                        win.execute_row_viewer_command(buf, command, viewport_rows, now)
-                    };
-                    if let Some(range) = copied {
-                        if let Some(out) =
-                            crate::smelt_edit::UiHost::copy_document_range(self, win_id, range)
-                        {
-                            self.yank_to_clipboard(out);
-                        }
-                    }
-                    return Status::Consumed;
+        if vim_enabled && readonly_text {
+            let result = {
+                let win = self.ui.win_mut(win_id).expect("window");
+                win.handle_viewer_key(k)
+            };
+            match result {
+                crate::smelt_edit::ViewerKeyResult::Command(command) => {
+                    return self.execute_viewer_command(win_id, buf_id, command, viewport_rows);
                 }
+                crate::smelt_edit::ViewerKeyResult::Consumed => return Status::Consumed,
+                crate::smelt_edit::ViewerKeyResult::Passthrough => {}
             }
-
-            let yank_tick_before = self.core.clipboard.kill_ring.yank_tick();
-            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-            let win = win.expect("window");
-            let buf = buf.expect("buffer");
-            let now = self.core.clock.instant_now();
-            let status = win.handle_key(buf, k, &mut self.core.clipboard, now);
-            win.update_tail_state(buf, viewport_rows);
-            if matches!(status, Status::Consumed) {
-                self.sync_viewer_clipboard_from_kill_ring(buf_id, yank_tick_before);
-                return Status::Consumed;
-            }
-            // Vim Passthrough (Shift+Arrows, etc.) falls through so the
-            // shared keymap layer can claim selection-extend chords -
-            // matches the prompt's behaviour.
         }
 
         self.dispatch_buffer_action(win_id, buf_id, k, viewport_rows)
+    }
+
+    fn execute_viewer_command(
+        &mut self,
+        win_id: crate::smelt_edit::WinId,
+        buf_id: crate::smelt_edit::BufId,
+        command: crate::smelt_edit::ViewerCommand,
+        viewport_rows: u16,
+    ) -> crate::smelt_edit::Status {
+        use crate::smelt_edit::Status;
+
+        let command = if self
+            .ui
+            .win(win_id)
+            .is_some_and(|win| win.has_materialized_rows())
+        {
+            self.resolve_row_viewer_command(win_id, command)
+                .unwrap_or(command)
+        } else {
+            command
+        };
+        let now = self.core.clock.instant_now();
+        let copied = {
+            let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+            let win = win.expect("window");
+            let buf = buf.expect("buffer");
+            win.execute_viewer_command(buf, command, viewport_rows, now)
+        };
+        self.copy_viewer_selection(win_id, buf_id, copied);
+        Status::Consumed
+    }
+
+    fn copy_viewer_selection(
+        &mut self,
+        win_id: crate::smelt_edit::WinId,
+        buf_id: crate::smelt_edit::BufId,
+        copied: Option<crate::smelt_edit::ViewerCopy>,
+    ) {
+        match copied {
+            Some(crate::smelt_edit::ViewerCopy::Rows(range)) => {
+                if let Some(out) =
+                    crate::smelt_edit::UiHost::copy_document_range(self, win_id, range)
+                {
+                    self.yank_to_clipboard(out);
+                }
+            }
+            Some(crate::smelt_edit::ViewerCopy::Bytes(range)) => {
+                if let Some(buf) = self.ui.buf(buf_id) {
+                    self.yank_to_clipboard(buf.copy_range(range));
+                }
+            }
+            None => {}
+        }
     }
 
     fn resolve_row_viewer_command(
