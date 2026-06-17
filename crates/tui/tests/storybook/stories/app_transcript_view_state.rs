@@ -8,6 +8,8 @@ use crate::app_story;
 
 const THINKING: &str = "**Inspecting the renderer**\nRead the transcript model first.\nCheck the Lua defaults next.\nCompare the rendered rows.\nUpdate the stories last.\nRun the snapshot tests.\nReview the final diff.";
 const THINKING_UNTITLED: &str = "Read the transcript model first.\nCheck the Lua defaults next.\nCompare the rendered rows.\nUpdate the stories last.\nRun the snapshot tests.\nReview the final diff.";
+const COMPACTED_SUMMARY: &str =
+    "Compacted 8 earlier turns: parser refactor, renderer wiring, three bug fixes.";
 
 app_story!(thinking_block_collapsed, |ctx| {
     ctx.set_viewport(56, 10);
@@ -41,6 +43,19 @@ app_story!(thinking_block_expanded, |ctx| {
         content: THINKING_UNTITLED.into(),
     });
     ctx.run_lua("smelt.transcript.fold_kind('thinking', 'open')");
+    ctx.assert_snapshot();
+});
+
+app_story!(compacted_block_collapsed, |ctx| {
+    ctx.set_viewport(60, 9);
+    ctx.push_compacted(COMPACTED_SUMMARY);
+    ctx.assert_snapshot();
+});
+
+app_story!(compacted_block_expanded, |ctx| {
+    ctx.set_viewport(60, 9);
+    ctx.push_compacted(COMPACTED_SUMMARY);
+    ctx.run_lua("smelt.transcript.fold_kind('compacted', 'open')");
     ctx.assert_snapshot();
 });
 

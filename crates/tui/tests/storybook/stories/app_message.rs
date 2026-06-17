@@ -95,8 +95,8 @@ app_story!(turn_error_block, |ctx| {
 });
 
 app_story!(compacted_block_summary, |ctx| {
-    // Tall enough for the compacted header, wrapped summary, idle prompt
-    // tip, and prompt/status chrome without clipping.
+    // Compacted history defaults collapsed: the summary is available by
+    // expanding the block, but the normal transcript shows only the divider.
     ctx.set_viewport(60, 9);
     ctx.push_compacted(
         "Compacted 8 earlier turns: parser refactor, renderer wiring, three bug fixes.",

@@ -3,8 +3,8 @@ source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
 ──────────────────────── compacted ────────────────────────
-
-
+Compacted 8 earlier turns: parser refactor, renderer
+wiring, three bug fixes.
 
   tip ctrl+enter / ctrl+q, steer the current response wit…
 ────────────────────────────────────────────────────────────

@@ -2446,10 +2446,13 @@ fn fallback_transcript_layout(
             }
             BlockLayout::Vbox(items)
         }
-        Block::Compacted { summary } => BlockLayout::Vbox(vec![
-            layout_text(" compacted ", None, false),
-            layout_text(summary.clone(), None, false),
-        ]),
+        Block::Compacted { summary } => {
+            let mut items = vec![layout_text(" compacted ", None, false)];
+            if !matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
+                items.push(layout_text(summary.clone(), None, false));
+            }
+            BlockLayout::Vbox(items)
+        }
     }
 }
 

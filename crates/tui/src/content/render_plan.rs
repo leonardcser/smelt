@@ -65,6 +65,9 @@ impl Default for TranscriptDefaultViewPolicy {
         policy
             .block_kinds
             .insert("thinking".to_string(), ViewState::Peek);
+        policy
+            .block_kinds
+            .insert("compacted".to_string(), ViewState::Collapsed);
         for tool in [
             "load_skill",
             "read_file",
@@ -762,6 +765,12 @@ mod tests {
                 content: "preview".into(),
             }),
             ViewState::Peek
+        );
+        assert_eq!(
+            policy.block_default_view_state(&Block::Compacted {
+                summary: "checkpoint".into(),
+            }),
+            ViewState::Collapsed
         );
         assert_eq!(
             policy.block_default_view_state(&Block::Text {
