@@ -616,7 +616,7 @@ mod tests {
         history
             .order
             .iter()
-            .filter_map(|id| match history.blocks.get(id) {
+            .filter_map(|id| match history.block(*id) {
                 Some(Block::Mode { text, .. }) => Some(text.as_str()),
                 _ => None,
             })

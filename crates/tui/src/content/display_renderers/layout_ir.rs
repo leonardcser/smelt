@@ -561,12 +561,12 @@ fn render_markdown_spec(
     }
 
     let total = measure_markdown_spec(spec, width, inline_options);
-    out.save_style();
-    if spec.italic {
-        out.set_italic();
-    }
-    let rows = if row_start == 0 && row_count >= total && gutter.is_none() {
-        render_markdown_inner_with_options(
+    if row_start == 0 && row_count >= total && gutter.is_none() {
+        if spec.italic {
+            out.save_style();
+            out.set_italic();
+        }
+        let rows = render_markdown_inner_with_options(
             out,
             &spec.content,
             width as usize,
@@ -574,10 +574,26 @@ fn render_markdown_spec(
             spec.dim,
             None,
             inline_options,
-        )
-    } else {
-        render_via_temp(out, width, row_start, row_count, gutter, |col| {
-            render_markdown_inner_with_options(
+        );
+        if spec.italic {
+            out.pop_style();
+        }
+        return rows;
+    }
+
+    render_via_temp(
+        out,
+        width,
+        row_start,
+        row_count,
+        gutter,
+        gutter.filter(|g| g.styled).map(|_| (spec.dim, spec.italic)),
+        |col| {
+            if spec.italic {
+                col.save_style();
+                col.set_italic();
+            }
+            let rows = render_markdown_inner_with_options(
                 col,
                 &spec.content,
                 width as usize,
@@ -585,11 +601,13 @@ fn render_markdown_spec(
                 spec.dim,
                 None,
                 inline_options,
-            )
-        })
-    };
-    out.pop_style();
-    rows
+            );
+            if spec.italic {
+                col.pop_style();
+            }
+            rows
+        },
+    )
 }
 
 fn measure_markdown_spec(spec: &MarkdownSpec, width: u16, inline_options: &InlineOptions) -> u16 {
@@ -700,7 +718,7 @@ fn render_code_spec(
         return render_code_block(out, &block, width as usize, false, None, false);
     }
 
-    render_via_temp(out, width, row_start, row_count, gutter, |col| {
+    render_via_temp(out, width, row_start, row_count, gutter, None, |col| {
         render_code_block(col, &block, width as usize, false, None, false)
     })
 }
@@ -820,6 +838,7 @@ fn render_via_temp(
     row_start: u16,
     row_count: u16,
     gutter: Option<&GutterSpec>,
+    styled_gutter: Option<(bool, bool)>,
     render: impl FnOnce(&mut LineBuilder) -> u16,
 ) -> u16 {
     let theme = out.theme().clone();
@@ -845,7 +864,7 @@ fn render_via_temp(
             print_row_chrome(out, RowChrome::Gutter(gutter));
         }
         apply_temp_decoration(out, &buf, row as usize, true);
-        emit_buffer_row_clipped(&buf, row, width, out);
+        emit_buffer_row_clipped(&buf, row, width, out, styled_gutter);
         out.newline();
         rows = rows.saturating_add(1);
     }
@@ -1119,7 +1138,7 @@ fn render_ir_row_prefix(
         };
         print_row_chrome(out, RowChrome::Prefix(prefix));
         apply_temp_decoration(out, &buf, row as usize, true);
-        emit_buffer_row_clipped(&buf, row, child_width, out);
+        emit_buffer_row_clipped(&buf, row, child_width, out, None);
         out.newline();
         rows = rows.saturating_add(1);
     }
@@ -1324,7 +1343,7 @@ fn render_ir_panel(
             }
             if outcome.line_count > 0 {
                 apply_temp_decoration(out, &buf, 0, false);
-                emit_buffer_row_clipped(&buf, 0, child_width, out);
+                emit_buffer_row_clipped(&buf, 0, child_width, out, None);
             }
         }
         out.fill_line_bg(panel_bg);
@@ -1730,7 +1749,7 @@ fn render_ir_hbox(
                 );
                 col.finish();
             }
-            let emitted = emit_buffer_row_clipped(&buf, 0, col_w, out);
+            let emitted = emit_buffer_row_clipped(&buf, 0, col_w, out, None);
             if emitted < col_w {
                 out.print_with_meta(
                     &" ".repeat((col_w - emitted) as usize),
@@ -1767,6 +1786,7 @@ fn emit_buffer_row_clipped(
     row: u16,
     max_cols: u16,
     out: &mut LineBuilder,
+    style_overlay: Option<(bool, bool)>,
 ) -> u16 {
     use unicode_width::UnicodeWidthChar;
 
@@ -1788,10 +1808,11 @@ fn emit_buffer_row_clipped(
             let plain: String = chars[col_idx as usize..h.col_start as usize]
                 .iter()
                 .collect();
+            let style = style_overlay.map(|overlay| overlay_style(None, overlay));
             let used = emit_clipped(
                 out,
                 &plain,
-                None,
+                style,
                 SpanMeta::default(),
                 max_cols,
                 emitted_cols,
@@ -1807,7 +1828,10 @@ fn emit_buffer_row_clipped(
             continue;
         }
         let segment: String = chars[col_idx as usize..end as usize].iter().collect();
-        let style = theme_clone.resolve(h.hl);
+        let style = overlay_style(
+            Some(theme_clone.resolve(h.hl)),
+            style_overlay.unwrap_or_default(),
+        );
         let used = emit_clipped(
             out,
             &segment,
@@ -1824,10 +1848,11 @@ fn emit_buffer_row_clipped(
     }
     if (col_idx as usize) < chars.len() && emitted_cols < max_cols {
         let tail: String = chars[col_idx as usize..].iter().collect();
+        let style = style_overlay.map(|overlay| overlay_style(None, overlay));
         let used = emit_clipped(
             out,
             &tail,
-            None,
+            style,
             SpanMeta::default(),
             max_cols,
             emitted_cols,
@@ -1836,6 +1861,20 @@ fn emit_buffer_row_clipped(
     }
     let _ = UnicodeWidthChar::width(' '); // satisfy import even if loop empty
     emitted_cols
+}
+
+fn overlay_style(
+    base: Option<smelt_core::style::Style>,
+    overlay: (bool, bool),
+) -> smelt_core::style::Style {
+    let mut style = base.unwrap_or_default();
+    if overlay.0 {
+        style.dim = true;
+    }
+    if overlay.1 {
+        style.italic = true;
+    }
+    style
 }
 
 fn emit_clipped(

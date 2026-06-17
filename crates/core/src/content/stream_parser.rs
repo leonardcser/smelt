@@ -265,7 +265,7 @@ impl StreamParser {
             .order
             .iter()
             .rev()
-            .find_map(|id| match history.blocks.get(id) {
+            .find_map(|id| match history.block(*id) {
                 Some(Block::ToolCall { call_id, .. }) => Some(call_id.clone()),
                 _ => None,
             })
@@ -421,7 +421,7 @@ impl StreamParser {
         let Some(id) = self.stream_exec_id else {
             return;
         };
-        let Some(Block::Exec { command, output }) = history.blocks.get(&id).cloned() else {
+        let Some(Block::Exec { command, output }) = history.block(id).cloned() else {
             return;
         };
         let mut new_output = output;
@@ -444,7 +444,7 @@ impl StreamParser {
         let Some(id) = self.stream_exec_id.take() else {
             return;
         };
-        if let Some(Block::Exec { command, output }) = history.blocks.get(&id).cloned() {
+        if let Some(Block::Exec { command, output }) = history.block(id).cloned() {
             let mut trimmed = output;
             trimmed.truncate(trimmed.trim_end().len());
             history.rewrite(

@@ -5,7 +5,7 @@ fn user_blocks(app: &TestApp) -> Vec<(String, Vec<String>)> {
     history
         .order
         .iter()
-        .filter_map(|id| history.blocks.get(id))
+        .filter_map(|id| history.block(*id))
         .filter_map(|block| match block {
             smelt_core::transcript_model::Block::User { text, image_labels } => {
                 Some((text.clone(), image_labels.clone()))

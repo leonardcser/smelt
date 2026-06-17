@@ -1,6 +1,6 @@
 use mlua::{Lua, Table, Value};
 use smelt_core::lua::TranscriptGroupSpec;
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
@@ -124,9 +124,13 @@ impl TranscriptDefaultViewPolicy {
     ) -> ViewState {
         match node {
             RenderNode::Block { id, .. } => history
-                .blocks
-                .get(id)
-                .map(|block| self.block_default_view_state(block))
+                .tool_name(*id)
+                .and_then(|name| self.tools.get(name).copied())
+                .or_else(|| {
+                    history
+                        .block_kind(*id)
+                        .and_then(|kind| self.block_kinds.get(kind).copied())
+                })
                 .unwrap_or(ViewState::Expanded),
             RenderNode::Group {
                 name,
@@ -140,7 +144,8 @@ impl TranscriptDefaultViewPolicy {
         }
     }
 
-    fn block_default_view_state(&self, block: &Block) -> ViewState {
+    #[cfg(test)]
+    fn block_default_view_state(&self, block: &smelt_core::transcript_model::Block) -> ViewState {
         tool_name(block)
             .and_then(|name| self.tools.get(name).copied())
             .or_else(|| self.block_kinds.get(block_kind(block)).copied())
@@ -619,14 +624,11 @@ fn selector_matches(
     let Some(id) = history.order.get(block_index).copied() else {
         return false;
     };
-    let Some(block) = history.blocks.get(&id) else {
-        return false;
-    };
     if spec
         .selector
         .kind
         .as_deref()
-        .is_some_and(|kind| kind != block_kind(block))
+        .is_some_and(|kind| history.block_kind(id) != Some(kind))
     {
         return false;
     }
@@ -634,17 +636,15 @@ fn selector_matches(
         .selector
         .name
         .as_deref()
-        .is_some_and(|name| tool_name(block) != Some(name))
+        .is_some_and(|name| history.tool_name(id) != Some(name))
     {
         return false;
     }
     if let Some(terminal) = spec.selector.terminal {
-        let terminal_state = match block {
-            Block::ToolCall { call_id, .. } => history
-                .tool_state(call_id)
-                .is_some_and(smelt_core::ToolState::is_terminal),
-            _ => false,
-        };
+        let terminal_state = history
+            .tool_call_id(id)
+            .and_then(|call_id| history.tool_state(call_id))
+            .is_some_and(smelt_core::ToolState::is_terminal);
         if terminal_state != terminal {
             return false;
         }
@@ -674,29 +674,18 @@ fn group_bucket(
 
 fn block_field(history: &BlockHistory, block_index: usize, field: &str) -> Option<String> {
     let id = history.order.get(block_index).copied()?;
-    let block = history.blocks.get(&id)?;
     match field {
-        "kind" => Some(block_kind(block).to_string()),
-        "name" => tool_name(block).map(str::to_string),
-        "status" => match block {
-            Block::ToolDraft { .. } => Some("drafting".to_string()),
-            Block::ToolCall { call_id, .. } => history
-                .tool_state(call_id)
-                .map(|state| state.status.label().to_string()),
-            _ => None,
-        },
-        "event" | "event_type" | "process_id" | "exit_code" => match block {
-            Block::ProcessStatus {
-                event: Some(event), ..
-            } => event.field_value(field),
-            _ => None,
-        },
-        field => field.strip_prefix("args.").and_then(|arg| match block {
-            Block::ToolDraft { args, .. } | Block::ToolCall { args, .. } => {
-                args.get(arg).map(json_bucket_value)
-            }
-            _ => None,
-        }),
+        "kind" => history.block_kind(id).map(str::to_string),
+        "name" => history.tool_name(id).map(str::to_string),
+        "status" if history.is_tool_draft(id) => Some("drafting".to_string()),
+        "status" => history
+            .tool_call_id(id)
+            .and_then(|call_id| history.tool_state(call_id))
+            .map(|state| state.status.label().to_string()),
+        "event" | "event_type" | "process_id" | "exit_code" => history.process_field(id, field),
+        field => field
+            .strip_prefix("args.")
+            .and_then(|arg| history.arg_field(id, arg).map(json_bucket_value)),
     }
 }
 
@@ -727,23 +716,24 @@ fn group_sidecar_hash(history: &BlockHistory, child_range: Range<usize>) -> u64 
 }
 
 fn block_sidecar_hash(history: &BlockHistory, id: BlockId) -> u64 {
-    match history.blocks.get(&id) {
-        Some(Block::ToolCall { call_id, .. }) => history
-            .tool_state(call_id)
-            .map(smelt_core::ToolState::display_hash)
-            .unwrap_or(0),
-        _ => 0,
-    }
+    history
+        .tool_call_id(id)
+        .and_then(|call_id| history.tool_state(call_id))
+        .map(smelt_core::ToolState::display_hash)
+        .unwrap_or(0)
 }
 
-fn tool_name(block: &Block) -> Option<&str> {
+#[cfg(test)]
+fn tool_name(block: &smelt_core::transcript_model::Block) -> Option<&str> {
     match block {
-        Block::ToolDraft { name, .. } | Block::ToolCall { name, .. } => Some(name),
+        smelt_core::transcript_model::Block::ToolDraft { name, .. }
+        | smelt_core::transcript_model::Block::ToolCall { name, .. } => Some(name),
         _ => None,
     }
 }
 
-fn block_kind(block: &Block) -> &'static str {
+#[cfg(test)]
+fn block_kind(block: &smelt_core::transcript_model::Block) -> &'static str {
     block.kind()
 }
 
@@ -760,6 +750,7 @@ fn view_state(value: Option<&str>) -> ViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smelt_core::transcript_model::Block;
 
     #[test]
     fn default_view_policy_peeks_thinking_blocks() {

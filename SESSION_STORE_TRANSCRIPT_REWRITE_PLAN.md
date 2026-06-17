@@ -790,6 +790,8 @@ Acceptance:
 
 ### Phase G: Lazy transcript descriptors
 
+Status: complete. Transcript block state now supports descriptor records that preserve block order, origin, tool sidecar state, content hashes, and descriptor-only metadata lookup without materializing `Block` values. The resume rebuild path installs descriptor-backed blocks for restored user, assistant-text, tool, mode, process-status, and compaction entries, while live/streaming blocks stay materialized. `TranscriptDocument` is the concrete `DisplayDocument` adapter used by the TUI row-document seam for transcript total rows, range materialization, and copy. Exact global height measurement remains Phase H's responsibility, so current first paint can still measure all nodes even though restored block payloads are descriptor-backed until layout/copy needs them.
+
 Deliverables:
 
 - Port useful WIP `TranscriptBlocks` descriptor-record ideas to DB-backed `transcript_blocks`.

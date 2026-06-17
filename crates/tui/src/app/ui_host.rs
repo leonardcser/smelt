@@ -72,9 +72,7 @@ impl crate::smelt_edit::UiHost for TuiApp {
         range: crate::smelt_edit::DocRange,
     ) -> Option<crate::smelt_edit::CopyOutput> {
         if win == crate::app::TRANSCRIPT_WIN {
-            let tw = self.transcript_width() as u16;
-            let theme = self.ui.theme().clone();
-            Some(self.transcript.copy_range(&self.lua, tw, &theme, range))
+            self.transcript_copy_range(range)
         } else {
             crate::smelt_edit::UiHost::copy_document_range(&mut self.ui, win, range)
         }

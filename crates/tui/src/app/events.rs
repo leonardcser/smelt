@@ -2338,7 +2338,7 @@ mod tests {
         let users = history
             .order
             .iter()
-            .filter_map(|id| history.blocks.get(id))
+            .filter_map(|id| history.block(*id))
             .filter_map(|block| match block {
                 smelt_core::Block::User { text, .. } => Some(text.as_str()),
                 _ => None,

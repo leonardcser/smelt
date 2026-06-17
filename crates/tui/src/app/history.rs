@@ -1,7 +1,7 @@
 use crate::app::{PersistFingerprints, TuiApp};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
-use smelt_core::{Block, ToolOutput, ToolState, ToolStatus};
+use smelt_core::{Block, ToolOutput, ToolState, ToolStatus, TranscriptBlockDescriptor};
 
 use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::HashMap;
@@ -152,7 +152,10 @@ fn push_note_block(
     let Some(block) = history_note_to_block(lua, note) else {
         return;
     };
-    transcript.push_with_origin(block, smelt_core::BlockOrigin::History(history_index));
+    transcript.push_descriptor_with_origin(
+        TranscriptBlockDescriptor::from_block(block),
+        smelt_core::BlockOrigin::History(history_index),
+    );
 }
 
 fn push_user_block(
@@ -166,8 +169,8 @@ fn push_user_block(
     let prefix_marker = engine::SUMMARY_PREFIX.trim_end();
     if let Some(rest) = text.strip_prefix(prefix_marker) {
         let summary = rest.trim_start_matches('\n');
-        transcript.push_with_origin(
-            Block::Compacted {
+        transcript.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::Compacted {
                 summary: summary.to_string(),
             },
             smelt_core::BlockOrigin::History(history_index),
@@ -175,15 +178,15 @@ fn push_user_block(
         return;
     }
     if let Some(note) = text.strip_prefix(protocol::MODE_NOTE_PREFIX) {
-        transcript.push_with_origin(
-            lua.mode_block(None, note.trim()),
+        transcript.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::from_block(lua.mode_block(None, note.trim())),
             smelt_core::BlockOrigin::History(history_index),
         );
         return;
     }
     if let Some(note) = text.strip_prefix(protocol::PROCESS_STATUS_NOTE_PREFIX) {
-        transcript.push_with_origin(
-            Block::ProcessStatus {
+        transcript.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::ProcessStatus {
                 text: note.trim().to_string(),
                 event: None,
             },
@@ -203,8 +206,8 @@ fn push_user_block(
             format!("{display_source} {suffix}")
         }
     };
-    transcript.push_with_origin(
-        Block::User {
+    transcript.push_descriptor_with_origin(
+        TranscriptBlockDescriptor::User {
             text: display_text,
             image_labels,
         },
@@ -230,8 +233,8 @@ fn push_assistant_blocks(
         }
     }
     if let Some(ref content) = turn.content {
-        transcript.push_with_origin(
-            Block::Text {
+        transcript.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::Text {
                 content: content.text_content().into_owned(),
             },
             smelt_core::BlockOrigin::History(history_index),
@@ -258,8 +261,8 @@ fn push_assistant_blocks(
             .elapsed_ms
             .or_else(|| tool_elapsed.get(&inv.call_id).copied());
         let summary = summary_resolver.resolve(&inv.name, &args);
-        transcript.push_tool_call_with_origin(
-            Block::ToolCall {
+        transcript.push_tool_descriptor_with_origin(
+            TranscriptBlockDescriptor::ToolCall {
                 call_id: inv.call_id.clone(),
                 name: inv.name.clone(),
                 summary,
@@ -305,7 +308,7 @@ mod tests {
 
         let transcript = build_transcript_from_session(&lua, &session);
         let id = transcript.history.order[0];
-        match transcript.history.blocks.get(&id) {
+        match transcript.history.block(id) {
             Some(Block::ToolCall { summary, args, .. }) => {
                 assert_eq!(args.get("label"), Some(&serde_json::json!("ok")));
                 assert_eq!(summary.as_plain_text(), r#"{"label":"ok"}"#);
@@ -781,7 +784,7 @@ impl TuiApp {
         }
         let prev_id = history.order[index - 1];
         let next_id = history.order[index];
-        let duplicate = match (history.blocks.get(&prev_id), history.blocks.get(&next_id)) {
+        let duplicate = match (history.block(prev_id), history.block(next_id)) {
             (Some(prev), Some(next)) => checkpoint_suffix_blocks_match(prev, next),
             _ => false,
         };
@@ -992,7 +995,7 @@ mod checkpoint_tests {
         let history = app.app.transcript.history();
         let id = history.order[0];
         assert!(matches!(
-            history.blocks.get(&id),
+            history.block(id),
             Some(Block::User { text, .. }) if text == "/reflect"
         ));
     }
@@ -1008,7 +1011,7 @@ mod checkpoint_tests {
         let history = app.app.transcript.history();
         let id = history.order[0];
         assert!(matches!(
-            history.blocks.get(&id),
+            history.block(id),
             Some(Block::ProcessStatus { text, .. }) if text == note
         ));
     }
@@ -1023,7 +1026,7 @@ mod checkpoint_tests {
 
         let history = app.app.transcript.history();
         let id = history.order[0];
-        assert!(matches!(history.blocks.get(&id), Some(Block::Mode { .. })));
+        assert!(matches!(history.block(id), Some(Block::Mode { .. })));
     }
 
     #[test]
@@ -1050,7 +1053,7 @@ mod checkpoint_tests {
         assert_eq!(history.order[3], before[2]);
         assert_eq!(history.order[4], before[3]);
         assert!(matches!(
-            history.blocks.get(&history.order[2]),
+            history.block(history.order[2]),
             Some(Block::Compacted { summary }) if summary == "summary"
         ));
     }
@@ -1089,7 +1092,7 @@ mod checkpoint_tests {
             .order
             .iter()
             .enumerate()
-            .filter_map(|(idx, id)| match history.blocks.get(id) {
+            .filter_map(|(idx, id)| match history.block(*id) {
                 Some(Block::Compacted { summary }) => Some((idx, summary.as_str())),
                 _ => None,
             })
@@ -1133,7 +1136,7 @@ mod checkpoint_tests {
         assert!(installed);
         let history = app.app.transcript.history();
         assert!(matches!(
-            history.blocks.get(&history.order[2]),
+            history.block(history.order[2]),
             Some(Block::Compacted { summary }) if summary == "summary"
         ));
     }
@@ -1162,10 +1165,10 @@ mod checkpoint_tests {
         assert_eq!(index, 1);
         assert_eq!(history.order.len(), 2);
         assert!(
-            matches!(history.blocks.get(&history.order[0]), Some(Block::Text { content }) if content == "old")
+            matches!(history.block(history.order[0]), Some(Block::Text { content }) if content == "old")
         );
         assert!(
-            matches!(history.blocks.get(&history.order[1]), Some(Block::Text { content }) if content == "recent")
+            matches!(history.block(history.order[1]), Some(Block::Text { content }) if content == "recent")
         );
     }
 
@@ -1206,11 +1209,11 @@ mod checkpoint_tests {
         assert!(installed);
         let history = app.app.transcript.history();
         assert!(matches!(
-            history.blocks.get(&history.order[4]),
+            history.block(history.order[4]),
             Some(Block::Compacted { summary }) if summary == "summary"
         ));
         assert!(matches!(
-            history.blocks.get(&history.order[5]),
+            history.block(history.order[5]),
             Some(Block::User { text, .. }) if text == "live recent"
         ));
     }
@@ -1249,7 +1252,7 @@ mod checkpoint_tests {
         let summaries: Vec<_> = history
             .order
             .iter()
-            .filter_map(|id| match history.blocks.get(id) {
+            .filter_map(|id| match history.block(*id) {
                 Some(Block::Compacted { summary }) => Some(summary.as_str()),
                 _ => None,
             })

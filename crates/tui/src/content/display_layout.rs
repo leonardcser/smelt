@@ -320,7 +320,7 @@ impl DisplayModel {
             }
             match node {
                 RenderNode::Block { id: block_id, .. } => {
-                    let Some(block) = history.blocks.get(&block_id).cloned() else {
+                    let Some(block) = history.block(block_id).cloned() else {
                         self.blocks.remove(&id);
                         continue;
                     };
@@ -496,19 +496,19 @@ fn display_layout_entry_matches_history(
     }
     match entry.id {
         RenderNodeId::Block(block_id) => {
-            let Some(block) = history.blocks.get(&block_id) else {
-                return false;
+            let Some(call_id) = history.tool_call_id(block_id) else {
+                if history.content_hash(block_id) != entry.key.content_hash {
+                    return false;
+                }
+                return entry.key.sidecar_hash == 0;
             };
             if history.content_hash(block_id) != entry.key.content_hash {
                 return false;
             }
-            let sidecar_hash = match block {
-                Block::ToolCall { call_id, .. } => history
-                    .tool_state(call_id)
-                    .map(ToolState::display_hash)
-                    .unwrap_or(0),
-                _ => 0,
-            };
+            let sidecar_hash = history
+                .tool_state(call_id)
+                .map(ToolState::display_hash)
+                .unwrap_or(0);
             sidecar_hash == entry.key.sidecar_hash
         }
         RenderNodeId::Group(_) => plan
@@ -636,7 +636,7 @@ fn block_snapshot_json(
     view_state: Option<ViewState>,
 ) -> Option<serde_json::Value> {
     let id = *history.order.get(block_index)?;
-    let block = history.blocks.get(&id)?;
+    let block = history.block(id)?;
     let mut value = serde_json::Map::new();
     value.insert("id".into(), serde_json::to_value(id).ok()?);
     value.insert("index".into(), serde_json::json!(block_index));

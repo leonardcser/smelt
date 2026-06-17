@@ -4,7 +4,7 @@ use crate::app::TuiApp;
 use crate::content::prompt_parser::{
     build_prompt_display_lines, prompt_display_uses_cursor_padding,
 };
-use crate::smelt_edit::{Buffer, Theme};
+use crate::smelt_edit::{Buffer, DisplayDocument, DisplaySnapshot, TextRange, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_core::content::file_icons::FileIconOptions;
 use smelt_core::content::highlight::InlineOptions;
@@ -311,6 +311,58 @@ impl Default for TranscriptView {
     }
 }
 
+pub(crate) struct TranscriptDocument<'a> {
+    view: &'a mut TranscriptView,
+    lua: &'a LuaRuntime,
+    width: u16,
+    theme: &'a Theme,
+}
+
+impl<'a> TranscriptDocument<'a> {
+    pub(crate) fn new(
+        view: &'a mut TranscriptView,
+        lua: &'a LuaRuntime,
+        width: u16,
+        theme: &'a Theme,
+    ) -> Self {
+        Self {
+            view,
+            lua,
+            width,
+            theme,
+        }
+    }
+}
+
+impl DisplayDocument for TranscriptDocument<'_> {
+    fn snapshot(&mut self) -> DisplaySnapshot {
+        DisplaySnapshot {
+            generation: self.view.display_cache_generation(),
+            total_rows: self.view.exact_total_rows(self.lua, self.width),
+        }
+    }
+
+    fn materialize(
+        &mut self,
+        range: std::ops::Range<crate::smelt_edit::RowIndex>,
+    ) -> crate::smelt_edit::DisplayRows {
+        self.view.display_rows_for_range(
+            self.lua,
+            self.width,
+            self.theme,
+            range.start,
+            range.end.saturating_sub(range.start),
+        )
+    }
+
+    fn copy_range(&mut self, range: TextRange) -> Option<crate::smelt_edit::CopyOutput> {
+        range.rows().map(|range| {
+            self.view
+                .copy_range(self.lua, self.width, self.theme, range)
+        })
+    }
+}
+
 pub(crate) struct ResumePreviewCache {
     views: HashMap<String, TranscriptView>,
     order: VecDeque<String>,
@@ -519,7 +571,9 @@ impl TuiApp {
         let _perf = smelt_perf::perf::begin("transcript:measure_rows_exact");
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
-        self.transcript.exact_total_rows(&self.lua, tw)
+        let theme = self.ui.theme().clone();
+        let mut document = TranscriptDocument::new(&mut self.transcript, &self.lua, tw, &theme);
+        DisplayDocument::snapshot(&mut document).total_rows
     }
 
     pub(crate) fn transcript_rows_and_breaks_range(
@@ -531,8 +585,19 @@ impl TuiApp {
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();
-        self.transcript
-            .display_rows_for_range(&self.lua, tw, &theme, start, count)
+        let mut document = TranscriptDocument::new(&mut self.transcript, &self.lua, tw, &theme);
+        DisplayDocument::materialize(&mut document, start..start.saturating_add(count))
+    }
+
+    pub(crate) fn transcript_copy_range(
+        &mut self,
+        range: crate::smelt_edit::DocRange,
+    ) -> Option<crate::smelt_edit::CopyOutput> {
+        self.sync_transcript_renderer_generation();
+        let tw = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
+        let mut document = TranscriptDocument::new(&mut self.transcript, &self.lua, tw, &theme);
+        DisplayDocument::copy_range(&mut document, TextRange::Rows(range))
     }
 
     pub(crate) fn transcript_visible_rows(
@@ -651,7 +716,7 @@ impl TuiApp {
             let Some(idx) = history.order.iter().position(|id| *id == block_id) else {
                 continue;
             };
-            let Some(block) = history.blocks.get(&block_id) else {
+            let Some(block) = history.block(block_id) else {
                 continue;
             };
             let role = transcript_block_role(block);
@@ -751,7 +816,7 @@ impl TuiApp {
         let Some(id) = history.order.last().copied() else {
             return false;
         };
-        if !matches!(history.blocks.get(&id), Some(Block::Mode { .. })) {
+        if !matches!(history.block(id), Some(Block::Mode { .. })) {
             return false;
         }
         self.transcript.history_mut().rewrite(id, block);
@@ -763,7 +828,7 @@ impl TuiApp {
         let Some((idx, id)) = history.order.iter().copied().enumerate().next_back() else {
             return;
         };
-        if matches!(history.blocks.get(&id), Some(Block::Mode { .. })) {
+        if matches!(history.block(id), Some(Block::Mode { .. })) {
             self.truncate_to(idx);
         }
     }

@@ -5,6 +5,7 @@
 use crate::paused_timer::PausedTimer;
 use crate::permissions::PermissionGrant;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Handle to an in-flight tool call; full mutable state lives in `tool_states[call_id]`.
@@ -109,15 +110,24 @@ impl ToolState {
 
     pub fn display_hash(&self) -> u64 {
         #[derive(serde::Serialize)]
+        struct DisplayOutput<'a> {
+            content: &'a str,
+            is_error: bool,
+        }
+
+        #[derive(serde::Serialize)]
         struct DisplayState<'a> {
             status: ToolStatus,
-            output: &'a Option<ToolOutputRef>,
+            output: Option<DisplayOutput<'a>>,
             user_message: &'a Option<String>,
         }
 
         crate::utils::hash_serializable(&DisplayState {
             status: self.status,
-            output: &self.output,
+            output: self.output.as_ref().map(|output| DisplayOutput {
+                content: output.content.as_str(),
+                is_error: output.is_error,
+            }),
             user_message: &self.user_message,
         })
     }
@@ -271,7 +281,7 @@ impl BlockId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlockOrigin {
     History(usize),
     CheckpointMarker,
@@ -347,9 +357,284 @@ pub struct LayoutKey {
     pub sidecar_hash: u64,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub enum TranscriptBlockDescriptor {
+    User {
+        text: String,
+        image_labels: Vec<String>,
+    },
+    Mode {
+        text: String,
+        icon: String,
+        hl_group: String,
+    },
+    ProcessStatus {
+        text: String,
+        event: Option<protocol::ProcessStatusEvent>,
+    },
+    Thinking {
+        content: String,
+    },
+    Text {
+        content: String,
+    },
+    CodeLine {
+        content: String,
+        lang: String,
+    },
+    ToolCall {
+        call_id: String,
+        name: String,
+        summary: protocol::StyledLines,
+        args: HashMap<String, serde_json::Value>,
+    },
+    Exec {
+        command: String,
+        output: String,
+    },
+    Compacted {
+        summary: String,
+    },
+}
+
+impl TranscriptBlockDescriptor {
+    pub fn from_block(block: Block) -> Self {
+        match block {
+            Block::User { text, image_labels } => Self::User { text, image_labels },
+            Block::Mode {
+                text,
+                icon,
+                hl_group,
+            } => Self::Mode {
+                text,
+                icon,
+                hl_group,
+            },
+            Block::ProcessStatus { text, event } => Self::ProcessStatus { text, event },
+            Block::Thinking { content } => Self::Thinking { content },
+            Block::Text { content } => Self::Text { content },
+            Block::CodeLine { content, lang } => Self::CodeLine { content, lang },
+            Block::ToolCall {
+                call_id,
+                name,
+                summary,
+                args,
+            } => Self::ToolCall {
+                call_id,
+                name,
+                summary,
+                args,
+            },
+            Block::Exec { command, output } => Self::Exec { command, output },
+            Block::Compacted { summary } => Self::Compacted { summary },
+        }
+    }
+
+    pub fn to_block(&self) -> Block {
+        match self {
+            Self::User { text, image_labels } => Block::User {
+                text: text.clone(),
+                image_labels: image_labels.clone(),
+            },
+            Self::Mode {
+                text,
+                icon,
+                hl_group,
+            } => Block::Mode {
+                text: text.clone(),
+                icon: icon.clone(),
+                hl_group: hl_group.clone(),
+            },
+            Self::ProcessStatus { text, event } => Block::ProcessStatus {
+                text: text.clone(),
+                event: event.clone(),
+            },
+            Self::Thinking { content } => Block::Thinking {
+                content: content.clone(),
+            },
+            Self::Text { content } => Block::Text {
+                content: content.clone(),
+            },
+            Self::CodeLine { content, lang } => Block::CodeLine {
+                content: content.clone(),
+                lang: lang.clone(),
+            },
+            Self::ToolCall {
+                call_id,
+                name,
+                summary,
+                args,
+            } => Block::ToolCall {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                summary: summary.clone(),
+                args: args.clone(),
+            },
+            Self::Exec { command, output } => Block::Exec {
+                command: command.clone(),
+                output: output.clone(),
+            },
+            Self::Compacted { summary } => Block::Compacted {
+                summary: summary.clone(),
+            },
+        }
+    }
+
+    fn content_hash(&self) -> u64 {
+        self.to_block().content_hash()
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::User { .. } => "user",
+            Self::Mode { .. } => "mode",
+            Self::ProcessStatus { .. } => "process_status",
+            Self::Thinking { .. } => "thinking",
+            Self::Text { .. } => "assistant",
+            Self::CodeLine { .. } => "code",
+            Self::ToolCall { .. } => "tool",
+            Self::Exec { .. } => "exec",
+            Self::Compacted { .. } => "compacted",
+        }
+    }
+
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            Self::ToolCall { name, .. } => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        match self {
+            Self::ToolCall { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn process_field(&self, field: &str) -> Option<String> {
+        match self {
+            Self::ProcessStatus {
+                event: Some(event), ..
+            } => event.field_value(field),
+            _ => None,
+        }
+    }
+
+    pub fn arg_field(&self, arg: &str) -> Option<&serde_json::Value> {
+        match self {
+            Self::ToolCall { args, .. } => args.get(arg),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct TranscriptBlockRecord {
+    pub descriptor: TranscriptBlockDescriptor,
+    pub origin: Option<BlockOrigin>,
+    pub tool_state: Option<(String, ToolState)>,
+}
+
+struct LazyBlock {
+    descriptor: TranscriptBlockDescriptor,
+    block: OnceLock<Block>,
+}
+
+impl LazyBlock {
+    fn new(descriptor: TranscriptBlockDescriptor) -> Self {
+        Self {
+            descriptor,
+            block: OnceLock::new(),
+        }
+    }
+
+    fn block(&self) -> &Block {
+        self.block.get_or_init(|| self.descriptor.to_block())
+    }
+}
+
+enum BlockEntry {
+    Materialized(Block),
+    Descriptor(LazyBlock),
+}
+
+impl BlockEntry {
+    fn block(&self) -> &Block {
+        match self {
+            Self::Materialized(block) => block,
+            Self::Descriptor(block) => block.block(),
+        }
+    }
+
+    fn into_materialized(self) -> Block {
+        match self {
+            Self::Materialized(block) => block,
+            Self::Descriptor(block) => block.descriptor.to_block(),
+        }
+    }
+
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Materialized(block) => block.kind(),
+            Self::Descriptor(block) => block.descriptor.kind(),
+        }
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        match self {
+            Self::Materialized(Block::ToolDraft { name, .. } | Block::ToolCall { name, .. }) => {
+                Some(name.as_str())
+            }
+            Self::Descriptor(block) => block.descriptor.tool_name(),
+            _ => None,
+        }
+    }
+
+    fn tool_call_id(&self) -> Option<&str> {
+        match self {
+            Self::Materialized(Block::ToolDraft { call_id, .. }) => call_id.as_deref(),
+            Self::Materialized(Block::ToolCall { call_id, .. }) => Some(call_id.as_str()),
+            Self::Descriptor(block) => block.descriptor.tool_call_id(),
+            _ => None,
+        }
+    }
+
+    fn process_field(&self, field: &str) -> Option<String> {
+        match self {
+            Self::Materialized(Block::ProcessStatus {
+                event: Some(event), ..
+            }) => event.field_value(field),
+            Self::Descriptor(block) => block.descriptor.process_field(field),
+            _ => None,
+        }
+    }
+
+    fn arg_field(&self, arg: &str) -> Option<&serde_json::Value> {
+        match self {
+            Self::Materialized(Block::ToolDraft { args, .. } | Block::ToolCall { args, .. }) => {
+                args.get(arg)
+            }
+            Self::Descriptor(block) => block.descriptor.arg_field(arg),
+            _ => None,
+        }
+    }
+
+    fn is_tool_draft(&self) -> bool {
+        matches!(self, Self::Materialized(Block::ToolDraft { .. }))
+    }
+
+    fn descriptor(&self) -> TranscriptBlockDescriptor {
+        match self {
+            Self::Materialized(block) => TranscriptBlockDescriptor::from_block(block.clone()),
+            Self::Descriptor(block) => block.descriptor.clone(),
+        }
+    }
+}
+
 pub struct BlockHistory {
     pub order: Vec<BlockId>,
-    pub blocks: HashMap<BlockId, Block>,
+    entries: HashMap<BlockId, BlockEntry>,
     /// Cached per-block content hashes; avoids re-hashing on layout-key construction.
     pub(crate) content_hashes: HashMap<BlockId, u64>,
     pub(crate) next_id: u64,
@@ -370,7 +655,7 @@ impl BlockHistory {
     pub(crate) fn new() -> Self {
         Self {
             order: Vec::new(),
-            blocks: HashMap::new(),
+            entries: HashMap::new(),
             content_hashes: HashMap::new(),
             next_id: 0,
             tool_states: HashMap::new(),
@@ -402,7 +687,7 @@ impl BlockHistory {
         if let Some(h) = self.content_hashes.get(&id) {
             return *h;
         }
-        self.blocks.get(&id).map(|b| b.content_hash()).unwrap_or(0)
+        self.block(id).map(|b| b.content_hash()).unwrap_or(0)
     }
 
     pub fn tool_state(&self, call_id: &str) -> Option<&ToolState> {
@@ -423,8 +708,85 @@ impl BlockHistory {
         self.order.is_empty()
     }
 
+    pub fn block(&self, id: BlockId) -> Option<&Block> {
+        self.entries.get(&id).map(BlockEntry::block)
+    }
+
+    pub fn block_kind(&self, id: BlockId) -> Option<&'static str> {
+        self.entries.get(&id).map(BlockEntry::kind)
+    }
+
+    pub fn tool_name(&self, id: BlockId) -> Option<&str> {
+        self.entries.get(&id).and_then(BlockEntry::tool_name)
+    }
+
+    pub fn tool_call_id(&self, id: BlockId) -> Option<&str> {
+        self.entries.get(&id).and_then(BlockEntry::tool_call_id)
+    }
+
+    pub fn is_tool_draft(&self, id: BlockId) -> bool {
+        self.entries
+            .get(&id)
+            .is_some_and(BlockEntry::is_tool_draft)
+    }
+
+    pub fn process_field(&self, id: BlockId, field: &str) -> Option<String> {
+        self.entries
+            .get(&id)
+            .and_then(|entry| entry.process_field(field))
+    }
+
+    pub fn arg_field(&self, id: BlockId, arg: &str) -> Option<&serde_json::Value> {
+        self.entries.get(&id).and_then(|entry| entry.arg_field(arg))
+    }
+
+    pub fn descriptor_records(&self) -> Vec<TranscriptBlockRecord> {
+        self.order
+            .iter()
+            .filter_map(|id| {
+                let entry = self.entries.get(id)?;
+                let descriptor = entry.descriptor();
+                let tool_state = descriptor.tool_call_id().and_then(|call_id| {
+                    self.tool_states
+                        .get(call_id)
+                        .map(|state| (call_id.to_string(), state.clone()))
+                });
+                Some(TranscriptBlockRecord {
+                    descriptor,
+                    origin: self.origins.get(id).copied(),
+                    tool_state,
+                })
+            })
+            .collect()
+    }
+
+    pub fn from_descriptor_records(records: Vec<TranscriptBlockRecord>) -> Self {
+        let mut history = Self::new();
+        for record in records {
+            if let Some((call_id, state)) = record.tool_state {
+                let hash = state.display_hash();
+                history.tool_states.insert(call_id.clone(), state);
+                history.tool_display_hashes.insert(call_id, hash);
+            }
+            history.add_descriptor(None, record.descriptor, record.origin);
+        }
+        history
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_lazy_blocks(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| match entry {
+                BlockEntry::Descriptor(block) => block.block.get().is_some(),
+                BlockEntry::Materialized(_) => false,
+            })
+            .count()
+    }
+
     pub fn block_at(&self, i: usize) -> &Block {
-        &self.blocks[&self.order[i]]
+        self.block(self.order[i])
+            .expect("block id in transcript order")
     }
 
     pub fn has_history_origin_at_or_after(&self, before_history_index: usize) -> bool {
@@ -476,7 +838,30 @@ impl BlockHistory {
             Some(idx) => self.order.insert(idx.min(self.order.len()), id),
             None => self.order.push(id),
         }
-        self.blocks.insert(id, block);
+        self.entries.insert(id, BlockEntry::Materialized(block));
+        self.content_hashes.insert(id, hash);
+        if let Some(origin) = origin {
+            self.origins.insert(id, origin);
+        }
+        self.bump_generation();
+        id
+    }
+
+    fn add_descriptor(
+        &mut self,
+        idx: Option<usize>,
+        descriptor: TranscriptBlockDescriptor,
+        origin: Option<BlockOrigin>,
+    ) -> BlockId {
+        let hash = descriptor.content_hash();
+        let id = BlockId(self.next_id);
+        self.next_id += 1;
+        match idx {
+            Some(idx) => self.order.insert(idx.min(self.order.len()), id),
+            None => self.order.push(id),
+        }
+        self.entries
+            .insert(id, BlockEntry::Descriptor(LazyBlock::new(descriptor)));
         self.content_hashes.insert(id, hash);
         if let Some(origin) = origin {
             self.origins.insert(id, origin);
@@ -491,6 +876,14 @@ impl BlockHistory {
 
     pub(crate) fn push_with_origin(&mut self, block: Block, origin: BlockOrigin) -> BlockId {
         self.add_block(None, block, Some(origin))
+    }
+
+    pub fn push_descriptor_with_origin(
+        &mut self,
+        descriptor: TranscriptBlockDescriptor,
+        origin: BlockOrigin,
+    ) -> BlockId {
+        self.add_descriptor(None, descriptor, Some(origin))
     }
 
     pub(crate) fn insert_checkpoint_marker(
@@ -539,11 +932,11 @@ impl BlockHistory {
         self.order.remove(idx);
         self.content_hashes.remove(&id);
         self.statuses.remove(&id);
-        if let Some(Block::ToolCall { call_id, .. }) = self.blocks.get(&id) {
-            self.tool_states.remove(call_id);
-            self.tool_display_hashes.remove(call_id);
+        if let Some(call_id) = self.tool_call_id(id).map(str::to_string) {
+            self.tool_states.remove(&call_id);
+            self.tool_display_hashes.remove(&call_id);
         }
-        let block = self.blocks.remove(&id);
+        let block = self.entries.remove(&id).map(BlockEntry::into_materialized);
         self.bump_generation();
         block
     }
@@ -560,7 +953,7 @@ impl BlockHistory {
         }
         self.order.retain(|id| !removed.contains(id));
         for id in removed {
-            self.blocks.remove(&id);
+            self.entries.remove(&id);
             self.content_hashes.remove(&id);
             self.statuses.remove(&id);
             self.origins.remove(&id);
@@ -593,6 +986,19 @@ impl BlockHistory {
         self.push_with_origin(block, origin)
     }
 
+    pub fn push_descriptor_with_state_and_origin(
+        &mut self,
+        descriptor: TranscriptBlockDescriptor,
+        call_id: String,
+        state: ToolState,
+        origin: BlockOrigin,
+    ) -> BlockId {
+        let hash = state.display_hash();
+        self.tool_states.insert(call_id.clone(), state);
+        self.tool_display_hashes.insert(call_id, hash);
+        self.add_descriptor(None, descriptor, Some(origin))
+    }
+
     pub fn update_tool_state(
         &mut self,
         call_id: &str,
@@ -612,15 +1018,15 @@ impl BlockHistory {
     /// `ViewState`. No-ops when the block doesn't exist (e.g. truncated during
     /// a stream). Same content hash skips the generation bump.
     pub fn rewrite(&mut self, id: BlockId, block: Block) {
-        if !self.blocks.contains_key(&id) {
+        if !self.entries.contains_key(&id) {
             return;
         }
         let hash = block.content_hash();
         if self.content_hashes.get(&id) == Some(&hash) {
-            self.blocks.insert(id, block);
+            self.entries.insert(id, BlockEntry::Materialized(block));
             return;
         }
-        self.blocks.insert(id, block);
+        self.entries.insert(id, BlockEntry::Materialized(block));
         self.content_hashes.insert(id, hash);
         self.bump_generation();
     }
@@ -654,7 +1060,7 @@ impl BlockHistory {
 
     pub fn clear(&mut self) {
         self.order.clear();
-        self.blocks.clear();
+        self.entries.clear();
         self.content_hashes.clear();
         self.next_id = 0;
         self.tool_states.clear();
@@ -683,12 +1089,10 @@ impl BlockHistory {
     /// Substitute the actual per-block content and sidecar hash into a base
     /// `LayoutKey` so cache lookups and layout passes agree.
     pub fn resolve_key(&self, id: BlockId, base: LayoutKey) -> LayoutKey {
-        let sidecar_hash = match self.blocks.get(&id) {
-            Some(Block::ToolCall { call_id, .. }) => {
-                self.tool_display_hashes.get(call_id).copied().unwrap_or(0)
-            }
-            _ => 0,
-        };
+        let sidecar_hash = self
+            .tool_call_id(id)
+            .and_then(|call_id| self.tool_display_hashes.get(call_id).copied())
+            .unwrap_or(0);
         LayoutKey {
             content_hash: self.content_hash(id),
             sidecar_hash,
@@ -702,7 +1106,7 @@ impl BlockHistory {
         }
         let removed: Vec<BlockId> = self.order.drain(idx..).collect();
         for id in removed {
-            self.blocks.remove(&id);
+            self.entries.remove(&id);
             self.content_hashes.remove(&id);
             self.statuses.remove(&id);
             self.origins.remove(&id);
@@ -715,14 +1119,7 @@ impl BlockHistory {
         let live: HashSet<String> = self
             .order
             .iter()
-            .filter_map(|id| self.blocks.get(id))
-            .filter_map(|b| {
-                if let Block::ToolCall { call_id, .. } = b {
-                    Some(call_id.clone())
-                } else {
-                    None
-                }
-            })
+            .filter_map(|id| self.tool_call_id(*id).map(str::to_string))
             .collect();
         self.tool_states.retain(|cid, _| live.contains(cid));
         self.tool_display_hashes.retain(|cid, _| live.contains(cid));
@@ -825,8 +1222,87 @@ mod tests {
         });
         assert_ne!(a, b);
         assert_eq!(history.order.len(), 2);
-        assert_eq!(history.blocks.len(), 2);
+        assert_eq!(history.entries.len(), 2);
         assert_eq!(history.content_hash(a), history.content_hash(b));
+    }
+
+    #[test]
+    fn descriptor_metadata_does_not_materialize_block() {
+        let mut history = BlockHistory::new();
+        let id = history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::ToolCall {
+                call_id: "call-1".into(),
+                name: "read_file".into(),
+                summary: "read".into(),
+                args: HashMap::from([("path".into(), serde_json::json!("/tmp/a"))]),
+            },
+            BlockOrigin::History(0),
+        );
+
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.materialized_lazy_blocks(), 0);
+        assert_eq!(history.block_kind(id), Some("tool"));
+        assert_eq!(history.tool_name(id), Some("read_file"));
+        assert_eq!(history.tool_call_id(id), Some("call-1"));
+        assert_eq!(
+            history.arg_field(id, "path"),
+            Some(&serde_json::json!("/tmp/a"))
+        );
+        assert_ne!(history.content_hash(id), 0);
+        assert_eq!(history.materialized_lazy_blocks(), 0);
+
+        assert!(matches!(history.block(id), Some(Block::ToolCall { .. })));
+        assert_eq!(history.materialized_lazy_blocks(), 1);
+    }
+
+    #[test]
+    fn descriptor_records_round_trip_without_materializing_blocks() {
+        let mut history = BlockHistory::new();
+        history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::User {
+                text: "hello".into(),
+                image_labels: Vec::new(),
+            },
+            BlockOrigin::History(0),
+        );
+        history.push_descriptor_with_state_and_origin(
+            TranscriptBlockDescriptor::ToolCall {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                summary: "run".into(),
+                args: HashMap::from([("command".into(), serde_json::json!("echo hi"))]),
+            },
+            "call-1".into(),
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: None,
+                output: Some(Box::new(ToolOutput {
+                    content: "hi".into(),
+                    is_error: false,
+                    metadata: Some(serde_json::json!({"small": true})),
+                })),
+                user_message: None,
+            },
+            BlockOrigin::History(1),
+        );
+
+        let records = history.descriptor_records();
+        assert_eq!(history.materialized_lazy_blocks(), 0);
+
+        let restored = BlockHistory::from_descriptor_records(records);
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored.materialized_lazy_blocks(), 0);
+        let tool_id = restored.order[1];
+        assert_eq!(restored.tool_name(tool_id), Some("bash"));
+        assert_eq!(restored.tool_call_id(tool_id), Some("call-1"));
+        let output = restored
+            .tool_state("call-1")
+            .and_then(|state| state.output.as_ref())
+            .expect("restored tool output");
+        assert_eq!(output.content, "hi");
+        assert!(!output.is_error);
+        assert_eq!(output.metadata, Some(serde_json::json!({"small": true})));
+        assert_eq!(restored.materialized_lazy_blocks(), 0);
     }
 
     #[test]
@@ -910,6 +1386,27 @@ mod tests {
         assert_eq!(a.display_hash(), b.display_hash());
 
         b.status = ToolStatus::Ok;
+        assert_ne!(a.display_hash(), b.display_hash());
+    }
+
+    #[test]
+    fn tool_display_hash_ignores_metadata() {
+        let mut a = pending_state();
+        a.status = ToolStatus::Ok;
+        a.output = Some(Box::new(ToolOutput {
+            content: "visible output".into(),
+            is_error: false,
+            metadata: Some(serde_json::json!({ "old_content": "a".repeat(32 * 1024) })),
+        }));
+        let mut b = a.clone();
+        b.output.as_mut().unwrap().metadata = Some(serde_json::json!({
+            "old_content": "b".repeat(32 * 1024),
+            "new_content": "c".repeat(32 * 1024),
+        }));
+
+        assert_eq!(a.display_hash(), b.display_hash());
+
+        b.output.as_mut().unwrap().content.push_str(" changed");
         assert_ne!(a.display_hash(), b.display_hash());
     }
 

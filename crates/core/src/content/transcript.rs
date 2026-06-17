@@ -1,6 +1,8 @@
 //! `Transcript` owns the block history. Streaming parsing lives in `StreamParser`; display projection in `tui`.
 
-use crate::transcript_model::{Block, BlockHistory, BlockId, BlockOrigin, ToolState};
+use crate::transcript_model::{
+    Block, BlockHistory, BlockId, BlockOrigin, ToolState, TranscriptBlockDescriptor,
+};
 
 pub struct Transcript {
     pub history: BlockHistory,
@@ -19,10 +21,22 @@ impl Transcript {
         }
     }
 
+    pub fn from_block_history(history: BlockHistory) -> Self {
+        Self { history }
+    }
+
+    pub fn from_descriptor_records(
+        records: Vec<crate::transcript_model::TranscriptBlockRecord>,
+    ) -> Self {
+        Self {
+            history: BlockHistory::from_descriptor_records(records),
+        }
+    }
+
     // ── Accessors ─────────────────────────────────────────────────────
 
     pub fn block(&self, id: BlockId) -> Option<&Block> {
-        self.history.blocks.get(&id)
+        self.history.block(id)
     }
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
@@ -78,6 +92,18 @@ impl Transcript {
         self.history.push_with_origin(block, origin);
     }
 
+    pub fn push_descriptor_with_origin(
+        &mut self,
+        descriptor: TranscriptBlockDescriptor,
+        origin: BlockOrigin,
+    ) {
+        let Some(block) = Self::normalize_block(descriptor.to_block()) else {
+            return;
+        };
+        self.history
+            .push_descriptor_with_origin(TranscriptBlockDescriptor::from_block(block), origin);
+    }
+
     pub fn insert_checkpoint_marker(&mut self, history_index: usize, block: Block) {
         let Some(block) = Self::normalize_block(block) else {
             return;
@@ -120,6 +146,23 @@ impl Transcript {
             .push_with_state_and_origin(block, call_id, state, origin);
     }
 
+    pub fn push_tool_descriptor_with_origin(
+        &mut self,
+        descriptor: TranscriptBlockDescriptor,
+        state: ToolState,
+        origin: BlockOrigin,
+    ) {
+        let Some(block) = Self::normalize_block(descriptor.to_block()) else {
+            return;
+        };
+        let descriptor = TranscriptBlockDescriptor::from_block(block);
+        let Some(call_id) = descriptor.tool_call_id().map(str::to_string) else {
+            return;
+        };
+        self.history
+            .push_descriptor_with_state_and_origin(descriptor, call_id, state, origin);
+    }
+
     pub fn truncate_to(&mut self, block_idx: usize) {
         self.history.truncate(block_idx);
     }
@@ -129,7 +172,7 @@ impl Transcript {
             .order
             .iter()
             .enumerate()
-            .filter_map(|(i, id)| match self.history.blocks.get(id) {
+            .filter_map(|(i, id)| match self.history.block(*id) {
                 Some(Block::User { text, .. }) => Some((i, text.clone())),
                 _ => None,
             })

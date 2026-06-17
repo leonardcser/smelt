@@ -1030,7 +1030,7 @@ mod tests {
         history
             .order
             .iter()
-            .filter_map(|id| history.blocks.get(id))
+            .filter_map(|id| history.block(*id))
             .filter_map(|block| match block {
                 Block::ProcessStatus { text, .. } => Some(text.clone()),
                 _ => None,
@@ -1043,7 +1043,7 @@ mod tests {
         history
             .order
             .iter()
-            .filter_map(|id| history.blocks.get(id))
+            .filter_map(|id| history.block(*id))
             .filter_map(|block| match block {
                 Block::User { text, .. } => Some(text.clone()),
                 _ => None,

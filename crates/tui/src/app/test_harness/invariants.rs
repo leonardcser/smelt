@@ -392,13 +392,17 @@ impl TestApp {
         // behind.
         let history = self.app.transcript.history();
         for (call_id, _) in history.tool_states() {
-            let exists = history.blocks.values().any(|b| {
-                matches!(
-                    b,
-                    smelt_core::transcript_model::Block::ToolCall { call_id: cid, .. }
-                        if cid == call_id
-                )
-            });
+            let exists = history
+                .order
+                .iter()
+                .filter_map(|id| history.block(*id))
+                .any(|b| {
+                    matches!(
+                        b,
+                        smelt_core::transcript_model::Block::ToolCall { call_id: cid, .. }
+                            if cid == call_id
+                    )
+                });
             assert!(
                 exists,
                 "tool_state {:?} has no matching Block::ToolCall in history",

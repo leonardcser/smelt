@@ -1604,9 +1604,8 @@ impl TranscriptProjection {
             .enumerate()
             .filter_map(|(index, node)| match node {
                 RenderNode::Block { id, .. } => history
-                    .blocks
-                    .get(id)
-                    .filter(|block| block.kind() == kind)
+                    .block_kind(*id)
+                    .filter(|block_kind| *block_kind == kind)
                     .map(|_| (index, RenderNodeId::Block(*id))),
                 RenderNode::Group { .. } => None,
             })
@@ -5127,7 +5126,7 @@ mod tests {
     fn approx_history_bytes(history: &BlockHistory) -> usize {
         let mut bytes = 0usize;
         for id in &history.order {
-            if let Some(block) = history.blocks.get(id) {
+            if let Some(block) = history.block(*id) {
                 bytes += block.raw_text().map_or(0, |text| text.len());
                 if let Block::ToolCall { call_id, .. } = block {
                     if let Some(state) = history.tool_state(call_id) {
