@@ -1,12 +1,15 @@
 //! Filesystem-driven `/reload` trigger. Watches Lua config inputs
 //! (init.lua, plugins, commands, tools, completers, dialogs, runtime
 //! overrides) and pushes a debounced wake-up signal into the TUI run loop,
-//! which then re-enters [`crate::app::TuiApp::reload_lua`].
+//! which then re-enters [`crate::app::TuiApp::reload_lua_config`].
 //!
 //! Owned by `TuiApp` so the watcher stays alive for the session and the
 //! drop guard tears down the `notify::RecommendedWatcher` on shutdown.
 
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::{hash_map::DefaultHasher, BTreeMap};
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -60,6 +63,151 @@ impl WatchPaths {
     }
 }
 
+/// The Lua config tree whose content can trigger an automatic reload. This is
+/// separate from the OS subscriptions: when `.smelt/` does not exist yet we may
+/// subscribe to its parent, but only paths inside these roots are config.
+#[derive(Clone, Debug)]
+struct ConfigWatchSet {
+    roots: Vec<PathBuf>,
+}
+
+impl ConfigWatchSet {
+    fn from_paths(paths: &WatchPaths) -> Self {
+        Self {
+            roots: paths.relevant_roots(),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_roots(roots: Vec<PathBuf>) -> Self {
+        Self { roots }
+    }
+
+    /// Cheap event-level prefilter. Passing this only means an event is worth
+    /// checking after debounce; the snapshot decides whether config changed.
+    fn event_may_affect_config(&self, event: &notify::Event) -> bool {
+        if ignored_event_kind(&event.kind) {
+            return false;
+        }
+        if event.paths.is_empty() {
+            return true;
+        }
+        event.paths.iter().any(|p| self.path_may_affect_config(p))
+    }
+
+    fn path_may_affect_config(&self, path: &Path) -> bool {
+        self.roots.iter().any(|root| {
+            if root.starts_with(path) {
+                return true;
+            }
+            if !path.starts_with(root) {
+                return false;
+            }
+            path == root || path.is_dir() || is_lua_path(path)
+        })
+    }
+
+    #[cfg(test)]
+    fn is_lua_config_path(&self, path: &Path) -> bool {
+        is_lua_path(path) && self.roots.iter().any(|root| path.starts_with(root))
+    }
+}
+
+/// Content fingerprint of every Lua config file. Notify events are hints only;
+/// this snapshot is the source of truth for whether reloadable config changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConfigSnapshot {
+    files: BTreeMap<PathBuf, FileSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FileSnapshot {
+    len: u64,
+    hash: u64,
+}
+
+impl ConfigSnapshot {
+    fn capture(watch_set: &ConfigWatchSet) -> Self {
+        let mut files = BTreeMap::new();
+        for root in &watch_set.roots {
+            collect_lua_files(root, &mut files);
+        }
+        Self { files }
+    }
+}
+
+/// Converts debounced filesystem hints into real reload decisions by rescanning
+/// the watch set and comparing it to the last accepted snapshot.
+#[derive(Clone, Debug)]
+struct AutoReloadFilter {
+    watch_set: ConfigWatchSet,
+    snapshot: ConfigSnapshot,
+}
+
+impl AutoReloadFilter {
+    fn new(watch_set: ConfigWatchSet) -> Self {
+        let snapshot = ConfigSnapshot::capture(&watch_set);
+        Self {
+            watch_set,
+            snapshot,
+        }
+    }
+
+    fn changed_since_last_scan(&mut self) -> bool {
+        let next = ConfigSnapshot::capture(&self.watch_set);
+        if next == self.snapshot {
+            return false;
+        }
+        self.snapshot = next;
+        true
+    }
+}
+
+fn ignored_event_kind(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Access(_))
+        || matches!(
+            kind,
+            EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+        )
+}
+
+fn is_lua_path(path: &Path) -> bool {
+    path.extension().and_then(|s| s.to_str()) == Some("lua")
+}
+
+fn collect_lua_files(path: &Path, files: &mut BTreeMap<PathBuf, FileSnapshot>) {
+    let Ok(file_type) = fs::symlink_metadata(path).map(|m| m.file_type()) else {
+        return;
+    };
+    if file_type.is_file() {
+        if is_lua_path(path) {
+            if let Some(snapshot) = snapshot_file(path) {
+                files.insert(path.to_path_buf(), snapshot);
+            }
+        }
+        return;
+    }
+    if !file_type.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        collect_lua_files(&entry.path(), files);
+    }
+}
+
+fn snapshot_file(path: &Path) -> Option<FileSnapshot> {
+    let bytes = fs::read(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(FileSnapshot {
+        len: bytes.len() as u64,
+        hash: hasher.finish(),
+    })
+}
+
 /// Spawn the watcher and debouncer. Returns the drop guard plus a
 /// receiver that yields `()` each time a debounced filesystem change
 /// warrants a reload.
@@ -67,12 +215,14 @@ pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<(
     let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let (signal_tx, signal_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
-    let relevant_roots = paths.relevant_roots();
+    let watch_set = ConfigWatchSet::from_paths(&paths);
+    let callback_watch_set = watch_set.clone();
+    let filter = AutoReloadFilter::new(watch_set);
 
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
-            if !relevant(&event, &relevant_roots) {
+            if !callback_watch_set.event_may_affect_config(&event) {
                 return;
             }
             let _ = raw_tx.send(());
@@ -107,7 +257,7 @@ pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<(
     }
 
     tokio::spawn(async move {
-        debounce_loop(&mut raw_rx, signal_tx).await;
+        debounce_loop(&mut raw_rx, signal_tx, filter).await;
     });
 
     Some((AutoReloadHandle { _watcher: watcher }, signal_rx))
@@ -123,35 +273,29 @@ fn try_watch(watcher: &mut RecommendedWatcher, path: &Path, mode: RecursiveMode)
     }
 }
 
-/// Keep only events that can plausibly change Lua config behavior. Drops
+/// Keep only events that can plausibly affect Lua config behavior. Drops
 /// metadata-only events (atime bumps from `cat`, permission probes from
-/// editors) and ignores prompt inputs (`AGENTS.md`, `SKILL.md`, markdown
+/// editors) and prompt-input file events (`AGENTS.md`, `SKILL.md`, markdown
 /// commands, system-prompt files) so instruction changes remain explicit
 /// through manual `/reload`.
+#[cfg(test)]
 fn relevant(event: &notify::Event, roots: &[PathBuf]) -> bool {
-    if matches!(event.kind, EventKind::Access(_)) {
-        return false;
-    }
-    // Modify(Metadata) is just chmod/touch; ignore.
-    if let EventKind::Modify(notify::event::ModifyKind::Metadata(_)) = event.kind {
-        return false;
-    }
-    if event.paths.is_empty() {
-        // Rescan events carry no paths; treat as relevant.
-        return true;
-    }
-    event.paths.iter().any(|p| relevant_path(p, roots))
+    ConfigWatchSet::from_roots(roots.to_vec()).event_may_affect_config(event)
 }
 
+#[cfg(test)]
 fn relevant_path(path: &Path, roots: &[PathBuf]) -> bool {
-    path.extension().and_then(|s| s.to_str()) == Some("lua")
-        && roots.iter().any(|root| path.starts_with(root))
+    ConfigWatchSet::from_roots(roots.to_vec()).is_lua_config_path(path)
 }
 
 /// Coalesce a burst of raw events into a single signal. After the first
 /// event arrives, wait for [`DEBOUNCE`] of silence before forwarding;
 /// any event landing inside the window resets the timer.
-async fn debounce_loop(raw_rx: &mut UnboundedReceiver<()>, signal_tx: UnboundedSender<()>) {
+async fn debounce_loop(
+    raw_rx: &mut UnboundedReceiver<()>,
+    signal_tx: UnboundedSender<()>,
+    mut filter: AutoReloadFilter,
+) {
     loop {
         if raw_rx.recv().await.is_none() {
             return;
@@ -162,6 +306,9 @@ async fn debounce_loop(raw_rx: &mut UnboundedReceiver<()>, signal_tx: UnboundedS
                 Ok(None) => return,
                 Err(_) => break,
             }
+        }
+        if !filter.changed_since_last_scan() {
+            continue;
         }
         if signal_tx.send(()).is_err() {
             return;
@@ -249,6 +396,78 @@ mod tests {
         assert!(relevant(&data_change, &roots));
     }
 
+    #[test]
+    fn relevant_event_ignores_prompt_input_file_paths() {
+        let agents = notify::Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![PathBuf::from("/repo/.smelt/AGENTS.md")],
+            attrs: notify::event::EventAttributes::default(),
+        };
+        let skill = notify::Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![PathBuf::from("/repo/.smelt/skills/example/SKILL.md")],
+            attrs: notify::event::EventAttributes::default(),
+        };
+
+        assert!(!relevant(&agents, &roots()));
+        assert!(!relevant(&skill, &roots()));
+    }
+
+    #[test]
+    fn snapshot_filter_rejects_replayed_unchanged_lua_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.lua");
+        std::fs::write(&init, "one\n").unwrap();
+        let watch_set = ConfigWatchSet::from_roots(vec![dir.path().to_path_buf()]);
+        let mut filter = AutoReloadFilter::new(watch_set);
+
+        assert!(!filter.changed_since_last_scan());
+
+        std::fs::write(&init, "two\n").unwrap();
+        assert!(filter.changed_since_last_scan());
+        assert!(!filter.changed_since_last_scan());
+    }
+
+    #[test]
+    fn snapshot_filter_handles_pathless_rescan_by_comparing_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.lua");
+        std::fs::write(&init, "before\n").unwrap();
+        let roots = vec![dir.path().to_path_buf()];
+        let mut filter = AutoReloadFilter::new(ConfigWatchSet::from_roots(roots.clone()));
+        let rescan = notify::Event {
+            kind: EventKind::Other,
+            paths: Vec::new(),
+            attrs: notify::event::EventAttributes::default(),
+        };
+
+        assert!(relevant(&rescan, &roots));
+        assert!(!filter.changed_since_last_scan());
+
+        std::fs::write(&init, "after\n").unwrap();
+        assert!(filter.changed_since_last_scan());
+    }
+
+    #[test]
+    fn snapshot_filter_detects_new_project_config_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_config = dir.path().join(".smelt");
+        let watch_set = ConfigWatchSet::from_roots(vec![project_config.clone()]);
+        let mut filter = AutoReloadFilter::new(watch_set.clone());
+        let mkdir = notify::Event {
+            kind: EventKind::Create(notify::event::CreateKind::Folder),
+            paths: vec![project_config.clone()],
+            attrs: notify::event::EventAttributes::default(),
+        };
+
+        assert!(watch_set.event_may_affect_config(&mkdir));
+        assert!(!filter.changed_since_last_scan());
+
+        std::fs::create_dir_all(&project_config).unwrap();
+        std::fs::write(project_config.join("init.lua"), "created = true\n").unwrap();
+        assert!(filter.changed_since_last_scan());
+    }
+
     #[tokio::test]
     async fn watcher_does_not_replay_changes_from_before_spawn() {
         let dir = tempfile::tempdir().unwrap();
@@ -272,12 +491,18 @@ mod tests {
 
     #[tokio::test]
     async fn debounce_loop_coalesces_bursts() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.lua");
+        std::fs::write(&init, "before\n").unwrap();
+        let filter =
+            AutoReloadFilter::new(ConfigWatchSet::from_roots(vec![dir.path().to_path_buf()]));
         let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel();
         let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
-            debounce_loop(&mut raw_rx, signal_tx).await;
+            debounce_loop(&mut raw_rx, signal_tx, filter).await;
         });
 
+        std::fs::write(&init, "after\n").unwrap();
         raw_tx.send(()).unwrap();
         raw_tx.send(()).unwrap();
         assert!(tokio::time::timeout(DEBOUNCE / 2, signal_rx.recv())
