@@ -563,23 +563,25 @@ These can be replaced without version compatibility:
 - renderer IR cache
 - any future display/height cache tables
 
-If a cache format changes, delete/rebuild it. Do not preserve cache readers as compatibility debt.
+If a cache format changes, delete/rebuild it. Do not preserve cache readers as compatibility debt, and do not reset durable data schema versions just because cache versions are reset. SQLite schema versions and legacy session compatibility ids remain data contracts; display/layout cache versions do not.
 
-`session.ir.bin` deserves special handling in the plan because its purpose is still valid. It was added to avoid rerunning expensive Lua/tool rendering across the whole transcript: keep enough intermediate representation and measured layout information to compute block heights quickly, then render only the visible viewport. The SQLite rewrite keeps that performance goal, but does not keep the old file as durable storage.
+`session.ir.bin` deserves special handling because its performance goal is still valid but its old identity is tied to the pre-SQLite intermediate representation. Phase I should remove the old `session.ir.bin` reader/writer and its version constants instead of carrying or resetting that format. The SQLite rewrite keeps the performance goal, not the old file.
 
 New rule:
 
 - Do not migrate `session.ir.bin`.
 - Do not treat missing or stale `session.ir.bin` as data loss.
-- Preserve the role as a disposable render/layout cache behind the new SQLite-backed transcript descriptors.
-- Rebuild or replace it using `history_items`, `transcript_blocks`, `objects`, renderer version, width, theme, and Lua renderer generation.
+- Remove the old `session.ir.bin` cache path during cleanup unless measurement proves a persisted cache is still needed as a short-term bridge.
+- If persisted display caching is reintroduced, give it a new cache identity and start its format version from `1`; include `history_items`, `transcript_blocks`, `objects`, renderer version, width, theme, and Lua renderer generation/cache key in the cache key.
 - The replacement can be SQLite cache tables, a new cache file, or in-memory-only at first. The exact cache shape is an optimization choice, not a compatibility promise.
 
 Losing this cache may make first render or first scroll through old regions slower, but it must never lose conversation content, tool metadata, or request audit data.
 
 ### Compatibility importers
 
-Keep importers only at the storage boundary for:
+Keep importers only at the storage boundary for migration/export. Do not keep legacy JSON as a normal runtime load path once migrate-on-open and background migration are reliable. The canonical open/resume path should be: ensure `session.db` exists, migrate from legacy inputs if needed, then load from SQLite.
+
+Compatibility importers cover:
 
 - legacy monolithic `session.json`
 - current split `meta.json` + `history.jsonl`
@@ -596,11 +598,21 @@ Importer responsibilities:
 5. Generate `transcript_blocks` descriptors and search text.
 6. Write/refresh `session_state` and `meta.json`.
 7. Leave legacy files untouched or move them to `legacy/` only after a verified import marker exists.
-8. Keep compatibility code isolated and removable.
+8. Keep compatibility code isolated, `COMPAT`-tracked, and used only by migration/export seams.
+9. Delete legacy readers from hot load/save/render/search paths as soon as equivalent migrate-on-open coverage exists; do not delete the importers that are still needed to create `session.db` from existing user files.
 
 ### Background migration
 
 On startup, launch a low-priority migration worker after the UI can paint. It scans the session root and migrates sessions missing a valid `session.db`. On-demand migration during resume is not enough because old conversations may not be resumed until after legacy loaders have been removed.
+
+Current implementation checkpoint:
+
+- `src/main.rs` calls `smelt_core::session::spawn_background_migration()` during startup before the TUI run loop; it is asynchronous, but it is not currently tied to a first-paint signal.
+- The worker scans `sessions/*`, skips directories with `session.db`, imports split JSONL or monolithic `session.json`, logs a `session_migration_batch` event when anything migrated or failed, and writes `migration.json` only for failures.
+- Session listing can infer `pending` when legacy files exist without `session.db`, and can surface `failed` from `migration.json` through `SessionMeta.migration`.
+- There is no UI notification or progress event for migration start/completion yet; success is currently observable indirectly by `session.db` existing and the pending status disappearing from the resume list.
+
+Phase I should add a small UI-visible migration status seam before removing direct legacy load paths: at minimum, report started/completed/failed batch counts to the app notification/log surface, and refresh the resume list when the batch finishes. A completion toast should only show when something migrated or failed, not on every no-op startup.
 
 No public migrate/doctor command is planned for the first pass. Because Smelt is still alpha, the normal path is automatic background migration plus keeping legacy readers for a short compatibility window. Add explicit migrate/doctor commands only if alpha feedback shows users need manual recovery.
 
@@ -833,12 +845,12 @@ Acceptance:
 Deliverables:
 
 - Delete manifest/segment store code and file artifact store code after SQLite import paths replace them.
-- Delete old `session.ir.bin` writer/reader or keep it as a disposable cache only.
+- Delete old `session.ir.bin` writer/reader and its cache-version constants; if persisted display caching returns, give it a new cache identity and start a new format version at `1`.
 - Delete old full row-index cache paths.
 - Delete eager resume transcript build path.
 - Delete old full-history save path.
 - Remove `requests.jsonl` live writer.
-- Keep legacy JSON importers isolated at the storage boundary, marked with the existing `COMPAT` ids in `docs/compat.md`, and out of the hot load/save/render paths. Do not remove them as part of this phase unless the compatibility window is explicitly closed.
+- Keep legacy JSON importers isolated at the storage boundary, marked with the existing `COMPAT` ids in `docs/compat.md`, and out of the hot load/save/render paths. Delete direct legacy load/read code once migrate-on-open covers old sessions; do not remove importers that are still required to build canonical `session.db` files unless the compatibility window is explicitly closed.
 
 Acceptance:
 
