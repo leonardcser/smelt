@@ -138,13 +138,14 @@ Current transcript projection is partly lazy and now uses a mixed estimated/exac
 - `plan_projection_measured` prepares the row index without globally measuring every missing node at `crates/tui/src/content/transcript_buf.rs`.
 - The projection planner estimates missing heights from descriptor text/tool output, exactifies the visible + overscan node range, then replans against the refined prefix rows.
 - Exact APIs such as full block layout, full row builds, range materialization, and copy exactify the rows they need before returning content.
-- Search indexes descriptor/provider text first and falls back to local exact display refinement for renderer-only chrome.
+- Search indexes descriptor/provider text first, asks SQLite `transcript_search` for preferred candidates when available, and falls back to local exact display refinement for renderer-only chrome.
 - Visible projection itself remains bounded and materializes only the planned node range.
 
 Remaining problems:
 
 - Cold arbitrary row jumps are approximate until local refinement catches up.
-- Search candidates are still in-memory TUI candidates, not SQLite FTS/candidate rows.
+- Core session resume still rehydrates provider `Session.history`; descriptor rows now avoid rebuilding `BlockHistory` from it, but the model history load path is not lazy yet.
+- Search still keeps an in-memory fallback candidate list after SQLite candidates so renderer-only chrome remains searchable.
 - Persisted display caches help only when keys match and the full exact row index is accepted.
 
 ### Existing UI seams that we should keep
@@ -791,7 +792,7 @@ Acceptance:
 
 ### Phase G: Lazy transcript descriptors
 
-Status: partial. Transcript block state now supports descriptor records that preserve block order, origin, tool sidecar state, content hashes, and descriptor-only metadata lookup without materializing `Block` values. The resume rebuild path installs descriptor-backed blocks for restored user, assistant-text, tool, mode, process-status, and compaction entries, while live/streaming blocks stay materialized. `TranscriptDocument` is the concrete `DisplayDocument` adapter used by the TUI row-document seam for transcript total rows, range materialization, and copy. Descriptor hashes are computed without constructing a `Block`, and tool sidecar hashes include metadata because Lua renderers may display it. Remaining work: load descriptor records directly from SQLite instead of reconstructing them from a loaded `Session`, make large tool metadata object-backed at render time rather than eagerly rehydrated, and move first paint off exact global height measurement in Phase H.
+Status: partial. Transcript block state now supports descriptor records that preserve block order, origin, tool sidecar state, content hashes, and descriptor-only metadata lookup without materializing `Block` values. The TUI persists descriptor records into SQLite `transcript_blocks` and the resume rebuild path installs descriptor-backed blocks from those rows when they are available, falling back to `build_transcript_from_session` for legacy or not-yet-persisted sessions. `TranscriptDocument` is the concrete `DisplayDocument` adapter used by the TUI row-document seam for transcript total rows, range materialization, and copy. Descriptor hashes are computed without constructing a `Block`, and tool sidecar hashes include metadata because Lua renderers may display it. Remaining work: make core session resume lazy for provider history too, keep large tool metadata object-backed all the way into visible render/copy/search instead of rehydrating descriptor sidecars on load, and finish deleting the eager rebuild fallback after the compatibility window.
 
 Deliverables:
 
@@ -809,7 +810,7 @@ Acceptance:
 
 ### Phase H: Progressive height, navigation, copy, and search
 
-Status: partial. Transcript projection now prepares `TranscriptHeightIndex`, a mixed estimated/exact row index, instead of measuring every missing height before first paint. Visible planning exact-measures the visible + overscan node range and replans after refinement, so a cold tail render of a large transcript does not measure every block. Estimates use descriptor text and tool output line counts before falling back to measured samples. `TranscriptDocument::snapshot` reports an estimated row count, while visible materialization, row-range display, copy, fold targeting, and resize anchors exactify the rows or anchor nodes they consume. Search now builds in-memory semantic candidates before exact display refinement, including renderer-only fallback scans. Remaining work: load descriptor records directly from SQLite, keep large tool metadata object-backed through render/copy/search, and replace TUI in-memory search candidates with SQLite FTS/candidate rows.
+Status: partial. Transcript projection now prepares `TranscriptHeightIndex`, a mixed estimated/exact row index, instead of measuring every missing height before first paint. Visible planning exact-measures the visible + overscan node range and replans after refinement, so a cold tail render of a large transcript does not measure every block. Estimates use descriptor text and tool output line counts before falling back to measured samples. `TranscriptDocument::snapshot` reports an estimated row count, while visible materialization, row-range display, copy, fold targeting, and resize anchors exactify the rows or anchor nodes they consume. Search now asks SQLite `transcript_search` for preferred candidates, builds in-memory semantic fallback candidates, and uses local exact display refinement for renderer-only chrome. Remaining work: make provider history loading lazy instead of fully rehydrating `Session.history`, keep large tool metadata object-backed through descriptor load/render/copy/search, and replace the in-memory fallback with a real SQLite FTS/candidate index once renderer-only chrome has durable candidate rows.
 
 Deliverables:
 

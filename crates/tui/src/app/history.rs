@@ -1,7 +1,9 @@
 use crate::app::{PersistFingerprints, TuiApp};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
-use smelt_core::{Block, ToolOutput, ToolState, ToolStatus, TranscriptBlockDescriptor};
+use smelt_core::{
+    Block, ToolOutput, ToolState, ToolStatus, TranscriptBlockDescriptor, TranscriptBlockRecord,
+};
 
 use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::HashMap;
@@ -93,6 +95,44 @@ pub(crate) fn build_transcript_from_session(
         transcript.history.order.len() as u64,
     );
     transcript
+}
+
+fn load_transcript_from_sqlite(session: &session::Session) -> Option<Transcript> {
+    let db_path = session::dir_for(session).join("session.db");
+    let db = smelt_store::SessionDb::open_read_only(db_path).ok()?;
+    let rows = db.read_transcript_descriptor_records().ok()?;
+    if rows.is_empty() {
+        return None;
+    }
+    let records = rows
+        .into_iter()
+        .map(|row| {
+            let descriptor: TranscriptBlockDescriptor = serde_json::from_str(&row.descriptor_json)?;
+            let origin = row
+                .origin_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?
+                .or_else(|| {
+                    row.history_idx
+                        .map(|idx| smelt_core::BlockOrigin::History(idx as usize))
+                });
+            let tool_state = row
+                .tool_state_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let content_hash = row.content_hash.parse::<u64>().unwrap_or_default();
+            Ok(TranscriptBlockRecord {
+                descriptor,
+                content_hash,
+                origin,
+                tool_state,
+            })
+        })
+        .collect::<Result<Vec<_>, serde_json::Error>>()
+        .ok()?;
+    Some(Transcript::from_descriptor_records(records))
 }
 
 fn fallback_transcript_index_for_history_index(
@@ -680,11 +720,10 @@ impl TuiApp {
         self.prune_rewindable_session_state(self.core.session.history.len());
         let display_cache = crate::content::display_cache::read_for_session(&self.core.session);
         let persisted_fingerprints = persist_fingerprints(&self.core.session, &display_cache);
-        self.transcript.replace_transcript_with_display_cache(
-            &self.lua,
-            build_transcript_from_session(&self.lua, &self.core.session),
-            display_cache,
-        );
+        let transcript = load_transcript_from_sqlite(&self.core.session)
+            .unwrap_or_else(|| build_transcript_from_session(&self.lua, &self.core.session));
+        self.transcript
+            .replace_transcript_with_display_cache(&self.lua, transcript, display_cache);
         self.persisted_fingerprints = persisted_fingerprints;
         self.session_dirty = false;
         self.dirty_history_from = None;
@@ -719,6 +758,7 @@ impl TuiApp {
             return;
         }
         let session = self.session_snapshot_for_persist();
+        let descriptor_records = self.transcript.history().descriptor_records();
         let display_cache = self.transcript.display_cache_data(&self.lua);
         let fingerprints = persist_fingerprints(&session, &display_cache);
         if fingerprints.is_some()
@@ -749,6 +789,7 @@ impl TuiApp {
             history_start_idx,
             blobs,
             display_cache,
+            descriptor_records,
         });
     }
 

@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -56,6 +56,11 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     if current < 3 {
         conn.execute_batch(MIGRATION_3)?;
         set_user_version(conn, 3)?;
+        current = 3;
+    }
+    if current < 4 {
+        conn.execute_batch(MIGRATION_4)?;
+        set_user_version(conn, 4)?;
     }
     conn.execute(
         "INSERT INTO store_meta (key, value, updated_at)
@@ -234,4 +239,10 @@ CREATE INDEX IF NOT EXISTS request_attempts_url_idx ON request_attempts(url);
 CREATE INDEX IF NOT EXISTS request_stats_input_tokens_idx ON request_stats(input_tokens DESC);
 CREATE INDEX IF NOT EXISTS request_stats_output_tokens_idx ON request_stats(output_tokens DESC);
 CREATE INDEX IF NOT EXISTS request_stats_total_cost_idx ON request_stats(total_cost_micros DESC);
+"#;
+
+const MIGRATION_4: &str = r#"
+ALTER TABLE transcript_blocks ADD COLUMN descriptor_json TEXT;
+ALTER TABLE transcript_blocks ADD COLUMN origin_json TEXT;
+ALTER TABLE transcript_blocks ADD COLUMN tool_state_json TEXT;
 "#;

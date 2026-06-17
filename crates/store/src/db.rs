@@ -7,6 +7,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
+use crate::history::{self, TranscriptDescriptorRecord, TranscriptSearchCandidate};
 use crate::legacy::{self, LegacyImportReport, RequestAttemptSummary};
 use crate::meta::{self, SessionMeta, SessionState, WriterLease};
 use crate::object::{self, ObjectMeta, StoredObject};
@@ -275,6 +276,24 @@ impl SessionDb {
         session_snapshot::load_session_snapshot(&self.conn)
     }
 
+    pub fn replace_transcript_descriptor_records(
+        &self,
+        records: &[TranscriptDescriptorRecord],
+    ) -> Result<()> {
+        history::replace_transcript_descriptor_records(&self.conn, records, self.object_compression)
+    }
+
+    pub fn read_transcript_descriptor_records(&self) -> Result<Vec<TranscriptDescriptorRecord>> {
+        history::read_transcript_descriptor_records(&self.conn)
+    }
+
+    pub fn search_transcript_candidates(
+        &self,
+        query: &str,
+    ) -> Result<Vec<TranscriptSearchCandidate>> {
+        history::search_transcript_candidates(&self.conn, query)
+    }
+
     pub fn history_text_bytes(&self) -> Result<u64> {
         session_snapshot::history_text_bytes(&self.conn)
     }
@@ -536,6 +555,62 @@ mod tests {
         assert_eq!(db.search_blob().unwrap(), "first\nuser\nsecond\nuser\n");
     }
 
+    #[test]
+    fn transcript_descriptors_roundtrip_and_feed_search_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.replace_transcript_descriptor_records(&[
+            TranscriptDescriptorRecord {
+                block_idx: 0,
+                history_idx: None,
+                kind: "assistant".into(),
+                tool_call_id: None,
+                tool_name: None,
+                content_hash: "11".into(),
+                estimated_text_bytes: 5,
+                preview_text: "alpha".into(),
+                search_text: "alpha".into(),
+                descriptor_json: serde_json::json!({"Text": {"content": "alpha"}}).to_string(),
+                origin_json: None,
+                tool_state_json: None,
+            },
+            TranscriptDescriptorRecord {
+                block_idx: 1,
+                history_idx: None,
+                kind: "tool".into(),
+                tool_call_id: Some("call-1".into()),
+                tool_name: Some("tool_name".into()),
+                content_hash: "12".into(),
+                estimated_text_bytes: 13,
+                preview_text: "needle output".into(),
+                search_text: "needle output".into(),
+                descriptor_json: serde_json::json!({
+                    "ToolCall": {
+                        "call_id": "call-1",
+                        "name": "tool_name",
+                        "summary": [],
+                        "args": {}
+                    }
+                })
+                .to_string(),
+                origin_json: None,
+                tool_state_json: None,
+            },
+        ])
+        .unwrap();
+
+        let rows = db.read_transcript_descriptor_records().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(db.search_blob().unwrap(), "alpha\nneedle output\n");
+        assert_eq!(
+            db.search_transcript_candidates("needle").unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 1,
+                history_idx: None,
+            }]
+        );
+    }
     #[test]
     fn appends_request_audit_to_sqlite_objects_and_queries_metadata() {
         let dir = tempfile::tempdir().unwrap();

@@ -6,6 +6,7 @@
 //! state must be current (session load, fork, shutdown).
 
 use smelt_core::session::{self, Session};
+use smelt_core::{BlockOrigin, TranscriptBlockRecord};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -21,6 +22,7 @@ pub(crate) struct PersistRequest {
     pub(crate) history_start_idx: usize,
     pub(crate) blobs: Vec<Blob>,
     pub(crate) display_cache: crate::content::display_cache::DisplayCacheData,
+    pub(crate) descriptor_records: Vec<TranscriptBlockRecord>,
 }
 
 enum Cmd {
@@ -162,6 +164,8 @@ fn write(req: &PersistRequest) -> Result<(), String> {
         req.history_start_idx,
     )
     .map_err(|err| format!("save session database: {err}"))?;
+    write_transcript_descriptors(&session_dir, &req.descriptor_records)
+        .map_err(|err| format!("save transcript descriptors: {err}"))?;
     crate::content::display_cache::write_for_session(&req.session, &req.display_cache);
     Ok(())
 }
@@ -185,4 +189,72 @@ fn write_blobs(
         url_to_blob.insert(b.data_url.clone(), format!("blob:{}", b.filename));
     }
     Ok(url_to_blob)
+}
+
+fn write_transcript_descriptors(
+    session_dir: &std::path::Path,
+    records: &[TranscriptBlockRecord],
+) -> Result<(), smelt_store::StoreError> {
+    let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
+    let rows = records
+        .iter()
+        .enumerate()
+        .map(transcript_descriptor_row)
+        .collect::<Result<Vec<_>, smelt_store::StoreError>>()?;
+    db.replace_transcript_descriptor_records(&rows)
+}
+
+fn transcript_descriptor_row(
+    (block_idx, record): (usize, &TranscriptBlockRecord),
+) -> Result<smelt_store::TranscriptDescriptorRecord, smelt_store::StoreError> {
+    let descriptor_json = serde_json::to_string(&record.descriptor)?;
+    let origin_json = record
+        .origin
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let tool_state_json = record
+        .tool_state
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let search_text = record
+        .tool_state
+        .as_ref()
+        .and_then(|(_, state)| state.output.as_ref())
+        .map(|output| output.content.clone())
+        .or_else(|| record.descriptor.raw_text())
+        .unwrap_or_default();
+    let history_idx = match record.origin {
+        Some(BlockOrigin::History(idx)) => Some(idx as u64),
+        _ => None,
+    };
+    Ok(smelt_store::TranscriptDescriptorRecord {
+        block_idx: block_idx as u64,
+        history_idx,
+        kind: record.descriptor.kind().to_string(),
+        tool_call_id: record.descriptor.tool_call_id().map(str::to_string),
+        tool_name: record.descriptor.tool_name().map(str::to_string),
+        content_hash: record.content_hash.to_string(),
+        estimated_text_bytes: search_text.len() as u64,
+        preview_text: preview(&search_text, 512),
+        search_text,
+        descriptor_json,
+        origin_json,
+        tool_state_json,
+    })
+}
+
+fn preview(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = 0;
+    for (idx, _) in text.char_indices() {
+        if idx > max_bytes {
+            break;
+        }
+        end = idx;
+    }
+    text[..end].to_string()
 }

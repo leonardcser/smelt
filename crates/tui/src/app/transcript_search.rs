@@ -95,30 +95,42 @@ impl TranscriptSearchIndex {
             .unwrap_or(0)
     }
 
-    fn candidate_entries(&self, query: &str) -> Vec<usize> {
+    fn candidate_entries(&self, query: &str, preferred: Option<&[usize]>) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut seen = vec![false; self.entries.len()];
+        if let Some(preferred) = preferred {
+            for entry in preferred.iter().copied() {
+                if entry < self.entries.len() && !seen[entry] {
+                    seen[entry] = true;
+                    out.push(entry);
+                }
+            }
+        }
         let grams = unique_trigrams(query);
         if grams.is_empty() {
-            return (0..self.entries.len()).collect();
+            out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
+            return out;
         }
         let mut postings: Vec<&Vec<usize>> = Vec::with_capacity(grams.len());
         for gram in grams {
             let Some(list) = self.trigrams.get(&gram) else {
-                return (0..self.entries.len()).collect();
+                out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
+                return out;
             };
             postings.push(list);
         }
         postings.sort_by_key(|list| list.len());
-        let mut out = postings[0].clone();
+        let mut trigram_hits = postings[0].clone();
         for list in postings.into_iter().skip(1) {
-            out.retain(|entry| list.binary_search(entry).is_ok());
-            if out.is_empty() {
+            trigram_hits.retain(|entry| list.binary_search(entry).is_ok());
+            if trigram_hits.is_empty() {
                 break;
             }
         }
-        let mut seen = vec![false; self.entries.len()];
-        for entry in &out {
-            if let Some(slot) = seen.get_mut(*entry) {
-                *slot = true;
+        for entry in trigram_hits {
+            if entry < self.entries.len() && !seen[entry] {
+                seen[entry] = true;
+                out.push(entry);
             }
         }
         out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
@@ -205,6 +217,21 @@ impl TuiApp {
         text
     }
 
+    fn sqlite_transcript_candidate_entries(&self, query: &str) -> Option<Vec<usize>> {
+        let db_path = smelt_core::session::dir_for(&self.core.session).join("session.db");
+        let db = smelt_store::SessionDb::open_read_only(db_path).ok()?;
+        let candidates = db.search_transcript_candidates(query).ok()?;
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(
+            candidates
+                .into_iter()
+                .map(|candidate| candidate.block_idx as usize)
+                .collect(),
+        )
+    }
+
     fn ensure_transcript_search_index(&mut self) -> Option<&TranscriptSearchIndex> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
@@ -246,8 +273,9 @@ impl TuiApp {
         &mut self,
         query: &str,
     ) -> Option<TranscriptSearchSession> {
+        let preferred = self.sqlite_transcript_candidate_entries(query);
         let index = self.ensure_transcript_search_index()?;
-        let candidates = index.candidate_entries(query);
+        let candidates = index.candidate_entries(query, preferred.as_deref());
         smelt_perf::perf::record_value("search:transcript:candidates", candidates.len() as u64);
         let total_rows = index.total_rows();
         Some(TranscriptSearchSession {
@@ -265,6 +293,7 @@ impl TuiApp {
         session: &mut TranscriptSearchSession,
         query: &str,
     ) -> bool {
+        let preferred = self.sqlite_transcript_candidate_entries(query);
         let Some(index) = self.ensure_transcript_search_index() else {
             return false;
         };
@@ -278,7 +307,7 @@ impl TuiApp {
         session.key = index.key;
         session.total_rows = index.total_rows();
         session.scanned.resize(index.entries.len(), false);
-        session.candidates = index.candidate_entries(query);
+        session.candidates = index.candidate_entries(query, preferred.as_deref());
         smelt_perf::perf::record_value(
             "search:transcript:candidates",
             session.candidates.len() as u64,
