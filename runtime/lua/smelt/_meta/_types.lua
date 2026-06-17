@@ -600,6 +600,7 @@
 ---@field watchdog_timeout_arg? string Tool argument that controls the watchdog deadline. Defaults to `timeout_ms`.
 ---@field watchdog_timeout_arg_scale_ms? integer Multiplier that converts `watchdog_timeout_arg` values to milliseconds. Use `1000` for second-based arguments.
 ---@field watchdog_grace_ms? integer Extra time added when a tool argument sets the watchdog deadline, in milliseconds.
+---@field headless? boolean Whether the tool is available when running headless. Defaults to true. Set to false for tools that require a UI surface (dialogs, menus, managed worktree creation, cwd switching).
 ---@field override? boolean Replace a core tool of the same name (advanced).
 
 --- Semantic transcript block snapshot passed to the root renderer.

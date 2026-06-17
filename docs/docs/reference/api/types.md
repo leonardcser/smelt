@@ -870,6 +870,7 @@ Plugin tool definition passed to `smelt.tools.register`. `execute` is required; 
 | `watchdog_timeout_arg` | `string` |  | Tool argument that controls the watchdog deadline. Defaults to `timeout_ms`. |
 | `watchdog_timeout_arg_scale_ms` | `integer` |  | Multiplier that converts `watchdog_timeout_arg` values to milliseconds. Use `1000` for second-based arguments. |
 | `watchdog_grace_ms` | `integer` |  | Extra time added when a tool argument sets the watchdog deadline, in milliseconds. |
+| `headless` | `boolean` |  | Whether the tool is available when running headless. Defaults to true. Set to false for tools that require a UI surface (dialogs, menus, managed worktree creation, cwd switching). |
 | `override` | `boolean` |  | Replace a core tool of the same name (advanced). |
 
 ### `smelt.transcript.Block`

@@ -111,6 +111,14 @@ pub struct ToolDef {
     /// through the gate before dispatch.
     #[serde(default)]
     pub hooks: ToolHookFlags,
+    /// If false, the tool should be hidden from the model in headless mode.
+    /// Defaults to true so existing tools remain visible.
+    #[serde(default = "default_true")]
+    pub headless: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Which metadata hooks a tool has registered. Sent with `ToolDef` so
@@ -663,6 +671,7 @@ mod tests {
             execution_mode: ToolExecutionMode::Concurrent,
             override_core: false,
             hooks: ToolHookFlags::default(),
+            headless: true,
         };
         let v = serde_json::to_value(&t).unwrap();
         assert!(v.get("modes").is_none());

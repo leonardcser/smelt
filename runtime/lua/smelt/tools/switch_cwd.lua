@@ -12,6 +12,7 @@ smelt.tools.register({
   name = "switch_cwd",
   description = "Switch Smelt's actual process working directory. Use this when you need Smelt itself, future relative tool calls, session metadata, prompt context, and workspace permissions to move to a different checkout or directory. This is different from running `cd` in bash, which only affects that one shell command.",
   effect = "write",
+  headless = false,
   parameters = {
     type = "object",
     properties = {

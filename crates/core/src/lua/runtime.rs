@@ -1182,7 +1182,11 @@ impl LuaRuntime {
             .contains_key(tool_name)
     }
 
-    pub fn tool_defs(&self, _mode: protocol::AgentMode) -> Vec<protocol::ToolDef> {
+    pub fn tool_defs(
+        &self,
+        _mode: protocol::AgentMode,
+        for_headless: bool,
+    ) -> Vec<protocol::ToolDef> {
         let handlers = self.shared.tools.lock().unwrap_or_else(|e| e.into_inner());
         let mut names: Vec<String> = handlers.keys().cloned().collect();
         drop(handlers);
@@ -1193,6 +1197,14 @@ impl LuaRuntime {
                 .lua
                 .named_registry_value::<mlua::Table>(&format!("__pt_meta_{name}"))
             {
+                let headless: bool = meta_table
+                    .get::<mlua::Value>("headless")
+                    .ok()
+                    .and_then(|v| v.as_boolean())
+                    .unwrap_or(true);
+                if for_headless && !headless {
+                    continue;
+                }
                 let description: String = meta_table.get("description").unwrap_or_default();
                 let parameters: serde_json::Value = meta_table
                     .get::<mlua::String>("parameters_json")
@@ -1228,6 +1240,7 @@ impl LuaRuntime {
                     execution_mode,
                     hooks,
                     override_core,
+                    headless,
                 });
             }
         }

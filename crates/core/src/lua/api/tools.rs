@@ -128,6 +128,11 @@ pub struct LuaToolDef {
     pub watchdog_timeout_arg_scale_ms: Option<u64>,
     /// Extra time added when a tool argument sets the watchdog deadline, in milliseconds.
     pub watchdog_grace_ms: Option<u64>,
+    /// Whether the tool is available when running headless. Defaults to true.
+    /// Set to false for tools that require a UI surface (dialogs, menus,
+    /// managed worktree creation, cwd switching).
+    #[lua(default)]
+    pub headless: Option<bool>,
     /// Replace a core tool of the same name (advanced).
     #[lua(rename = "override", default)]
     pub override_core: bool,
@@ -204,6 +209,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     paths_for_workspace_handle.is_some(),
                 )?;
                 meta.set("hook_preview", preview_handle.is_some())?;
+                meta.set("headless", def.headless.unwrap_or(true))?;
                 meta.set("override_core", def.override_core)?;
                 if let Some(watchdog_timeout_ms) = def.watchdog_timeout_ms {
                     meta.set("watchdog_timeout_ms", watchdog_timeout_ms)?;

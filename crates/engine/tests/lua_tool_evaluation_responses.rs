@@ -192,6 +192,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 execution_mode: ToolExecutionMode::Concurrent,
                 override_core: false,
                 hooks: ToolHookFlags::default(),
+                headless: true,
             };
 
             handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {

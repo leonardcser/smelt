@@ -1861,7 +1861,7 @@ fn plan_mode_reload_registers_present_plan_when_already_in_plan() {
         .with_init_lua(&init)
         .with_mode(plan.clone())
         .build();
-    let tools = app.app.lua.tool_defs(plan);
+    let tools = app.app.lua.tool_defs(plan, false);
     assert!(
         tools.iter().any(|t| t.name == "present_plan"),
         "present_plan should be present after reload while already in plan"

@@ -173,6 +173,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         execution_mode: ToolExecutionMode::Concurrent,
         override_core: false,
         hooks: ToolHookFlags::default(),
+        headless: true,
     };
 
     handle.send(UiCommand::StartTurn(Box::new(StartTurnPayload {

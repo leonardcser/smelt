@@ -48,7 +48,7 @@ impl TuiApp {
         };
         let tools = {
             let _perf = smelt_perf::perf::begin("agent:tool_defs");
-            self.lua.tool_defs(self.core.config.mode.clone())
+            self.lua.tool_defs(self.core.config.mode.clone(), false)
         };
         self.apply_pending_history_appends_for_request();
         (system_prompt, tools)

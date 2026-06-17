@@ -82,7 +82,7 @@ impl HeadlessApp {
         }
         self.lua
             .as_ref()
-            .map(|lua| lua.tool_defs(self.core.config.mode.clone()))
+            .map(|lua| lua.tool_defs(self.core.config.mode.clone(), true))
             .unwrap_or_default()
     }
 
@@ -514,7 +514,7 @@ mod tests {
         }
     }
 
-    fn lua_with_probe_tool() -> crate::lua::LuaRuntime {
+    fn lua_with_probe_tools() -> crate::lua::LuaRuntime {
         let lua = crate::lua::LuaRuntime::new();
         lua.lua
             .load(
@@ -523,6 +523,13 @@ mod tests {
                     name = "headless_probe",
                     description = "test tool",
                     parameters = { type = "object", properties = {} },
+                    execute = function(args) return "ok" end,
+                })
+                smelt.tools.register({
+                    name = "ui_only_probe",
+                    description = "ui only",
+                    parameters = { type = "object", properties = {} },
+                    headless = false,
                     execute = function(args) return "ok" end,
                 })
                 "#,
@@ -545,7 +552,7 @@ mod tests {
             env,
         );
         let capabilities = engine::SystemPromptCapabilities::from_tool_calling(tool_calling);
-        let lua = tool_calling.then(lua_with_probe_tool);
+        let lua = tool_calling.then(lua_with_probe_tools);
         HeadlessApp::new(
             core,
             HeadlessSink::new(OutputFormat::Json, crate::ColorMode::Never, false),
@@ -560,10 +567,9 @@ mod tests {
         let enabled = headless_app(true);
         let disabled = headless_app(false);
 
-        assert!(enabled
-            .tool_defs()
-            .iter()
-            .any(|tool| tool.name == "headless_probe"));
+        let enabled_names: Vec<_> = enabled.tool_defs().iter().map(|t| t.name.clone()).collect();
+        assert!(enabled_names.contains(&"headless_probe".to_string()));
+        assert!(!enabled_names.contains(&"ui_only_probe".to_string()));
         assert!(disabled.tool_defs().is_empty());
     }
 }

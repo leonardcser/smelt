@@ -7,6 +7,7 @@ smelt.tools.register({
   name = "ask_user_question",
   description = "Ask the user questions to gather preferences, clarify instructions, or get decisions on implementation choices. Present 1-4 questions with 2-4 options each.",
   execution_mode = "sequential",
+  headless = false,
   permission_defaults = { normal = "allow", plan = "allow", apply = "allow" },
   effect = "user_interaction",
   parameters = {

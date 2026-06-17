@@ -1283,7 +1283,7 @@ mod tests {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let defs = rt.tool_defs(protocol::AgentMode::normal());
+        let defs = rt.tool_defs(protocol::AgentMode::normal(), false);
         let ask = defs
             .iter()
             .find(|d| d.name == "ask_user_question")
@@ -1296,7 +1296,7 @@ mod tests {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        let defs = rt.tool_defs(protocol::AgentMode::normal());
+        let defs = rt.tool_defs(protocol::AgentMode::normal(), false);
         for name in ["edit_file", "edit_notebook"] {
             let tool = defs
                 .iter()
