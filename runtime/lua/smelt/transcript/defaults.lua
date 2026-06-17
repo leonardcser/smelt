@@ -396,6 +396,28 @@ function smelt.transcript.defaults.render_llm_markdown(content, opts)
   return layout.markdown(content or "", opts or {})
 end
 
+--- Render capped LLM-authored Markdown for tool bodies and other long outputs.
+---@type fun(content: string?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
+function smelt.transcript.defaults.render_llm_markdown_tail(content, ctx, opts)
+  opts = opts or {}
+  ctx = ctx or {}
+  local limits = ctx.limits or {}
+  local markdown_opts = opts.markdown or {
+    dim = opts.dim,
+    italic = opts.italic,
+    hl_group = opts.hl or opts.hl_group,
+  }
+  return layout.cap(
+    M.render_llm_markdown(content, markdown_opts),
+    {
+      rows = opts.rows or limits.tool_output_rows or 20,
+      keep = opts.keep or "tail",
+      marker = opts.marker or "above",
+      total_rows = opts.total_rows,
+    }
+  )
+end
+
 --- Render assistant text.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 function smelt.transcript.defaults.render_assistant(block, ctx)

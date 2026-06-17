@@ -3,9 +3,11 @@
 //! `MarkdownStream` is intentionally less eager than plain text streaming. It
 //! withholds Markdown control lines whose meaning can change as more bytes
 //! arrive, such as fence delimiters and table delimiters, and it keeps
-//! incomplete table rows out of the visible preview. The stream only exposes
-//! content once the Markdown renderer can produce stable rows; final Markdown
-//! parsing and formatting still belong to the normal rendering path.
+//! incomplete table rows out of the visible preview. It is not a Markdown
+//! parser; the stabilized subset is limited to fenced code blocks and pipe
+//! tables. The stream only exposes content once the Markdown renderer can
+//! produce stable rows; final Markdown parsing and formatting still belong to
+//! the normal rendering path.
 
 use crate::transcript_model::{Block, BlockHistory, BlockId, Status};
 
@@ -55,6 +57,11 @@ impl MarkdownStreamKind {
 
 pub struct MarkdownStream {
     kind: MarkdownStreamKind,
+    state: MarkdownStreamState,
+}
+
+#[derive(Default)]
+struct MarkdownStreamState {
     current_line: String,
     current_line_id: Option<BlockId>,
     active: Option<ActiveMarkdownBlock>,
@@ -101,18 +108,18 @@ impl MarkdownStream {
     fn with_kind(kind: MarkdownStreamKind) -> Self {
         Self {
             kind,
-            current_line: String::new(),
-            current_line_id: None,
-            active: None,
+            state: MarkdownStreamState::default(),
         }
     }
 
     pub fn is_active(&self) -> bool {
-        !self.current_line.is_empty() || self.current_line_id.is_some() || self.active.is_some()
+        !self.state.current_line.is_empty()
+            || self.state.current_line_id.is_some()
+            || self.state.active.is_some()
     }
 
     pub fn clear(&mut self) {
-        *self = Self::default();
+        self.state = MarkdownStreamState::default();
     }
 
     pub fn append(&mut self, history: &mut BlockHistory, delta: &str) {
@@ -121,18 +128,18 @@ impl MarkdownStream {
                 continue;
             }
             if ch == '\n' {
-                let line = std::mem::take(&mut self.current_line);
+                let line = std::mem::take(&mut self.state.current_line);
                 self.process_line(history, &line);
             } else {
-                self.current_line.push(ch);
+                self.state.current_line.push(ch);
             }
         }
         self.sync(history);
     }
 
     pub fn flush(&mut self, history: &mut BlockHistory) {
-        if !self.current_line.is_empty() {
-            let line = std::mem::take(&mut self.current_line);
+        if !self.state.current_line.is_empty() {
+            let line = std::mem::take(&mut self.state.current_line);
             self.process_line(history, &line);
         }
         self.finish_active(history);
@@ -140,27 +147,27 @@ impl MarkdownStream {
 
     fn sync(&mut self, history: &mut BlockHistory) {
         let kind = self.kind;
-        match self.active.as_mut() {
+        match self.state.active.as_mut() {
             Some(ActiveMarkdownBlock::Paragraph { content, id }) => {
-                if opening_fence_candidate(&self.current_line) != Candidate::Not {
+                if opening_fence_candidate(&self.state.current_line) != Candidate::Not {
                     Self::sync_text(kind, history, id, content.clone());
                 } else {
                     Self::sync_text(
                         kind,
                         history,
                         id,
-                        joined_preview(content, &self.current_line),
+                        joined_preview(content, &self.state.current_line),
                     );
                 }
             }
             Some(ActiveMarkdownBlock::TableCandidate { header }) => {
-                match table_delimiter_candidate(&self.current_line) {
+                match table_delimiter_candidate(&self.state.current_line) {
                     Candidate::Not => {
                         Self::sync_text(
                             kind,
                             history,
-                            &mut self.current_line_id,
-                            joined_preview(header, &self.current_line),
+                            &mut self.state.current_line_id,
+                            joined_preview(header, &self.state.current_line),
                         );
                     }
                     Candidate::Pending | Candidate::Complete => {}
@@ -172,36 +179,36 @@ impl MarkdownStream {
                 }
             }
             Some(ActiveMarkdownBlock::Code { content, fence, id }) => {
-                if closing_fence_candidate(&self.current_line, fence) != Candidate::Not {
+                if closing_fence_candidate(&self.state.current_line, fence) != Candidate::Not {
                     Self::sync_text(kind, history, id, content.clone());
                 } else {
                     Self::sync_text(
                         kind,
                         history,
                         id,
-                        joined_preview(content, &self.current_line),
+                        joined_preview(content, &self.state.current_line),
                     );
                 }
             }
             None => {
-                if self.current_line.trim().is_empty()
-                    || opening_fence_candidate(&self.current_line) != Candidate::Not
-                    || is_streaming_table_row(&self.current_line)
+                if self.state.current_line.trim().is_empty()
+                    || opening_fence_candidate(&self.state.current_line) != Candidate::Not
+                    || is_streaming_table_row(&self.state.current_line)
                 {
                     return;
                 }
                 Self::sync_text(
                     kind,
                     history,
-                    &mut self.current_line_id,
-                    self.current_line.clone(),
+                    &mut self.state.current_line_id,
+                    self.state.current_line.clone(),
                 );
             }
         }
     }
 
     fn process_line(&mut self, history: &mut BlockHistory, line: &str) {
-        match self.active.take() {
+        match self.state.active.take() {
             Some(ActiveMarkdownBlock::Code {
                 mut content,
                 fence,
@@ -209,24 +216,24 @@ impl MarkdownStream {
             }) => {
                 append_line(&mut content, line);
                 if markdown_closes_fence(&fence, line) {
-                    self.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
                 } else {
-                    self.active = Some(ActiveMarkdownBlock::Code { content, fence, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Code { content, fence, id });
                 }
             }
             Some(ActiveMarkdownBlock::TableCandidate { header }) => {
                 if markdown_table_delimiter(line) {
-                    self.active = Some(ActiveMarkdownBlock::Table {
+                    self.state.active = Some(ActiveMarkdownBlock::Table {
                         rows: vec![header, line.to_string()],
                         id: None,
                     });
                 } else {
-                    let id = self.current_line_id.take();
+                    let id = self.state.current_line_id.take();
                     let mut content = header;
                     if !line.trim().is_empty() {
                         append_line(&mut content, line);
                     }
-                    self.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
                     if line.trim().is_empty() {
                         self.finish_active(history);
                     }
@@ -235,25 +242,25 @@ impl MarkdownStream {
             Some(ActiveMarkdownBlock::Table { mut rows, id }) => {
                 if is_streaming_table_row(line) {
                     rows.push(line.to_string());
-                    self.active = Some(ActiveMarkdownBlock::Table { rows, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Table { rows, id });
                 } else if line.trim().is_empty() {
-                    self.active = Some(ActiveMarkdownBlock::Table { rows, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Table { rows, id });
                 } else {
-                    self.active = Some(ActiveMarkdownBlock::Table { rows, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Table { rows, id });
                     self.finish_active(history);
                     self.process_line(history, line);
                 }
             }
             Some(ActiveMarkdownBlock::Paragraph { mut content, id }) => {
                 if line.trim().is_empty() {
-                    self.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
                     self.finish_active(history);
                 } else if let Some(fence) = markdown_opening_fence(line) {
                     append_line(&mut content, line);
-                    self.active = Some(ActiveMarkdownBlock::Code { content, fence, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Code { content, fence, id });
                 } else {
                     append_line(&mut content, line);
-                    self.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
                 }
             }
             None => {
@@ -261,20 +268,20 @@ impl MarkdownStream {
                     return;
                 }
                 if let Some(fence) = markdown_opening_fence(line) {
-                    self.active = Some(ActiveMarkdownBlock::Code {
+                    self.state.active = Some(ActiveMarkdownBlock::Code {
                         content: line.to_string(),
                         fence,
-                        id: self.current_line_id.take(),
+                        id: self.state.current_line_id.take(),
                     });
                 } else if is_streaming_table_row(line) {
-                    self.current_line_id = None;
-                    self.active = Some(ActiveMarkdownBlock::TableCandidate {
+                    self.state.current_line_id = None;
+                    self.state.active = Some(ActiveMarkdownBlock::TableCandidate {
                         header: line.to_string(),
                     });
                 } else {
-                    self.active = Some(ActiveMarkdownBlock::Paragraph {
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph {
                         content: line.to_string(),
-                        id: self.current_line_id.take(),
+                        id: self.state.current_line_id.take(),
                     });
                 }
             }
@@ -282,7 +289,7 @@ impl MarkdownStream {
     }
 
     fn finish_active(&mut self, history: &mut BlockHistory) {
-        let Some(active) = self.active.take() else {
+        let Some(active) = self.state.active.take() else {
             return;
         };
         match active {

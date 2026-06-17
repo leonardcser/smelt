@@ -464,6 +464,23 @@ mod tests {
     }
 
     #[test]
+    fn clear_preserves_thinking_stream_kind() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_thinking(&mut history, "discard me");
+        parser.clear();
+        parser.append_streaming_thinking(&mut history, "thinking after clear");
+        parser.flush_streaming_thinking(&mut history);
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history.block_at(1),
+            &Block::Thinking {
+                content: "thinking after clear".into(),
+            }
+        );
+    }
+
+    #[test]
     fn streaming_thinking_opening_fence_is_not_shown_as_text() {
         let (mut parser, mut history) = setup();
         parser.append_streaming_thinking(&mut history, "``");
