@@ -150,7 +150,8 @@ keys take on their vim meanings:
 
 Full vim support: motions, operators (`d`, `c`, `y`), text objects (`iw`,
 `a(`…), find (`f`, `t`, `F`, `T`, `;`, `,`), and commands (`x`, `s`, `r`, `p`,
-`u`, `~`, `J`, etc.).
+`u`, `~`, `J`, etc.). Prompt visual selections scope submit/steer actions to the
+selection.
 
 Yank / paste are mirrored with the system clipboard: `y` / `yy` / `d` / `x`
 push to the clipboard, and `p` / `P` read from it. If the clipboard was
@@ -164,10 +165,13 @@ direction toggles). The transcript shares the same keymap as the prompt —
 arrows, `Ctrl+P` / `Ctrl+N`, `PgUp` / `PgDn`, `Ctrl+V` / `Alt+V`, `Alt+<` /
 `Alt+>`, `Home` / `End`, `Cmd+C`, and shift-extended selection variants all
 work. Editing chords are silently dropped on the read-only transcript buffer.
-`Ctrl+C` returns focus to the prompt. With vim enabled the full vim engine
-runs on the transcript (motions, `y` to yank, `v` / `V` visual selection,
-`Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` / `Ctrl+Y` / `Ctrl+E` viewport
-scrolling).
+`Ctrl+C` returns focus to the prompt. `Enter` toggles folds; vim-style `za` /
+`zo` / `zc` / `zR` / `zM` also work. `Ctrl+click` opens transcript links, email
+addresses, and file paths; in vim mode, use `gf`.
+
+With vim enabled the full vim engine runs on the transcript (motions, `y` to
+yank, `v` / `V` visual selection, `Ctrl+B` / `Ctrl+F` / `Ctrl+U` / `Ctrl+D` /
+`Ctrl+Y` / `Ctrl+E` viewport scrolling).
 
 ## Cmdline (`:`)
 

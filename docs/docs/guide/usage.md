@@ -84,7 +84,8 @@ terminal.
 
 While the agent is responding, keep typing. Press `Enter` to queue a message for
 later, or use `Ctrl+Enter` / `Ctrl+Q` to steer the response currently in
-progress.
+progress. In vim visual mode, `Enter`, `Ctrl+Enter`, and `Ctrl+Q` act on only
+the selection.
 
 - `Enter` while busy — queue this message for later
 - `Ctrl+Enter` / `Ctrl+Q` while busy — steer the current response

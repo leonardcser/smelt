@@ -247,6 +247,18 @@ M.register({
 })
 
 M.register({
+  id = "commands.review",
+  key = "/btw /reflect /simplify",
+  text = "ask side questions or have the agent review its own plan and changes",
+})
+
+M.register({
+  id = "config.reload",
+  key = "f5",
+  text = "reload Lua config without restarting",
+})
+
+M.register({
   id = "paste.image",
   key = "cmd+v",
   text = "paste an image from the clipboard into the prompt",
@@ -256,6 +268,18 @@ M.register({
   id = "transcript.search",
   key = "/ and ?",
   text = "search the transcript forward or backward",
+})
+
+M.register({
+  id = "transcript.fold",
+  key = "enter / za",
+  text = "in the transcript, toggle folded blocks; zR/zM opens or closes all",
+})
+
+M.register({
+  id = "transcript.open.action",
+  key = "ctrl+click / gf",
+  text = "open transcript links, emails, and file paths",
 })
 
 M.register({
@@ -314,6 +338,13 @@ M.register({
   id = "vim.visual",
   key = "v / shift+v",
   text = "in vim normal mode, start character or line visual selection",
+  when = "vim_enabled",
+})
+
+M.register({
+  id = "vim.visual.submit",
+  key = "enter / ctrl+enter / ctrl+q",
+  text = "with a prompt visual selection, send, queue, or steer only that selection",
   when = "vim_enabled",
 })
 
