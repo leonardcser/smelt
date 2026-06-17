@@ -107,9 +107,7 @@ pub struct TuiApp {
     pub(crate) pending_history_appends: Vec<PendingHistoryAppend>,
     process_completion_rx:
         tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
-    session_migration_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<smelt_core::session::SessionMigrationBatchReport>,
-    >,
+    app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     pub(crate) context_tokens_updated_this_turn: bool,
     pub(crate) cancel_generation: u64,
     /// Set while routing an engine event whose `TurnState` has been moved
@@ -191,6 +189,11 @@ pub(crate) struct PromptResizeClick {
     pub(crate) row: u16,
     pub(crate) col: u16,
     pub(crate) at: Instant,
+}
+
+#[derive(Debug)]
+pub enum AppEvent {
+    SessionMigration(smelt_core::session::SessionMigrationEvent),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -898,9 +901,7 @@ impl TuiApp {
         project_trust: smelt_core::trust::TrustState,
         clock: Arc<dyn engine::clock::Clock>,
         env: Arc<engine::env::RuntimeEnv>,
-        session_migration_rx: Option<
-            tokio::sync::mpsc::UnboundedReceiver<smelt_core::session::SessionMigrationBatchReport>,
-        >,
+        app_event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<AppEvent>>,
     ) -> Self {
         let host_rx = engine.take_host_rx();
         let input = PromptState::new();
@@ -1103,7 +1104,7 @@ impl TuiApp {
             pending_turn_meta: None,
             pending_history_appends: Vec::new(),
             process_completion_rx,
-            session_migration_rx,
+            app_event_rx,
             context_tokens_updated_this_turn: false,
             cancel_generation: 0,
             dispatching_turn_id: None,
@@ -1649,6 +1650,26 @@ impl TuiApp {
                 "failed to save session {}: {}",
                 err.session_id, err.message
             ));
+        }
+    }
+
+    pub(crate) fn handle_app_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::SessionMigration(event) => self.handle_session_migration_event(event),
+        }
+    }
+
+    pub(crate) fn handle_session_migration_event(
+        &mut self,
+        event: smelt_core::session::SessionMigrationEvent,
+    ) {
+        match event {
+            smelt_core::session::SessionMigrationEvent::Started { pending } => {
+                self.notify(format!("session migration started: {pending} pending"));
+            }
+            smelt_core::session::SessionMigrationEvent::Completed(report) => {
+                self.handle_session_migration_report(report);
+            }
         }
     }
 
@@ -2230,13 +2251,13 @@ impl TuiApp {
                     self.handle_process_completed(completion.id, completion.exit_code);
                 }
 
-                Some(report) = async {
-                    match self.session_migration_rx.as_mut() {
+                Some(event) = async {
+                    match self.app_event_rx.as_mut() {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
                     }
                 } => {
-                    self.handle_session_migration_report(report);
+                    self.handle_app_event(event);
                     self.render_normal();
                 }
 

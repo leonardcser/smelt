@@ -842,7 +842,7 @@ Acceptance:
 
 ### Phase I: Cleanup and compatibility isolation
 
-Status: implemented in this branch. The old `session.ir.bin` module, reader/writer, format constants, persisted display-layout payloads, and persisted exact row-index save path are gone. Runtime open/search paths now ensure or trigger legacy-to-SQLite migration before loading from SQLite instead of returning a directly loaded legacy `Session`. Background migration reports completion to the TUI, clears resume-preview cache state, and only shows a toast when at least one session migrated or failed.
+Status: implemented in this branch. The old `session.ir.bin` module, reader/writer, format constants, persisted display-layout payloads, and persisted exact row-index save path are gone. Runtime open/search/audit paths ensure or trigger legacy-to-SQLite migration before loading from SQLite instead of returning a directly loaded legacy `Session`. Background migration reports start and completion to the TUI, clears resume-preview cache state on completion, and only shows a completion toast when at least one session migrated or failed.
 
 Deliverables:
 

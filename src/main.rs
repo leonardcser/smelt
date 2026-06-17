@@ -678,9 +678,9 @@ async fn main() {
             remember: cfg.remember.clone(),
             context_window: None,
         };
-        let (session_migration_tx, session_migration_rx) = tokio::sync::mpsc::unbounded_channel();
-        smelt_core::session::spawn_background_migration_with_report(move |report| {
-            let _ = session_migration_tx.send(report);
+        let (app_event_tx, app_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        smelt_core::session::spawn_background_migration_with_event(move |event| {
+            let _ = app_event_tx.send(tui::app::AppEvent::SessionMigration(event));
         });
         let mut app = tui::app::TuiApp::new(
             app_config,
@@ -692,7 +692,7 @@ async fn main() {
             project_trust,
             Arc::clone(&clock),
             Arc::clone(&env),
-            Some(session_migration_rx),
+            Some(app_event_rx),
         );
         app.core.skills = Some(Arc::clone(&skill_loader));
         app.core.mcp = Some(Arc::clone(&mcp_manager));

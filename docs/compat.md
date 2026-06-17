@@ -40,8 +40,8 @@ with `COMPAT(<id>)`.
 
 - Remove after: old session dirs without `meta.json` / `content.txt` no longer
   matter
-- Why: rebuild list metadata and search text from canonical SQLite, migrating legacy
-  inputs first when necessary
+- Why: rebuild list metadata and search text from canonical SQLite, surfacing pending
+  migration status for legacy inputs without loading them directly
 - Code:
   - `crates/core/src/session.rs`: session listing/search blob fallbacks
 

@@ -53,6 +53,12 @@ pub struct SessionMigrationBatchReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionMigrationEvent {
+    Started { pending: usize },
+    Completed(SessionMigrationBatchReport),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionMigrationError {
     MissingFile { path: PathBuf },
     ReadFile { path: PathBuf, message: String },
@@ -88,7 +94,7 @@ impl fmt::Display for SessionMigrationError {
                 write!(f, "session not found or prefix is ambiguous: {id}")
             }
             SessionMigrationError::MissingDatabase { id } => {
-                write!(f, "session {id} has no sqlite database to export")
+                write!(f, "session {id} has no sqlite database")
             }
             SessionMigrationError::OpenDatabase { message } => {
                 write!(f, "failed to open sqlite database: {message}")
@@ -160,6 +166,33 @@ fn migrate_session_dir_to_db_inner(
     Ok(SessionMigrationOutcome::Migrated)
 }
 
+pub fn ensure_session_db(dir_path: &Path) -> SessionMigrationResult<()> {
+    if dir_path.join("session.db").is_file() {
+        return Ok(());
+    }
+    let _ = migrate_session_dir_to_db(dir_path)?;
+    if dir_path.join("session.db").is_file() {
+        Ok(())
+    } else {
+        Err(SessionMigrationError::MissingDatabase {
+            id: session_dir_id(dir_path),
+        })
+    }
+}
+
+pub(crate) fn session_dir_needs_migration(dir_path: &Path) -> bool {
+    !dir_path.join("session.db").is_file()
+        && (dir_path.join("history.jsonl").is_file() || dir_path.join("session.json").is_file())
+}
+
+fn session_dir_id(dir_path: &Path) -> String {
+    dir_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("<unknown>")
+        .to_string()
+}
+
 pub fn migrate_all_sessions_once() -> SessionMigrationBatchReport {
     migrate_all_sessions_in_dir(&crate::session::sessions_dir())
 }
@@ -186,13 +219,8 @@ pub(crate) fn migrate_all_sessions_in_dir(dir: &Path) -> SessionMigrationBatchRe
             Err(err) => {
                 report.failed += 1;
                 if report.failures.len() < MAX_MIGRATION_FAILURE_LOGS {
-                    let id = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("<unknown>")
-                        .to_string();
                     report.failures.push(SessionMigrationFailure {
-                        id,
+                        id: session_dir_id(&path),
                         message: err.to_string(),
                     });
                 }
@@ -202,19 +230,51 @@ pub(crate) fn migrate_all_sessions_in_dir(dir: &Path) -> SessionMigrationBatchRe
     report
 }
 
+pub(crate) fn pending_session_migration_count_in_dir(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && session_dir_needs_migration(path))
+        .count()
+}
+
+pub fn pending_session_migration_count() -> usize {
+    pending_session_migration_count_in_dir(&crate::session::sessions_dir())
+}
+
 pub fn spawn_background_migration() {
-    spawn_background_migration_with_report(|_| {});
+    spawn_background_migration_with_event(|_| {});
 }
 
 pub fn spawn_background_migration_with_report(
     on_report: impl FnOnce(SessionMigrationBatchReport) + Send + 'static,
 ) {
+    let mut on_report = Some(on_report);
+    spawn_background_migration_with_event(move |event| {
+        if let SessionMigrationEvent::Completed(report) = event {
+            if let Some(on_report) = on_report.take() {
+                on_report(report);
+            }
+        }
+    });
+}
+
+pub fn spawn_background_migration_with_event(
+    mut on_event: impl FnMut(SessionMigrationEvent) + Send + 'static,
+) {
     let _ = std::thread::Builder::new()
         .name("smelt-session-migration".to_string())
-        .spawn(|| {
+        .spawn(move || {
+            let pending = pending_session_migration_count();
+            if pending > 0 {
+                on_event(SessionMigrationEvent::Started { pending });
+            }
             let report = migrate_all_sessions_once();
             log_migration_batch_report(&report);
-            on_report(report);
+            on_event(SessionMigrationEvent::Completed(report));
         });
 }
 

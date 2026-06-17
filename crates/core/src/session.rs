@@ -167,10 +167,12 @@ pub struct Session {
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
 
 pub use crate::session_migration::{
-    export_history_jsonl, export_requests_jsonl, migrate_all_sessions_once,
-    migrate_session_dir_to_db, spawn_background_migration, spawn_background_migration_with_report,
-    SessionMigrationBatchReport, SessionMigrationError, SessionMigrationFailure,
-    SessionMigrationOutcome, SessionMigrationState, SessionMigrationStatus,
+    ensure_session_db, export_history_jsonl, export_requests_jsonl, migrate_all_sessions_once,
+    migrate_session_dir_to_db, pending_session_migration_count, spawn_background_migration,
+    spawn_background_migration_with_event, spawn_background_migration_with_report,
+    SessionMigrationBatchReport, SessionMigrationError, SessionMigrationEvent,
+    SessionMigrationFailure, SessionMigrationOutcome, SessionMigrationState,
+    SessionMigrationStatus,
 };
 
 // COMPAT(session-v1-messages): load old session.json files that stored
@@ -1297,10 +1299,22 @@ fn load_exact(id: &str) -> Option<Session> {
 }
 
 fn load_session_files(dir_path: &std::path::Path) -> Option<Session> {
-    if !dir_path.join("session.db").is_file() {
-        let _ = crate::session_migration::migrate_session_dir_to_db(dir_path);
+    if let Err(err) = crate::session_migration::ensure_session_db(dir_path) {
+        log_session_migration_error(dir_path, &err);
+        return None;
     }
     load_db_session(dir_path).and_then(|session| internalize_session_blobs(dir_path, session))
+}
+
+fn log_session_migration_error(dir_path: &std::path::Path, err: &SessionMigrationError) {
+    engine::log::entry(
+        engine::log::Level::Warn,
+        "session_migration_failed",
+        &serde_json::json!({
+            "session_dir": dir_path.display().to_string(),
+            "error": err.to_string(),
+        }),
+    );
 }
 
 fn internalize_session_blobs(dir_path: &std::path::Path, mut session: Session) -> Option<Session> {
@@ -1653,8 +1667,8 @@ pub fn list_sessions() -> Vec<SessionMeta> {
 }
 
 /// COMPAT(session-search-sidecar-missing): uses `meta.json` when present,
-/// reads canonical SQLite metadata when available, and keeps a lightweight
-/// legacy `session.json` metadata fallback until background migration has run.
+/// reads canonical SQLite metadata when available, and surfaces pending/failed
+/// migration status without reading legacy session payloads.
 fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
     let meta = if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
         if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
@@ -1673,18 +1687,6 @@ fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
     } else if let Some(meta) = load_meta_from_db(&path) {
         write_meta(&path, &meta);
         meta
-    } else if let Some(session) = fs::read_to_string(path.join("session.json"))
-        .ok()
-        .and_then(|contents| serde_json::from_str::<Session>(&contents).ok())
-    {
-        let mut meta = session.meta();
-        if meta.id.is_empty() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                meta.id = name.to_string();
-            }
-        }
-        write_meta(&path, &meta);
-        meta
     } else {
         return migration_meta_for_dir(&path);
     };
@@ -1692,7 +1694,7 @@ fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
 }
 
 fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
-    let migration = crate::session_migration::migration_status_for_dir(path)?;
+    let migration = migration_status_for_dir(path)?;
     let id = path.file_name().and_then(|name| name.to_str())?.to_string();
     Some(SessionMeta {
         id,
@@ -1713,8 +1715,20 @@ fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
 }
 
 fn with_migration_status(path: &Path, mut meta: SessionMeta) -> SessionMeta {
-    meta.migration = crate::session_migration::migration_status_for_dir(path);
+    meta.migration = migration_status_for_dir(path);
     meta
+}
+
+fn migration_status_for_dir(path: &Path) -> Option<SessionMigrationStatus> {
+    crate::session_migration::migration_status_for_dir(path).or_else(|| {
+        crate::session_migration::session_dir_needs_migration(path).then_some(
+            SessionMigrationStatus {
+                state: SessionMigrationState::Pending,
+                message: None,
+                updated_at_ms: 0,
+            },
+        )
+    })
 }
 
 fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
@@ -1792,14 +1806,6 @@ fn compute_text_bytes(history: &[HistoryItem]) -> u64 {
 }
 
 fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
-    if let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) {
-        if let Ok(bytes) = db.history_text_bytes() {
-            meta.text_bytes = Some(bytes);
-            write_meta(session_dir, meta);
-            return;
-        }
-    }
-    let _ = crate::session_migration::migrate_session_dir_to_db(session_dir);
     let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) else {
         return;
     };
@@ -1845,7 +1851,10 @@ pub fn load_search_blob(id: &str) -> Option<String> {
             return Some(blob);
         }
     }
-    let _ = crate::session_migration::migrate_session_dir_to_db(&session_dir);
+    if let Err(err) = crate::session_migration::ensure_session_db(&session_dir) {
+        log_session_migration_error(&session_dir, &err);
+        return None;
+    }
     if let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) {
         if let Ok(blob) = db.search_blob() {
             atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
@@ -2123,6 +2132,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_session_without_db_lists_as_pending_without_parsing_payload() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(dir.path().join("session.json"), b"not json").expect("write invalid legacy");
+
+        let listed = load_meta_for_dir(dir.path().to_path_buf()).expect("pending meta");
+
+        assert_eq!(listed.id, dir.path().file_name().unwrap().to_str().unwrap());
+        assert_eq!(
+            listed.migration.as_ref().unwrap().state,
+            SessionMigrationState::Pending
+        );
+        assert!(!dir.path().join("session.db").exists());
+        assert!(!dir
+            .path()
+            .join(crate::session_migration::MIGRATION_STATUS_FILE)
+            .exists());
+    }
+
+    #[test]
     fn failed_migration_keeps_legacy_files_and_is_retryable() {
         let dir = tempfile::tempdir().expect("temp dir");
         fs::write(dir.path().join("session.json"), b"not json").expect("write invalid legacy");
@@ -2184,6 +2212,11 @@ mod tests {
             fs::create_dir(&bad).expect("bad dir");
             fs::write(bad.join("session.json"), b"not json").expect("write bad legacy");
         }
+
+        assert_eq!(
+            crate::session_migration::pending_session_migration_count_in_dir(root.path()),
+            8
+        );
 
         let report = crate::session_migration::migrate_all_sessions_in_dir(root.path());
 

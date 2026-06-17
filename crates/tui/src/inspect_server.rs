@@ -490,13 +490,16 @@ async fn session_requests(id: &str) -> (&'static str, &'static str, String) {
 
 fn session_requests_json(id: &str) -> std::result::Result<String, String> {
     let dir = session_dir(id);
+    if let Err(err) = smelt_core::session::ensure_session_db(&dir) {
+        if matches!(
+            err,
+            smelt_core::session::SessionMigrationError::MissingDatabase { .. }
+        ) {
+            return Ok("[]".to_string());
+        }
+        return Err(err.to_string());
+    }
     let db_path = dir.join("session.db");
-    if !db_path.is_file() {
-        let _ = smelt_core::session::migrate_session_dir_to_db(&dir);
-    }
-    if !db_path.is_file() {
-        return Ok("[]".to_string());
-    }
     let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
     let attempts = db
         .query_request_attempts(&smelt_store::RequestAuditQuery {
@@ -531,10 +534,17 @@ fn request_payload_json(id: &str, request_id: &str) -> std::result::Result<Optio
     let attempt_id = request_id
         .parse::<i64>()
         .map_err(|err| format!("invalid request id: {err}"))?;
-    let db_path = session_dir(id).join("session.db");
-    if !db_path.is_file() {
-        return Ok(None);
+    let dir = session_dir(id);
+    if let Err(err) = smelt_core::session::ensure_session_db(&dir) {
+        if matches!(
+            err,
+            smelt_core::session::SessionMigrationError::MissingDatabase { .. }
+        ) {
+            return Ok(None);
+        }
+        return Err(err.to_string());
     }
+    let db_path = dir.join("session.db");
     let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
     let Some(payloads) = db
         .request_payloads(attempt_id)
