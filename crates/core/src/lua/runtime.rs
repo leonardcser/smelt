@@ -89,6 +89,13 @@ const EARLY_DIRS: &[&str] = &["early"];
 /// `customize` skill.
 pub const OPTIONAL_PLUGINS: &[&str] = &["smelt.plugins.which_key", "smelt.plugins.inspect"];
 
+/// Command metadata used by command-line completion UIs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCompletionItem {
+    pub name: String,
+    pub description: Option<String>,
+}
+
 /// Outcome of dispatching a keymap chord.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeymapResult {
@@ -989,6 +996,25 @@ impl LuaRuntime {
             .map(|m| {
                 let mut v: Vec<String> = m.keys().cloned().collect();
                 v.sort();
+                v
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn command_completion_items(&self) -> Vec<CommandCompletionItem> {
+        self.shared
+            .commands
+            .lock()
+            .map(|m| {
+                let mut v: Vec<CommandCompletionItem> = m
+                    .iter()
+                    .filter(|(_, cmd)| !cmd.hidden)
+                    .map(|(name, cmd)| CommandCompletionItem {
+                        name: name.clone(),
+                        description: cmd.description.clone(),
+                    })
+                    .collect();
+                v.sort_by(|a, b| a.name.cmp(&b.name));
                 v
             })
             .unwrap_or_default()

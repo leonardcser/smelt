@@ -11,12 +11,20 @@ local metrics_perf = {}
 ---@type fun(): nil
 metrics_perf.clear = nil
 
+--- Return whether perf instrumentation collection is enabled.
+---@type fun(): boolean
+metrics_perf.enabled = nil
+
 --- Toggle perf instrumentation collection on/off. Disabled by default; enable to populate `snapshot` for the F12 debug panel.
 ---@type fun(on: boolean): nil
 metrics_perf.set_enabled = nil
 
---- Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields. Powers the F12 debug panel.
+--- Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields. Powers detailed diagnostics; prefer `snapshot_top` for live UI panels.
 ---@type fun(): table
 metrics_perf.snapshot = nil
+
+--- Return a cheap live perf snapshot with only the top `limit` duration rows and no value rows. Intended for panels that refresh frequently.
+---@type fun(limit: integer?): table
+metrics_perf.snapshot_top = nil
 
 return metrics_perf

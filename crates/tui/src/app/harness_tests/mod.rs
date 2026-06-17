@@ -5,6 +5,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, Ke
 use protocol::{AgentMode, EngineEvent};
 use std::time::Duration;
 
+mod cmdline;
 mod compaction;
 mod dialogs;
 mod error_queue;

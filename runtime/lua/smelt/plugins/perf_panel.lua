@@ -141,7 +141,7 @@ local function compose_lines(snap, label_w, max_rows)
 	return lines, color_spans
 end
 
-local function paint()
+local function paint_body()
 	if not state.open then
 		return
 	end
@@ -149,16 +149,23 @@ local function paint()
 	if not buf or not win then
 		return
 	end
-	local ok, snap = pcall(smelt.metrics.perf.snapshot)
+	local label_w, max_rows = current_layout(win)
+	local ok, snap = pcall(smelt.metrics.perf.snapshot_top, math.max(max_rows - 1, 1))
 	if not ok then
 		return
 	end
-	local label_w, max_rows = current_layout(win)
 	local lines, spans = compose_lines(snap, label_w, max_rows)
 	buf:lines(lines):clear_ns(NS_HL)
 	for _, sp in ipairs(spans) do
 		buf:mark(NS_HL, sp.row, sp.col, { end_col = sp.end_col, fg = sp.role })
 	end
+end
+
+local function paint()
+	if smelt.perf and smelt.perf.time then
+		return smelt.perf.time("perf_panel:paint", paint_body)
+	end
+	return paint_body()
 end
 
 local function close()
@@ -218,7 +225,7 @@ local function open()
 	state.row_seen = {}
 	-- If perf is already on (e.g. `--bench`), leave its samples and enabled
 	-- flag alone so the end-of-run summary still has data to print.
-	state.owns_perf = not smelt.metrics.perf.snapshot().enabled
+	state.owns_perf = not smelt.metrics.perf.enabled()
 	if state.owns_perf then
 		smelt.metrics.perf.clear()
 		smelt.metrics.perf.set_enabled(true)

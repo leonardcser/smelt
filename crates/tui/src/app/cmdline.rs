@@ -5,7 +5,7 @@ use crate::app::{search::SearchDirection, CommandAction, TuiApp};
 use crate::smelt_edit::layout::Anchor;
 use crate::smelt_edit::BufCreateOpts;
 use crate::smelt_edit::UiHost;
-use crate::smelt_edit::{Constraint, LayoutTree, Overlay, SplitConfig};
+use crate::smelt_edit::{Constraint, LayoutTree, Overlay, SplitConfig, WinId};
 use crossterm::event::{Event, KeyCode, KeyEvent};
 
 /// Prefix glyph; cursor and editing clamp past the one-cell prefix so it cannot be deleted.
@@ -47,17 +47,23 @@ pub(crate) struct CmdlineState {
     pub(crate) history_browse: Option<usize>,
     /// Live input snapshot saved when history browsing begins; restored on Down past the newest entry.
     pub(crate) history_stash: String,
-    /// Tab-cycle state: command-name candidates ordered by fuzzy match against the
-    /// query at first Tab, plus the current cursor into that list. Dropped on close
+    /// Visible command-name completion opened explicitly by Tab. Dropped on close
     /// or text mutation so the next Tab re-ranks against the new query.
     pub(crate) completer: Option<CmdlineCompleter>,
 }
 
-/// Linear tab-cycling completer for the `:` cmdline. Holds the candidate
-/// command names ranked best-first and the current selection index.
+/// Visible completer for the `:` cmdline. Holds ranked command candidates,
+/// the current logical selection, and the picker leaf that renders the list.
 pub(crate) struct CmdlineCompleter {
-    pub(crate) labels: Vec<String>,
+    pub(crate) items: Vec<CmdlineCompletionItem>,
     pub(crate) selected: usize,
+    pub(crate) picker: Option<WinId>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CmdlineCompletionItem {
+    pub(crate) label: String,
+    pub(crate) description: Option<String>,
 }
 
 enum CmdlineInputAction {
@@ -66,6 +72,7 @@ enum CmdlineInputAction {
     CloseIfEmpty,
     HistoryPrevious,
     HistoryNext,
+    CompleteOpenOrAccept,
     CompleteNext,
     CompletePrevious,
     Edit(crate::line_input::EditCommand),
@@ -80,9 +87,10 @@ impl CmdlineInputAction {
             (KeyCode::Backspace, _) | (KeyCode::Char('w'), M::CONTROL) => Some(Self::CloseIfEmpty),
             (KeyCode::Up, _) => Some(Self::HistoryPrevious),
             (KeyCode::Down, _) => Some(Self::HistoryNext),
-            (KeyCode::Tab, _)
-            | (KeyCode::Char('j'), M::CONTROL)
-            | (KeyCode::Char('n'), M::CONTROL) => Some(Self::CompleteNext),
+            (KeyCode::Tab, _) => Some(Self::CompleteOpenOrAccept),
+            (KeyCode::Char('j'), M::CONTROL) | (KeyCode::Char('n'), M::CONTROL) => {
+                Some(Self::CompleteNext)
+            }
             (KeyCode::BackTab, _) | (KeyCode::Char('p'), M::CONTROL) => {
                 Some(Self::CompletePrevious)
             }
@@ -92,6 +100,14 @@ impl CmdlineInputAction {
             _ => crate::line_input::command_for_key(key).map(Self::Edit),
         }
     }
+}
+
+fn cmdline_picker_item(item: &CmdlineCompletionItem) -> crate::picker::PickerItem {
+    let mut row = crate::picker::PickerItem::new(item.label.clone());
+    if let Some(desc) = item.description.as_deref() {
+        row = row.with_description(desc.to_string());
+    }
+    row
 }
 
 impl TuiApp {
@@ -174,11 +190,31 @@ impl TuiApp {
     }
 
     pub(crate) fn close_cmdline(&mut self) {
+        self.cmdline_close_completer();
         if let Some(win) = self.well_known.cmdline.take() {
             self.close_overlay_leaf(win);
         }
-        self.cmdline.completer = None;
         self.cmdline.mode = CmdlineMode::Command;
+    }
+
+    fn cmdline_close_completer(&mut self) {
+        if let Some(mut completer) = self.cmdline.completer.take() {
+            if let Some(win) = completer.picker.take() {
+                self.close_overlay_leaf(win);
+            }
+        }
+    }
+
+    fn cmdline_dismiss_completer(&mut self) {
+        self.cmdline_close_completer();
+    }
+
+    fn cmdline_completer_open(&self) -> bool {
+        self.cmdline
+            .completer
+            .as_ref()
+            .and_then(|c| c.picker)
+            .is_some()
     }
 
     fn cmdline_text(&self) -> String {
@@ -244,6 +280,10 @@ impl TuiApp {
     pub(crate) fn cmdline_handle_key(&mut self, k: KeyEvent) -> Option<bool> {
         match CmdlineInputAction::from_key(self.cmdline.mode, k)? {
             CmdlineInputAction::Cancel => {
+                if self.cmdline_completer_open() {
+                    self.cmdline_dismiss_completer();
+                    return Some(false);
+                }
                 if matches!(self.cmdline.mode, CmdlineMode::Search { .. }) {
                     self.clear_search();
                 }
@@ -261,19 +301,31 @@ impl TuiApp {
                 Some(false)
             }
             CmdlineInputAction::HistoryPrevious => {
-                self.cmdline_history_up();
+                if self.cmdline_completer_open() {
+                    self.cmdline_complete_move(1);
+                } else {
+                    self.cmdline_history_up();
+                }
                 Some(false)
             }
             CmdlineInputAction::HistoryNext => {
-                self.cmdline_history_down();
+                if self.cmdline_completer_open() {
+                    self.cmdline_complete_move(-1);
+                } else {
+                    self.cmdline_history_down();
+                }
+                Some(false)
+            }
+            CmdlineInputAction::CompleteOpenOrAccept => {
+                self.cmdline_complete_open_or_accept();
                 Some(false)
             }
             CmdlineInputAction::CompleteNext => {
-                self.cmdline_cycle_completer(true);
+                self.cmdline_complete_move(-1);
                 Some(false)
             }
             CmdlineInputAction::CompletePrevious => {
-                self.cmdline_cycle_completer(false);
+                self.cmdline_complete_move(1);
                 Some(false)
             }
             CmdlineInputAction::Edit(command) => {
@@ -298,7 +350,7 @@ impl TuiApp {
             }
         }
         if text != old_text {
-            self.cmdline.completer = None;
+            self.cmdline_dismiss_completer();
         }
     }
 
@@ -348,14 +400,14 @@ impl TuiApp {
                 self.cmdline.history_browse = Some(idx);
                 let cursor = entry.len();
                 self.cmdline_set_payload(&entry, cursor);
-                self.cmdline.completer = None;
+                self.cmdline_dismiss_completer();
             }
             HistoryStepOwned::Restore { stash } => {
                 self.cmdline.history_browse = None;
                 self.cmdline.history_stash = String::new();
                 let cursor = stash.len();
                 self.cmdline_set_payload(&stash, cursor);
-                self.cmdline.completer = None;
+                self.cmdline_dismiss_completer();
             }
         }
     }
@@ -394,48 +446,104 @@ impl TuiApp {
         }
     }
 
-    fn cmdline_cycle_completer(&mut self, next: bool) {
+    fn cmdline_complete_open_or_accept(&mut self) {
+        if self.cmdline_completer_open() {
+            self.cmdline_accept_completion();
+            return;
+        }
+        self.cmdline_open_completer();
+    }
+
+    fn cmdline_complete_move(&mut self, delta: isize) {
+        if !self.cmdline_completer_open() {
+            return;
+        }
+        let Some(comp) = self.cmdline.completer.as_ref() else {
+            return;
+        };
+        let n = comp.items.len();
+        if n == 0 {
+            return;
+        }
+        let next = (comp.selected as isize + delta).rem_euclid(n as isize) as usize;
+        self.cmdline_select_completion(next);
+    }
+
+    fn cmdline_open_completer(&mut self) {
         if !matches!(self.cmdline.mode, CmdlineMode::Command) {
             return;
         }
-        if self.cmdline.completer.is_none() {
-            let typed = self.cmdline_text();
-            let labels = self.lua.command_names();
-            let ranked: Vec<String> = if typed.is_empty() {
-                labels
-            } else {
-                let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-                smelt_core::fuzzy::fuzzy_rank(&typed, &refs)
-                    .into_iter()
-                    .map(|i| labels[i].clone())
-                    .collect()
-            };
-            if ranked.is_empty() {
-                return;
-            }
-            self.cmdline.completer = Some(CmdlineCompleter {
-                labels: ranked,
-                selected: 0,
-            });
-        } else if let Some(comp) = self.cmdline.completer.as_mut() {
-            let n = comp.labels.len();
-            if n == 0 {
-                return;
-            }
-            comp.selected = if next {
-                (comp.selected + n - 1) % n
-            } else {
-                (comp.selected + 1) % n
-            };
+        let typed = self.cmdline_text();
+        let items = self.lua.command_completion_items();
+        let ranked: Vec<CmdlineCompletionItem> = if typed.is_empty() {
+            items
+                .into_iter()
+                .map(|item| CmdlineCompletionItem {
+                    label: item.name,
+                    description: item.description,
+                })
+                .collect()
+        } else {
+            let labels: Vec<&str> = items.iter().map(|item| item.name.as_str()).collect();
+            smelt_core::fuzzy::fuzzy_rank(&typed, &labels)
+                .into_iter()
+                .map(|i| CmdlineCompletionItem {
+                    label: items[i].name.clone(),
+                    description: items[i].description.clone(),
+                })
+                .collect()
+        };
+        if ranked.is_empty() {
+            return;
         }
-        let payload = self
+
+        let picker_items = ranked.iter().map(cmdline_picker_item).collect();
+        let Some(picker) = crate::picker::open(
+            self,
+            picker_items,
+            0,
+            crate::picker::PickerPlacement::CmdlineDocked { max_rows: 8 },
+            false,
+            false,
+            50,
+        ) else {
+            return;
+        };
+        self.cmdline.completer = Some(CmdlineCompleter {
+            items: ranked,
+            selected: 0,
+            picker: Some(picker),
+        });
+    }
+
+    fn cmdline_accept_completion(&mut self) {
+        let label = self
             .cmdline
             .completer
             .as_ref()
-            .and_then(|c| c.labels.get(c.selected).cloned());
-        if let Some(label) = payload {
-            let cursor = label.len();
-            self.cmdline_set_payload(&label, cursor);
+            .and_then(|comp| comp.items.get(comp.selected))
+            .map(|item| item.label.clone());
+        let Some(label) = label else {
+            return;
+        };
+        self.cmdline_dismiss_completer();
+        let cursor = label.len();
+        self.cmdline_set_payload(&label, cursor);
+    }
+
+    fn cmdline_select_completion(&mut self, selected: usize) {
+        let (picker, selected) = {
+            let Some(comp) = self.cmdline.completer.as_mut() else {
+                return;
+            };
+            if comp.items.is_empty() {
+                return;
+            }
+            comp.selected = selected.min(comp.items.len() - 1);
+            (comp.picker, comp.selected)
+        };
+        if let Some(win) = picker {
+            crate::picker::set_selected(self, win, selected);
         }
     }
 }

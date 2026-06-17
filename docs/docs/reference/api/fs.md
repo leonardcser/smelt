@@ -40,14 +40,6 @@ Find paths matching `pattern` under `path` off the main thread. `opts`
 accepts `max`, `max_scanned`, and `timeout_ms`. Returns a table with
 `{ paths, scanned, truncated, timed_out }` or `(nil, err)`.
 
-## `smelt.fs.invalidate_workspace_files`
-
-```lua
-fun(): nil
-```
-
-Clear the cached workspace file list. The next `workspace_file_matches` call rebuilds it for the current cwd.
-
 ## `smelt.fs.is_dir`
 
 ```lua
@@ -179,22 +171,6 @@ Filesystem watcher. Calls `handler(event)` for each event, where
 `opts.recursive` defaults to true; set false to watch only the immediate
 entries of a directory. Returns a `Reg` whose `:remove()` stops the
 watcher and cancels the polling coroutine.
-
-## `smelt.fs.workspace_file_matches`
-
-```lua
-fun(query: string, limit: integer?): table
-```
-
-Return bounded fuzzy-matched workspace file rows as `{ index, label }` tables. `index` is the 1-based index in the cached workspace file list.
-
-## `smelt.fs.workspace_files`
-
-```lua
-fun(): string[]
-```
-
-Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically. Uses `git ls-files` when a git repo is present and falls back to a depth-capped filesystem walk otherwise. Suitable as the source for an `@file` completer.
 
 ## `smelt.fs.write`
 

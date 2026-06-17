@@ -451,7 +451,7 @@
 ---@class smelt.picker.Picker
 ---@field win fun(): smelt.win.Win Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input).
 ---@field close fun(): nil Close the picker overlay. No-op if already closed.
----@field items fun(items: table, selected: integer?): smelt.picker.Picker Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining.
+---@field items fun(items: table, selected: integer?): smelt.picker.Picker Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, label_color?, prefix?, icon?, ... }`. `icon = { kind = "file"|"dir", path = string }` renders file-list icons unless `prefix` is set. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining.
 ---@field selected fun(idx: integer?): any Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining.
 ---@field move fun(delta: integer): smelt.picker.Picker Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining.
 
@@ -462,16 +462,19 @@
 ---@field items fun(anchor: integer, text: string, cpos: integer): table[] Build a full candidate set for Lua-side ranking.
 ---@field query fun(text: string, anchor: integer, cpos: integer): string Query used for Lua-side ranking.
 ---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
----@field limit? integer Maximum rows requested from `matches` providers.
 ---@field on_select? fun(item: table): nil Live selection callback.
 
 --- Completer specification handed to `smelt.prompt.completer` for bounded,
 --- already-ranked providers.
 ---@class smelt.prompt.MatchesCompleterSpec
 ---@field detect fun(text: string, cpos: integer): integer? Detect the active trigger and return its 0-based anchor byte offset.
----@field matches fun(anchor: integer, text: string, cpos: integer, limit: integer): table[] Return bounded already-filtered/ranked rows.
+---@field matches fun(anchor: integer, text: string, cpos: integer, limit: integer): table[]|table Return bounded already-filtered/ranked rows, or `{ items, status?, message? }` for providers with loading/empty/error states.
+---@field query? fun(text: string, anchor: integer, cpos: integer): string Query identity used to distinguish user edits from provider refreshes.
 ---@field accept fun(item: table, anchor: integer, action: string): nil Splice the accepted candidate into the prompt.
 ---@field limit? integer Maximum rows requested from `matches` providers.
+---@field poll_ms? integer Refresh interval while `matches` returns `{ scanning = true }` or `{ searching = true }`.
+---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
+---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
 ---@field on_select? fun(item: table): nil Live selection callback.
 
 --- Picker entry shown in the prompt-docked dropdown. `label` and the
@@ -490,7 +493,12 @@
 --- switches the picker to persistent mode (stays open across selects);
 --- omit it for single-shot behaviour.
 ---@class smelt.prompt.PickerOpts
----@field items smelt.prompt.PickerItem[] | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer.
+---@field items? smelt.prompt.PickerItem[] | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer.
+---@field provider? fun(query: string, limit: integer): table Async/ranked provider returning `{ items, searching?, scanning?, message?, status? }`.
+---@field limit? integer Maximum rows requested from `provider`; defaults to 200.
+---@field poll_ms? integer Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`.
+---@field loading_delay_ms? integer Delay before showing an initial loading row when there are no stale rows to keep.
+---@field loading_poll_ms? integer Quiet polling interval before the initial loading row appears.
 ---@field on_select? fun(item: smelt.prompt.PickerItem): nil Fires on every cursor move.
 ---@field on_enter? fun(item: smelt.prompt.PickerItem, idx: integer): nil Persistent-mode accept handler.
 ---@field rank? fun(items: table[], query: string, original: smelt.prompt.PickerItem[]): integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order.
@@ -520,6 +528,11 @@
 ---@field thinking_budgets? table Per-level token budgets for budget-based thinking.
 ---@field context_window? integer Total context window, in tokens.
 ---@field supports_reasoning? boolean Whether this model supports reasoning/thinking parameters.
+
+---@class smelt.provider.NormalizedResult
+---@field rows table[] Rows to render after optional synthetic message insertion.
+---@field result? table Original provider result when the input used the provider shape.
+---@field loading boolean True while the provider is still scanning or searching.
 
 --- Options for `smelt.render.diff_split`.
 ---@class smelt.render.DiffSplitOpts

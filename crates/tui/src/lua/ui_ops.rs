@@ -765,7 +765,7 @@ pub(crate) fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, 
     let mut items: Vec<crate::picker::PickerItem> = Vec::new();
     for pair in items_tbl.sequence_values::<mlua::Value>() {
         let v = pair.map_err(|e| format!("picker item: {e}"))?;
-        items.push(parse_picker_item(&v)?);
+        items.push(parse_picker_item(app, &v)?);
     }
     if items.is_empty() {
         return Err("picker.open: items must be non-empty".into());
@@ -793,7 +793,10 @@ pub(crate) fn open_picker(app: &mut TuiApp, opts: mlua::Table) -> Result<WinId, 
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::PickerItem, String> {
+pub(crate) fn parse_picker_item(
+    app: &TuiApp,
+    v: &mlua::Value,
+) -> Result<crate::picker::PickerItem, String> {
     match v {
         mlua::Value::String(s) => Ok(crate::picker::PickerItem::new(
             s.to_string_lossy().to_string(),
@@ -806,8 +809,11 @@ pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::Picker
             if let Ok(desc) = t.get::<String>("description") {
                 item = item.with_description(desc);
             }
-            if let Ok(prefix) = t.get::<String>("prefix") {
+            let explicit_prefix = t.get::<Option<String>>("prefix").ok().flatten();
+            if let Some(prefix) = explicit_prefix {
                 item = item.with_prefix(prefix);
+            } else {
+                item = apply_picker_icon(app, item, t);
             }
             if let Ok(Some(ansi)) = t.get::<Option<u64>>("ansi_color") {
                 item = item.with_prefix_style(
@@ -828,6 +834,63 @@ pub(crate) fn parse_picker_item(v: &mlua::Value) -> Result<crate::picker::Picker
             other.type_name()
         )),
     }
+}
+
+fn apply_picker_icon(
+    app: &TuiApp,
+    item: crate::picker::PickerItem,
+    t: &mlua::Table,
+) -> crate::picker::PickerItem {
+    let Some(icon) = t.get::<Option<mlua::Table>>("icon").ok().flatten() else {
+        return item;
+    };
+    let Some(kind) = icon.get::<Option<String>>("kind").ok().flatten() else {
+        return item;
+    };
+    let Some(path) = icon.get::<Option<String>>("path").ok().flatten() else {
+        return item;
+    };
+    apply_file_icon(app, item, &kind, &path)
+}
+
+fn apply_file_icon(
+    app: &TuiApp,
+    item: crate::picker::PickerItem,
+    kind: &str,
+    path: &str,
+) -> crate::picker::PickerItem {
+    let settings = &app.core.config.settings;
+    if !settings.file_icons {
+        return item;
+    }
+
+    let colors = settings.file_icon_colors;
+    if kind == "dir" {
+        let style = if colors {
+            app.ui.theme().get("Directory")
+        } else {
+            Default::default()
+        };
+        return item.with_prefix(" ").with_prefix_style(style);
+    }
+
+    let options = smelt_core::content::file_icons::FileIconOptions::new(
+        settings.file_icons,
+        colors,
+        app.ui.theme().is_light(),
+        None,
+    );
+    let Some(icon) =
+        smelt_core::content::file_icons::lookup_path(std::path::Path::new(path), &options)
+    else {
+        return item;
+    };
+    let style = icon
+        .group
+        .map(|group| app.ui.theme().resolve(group))
+        .unwrap_or_default();
+    item.with_prefix(format!("{} ", icon.icon))
+        .with_prefix_style(style)
 }
 
 pub(crate) fn window_buffer_empty_pub(app: &TuiApp, win: WinId) -> bool {

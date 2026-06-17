@@ -62,44 +62,67 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
 
     perf.fn_(
+        "enabled",
+        "Return whether perf instrumentation collection is enabled.",
+        &[],
+        |_, ()| -> LuaResult<bool> { Ok(smelt_perf::perf::enabled()) },
+    )?;
+
+    perf.fn_(
         "snapshot",
-        "Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields. Powers the F12 debug panel.",
+        "Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields. Powers detailed diagnostics; prefer `snapshot_top` for live UI panels.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let snap = smelt_perf::perf::snapshot();
-            let out = lua.create_table()?;
-            let durs = lua.create_table()?;
-            for (i, row) in snap.durations.iter().enumerate() {
-                let r = lua.create_table()?;
-                r.set("label", row.label)?;
-                r.set("count", row.count)?;
-                r.set("last_us", row.last_us)?;
-                r.set("p50_us", row.p50_us)?;
-                r.set("p95_us", row.p95_us)?;
-                r.set("p99_us", row.p99_us)?;
-                r.set("max_us", row.max_us)?;
-                r.set("total_us", row.total_us)?;
-                durs.set(i + 1, r)?;
-            }
-            out.set("durations", durs)?;
-            let vals = lua.create_table()?;
-            for (i, row) in snap.values.iter().enumerate() {
-                let r = lua.create_table()?;
-                r.set("label", row.label)?;
-                r.set("count", row.count)?;
-                r.set("last", row.last)?;
-                r.set("p50", row.p50)?;
-                r.set("p95", row.p95)?;
-                r.set("p99", row.p99)?;
-                r.set("max", row.max)?;
-                r.set("total", row.total)?;
-                vals.set(i + 1, r)?;
-            }
-            out.set("values", vals)?;
-            out.set("enabled", smelt_perf::perf::enabled())?;
-            Ok(out)
+            let _perf = smelt_perf::perf::begin("metrics:perf_snapshot");
+            perf_snapshot_to_lua(lua, smelt_perf::perf::snapshot())
+        },
+    )?;
+
+    perf.fn_(
+        "snapshot_top",
+        "Return a cheap live perf snapshot with only the top `limit` duration rows and no value rows. Intended for panels that refresh frequently.",
+        &[
+            "limit",
+        ],
+        |lua, limit: Option<u64>| -> LuaResult<mlua::Table> {
+            let _perf = smelt_perf::perf::begin("metrics:perf_snapshot_top");
+            perf_snapshot_to_lua(lua, smelt_perf::perf::snapshot_top(limit.unwrap_or(16) as usize))
         },
     )?;
 
     Ok(())
+}
+
+fn perf_snapshot_to_lua(lua: &Lua, snap: smelt_perf::perf::Snapshot) -> LuaResult<mlua::Table> {
+    let out = lua.create_table()?;
+    let durs = lua.create_table()?;
+    for (i, row) in snap.durations.iter().enumerate() {
+        let r = lua.create_table()?;
+        r.set("label", row.label)?;
+        r.set("count", row.count)?;
+        r.set("last_us", row.last_us)?;
+        r.set("p50_us", row.p50_us)?;
+        r.set("p95_us", row.p95_us)?;
+        r.set("p99_us", row.p99_us)?;
+        r.set("max_us", row.max_us)?;
+        r.set("total_us", row.total_us)?;
+        durs.set(i + 1, r)?;
+    }
+    out.set("durations", durs)?;
+    let vals = lua.create_table()?;
+    for (i, row) in snap.values.iter().enumerate() {
+        let r = lua.create_table()?;
+        r.set("label", row.label)?;
+        r.set("count", row.count)?;
+        r.set("last", row.last)?;
+        r.set("p50", row.p50)?;
+        r.set("p95", row.p95)?;
+        r.set("p99", row.p99)?;
+        r.set("max", row.max)?;
+        r.set("total", row.total)?;
+        vals.set(i + 1, r)?;
+    }
+    out.set("values", vals)?;
+    out.set("enabled", smelt_perf::perf::enabled())?;
+    Ok(out)
 }

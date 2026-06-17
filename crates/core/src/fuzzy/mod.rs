@@ -13,7 +13,7 @@ pub mod score;
 /// neo_frizbee rebases: https://github.com/saghen/frizbee/pull/78
 const SIMD_SLACK: usize = 16;
 
-fn pad_for_simd(s: &str) -> String {
+pub(crate) fn pad_for_simd(s: &str) -> String {
     let mut padded = String::with_capacity(s.len() + SIMD_SLACK);
     padded.push_str(s);
     padded

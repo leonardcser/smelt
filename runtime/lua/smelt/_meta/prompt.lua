@@ -37,7 +37,9 @@ prompt.is_modal = nil
 
 --- Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
 --- the current prompt buffer on every keystroke, ranked by `opts.rank` or
---- `smelt.fuzzy.rank`. Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
+--- `smelt.fuzzy.rank`; alternatively `opts.provider(query, limit)` may return
+--- the shared provider result shape `{ items, searching?, scanning?, message?,
+--- status? }`. Pass `opts.on_select` for the per-navigation hook; pass `opts.on_enter`
 --- to switch to persistent mode (the picker stays open across selections
 --- until Esc). Returns `{ action, item, index }` on accept or `nil` on
 --- dismiss (single-shot mode). Must run inside a `smelt.spawn` frame.

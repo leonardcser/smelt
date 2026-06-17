@@ -70,6 +70,8 @@ pub(crate) enum PickerPlacement {
     Cursor,
     /// Bottom of screen, full width, one row above the status bar.
     ScreenBottom,
+    /// Docked directly above the `:` cmdline; reversed so the best match is closest to input.
+    CmdlineDocked { max_rows: u16 },
 }
 
 /// Per-leaf picker state, keyed by `WinId`. The picker owns the full logical
@@ -100,7 +102,10 @@ pub(crate) fn open(
     blocks_agent: bool,
     z: u16,
 ) -> Option<WinId> {
-    let reversed = matches!(placement, PickerPlacement::PromptDocked { .. });
+    let reversed = matches!(
+        placement,
+        PickerPlacement::PromptDocked { .. } | PickerPlacement::CmdlineDocked { .. }
+    );
     let total = items.len();
     let selected = clamp_selected(selected, total);
 
@@ -223,7 +228,10 @@ pub(crate) fn sync_layouts(app: &mut TuiApp) {
         let Some(state) = app.picker_state.get(&leaf) else {
             continue;
         };
-        if !matches!(state.placement, PickerPlacement::PromptDocked { .. }) {
+        if !matches!(
+            state.placement,
+            PickerPlacement::PromptDocked { .. } | PickerPlacement::CmdlineDocked { .. }
+        ) {
             continue;
         }
         let total = state.items.len();
@@ -321,21 +329,29 @@ fn clamp_selected(selected: usize, total: usize) -> usize {
     selected.min(total.saturating_sub(1))
 }
 
-/// Effective row cap for a prompt-docked picker, limited by the available
-/// headroom above the prompt chrome so the overlay never overlaps the
-/// prompt block. Non-docked placements simply use the requested cap.
+/// Effective row cap for docked pickers, limited by available headroom so
+/// overlays never cover their input chrome. Non-docked placements use the
+/// default picker cap.
 fn effective_max_rows(placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> u16 {
     let desired = match placement {
-        PickerPlacement::PromptDocked { max_rows } => max_rows,
+        PickerPlacement::PromptDocked { max_rows }
+        | PickerPlacement::CmdlineDocked { max_rows } => max_rows,
         _ => 32,
     };
-    if !matches!(placement, PickerPlacement::PromptDocked { .. }) {
-        return desired.max(1);
+    match placement {
+        PickerPlacement::PromptDocked { .. } => {
+            let headroom = crate::content::layout::available_rows_above_prompt_chrome(ui);
+            // Always keep at least one row so the picker remains usable even when
+            // the prompt block fills the entire terminal.
+            desired.max(1).min(headroom.max(1))
+        }
+        PickerPlacement::CmdlineDocked { .. } => {
+            let (_, term_h) = ui.terminal_size();
+            let headroom = term_h.saturating_sub(1);
+            desired.max(1).min(headroom.max(1))
+        }
+        _ => desired.max(1),
     }
-    let headroom = crate::content::layout::available_rows_above_prompt_chrome(ui);
-    // Always keep at least one row so the picker remains usable even when
-    // the prompt block fills the entire terminal.
-    desired.max(1).min(headroom.max(1))
 }
 
 fn picker_height(item_count: usize, placement: PickerPlacement, ui: &crate::smelt_edit::Ui) -> u16 {
@@ -395,6 +411,7 @@ fn anchor_for(ui: &crate::smelt_edit::Ui, placement: PickerPlacement, height: u1
         // `require("smelt.statusline").win` from the Lua side instead
         // of relying on a Rust-side reservation.
         PickerPlacement::ScreenBottom => Anchor::ScreenBottom { above_rows: 0 },
+        PickerPlacement::CmdlineDocked { .. } => Anchor::ScreenBottom { above_rows: 1 },
     }
 }
 
@@ -714,5 +731,24 @@ mod tests {
             Anchor::ScreenBottom { above_rows } => assert_eq!(above_rows, 0),
             other => panic!("expected Anchor::ScreenBottom, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn anchor_for_cmdline_docked_reserves_cmdline_row() {
+        let ui = fresh_ui();
+        match anchor_for(&ui, PickerPlacement::CmdlineDocked { max_rows: 8 }, 4) {
+            Anchor::ScreenBottom { above_rows } => assert_eq!(above_rows, 1),
+            other => panic!("expected Anchor::ScreenBottom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn picker_height_cmdline_docked_clamps_above_cmdline() {
+        let mut ui = fresh_ui();
+        ui.set_terminal_size(80, 5);
+        assert_eq!(
+            picker_height(50, PickerPlacement::CmdlineDocked { max_rows: 8 }, &ui),
+            4
+        );
     }
 }

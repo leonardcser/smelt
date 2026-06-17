@@ -165,3 +165,4 @@ fun(items: table): smelt.layout.Node
 Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by a `smelt.layout` primitive.
+

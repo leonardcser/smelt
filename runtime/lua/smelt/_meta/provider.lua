@@ -7,6 +7,18 @@
 ---@class smelt.provider
 local provider = {}
 
+--- Return true when the row list contains at least one non-synthetic row.
+---@type fun(rows: table[]?): boolean
+provider.has_real_rows = nil
+
+--- Return true when a provider or normalized result is still loading.
+---@type fun(result: table?): boolean
+provider.is_loading = nil
+
+--- Return the stable identity key used to preserve selection across provider refreshes.
+---@type fun(item: table?): string?
+provider.item_key = nil
+
 --- Return every registered provider as an array of tables. Each entry has `name`, `type`, `api_base`, `api_key_env`, and a `models` array.
 ---@type fun(): table
 provider.list = nil
@@ -21,8 +33,16 @@ provider.list = nil
 ---@type fun(mw: table): smelt.Reg
 provider.middleware = nil
 
+--- Normalize a provider result or plain row list into renderable rows plus loading state.
+---@type fun(result: table[]|table?, opts?: { show_message?: boolean, loading_message?: string }): smelt.provider.NormalizedResult
+provider.normalize = nil
+
 --- Declare a provider named `name`. Re-registering replaces the previous entry of the same name. Returns a `Reg` whose `:remove()` drops the provider.
 ---@type fun(name: string, cfg: smelt.provider.Config): smelt.Reg
 provider.register = nil
+
+--- Return true when the row list is exactly one synthetic status/message row.
+---@type fun(rows: table[]?): boolean
+provider.synthetic_only = nil
 
 return provider

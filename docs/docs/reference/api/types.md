@@ -662,7 +662,7 @@ Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the sa
 | --- | --- | --- | --- |
 | `win` | `fun(): smelt.win.Win` | yes | Return the underlying Win handle (use `win:key(...)`, `win:on(...)` to bind input). |
 | `close` | `fun(): nil` | yes | Close the picker overlay. No-op if already closed. |
-| `items` | `fun(items: table, selected: integer?): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, prefix?, ... }`. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining. |
+| `items` | `fun(items: table, selected: integer?): smelt.picker.Picker` | yes | Replace the picker's items. Each entry is a string or `{ label, description?, ansi_color?, label_color?, prefix?, icon?, ... }`. `icon = { kind = "file"|"dir", path = string }` renders file-list icons unless `prefix` is set. `selected` is the 0-based logical index to land the cursor on (default 0 - top of the new list); pass the current selection here to avoid a flash to row 0 followed by a separate `:selected()` call. Returns the handle for chaining. |
 | `selected` | `fun(idx: integer?): any` | yes | Read or write the current logical selection (0-based). Without arg returns the index (`nil` if the picker is empty); with arg sets the selection and returns the handle for chaining. |
 | `move` | `fun(delta: integer): smelt.picker.Picker` | yes | Move the picker's cursor by `delta` rows (clamped to the buffer's line count). Returns the handle for chaining. |
 
@@ -677,7 +677,6 @@ sets ranked in Lua.
 | `items` | `fun(anchor: integer, text: string, cpos: integer):` | yes | table[] Build a full candidate set for Lua-side ranking. |
 | `query` | `fun(text: string, anchor: integer, cpos: integer):` | yes | string Query used for Lua-side ranking. |
 | `accept` | `fun(item: table, anchor: integer, action: string):` | yes | nil Splice the accepted candidate into the prompt. |
-| `limit` | `integer` |  | Maximum rows requested from `matches` providers. |
 | `on_select` | `fun(item: table):` |  | nil Live selection callback. |
 
 ### `smelt.prompt.MatchesCompleterSpec`
@@ -688,9 +687,13 @@ already-ranked providers.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `detect` | `fun(text: string, cpos: integer):` | yes | integer? Detect the active trigger and return its 0-based anchor byte offset. |
-| `matches` | `fun(anchor: integer, text: string, cpos: integer, limit: integer):` | yes | table[] Return bounded already-filtered/ranked rows. |
+| `matches` | `fun(anchor: integer, text: string, cpos: integer, limit: integer):` | yes | table[]|table Return bounded already-filtered/ranked rows, or `{ items, status?, message? }` for providers with loading/empty/error states. |
+| `query` | `fun(text: string, anchor: integer, cpos: integer):` |  | string Query identity used to distinguish user edits from provider refreshes. |
 | `accept` | `fun(item: table, anchor: integer, action: string):` | yes | nil Splice the accepted candidate into the prompt. |
 | `limit` | `integer` |  | Maximum rows requested from `matches` providers. |
+| `poll_ms` | `integer` |  | Refresh interval while `matches` returns `{ scanning = true }` or `{ searching = true }`. |
+| `loading_delay_ms` | `integer` |  | Delay before showing an initial loading row when there are no stale rows to keep. |
+| `loading_poll_ms` | `integer` |  | Quiet polling interval before the initial loading row appears. |
 | `on_select` | `fun(item: table):` |  | nil Live selection callback. |
 
 ### `smelt.prompt.PickerItem`
@@ -717,7 +720,12 @@ omit it for single-shot behaviour.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `items` | [smelt.prompt.PickerItem[]](types.md#smeltpromptpickeritem) | yes | | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer. |
+| `items` | [smelt.prompt.PickerItem[]](types.md#smeltpromptpickeritem) |  | | fun(): smelt.prompt.PickerItem[] Eager list or lazy producer. |
+| `provider` | `fun(query: string, limit: integer):` |  | table Async/ranked provider returning `{ items, searching?, scanning?, message?, status? }`. |
+| `limit` | `integer` |  | Maximum rows requested from `provider`; defaults to 200. |
+| `poll_ms` | `integer` |  | Refresh interval while provider returns `{ scanning = true }` or `{ searching = true }`. |
+| `loading_delay_ms` | `integer` |  | Delay before showing an initial loading row when there are no stale rows to keep. |
+| `loading_poll_ms` | `integer` |  | Quiet polling interval before the initial loading row appears. |
 | `on_select` | `fun(item: smelt.prompt.PickerItem):` |  | nil Fires on every cursor move. |
 | `on_enter` | `fun(item: smelt.prompt.PickerItem, idx: integer):` |  | nil Persistent-mode accept handler. |
 | `rank` | `fun(items: table[], query: string, original: smelt.prompt.PickerItem[]):` |  | integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order. |
@@ -755,6 +763,14 @@ One model entry in a provider's `models` list. Plugin authors can pass either a 
 | `thinking_budgets` | `table` |  | Per-level token budgets for budget-based thinking. |
 | `context_window` | `integer` |  | Total context window, in tokens. |
 | `supports_reasoning` | `boolean` |  | Whether this model supports reasoning/thinking parameters. |
+
+### `smelt.provider.NormalizedResult`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `rows` | `table[]` | yes | Rows to render after optional synthetic message insertion. |
+| `result` | `table` |  | Original provider result when the input used the provider shape. |
+| `loading` | `boolean` | yes | True while the provider is still scanning or searching. |
 
 ### `smelt.render.DiffSplitOpts`
 
@@ -1099,3 +1115,4 @@ Variants: `"insert"` \| `"normal"` \| `"visual"` \| `"visual_line"`
 Window-event names accepted by `win:on(event, fn)`. Maps onto the internal `WinEvent` enum.
 
 Variants: `"open"` \| `"close"` \| `"focus"` \| `"blur"` \| `"selection_changed"` \| `"submit"` \| `"text_changed"` \| `"dismiss"` \| `"tick"` \| `"press"` \| `"release"` \| `"drag"` \| `"scrolled"` \| `"resized"` \| `"placeholder_accepted"` \| `"placeholder_dismissed"`
+

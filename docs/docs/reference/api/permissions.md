@@ -61,3 +61,4 @@ fun(spec: smelt.permissions.SyncSpec): nil
 Types: [`smelt.permissions.SyncSpec`](types.md#smeltpermissionssyncspec)
 
 Replace runtime + workspace permission entries with `spec.session`, `spec.path_grants`, and `spec.workspace`. Persists workspace rules to disk; session rules apply for this run only.
+

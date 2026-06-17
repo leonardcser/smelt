@@ -106,58 +106,117 @@ pub struct Snapshot {
     pub values: Vec<ValueRow>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DurationSeed {
+    label: &'static str,
+    count: usize,
+    last_us: u64,
+    total_us: u64,
+}
+
 fn pct_idx(count: usize, p: usize) -> usize {
     ((count * p) / 100).min(count.saturating_sub(1))
 }
 
+fn duration_seed(label: &'static str, durs: &[Duration]) -> Option<DurationSeed> {
+    if durs.is_empty() {
+        return None;
+    }
+    Some(DurationSeed {
+        label,
+        count: durs.len(),
+        last_us: durs.last().map(|d| d.as_micros() as u64).unwrap_or(0),
+        total_us: durs.iter().map(|d| d.as_micros() as u64).sum(),
+    })
+}
+
+fn duration_row(seed: DurationSeed, durs: &[Duration]) -> Option<DurationRow> {
+    if durs.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<u64> = durs.iter().map(|d| d.as_micros() as u64).collect();
+    sorted.sort_unstable();
+    Some(DurationRow {
+        label: seed.label,
+        count: seed.count,
+        last_us: seed.last_us,
+        p50_us: sorted[pct_idx(sorted.len(), 50)],
+        p95_us: sorted[pct_idx(sorted.len(), 95)],
+        p99_us: sorted[pct_idx(sorted.len(), 99)],
+        max_us: *sorted.last().unwrap(),
+        total_us: seed.total_us,
+    })
+}
+
+fn value_row(label: &'static str, vs: &[u64]) -> Option<ValueRow> {
+    if vs.is_empty() {
+        return None;
+    }
+    let mut sorted = vs.to_vec();
+    sorted.sort_unstable();
+    Some(ValueRow {
+        label,
+        count: sorted.len(),
+        last: vs.last().copied().unwrap_or(0),
+        p50: sorted[pct_idx(sorted.len(), 50)],
+        p95: sorted[pct_idx(sorted.len(), 95)],
+        p99: sorted[pct_idx(sorted.len(), 99)],
+        max: *sorted.last().unwrap(),
+        total: sorted.iter().sum(),
+    })
+}
+
 /// Snapshot current sample buffers. Durations sorted by total descending; values by label.
 pub fn snapshot() -> Snapshot {
+    let _perf = begin("perf:snapshot");
     let mut out = Snapshot::default();
     if let Ok(map) = samples().lock() {
         for (label, durs) in map.iter() {
-            if durs.is_empty() {
+            let Some(seed) = duration_seed(label, durs) else {
                 continue;
+            };
+            if let Some(row) = duration_row(seed, durs) {
+                out.durations.push(row);
             }
-            let mut sorted: Vec<u64> = durs.iter().map(|d| d.as_micros() as u64).collect();
-            sorted.sort_unstable();
-            let last_us = durs.last().map(|d| d.as_micros() as u64).unwrap_or(0);
-            let total_us: u64 = sorted.iter().sum();
-            out.durations.push(DurationRow {
-                label,
-                count: sorted.len(),
-                last_us,
-                p50_us: sorted[pct_idx(sorted.len(), 50)],
-                p95_us: sorted[pct_idx(sorted.len(), 95)],
-                p99_us: sorted[pct_idx(sorted.len(), 99)],
-                max_us: *sorted.last().unwrap(),
-                total_us,
-            });
         }
     }
     out.durations.sort_by_key(|r| std::cmp::Reverse(r.total_us));
 
     if let Ok(map) = value_samples().lock() {
         for (label, vs) in map.iter() {
-            if vs.is_empty() {
-                continue;
+            if let Some(row) = value_row(label, vs) {
+                out.values.push(row);
             }
-            let mut sorted = vs.clone();
-            sorted.sort_unstable();
-            let last = vs.last().copied().unwrap_or(0);
-            let total: u64 = sorted.iter().sum();
-            out.values.push(ValueRow {
-                label,
-                count: sorted.len(),
-                last,
-                p50: sorted[pct_idx(sorted.len(), 50)],
-                p95: sorted[pct_idx(sorted.len(), 95)],
-                p99: sorted[pct_idx(sorted.len(), 99)],
-                max: *sorted.last().unwrap(),
-                total,
-            });
         }
     }
     out.values.sort_by(|a, b| a.label.cmp(b.label));
+    out
+}
+
+/// Cheap live-panel snapshot of the top duration rows. Omits value rows and only
+/// computes percentiles for labels that will be displayed.
+pub fn snapshot_top(limit: usize) -> Snapshot {
+    let _perf = begin("perf:snapshot_top");
+    let mut out = Snapshot::default();
+    if limit == 0 {
+        return out;
+    }
+    if let Ok(map) = samples().lock() {
+        let mut seeds = map
+            .iter()
+            .filter_map(|(label, durs)| duration_seed(label, durs))
+            .collect::<Vec<_>>();
+        seeds.sort_by_key(|seed| std::cmp::Reverse(seed.total_us));
+        seeds.truncate(limit);
+        for seed in seeds {
+            let Some(durs) = map.get(seed.label) else {
+                continue;
+            };
+            if let Some(row) = duration_row(seed, durs) {
+                out.durations.push(row);
+            }
+        }
+    }
     out
 }
 

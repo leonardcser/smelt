@@ -14,6 +14,14 @@ fun(): nil
 
 Clear all accumulated perf samples (durations and value gauges).
 
+## `smelt.metrics.perf.enabled`
+
+```lua
+fun(): boolean
+```
+
+Return whether perf instrumentation collection is enabled.
+
 ## `smelt.metrics.perf.set_enabled`
 
 ```lua
@@ -28,5 +36,13 @@ Toggle perf instrumentation collection on/off. Disabled by default; enable to po
 fun(): table
 ```
 
-Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields. Powers the F12 debug panel.
+Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields. Powers detailed diagnostics; prefer `snapshot_top` for live UI panels.
+
+## `smelt.metrics.perf.snapshot_top`
+
+```lua
+fun(limit: integer?): table
+```
+
+Return a cheap live perf snapshot with only the top `limit` duration rows and no value rows. Intended for panels that refresh frequently.
 

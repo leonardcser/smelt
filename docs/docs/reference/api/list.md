@@ -24,3 +24,4 @@ viewport. Returns a handle with `:selected`,
 `:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
 `:set_cursor`, `:move_cursor`. See the header docstring for the full
 usage shape.
+

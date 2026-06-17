@@ -31,6 +31,21 @@ app_story!(prompt_slash_command_completion, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(prompt_slash_command_refilter_keeps_best_on_bottom, |ctx| {
+    // Slash command filtering resets to the best match instead of preserving
+    // the previously selected command at its new ranked position. In the
+    // prompt-docked picker, logical best renders on the bottom row.
+    ctx.set_viewport(50, 10);
+    ctx.run_lua(
+        r#"
+      smelt.cmd.register("aaacx", function() end, { desc = "old first" })
+      smelt.cmd.register("acx", function() end, { desc = "best match" })
+    "#,
+    );
+    ctx.type_prompt("/acx");
+    ctx.assert_snapshot();
+});
+
 app_story!(prompt_slash_completion_shrinks_for_short_terminal, |ctx| {
     // When the terminal is very short the prompt-docked picker must
     // shrink so it never overlaps the prompt input.
@@ -178,8 +193,20 @@ app_story!(prompt_file_completion_with_error_notification, |ctx| {
     // `@file` uses the same prompt-docked picker plane as slash completion.
     // An error toast must paint above the picker row when they coincide.
     ctx.set_viewport(50, 8);
-    ctx.write_fixture("src/main.rs", "fn main() {}\n");
-    ctx.write_fixture("README.md", "# story\n");
+    ctx.run_lua(
+        r#"
+        smelt.files.search = function(_, _)
+          return {
+            items = {
+              { label = "src", path = "src", kind = "dir" },
+              { label = "src/main.rs", path = "src/main.rs", kind = "file" },
+            },
+            status = "ready",
+            ready = true,
+          }
+        end
+        "#,
+    );
     ctx.type_prompt("@");
     ctx.run_lua(r#"smelt.notify.error("file lookup failed", "story")"#);
     ctx.assert_snapshot();

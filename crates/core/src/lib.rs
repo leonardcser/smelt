@@ -40,6 +40,7 @@ pub mod transcript_model;
 pub mod trust;
 pub mod utils;
 pub mod working;
+pub mod workspace_files;
 pub mod worktree;
 
 #[cfg(test)]

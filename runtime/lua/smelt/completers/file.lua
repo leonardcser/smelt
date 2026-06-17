@@ -2,7 +2,7 @@
 -- followed by non-whitespace bytes, or just `@` itself). Selecting an entry
 -- inserts `@path ` (or `@"quoted path" ` when the label contains a space).
 
-if not (smelt.prompt and smelt.prompt.completer) then return end
+if not (smelt.prompt and smelt.prompt.completer and smelt.files) then return end
 
 -- Returns the byte offset of the `@` anchor when the cursor sits inside an
 -- `@…` zone. Mirrors the previous Rust `cursor_in_at_zone` helper: `@` must
@@ -27,27 +27,46 @@ local function cursor_in_at_zone(buf, cpos)
   return at_byte
 end
 
-local function quote_if_needed(label)
-  if label:find(" ", 1, true) then
-    return '@"' .. label .. '"'
+local function quote_if_needed(text)
+  if text:find(" ", 1, true) then
+    return '@"' .. text .. '"'
   end
-  return "@" .. label
+  return "@" .. text
+end
+
+local function query_at(anchor, text, cpos)
+  if cpos > anchor + 1 then return text:sub(anchor + 2, cpos) end
+  return ""
+end
+
+local function mark_file_icon_rows(result)
+  if type(result) == "table" and type(result.items) == "table" then
+    for _, item in ipairs(result.items) do
+      item.icon = { kind = item.kind, path = item.path }
+    end
+  end
+  return result
 end
 
 smelt.prompt.completer({
-  prefix = "./",
   limit = 200,
   detect = function(text, cpos)
     return cursor_in_at_zone(text, cpos)
   end,
   matches = function(anchor, text, cpos, limit)
-    local query = ""
-    if cpos > anchor + 1 then query = text:sub(anchor + 2, cpos) end
-    return smelt.fs.workspace_file_matches(query, limit)
+    return mark_file_icon_rows(smelt.files.search(query_at(anchor, text, cpos), {
+      limit = limit,
+      include_dirs = true,
+    }))
+  end,
+  query = function(text, anchor, cpos)
+    return query_at(anchor, text, cpos)
   end,
   accept = function(item, anchor, _)
+    if item._synthetic then return end
     -- Replace from `@` through the cursor with the quoted token + trailing space.
     local cpos = smelt.prompt.cursor()
-    smelt.prompt.replace_range(anchor, cpos, quote_if_needed(item.label) .. " ")
+    smelt.files.accept(item)
+    smelt.prompt.replace_range(anchor, cpos, quote_if_needed(item.insert_text or item.path or item.label) .. " ")
   end,
 })

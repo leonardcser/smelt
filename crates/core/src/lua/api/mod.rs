@@ -17,6 +17,7 @@ mod clipboard;
 mod clock;
 mod cmd;
 mod defaults;
+mod files;
 mod frontend;
 mod fs;
 mod fuzzy;
@@ -140,6 +141,7 @@ pub fn register_host_api(
     clipboard::register(lua, smelt)?;
     cmd::register(lua, smelt, shared)?;
     defaults::register(lua, smelt, shared)?;
+    files::register(lua, smelt)?;
     frontend::register(lua, smelt)?;
     fs::register(lua, smelt, shared)?;
     fuzzy::register(lua, smelt)?;

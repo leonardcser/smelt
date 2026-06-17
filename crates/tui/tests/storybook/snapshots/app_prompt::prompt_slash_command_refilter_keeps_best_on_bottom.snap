@@ -5,9 +5,11 @@ expression: frame.text()
 ---
 
 
- src/main.rs
-  error  file lookup failed
+
+
+ /aaacx  old first
+ /acx    best match
 ──────────────────────────────────────────────────
- @
+ /acx
 ──────────────────────────────────────────────────
  ○ normal                                 1:1 100%

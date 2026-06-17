@@ -6,6 +6,30 @@
 
 List built-in model providers and register custom ones. Headless-safe.
 
+## `smelt.provider.has_real_rows`
+
+```lua
+fun(rows: table[]?): boolean
+```
+
+Return true when the row list contains at least one non-synthetic row.
+
+## `smelt.provider.is_loading`
+
+```lua
+fun(result: table?): boolean
+```
+
+Return true when a provider or normalized result is still loading.
+
+## `smelt.provider.item_key`
+
+```lua
+fun(item: table?): string?
+```
+
+Return the stable identity key used to preserve selection across provider refreshes.
+
 ## `smelt.provider.list`
 
 ```lua
@@ -30,6 +54,16 @@ Hooks fire in registration order. Each hook sees the previous hook's replacement
 
 For streaming observation use `smelt.cell("stream_delta"):subscribe( ...)` - synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
 
+## `smelt.provider.normalize`
+
+```lua
+fun(result: table[]|table?, opts?: { show_message?: boolean, loading_message?: string }): smelt.provider.NormalizedResult
+```
+
+Types: [`smelt.provider.NormalizedResult`](types.md#smeltprovidernormalizedresult)
+
+Normalize a provider result or plain row list into renderable rows plus loading state.
+
 ## `smelt.provider.register`
 
 ```lua
@@ -39,4 +73,12 @@ fun(name: string, cfg: smelt.provider.Config): smelt.Reg
 Types: [`smelt.provider.Config`](types.md#smeltproviderconfig), [`smelt.Reg`](types.md#smeltreg)
 
 Declare a provider named `name`. Re-registering replaces the previous entry of the same name. Returns a `Reg` whose `:remove()` drops the provider.
+
+## `smelt.provider.synthetic_only`
+
+```lua
+fun(rows: table[]?): boolean
+```
+
+Return true when the row list is exactly one synthetic status/message row.
 

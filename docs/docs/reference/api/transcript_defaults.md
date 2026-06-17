@@ -283,3 +283,4 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
 Return a compact tool detail for collapsed tool blocks.
+

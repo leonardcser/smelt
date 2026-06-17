@@ -42,6 +42,7 @@ pub struct Core {
     pub frontend: FrontendKind,
     pub skills: Option<Arc<SkillLoader>>,
     pub files: crate::fs::FileStateCache,
+    pub workspace_files: crate::workspace_files::WorkspaceFiles,
     pub processes: ProcessRegistry,
     pub permissions: Arc<crate::permissions::Permissions>,
     /// MCP server registry. Shared `Arc` with the engine's
@@ -80,6 +81,11 @@ impl Core {
         });
         let confirms = Confirms::new();
         let confirms_flag = confirms.is_clear_flag();
+        let mut workspace_files =
+            crate::workspace_files::WorkspaceFiles::new(env.xdg_state().clone());
+        if frontend.is_interactive() {
+            let _ = workspace_files.warmup(&env.cwd());
+        }
         Self {
             config,
             session: Session::new(env.pid(), env.cwd()),
@@ -94,6 +100,7 @@ impl Core {
             frontend,
             skills: None,
             files: crate::fs::FileStateCache::new(),
+            workspace_files,
             processes: ProcessRegistry::new(),
             permissions,
             mcp: None,

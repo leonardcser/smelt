@@ -601,6 +601,19 @@ Wall-clock time primitives.
 - `smelt.clock.unix_ms` :: `fun(): integer`
   Return the current Unix timestamp in milliseconds.
 
+#### `smelt.files`
+
+Workspace file search.
+
+- `smelt.files.accept` :: `fun(item: table, opts: table?): boolean, string?`
+  Record a selected file result for recent-selection ranking.
+- `smelt.files.rescan` :: `fun(opts: table?): boolean, string?`
+  Trigger an asynchronous full rescan for the current workspace or `opts.cwd`.
+- `smelt.files.search` :: `fun(query: string, opts: table?): table`
+  Search workspace files.
+- `smelt.files.status` :: `fun(opts: table?): table`
+  Return indexing status for the current workspace or `opts.cwd`: `{ root, initialized, files, scanned, scanning, watcher_ready, warmup_complete }`.
+
 #### `smelt.frontend`
 
 Query which frontend is active (TUI vs headless).
@@ -622,8 +635,6 @@ Sync filesystem primitives.
   Find paths matching `pattern` under `path` (defaults to cwd).
 - `smelt.fs.glob_async` :: `fun(pattern: string, path: string?, opts: table?): table?, string?`
   Find paths matching `pattern` under `path` off the main thread.
-- `smelt.fs.invalidate_workspace_files` :: `fun(): nil`
-  Clear the cached workspace file list.
 - `smelt.fs.is_dir` :: `fun(p: string): boolean`
   Return `true` if `p` exists and refers to a directory.
 - `smelt.fs.is_file` :: `fun(p: string): boolean`
@@ -654,10 +665,6 @@ Sync filesystem primitives.
   Return the size of file `p` in bytes.
 - `smelt.fs.watch` :: `fun(path: string, handler: fun(event: { kind: string, detail: string?, paths: string[] }), opts: table?): smelt.Reg`
   Filesystem watcher.
-- `smelt.fs.workspace_file_matches` :: `fun(query: string, limit: integer?): table`
-  Return bounded fuzzy-matched workspace file rows as `{ index, label }` tables.
-- `smelt.fs.workspace_files` :: `fun(): string[]`
-  Return tracked + untracked non-ignored files under the cwd, plus every intermediate parent directory, sorted lexicographically.
 - `smelt.fs.write` :: `fun(p: string, contents: string): boolean, string?`
   Write `contents` to file `p`, creating it if necessary.
 - `smelt.fs.write_async` :: `fun(path: string, contents: string): boolean, string?, integer?`
@@ -951,12 +958,22 @@ Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned proc
 
 List built-in model providers and register custom ones.
 
+- `smelt.provider.has_real_rows` :: `fun(rows: table[]?): boolean`
+  Return true when the row list contains at least one non-synthetic row.
+- `smelt.provider.is_loading` :: `fun(result: table?): boolean`
+  Return true when a provider or normalized result is still loading.
+- `smelt.provider.item_key` :: `fun(item: table?): string?`
+  Return the stable identity key used to preserve selection across provider refreshes.
 - `smelt.provider.list` :: `fun(): table`
   Return every registered provider as an array of tables.
 - `smelt.provider.middleware` :: `fun(mw: table): smelt.Reg`
   Register provider middleware.
+- `smelt.provider.normalize` :: `fun(result: table[]|table?, opts?: { show_message?: boolean, loading_message?: string }): smelt.provider.NormalizedResult`
+  Normalize a provider result or plain row list into renderable rows plus loading state.
 - `smelt.provider.register` :: `fun(name: string, cfg: smelt.provider.Config): smelt.Reg`
   Declare a provider named `name`.
+- `smelt.provider.synthetic_only` :: `fun(rows: table[]?): boolean`
+  Return true when the row list is exactly one synthetic status/message row.
 
 #### `smelt.reg`
 
@@ -1282,10 +1299,14 @@ Perf instrumentation toggle, clear, and snapshot.
 
 - `smelt.metrics.perf.clear` :: `fun(): nil`
   Clear all accumulated perf samples (durations and value gauges).
+- `smelt.metrics.perf.enabled` :: `fun(): boolean`
+  Return whether perf instrumentation collection is enabled.
 - `smelt.metrics.perf.set_enabled` :: `fun(on: boolean): nil`
   Toggle perf instrumentation collection on/off.
 - `smelt.metrics.perf.snapshot` :: `fun(): table`
   Return the current perf snapshot as `{ durations, values, enabled }` with per-label `count`, `last`, `p50`, `p95`, `p99`, `max`, `total` fields.
+- `smelt.metrics.perf.snapshot_top` :: `fun(limit: integer?): table`
+  Return a cheap live perf snapshot with only the top `limit` duration rows and no value rows.
 
 #### `smelt.model`
 
