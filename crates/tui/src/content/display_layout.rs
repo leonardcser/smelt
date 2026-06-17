@@ -19,16 +19,21 @@ pub(crate) fn transcript_renderer_cache_key(
     lua: &LuaRuntime,
     inline_options: &InlineOptions,
 ) -> Option<u64> {
+    let mut key = lua.transcript_renderer_cache_key();
     let icon_hash = inline_options
         .file_icons
         .enabled
         .then(|| inline_options.file_icons.cache_hash());
-    match (lua.transcript_renderer_cache_key(), icon_hash) {
-        (Some(base), Some(icon_hash)) => Some(base ^ icon_hash.rotate_left(17)),
-        (Some(base), None) => Some(base),
-        (None, Some(icon_hash)) => Some(icon_hash),
-        (None, None) => None,
+    for hash in [icon_hash, lua.transcript_settings_cache_key()]
+        .into_iter()
+        .flatten()
+    {
+        key = Some(match key {
+            Some(base) => base ^ hash.rotate_left(17),
+            None => hash,
+        });
     }
+    key
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

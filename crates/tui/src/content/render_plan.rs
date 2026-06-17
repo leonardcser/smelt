@@ -83,7 +83,7 @@ impl TranscriptDefaultViewPolicy {
     pub(crate) fn from_lua(lua: &smelt_core::lua::runtime::LuaRuntime) -> Self {
         let mut policy = Self::default();
         if let Err(err) = policy.apply_lua_config(&lua.lua) {
-            lua.record_error(format!("smelt.settings.transcript_view: {err}"));
+            lua.record_error(format!("smelt.settings.transcript.view: {err}"));
         }
         policy
     }
@@ -96,7 +96,11 @@ impl TranscriptDefaultViewPolicy {
         let Some(settings) = settings else {
             return Ok(());
         };
-        let config = settings.get::<Option<Table>>("transcript_view")?;
+        let transcript = settings.get::<Option<Table>>("transcript")?;
+        let Some(transcript) = transcript else {
+            return Ok(());
+        };
+        let config = transcript.get::<Option<Table>>("view")?;
         let Some(config) = config else { return Ok(()) };
 
         apply_view_section(&config, "blocks", &mut self.block_kinds)?;

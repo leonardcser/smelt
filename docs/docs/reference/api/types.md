@@ -25,7 +25,7 @@ Buffer handle returned by `smelt.buf.new(opts?)`. Setter methods return the same
 | `line` | `fun(idx: integer): string?` | yes | Read a single line by 1-based index. `nil` if out of range or the buffer is gone. |
 | `styled` | `fun(lines: table): smelt.buf.Buf` | yes | Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining. |
 | `readonly` | `fun(val: boolean?): any` | yes | Read or write the readonly flag. With arg, returns the handle for chaining. |
-| `mark` | `fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer` | yes | Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line - the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`. |
+| `mark` | `fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer` | yes | Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line, the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`. |
 | `clear_ns` | `fun(ns: integer, start: integer?, end_: integer?): smelt.buf.Buf` | yes | Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining. |
 
 ### `smelt.buf.MarkOpts`
@@ -75,7 +75,7 @@ Sticky handle returned by `smelt.cell(name)`. Setters return the handle for chai
 | --- | --- | --- | --- |
 | `get` | `fun(): any` | yes | Return the current cell value, or `nil` when the cell isn't declared. |
 | `set` | `fun(value: any): smelt.cell.Cell` | yes | Publish a new value. Returns the handle for chaining. |
-| `subscribe` | `fun(handler: fun(value: any)): smelt.Reg` | yes | Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass) - the module body re-runs inside `bring_up_lua` where the bind takes effect. |
+| `subscribe` | `fun(handler: fun(value: any)): smelt.Reg` | yes | Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect. |
 | `name` | `fun(): string` | yes | Return the cell name. |
 
 ### `smelt.cli.RegisterFlagOpts`

@@ -77,7 +77,7 @@ Run `command` with a `timeout_ms` deadline, streaming each output line into the 
 fun(opts: table?): nil
 ```
 
-Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`); `opts.args` is the leading argv (e.g. `{ "-fc" }`) - the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
+Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`); `opts.args` is the leading argv (e.g. `{ "-fc" }`), and the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
 
 ## `smelt.process.spawn_bg`
 

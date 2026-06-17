@@ -1439,6 +1439,25 @@ impl LuaRuntime {
         (key != 0).then_some(key)
     }
 
+    pub fn transcript_settings_cache_key(&self) -> Option<u64> {
+        let transcript = self
+            .lua
+            .globals()
+            .get::<Option<mlua::Table>>("smelt")
+            .ok()
+            .flatten()
+            .and_then(|smelt| smelt.get::<Option<mlua::Table>>("settings").ok().flatten())
+            .and_then(|settings| {
+                settings
+                    .get::<Option<mlua::Table>>("transcript")
+                    .ok()
+                    .flatten()
+            })?;
+        Some(crate::utils::hash_serializable(
+            &crate::lua::api::lua_table_to_json(&self.lua, &transcript),
+        ))
+    }
+
     pub fn transcript_group_generation(&self) -> u64 {
         self.shared
             .transcript_groups_generation
@@ -1946,13 +1965,71 @@ fn transcript_render_ctx_to_lua_table(
     ctx.set("renderer_generation", renderer_generation)?;
     ctx.set("surface", "transcript")?;
 
+    let configured_limits = transcript_limits_table(lua)?;
+    let default_rows = crate::content::block_layout::DEFAULT_TOOL_BLOCK_ROWS;
+    let tool_rows =
+        transcript_limit(configured_limits.as_ref(), "tool_rows")?.unwrap_or(default_rows);
+
     let limits = lua.create_table()?;
-    let rows = crate::content::block_layout::DEFAULT_TOOL_BLOCK_ROWS;
-    limits.set("tool_header_rows", rows)?;
-    limits.set("tool_body_rows", rows)?;
-    limits.set("tool_output_rows", rows)?;
+    limits.set(
+        "tool_header_rows",
+        transcript_limit(configured_limits.as_ref(), "tool_header_rows")?.unwrap_or(tool_rows),
+    )?;
+    limits.set(
+        "tool_body_rows",
+        transcript_limit(configured_limits.as_ref(), "tool_body_rows")?.unwrap_or(tool_rows),
+    )?;
+    limits.set(
+        "tool_output_rows",
+        transcript_limit(configured_limits.as_ref(), "tool_output_rows")?.unwrap_or(tool_rows),
+    )?;
+    limits.set(
+        "collapsed_error_rows",
+        transcript_limit(configured_limits.as_ref(), "collapsed_error_rows")?.unwrap_or(4),
+    )?;
+    limits.set(
+        "thinking_peek_rows",
+        transcript_limit(configured_limits.as_ref(), "thinking_peek_rows")?.unwrap_or(4),
+    )?;
+    limits.set(
+        "thinking_peek_head_rows",
+        transcript_limit(configured_limits.as_ref(), "thinking_peek_head_rows")?.unwrap_or(1),
+    )?;
     ctx.set("limits", limits)?;
     Ok(ctx)
+}
+
+fn transcript_limits_table(lua: &Lua) -> LuaResult<Option<mlua::Table>> {
+    let globals = lua.globals();
+    let Some(smelt) = globals.get::<Option<mlua::Table>>("smelt")? else {
+        return Ok(None);
+    };
+    let Some(settings) = smelt.get::<Option<mlua::Table>>("settings")? else {
+        return Ok(None);
+    };
+    let Some(transcript) = settings.get::<Option<mlua::Table>>("transcript")? else {
+        return Ok(None);
+    };
+    transcript.get::<Option<mlua::Table>>("limits")
+}
+
+fn transcript_limit(limits: Option<&mlua::Table>, key: &str) -> LuaResult<Option<u16>> {
+    let Some(limits) = limits else {
+        return Ok(None);
+    };
+    let value = limits.get::<mlua::Value>(key)?;
+    match value {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::Integer(value) if value >= 1 => {
+            Ok(Some(value.min(i64::from(u16::MAX)) as u16))
+        }
+        mlua::Value::Number(value) if value.is_finite() && value >= 1.0 => {
+            Ok(Some(value.floor().min(f64::from(u16::MAX)) as u16))
+        }
+        _ => Err(mlua::Error::external(format!(
+            "smelt.settings.transcript.limits.{key}: expected a positive number"
+        ))),
+    }
 }
 
 fn transcript_group_to_lua_table(
@@ -2906,6 +2983,67 @@ mod tests {
             .eval()
             .unwrap();
         assert!(has_api);
+    }
+
+    #[test]
+    fn transcript_settings_cache_key_tracks_transcript_table() {
+        let rt = LuaRuntime::new();
+        assert_eq!(rt.transcript_settings_cache_key(), None);
+
+        rt.lua
+            .load(
+                r#"
+                smelt.settings = {
+                  transcript = {
+                    view = { tools = { bash = "collapsed" } },
+                    limits = { collapsed_error_rows = 2 },
+                  },
+                }
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let before = rt.transcript_settings_cache_key().unwrap();
+
+        rt.lua
+            .load("smelt.settings.transcript.limits.collapsed_error_rows = 3")
+            .exec()
+            .unwrap();
+        let after = rt.transcript_settings_cache_key().unwrap();
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn transcript_limits_accept_numbers_and_reject_invalid_values() {
+        let lua = Lua::new();
+        let limits = lua.create_table().unwrap();
+        limits.set("integer_rows", 2).unwrap();
+        limits.set("float_rows", 2.9).unwrap();
+        limits.set("zero_rows", 0).unwrap();
+        limits.set("string_rows", "2").unwrap();
+
+        assert_eq!(
+            transcript_limit(Some(&limits), "missing_rows").unwrap(),
+            None
+        );
+        assert_eq!(
+            transcript_limit(Some(&limits), "integer_rows").unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            transcript_limit(Some(&limits), "float_rows").unwrap(),
+            Some(2)
+        );
+
+        let zero_err = transcript_limit(Some(&limits), "zero_rows").unwrap_err();
+        assert!(zero_err
+            .to_string()
+            .contains("smelt.settings.transcript.limits.zero_rows"));
+        let string_err = transcript_limit(Some(&limits), "string_rows").unwrap_err();
+        assert!(string_err
+            .to_string()
+            .contains("smelt.settings.transcript.limits.string_rows"));
     }
 
     #[test]

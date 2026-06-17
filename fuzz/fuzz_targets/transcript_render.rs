@@ -235,10 +235,13 @@ fn register_transcript_group(app: &mut TestApp, kind: u8) {
         "#,
         r#"
         pcall(function()
-          smelt.settings.transcript_view = {
-            blocks = { thinking = "collapsed" },
-            tools = { read_file = "collapsed", grep = "collapsed", bash = "expanded" },
-            groups = { fuzz_tool_batch = "expanded", fuzz_process_batch = "collapsed" },
+          smelt.settings.transcript = {
+            view = {
+              blocks = { thinking = "collapsed" },
+              tools = { read_file = "collapsed", grep = "collapsed", bash = "expanded" },
+              groups = { fuzz_tool_batch = "expanded", fuzz_process_batch = "collapsed" },
+            },
+            limits = { tool_rows = 12, collapsed_error_rows = 3 },
           }
           smelt.transcript.invalidate_renderer()
         end)

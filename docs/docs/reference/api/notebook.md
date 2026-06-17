@@ -53,7 +53,7 @@ Compute the preview payload for an `edit_notebook` call. Returns `nil` when the 
 fun(path: string, offset: integer, limit: integer): string?, string?
 ```
 
-Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure - same output the built-in `read_file` tool produces.
+Render a Jupyter notebook at `path` as cell-by-cell text starting at `offset` for at most `limit` cells. Returns `(text, nil)` on success or `(nil, err_msg)` on parse failure, matching the output the built-in `read_file` tool produces.
 
 ## `smelt.notebook.read_async`
 

@@ -131,31 +131,40 @@ parallel calls appear, plus typed background-process completion notes. Manual
 fold state is session-local: closing or opening a group affects the current UI
 only and is not written to the session file.
 
-Set quick default view preferences from `init.lua` with
-`smelt.settings.transcript_view`. Values are `"collapsed"`, `"peek"`, or
-`"expanded"`; for built-in groups, `false` disables that grouping rule.
+Set quick transcript display preferences from `init.lua` with
+`smelt.settings.transcript`. `view` values are `"collapsed"`, `"peek"`, or
+`"expanded"`; for built-in groups, `false` disables that grouping rule. `limits`
+controls display-only row caps.
 
 ```lua
-smelt.settings.transcript_view = {
-  blocks = {
-    thinking = "peek",
+smelt.settings.transcript = {
+  view = {
+    blocks = {
+      thinking = "peek",
+    },
+    tools = {
+      load_skill = "collapsed",
+      read_file = "collapsed",
+      grep = "collapsed",
+      glob = "collapsed",
+      web_fetch = "collapsed",
+      write_file = "collapsed",
+      edit_file = "collapsed",
+      edit_notebook = "collapsed",
+    },
+    groups = {
+      read_file_batch = "collapsed",
+      grep_batch = "collapsed",
+      glob_batch = "collapsed",
+      background_process_completed = "collapsed",
+      -- read_file_batch = false,
+    },
   },
-  tools = {
-    load_skill = "collapsed",
-    read_file = "collapsed",
-    grep = "collapsed",
-    glob = "collapsed",
-    web_fetch = "collapsed",
-    write_file = "collapsed",
-    edit_file = "collapsed",
-    edit_notebook = "collapsed",
-  },
-  groups = {
-    read_file_batch = "collapsed",
-    grep_batch = "collapsed",
-    glob_batch = "collapsed",
-    background_process_completed = "collapsed",
-    -- read_file_batch = false,
+  limits = {
+    tool_rows = 20,
+    collapsed_error_rows = 4,
+    thinking_peek_rows = 4,
+    thinking_peek_head_rows = 1,
   },
 }
 ```

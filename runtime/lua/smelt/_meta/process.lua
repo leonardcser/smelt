@@ -46,7 +46,7 @@ process.run = nil
 ---@type fun(task_id: integer, call_id: string, command: string, timeout_ms: integer, background_on_timeout: boolean): nil
 process.run_streaming = nil
 
---- Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`); `opts.args` is the leading argv (e.g. `{ "-fc" }`) - the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
+--- Override the wrapping shell used by `spawn_bg` and `run_streaming` for string-form commands. `opts.program` is the executable (e.g. `"/bin/zsh"`); `opts.args` is the leading argv (e.g. `{ "-fc" }`), and the command string is appended after these. Pass `nil` (no args) to revert to the default `sh -c`.
 ---@type fun(opts: table?): nil
 process.set_default_shell = nil
 

@@ -105,6 +105,54 @@ app_story!(tools_collapsed_summaries, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(tools_collapsed_errors, |ctx| {
+    ctx.set_viewport(86, 18);
+    ctx.tool_call_error(
+        "read_file",
+        &[("file_path", json!("missing.rs"))],
+        "No such file or directory (os error 2)",
+        Some(1),
+    );
+    ctx.tool_call_error(
+        "edit_file",
+        &[
+            ("file_path", json!("src/lib.rs")),
+            ("old_string", json!("pub fn missing() {}\n")),
+            ("new_string", json!("pub fn present() {}\n")),
+        ],
+        "old_string not found in src/lib.rs",
+        Some(2),
+    );
+    ctx.tool_call_error(
+        "grep",
+        &[("pattern", json!("[unterminated")), ("path", json!("src"))],
+        "regex parse error:\n    [unterminated\n    ^\nerror: unclosed character class",
+        Some(3),
+    );
+    ctx.run_lua("smelt.transcript.fold_kind('tool', 'close')");
+    ctx.assert_snapshot();
+});
+
+app_story!(transcript_settings_view_and_limits, |ctx| {
+    ctx.set_viewport(86, 14);
+    ctx.run_lua(
+        r#"
+        smelt.settings.transcript = {
+          view = { tools = { bash = "collapsed" } },
+          limits = { collapsed_error_rows = 2 },
+        }
+        smelt.transcript.invalidate_renderer()
+        "#,
+    );
+    ctx.tool_call_error(
+        "bash",
+        &[("command", json!("cargo test --workspace"))],
+        "error: test failed\nfailures:\n    app::tests::first\n    app::tests::second",
+        Some(42),
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(tools_expanded_bodies, |ctx| {
     ctx.set_viewport(86, 30);
     ctx.tool_call(

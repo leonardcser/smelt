@@ -158,7 +158,6 @@ end
 
 local function grep_collapsed_detail(block)
   local output = block.output
-  if output and output.is_error then return "error" end
 
   local mode = requested_mode((block and block.args) or {})
   local metadata = output and output.metadata

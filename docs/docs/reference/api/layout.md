@@ -28,7 +28,7 @@ Syntax-highlighted code layout leaf. `opts.lang` supplies the language name.
 fun(opts: table): table
 ```
 
-Inline-diff render directive - the worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
+Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
 
 ## `smelt.layout.elapsed`
 
@@ -52,7 +52,7 @@ Explicit zero-row layout node. Use this instead of returning nil when a renderer
 fun(opts: table): table
 ```
 
-Syntax-highlighted file-view render directive - single line-number column, no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.
+Syntax-highlighted file-view render directive. Uses a single line-number column and no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.
 
 ## `smelt.layout.gutter`
 

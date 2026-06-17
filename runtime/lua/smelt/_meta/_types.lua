@@ -14,7 +14,7 @@
 ---@field line fun(idx: integer): string? Read a single line by 1-based index. `nil` if out of range or the buffer is gone.
 ---@field styled fun(lines: table): smelt.buf.Buf Replace the buffer with a list of styled lines (`{ { text, style?, syntax? }, ... }`). Returns the handle for chaining.
 ---@field readonly fun(val: boolean?): any Read or write the readonly flag. With arg, returns the handle for chaining.
----@field mark fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line - the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.
+---@field mark fun(ns: integer, row: integer, col: integer, opts: smelt.buf.MarkOpts?): integer Place a highlight or virt-text extmark at `(row, col)`. Row is 1-based; `col` and `opts.end_col` are byte offsets into the line, the same unit as `#s`, `string.find`, and `string.sub`. Off-boundary bytes snap to the nearest UTF-8 char boundary; out-of-range bytes clamp to the line end. Returns the new extmark id. Allocate `ns` via `smelt.ns(name)`.
 ---@field clear_ns fun(ns: integer, start: integer?, end_: integer?): smelt.buf.Buf Drop every extmark owned by `ns` between `[start, end)` (1-based, exclusive end). Defaults clear the whole buffer. Returns the handle for chaining.
 
 --- Options accepted by `buf:mark(ns, row, col, opts)`. Mirrors a useful subset of `nvim_buf_set_extmark`'s keyset; pick highlight or virt-text fields, not both.
@@ -52,7 +52,7 @@
 ---@class smelt.cell.Cell
 ---@field get fun(): any Return the current cell value, or `nil` when the cell isn't declared.
 ---@field set fun(value: any): smelt.cell.Cell Publish a new value. Returns the handle for chaining.
----@field subscribe fun(handler: fun(value: any)): smelt.Reg Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass) - the module body re-runs inside `bring_up_lua` where the bind takes effect.
+---@field subscribe fun(handler: fun(value: any)): smelt.Reg Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect.
 ---@field name fun(): string Return the cell name.
 
 --- Flag specification accepted by `smelt.cli.register_flag`.

@@ -51,7 +51,7 @@ smelt.quit = nil
 smelt.sleep = nil
 
 --- Tier: Host - Available in every runtime, including headless mode.
---- Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task - any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds. Spawns inherit the current task lifecycle; top-level spawns are app-scoped and survive agent-turn interrupts.
+--- Run `handler` as a coroutine on the Lua task runtime. The handler may yield; its result is discarded. Returns a `Reg` whose `:remove()` cancels the task. Any in-flight `smelt.sleep` / `smelt.task.wait` raises `cancelled` and the coroutine unwinds. Spawns inherit the current task lifecycle; top-level spawns are app-scoped and survive agent-turn interrupts.
 ---@see smelt.task.wait
 ---@type fun(handler: fun()): smelt.Reg
 smelt.spawn = nil

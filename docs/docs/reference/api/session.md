@@ -180,7 +180,7 @@ Return the searchable plain-text blob for session `id` (user + assistant text on
 fun(ids: string[]): table
 ```
 
-Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions - the heavy IO happens on a worker pool rather than serializing on the Lua thread.
+Parallel batch read of `session.text(id)` for many ids. Returns a table keyed by id; missing sessions are omitted. Use this when a picker needs to search across all sessions. The heavy IO happens on a worker pool rather than serializing on the Lua thread.
 
 ## `smelt.session.tokens`
 

@@ -13,7 +13,6 @@ end
 
 local function glob_collapsed_detail(block)
   local output = block.output
-  if output and output.is_error then return "error" end
 
   local metadata = output and output.metadata
   if type(metadata) == "table" and type(metadata.display_count) == "table" then

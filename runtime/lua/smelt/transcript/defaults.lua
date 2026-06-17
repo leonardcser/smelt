@@ -74,9 +74,26 @@ function smelt.transcript.defaults.render_tool(block, ctx)
   return M.render_tool_full(block, ctx)
 end
 
+local function render_tool_error_summary(block, ctx)
+  return layout.vbox({
+    M.render_tool_header(block, ctx),
+    layout.gutter(
+      M.render_tool_output_tail(block.output, ctx, {
+        rows = (ctx and ctx.limits and ctx.limits.collapsed_error_rows) or 4,
+        keep = "head",
+        marker = "below",
+      }),
+      { text = "  " }
+    ),
+  })
+end
+
 --- Render a compact tool summary: header plus an optional detail line.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_tool_summary(block, ctx)
+  local output = block.output
+  if output and output.is_error then return render_tool_error_summary(block, ctx) end
+
   local header = M.render_tool_header(block, ctx)
   local detail = M.tool_collapsed_detail(block, ctx)
   if not detail or detail == "" then return header end
@@ -416,14 +433,13 @@ end
 --- Render a compact live preview of thinking: first rendered row, omitted rows, tail.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_thinking_peek(block, ctx)
-  local _ = ctx
   local content = block.content or ""
   if content == "" then content = block.thinking_summary or "thinking (0 lines)" end
   return layout.gutter(
     layout.cap(thinking_content_layout(content), {
-      rows = 4,
+      rows = (ctx and ctx.limits and ctx.limits.thinking_peek_rows) or 4,
       keep = "head_tail",
-      head_rows = 1,
+      head_rows = (ctx and ctx.limits and ctx.limits.thinking_peek_head_rows) or 1,
       marker = "middle",
     }),
     { text = "│ ", styled = true }

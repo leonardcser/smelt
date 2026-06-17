@@ -44,5 +44,5 @@ fun(buf: smelt.buf.Buf, content: string, opts: table?): nil
 
 Types: [`smelt.buf.Buf`](types.md#smeltbufbuf)
 
-Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = "ErrorMsg"` for errors, `"SmeltAccent"` for accent, or any registered theme group - the mapping is the caller's choice, not the renderer's. `opts.width` overrides the wrapping width for tool layouts rendered into narrower panes.
+Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = "ErrorMsg"` for errors, `"SmeltAccent"` for accent, or any registered theme group; the mapping is the caller's choice, not the renderer's. `opts.width` overrides the wrapping width for tool layouts rendered into narrower panes.
 
