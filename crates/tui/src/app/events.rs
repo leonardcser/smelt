@@ -60,6 +60,41 @@ impl TuiApp {
             }
         }
 
+        // Ctrl+C kills a focused shell-output command before modal dismiss sees it.
+        if self.shell_panel_is_focused()
+            && self
+                .exec
+                .as_ref()
+                .is_some_and(|handle| handle.sink == crate::commands::ShellSink::Overlay)
+            && matches!(
+                ev,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                })
+            )
+        {
+            if let Some(handle) = self.exec.take() {
+                handle.kill.notify_one();
+            }
+            return false;
+        }
+
+        if self.shell_panel_is_focused()
+            && matches!(
+                ev,
+                Event::Key(KeyEvent {
+                    code: KeyCode::Esc | KeyCode::Char('q'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                })
+            )
+        {
+            self.close_shell_panel_and_stop_job();
+            return false;
+        }
+
         // Overlay/modal focus: route keys through the focused leaf's keymap registry.
         // Mouse events fall through so wheel/scrollbar logic runs over the overlay rect.
         if self.ui.focused_overlay().is_some() || self.ui.active_modal().is_some() {
@@ -96,6 +131,9 @@ impl TuiApp {
                     return false;
                 }
                 if self.handle_search_open_before_window_dispatch(k) {
+                    return false;
+                }
+                if self.try_open_cmdline_for_key(k) {
                     return false;
                 }
                 if matches!(self.run_key_cascade(k), crate::smelt_edit::Status::Consumed) {
@@ -203,6 +241,9 @@ impl TuiApp {
                             };
                             self.commit_prompt_submission(edit.take().expect("submit edit"));
                             self.apply_input_outcome(outcome, content, &display);
+                            if self.pending_quit {
+                                return true;
+                            }
                             true
                         } else {
                             let outcome = self.handle_empty_submit();
@@ -234,6 +275,32 @@ impl TuiApp {
 
     fn handle_search_open_before_window_dispatch(&mut self, k: KeyEvent) -> bool {
         self.try_open_search_for_key(k)
+    }
+
+    pub(crate) fn try_open_cmdline_for_key(&mut self, k: KeyEvent) -> bool {
+        if !matches!(
+            (k.code, k.modifiers),
+            (KeyCode::Char(':'), KeyModifiers::NONE | KeyModifiers::SHIFT)
+        ) {
+            return false;
+        }
+
+        if let Some(win) = self.ui.focus() {
+            if self.ui.focused_overlay().is_some() {
+                let Some(win) = self.ui.win(win) else {
+                    return false;
+                };
+                if win.vim_enabled() && win.vim_mode() == crate::smelt_edit::VimMode::Insert {
+                    return false;
+                }
+                if !win.surface().is_readonly_text() {
+                    return false;
+                }
+            }
+        }
+
+        self.open_cmdline();
+        true
     }
 
     pub(crate) fn try_open_search_for_key(&mut self, k: KeyEvent) -> bool {
@@ -984,18 +1051,15 @@ impl TuiApp {
 
         let is_from_paste = self.input.skip_shell_escape();
 
-        // `:` is a vim-style alias for `/` - normalize before command lookup.
-        let dispatch_input = if let Some(rest) = trimmed.strip_prefix(':') {
-            format!("/{rest}")
-        } else {
-            trimmed.to_string()
-        };
-
-        match crate::commands::run_command(self, &dispatch_input) {
+        match crate::commands::run_command(self, trimmed) {
             CommandAction::Exec(handle) => return InputOutcome::Exec(handle),
             CommandAction::Continue => {}
         }
-        if smelt_core::commands::registered_command_token(&dispatch_input).is_some() {
+        if matches!(
+            crate::commands::parse_command_line(trimmed),
+            crate::commands::ParsedCommand::Slash { .. }
+        ) || crate::commands::prompt_quit_alias(trimmed)
+        {
             return InputOutcome::Continue;
         }
         // Shell escapes (`!cmd`) skip agent start, but pasted content starting with `!` does not.

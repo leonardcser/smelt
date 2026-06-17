@@ -4,6 +4,57 @@ use crate::app::{
 use crate::state;
 use protocol::{AgentMode, Content, ReasoningEffort, UiCommand};
 
+mod parse;
+
+pub(crate) use parse::{parse_command_line, ParsedCommand};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandSource {
+    Prompt,
+    Cmdline,
+    Lua,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShellSink {
+    Transcript,
+    Overlay,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CommandContext {
+    pub(crate) source: CommandSource,
+    pub(crate) queue_target: QueueStage,
+}
+
+impl CommandContext {
+    pub(crate) fn prompt() -> Self {
+        Self {
+            source: CommandSource::Prompt,
+            queue_target: QueueStage::Turn,
+        }
+    }
+
+    pub(crate) fn cmdline() -> Self {
+        Self {
+            source: CommandSource::Cmdline,
+            queue_target: QueueStage::Turn,
+        }
+    }
+
+    pub(crate) fn lua() -> Self {
+        Self {
+            source: CommandSource::Lua,
+            queue_target: QueueStage::Turn,
+        }
+    }
+
+    pub(crate) fn with_queue_target(mut self, queue_target: QueueStage) -> Self {
+        self.queue_target = queue_target;
+        self
+    }
+}
+
 pub(crate) enum ExecEvent {
     Output(String),
     Done(Option<i32>),
@@ -14,106 +65,215 @@ pub(crate) enum ExecEvent {
 pub(crate) struct ExecHandle {
     pub rx: tokio::sync::mpsc::UnboundedReceiver<ExecEvent>,
     pub kill: std::sync::Arc<tokio::sync::Notify>,
+    pub sink: ShellSink,
 }
 
-/// Parsed shape of a raw command line typed into the prompt or cmdline.
-///
-/// The dispatcher's call site treats `Shell` specially (spawn a child) and
-/// `Slash` as a registered command invocation. `Bare` is plain text that the
-/// user typed without a sigil - it is NOT dispatched as a command, even if
-/// its first word matches a registered name; the caller hands it to the
-/// agent as a normal user message.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ParsedCommand<'a> {
-    /// Empty (or whitespace-only) line.
-    Empty,
-    /// `! <script>` shell escape. `script` has its leading whitespace trimmed.
-    Shell { script: &'a str },
-    /// Slash command (`/name [arg…]` or `:name [arg…]`). Requires a sigil.
-    Slash { name: &'a str, arg: Option<&'a str> },
-    /// Plain text with no sigil. Never dispatched as a command.
-    Bare { text: &'a str },
+pub(crate) enum CommandEffect {
+    Continue,
+    QuitApp,
+    CloseFocusedContext,
+    QuitFocusedContextOrApp,
+    RunCommand {
+        name: String,
+        arg: Option<String>,
+        ctx: CommandContext,
+    },
+    StartShell {
+        script: String,
+        sink: ShellSink,
+    },
 }
 
-/// Classify a raw command line without dispatching it. See [`ParsedCommand`].
-pub(crate) fn parse_command_line(line: &str) -> ParsedCommand<'_> {
-    let line = line.trim();
-    if line.is_empty() {
-        return ParsedCommand::Empty;
-    }
-    if let Some(rest) = line.strip_prefix('!') {
-        return ParsedCommand::Shell {
-            script: rest.trim_start(),
-        };
-    }
-    let Some(body) = line.strip_prefix(':').or_else(|| line.strip_prefix('/')) else {
-        return ParsedCommand::Bare { text: line };
+pub(crate) fn prompt_quit_alias(line: &str) -> bool {
+    let ParsedCommand::Ex { name, bang: _, arg } = parse_command_line(line) else {
+        return false;
     };
-    // `splitn` steps past one whole whitespace char (may be multi-byte, e.g.
-    // U+2000 EN QUAD) instead of slicing at `idx + 1` mid-codepoint.
-    match body.splitn(2, char::is_whitespace).collect::<Vec<_>>()[..] {
-        [name, arg] => {
-            let arg = arg.trim();
-            ParsedCommand::Slash {
-                name,
-                arg: if arg.is_empty() { None } else { Some(arg) },
+    arg.is_none() && matches!(name, "q" | "quit" | "qa" | "qall" | "quitall" | "wq" | "x")
+}
+
+fn parse_for_context<'a>(line: &'a str, ctx: CommandContext) -> ParsedCommand<'a> {
+    if ctx.source == CommandSource::Prompt
+        && line.trim_start().starts_with(':')
+        && !prompt_quit_alias(line)
+    {
+        return ParsedCommand::Bare { text: line.trim() };
+    }
+    parse_command_line(line)
+}
+
+impl CommandEffect {
+    fn from_parsed(parsed: ParsedCommand<'_>, ctx: CommandContext) -> Self {
+        match parsed {
+            ParsedCommand::Shell { script, sink } => {
+                let sink = match (ctx.source, sink) {
+                    (CommandSource::Prompt, ShellSink::Overlay) => ShellSink::Transcript,
+                    _ => sink,
+                };
+                Self::StartShell {
+                    script: script.to_string(),
+                    sink,
+                }
+            }
+            ParsedCommand::Slash { name, arg } => Self::RunCommand {
+                name: name.to_string(),
+                arg: arg.map(str::to_string),
+                ctx,
+            },
+            ParsedCommand::Ex { name, bang, arg } => ex_command_effect(name, bang, arg, ctx),
+            ParsedCommand::Empty | ParsedCommand::Bare { .. } => Self::Continue,
+        }
+    }
+}
+
+fn ex_command_effect(
+    name: &str,
+    bang: bool,
+    arg: Option<&str>,
+    ctx: CommandContext,
+) -> CommandEffect {
+    let name = name.trim();
+    match name {
+        "q" | "quit" => {
+            if bang {
+                CommandEffect::QuitApp
+            } else {
+                CommandEffect::QuitFocusedContextOrApp
             }
         }
-        _ => ParsedCommand::Slash {
-            name: body,
-            arg: None,
+        "qa" | "qall" | "quitall" => CommandEffect::QuitApp,
+        "close" => CommandEffect::CloseFocusedContext,
+        "wq" | "x" => CommandEffect::QuitApp,
+        _ => CommandEffect::RunCommand {
+            name: name.to_string(),
+            arg: arg.map(str::to_string),
+            ctx,
         },
     }
 }
 
-/// Dispatch a raw command line. `!` lines spawn a shell escape; `/` and `:`
-/// dispatch to a Lua-registered handler. Bare text (no sigil) is never
-/// dispatched - it is left for the caller to forward to the agent.
+/// Dispatch a raw command line with prompt semantics.
 pub(crate) fn run_command(app: &mut TuiApp, line: &str) -> CommandAction {
-    run_command_for_queue_target(app, line, QueueStage::Turn)
+    run_command_with_context(app, line, CommandContext::prompt())
 }
 
-fn run_command_for_queue_target(
+pub(crate) fn run_command_with_context(
     app: &mut TuiApp,
     line: &str,
-    queue_target: QueueStage,
+    ctx: CommandContext,
 ) -> CommandAction {
     let _perf = smelt_perf::perf::begin("cmd:dispatch");
-    let (name, arg) = match parse_command_line(line) {
-        ParsedCommand::Shell { script } => {
-            if app.input.skip_shell_escape() {
-                return CommandAction::Continue;
-            }
-            return match app.start_shell_escape(script) {
-                Some(handle) => CommandAction::Exec(handle),
-                None => CommandAction::Continue,
-            };
-        }
-        ParsedCommand::Slash { name, arg } => (name.to_string(), arg.map(str::to_string)),
-        ParsedCommand::Empty | ParsedCommand::Bare { .. } => return CommandAction::Continue,
-    };
-    let next_turn_id = app.next_turn_id;
-    app.core
-        .cells
-        .set_dyn("cmd_pre", std::rc::Rc::new(name.clone()));
-    app.drain_cells_pending();
-    if !name.is_empty() && app.lua.has_command(&name) {
-        app.lua
-            .run_command_with_queue_target(&name, arg, queue_target.into());
-    }
-    app.core.cells.set_dyn("cmd_post", std::rc::Rc::new(name));
-    app.drain_cells_pending();
-    app.flush_lua_callbacks();
-    if app.next_turn_id == next_turn_id {
-        app.invalidate_prompt_prediction();
-    }
-    CommandAction::Continue
+    let effect = CommandEffect::from_parsed(parse_for_context(line, ctx), ctx);
+    app.apply_command_effect(effect)
+}
+
+enum CloseTarget {
+    Cmdline,
+    ShellPanel,
+    Overlay(crate::smelt_edit::OverlayId),
 }
 
 impl TuiApp {
-    /// Apply a resolved `InputOutcome` to app state. `/quit` is handled
-    /// separately via `pending_quit`; this covers the start-agent, exec,
-    /// and continue cases.
+    fn focused_close_target(&self) -> Option<CloseTarget> {
+        if self.cmdline_is_focused() {
+            return Some(CloseTarget::Cmdline);
+        }
+        let overlay = self.ui.focused_overlay()?;
+        if self
+            .shell_panel
+            .is_some_and(|panel| panel.overlay == overlay)
+        {
+            return Some(CloseTarget::ShellPanel);
+        }
+        Some(CloseTarget::Overlay(overlay))
+    }
+
+    pub(crate) fn apply_command_effect(&mut self, effect: CommandEffect) -> CommandAction {
+        match effect {
+            CommandEffect::Continue => CommandAction::Continue,
+            CommandEffect::QuitApp => {
+                self.pending_quit = true;
+                CommandAction::Continue
+            }
+            CommandEffect::CloseFocusedContext => {
+                if !self.close_focused_context() {
+                    self.notify_error("no focused window to close".into());
+                }
+                CommandAction::Continue
+            }
+            CommandEffect::QuitFocusedContextOrApp => {
+                self.quit_focused_context_or_app();
+                CommandAction::Continue
+            }
+            CommandEffect::RunCommand { name, arg, ctx } => {
+                self.run_command_by_name(&name, arg.as_deref(), ctx)
+            }
+            CommandEffect::StartShell { script, sink } => {
+                if self.input.skip_shell_escape() {
+                    return CommandAction::Continue;
+                }
+                match self.start_shell_escape_with_sink(&script, sink) {
+                    Some(handle) => CommandAction::Exec(handle),
+                    None => CommandAction::Continue,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn run_command_by_name(
+        &mut self,
+        name: &str,
+        arg: Option<&str>,
+        ctx: CommandContext,
+    ) -> CommandAction {
+        let name = name.to_string();
+        let arg = arg.map(str::to_string);
+        let next_turn_id = self.next_turn_id;
+        self.core
+            .cells
+            .set_dyn("cmd_pre", std::rc::Rc::new(name.clone()));
+        self.drain_cells_pending();
+        if !name.is_empty() && self.lua.has_command(&name) {
+            self.lua
+                .run_command_with_queue_target(&name, arg, ctx.queue_target.into());
+        } else {
+            let prefix = match ctx.source {
+                CommandSource::Cmdline => ':',
+                _ => '/',
+            };
+            self.notify_error(format!("unknown command: {prefix}{name}"));
+        }
+        self.core.cells.set_dyn("cmd_post", std::rc::Rc::new(name));
+        self.drain_cells_pending();
+        self.flush_lua_callbacks();
+        if self.next_turn_id == next_turn_id {
+            self.invalidate_prompt_prediction();
+        }
+        CommandAction::Continue
+    }
+
+    pub(crate) fn quit_focused_context_or_app(&mut self) {
+        if !self.close_focused_context() {
+            self.pending_quit = true;
+        }
+    }
+
+    pub(crate) fn close_focused_context(&mut self) -> bool {
+        match self.focused_close_target() {
+            Some(CloseTarget::Cmdline) => {
+                self.close_cmdline();
+                true
+            }
+            Some(CloseTarget::ShellPanel) => self.close_shell_panel_and_stop_job(),
+            Some(CloseTarget::Overlay(overlay)) => {
+                self.close_overlay(overlay);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply a resolved `InputOutcome` to app state. Command handlers update
+    /// `pending_quit` directly; this covers start-agent, exec, and continue cases.
     pub(crate) fn apply_input_outcome(
         &mut self,
         outcome: InputOutcome,
@@ -137,7 +297,11 @@ impl TuiApp {
         input: &str,
         queue_target: QueueStage,
     ) -> CommandAction {
-        run_command_for_queue_target(self, input, queue_target)
+        run_command_with_context(
+            self,
+            input,
+            CommandContext::prompt().with_queue_target(queue_target),
+        )
     }
 
     /// Attempt to execute a command mid-run. Returns the outcome, or `None`
@@ -149,7 +313,6 @@ impl TuiApp {
     ) -> Option<EventOutcome> {
         let is_from_paste = self.input.skip_shell_escape();
 
-        // Shell escape - `! cmd` (skipped while pasting).
         if input.starts_with('!') && !is_from_paste {
             return match self.run_command_with_queue_target(input, queue_target) {
                 CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
@@ -157,31 +320,23 @@ impl TuiApp {
             };
         }
 
-        // `:` is a vim-style alias for `/`; non-command input is queued.
-        let normalized = if let Some(rest) = input.strip_prefix(':') {
-            format!("/{rest}")
-        } else if input.starts_with('/') {
-            input.to_string()
-        } else {
-            return None;
-        };
+        if prompt_quit_alias(input) {
+            return Some(EventOutcome::Quit);
+        }
 
-        let name = match parse_command_line(&normalized) {
+        let parsed = parse_command_line(input);
+        let (name, normalized) = match parsed {
             ParsedCommand::Slash { name, .. } if !name.is_empty() && self.lua.has_command(name) => {
-                name.to_string()
+                (name.to_string(), input.to_string())
             }
             _ => return None,
         };
-        // Commands that opt into `queue_when_busy` get one synchronous pass so
-        // handlers that build a custom-command turn can capture their evaluated
-        // body and enqueue it via `smelt.engine.submit_command`.
         if self.lua.command_queues_when_busy(&name) {
             return match self.run_command_with_queue_target(&normalized, queue_target) {
                 CommandAction::Exec(handle) => Some(EventOutcome::Exec(handle)),
                 CommandAction::Continue => Some(EventOutcome::Noop),
             };
         }
-        // Commands registered with `{ while_busy = false }` are blocked mid-turn.
         if self.lua.command_blocks_while_busy(&name) == Some(true) {
             self.notify_error(format!("cannot run /{name} while agent is working"));
             return Some(EventOutcome::Noop);
@@ -196,12 +351,29 @@ impl TuiApp {
     /// Spawn a shell command. Returns a handle for streaming output and
     /// killing the process on Ctrl+C.
     pub(crate) fn start_shell_escape(&mut self, raw: &str) -> Option<ExecHandle> {
+        self.start_shell_escape_with_sink(raw, ShellSink::Transcript)
+    }
+
+    pub(crate) fn start_shell_escape_with_sink(
+        &mut self,
+        raw: &str,
+        sink: ShellSink,
+    ) -> Option<ExecHandle> {
         let cmd = raw.trim();
         if cmd.is_empty() {
             return None;
         }
-        self.start_exec(cmd.to_string());
-        self.publish_input_submit(format!("!{cmd}"));
+        if self.exec.is_some() {
+            self.notify_error("a shell command is already running".into());
+            return None;
+        }
+        match sink {
+            ShellSink::Transcript => {
+                self.start_exec(cmd.to_string());
+                self.publish_input_submit(format!("!{cmd}"));
+            }
+            ShellSink::Overlay => self.open_shell_panel(cmd),
+        }
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let kill = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -263,7 +435,7 @@ impl TuiApp {
             let _ = tx.send(ExecEvent::Done(status.and_then(|s| s.code())));
         });
 
-        Some(ExecHandle { rx, kill })
+        Some(ExecHandle { rx, kill, sink })
     }
 
     /// Switch to a model by key. No-op if the key is not found.
@@ -429,6 +601,14 @@ mod tests {
 
     fn slash<'a>(name: &'a str, arg: Option<&'a str>) -> ParsedCommand<'a> {
         ParsedCommand::Slash { name, arg }
+    }
+
+    fn ex<'a>(name: &'a str, bang: bool, arg: Option<&'a str>) -> ParsedCommand<'a> {
+        ParsedCommand::Ex { name, bang, arg }
+    }
+
+    fn shell(script: &str, sink: ShellSink) -> ParsedCommand<'_> {
+        ParsedCommand::Shell { script, sink }
     }
 
     fn mode_blocks(app: &crate::app::TuiApp) -> Vec<&str> {
@@ -629,7 +809,7 @@ mod tests {
     fn bang_prefix_parses_as_shell_escape() {
         assert_eq!(
             parse_command_line("!echo hi"),
-            ParsedCommand::Shell { script: "echo hi" }
+            shell("echo hi", ShellSink::Transcript)
         );
     }
 
@@ -638,13 +818,13 @@ mod tests {
         // `! echo hi` and `!echo hi` produce the same script.
         assert_eq!(
             parse_command_line("!   echo hi"),
-            ParsedCommand::Shell { script: "echo hi" }
+            shell("echo hi", ShellSink::Transcript)
         );
     }
 
     #[test]
     fn shell_escape_keeps_an_empty_script_for_bare_bang() {
-        assert_eq!(parse_command_line("!"), ParsedCommand::Shell { script: "" });
+        assert_eq!(parse_command_line("!"), shell("", ShellSink::Transcript));
     }
 
     #[test]
@@ -679,9 +859,13 @@ mod tests {
     }
 
     #[test]
-    fn colon_is_an_alias_for_slash() {
-        assert_eq!(parse_command_line(":quit"), slash("quit", None));
-        assert_eq!(parse_command_line(":model x"), slash("model", Some("x")));
+    fn colon_parses_as_ex_command() {
+        assert_eq!(parse_command_line(":quit"), ex("quit", false, None));
+        assert_eq!(parse_command_line(":q!"), ex("q", true, None));
+        assert_eq!(
+            parse_command_line(":model x"),
+            ex("model", false, Some("x"))
+        );
     }
 
     #[test]
@@ -715,7 +899,7 @@ mod tests {
         // The leading char wins - `!/foo` is a shell escape for `/foo`.
         assert_eq!(
             parse_command_line("!/foo bar"),
-            ParsedCommand::Shell { script: "/foo bar" }
+            shell("/foo bar", ShellSink::Transcript)
         );
     }
 
@@ -727,16 +911,47 @@ mod tests {
         );
         assert_eq!(
             parse_command_line("  !echo hi  "),
-            ParsedCommand::Shell { script: "echo hi" }
+            shell("echo hi", ShellSink::Transcript)
         );
     }
 
     #[test]
-    fn slash_name_can_contain_unicode_word_chars() {
-        // `find` uses `char::is_whitespace`, so any non-ws unicode goes in `name`.
+    fn ex_bang_parses_as_overlay_shell() {
         assert_eq!(
-            parse_command_line("/日本語 arg"),
-            slash("日本語", Some("arg"))
+            parse_command_line(":!echo hi"),
+            shell("echo hi", ShellSink::Overlay)
+        );
+    }
+
+    #[test]
+    fn prompt_colon_commands_are_only_quit_aliases() {
+        assert_eq!(
+            parse_for_context(":help", CommandContext::prompt()),
+            ParsedCommand::Bare { text: ":help" }
+        );
+        assert_eq!(
+            parse_for_context(":q", CommandContext::prompt()),
+            ex("q", false, None)
+        );
+        assert_eq!(
+            parse_for_context(":wq", CommandContext::prompt()),
+            ex("wq", false, None)
+        );
+    }
+
+    #[test]
+    fn cmdline_colon_commands_use_command_namespace() {
+        assert_eq!(
+            parse_for_context(":help", CommandContext::cmdline()),
+            ex("help", false, None)
+        );
+    }
+
+    #[test]
+    fn slash_commands_remain_prompt_commands() {
+        assert_eq!(
+            parse_for_context("/help", CommandContext::prompt()),
+            slash("help", None)
         );
     }
 }

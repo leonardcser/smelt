@@ -211,6 +211,7 @@ local function attach()
 		resizable = true,
 		layout = smelt.ui.layout.leaf(state.win, { measure = { PANEL_W, PANEL_H } }),
 	})
+	state.win:focus()
 	-- Cancel any prior timer (hot-reload survival) before re-arming.
 	if state.timer then
 		state.timer:remove()

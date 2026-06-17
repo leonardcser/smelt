@@ -244,6 +244,7 @@ local function attach()
 		resizable = true,
 		layout = smelt.ui.layout.leaf(state.win, { measure = { PANEL_W, PANEL_H } }),
 	})
+	state.win:focus()
 	if state.timer then
 		state.timer:remove()
 	end

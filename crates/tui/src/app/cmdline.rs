@@ -1,6 +1,10 @@
 //! Nvim-style status input: a Buffer-backed modal overlay with history and Tab completion.
 
-use crate::app::{search::SearchDirection, CommandAction, TuiApp};
+use crate::app::{
+    cmdline_history::{command_history_kind, CommandHistory},
+    search::SearchDirection,
+    CommandAction, TuiApp,
+};
 
 use crate::smelt_edit::layout::Anchor;
 use crate::smelt_edit::BufCreateOpts;
@@ -41,9 +45,8 @@ impl CmdlineMode {
 #[derive(Default)]
 pub(crate) struct CmdlineState {
     pub(crate) mode: CmdlineMode,
-    pub(crate) history: Vec<String>,
-    pub(crate) search_history: Vec<String>,
-    /// Index into `history` while browsing with Up/Down; `None` otherwise.
+    pub(crate) history: CommandHistory,
+    /// Index into filtered history while browsing with Up/Down; `None` otherwise.
     pub(crate) history_browse: Option<usize>,
     /// Live input snapshot saved when history browsing begins; restored on Down past the newest entry.
     pub(crate) history_stash: String,
@@ -351,19 +354,21 @@ impl TuiApp {
         }
         if text != old_text {
             self.cmdline_dismiss_completer();
+            self.cmdline.history_browse = None;
+            self.cmdline.history_stash = String::new();
         }
     }
 
-    fn active_history(&self) -> &[String] {
-        match self.cmdline.mode {
-            CmdlineMode::Command => &self.cmdline.history,
-            CmdlineMode::Search { .. } => &self.cmdline.search_history,
-        }
+    fn active_history(&self) -> Vec<String> {
+        let payload = self.cmdline_text();
+        self.cmdline
+            .history
+            .matching(command_history_kind(self.cmdline.mode, &payload))
     }
 
     fn cmdline_history_up(&mut self) {
         let current = self.cmdline_text();
-        let history = self.active_history().to_vec();
+        let history = self.active_history();
         let owned =
             super::cmdline_edit::history_up(&history, self.cmdline.history_browse).into_owned();
         self.apply_history_step(owned, current);
@@ -371,7 +376,7 @@ impl TuiApp {
 
     fn cmdline_history_down(&mut self) {
         let stash = self.cmdline.history_stash.clone();
-        let history = self.active_history().to_vec();
+        let history = self.active_history();
         let owned =
             super::cmdline_edit::history_down(&history, self.cmdline.history_browse, &stash)
                 .into_owned();
@@ -417,15 +422,17 @@ impl TuiApp {
         let mode = self.cmdline.mode;
         match mode {
             CmdlineMode::Command => {
-                let last = self.cmdline.history.last().cloned();
-                if !line.is_empty() && last.as_deref() != Some(line.as_str()) {
-                    self.cmdline.history.push(line.clone());
-                }
+                let kind = command_history_kind(mode, &line);
+                self.cmdline.history.push(kind, line.clone());
                 self.close_cmdline();
                 if line.is_empty() {
                     return false;
                 }
-                let action = crate::commands::run_command(self, &format!(":{line}"));
+                let action = crate::commands::run_command_with_context(
+                    self,
+                    &format!(":{line}"),
+                    crate::commands::CommandContext::cmdline(),
+                );
                 match action {
                     CommandAction::Exec(handle) => {
                         self.exec = Some(handle);
@@ -435,10 +442,8 @@ impl TuiApp {
                 }
             }
             CmdlineMode::Search { target, direction } => {
-                let last = self.cmdline.search_history.last().cloned();
-                if !line.is_empty() && last.as_deref() != Some(line.as_str()) {
-                    self.cmdline.search_history.push(line.clone());
-                }
+                let kind = command_history_kind(mode, &line);
+                self.cmdline.history.push(kind, line.clone());
                 self.close_cmdline();
                 self.submit_search(target, direction, line);
                 false

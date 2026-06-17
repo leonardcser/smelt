@@ -63,7 +63,10 @@ fn cmdline_completion_renders_prompt_style_list_above_cmdline() {
 fn cmdline_up_down_use_history_when_completion_closed() {
     let mut app = TestApp::builder().with_vim(true).build();
     register_cmdline_test_commands(&mut app);
-    app.app.cmdline.history.push("older-command".to_string());
+    app.app.cmdline.history.push(
+        crate::app::cmdline_history::CommandHistoryKind::Command,
+        "older-command".to_string(),
+    );
 
     app.press(KeyCode::Esc);
     app.press(KeyCode::Char(':'));
@@ -83,7 +86,10 @@ fn cmdline_up_down_use_history_when_completion_closed() {
 fn cmdline_up_down_select_completion_when_picker_is_open() {
     let mut app = TestApp::builder().with_vim(true).build();
     register_cmdline_test_commands(&mut app);
-    app.app.cmdline.history.push("older-command".to_string());
+    app.app.cmdline.history.push(
+        crate::app::cmdline_history::CommandHistoryKind::Command,
+        "older-command".to_string(),
+    );
 
     app.press(KeyCode::Esc);
     app.press(KeyCode::Char(':'));

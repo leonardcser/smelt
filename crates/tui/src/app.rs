@@ -1,6 +1,7 @@
 pub(crate) mod agent;
 pub(crate) mod cmdline;
 pub(crate) mod cmdline_edit;
+pub(crate) mod cmdline_history;
 pub(crate) mod content_keys;
 pub(crate) mod engine_events;
 pub(crate) mod events;
@@ -16,6 +17,7 @@ pub(crate) mod queue;
 pub(crate) mod render_loop;
 pub(crate) mod reveal;
 pub(crate) mod search;
+pub(crate) mod shell_panel;
 #[cfg(any(test, feature = "harness"))]
 pub mod test_harness;
 pub(crate) mod transcript;
@@ -55,6 +57,7 @@ pub struct TuiApp {
     pub(crate) input_history: History,
     pub(crate) input: PromptState,
     pub(crate) exec: Option<crate::commands::ExecHandle>,
+    pub(crate) shell_panel: Option<ShellPanel>,
     /// Wakeup from cross-thread tasks that pushed to the Lua inbox. Drains the inbox so parked coroutines resume.
     lua_wakeup_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
     /// Host-callback receiver from the engine task. Lives next to the
@@ -377,6 +380,13 @@ pub(crate) enum EventOutcome {
 pub(crate) enum CommandAction {
     Continue,
     Exec(crate::commands::ExecHandle),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ShellPanel {
+    pub(crate) overlay: crate::smelt_edit::OverlayId,
+    pub(crate) win: crate::smelt_edit::WinId,
+    pub(crate) buf: crate::smelt_edit::BufId,
 }
 
 pub(crate) enum InputOutcome {
@@ -1052,6 +1062,7 @@ impl TuiApp {
             input_history: History::load(),
             input,
             exec: None,
+            shell_panel: None,
             lua_wakeup_rx,
             host_rx,
             queued_inputs: InputQueues::default(),
@@ -2240,13 +2251,17 @@ impl TuiApp {
                         None => std::future::pending().await,
                     }
                 } => {
+                    let sink = self.exec.as_ref().map(|handle| handle.sink);
                     match ev {
                         crate::commands::ExecEvent::Output(line) => {
-                            self.append_exec_output(&line);
+                            if let Some(sink) = sink {
+                                self.append_shell_output(&line, sink);
+                            }
                         }
                         crate::commands::ExecEvent::Done(code) => {
-                            self.finish_exec(code);
-                            self.finalize_exec();
+                            if let Some(sink) = sink {
+                                self.finish_shell_output(code, sink);
+                            }
                             self.exec = None;
                         }
                     }
