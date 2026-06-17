@@ -1154,11 +1154,16 @@ impl BlockHistory {
     }
 
     pub fn block_gap(&self, i: usize) -> u16 {
-        if i > 0 {
-            gap_between(self.block_at(i - 1), self.block_at(i))
-        } else {
-            0
+        if i == 0 {
+            return 0;
         }
+        let Some(above) = self.order.get(i - 1).and_then(|id| self.entries.get(id)) else {
+            return 0;
+        };
+        let Some(below) = self.order.get(i).and_then(|id| self.entries.get(id)) else {
+            return 0;
+        };
+        gap_between_entries(above, below)
     }
 
     pub fn rendered_block_gap(&self, i: usize, rendered_rows: usize) -> u16 {
@@ -1213,26 +1218,61 @@ impl BlockHistory {
 /// transitions are separated by one blank row. Adjacent code lines collapse,
 /// and markdown headings sit directly on top of their following content.
 pub fn gap_between(above: &Block, below: &Block) -> u16 {
-    if matches!(
-        (above, below),
-        (Block::CodeLine { .. }, Block::CodeLine { .. })
-    ) {
+    gap_between_parts(
+        above.kind(),
+        below.kind(),
+        starts_with_thinking_title(below),
+        ends_with_heading(above),
+    )
+}
+
+fn gap_between_entries(above: &BlockEntry, below: &BlockEntry) -> u16 {
+    gap_between_parts(
+        above.kind(),
+        below.kind(),
+        entry_starts_with_thinking_title(below),
+        entry_ends_with_heading(above),
+    )
+}
+
+fn gap_between_parts(
+    above_kind: &str,
+    below_kind: &str,
+    below_starts_thinking_title: bool,
+    above_ends_heading: bool,
+) -> u16 {
+    if above_kind == "code" && below_kind == "code" {
         return 0;
     }
-    if matches!(
-        (above, below),
-        (Block::Thinking { .. }, Block::Thinking { .. })
-    ) {
-        return if starts_with_thinking_title(below) {
-            1
-        } else {
-            0
-        };
+    if above_kind == "thinking" && below_kind == "thinking" {
+        return if below_starts_thinking_title { 1 } else { 0 };
     }
-    if matches!(below, Block::Text { .. } | Block::CodeLine { .. }) && ends_with_heading(above) {
+    if matches!(below_kind, "assistant" | "code") && above_ends_heading {
         return 0;
     }
     1
+}
+
+fn entry_starts_with_thinking_title(entry: &BlockEntry) -> bool {
+    if entry.kind() != "thinking" {
+        return false;
+    }
+    entry.raw_text().is_some_and(|content| {
+        content
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .and_then(crate::content::markdown_stream::thinking_title)
+            .is_some()
+    })
+}
+
+fn entry_ends_with_heading(entry: &BlockEntry) -> bool {
+    if entry.kind() != "assistant" {
+        return false;
+    }
+    entry
+        .raw_text()
+        .is_some_and(|content| crate::content::markdown_ir::ends_with_heading(&content))
 }
 
 fn starts_with_thinking_title(block: &Block) -> bool {
@@ -1758,6 +1798,40 @@ mod tests {
         });
         // Text -> User: 1
         assert_eq!(history.block_gap(1), 1);
+    }
+
+    #[test]
+    fn block_gap_uses_descriptors_without_materializing_blocks() {
+        let mut history = BlockHistory::new();
+        history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::Text {
+                content: "# heading".into(),
+            },
+            BlockOrigin::History(0),
+        );
+        history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::CodeLine {
+                content: "let x = 1;".into(),
+                lang: "rust".into(),
+            },
+            BlockOrigin::History(1),
+        );
+        history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::Thinking {
+                content: "plain thought".into(),
+            },
+            BlockOrigin::History(2),
+        );
+        history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::Thinking {
+                content: "**New section**\nbody".into(),
+            },
+            BlockOrigin::History(3),
+        );
+
+        assert_eq!(history.block_gap(1), 0);
+        assert_eq!(history.block_gap(3), 1);
+        assert_eq!(history.materialized_lazy_blocks(), 0);
     }
 
     #[test]
