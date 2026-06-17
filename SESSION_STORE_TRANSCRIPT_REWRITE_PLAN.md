@@ -388,7 +388,7 @@ struct TranscriptBlockDesc {
 }
 ```
 
-`TranscriptBlocks` is the replacement target for the resumed-session use of `BlockHistory`. It is loaded from SQLite `transcript_blocks` descriptor rows for resumed sessions and appended in memory for live streaming until the writer commits those descriptors. Those are construction details, not separate UI abstractions.
+`TranscriptBlocks` is the replacement target for the resumed-session use of `BlockHistory`. It is loaded from SQLite `transcript_blocks` descriptor rows for resumed sessions and appended in memory for live streaming until the writer commits those descriptors. Tool draft descriptors are live-only: they may participate in rendering while a provider streams partial tool arguments, but persistence skips them and only promoted `ToolCall` blocks become durable. Those are construction details, not separate UI abstractions.
 
 `TranscriptDocument` owns `TranscriptBlocks`, `RenderPlan`, `TranscriptHeightIndex`, `RenderCache`, and viewport materialization. It is the transcript implementation of the existing `DisplayDocument` contract:
 

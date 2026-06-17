@@ -823,6 +823,9 @@ impl BlockHistory {
             .filter_map(|id| {
                 let entry = self.entries.get(id)?;
                 let descriptor = entry.descriptor();
+                if matches!(descriptor, TranscriptBlockDescriptor::ToolDraft { .. }) {
+                    return None;
+                }
                 let tool_state = descriptor.tool_call_id().and_then(|call_id| {
                     self.tool_states
                         .get(call_id)
@@ -1383,6 +1386,36 @@ mod tests {
         assert!(!output.is_error);
         assert_eq!(output.metadata, Some(serde_json::json!({"small": true})));
         assert_eq!(restored.materialized_lazy_blocks(), 0);
+    }
+
+    #[test]
+    fn descriptor_records_skip_transient_tool_drafts() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "before".into(),
+        });
+        history.push(Block::ToolDraft {
+            stream_id: "stream-1".into(),
+            call_id: Some("call-1".into()),
+            name: "bash".into(),
+            summary: protocol::StyledLines::from_plain("echo hi"),
+            args: HashMap::from([("command".into(), serde_json::json!("echo hi"))]),
+            raw_arguments: "{\"command\":\"echo hi\"}".into(),
+            finished: false,
+        });
+        history.push(Block::Text {
+            content: "after".into(),
+        });
+
+        let records = history.descriptor_records();
+
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| !matches!(
+            record.descriptor,
+            TranscriptBlockDescriptor::ToolDraft { .. }
+        )));
+        assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("before"));
+        assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("after"));
     }
 
     #[test]
