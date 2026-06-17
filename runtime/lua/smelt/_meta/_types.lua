@@ -40,6 +40,16 @@
 ---@field selectable? boolean If false, the range is skipped by mouse selection.
 ---@field yank_as? string Override the yanked string when the user copies this range.
 
+--- Options for `smelt.buf.new(opts?)`. Named buffers survive `/reload`; anonymous buffers are reaped.
+---@class smelt.buf.NewOpts
+---@field name? string Stable name used to reuse this buffer across `/reload`.
+---@field readonly? boolean When true, UI editing operations cannot mutate the buffer.
+---@field editable? boolean Enable undo history for plugin-managed editable buffers.
+---@field undo? integer Undo history entry limit when `editable = true` (defaults to 100).
+---@field mode? "plain"|"markdown"|"md"|"code" Attach a parser-backed renderer to the buffer.
+---@field lang? string Syntax language token required by `mode = "code"`.
+---@field diff_base? string When `mode = "code"`, render the buffer source as an inline diff against this base text.
+
 --- Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of bundled module short-names - see the table below for the `smelt.<dotted>` form each one expands to. | field | expansion | |---|---| | `tools = { "web_search" }` | `smelt.tools.web_search` | | `commands = { "compact" }` | `smelt.commands.compact` | | `plugins = { "predict" }` | `smelt.plugins.predict` | | `dialogs = { "resume" }` | `smelt.dialogs.resume` | | `modules = { "smelt.foo.bar" }` | passed through verbatim |
 ---@class smelt.builtins.Selector
 ---@field tools? string[] Short tool names under `smelt.tools.*` (e.g. `"bash"`, `"web_search"`).
@@ -229,11 +239,31 @@
 ---@field on fun(event: smelt.input.Event, func: fun(value: table)): smelt.Reg Subscribe to `change`, `submit`, or `cancel`. Callback payload carries `ctx.text`.
 ---@field key fun(chord: string, func: fun(value: table)): smelt.Reg Bind `func` to `chord` on the underlying input window. Returns a Reg handle.
 
+--- Opaque block-layout node returned by `smelt.layout.*` constructors and accepted by transcript renderers, tool previews, and other content-layout APIs.
+---@class smelt.layout.Node
+
 ---@class smelt.lifecycle.Guard
 ---@field alive fun(self:smelt.lifecycle.Guard):boolean Return true while every captured epoch still matches and the guard was not cancelled or superseded.
 ---@field cancel fun(self:smelt.lifecycle.Guard) Mark the guard stale immediately.
 ---@field latest fun(self:smelt.lifecycle.Guard,key:string):smelt.lifecycle.Guard Mark this guard as the latest request for `key`; older guards with the same key become stale.
 ---@field wrap fun(self:smelt.lifecycle.Guard,fn:function):function Return a wrapper that calls `fn` only while the guard is alive.
+
+---@class smelt.list.List
+---@field refresh fun(self: smelt.list.List)
+---@field set_items fun(self: smelt.list.List, items: any[]?)
+---@field set_items_preserve fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any)
+---@field set_filter fun(self: smelt.list.List, fn: (fun(item: any): boolean)?)
+---@field set_render fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row)
+---@field visible fun(self: smelt.list.List): any[]
+---@field size fun(self: smelt.list.List): integer
+---@field selected_index fun(self: smelt.list.List): integer?
+---@field selected fun(self: smelt.list.List): any
+---@field set_cursor fun(self: smelt.list.List, i: integer)
+---@field move_cursor fun(self: smelt.list.List, delta: integer)
+
+---@class smelt.list.Mark
+---@field col? integer 0-based byte column for the mark.
+---@field opts? smelt.buf.MarkOpts Mark/highlight options.
 
 --- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
 --- they own the rendered selection cursor and the backing line buffer;
@@ -242,10 +272,20 @@
 ---@field leaf smelt.win.Win Selectable list leaf (typically from `smelt.dialog.list`).
 ---@field buf smelt.buf.Buf Backing buffer that mirrors the rendered rows.
 ---@field items? any[] Initial item set. Mutate via `:set_items(...)` later if needed.
----@field render fun(item: any): table Returns `{ text, spans?, marks? }` per visible row.
+---@field render fun(item: any): smelt.list.Row Returns `{ text, spans?, marks? }` per visible row.
 ---@field filter? fun(item: any): boolean Predicate re-run on `:set_filter` / `:refresh`.
 ---@field empty_text? string Placeholder line shown when no row passes the filter.
 ---@field anchor? "top"|"bottom" Render short lists at the top or bottom of the viewport. Defaults to "top".
+
+---@class smelt.list.Row
+---@field text? string Plain row text. Used when `spans` is omitted.
+---@field spans? smelt.list.Span[] Styled spans for the row.
+---@field marks? smelt.list.Mark[] Extmarks to apply after rendering.
+
+---@class smelt.list.Span
+---@field text string Span text.
+---@field style? table Highlight style passed through to `buf:styled`.
+---@field syntax? string Inline syntax token for this span.
 
 --- MCP server config accepted by `smelt.mcp.register`.
 ---@class smelt.mcp.Config
@@ -271,6 +311,40 @@
 ---@class smelt.overlay.DragConfig
 ---@field title? boolean When true, the overlay chrome moves the overlay unless a resize handle owns the cell.
 ---@field body? boolean | "inert" `true` moves from any body leaf; `"inert"` moves only from non-focusable, non-selectable leaves.
+
+--- One overlay-scoped key binding installed by `smelt.overlay.new({ keymaps = ... })`.
+---@class smelt.overlay.Keymap
+---@field key string Key chord such as `<Esc>`, `<C-j>`, or `q`.
+---@field on_press fun(ctx: table) Handler invoked when the key fires while any overlay leaf has focus.
+---@field hint? string Human-readable hint for key-discovery plugins.
+
+--- Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.layout` tree.
+---@class smelt.overlay.NewOpts
+---@field layout smelt.ui.layout Layout tree to render inside the overlay.
+---@field name? string Stable name used to hot-reload this overlay in place.
+---@field title? string | table Optional title rendered in the overlay border.
+---@field border? table Border style override; parsed with the shared border vocabulary.
+---@field anchor? "dock_bottom"|"dock_top"|"dock_left"|"dock_right"|"center"|"screen_at"|"win" Where to place the overlay. Defaults to `dock_bottom`.
+---@field above_rows? integer Rows to keep clear above the bottom dock, typically the statusline height.
+---@field target? smelt.win.Win | integer Target window for `anchor = "win"`.
+---@field attach? string Alignment point for `anchor = "win"` such as `nw`, `center`, or `se`.
+---@field row? integer Screen row offset for `anchor = "screen_at"`.
+---@field col? integer Screen column offset for `anchor = "screen_at"`.
+---@field row_offset? integer Row offset for `anchor = "win"`.
+---@field col_offset? integer Column offset for `anchor = "win"`.
+---@field corner? string Corner used by `anchor = "screen_at"` (`nw`, `ne`, `sw`, or `se`).
+---@field width? integer | string | table Overlay width constraint. Accepts cells, `"N%"`, `"fit"`, `"fill"`, `"min:N"`, `"max:N"`, `"ratio:N/M"`, or long table form.
+---@field height? integer | string | table Overlay height constraint. Same vocabulary as `width`.
+---@field max_width? integer | string | table Optional upper bound applied after width resolves.
+---@field max_height? integer | string | table Optional upper bound applied after height resolves.
+---@field min_width? integer | string | table Optional lower bound applied after width resolves.
+---@field min_height? integer | string | table Optional lower bound applied after height resolves.
+---@field modal? boolean Whether the overlay blocks input behind it. Defaults to true.
+---@field blocks_agent? boolean Whether the overlay should block agent progress while open.
+---@field z? integer Z-index. Higher overlays render above lower overlays.
+---@field draggable? boolean | smelt.overlay.DragConfig Enable or configure mouse dragging.
+---@field resizable? boolean | smelt.overlay.ResizeConfig Enable or configure mouse resize handles.
+---@field keymaps? smelt.overlay.Keymap[] Overlay-scoped key bindings.
 
 --- Overlay handle returned by `smelt.overlay.new(opts)`.
 ---@class smelt.overlay.Overlay
@@ -298,6 +372,12 @@
 ---@field set fun(row: integer, col: integer, ch: string, style: table?): nil Write a single character with optional style at (row, col).
 ---@field put_str fun(row: integer, col: integer, text: string, style: table?): nil Write a string with optional style at (row, col).
 ---@field fill_rect fun(row: integer, col: integer, w: integer, h: integer, ch: string?, style: table?): nil Fill a rectangle with an optional character and style.
+
+--- Current permission state returned by `smelt.permissions.list()`.
+---@class smelt.permissions.ListResult
+---@field session smelt.permissions.SessionEntry[] Session-scoped tool/pattern approvals for this run.
+---@field path_grants smelt.permissions.SessionPathGrant[] Session-scoped path grants for this run.
+---@field workspace smelt.permissions.WorkspaceRule[] Workspace rules loaded from the on-disk store rooted at the current cwd.
 
 --- Permission slots that apply within a single agent mode. The fixed `tools` key controls the tool itself; any additional key is treated as a subcommand bucket and routed through that tool's subpattern parser (e.g. `bash = { allow = { "git status" } }`).
 ---@class smelt.permissions.ModePerms
@@ -338,6 +418,34 @@
 ---@class smelt.permissions.WorkspaceRule
 ---@field tool string Tool name the rule applies to.
 ---@field patterns string[] Patterns granted for this tool.
+
+---@class smelt.picker.FuzzyOpts
+---@field items (string|smelt.picker.Item)[] Items to filter.
+---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Picker placement. Defaults to "prompt_docked" for this wrapper.
+---@field on_select? fun(item: smelt.picker.Item) Live selection callback.
+
+---@class smelt.picker.FuzzyResult
+---@field index integer 1-based accepted item index.
+---@field item smelt.picker.Item Accepted normalized item.
+---@field action string Accept action reported by the prompt picker.
+
+--- Row accepted by picker constructors. A bare string is also accepted and is treated as `{ label = string }`.
+---@class smelt.picker.Item
+---@field label string Primary text shown for this row.
+---@field description? string Secondary text shown next to the label.
+---@field prefix? string Small prefix rendered before the label.
+---@field ansi_color? integer ANSI color slot for the prefix.
+---@field label_color? integer ANSI color slot for the label.
+---@field search_terms? string[] Extra strings considered by fuzzy pickers.
+
+--- Options for the low-level non-blocking picker handle constructor.
+---@class smelt.picker.NewOpts
+---@field items (string | smelt.picker.Item)[] Initial picker rows. Must be non-empty.
+---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Where to place the picker. Defaults to `center`.
+
+---@class smelt.picker.OpenResult
+---@field index integer 1-based accepted item index.
+---@field item any Original item from `opts.items`.
 
 --- Picker handle returned by `smelt.picker.new(opts)`. Setter methods return the same handle for chaining.
 ---@class smelt.picker.Picker
@@ -412,6 +520,24 @@
 ---@field thinking_budgets? table Per-level token budgets for budget-based thinking.
 ---@field context_window? integer Total context window, in tokens.
 ---@field supports_reasoning? boolean Whether this model supports reasoning/thinking parameters.
+
+--- Options for `smelt.render.diff_split`.
+---@class smelt.render.DiffSplitOpts
+---@field old? string Left/pre-edit text.
+---@field new? string Right/post-edit text.
+---@field lang? string Syntax language token such as `"rust"`, `"lua"`, or `"py"`.
+---@field path? string Path whose extension is used when `lang` is omitted.
+
+--- Options for `smelt.render.syntax`.
+---@class smelt.render.SyntaxOpts
+---@field content? string Source code to render.
+---@field lang? string Syntax language token such as `"rust"`, `"lua"`, or `"py"`.
+---@field path? string Path whose extension is used when `lang` is omitted.
+
+--- Options for `smelt.render.text`.
+---@class smelt.render.TextOpts
+---@field hl_group? string Highlight group applied to the whole block. When omitted, text renders dim.
+---@field width? integer Wrapping width in terminal cells. Defaults to the current terminal width.
 
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 ---@class smelt.theme.ColorDecl
@@ -503,6 +629,14 @@
 ---@field surface string Rendering surface name, currently `"transcript"`.
 ---@field limits table Numeric product row budgets such as `tool_output_rows`.
 
+---@class smelt.transcript.Group
+---@field id? integer Stable render-plan group id.
+---@field name? string Group spec name.
+---@field title? string Optional display title.
+---@field view_state? string Current group view state.
+---@field children? smelt.transcript.Block[] Child block snapshots.
+---@field blocks? smelt.transcript.Block[] Legacy alias for `children`.
+
 --- Group selector declared through `smelt.transcript.groups.register`.
 ---@class smelt.transcript.GroupSelector
 ---@field kind? string Match block kind.
@@ -541,6 +675,11 @@
 ---@field content string Captured output text.
 ---@field is_error boolean True when the tool result is an error.
 ---@field metadata? table Tool-specific structured metadata.
+
+--- Terminal size in cells.
+---@class smelt.ui.Size
+---@field width integer Terminal width in cells.
+---@field height integer Terminal height in cells.
 
 --- Shareable natural-size handle returned by `smelt.ui.layout.measure`.
 ---@class smelt.ui.layout.Measure

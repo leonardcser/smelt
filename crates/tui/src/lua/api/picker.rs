@@ -7,8 +7,53 @@
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, Tier};
-use smelt_core::lua::lua_type::{LuaClassDecl, LuaType};
+use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
+
+/// Options accepted by `smelt.picker.new(opts)`.
+struct LuaPickerNewOpts(mlua::Table);
+
+impl LuaType for LuaPickerNewOpts {
+    fn lua_type() -> String {
+        record_class(LuaClassDecl {
+            name: "smelt.picker.Item",
+            doc: "Row accepted by picker constructors. A bare string is also accepted and is treated as `{ label = string }`.",
+            fields: vec![
+                LuaClassField { name: "label", ty: "string".into(), optional: false, doc: "Primary text shown for this row." },
+                LuaClassField { name: "description", ty: "string".into(), optional: true, doc: "Secondary text shown next to the label." },
+                LuaClassField { name: "prefix", ty: "string".into(), optional: true, doc: "Small prefix rendered before the label." },
+                LuaClassField { name: "ansi_color", ty: "integer".into(), optional: true, doc: "ANSI color slot for the prefix." },
+                LuaClassField { name: "label_color", ty: "integer".into(), optional: true, doc: "ANSI color slot for the label." },
+                LuaClassField { name: "search_terms", ty: "string[]".into(), optional: true, doc: "Extra strings considered by fuzzy pickers." },
+            ],
+        });
+        record_class(LuaClassDecl {
+            name: "smelt.picker.NewOpts",
+            doc: "Options for the low-level non-blocking picker handle constructor.",
+            fields: vec![
+                LuaClassField {
+                    name: "items",
+                    ty: "(string | smelt.picker.Item)[]".into(),
+                    optional: false,
+                    doc: "Initial picker rows. Must be non-empty.",
+                },
+                LuaClassField {
+                    name: "placement",
+                    ty: "\"center\"|\"bottom\"|\"cursor\"|\"prompt_docked\"".into(),
+                    optional: true,
+                    doc: "Where to place the picker. Defaults to `center`.",
+                },
+            ],
+        });
+        "smelt.picker.NewOpts".into()
+    }
+}
+
+impl FromLua for LuaPickerNewOpts {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> LuaResult<Self> {
+        Ok(Self(mlua::Table::from_lua(value, lua)?))
+    }
+}
 
 /// Lua-side handle for a picker. Backed by a `WinId` - the picker is
 /// just a list-style win wrapped in an overlay, so methods delegate to
@@ -130,8 +175,8 @@ The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `s
         "new",
         "Open a picker overlay and return a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.",
         &["opts"],
-        |_, opts: mlua::Table| -> LuaResult<LuaPicker> {
-            let win = crate::lua::with_app(|app| crate::lua::ui_ops::open_picker(app, opts))
+        |_, (opts,): (LuaPickerNewOpts,)| -> LuaResult<LuaPicker> {
+            let win = crate::lua::with_app(|app| crate::lua::ui_ops::open_picker(app, opts.0))
                 .map_err(|e| LuaError::RuntimeError(format!("picker: {e}")))?;
             Ok(LuaPicker { win })
         },

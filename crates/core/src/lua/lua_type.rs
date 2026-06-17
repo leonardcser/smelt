@@ -329,7 +329,12 @@ impl<P: LuaTypeTuple, R: LuaType> LuaTypeTuple for LuaCallback<P, R> {
 
 impl LuaType for crate::lua::api::layout::LuaBlockLayout {
     fn lua_type() -> String {
-        "table".into()
+        crate::lua::doc::record_class(LuaClassDecl {
+            name: "smelt.layout.Node",
+            doc: "Opaque block-layout node returned by `smelt.layout.*` constructors and accepted by transcript renderers, tool previews, and other content-layout APIs.",
+            fields: Vec::new(),
+        });
+        "smelt.layout.Node".into()
     }
 }
 

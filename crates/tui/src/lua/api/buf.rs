@@ -9,7 +9,7 @@ use crate::lua::LuaShared;
 use lua_doc_derive::{LuaAlias, LuaOpts};
 use mlua::prelude::*;
 use smelt_core::lua::doc::{record_class, Tier};
-use smelt_core::lua::lua_type::{LuaClassDecl, LuaType};
+use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
@@ -157,6 +157,69 @@ pub struct LuaMarkOpts {
     pub selectable: Option<bool>,
     /// Override the yanked string when the user copies this range.
     pub yank_as: Option<String>,
+}
+
+/// Options accepted by `smelt.buf.new(opts?)`.
+struct LuaBufNewOpts(mlua::Table);
+
+impl LuaType for LuaBufNewOpts {
+    fn lua_type() -> String {
+        record_class(LuaClassDecl {
+            name: "smelt.buf.NewOpts",
+            doc: "Options for `smelt.buf.new(opts?)`. Named buffers survive `/reload`; anonymous buffers are reaped.",
+            fields: vec![
+                LuaClassField {
+                    name: "name",
+                    ty: "string".into(),
+                    optional: true,
+                    doc: "Stable name used to reuse this buffer across `/reload`.",
+                },
+                LuaClassField {
+                    name: "readonly",
+                    ty: "boolean".into(),
+                    optional: true,
+                    doc: "When true, UI editing operations cannot mutate the buffer.",
+                },
+                LuaClassField {
+                    name: "editable",
+                    ty: "boolean".into(),
+                    optional: true,
+                    doc: "Enable undo history for plugin-managed editable buffers.",
+                },
+                LuaClassField {
+                    name: "undo",
+                    ty: "integer".into(),
+                    optional: true,
+                    doc: "Undo history entry limit when `editable = true` (defaults to 100).",
+                },
+                LuaClassField {
+                    name: "mode",
+                    ty: "\"plain\"|\"markdown\"|\"md\"|\"code\"".into(),
+                    optional: true,
+                    doc: "Attach a parser-backed renderer to the buffer.",
+                },
+                LuaClassField {
+                    name: "lang",
+                    ty: "string".into(),
+                    optional: true,
+                    doc: "Syntax language token required by `mode = \"code\"`.",
+                },
+                LuaClassField {
+                    name: "diff_base",
+                    ty: "string".into(),
+                    optional: true,
+                    doc: "When `mode = \"code\"`, render the buffer source as an inline diff against this base text.",
+                },
+            ],
+        });
+        "smelt.buf.NewOpts".into()
+    }
+}
+
+impl FromLua for LuaBufNewOpts {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> LuaResult<Self> {
+        Ok(Self(mlua::Table::from_lua(value, lua)?))
+    }
 }
 
 /// Lua-side handle for a `BufId`. Methods on this userdata are the
@@ -387,9 +450,10 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
             "new",
             "Create a buffer and return a `Buf` userdata. `opts.name` opts the buffer into hot-reload survival. Repeat calls with the same name return the same handle with mutable opts re-applied. When omitted from a module body, a stable per-(plugin, declaration-index) name is auto-assigned so the buffer survives `/reload` without explicit naming.",
             &["opts"],
-            move |lua, opts: Option<mlua::Table>| -> LuaResult<LuaBuf> {
+            move |lua, opts: Option<LuaBufNewOpts>| -> LuaResult<LuaBuf> {
                 // Auto-name from active plugin scope when caller didn't.
-                if let Some(ref tbl) = opts {
+                if let Some(ref opts) = opts {
+                    let tbl = &opts.0;
                     let has_name = tbl
                         .get::<Option<String>>("name")
                         .ok()
@@ -408,13 +472,13 @@ UiHost-only - buffers are terminal-screen backing stores that windows render int
                         if let Some(auto) = crate::lua::auto_name_for_scope(lua, "buf") {
                             let t = lua.create_table()?;
                             t.set("name", auto)?;
-                            Some(t)
+                            Some(LuaBufNewOpts(t))
                         } else {
                             None
                         }
                     }
                 };
-                let id = create_or_open(&s, opts.as_ref())?;
+                let id = create_or_open(&s, opts.as_ref().map(|opts| &opts.0))?;
                 Ok(LuaBuf { id })
             },
         )?;

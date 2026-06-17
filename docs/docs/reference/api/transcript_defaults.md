@@ -4,89 +4,109 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Bundled default transcript renderers. These are ordinary Lua helpers used by the default root renderer and available for user renderers to call or compose.
+Bundled default transcript renderers. These are ordinary Lua helpers used by the
+default root renderer and available for user renderers to call or compose.
 
 ## `smelt.transcript.defaults.child_failed`
 
 ```lua
-fun(child: table): boolean
+fun(child: smelt.transcript.Block): boolean
 ```
+
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock)
 
 True when a grouped child represents a failed or denied tool result.
 
 ## `smelt.transcript.defaults.group_children`
 
 ```lua
-fun(group: table): table
+fun(group: smelt.transcript.Group): smelt.transcript.Block[]
 ```
+
+Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup),
+[`smelt.transcript.Block`](types.md#smelttranscriptblock)
 
 Return child snapshots for a transcript group snapshot.
 
 ## `smelt.transcript.defaults.group_failure_counts`
 
 ```lua
-fun(group: table): integer, integer
+fun(group: smelt.transcript.Group): integer, integer
 ```
+
+Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup)
 
 Count failed and denied tool children in a transcript group snapshot.
 
 ## `smelt.transcript.defaults.render`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render any semantic transcript block with the bundled default policy.
 
 ## `smelt.transcript.defaults.render_assistant`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render assistant text.
 
 ## `smelt.transcript.defaults.render_code`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a code block with syntax highlighting.
 
 ## `smelt.transcript.defaults.render_compacted`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a compacted-history marker.
 
 ## `smelt.transcript.defaults.render_exec`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render an exec block.
 
 ## `smelt.transcript.defaults.render_group_child_list`
 
 ```lua
-fun(group: table, ctx: smelt.transcript.Context, opts: table?): table
+fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a compact ordered child list for collapsed group nodes. Failed children
 stay in place and use a plain error highlight; expand the group for details.
@@ -94,90 +114,109 @@ stay in place and use a plain error highlight; expand the group for details.
 ## `smelt.transcript.defaults.render_group_children`
 
 ```lua
-fun(group: table, ctx: smelt.transcript.Context): table
+fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render all group children through the bundled default block renderer.
 
 ## `smelt.transcript.defaults.render_mode`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a mode note.
 
 ## `smelt.transcript.defaults.render_process_status`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a process-status note.
 
 ## `smelt.transcript.defaults.render_thinking`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render thinking for the current transcript view state.
 
 ## `smelt.transcript.defaults.render_thinking_full`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render the full thinking block with the current gutter.
 
 ## `smelt.transcript.defaults.render_thinking_peek`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Render a compact live preview of thinking: first rendered row, omitted rows, tail.
+Render a compact live preview of thinking: first rendered row, omitted rows,
+tail.
 
 ## `smelt.transcript.defaults.render_thinking_summary`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a compact thinking summary.
 
 ## `smelt.transcript.defaults.render_tool`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a tool block for the current transcript view state.
 
 ## `smelt.transcript.defaults.render_tool_body`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table?
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node?
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a tool body. Raw output is capped by the safe tail-output helper;
 structured renderers are guttered but otherwise left uncapped.
@@ -185,10 +224,12 @@ structured renderers are guttered but otherwise left uncapped.
 ## `smelt.transcript.defaults.render_tool_full`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a full tool block using the current generic primitives and explicit item
 construction.
@@ -196,32 +237,38 @@ construction.
 ## `smelt.transcript.defaults.render_tool_header`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render the default one-line tool header.
 
 ## `smelt.transcript.defaults.render_tool_output`
 
 ```lua
-fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table
+fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.ToolOutput`](types.md#smelttranscripttooloutput), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.ToolOutput`](types.md#smelttranscripttooloutput),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render raw tool output using generic layout primitives: text, gutter, and a
-rendered-row cap. Error output uses `ErrorMsg`; success output remains dimmed
-by the text primitive's no-highlight fallback.
+rendered-row cap. Error output uses `ErrorMsg`; success output remains dimmed by
+the text primitive's no-highlight fallback.
 
 ## `smelt.transcript.defaults.render_tool_output_tail`
 
 ```lua
-fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table
+fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.ToolOutput`](types.md#smelttranscripttooloutput), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.ToolOutput`](types.md#smelttranscripttooloutput),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render raw tool output without gutter using generic layout primitives: text and
 a rendered-row cap. Body renderers use this for expanded/tail previews.
@@ -229,42 +276,50 @@ a rendered-row cap. Body renderers use this for expanded/tail previews.
 ## `smelt.transcript.defaults.render_tool_summary`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render a compact tool summary: header plus an optional detail line.
 
 ## `smelt.transcript.defaults.render_unknown`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render unknown block kinds without failing the transcript.
 
 ## `smelt.transcript.defaults.render_user`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Render a user block. Custom renderers can layer richer panel/text
-annotations; the bundled default keeps the same full-width prompt chrome as
-the Rust renderer while leaving the content policy in Lua.
+Render a user block. Custom renderers can layer richer panel/text annotations;
+the bundled default keeps the same full-width prompt chrome as the Rust renderer
+while leaving the content policy in Lua.
 
 ## `smelt.transcript.defaults.render_user_text`
 
 ```lua
-fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
+fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext),
+[`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render user text.
 
@@ -274,7 +329,7 @@ Render user text.
 fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): string?
 ```
 
-Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext)
+Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock),
+[`smelt.transcript.Context`](types.md#smelttranscriptcontext)
 
 Return a compact tool detail for collapsed tool blocks.
-

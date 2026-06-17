@@ -8,7 +8,7 @@
 local render = {}
 
 --- Paint a side-by-side diff between `opts.old` and `opts.new` into two buffers. Both buffers end up with the same row count; synthetic padding rows align them. Pick syntax via `opts.lang` or `opts.path`.
----@type fun(left: smelt.buf.Buf, right: smelt.buf.Buf, opts: table): nil
+---@type fun(left: smelt.buf.Buf, right: smelt.buf.Buf, opts: smelt.render.DiffSplitOpts): nil
 render.diff_split = nil
 
 --- Render markdown `source` into the buffer using the same renderer the transcript uses for assistant text blocks.
@@ -16,11 +16,11 @@ render.diff_split = nil
 render.markdown = nil
 
 --- Paint syntect-highlighted code from `opts.content` into the buffer as a plain block. Pick syntax via `opts.lang` or `opts.path`. Unknown languages fall back to plain text.
----@type fun(buf: smelt.buf.Buf, opts: table): nil
+---@type fun(buf: smelt.buf.Buf, opts: smelt.render.SyntaxOpts): nil
 render.syntax = nil
 
 --- Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = "ErrorMsg"` for errors, `"SmeltAccent"` for accent, or any registered theme group; the mapping is the caller's choice, not the renderer's. `opts.width` overrides the wrapping width for tool layouts rendered into narrower panes.
----@type fun(buf: smelt.buf.Buf, content: string, opts: table?): nil
+---@type fun(buf: smelt.buf.Buf, content: string, opts: smelt.render.TextOpts?): nil
 render.text = nil
 
 return render

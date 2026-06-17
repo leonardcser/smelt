@@ -15,6 +15,7 @@ use crate::content::highlight::{
 };
 use crate::content::to_buffer::render_into_buffer;
 use crate::smelt_edit::BufId;
+use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
 use smelt_core::content::highlight::SplitSide;
 use smelt_core::lua::doc::Tier;
@@ -22,6 +23,45 @@ use smelt_core::lua::module::LuaMod;
 use smelt_core::theme::intern;
 
 use super::buf::LuaBuf;
+
+/// Options for `smelt.render.text`.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.render.TextOpts")]
+pub struct LuaRenderTextOpts {
+    /// Highlight group applied to the whole block. When omitted, text renders dim.
+    pub hl_group: Option<String>,
+    /// Wrapping width in terminal cells. Defaults to the current terminal width.
+    pub width: Option<u16>,
+}
+
+/// Options for `smelt.render.syntax`.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.render.SyntaxOpts")]
+pub struct LuaRenderSyntaxOpts {
+    /// Source code to render.
+    #[lua(default)]
+    pub content: String,
+    /// Syntax language token such as `"rust"`, `"lua"`, or `"py"`.
+    pub lang: Option<String>,
+    /// Path whose extension is used when `lang` is omitted.
+    pub path: Option<String>,
+}
+
+/// Options for `smelt.render.diff_split`.
+#[derive(Default, Debug, LuaOpts)]
+#[lua(name = "smelt.render.DiffSplitOpts")]
+pub struct LuaRenderDiffSplitOpts {
+    /// Left/pre-edit text.
+    #[lua(default)]
+    pub old: String,
+    /// Right/post-edit text.
+    #[lua(default)]
+    pub new: String,
+    /// Syntax language token such as `"rust"`, `"lua"`, or `"py"`.
+    pub lang: Option<String>,
+    /// Path whose extension is used when `lang` is omitted.
+    pub path: Option<String>,
+}
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
@@ -36,21 +76,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "text",
         "Paint plain text into a buffer. With no `opts.hl_group`, text renders as dim body. Pass `opts.hl_group = \"ErrorMsg\"` for errors, `\"SmeltAccent\"` for accent, or any registered theme group; the mapping is the caller's choice, not the renderer's. `opts.width` overrides the wrapping width for tool layouts rendered into narrower panes.",
         &["buf", "content", "opts"],
-        |_, (buf, content, opts): (LuaBuf, String, Option<mlua::Table>)| -> LuaResult<()> {
-            let hl_group = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<String>>("hl_group").ok().flatten());
-            let width_opt = opts
-                .as_ref()
-                .and_then(|t| t.get::<u16>("width").ok())
-                .filter(|w| *w > 0);
+        |_, (buf, content, opts): (LuaBuf, String, Option<LuaRenderTextOpts>)| -> LuaResult<()> {
+            let hl_group = opts.as_ref().and_then(|opts| opts.hl_group.as_deref());
+            let width_opt = opts.as_ref().and_then(|opts| opts.width).filter(|w| *w > 0);
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
                 let width = width_opt.unwrap_or_else(|| crate::content::term_width() as u16);
                 if let Some(buf) = app.ui.buf_mut(buf.id) {
                     render_into_buffer(buf, width, &theme_snap, |sink| {
                         let max_cols = (width as usize).saturating_sub(3);
-                        let hl = hl_group.as_deref().map(intern);
+                        let hl = hl_group.map(intern);
                         match hl {
                             Some(g) => sink.push_hl(g),
                             None => sink.push_dim(),
@@ -106,10 +141,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "syntax",
         "Paint syntect-highlighted code from `opts.content` into the buffer as a plain block. Pick syntax via `opts.lang` or `opts.path`. Unknown languages fall back to plain text.",
         &["buf", "opts"],
-        |_, (buf, opts): (LuaBuf, mlua::Table)| -> LuaResult<()> {
-            let content: String = opts.get::<Option<String>>("content")?.unwrap_or_default();
-            let lang: Option<String> = opts.get::<Option<String>>("lang")?;
-            let path: Option<String> = opts.get::<Option<String>>("path")?;
+        |_, (buf, opts): (LuaBuf, LuaRenderSyntaxOpts)| -> LuaResult<()> {
+            let content = opts.content;
+            let lang = opts.lang;
+            let path = opts.path;
             crate::lua::with_app(|app| {
                 let theme_snap = app.ui.theme().clone();
                 let width = crate::content::term_width() as u16;
@@ -133,11 +168,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "diff_split",
         "Paint a side-by-side diff between `opts.old` and `opts.new` into two buffers. Both buffers end up with the same row count; synthetic padding rows align them. Pick syntax via `opts.lang` or `opts.path`.",
         &["left", "right", "opts"],
-        |_, (left, right, opts): (LuaBuf, LuaBuf, mlua::Table)| -> LuaResult<()> {
-            let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
-            let new: String = opts.get::<Option<String>>("new")?.unwrap_or_default();
-            let lang: Option<String> = opts.get::<Option<String>>("lang")?;
-            let path: Option<String> = opts.get::<Option<String>>("path")?;
+        |_, (left, right, opts): (LuaBuf, LuaBuf, LuaRenderDiffSplitOpts)| -> LuaResult<()> {
+            let old = opts.old;
+            let new = opts.new;
+            let lang = opts.lang;
+            let path = opts.path;
             let ext: Option<String> = lang.as_deref().map(|l| lang_to_ext(l).to_string()).or_else(
                 || {
                     path.as_deref()

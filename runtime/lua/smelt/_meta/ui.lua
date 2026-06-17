@@ -8,7 +8,7 @@
 local ui = {}
 
 --- Return the current terminal size as `{ width, height }` in cells. Useful for choosing between compact and wide overlay layouts without relying on any particular window's current rect.
----@type fun(): table
+---@type fun(): smelt.ui.Size
 ui.size = nil
 
 return ui

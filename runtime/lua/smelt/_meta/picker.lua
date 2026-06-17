@@ -14,11 +14,11 @@ local picker = {}
 ---   • `opts.on_select(item)` - fires on navigation
 ---   • `opts.placement` - defaults to "prompt_docked"
 ---@see smelt.fuzzy.rank
----@type fun(opts: table): { index: integer, item: table, action: string }?
+---@type fun(opts: smelt.picker.FuzzyOpts): smelt.picker.FuzzyResult?
 picker.fuzzy = nil
 
 --- Open a picker overlay and return a `Picker` userdata. The picker is non-blocking; the yield-until-pick wrapper lives in pure Lua as `smelt.picker.choose(opts)`.
----@type fun(opts: table): smelt.picker.Picker
+---@type fun(opts: smelt.picker.NewOpts): smelt.picker.Picker
 picker.new = nil
 
 --- Open a floating picker over `opts.items` and yield until the user
@@ -27,7 +27,7 @@ picker.new = nil
 --- Esc dismisses. Returns `{ index, item }` on accept or `nil` on
 --- dismiss. Must run inside a `smelt.spawn` (or tool execute) frame.
 ---@see smelt.picker.new
----@type fun(opts: table): { index: integer, item: any }?
+---@type fun(opts: smelt.picker.NewOpts): smelt.picker.OpenResult?
 picker.open = nil
 
 return picker

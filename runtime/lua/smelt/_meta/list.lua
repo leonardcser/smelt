@@ -17,7 +17,7 @@ local list = {}
 --- `:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
 --- `:set_cursor`, `:move_cursor`. See the header docstring for the full
 --- usage shape.
----@type fun(opts: smelt.list.Opts): table
+---@type fun(opts: smelt.list.Opts): smelt.list.List
 list.new = nil
 
 return list

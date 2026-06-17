@@ -7,12 +7,16 @@
 
 local M = {}
 
+---@class smelt.picker.OpenResult
+---@field index integer 1-based accepted item index.
+---@field item any Original item from `opts.items`.
+
 -- Open a floating picker over `opts.items` and yield until the user
 -- accepts or dismisses. `opts` is forwarded to `smelt.picker.new` for
 -- placement / styling; up/down/ctrl-j/k/p/n navigate, Enter resolves,
 -- Esc dismisses. Returns `{ index, item }` on accept or `nil` on
 -- dismiss. Must run inside a `smelt.spawn` (or tool execute) frame.
----@type fun(opts: table): { index: integer, item: any }?
+---@type fun(opts: smelt.picker.NewOpts): smelt.picker.OpenResult?
 function smelt.picker.open(opts)
   if not coroutine.isyieldable() then
     error("smelt.picker.open: call from inside smelt.spawn(fn) or tool.execute", 2)

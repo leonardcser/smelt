@@ -11,7 +11,7 @@ local overlay = {}
 ---@see smelt.ui.layout
 ---@see smelt.overlay.DragConfig
 ---@see smelt.overlay.ResizeConfig
----@type fun(opts: table): smelt.overlay.Overlay
+---@type fun(opts: smelt.overlay.NewOpts): smelt.overlay.Overlay
 overlay.new = nil
 
 return overlay

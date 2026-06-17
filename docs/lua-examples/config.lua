@@ -2,14 +2,14 @@
 -- Copy into ~/.config/smelt/init.lua (or dofile this from there).
 
 -- Optional bundled plugins (uncomment to enable).
--- require("smelt.plugins.background_commands")  -- experimental: bash run_in_background, /ps
+-- require("smelt.plugins.which_key")
+-- require("smelt.plugins.inspect")
 
 -- Providers
 smelt.provider.register("ollama", {
   type = "openai-compatible",
   api_base = "http://localhost:11434/v1",
   models = {
-    "glm-5",
     { name = "qwen3.6:27b", temperature = 0.8, top_p = 0.95 },
   },
 })

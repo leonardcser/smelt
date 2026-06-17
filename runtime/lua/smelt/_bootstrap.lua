@@ -360,13 +360,23 @@ end
 -- Picker depends on `smelt.prompt.open_picker` (UiHost tier). Only
 -- attach the convenience wrapper when the prompt namespace is present.
 if smelt.picker and smelt.prompt and smelt.prompt.open_picker then
+  ---@class smelt.picker.FuzzyOpts
+  ---@field items (string|smelt.picker.Item)[] Items to filter.
+  ---@field placement? "center"|"bottom"|"cursor"|"prompt_docked" Picker placement. Defaults to "prompt_docked" for this wrapper.
+  ---@field on_select? fun(item: smelt.picker.Item) Live selection callback.
+
+  ---@class smelt.picker.FuzzyResult
+  ---@field index integer 1-based accepted item index.
+  ---@field item smelt.picker.Item Accepted normalized item.
+  ---@field action string Accept action reported by the prompt picker.
+
   -- Fuzzy-finder picker. Filters `opts.items` against the prompt input on every
   -- keystroke, ranked by `smelt.fuzzy.rank`. Accepts string items or
   -- `{ label, description?, ansi_color?, search_terms? }` records. Returns
   -- `{ index, item, action }` on accept or `nil` on dismiss.
   --   • `opts.on_select(item)` - fires on navigation
   --   • `opts.placement` - defaults to "prompt_docked"
-  ---@type fun(opts: table): { index: integer, item: table, action: string }?
+  ---@type fun(opts: smelt.picker.FuzzyOpts): smelt.picker.FuzzyResult?
   function smelt.picker.fuzzy(opts)
     if type(opts) ~= "table" then
       error("smelt.picker.fuzzy: expected table of options", 2)

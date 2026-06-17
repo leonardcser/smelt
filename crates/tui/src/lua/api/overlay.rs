@@ -15,6 +15,76 @@ use std::sync::Arc;
 
 use crate::lua::{parse_keybind, LuaShared};
 
+/// Options accepted by `smelt.overlay.new(opts)`.
+struct LuaOverlayNewOpts(mlua::Table);
+
+impl LuaType for LuaOverlayNewOpts {
+    fn lua_type() -> String {
+        record_class(LuaClassDecl {
+            name: "smelt.overlay.Keymap",
+            doc: "One overlay-scoped key binding installed by `smelt.overlay.new({ keymaps = ... })`.",
+            fields: vec![
+                LuaClassField {
+                    name: "key",
+                    ty: "string".into(),
+                    optional: false,
+                    doc: "Key chord such as `<Esc>`, `<C-j>`, or `q`.",
+                },
+                LuaClassField {
+                    name: "on_press",
+                    ty: "fun(ctx: table)".into(),
+                    optional: false,
+                    doc: "Handler invoked when the key fires while any overlay leaf has focus.",
+                },
+                LuaClassField {
+                    name: "hint",
+                    ty: "string".into(),
+                    optional: true,
+                    doc: "Human-readable hint for key-discovery plugins.",
+                },
+            ],
+        });
+        record_class(LuaClassDecl {
+            name: "smelt.overlay.NewOpts",
+            doc: "Options for `smelt.overlay.new(opts)`. The overlay body comes from a `smelt.ui.layout` tree.",
+            fields: vec![
+                LuaClassField { name: "layout", ty: "smelt.ui.layout".into(), optional: false, doc: "Layout tree to render inside the overlay." },
+                LuaClassField { name: "name", ty: "string".into(), optional: true, doc: "Stable name used to hot-reload this overlay in place." },
+                LuaClassField { name: "title", ty: "string | table".into(), optional: true, doc: "Optional title rendered in the overlay border." },
+                LuaClassField { name: "border", ty: "table".into(), optional: true, doc: "Border style override; parsed with the shared border vocabulary." },
+                LuaClassField { name: "anchor", ty: "\"dock_bottom\"|\"dock_top\"|\"dock_left\"|\"dock_right\"|\"center\"|\"screen_at\"|\"win\"".into(), optional: true, doc: "Where to place the overlay. Defaults to `dock_bottom`." },
+                LuaClassField { name: "above_rows", ty: "integer".into(), optional: true, doc: "Rows to keep clear above the bottom dock, typically the statusline height." },
+                LuaClassField { name: "target", ty: "smelt.win.Win | integer".into(), optional: true, doc: "Target window for `anchor = \"win\"`." },
+                LuaClassField { name: "attach", ty: "string".into(), optional: true, doc: "Alignment point for `anchor = \"win\"` such as `nw`, `center`, or `se`." },
+                LuaClassField { name: "row", ty: "integer".into(), optional: true, doc: "Screen row offset for `anchor = \"screen_at\"`." },
+                LuaClassField { name: "col", ty: "integer".into(), optional: true, doc: "Screen column offset for `anchor = \"screen_at\"`." },
+                LuaClassField { name: "row_offset", ty: "integer".into(), optional: true, doc: "Row offset for `anchor = \"win\"`." },
+                LuaClassField { name: "col_offset", ty: "integer".into(), optional: true, doc: "Column offset for `anchor = \"win\"`." },
+                LuaClassField { name: "corner", ty: "string".into(), optional: true, doc: "Corner used by `anchor = \"screen_at\"` (`nw`, `ne`, `sw`, or `se`)." },
+                LuaClassField { name: "width", ty: "integer | string | table".into(), optional: true, doc: "Overlay width constraint. Accepts cells, `\"N%\"`, `\"fit\"`, `\"fill\"`, `\"min:N\"`, `\"max:N\"`, `\"ratio:N/M\"`, or long table form." },
+                LuaClassField { name: "height", ty: "integer | string | table".into(), optional: true, doc: "Overlay height constraint. Same vocabulary as `width`." },
+                LuaClassField { name: "max_width", ty: "integer | string | table".into(), optional: true, doc: "Optional upper bound applied after width resolves." },
+                LuaClassField { name: "max_height", ty: "integer | string | table".into(), optional: true, doc: "Optional upper bound applied after height resolves." },
+                LuaClassField { name: "min_width", ty: "integer | string | table".into(), optional: true, doc: "Optional lower bound applied after width resolves." },
+                LuaClassField { name: "min_height", ty: "integer | string | table".into(), optional: true, doc: "Optional lower bound applied after height resolves." },
+                LuaClassField { name: "modal", ty: "boolean".into(), optional: true, doc: "Whether the overlay blocks input behind it. Defaults to true." },
+                LuaClassField { name: "blocks_agent", ty: "boolean".into(), optional: true, doc: "Whether the overlay should block agent progress while open." },
+                LuaClassField { name: "z", ty: "integer".into(), optional: true, doc: "Z-index. Higher overlays render above lower overlays." },
+                LuaClassField { name: "draggable", ty: "boolean | smelt.overlay.DragConfig".into(), optional: true, doc: "Enable or configure mouse dragging." },
+                LuaClassField { name: "resizable", ty: "boolean | smelt.overlay.ResizeConfig".into(), optional: true, doc: "Enable or configure mouse resize handles." },
+                LuaClassField { name: "keymaps", ty: "smelt.overlay.Keymap[]".into(), optional: true, doc: "Overlay-scoped key bindings." },
+            ],
+        });
+        "smelt.overlay.NewOpts".into()
+    }
+}
+
+impl FromLua for LuaOverlayNewOpts {
+    fn from_lua(value: mlua::Value, lua: &Lua) -> LuaResult<Self> {
+        Ok(Self(mlua::Table::from_lua(value, lua)?))
+    }
+}
+
 /// Lua-side handle for an `OverlayId`.
 #[derive(Clone, Copy, Debug)]
 pub struct LuaOverlay {
@@ -172,7 +242,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "new",
         "Open an overlay rendered from `opts.layout` (a `smelt.ui.layout` userdata) and return an `Overlay` userdata. `opts.name` opts the overlay into hot-reload survival. `opts.width` and `opts.height` size the overlay rect (per axis) using the same constraint vocabulary as `layout.vbox`/`hbox` slots - integer cells, `\"N%\"`, `\"fit\"` (default; read the layout's natural size), `\"fill\"`, `\"max:N\"`, etc. `opts.max_width`/`opts.max_height` cap the resolved size from above; `opts.min_width`/`opts.min_height` floor it from below - pair either with `\"fit\"` to express \"shrink to content, clamped between floor and cap\". `opts.draggable` accepts a boolean or `smelt.overlay.DragConfig`; `opts.resizable` accepts a boolean or `smelt.overlay.ResizeConfig`. `opts.keymaps` (list of `{key, on_press, hint?}`) installs overlay-scoped bindings.",
         &["opts"],
-        |lua, opts: mlua::Table| -> LuaResult<LuaOverlay> {
+        |lua, (opts,): (LuaOverlayNewOpts,)| -> LuaResult<LuaOverlay> {
+            let opts = opts.0;
             let keymaps: Option<mlua::Table> = opts.get("keymaps").ok().flatten();
             // Auto-name overlays declared without `opts.name` inside a
             // module body so they survive `/reload` keyed by their

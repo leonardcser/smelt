@@ -2,7 +2,7 @@
 
 Run the agent without the TUI for scripting and automation. Headless mode is
 useful in CI pipelines, pre-commit hooks, or any workflow where you want the
-agent to answer a single question and exit — no interactive prompt, no
+agent to answer a single question and exit, with no interactive prompt, no
 keyboard shortcuts, just stdout.
 
 ## Usage
@@ -22,7 +22,7 @@ smelt --headless "summarize @src/main.rs"
 ```
 
 Slash commands (`/resume`, `/clear`, etc.) are interactive-only and exit 1 with
-`"…" requires interactive mode`. The shell escape (`!cmd`) does work — it runs
+`"…" requires interactive mode`. The shell escape (`!cmd`) does work; it runs
 the command via `sh -c` and exits without calling the model.
 
 ## Provider and Model
@@ -62,14 +62,15 @@ mode.
 smelt --headless "summarize this repo"
 ```
 
-- **stdout** — the final assistant message (printed once the turn completes)
-- **stderr** — thinking, tool activity (one line per call: `✓ tool_name(args) (123ms)`), retries, token/cost summary, errors
+- **stdout**: the final assistant message (printed once the turn completes)
+- **stderr**: thinking, tool activity (one line per call:
+  `✓ tool_name(args) (123ms)`), retries, token/cost summary, errors
 
-Use `-v` / `--verbose` to include tool output on stderr.
+Use `--verbose` to include tool output on stderr.
 
 When both stdout and stderr are terminals (interactive use), the final message
 is printed to stderr so it appears alongside tool output. When either stream is
-piped or redirected, the final message goes to stdout — giving you a clean
+piped or redirected, the final message goes to stdout. This gives you a clean
 answer suitable for files or downstream commands.
 
 ### JSON
@@ -79,15 +80,16 @@ smelt --headless --format json "summarize this repo"
 ```
 
 Every engine event is emitted as one JSON object per line (JSONL) to stdout.
-Nothing else is written to stdout in this mode — no token summary, no final
+Nothing else is written to stdout in this mode: no token summary, no final
 message reprint. The stream ends after `TurnComplete` or `TurnError`.
 
 ## Permissions
 
 Headless mode never prompts:
 
-- **Yolo mode** (`--mode yolo`) — all permission requests are auto-approved
-- **Other modes** — permission requests are auto-denied; the tool call fails and the model has to recover
+- **Yolo mode** (`--mode yolo`): all permission requests are auto-approved
+- **Other modes**: permission requests are auto-denied; the tool call fails and
+  the model has to recover
 
 Default rules still apply, so read-only tools (`read_file`, `glob`, `grep`,
 allowed `bash` patterns) run silently in every mode. See
@@ -112,11 +114,11 @@ smelt --headless --color=always "fix the bug" 2>&1 | less -R
 
 ## Exit Codes
 
-| Code | Meaning                                                              |
-| ---- | -------------------------------------------------------------------- |
-| 0    | Turn completed (including `TurnError` in JSON mode — see the stream) |
-| 1    | Missing message, auth failure, slash command, or shell escape error  |
-| 130  | Interrupted by `SIGINT` / `SIGTERM` (Ctrl-C)                         |
+| Code | Meaning                                                             |
+| ---- | ------------------------------------------------------------------- |
+| 0    | Turn completed (including `TurnError` in JSON mode; see the stream) |
+| 1    | Missing message, auth failure, slash command, or shell escape error |
+| 130  | Interrupted by `SIGINT` / `SIGTERM` (Ctrl-C)                        |
 
 On interrupt, smelt sends a cancel to the engine and exits 130 once the current
 request unwinds.
@@ -124,7 +126,7 @@ request unwinds.
 ## Sessions
 
 Headless turns are one-shot. `--resume` is ignored, and the session is not
-persisted — there is no resume hint printed on exit. To chain turns, drive
+persisted, and there is no resume hint printed on exit. To chain turns, drive
 smelt from your script and feed prior context through the prompt.
 
 ## Examples

@@ -254,6 +254,33 @@ function List:move_cursor(delta)
   self:set_cursor(idx + delta)
 end
 
+---@class smelt.list.Mark
+---@field col? integer 0-based byte column for the mark.
+---@field opts? smelt.buf.MarkOpts Mark/highlight options.
+
+---@class smelt.list.Span
+---@field text string Span text.
+---@field style? table Highlight style passed through to `buf:styled`.
+---@field syntax? string Inline syntax token for this span.
+
+---@class smelt.list.Row
+---@field text? string Plain row text. Used when `spans` is omitted.
+---@field spans? smelt.list.Span[] Styled spans for the row.
+---@field marks? smelt.list.Mark[] Extmarks to apply after rendering.
+
+---@class smelt.list.List
+---@field refresh fun(self: smelt.list.List)
+---@field set_items fun(self: smelt.list.List, items: any[]?)
+---@field set_items_preserve fun(self: smelt.list.List, items: any[]?, key_fn: fun(item: any): any)
+---@field set_filter fun(self: smelt.list.List, fn: (fun(item: any): boolean)?)
+---@field set_render fun(self: smelt.list.List, fn: fun(item: any): smelt.list.Row)
+---@field visible fun(self: smelt.list.List): any[]
+---@field size fun(self: smelt.list.List): integer
+---@field selected_index fun(self: smelt.list.List): integer?
+---@field selected fun(self: smelt.list.List): any
+---@field set_cursor fun(self: smelt.list.List, i: integer)
+---@field move_cursor fun(self: smelt.list.List, delta: integer)
+
 --- Options accepted by `smelt.list.new`. `leaf` and `buf` are mandatory -
 --- they own the rendered selection cursor and the backing line buffer;
 --- the rest configure how data is sourced, filtered, and rendered.
@@ -261,7 +288,7 @@ end
 ---@field leaf smelt.win.Win Selectable list leaf (typically from `smelt.dialog.list`).
 ---@field buf smelt.buf.Buf Backing buffer that mirrors the rendered rows.
 ---@field items? any[] Initial item set. Mutate via `:set_items(...)` later if needed.
----@field render fun(item: any): table Returns `{ text, spans?, marks? }` per visible row.
+---@field render fun(item: any): smelt.list.Row Returns `{ text, spans?, marks? }` per visible row.
 ---@field filter? fun(item: any): boolean Predicate re-run on `:set_filter` / `:refresh`.
 ---@field empty_text? string Placeholder line shown when no row passes the filter.
 ---@field anchor? "top"|"bottom" Render short lists at the top or bottom of the viewport. Defaults to "top".
@@ -276,7 +303,7 @@ end
 -- `:set_items`, `:set_items_preserve`, `:set_filter`, `:refresh`,
 -- `:set_cursor`, `:move_cursor`. See the header docstring for the full
 -- usage shape.
----@type fun(opts: smelt.list.Opts): table
+---@type fun(opts: smelt.list.Opts): smelt.list.List
 function smelt.list.new(opts)
   if type(opts) ~= "table" then
     error("smelt.list.new: expected options table", 2)

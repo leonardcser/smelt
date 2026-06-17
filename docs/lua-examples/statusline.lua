@@ -12,11 +12,20 @@
 
 local statusline = require("smelt.statusline")
 
+local branch_cache = { at = 0, value = nil }
+
 local function git_branch()
+  local now = os.time()
+  if now - branch_cache.at < 2 then return branch_cache.value end
+  branch_cache.at = now
   local f = io.popen("git rev-parse --abbrev-ref HEAD 2>/dev/null")
-  if not f then return nil end
+  if not f then
+    branch_cache.value = nil
+    return nil
+  end
   local branch = f:read("*l")
   f:close()
+  branch_cache.value = branch
   return branch
 end
 

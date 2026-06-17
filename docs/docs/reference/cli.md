@@ -3,39 +3,52 @@
 ```
 smelt [MESSAGE]
 smelt auth
+smelt inspect [--session <ID_OR_PREFIX>] [--port <PORT>] [--open | --no-open]
 ```
 
 When a message is provided, it auto-submits on startup. Running with no
 arguments and no config file launches the interactive setup wizard.
 
-CLI flags always take precedence over config values.
+CLI flags always take precedence over config values. Runtime choices made inside
+the TUI, such as `/model`, are remembered for the next launch unless disabled
+with `smelt.remember(...)`.
 
 ## Subcommands
 
-| Subcommand   | Description                                                                          |
-| ------------ | ------------------------------------------------------------------------------------ |
-| `smelt auth` | Manage provider authentication (add providers, Codex or GitHub Copilot login/logout) |
+| Subcommand      | Description                                                                                         |
+| --------------- | --------------------------------------------------------------------------------------------------- |
+| `smelt auth`    | Provider picker for login/logout flows and API-key provider snippets                                |
+| `smelt inspect` | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
+
+`smelt inspect` options:
+
+| Flag                 | Description                                                         |
+| -------------------- | ------------------------------------------------------------------- |
+| `-s, --session <ID>` | Session id or prefix to open initially                              |
+| `--port <PORT>`      | Fixed loopback port to bind instead of an ephemeral port            |
+| `--open`             | Force opening a browser even when GUI auto-detection is unavailable |
+| `--no-open`          | Do not open a browser; only print the URL                           |
 
 ## Connection
 
-| Flag                  | Description                                                                                                                       |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `--config <PATH>`     | Path to a custom `init.lua`                                                                                                       |
-| `-m, --model <MODEL>` | Model to use. With configured providers, prefer `provider_name/model_name`; with `--api-base`, use the provider-native model name |
-| `--api-base <URL>`    | API base URL (overrides config)                                                                                                   |
-| `--api-key-env <VAR>` | Env var holding the API key                                                                                                       |
-| `--type <TYPE>`       | Provider type: `openai-compatible`, `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot` (auto-detected from URL when omitted) |
+| Flag                  | Description                                                                                                                                              |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--config <PATH>`     | Path to a custom `init.lua`                                                                                                                              |
+| `-m, --model <MODEL>` | Model to use. With configured providers, prefer `provider_name/model_name`; with `--api-base`, use the provider-native model name                        |
+| `--api-base <URL>`    | API base URL (overrides config)                                                                                                                          |
+| `--api-key-env <VAR>` | Env var holding the API key                                                                                                                              |
+| `--type <TYPE>`       | Provider type: `openai-compatible`, `openai`, `codex`, `anthropic-compatible`, `anthropic`, `copilot`, `kimi-code` (auto-detected from URL when omitted) |
 
 Auto-detection:
 
-| URL contains                     | Detected type          |
-| -------------------------------- | ---------------------- |
-| anything else                    | `openai-compatible`    |
-| `api.openai.com`                 | `openai`               |
-| `chatgpt.com`                    | `codex`                |
-| `api.kimi.com/coding`            | `anthropic-compatible` |
-| `api.anthropic.com`              | `anthropic`            |
-| `githubcopilot.com`              | `copilot`              |
+| URL contains          | Detected type       |
+| --------------------- | ------------------- |
+| `api.kimi.com/coding` | `kimi-code`         |
+| `api.anthropic.com`   | `anthropic`         |
+| `api.openai.com`      | `openai`            |
+| `chatgpt.com`         | `codex`             |
+| `githubcopilot.com`   | `copilot`           |
+| anything else         | `openai-compatible` |
 
 ## Behavior
 
@@ -51,9 +64,9 @@ Auto-detection:
 | `--set <KEY=VALUE>`          | Override a config setting (repeatable; see [Settings](configuration.md#settings) for valid keys) |
 
 Reasoning effort controls how deeply the model thinks before responding.
-Supported by Anthropic (`thinking`), OpenAI (`reasoning`), openai-compatible, and anthropic-compatible
-providers that support `reasoning_effort`. For OpenAI, `max` maps to `xhigh`.
-Models that don't support thinking ignore this setting.
+Supported by Anthropic (`thinking`), OpenAI (`reasoning`), openai-compatible,
+and anthropic-compatible providers that support `reasoning_effort`. For OpenAI,
+`max` maps to `xhigh`. Models that don't support thinking ignore this setting.
 
 ## Sampling
 
@@ -71,11 +84,12 @@ Models that don't support thinking ignore this setting.
 
 ## Runtime
 
-| Flag                  | Description                                                                    |
-| --------------------- | ------------------------------------------------------------------------------ |
-| `--headless`          | No TUI — requires a message argument. See [Headless](../advanced/headless.md). |
-| `--format <FORMAT>`   | Headless output format: `text` (default) or `json` (JSONL events)              |
-| `-v, --verbose`       | Show tool output in headless mode                                              |
-| `--color <WHEN>`      | Color output: `auto` (default), `always`, `never`                              |
-| `--log-level <LEVEL>` | `debug`, `info`, `warn`, `error` (default: `info`)                             |
-| `--bench`             | Print timing summary on exit                                                   |
+| Flag                  | Description                                                                   |
+| --------------------- | ----------------------------------------------------------------------------- |
+| `--version` / `-v`    | Print the smelt build identity (same as `/version`)                           |
+| `--headless`          | No TUI; requires a message argument. See [Headless](../advanced/headless.md). |
+| `--format <FORMAT>`   | Headless output format: `text` (default) or `json` (JSONL events)             |
+| `--verbose`           | Show tool output in headless mode                                             |
+| `--color <WHEN>`      | Color output: `auto` (default), `always`, `never`                             |
+| `--log-level <LEVEL>` | `debug`, `info`, `warn`, `error` (default: `info`)                            |
+| `--bench`             | Print timing summary on exit                                                  |

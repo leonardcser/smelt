@@ -3,7 +3,7 @@
 
 -- /hello - greet with a notification.
 smelt.cmd.register("hello", function(arg)
-  local name = arg or "world"
+  local name = (arg and arg ~= "") and arg or "world"
   smelt.notify("hello, " .. name .. "!")
 end)
 

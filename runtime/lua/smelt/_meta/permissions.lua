@@ -20,7 +20,7 @@ permissions.check_tool = nil
 permissions.grant_session = nil
 
 --- Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.
----@type fun(): table
+---@type fun(): smelt.permissions.ListResult
 permissions.list = nil
 
 --- Install the per-mode permission ruleset. See `smelt.permissions.RulesSpec`.

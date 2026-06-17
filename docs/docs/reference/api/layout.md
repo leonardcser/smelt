@@ -4,133 +4,200 @@
 
 **Tier:** `Host` - Available in every runtime, including headless mode.
 
-Declarative, width-independent content layout primitives for transcript/tool display.
+Declarative, width-independent content layout primitives for transcript/tool
+display.
 
 ## `smelt.layout.cap`
 
 ```lua
-fun(child: any, opts: table): table
+fun(child: any, opts: table): smelt.layout.Node
 ```
 
-Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head`, `tail`, or `head_tail`; edge caps accept `opts.marker = "above" | "below"`; `head_tail` uses `opts.head_rows` and accepts `opts.marker = "middle"`. `opts.total_rows` may provide the full source row count for clearer tail markers.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head`,
+`tail`, or `head_tail`; edge caps accept `opts.marker = "above" | "below"`;
+`head_tail` uses `opts.head_rows` and accepts `opts.marker = "middle"`.
+`opts.total_rows` may provide the full source row count for clearer tail
+markers.
 
 ## `smelt.layout.code`
 
 ```lua
-fun(content: string, opts: table?): table
+fun(content: string, opts: table?): smelt.layout.Node
 ```
+
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Syntax-highlighted code layout leaf. `opts.lang` supplies the language name.
 
 ## `smelt.layout.diff`
 
 ```lua
-fun(opts: table): table
+fun(opts: table): smelt.layout.Node
 ```
 
-Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Inline-diff render directive. The worker renders the diff directly into the
+block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path`
+picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the
+diff-view anchor; `opts.lang` overrides path-based syntax.
 
 ## `smelt.layout.elapsed`
 
 ```lua
-fun(elapsed: any, opts: table?): table
+fun(elapsed: any, opts: table?): smelt.layout.Node
 ```
 
-Dynamic elapsed-time text leaf. Pass `block.elapsed` from a transcript renderer, or a call-id string with `opts.status` / `opts.secs`. Rust resolves current tool elapsed at render time when possible.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Dynamic elapsed-time text leaf. Pass `block.elapsed` from a transcript renderer,
+or a call-id string with `opts.status` / `opts.secs`. Rust resolves current tool
+elapsed at render time when possible.
 
 ## `smelt.layout.empty`
 
 ```lua
-fun(): table
+fun(): smelt.layout.Node
 ```
 
-Explicit zero-row layout node. Use this instead of returning nil when a renderer intentionally hides content.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Explicit zero-row layout node. Use this instead of returning nil when a renderer
+intentionally hides content.
 
 ## `smelt.layout.file_view`
 
 ```lua
-fun(opts: table): table
+fun(opts: table): smelt.layout.Node
 ```
 
-Syntax-highlighted file-view render directive. Uses a single line-number column and no diff bg. `opts.content` is the source text; `opts.path` picks syntax via extension; `opts.lang` overrides path-based syntax.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Syntax-highlighted file-view render directive. Uses a single line-number column
+and no diff bg. `opts.content` is the source text; `opts.path` picks syntax via
+extension; `opts.lang` overrides path-based syntax.
 
 ## `smelt.layout.gutter`
 
 ```lua
-fun(child: any, opts: table?): table
+fun(child: any, opts: table?): smelt.layout.Node
 ```
 
-Render `child` with an explicit non-selectable gutter prefix on each emitted row. `opts.text` defaults to two spaces. The prefix consumes display width before wrapping/measuring the child; `opts.styled = true` lets row-level styles include the prefix.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Render `child` with an explicit non-selectable gutter prefix on each emitted
+row. `opts.text` defaults to two spaces. The prefix consumes display width
+before wrapping/measuring the child; `opts.styled = true` lets row-level styles
+include the prefix.
 
 ## `smelt.layout.hbox`
 
 ```lua
-fun(items: table): table
+fun(items: table): smelt.layout.Node
 ```
 
-Lay `items` out horizontally. Each entry is either a layout userdata (defaults to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` / `{ layout, fit=true }` for a fixed, weighted, or renderer-defined intrinsic-width slot. `fit=true` uses unwrapped content width when available, capped by the parent; fixed and fit slots are allocated before fill slots.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Lay `items` out horizontally. Each entry is either a layout userdata (defaults
+to fill weight 1) or `{ layout, cols=N }` / `{ layout, weight=N }` /
+`{ layout, fit=true }` for a fixed, weighted, or renderer-defined
+intrinsic-width slot. `fit=true` uses unwrapped content width when available,
+capped by the parent; fixed and fit slots are allocated before fill slots.
 
 ## `smelt.layout.line`
 
 ```lua
-fun(spans: any, opts: table?): table
+fun(spans: any, opts: table?): smelt.layout.Node
 ```
 
-Single styled line layout leaf. `spans` is a string or a one-dimensional span table; unlike `runs`, this does not wrap.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Single styled line layout leaf. `spans` is a string or a one-dimensional span
+table; unlike `runs`, this does not wrap.
 
 ## `smelt.layout.markdown`
 
 ```lua
-fun(content: string, opts: table?): table
+fun(content: string, opts: table?): smelt.layout.Node
 ```
 
-Markdown layout leaf. `opts.dim` dims all spans; `opts.italic` italicizes inline-mode spans; `opts.inline = true` preserves line-by-line inline markdown without block parsing.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Markdown layout leaf. `opts.dim` dims all spans; `opts.italic` italicizes
+inline-mode spans; `opts.inline = true` preserves line-by-line inline markdown
+without block parsing.
 
 ## `smelt.layout.panel`
 
 ```lua
-fun(child: any, opts: table?): table
+fun(child: any, opts: table?): smelt.layout.Node
 ```
 
-Render `child` inside a full-width background panel. `opts.hl_group` / `opts.hl` names the panel highlight group; `opts.padding` defaults to 1 cell/row.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Render `child` inside a full-width background panel. `opts.hl_group` / `opts.hl`
+names the panel highlight group; `opts.padding` defaults to 1 cell/row.
 
 ## `smelt.layout.runs`
 
 ```lua
-fun(lines: any, opts: table?): table
+fun(lines: any, opts: table?): smelt.layout.Node
 ```
 
-Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`). `opts.hl_group` / `opts.hl` supplies a default theme group for spans without `hl`; `opts.continuation_indent` indents soft-wrapped continuation rows by display columns.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Styled inline text layout leaf. `lines` is a string or styled-lines table
+(`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`).
+`opts.hl_group` / `opts.hl` supplies a default theme group for spans without
+`hl`; `opts.continuation_indent` indents soft-wrapped continuation rows by
+display columns.
 
 ## `smelt.layout.separator`
 
 ```lua
-fun(opts: table?): table
+fun(opts: table?): smelt.layout.Node
 ```
 
-Full-width horizontal separator. `opts.label` is centered in the row and accepts the same styled span shape as `smelt.layout.line`; generated line fill is chrome and is not searchable/selectable. `opts.dim` defaults to true.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Full-width horizontal separator. `opts.label` is centered in the row and accepts
+the same styled span shape as `smelt.layout.line`; generated line fill is chrome
+and is not searchable/selectable. `opts.dim` defaults to true.
 
 ## `smelt.layout.style`
 
 ```lua
-fun(child: any, opts: table?): table
+fun(child: any, opts: table?): smelt.layout.Node
 ```
 
-Apply inherited style to a child layout. `opts.hl_group` / `opts.hl` names a theme group; `opts.fg` / `opts.bg` name theme colors; `opts.dim`, `opts.bold`, and `opts.italic` set text attributes. Child spans may override inherited fields.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Apply inherited style to a child layout. `opts.hl_group` / `opts.hl` names a
+theme group; `opts.fg` / `opts.bg` name theme colors; `opts.dim`, `opts.bold`,
+and `opts.italic` set text attributes. Child spans may override inherited
+fields.
 
 ## `smelt.layout.text`
 
 ```lua
-fun(content: string, opts: table?): table
+fun(content: string, opts: table?): smelt.layout.Node
 ```
 
-Plain text layout leaf. `opts.hl_group` / `opts.hl` may name a theme group; without it, text renders dimmed. `opts.ansi = true` enables ANSI parsing. Wrapping is computed by the transcript at the current width.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Plain text layout leaf. `opts.hl_group` / `opts.hl` may name a theme group;
+without it, text renders dimmed. `opts.ansi = true` enables ANSI parsing.
+Wrapping is computed by the transcript at the current width.
 
 ## `smelt.layout.vbox`
 
 ```lua
-fun(items: table): table
+fun(items: table): smelt.layout.Node
 ```
 
-Stack `items` vertically into a single block layout. Each item must be a layout userdata produced by a `smelt.layout` primitive.
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
+Stack `items` vertically into a single block layout. Each item must be a layout
+userdata produced by a `smelt.layout` primitive.

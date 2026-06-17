@@ -12,10 +12,44 @@
 
 use crate::lua::LuaShared;
 use mlua::prelude::*;
-use smelt_core::lua::doc::Tier;
+use smelt_core::lua::doc::{record_class, Tier};
+use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
 use smelt_core::lua::LuaHandle;
 use std::sync::Arc;
+
+/// Terminal size returned by `smelt.ui.size()`.
+struct LuaUiSize(mlua::Table);
+
+impl LuaType for LuaUiSize {
+    fn lua_type() -> String {
+        record_class(LuaClassDecl {
+            name: "smelt.ui.Size",
+            doc: "Terminal size in cells.",
+            fields: vec![
+                LuaClassField {
+                    name: "width",
+                    ty: "integer".into(),
+                    optional: false,
+                    doc: "Terminal width in cells.",
+                },
+                LuaClassField {
+                    name: "height",
+                    ty: "integer".into(),
+                    optional: false,
+                    doc: "Terminal height in cells.",
+                },
+            ],
+        });
+        "smelt.ui.Size".into()
+    }
+}
+
+impl IntoLua for LuaUiSize {
+    fn into_lua(self, _: &Lua) -> LuaResult<mlua::Value> {
+        Ok(mlua::Value::Table(self.0))
+    }
+}
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
     // `smelt.ui` is a thin grouping namespace for screen-composition primitives.
@@ -33,13 +67,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         "size",
         "Return the current terminal size as `{ width, height }` in cells. Useful for choosing between compact and wide overlay layouts without relying on any particular window's current rect.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
+        |lua, ()| -> LuaResult<LuaUiSize> {
             let (width, height) = crate::lua::try_with_app(|app| (app.last_width, app.last_height))
                 .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)));
             let out = lua.create_table()?;
             out.set("width", width)?;
             out.set("height", height)?;
-            Ok(out)
+            Ok(LuaUiSize(out))
         },
     )?;
 

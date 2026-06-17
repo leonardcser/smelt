@@ -4,43 +4,43 @@ Type `/` to open the command picker with fuzzy search.
 
 ## Built-in Commands
 
-| Command                   | Description                                                |
-| ------------------------- | ---------------------------------------------------------- |
-| `/clear`, `/new`          | Start a new conversation                                   |
-| `/rewind`                 | Rewind to a previous turn (same as `Esc Esc`)              |
-| `/resume`                 | Resume a saved session                                     |
-| `/compact [instructions]` | Summarize older history to free context                    |
-| `/fork`, `/branch`        | Fork the current session                                   |
-| `/export`                 | Export conversation; prompts for clipboard or file         |
-| `/model [provider/model]` | Switch model (opens picker if no name given)               |
-| `/color [name]`           | Set session color                                          |
-| `/stats`                  | Show token usage statistics                                |
-| `/usage`, `/cost`         | Show session cost and active-provider usage limits         |
-| `/thinking [open|close|peek|toggle]` | Set thinking block presentation for this session            |
-| `/reasoning [off|low|medium|high|max]` | Set or show reasoning effort                    |
-| `/permissions`            | Manage saved permissions                                   |
-| `/ps`                     | Manage background processes                                |
-| `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                |
-| `/messages`               | Show recorded errors, warnings, and notices                |
-| `/skills`                 | Show loaded skills and their source locations              |
-| `/mcp`                    | Show MCP servers, lifecycle state, and tool names          |
-| `/help`                   | Show keybindings (also `F1`)                               |
-| `/docs`                   | Open the smelt documentation in your browser               |
-| `/btw <question>`         | Ask a side question; answer streams into a dialog          |
-| `/reflect [focus]`        | Step back and rethink recent changes before moving on      |
-| `/simplify [focus]`       | Review changed code for reuse, quality, and efficiency     |
-| `/trust`                  | Trust the current project's `.smelt/` content              |
+| Command                   | Description                                                          |
+| ------------------------- | -------------------------------------------------------------------- | ------ | -------- | ------------------------------------------------ | ---------------------------- |
+| `/clear`, `/new`          | Start a new conversation                                             |
+| `/rewind`                 | Rewind to a previous turn (same as `Esc Esc`)                        |
+| `/resume`                 | Resume a saved session                                               |
+| `/compact [instructions]` | Summarize older history to free context                              |
+| `/fork`, `/branch`        | Fork the current session                                             |
+| `/export`                 | Export conversation; prompts for clipboard or file                   |
+| `/model [provider/model]` | Switch model (opens picker if no name given)                         |
+| `/color [name]`           | Set session color                                                    |
+| `/stats`                  | Show token usage statistics                                          |
+| `/usage`, `/cost`         | Show session cost and active-provider usage limits                   |
+| `/thinking [open          | close                                                                | peek   | toggle]` | Set thinking block presentation for this session |
+| `/reasoning [off          | low                                                                  | medium | high     | max]`                                            | Set or show reasoning effort |
+| `/permissions`            | Manage saved permissions                                             |
+| `/ps`                     | Manage background processes                                          |
+| `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                          |
+| `/messages`               | Show recorded errors, warnings, and notices                          |
+| `/skills`                 | Show loaded skills and their source locations                        |
+| `/mcp`                    | Show MCP servers, lifecycle state, and tool names                    |
+| `/help`                   | Show keybindings (also `F1`)                                         |
+| `/docs`                   | Open the smelt documentation in your browser                         |
+| `/btw <question>`         | Ask a side question; answer streams into a dialog                    |
+| `/reflect [focus]`        | Step back and rethink recent changes before moving on                |
+| `/simplify [focus]`       | Review changed code for reuse, quality, and efficiency               |
+| `/trust`                  | Trust the current project's `.smelt/` content                        |
 | `/reload`                 | Re-evaluate user Lua (init + plugins) without restarting (also `F5`) |
-| `/version`                | Show the running build identity as a notification          |
-| `/changelog`              | Open the release notes for the latest cached build         |
+| `/version`                | Show the running build identity as a notification                    |
+| `/changelog`              | Open the release notes for the latest cached build                   |
 | `/upgrade [check]`        | Install the newest smelt build (or refresh the cache with `check`)   |
-| `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)                     |
+| `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)                               |
 
 ## Shell Escape
 
 Prefix with `!` to run a shell command directly, without going through the
 agent. Output appears inline in the conversation. Shell escapes are useful for
-quick checks — verifying test output, reading a config value — without
+quick checks, such as verifying test output or reading a config value, without
 bloating the agent's context window with a full tool call.
 
 ```
@@ -77,6 +77,6 @@ All fields are optional:
 
 ### Shell Execution in Templates
 
-- **Inline**: `` !`command` `` — output replaces the backtick expression
-- **Fenced**: ` ```! ` code block — output replaces the block
-- **Escape**: `` \!`command` `` — prevents execution
+- **Inline**: `` !`command` ``, output replaces the backtick expression
+- **Fenced**: ` ```! ` code block, output replaces the block
+- **Escape**: `` \!`command` ``, prevents execution

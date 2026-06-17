@@ -21,14 +21,24 @@
 
 ## Run
 
-Just run `smelt`. The first launch opens a wizard that picks a provider, logs
-you into ChatGPT, GitHub Copilot, or Kimi Code if needed, and writes
-`~/.config/smelt/init.lua` for API-key providers.
+Just run `smelt`. The first launch opens a provider wizard. Subscription
+providers log in with OAuth and can be used immediately; API-key providers write
+a starter `~/.config/smelt/init.lua`.
+
+You can also skip the wizard and configure everything from the command line:
+
+```bash
+smelt --model gpt-5.5 --api-base https://api.openai.com/v1 --api-key-env OPENAI_API_KEY
+smelt --headless --model openai/gpt-5 "summarize @README.md"
+smelt --resume              # open the saved-session picker
+```
+
+See the [CLI Reference](../reference/cli.md) for every flag.
 
 ### Subscription providers
 
 These use your existing subscription and require no API key. Run `smelt auth`
-once, then start smelt with no extra flags:
+once, pick the provider, then start smelt with no extra flags:
 
 === ":fontawesome-brands-openai: ChatGPT (Codex)"
 
@@ -99,7 +109,7 @@ These need `--model` and an environment variable or config file:
 Once you have a setup you like, write it to `~/.config/smelt/init.lua` and run
 `smelt` from then on with no flags. Keeping config in a file means your
 providers, keymaps, and custom commands are version-controlled and portable
-across machines — no need to remember a long CLI invocation every time.
+across machines. You do not need to remember a long CLI invocation every time.
 
 ```lua
 smelt.provider.register("ollama", {
@@ -126,9 +136,9 @@ permission rules, statusline segments, and custom tools all live here.
 
 ## Next
 
-- [Usage](usage.md) — modes, tools, sessions, daily workflow
-- [Customization](customization.md) — themes, keymaps, slash commands, MCP
-- [Plugin Authoring](plugins.md) — the Lua API in depth
-- [Configuration Reference](../reference/configuration.md) — every setting and
+- [Usage](usage.md): modes, tools, sessions, daily workflow
+- [Customization](customization.md): themes, keymaps, slash commands, MCP
+- [Plugin Authoring](plugins.md): the Lua API in depth
+- [Configuration Reference](../reference/configuration.md): every setting and
   provider field
-- [CLI Reference](../reference/cli.md) — every flag
+- [CLI Reference](../reference/cli.md): every flag

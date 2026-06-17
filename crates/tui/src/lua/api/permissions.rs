@@ -4,7 +4,8 @@
 
 use lua_doc_derive::LuaOpts;
 use mlua::prelude::*;
-use smelt_core::lua::doc::Tier;
+use smelt_core::lua::doc::{record_class, Tier};
+use smelt_core::lua::lua_type::{LuaClassDecl, LuaClassField, LuaType};
 use smelt_core::lua::module::LuaMod;
 use std::sync::Arc;
 
@@ -44,6 +45,45 @@ pub struct LuaPermissionWorkspaceRule {
     pub tool: String,
     /// Patterns granted for this tool.
     pub patterns: Vec<String>,
+}
+
+/// Result table returned by `smelt.permissions.list`.
+pub struct LuaPermissionList(mlua::Table);
+
+impl LuaType for LuaPermissionList {
+    fn lua_type() -> String {
+        record_class(LuaClassDecl {
+            name: "smelt.permissions.ListResult",
+            doc: "Current permission state returned by `smelt.permissions.list()`.",
+            fields: vec![
+                LuaClassField {
+                    name: "session",
+                    ty: "smelt.permissions.SessionEntry[]".into(),
+                    optional: false,
+                    doc: "Session-scoped tool/pattern approvals for this run.",
+                },
+                LuaClassField {
+                    name: "path_grants",
+                    ty: "smelt.permissions.SessionPathGrant[]".into(),
+                    optional: false,
+                    doc: "Session-scoped path grants for this run.",
+                },
+                LuaClassField {
+                    name: "workspace",
+                    ty: "smelt.permissions.WorkspaceRule[]".into(),
+                    optional: false,
+                    doc: "Workspace rules loaded from the on-disk store rooted at the current cwd.",
+                },
+            ],
+        });
+        "smelt.permissions.ListResult".into()
+    }
+}
+
+impl IntoLua for LuaPermissionList {
+    fn into_lua(self, _: &Lua) -> LuaResult<mlua::Value> {
+        Ok(mlua::Value::Table(self.0))
+    }
 }
 
 /// Spec for `smelt.permissions.sync`.
@@ -141,7 +181,7 @@ pub(super) fn register(
         "list",
         "Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = \"path\", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
         &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
+        |lua, ()| -> LuaResult<LuaPermissionList> {
             let (session_entries, path_grants, cwd) = crate::lua::try_with_app(|app| {
                 let entries = app
                     .session_permission_entries()
@@ -186,7 +226,7 @@ pub(super) fn register(
                 workspace_arr.set(i + 1, row)?;
             }
             out.set("workspace", workspace_arr)?;
-            Ok(out)
+            Ok(LuaPermissionList(out))
         },
     )?;
     m.fn_(
