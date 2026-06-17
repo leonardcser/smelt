@@ -12,6 +12,10 @@ pub(crate) fn descriptor_search_text(
     append_search_line(&mut text, thinking_summary(descriptor).as_deref());
     append_search_line(&mut text, compacted_label(descriptor));
     append_search_line(&mut text, compacted_separator(descriptor));
+    append_search_line(
+        &mut text,
+        edit_file_search_text(descriptor, tool_state).as_deref(),
+    );
     if let Some(display_count) = tool_state.and_then(display_count_search_text) {
         append_search_line(&mut text, Some(&display_count));
     }
@@ -85,6 +89,79 @@ fn compacted_separator(descriptor: &TranscriptBlockDescriptor) -> Option<&'stati
     matches!(descriptor, TranscriptBlockDescriptor::Compacted { .. }).then_some("─")
 }
 
+fn edit_file_search_text(
+    descriptor: &TranscriptBlockDescriptor,
+    tool_state: Option<&ToolState>,
+) -> Option<String> {
+    let args = edit_file_args(descriptor)?;
+    let mut text = String::new();
+    let old_string = string_field(args, "old_string").unwrap_or_default();
+    let new_string = string_field(args, "new_string").unwrap_or_default();
+    append_search_line(
+        &mut text,
+        Some(&replacement_line_detail(old_string, new_string)),
+    );
+    append_search_line(&mut text, string_field(args, "file_path"));
+
+    let metadata = tool_state
+        .and_then(|state| state.output.as_ref())
+        .and_then(|output| output.metadata.as_ref())
+        .and_then(serde_json::Value::as_object);
+    let has_snapshot = metadata.is_some_and(|metadata| {
+        let old_content = metadata
+            .get("old_content")
+            .and_then(serde_json::Value::as_str);
+        let new_content = metadata
+            .get("new_content")
+            .and_then(serde_json::Value::as_str);
+        append_search_line(&mut text, old_content);
+        append_search_line(&mut text, new_content);
+        old_content.is_some() || new_content.is_some()
+    });
+    if !has_snapshot {
+        append_search_line(&mut text, Some(old_string));
+        append_search_line(&mut text, Some(new_string));
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+fn edit_file_args(
+    descriptor: &TranscriptBlockDescriptor,
+) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
+    match descriptor {
+        TranscriptBlockDescriptor::ToolDraft { name, args, .. }
+        | TranscriptBlockDescriptor::ToolCall { name, args, .. }
+            if name == "edit_file" =>
+        {
+            Some(args)
+        }
+        _ => None,
+    }
+}
+
+fn string_field<'a>(
+    fields: &'a std::collections::HashMap<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    fields.get(key).and_then(serde_json::Value::as_str)
+}
+
+fn replacement_line_detail(old_text: &str, new_text: &str) -> String {
+    format!(
+        "{}, {}",
+        line_label(line_count(old_text), "old line"),
+        line_label(line_count(new_text), "new line")
+    )
+}
+
+fn line_count(text: &str) -> usize {
+    text.lines().count()
+}
+
+fn line_label(count: usize, label: &str) -> String {
+    format!("{} {}{}", count, label, if count == 1 { "" } else { "s" })
+}
+
 fn display_count_search_text(state: &ToolState) -> Option<String> {
     let metadata = state.output.as_ref()?.metadata.as_ref()?;
     let display_count = metadata.get("display_count")?.as_object()?;
@@ -135,16 +212,42 @@ mod tests {
     use super::*;
     use smelt_core::transcript_model::{ToolOutput, ToolStatus};
 
-    fn tool_state(metadata: serde_json::Value) -> ToolState {
+    fn tool_state_with_content(content: &str, metadata: serde_json::Value) -> ToolState {
         ToolState {
             status: ToolStatus::Ok,
             elapsed: None,
             output: Some(Box::new(ToolOutput {
-                content: "output".to_string(),
+                content: content.to_string(),
                 is_error: false,
                 metadata: Some(metadata),
             })),
             user_message: None,
+        }
+    }
+
+    fn tool_state(metadata: serde_json::Value) -> ToolState {
+        tool_state_with_content("output", metadata)
+    }
+
+    fn edit_file_descriptor(old_string: &str, new_string: &str) -> TranscriptBlockDescriptor {
+        let mut args = std::collections::HashMap::new();
+        args.insert(
+            "file_path".to_string(),
+            serde_json::Value::String("/tmp/example.rs".to_string()),
+        );
+        args.insert(
+            "old_string".to_string(),
+            serde_json::Value::String(old_string.to_string()),
+        );
+        args.insert(
+            "new_string".to_string(),
+            serde_json::Value::String(new_string.to_string()),
+        );
+        TranscriptBlockDescriptor::ToolCall {
+            call_id: "call-1".to_string(),
+            name: "edit_file".to_string(),
+            summary: protocol::StyledLines::from_plain("example.rs"),
+            args,
         }
     }
 
@@ -191,6 +294,34 @@ mod tests {
         assert_eq!(
             descriptor_search_text(&descriptor, None),
             "archived\ncompacted\n─"
+        );
+    }
+
+    #[test]
+    fn descriptor_search_text_includes_edit_file_snapshot_metadata() {
+        let descriptor = edit_file_descriptor("old needle", "new needle");
+        let state = tool_state_with_content(
+            "edited example.rs",
+            serde_json::json!({
+                "path": "/tmp/example.rs",
+                "old_content": "fn old_snapshot() {}\n",
+                "new_content": "fn new_snapshot() {}\n",
+            }),
+        );
+
+        assert_eq!(
+            descriptor_search_text(&descriptor, Some(&state)),
+            "edited example.rs\n1 old line, 1 new line\n/tmp/example.rs\nfn old_snapshot() {}\nfn new_snapshot() {}\n"
+        );
+    }
+
+    #[test]
+    fn descriptor_search_text_includes_edit_file_planned_strings_without_snapshot() {
+        let descriptor = edit_file_descriptor("alpha\nbeta", "gamma");
+
+        assert_eq!(
+            descriptor_search_text(&descriptor, None),
+            "2 old lines, 1 new line\n/tmp/example.rs\nalpha\nbeta\ngamma"
         );
     }
 }
