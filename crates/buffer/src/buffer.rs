@@ -209,6 +209,13 @@ pub enum SourceLine {
     Synthetic,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineCursorPolicy {
+    #[default]
+    SnapPastChrome,
+    PreserveRequested,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LineDecoration {
     /// Row-level bg fill, painted across the entire slice width by `Window::render`.
@@ -246,6 +253,10 @@ pub struct LineDecoration {
     /// window's `WrappedLayout` skips wrapping these rows so the producer's
     /// layout is preserved verbatim.
     pub pre_formatted: bool,
+    /// How cursor column resolution treats this rendered row. Prompt ghost text
+    /// preserves the source-mapped column instead of snapping across its
+    /// unselectable placeholder cells.
+    pub cursor_policy: LineCursorPolicy,
 }
 
 pub type SpanStyle = Style;
@@ -1339,6 +1350,7 @@ impl Buffer {
             external_source_text: None,
             source_line: None,
             pre_formatted: false,
+            cursor_policy: LineCursorPolicy::SnapPastChrome,
         };
         let Some(state) = self.extmarks.ns(self.ns_decorations) else {
             return &DEFAULT;

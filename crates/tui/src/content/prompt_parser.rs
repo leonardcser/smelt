@@ -6,7 +6,9 @@ use crate::content::prompt_spans::{
     build_char_kinds, build_display_spans, spans_to_string, Span, SpanKind, TAB_DISPLAY,
 };
 use smelt_buffer::attachment::{AttachmentId, AttachmentStore, ATTACHMENT_MARKER};
-use smelt_buffer::buffer::{Buffer, BufferCopy, BufferParser, CopyOutput, SpanMeta};
+use smelt_buffer::buffer::{
+    Buffer, BufferCopy, BufferParser, CopyOutput, LineCursorPolicy, LineDecoration, SpanMeta,
+};
 use smelt_buffer::coords::ProjectionMaps;
 use smelt_core::theme::intern;
 use std::sync::{Arc, Mutex};
@@ -260,6 +262,13 @@ impl BufferParser for PromptBufferParser {
         if ghost {
             let ghost_group = intern("GhostText");
             for (li, (line, _)) in visual_lines.iter().enumerate() {
+                buf.set_decoration(
+                    li,
+                    LineDecoration {
+                        cursor_policy: LineCursorPolicy::PreserveRequested,
+                        ..Default::default()
+                    },
+                );
                 let width = smelt_buffer::text::byte_to_cell(line, line.len())
                     .min(u16::MAX as usize) as u16;
                 if width > 0 {
@@ -402,6 +411,10 @@ mod tests {
             .highlights_at(0)
             .iter()
             .any(|span| !span.meta.selectable));
+        assert_eq!(
+            buf.decoration_at(0).cursor_policy,
+            LineCursorPolicy::PreserveRequested
+        );
     }
 
     #[test]

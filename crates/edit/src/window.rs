@@ -8,7 +8,7 @@ use super::{BufId, UndoHistory, WinId};
 use crate::row::{row_to_usize, DocPosition, DocRange, MaterializedRows, RowIndex};
 use crate::Theme;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use smelt_buffer::buffer::VirtTextPos;
+use smelt_buffer::buffer::{LineCursorPolicy, VirtTextPos};
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_term::grid::{GridSlice, Style};
 use smelt_term::layout::{Gutters, Rect};
@@ -1247,7 +1247,7 @@ impl Window {
             };
         };
         let cpos = |cell: usize| {
-            let cell = snap_col_past_chrome(buf, logical_row, cell as u16) as usize;
+            let cell = resolve_cursor_col(buf, logical_row, cell as u16) as usize;
             buf.byte_at_display_pos(logical_row, cell)
         };
         if line.is_empty() {
@@ -1341,7 +1341,7 @@ impl Window {
         let Some((lrow, cell)) = self.logical_cell_at_visual(buf, vrow, vcell) else {
             return buf.byte_at_display_pos(last_logical, 0);
         };
-        let cell = snap_col_past_chrome(buf, lrow, cell as u16) as usize;
+        let cell = resolve_cursor_col(buf, lrow, cell as u16) as usize;
         buf.byte_at_display_pos(lrow, cell)
     }
 
@@ -3011,7 +3011,7 @@ impl Window {
                     .logical_at_visual(row_to_usize(row))
                     .map(|(lr, _)| lr)
                     .unwrap_or_else(|| row_to_usize(row));
-                let col = snap_col_past_chrome(buf, logical_row, col);
+                let col = resolve_cursor_col(buf, logical_row, col);
                 Self::screen_row_at(self.absolute_row(row), self.scroll_top, height)
                     .map(|screen_row| (col, screen_row))
             });
@@ -3088,7 +3088,10 @@ fn cell_range_contains_selectable(
     })
 }
 
-fn snap_col_past_chrome(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
+fn resolve_cursor_col(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
+    if buf.decoration_at(logical_row).cursor_policy == LineCursorPolicy::PreserveRequested {
+        return col;
+    }
     let mut spans = Vec::new();
     buf.highlights_at_into(logical_row, &mut spans);
     if spans.iter().all(|s| s.meta.selectable) {
@@ -5250,9 +5253,9 @@ mod tests {
             smelt_buffer::buffer::SpanMeta::unselectable(),
         );
 
-        assert_eq!(snap_col_past_chrome(&buf, 0, 0), 2);
-        assert_eq!(snap_col_past_chrome(&buf, 0, 1), 2);
-        assert_eq!(snap_col_past_chrome(&buf, 0, 2), 2);
+        assert_eq!(resolve_cursor_col(&buf, 0, 0), 2);
+        assert_eq!(resolve_cursor_col(&buf, 0, 1), 2);
+        assert_eq!(resolve_cursor_col(&buf, 0, 2), 2);
     }
 
     #[test]
@@ -5650,6 +5653,44 @@ mod tests {
         // Adjacent cells keep the buffer text untouched.
         assert_eq!(grid.cell(0, 0).symbol, 'a');
         assert_eq!(grid.cell(2, 0).symbol, 'c');
+    }
+
+    #[test]
+    fn render_preserves_cursor_column_on_ghost_row() {
+        let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
+        buf.set_all_lines(vec!["ghost".into()]);
+        buf.add_highlight_with_meta(
+            0,
+            0,
+            5,
+            crate::SpanStyle::new(),
+            smelt_buffer::buffer::SpanMeta::unselectable(),
+        );
+        buf.set_decoration(
+            0,
+            smelt_buffer::buffer::LineDecoration {
+                cursor_policy: smelt_buffer::buffer::LineCursorPolicy::PreserveRequested,
+                ..Default::default()
+            },
+        );
+        let mut w = make_win();
+        w.text_state_mut().cpos = 0;
+        w.text_state_mut().cursor_row = 0;
+        w.text_state_mut().cursor_col = 0;
+        let cursor_style = crate::grid::Style::new().bg(crate::grid::Color::White);
+        let mut ctx = ctx();
+        ctx.cursor_shape = CursorShape::Block {
+            glyph: 'g',
+            style: cursor_style,
+            pos: None,
+        };
+        let mut grid = Grid::new(10, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 10, 1));
+        w.render(&buf, &mut slice, &ctx);
+
+        assert_eq!(grid.cell(0, 0).symbol, 'g');
+        assert_eq!(grid.cell(0, 0).style.bg, cursor_style.bg);
+        assert_ne!(grid.cell(5, 0).style.bg, cursor_style.bg);
     }
 
     #[test]
@@ -6182,7 +6223,7 @@ mod tests {
     }
 
     #[test]
-    fn snap_col_past_chrome_clamps_trailing_pad_to_selectable_edge() {
+    fn resolve_cursor_col_clamps_trailing_pad_to_selectable_edge() {
         // Click in a user-block trailing bg pad (chrome past the content) must
         // not push the cursor to layout_width - that would pan the viewport
         // horizontally to the row's right edge. Clamp to the last selectable
@@ -6200,31 +6241,56 @@ mod tests {
         );
         buf.add_highlight_with_meta(0, 6, 32, crate::SpanStyle::new(), chrome);
 
-        assert_eq!(snap_col_past_chrome(&buf, 0, 0), 1, "lead chrome → content");
-        assert_eq!(snap_col_past_chrome(&buf, 0, 3), 3, "selectable stays put");
+        assert_eq!(resolve_cursor_col(&buf, 0, 0), 1, "lead chrome → content");
+        assert_eq!(resolve_cursor_col(&buf, 0, 3), 3, "selectable stays put");
         assert_eq!(
-            snap_col_past_chrome(&buf, 0, 20),
+            resolve_cursor_col(&buf, 0, 20),
             6,
             "trailing chrome clamps to selectable edge"
         );
     }
 
     #[test]
-    fn snap_col_past_chrome_all_chrome_row_stays_put_except_single_pad() {
-        // A one-cell user-block padding row should put the cursor just after the
-        // pad. Wider all-chrome rows still stay at the left edge so a generic
-        // non-selectable separator can't push the cursor to layout_width.
+    fn resolve_cursor_col_all_chrome_row_parks_at_row_edge() {
+        // All-chrome rows still have a visual cursor edge: thinking-block
+        // padding such as "│ " should not put the cursor at column zero.
         let mut one_pad = make_buf(vec![" ".into()]);
         let chrome = smelt_buffer::buffer::SpanMeta::unselectable();
         one_pad.add_highlight_with_meta(0, 0, 1, crate::SpanStyle::new(), chrome.clone());
-        assert_eq!(snap_col_past_chrome(&one_pad, 0, 0), 1);
+        assert_eq!(resolve_cursor_col(&one_pad, 0, 0), 1);
 
         let mut wide = make_buf(vec![" ".repeat(40)]);
         wide.add_highlight_with_meta(0, 0, 40, crate::SpanStyle::new(), chrome);
 
-        assert_eq!(snap_col_past_chrome(&wide, 0, 0), 0);
-        assert_eq!(snap_col_past_chrome(&wide, 0, 20), 0);
-        assert_eq!(snap_col_past_chrome(&wide, 0, 39), 0);
+        assert_eq!(resolve_cursor_col(&wide, 0, 0), 40);
+        assert_eq!(resolve_cursor_col(&wide, 0, 20), 40);
+        assert_eq!(resolve_cursor_col(&wide, 0, 39), 40);
+    }
+
+    #[test]
+    fn resolve_cursor_col_preserves_ghost_rows() {
+        let mut buf = make_buf(vec!["ghost placeholder".into()]);
+        let width = smelt_buffer::text::byte_to_cell(
+            buf.get_line(0).unwrap(),
+            buf.get_line(0).unwrap().len(),
+        ) as u16;
+        buf.add_highlight_with_meta(
+            0,
+            0,
+            width,
+            crate::SpanStyle::new(),
+            smelt_buffer::buffer::SpanMeta::unselectable(),
+        );
+        buf.set_decoration(
+            0,
+            smelt_buffer::buffer::LineDecoration {
+                cursor_policy: smelt_buffer::buffer::LineCursorPolicy::PreserveRequested,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(resolve_cursor_col(&buf, 0, 0), 0);
+        assert_eq!(resolve_cursor_col(&buf, 0, 5), 5);
     }
 
     #[test]
