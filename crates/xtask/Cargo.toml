@@ -8,3 +8,5 @@ publish = false
 smelt-core = { workspace = true }
 smelt-tui = { workspace = true }
 smelt-protocol = { workspace = true }
+smelt-store = { workspace = true }
+serde_json = { workspace = true }

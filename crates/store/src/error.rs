@@ -1,0 +1,50 @@
+use std::fmt;
+
+#[derive(Debug)]
+pub enum StoreError {
+    Io(std::io::Error),
+    Sqlite(rusqlite::Error),
+    Json(serde_json::Error),
+    Integrity(String),
+    UnsupportedSchema { found: i32, expected: i32 },
+}
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StoreError::Io(err) => write!(f, "io error: {err}"),
+            StoreError::Sqlite(err) => write!(f, "sqlite error: {err}"),
+            StoreError::Json(err) => write!(f, "json error: {err}"),
+            StoreError::Integrity(message) => write!(f, "integrity error: {message}"),
+            StoreError::UnsupportedSchema { found, expected } => {
+                write!(f, "unsupported schema version {found}; expected {expected}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+impl From<std::io::Error> for StoreError {
+    fn from(err: std::io::Error) -> Self {
+        StoreError::Io(err)
+    }
+}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(err: rusqlite::Error) -> Self {
+        StoreError::Sqlite(err)
+    }
+}
+
+impl From<serde_json::Error> for StoreError {
+    fn from(err: serde_json::Error) -> Self {
+        StoreError::Json(err)
+    }
+}
+
+pub type Result<T> = std::result::Result<T, StoreError>;
+
+pub(crate) fn to_sql_error(err: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(err))
+}

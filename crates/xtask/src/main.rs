@@ -1,6 +1,7 @@
 //! Dev tooling. Invoke as `cargo xtask <command>` (see `.cargo/config.toml`).
 
 mod bench_file_search;
+mod bench_store_compression;
 mod bench_transcript_layout;
 mod fuzz;
 mod gen_file_icons;
@@ -12,6 +13,7 @@ fn main() {
     let cmd = args.next();
     match cmd.as_deref() {
         Some("bench-file-search") => bench_file_search::run(args.collect()),
+        Some("bench-store-compression") => bench_store_compression::run(args.collect()),
         Some("bench-transcript-layout") => bench_transcript_layout::run(args.collect()),
         Some("gen-file-icons") => gen_file_icons::run(args.collect()),
         Some("gen-lua-docs") => gen_lua_docs::run(),
@@ -35,6 +37,9 @@ fn print_usage() {
     eprintln!("commands:");
     eprintln!(
         "  bench-file-search [--runs N] [--entries N] [--queries CSV] benchmark file fuzzy search"
+    );
+    eprintln!(
+        "  bench-store-compression STATE_DIR [--max-samples N] [--max-bytes N] sample store compression"
     );
     eprintln!(
         "  bench-transcript-layout [--runs N] [--workloads CSV] run transcript layout benches"
