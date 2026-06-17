@@ -34,6 +34,7 @@ pub mod permissions;
 pub mod process;
 pub mod runtime;
 pub mod session;
+pub mod session_migration;
 pub mod state;
 pub mod timers;
 pub mod tools;

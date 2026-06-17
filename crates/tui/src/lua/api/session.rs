@@ -593,7 +593,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     row.set("size_bytes", size)?;
                 }
                 if let Some(migration) = meta.migration {
-                    row.set("migration_status", migration.state)?;
+                    row.set("migration_status", migration.state.as_str())?;
                     if let Some(message) = migration.message {
                         row.set("migration_message", message)?;
                     }

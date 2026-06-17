@@ -32,8 +32,9 @@ with `COMPAT(<id>)`.
 - Why: import pre-SQLite `meta.json` + `history.jsonl` session directories to
   canonical SQLite storage without requiring the user to open each session
 - Code:
-  - `crates/core/src/session.rs`: `load_jsonl_session`,
-    `migrate_session_dir_to_db`, `migrate_all_sessions_once`
+  - `crates/core/src/session.rs`: `load_jsonl_session`
+  - `crates/core/src/session_migration.rs`: `migrate_session_dir_to_db`,
+    `migrate_all_sessions_once`
 
 ## session-search-sidecar-missing
 
