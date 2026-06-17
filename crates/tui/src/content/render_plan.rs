@@ -365,7 +365,6 @@ impl RenderPlan {
             .map(|(index, node)| (node.id(), index))
             .collect();
         let fingerprint = smelt_core::utils::hash_serializable(&PlanFingerprint {
-            history_generation: history.generation(),
             group_generation,
             group_cache_key,
             node_ids: nodes.iter().map(RenderNode::id).collect(),
@@ -526,7 +525,6 @@ impl RenderPlan {
 
 #[derive(serde::Serialize)]
 struct PlanFingerprint {
-    history_generation: u64,
     group_generation: u64,
     group_cache_key: Option<u64>,
     node_ids: Vec<RenderNodeId>,
