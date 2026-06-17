@@ -11,6 +11,7 @@ use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver as StdReceiver, RecvTimeoutError, Sender as StdSender};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -19,11 +20,23 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 /// tempfile in place" bursts (vim's `:w` typically fires 2–4 events).
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// Handle returned by [`spawn`]. Owns the `notify` watcher; dropping it
-/// stops the OS subscription. The accompanying signal task exits when
-/// the watcher channel closes.
+/// Handle returned by [`spawn`]. Owns the watcher worker; dropping it
+/// stops the OS subscription and asks the debouncer thread to exit.
 pub struct AutoReloadHandle {
-    _watcher: RecommendedWatcher,
+    tx: StdSender<AutoReloadMsg>,
+    _worker: std::thread::JoinHandle<()>,
+}
+
+impl Drop for AutoReloadHandle {
+    fn drop(&mut self) {
+        let _ = self.tx.send(AutoReloadMsg::Shutdown);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AutoReloadMsg {
+    Event,
+    Shutdown,
 }
 
 /// Roots the auto-reloader watches. This intentionally covers Lua config
@@ -33,9 +46,9 @@ pub struct AutoReloadHandle {
 pub struct WatchPaths {
     /// `~/.config/smelt/` - recursive.
     pub global_config: Option<PathBuf>,
-    /// `.smelt/` under cwd - recursive when present. When missing, its
-    /// parent is watched recursively and events are filtered back to `.smelt/`
-    /// so first-time project config starts hot-reloading without a restart.
+    /// `.smelt/` under cwd - recursive when present. When missing, the
+    /// parent is watched non-recursively just long enough to notice `.smelt/`
+    /// creation, then the watcher upgrades to recursive `.smelt/` watching.
     pub project_config: Option<PathBuf>,
 }
 
@@ -64,8 +77,9 @@ impl WatchPaths {
 }
 
 /// The Lua config tree whose content can trigger an automatic reload. This is
-/// separate from the OS subscriptions: when `.smelt/` does not exist yet we may
-/// subscribe to its parent, but only paths inside these roots are config.
+/// separate from the OS subscriptions: when `.smelt/` does not exist yet we
+/// subscribe to its parent non-recursively, but only paths inside these roots
+/// are config.
 #[derive(Clone, Debug)]
 struct ConfigWatchSet {
     roots: Vec<PathBuf>,
@@ -142,14 +156,35 @@ impl ConfigSnapshot {
 struct AutoReloadFilter {
     watch_set: ConfigWatchSet,
     snapshot: ConfigSnapshot,
+    project_config: Option<PathBuf>,
+    project_config_watched: bool,
 }
 
 impl AutoReloadFilter {
-    fn new(watch_set: ConfigWatchSet) -> Self {
+    fn new(watch_set: ConfigWatchSet, project_config_watched: bool) -> Self {
         let snapshot = ConfigSnapshot::capture(&watch_set);
+        let project_config = watch_set
+            .roots
+            .iter()
+            .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(".smelt"))
+            .cloned();
         Self {
             watch_set,
             snapshot,
+            project_config,
+            project_config_watched,
+        }
+    }
+
+    fn refresh_project_config_watch(&mut self, mut watch: impl FnMut(&Path) -> bool) {
+        if self.project_config_watched {
+            return;
+        }
+        let Some(path) = self.project_config.as_ref() else {
+            return;
+        };
+        if path.is_dir() && watch(path) {
+            self.project_config_watched = true;
         }
     }
 
@@ -212,20 +247,20 @@ fn snapshot_file(path: &Path) -> Option<FileSnapshot> {
 /// receiver that yields `()` each time a debounced filesystem change
 /// warrants a reload.
 pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<()>)> {
-    let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (raw_tx, raw_rx) = std::sync::mpsc::channel::<AutoReloadMsg>();
     let (signal_tx, signal_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
     let watch_set = ConfigWatchSet::from_paths(&paths);
     let callback_watch_set = watch_set.clone();
-    let filter = AutoReloadFilter::new(watch_set);
 
+    let callback_tx = raw_tx.clone();
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
             if !callback_watch_set.event_may_affect_config(&event) {
                 return;
             }
-            let _ = raw_tx.send(());
+            let _ = callback_tx.send(AutoReloadMsg::Event);
         },
         Config::default(),
     ) {
@@ -242,11 +277,15 @@ pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<(
             subscribed_any = true;
         }
     }
+    let mut project_config_watched = false;
     if let Some(p) = paths.project_config.as_ref() {
-        if try_watch(&mut watcher, p, RecursiveMode::Recursive) {
-            subscribed_any = true;
+        if p.exists() {
+            if try_watch(&mut watcher, p, RecursiveMode::Recursive) {
+                subscribed_any = true;
+                project_config_watched = true;
+            }
         } else if let Some(parent) = p.parent() {
-            if try_watch(&mut watcher, parent, RecursiveMode::Recursive) {
+            if try_watch(&mut watcher, parent, RecursiveMode::NonRecursive) {
                 subscribed_any = true;
             }
         }
@@ -256,11 +295,19 @@ pub fn spawn(paths: WatchPaths) -> Option<(AutoReloadHandle, UnboundedReceiver<(
         return None;
     }
 
-    tokio::spawn(async move {
-        debounce_loop(&mut raw_rx, signal_tx, filter).await;
-    });
+    let filter = AutoReloadFilter::new(watch_set, project_config_watched);
+    let worker = std::thread::Builder::new()
+        .name("smelt-auto-reload".to_string())
+        .spawn(move || debounce_loop(raw_rx, signal_tx, filter, watcher))
+        .ok()?;
 
-    Some((AutoReloadHandle { _watcher: watcher }, signal_rx))
+    Some((
+        AutoReloadHandle {
+            tx: raw_tx,
+            _worker: worker,
+        },
+        signal_rx,
+    ))
 }
 
 fn try_watch(watcher: &mut RecommendedWatcher, path: &Path, mode: RecursiveMode) -> bool {
@@ -291,22 +338,37 @@ fn relevant_path(path: &Path, roots: &[PathBuf]) -> bool {
 /// Coalesce a burst of raw events into a single signal. After the first
 /// event arrives, wait for [`DEBOUNCE`] of silence before forwarding;
 /// any event landing inside the window resets the timer.
-async fn debounce_loop(
-    raw_rx: &mut UnboundedReceiver<()>,
+fn debounce_loop(
+    raw_rx: StdReceiver<AutoReloadMsg>,
+    signal_tx: UnboundedSender<()>,
+    filter: AutoReloadFilter,
+    mut watcher: RecommendedWatcher,
+) {
+    debounce_loop_inner(raw_rx, signal_tx, filter, |path| {
+        try_watch(&mut watcher, path, RecursiveMode::Recursive)
+    });
+}
+
+fn debounce_loop_inner(
+    raw_rx: StdReceiver<AutoReloadMsg>,
     signal_tx: UnboundedSender<()>,
     mut filter: AutoReloadFilter,
+    mut watch_project_config: impl FnMut(&Path) -> bool,
 ) {
     loop {
-        if raw_rx.recv().await.is_none() {
-            return;
+        match raw_rx.recv() {
+            Ok(AutoReloadMsg::Event) => {}
+            Ok(AutoReloadMsg::Shutdown) | Err(_) => return,
         }
         loop {
-            match tokio::time::timeout(DEBOUNCE, raw_rx.recv()).await {
-                Ok(Some(())) => continue,
-                Ok(None) => return,
-                Err(_) => break,
+            match raw_rx.recv_timeout(DEBOUNCE) {
+                Ok(AutoReloadMsg::Event) => continue,
+                Ok(AutoReloadMsg::Shutdown) => return,
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return,
             }
         }
+        filter.refresh_project_config_watch(&mut watch_project_config);
         if !filter.changed_since_last_scan() {
             continue;
         }
@@ -419,7 +481,7 @@ mod tests {
         let init = dir.path().join("init.lua");
         std::fs::write(&init, "one\n").unwrap();
         let watch_set = ConfigWatchSet::from_roots(vec![dir.path().to_path_buf()]);
-        let mut filter = AutoReloadFilter::new(watch_set);
+        let mut filter = AutoReloadFilter::new(watch_set, false);
 
         assert!(!filter.changed_since_last_scan());
 
@@ -434,7 +496,7 @@ mod tests {
         let init = dir.path().join("init.lua");
         std::fs::write(&init, "before\n").unwrap();
         let roots = vec![dir.path().to_path_buf()];
-        let mut filter = AutoReloadFilter::new(ConfigWatchSet::from_roots(roots.clone()));
+        let mut filter = AutoReloadFilter::new(ConfigWatchSet::from_roots(roots.clone()), false);
         let rescan = notify::Event {
             kind: EventKind::Other,
             paths: Vec::new(),
@@ -453,7 +515,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project_config = dir.path().join(".smelt");
         let watch_set = ConfigWatchSet::from_roots(vec![project_config.clone()]);
-        let mut filter = AutoReloadFilter::new(watch_set.clone());
+        let mut filter = AutoReloadFilter::new(watch_set.clone(), false);
         let mkdir = notify::Event {
             kind: EventKind::Create(notify::event::CreateKind::Folder),
             paths: vec![project_config.clone()],
@@ -464,6 +526,13 @@ mod tests {
         assert!(!filter.changed_since_last_scan());
 
         std::fs::create_dir_all(&project_config).unwrap();
+        let mut watched = false;
+        filter.refresh_project_config_watch(|path| {
+            watched = path == project_config;
+            true
+        });
+        assert!(watched);
+        assert!(filter.project_config_watched);
         std::fs::write(project_config.join("init.lua"), "created = true\n").unwrap();
         assert!(filter.changed_since_last_scan());
     }
@@ -494,17 +563,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let init = dir.path().join("init.lua");
         std::fs::write(&init, "before\n").unwrap();
-        let filter =
-            AutoReloadFilter::new(ConfigWatchSet::from_roots(vec![dir.path().to_path_buf()]));
-        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel();
+        let filter = AutoReloadFilter::new(
+            ConfigWatchSet::from_roots(vec![dir.path().to_path_buf()]),
+            true,
+        );
+        let (raw_tx, raw_rx) = std::sync::mpsc::channel();
         let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();
-        let task = tokio::spawn(async move {
-            debounce_loop(&mut raw_rx, signal_tx, filter).await;
+        let task = std::thread::spawn(move || {
+            debounce_loop_inner(raw_rx, signal_tx, filter, |_| false);
         });
 
         std::fs::write(&init, "after\n").unwrap();
-        raw_tx.send(()).unwrap();
-        raw_tx.send(()).unwrap();
+        raw_tx.send(AutoReloadMsg::Event).unwrap();
+        raw_tx.send(AutoReloadMsg::Event).unwrap();
         assert!(tokio::time::timeout(DEBOUNCE / 2, signal_rx.recv())
             .await
             .is_err());
@@ -514,7 +585,7 @@ mod tests {
             .is_some());
         assert!(signal_rx.try_recv().is_err());
 
-        drop(raw_tx);
-        task.await.unwrap();
+        raw_tx.send(AutoReloadMsg::Shutdown).unwrap();
+        task.join().unwrap();
     }
 }

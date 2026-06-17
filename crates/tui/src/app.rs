@@ -196,6 +196,12 @@ pub enum AppEvent {
     SessionMigration(smelt_core::session::SessionMigrationEvent),
 }
 
+type AutoReloadSetup = Option<(
+    crate::auto_reload::AutoReloadHandle,
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+)>;
+type AutoReloadSetupRx = tokio::sync::oneshot::Receiver<AutoReloadSetup>;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Notification {
     pub(crate) win: crate::smelt_edit::WinId,
@@ -1968,6 +1974,8 @@ impl TuiApp {
         }
 
         let mut auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
+        let mut auto_reload_setup_rx: Option<AutoReloadSetupRx> = None;
+        let mut auto_reload_start_pending = self.core.config.settings.auto_reload;
 
         let mut term_events = match crate::term_input::TerminalInput::spawn() {
             Ok(input) => input,
@@ -2000,15 +2008,9 @@ impl TuiApp {
             self.notify_error_sticky(format!("lua init: {err}"));
         }
 
-        // Start watching after cold-start Lua has finished so launch-time
-        // config setup cannot immediately schedule a redundant reload.
-        if self.core.config.settings.auto_reload {
-            let paths = crate::auto_reload::WatchPaths::discover(std::path::Path::new(&self.cwd));
-            if let Some((handle, rx)) = crate::auto_reload::spawn(paths) {
-                self.auto_reload = Some(handle);
-                auto_reload_rx = Some(rx);
-            }
-        }
+        // Auto-reload watcher setup is kicked off after the first frame so
+        // filesystem subscription and snapshot work can never leave the
+        // alternate screen blank during startup.
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
         if let Some(msg) = initial_message {
@@ -2142,6 +2144,17 @@ impl TuiApp {
             }
 
             self.render_normal();
+            if auto_reload_start_pending {
+                auto_reload_start_pending = false;
+                let cwd = self.cwd.clone();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                tokio::task::spawn_blocking(move || {
+                    let paths =
+                        crate::auto_reload::WatchPaths::discover(std::path::Path::new(&cwd));
+                    let _ = tx.send(crate::auto_reload::spawn(paths));
+                });
+                auto_reload_setup_rx = Some(rx);
+            }
             let last_frame = self.core.clock.instant_now();
 
             let now = self.core.clock.instant_now();
@@ -2277,6 +2290,19 @@ impl TuiApp {
                     self.flush_lua_callbacks();
                     self.drive_lua_tasks();
                     self.render_normal();
+                }
+
+                setup = async {
+                    match auto_reload_setup_rx.as_mut() {
+                        Some(rx) => rx.await.ok(),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    auto_reload_setup_rx = None;
+                    if let Some(Some((handle, rx))) = setup {
+                        self.auto_reload = Some(handle);
+                        auto_reload_rx = Some(rx);
+                    }
                 }
 
                 Some(_) = async {
