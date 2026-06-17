@@ -20,6 +20,8 @@ pub struct DiffSpec {
     pub path: String,
     pub anchor: String,
     pub lang: Option<String>,
+    #[serde(default)]
+    pub full_file: bool,
 }
 
 /// File-view render directive (all-Context diff IR). Used by `write_file` and

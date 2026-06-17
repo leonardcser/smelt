@@ -1098,11 +1098,7 @@ impl TranscriptProjection {
 
     fn finish_compile_jobs(&mut self, env: TranscriptRenderEnv<'_>, jobs: Vec<CompileJob>) {
         let compiled = jobs.len();
-        let blocks = jobs
-            .into_iter()
-            .map(|job| job.compile(env.clone()))
-            .collect();
-        self.display_layouts.insert_compiled_blocks(blocks);
+        self.display_layouts.compile_and_insert(env, jobs);
         if compiled > 0 {
             self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
         }

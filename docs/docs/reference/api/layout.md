@@ -34,7 +34,7 @@ fun(opts: table): smelt.layout.Node
 
 Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
+Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax; `opts.full_file` treats `opts.old` as the complete pre-edit file for stable previews after writes.
 
 ## `smelt.layout.elapsed`
 

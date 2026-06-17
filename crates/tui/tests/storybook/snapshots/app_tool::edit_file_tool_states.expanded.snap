@@ -1,6 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
-assertion_line: 472
+assertion_line: 488
 expression: frame.text()
 ---
 * edit_file src/lib.rs
@@ -20,13 +20,13 @@ expression: frame.text()
    2 +     a.checked_add(b).expect("overflow")
 
 * edit_file runtime/lua/smelt/plugins/compact.lua
+   1   line 1
    2 - Use them as evidence for task priority and return instructions.
    2 + Use them as evidence for task priority and return/resume instructions.
+   3   line 3
 
 * edit_file src/lib.rs
   old_string not found in src/lib.rs
-
-
 
 
 ─ ✿ working… ───────────────────────────────────────────────────────────────────────

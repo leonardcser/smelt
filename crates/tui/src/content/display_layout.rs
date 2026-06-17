@@ -13,7 +13,7 @@ use smelt_core::theme::intern;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
-pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 9;
+pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 10;
 
 pub(crate) fn transcript_renderer_cache_key(
     lua: &LuaRuntime,
@@ -144,6 +144,7 @@ pub(crate) enum CompileJob {
         view_state: ViewState,
         block: Block,
         state: Option<ToolState>,
+        cache_source_views: bool,
     },
     Group {
         id: RenderNodeId,
@@ -155,9 +156,10 @@ pub(crate) enum CompileJob {
 }
 
 impl CompileJob {
-    pub(crate) fn compile(
+    fn compile(
         self,
         env: TranscriptRenderEnv<'_>,
+        source_views: &mut SourceViewCache,
     ) -> (RenderNodeId, DisplayCacheKey, LayoutIr) {
         match self {
             Self::Block {
@@ -168,11 +170,26 @@ impl CompileJob {
                 view_state,
                 block,
                 state,
-            } => (
-                id,
-                key,
-                compile_block_with_lua(env, block_id, index, &block, state.as_ref(), view_state),
-            ),
+                cache_source_views,
+            } => {
+                let mut cache = CompileLayoutCache {
+                    source_views,
+                    source_views_enabled: cache_source_views,
+                };
+                (
+                    id,
+                    key,
+                    compile_block_with_lua(
+                        env,
+                        block_id,
+                        index,
+                        &block,
+                        state.as_ref(),
+                        view_state,
+                        &mut cache,
+                    ),
+                )
+            }
             Self::Group {
                 id,
                 name,
@@ -209,9 +226,17 @@ struct CachedLayout {
     layout: LayoutIr,
 }
 
+type SourceViewCache = HashMap<u64, SourceViewIr>;
+
+struct CompileLayoutCache<'a> {
+    source_views: &'a mut SourceViewCache,
+    source_views_enabled: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct DisplayModel {
     blocks: HashMap<RenderNodeId, CachedLayout>,
+    source_views: SourceViewCache,
 }
 
 impl DisplayModel {
@@ -262,11 +287,7 @@ impl DisplayModel {
             blocks,
         );
         let compiled = jobs.len();
-        let blocks = jobs
-            .into_iter()
-            .map(|job| job.compile(env.clone()))
-            .collect();
-        self.insert_compiled_blocks(blocks);
+        self.compile_and_insert(env, jobs);
         compiled
     }
 
@@ -307,6 +328,7 @@ impl DisplayModel {
                         Block::ToolCall { call_id, .. } => history.tool_state(call_id).cloned(),
                         _ => None,
                     };
+                    let cache_source_views = cache_source_views_for_block(&block);
                     jobs.push(CompileJob::Block {
                         id,
                         block_id,
@@ -315,6 +337,7 @@ impl DisplayModel {
                         view_state: key.view_state,
                         block,
                         state,
+                        cache_source_views,
                     });
                 }
                 RenderNode::Group { ref name, .. } => {
@@ -403,6 +426,18 @@ impl DisplayModel {
         entries
     }
 
+    pub(crate) fn compile_and_insert(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        jobs: Vec<CompileJob>,
+    ) {
+        let mut layouts = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            layouts.push(job.compile(env.clone(), &mut self.source_views));
+        }
+        self.insert_compiled_blocks(layouts);
+    }
+
     pub(crate) fn insert_compiled_blocks(
         &mut self,
         layouts: Vec<(RenderNodeId, DisplayCacheKey, LayoutIr)>,
@@ -431,6 +466,16 @@ impl DisplayModel {
             .filter(|cached| cached.key == display_key)
             .map(|cached| &cached.layout)
     }
+}
+
+fn cache_source_views_for_block(block: &Block) -> bool {
+    !matches!(
+        block,
+        Block::ToolDraft {
+            finished: false,
+            ..
+        }
+    )
 }
 
 fn display_layout_entry_matches_history(
@@ -494,6 +539,11 @@ fn display_layout_entry_matches_history(
 #[cfg(test)]
 pub(crate) fn compile_block(block: &Block) -> LayoutIr {
     let lua = LuaRuntime::new();
+    let mut source_views = SourceViewCache::default();
+    let mut cache = CompileLayoutCache {
+        source_views: &mut source_views,
+        source_views_enabled: true,
+    };
     compile_block_with_lua(
         TranscriptRenderEnv::new(&lua),
         BlockId::new(0),
@@ -501,6 +551,7 @@ pub(crate) fn compile_block(block: &Block) -> LayoutIr {
         block,
         None,
         ViewState::Expanded,
+        &mut cache,
     )
 }
 
@@ -702,12 +753,13 @@ fn compile_block_with_lua(
     block: &Block,
     state: Option<&ToolState>,
     view_state: ViewState,
+    cache: &mut CompileLayoutCache<'_>,
 ) -> LayoutIr {
     let kind = block_kind(block);
     let layout = env
         .lua
         .render_transcript_layout(id, index, block, state, view_state);
-    match compile_layout_ir(&layout) {
+    match compile_layout_ir_with_cache(&layout, cache) {
         Ok(layout) => layout,
         Err(e) => {
             env.lua.record_error(format!(
@@ -727,6 +779,18 @@ fn block_kind(block: &Block) -> &'static str {
 }
 
 pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String> {
+    let mut source_views = SourceViewCache::default();
+    let mut cache = CompileLayoutCache {
+        source_views: &mut source_views,
+        source_views_enabled: true,
+    };
+    compile_layout_ir_with_cache(layout, &mut cache)
+}
+
+fn compile_layout_ir_with_cache(
+    layout: &BlockLayout,
+    cache: &mut CompileLayoutCache<'_>,
+) -> Result<LayoutIr, String> {
     match layout {
         BlockLayout::Empty => Ok(BlockLayout::Empty),
         BlockLayout::Leaf(LuaLeaf::Text(spec)) => Ok(BlockLayout::Leaf(IrLeaf::Text(TextSpec {
@@ -746,43 +810,62 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
         BlockLayout::Leaf(LuaLeaf::Separator(spec)) => {
             Ok(BlockLayout::Leaf(IrLeaf::Separator(spec.clone())))
         }
-        BlockLayout::Leaf(LuaLeaf::Diff(spec)) => {
-            let ext = spec
-                .lang
-                .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext);
-            let ir = smelt_core::content::highlight::build_diff_ir_ext(
-                &spec.old,
-                &spec.new,
-                &spec.path,
-                &spec.anchor,
-                ext,
-            );
-            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
-                ir,
-            ))))
-        }
-        BlockLayout::Leaf(LuaLeaf::FileView(spec)) => {
-            let ext = spec
-                .lang
-                .as_deref()
-                .map(smelt_core::content::highlight::lang_to_ext)
-                .or_else(|| {
-                    std::path::Path::new(&spec.path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                });
-            let ir = smelt_core::content::highlight::build_file_view_ir(&spec.content, ext);
-            Ok(BlockLayout::Leaf(IrLeaf::SourceView(SourceViewIr::Diff(
-                ir,
-            ))))
-        }
+        BlockLayout::Leaf(LuaLeaf::Diff(spec)) => cached_source_view(
+            cache.source_views,
+            cache.source_views_enabled,
+            smelt_core::utils::hash_serializable(&("diff", spec)),
+            || {
+                let ext = spec
+                    .lang
+                    .as_deref()
+                    .map(smelt_core::content::highlight::lang_to_ext);
+                let ir = if spec.full_file {
+                    smelt_core::content::highlight::build_diff_ir_ext_with_base(
+                        &spec.old,
+                        &spec.new,
+                        &spec.path,
+                        &spec.anchor,
+                        ext,
+                        Some(&spec.old),
+                    )
+                } else {
+                    smelt_core::content::highlight::build_diff_ir_ext(
+                        &spec.old,
+                        &spec.new,
+                        &spec.path,
+                        &spec.anchor,
+                        ext,
+                    )
+                };
+                SourceViewIr::Diff(ir)
+            },
+        ),
+        BlockLayout::Leaf(LuaLeaf::FileView(spec)) => cached_source_view(
+            cache.source_views,
+            cache.source_views_enabled,
+            smelt_core::utils::hash_serializable(&("file_view", spec)),
+            || {
+                let ext = spec
+                    .lang
+                    .as_deref()
+                    .map(smelt_core::content::highlight::lang_to_ext)
+                    .or_else(|| {
+                        std::path::Path::new(&spec.path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                    });
+                SourceViewIr::Diff(smelt_core::content::highlight::build_file_view_ir(
+                    &spec.content,
+                    ext,
+                ))
+            },
+        ),
         BlockLayout::Leaf(LuaLeaf::SourceView(ir)) => {
             Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir.clone())))
         }
         BlockLayout::Vbox(items) => items
             .iter()
-            .map(compile_layout_ir)
+            .map(|layout| compile_layout_ir_with_cache(layout, cache))
             .collect::<Result<Vec<_>, _>>()
             .map(BlockLayout::Vbox),
         BlockLayout::Hbox(items) => items
@@ -790,28 +873,50 @@ pub(crate) fn compile_layout_ir(layout: &BlockLayout) -> Result<LayoutIr, String
             .map(|item| {
                 Ok(HboxItem {
                     constraint: item.constraint,
-                    layout: compile_layout_ir(&item.layout)?,
+                    layout: compile_layout_ir_with_cache(&item.layout, cache)?,
                 })
             })
             .collect::<Result<Vec<_>, _>>()
             .map(BlockLayout::Hbox),
         BlockLayout::Gutter { child, spec } => Ok(BlockLayout::Gutter {
-            child: Box::new(compile_layout_ir(child)?),
+            child: Box::new(compile_layout_ir_with_cache(child, cache)?),
             spec: spec.clone(),
         }),
         BlockLayout::Panel { child, spec } => Ok(BlockLayout::Panel {
-            child: Box::new(compile_layout_ir(child)?),
+            child: Box::new(compile_layout_ir_with_cache(child, cache)?),
             spec: spec.clone(),
         }),
         BlockLayout::Style { child, spec } => Ok(BlockLayout::Style {
-            child: Box::new(compile_layout_ir(child)?),
+            child: Box::new(compile_layout_ir_with_cache(child, cache)?),
             spec: spec.clone(),
         }),
         BlockLayout::Cap { child, spec } => Ok(BlockLayout::Cap {
-            child: Box::new(compile_layout_ir(child)?),
+            child: Box::new(compile_layout_ir_with_cache(child, cache)?),
             spec: spec.clone(),
         }),
     }
+}
+
+fn cached_source_view(
+    source_views: &mut SourceViewCache,
+    enabled: bool,
+    key: u64,
+    build: impl FnOnce() -> SourceViewIr,
+) -> Result<LayoutIr, String> {
+    if enabled {
+        if let Some(ir) = source_views.get(&key) {
+            return Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir.clone())));
+        }
+    }
+
+    let ir = build();
+    if enabled {
+        if source_views.len() >= 128 {
+            source_views.clear();
+        }
+        source_views.insert(key, ir.clone());
+    }
+    Ok(BlockLayout::Leaf(IrLeaf::SourceView(ir)))
 }
 
 pub(crate) fn measure_block(layout: &LayoutIr, ctx: MeasureCtx) -> u64 {

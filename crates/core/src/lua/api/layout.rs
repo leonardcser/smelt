@@ -366,7 +366,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "diff",
-        "Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.",
+        "Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax; `opts.full_file` treats `opts.old` as the complete pre-edit file for stable previews after writes.",
         &["opts"],
         |_, opts: mlua::Table| -> LuaResult<LuaBlockLayout> {
             let old: String = opts.get::<Option<String>>("old")?.unwrap_or_default();
@@ -376,12 +376,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .get::<Option<String>>("anchor")?
                 .unwrap_or_else(|| old.clone());
             let lang: Option<String> = opts.get::<Option<String>>("lang")?;
+            let full_file = opts.get::<Option<bool>>("full_file")?.unwrap_or(false);
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Diff(DiffSpec {
                 old,
                 new,
                 path,
                 anchor,
                 lang,
+                full_file,
             }))))
         },
     )?;

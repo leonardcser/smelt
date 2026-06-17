@@ -15,7 +15,7 @@ layout.cap = nil
 ---@type fun(content: string, opts: table?): smelt.layout.Node
 layout.code = nil
 
---- Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax.
+--- Inline-diff render directive. The worker renders the diff directly into the block buffer. `opts.old`, `opts.new` are the before/after strings; `opts.path` picks syntax via extension; `opts.anchor` (defaults to `opts.old`) is the diff-view anchor; `opts.lang` overrides path-based syntax; `opts.full_file` treats `opts.old` as the complete pre-edit file for stable previews after writes.
 ---@type fun(opts: table): smelt.layout.Node
 layout.diff = nil
 

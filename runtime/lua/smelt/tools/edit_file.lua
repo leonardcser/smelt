@@ -37,6 +37,16 @@ local function edit_fields(args)
   return args.file_path or "", args.old_string or "", args.new_string or "", args.replace_all == true
 end
 
+local function diff_from_content(path, old_content, new_content, anchor)
+  return smelt.layout.diff({
+    old = old_content,
+    new = new_content,
+    path = path,
+    anchor = anchor,
+    full_file = true,
+  })
+end
+
 local function planned_diff(args)
   local path, old_string, new_string, do_all = edit_fields(args)
   local cached = path ~= "" and smelt.fs.file_state.get(path) or nil
@@ -50,12 +60,13 @@ local function planned_diff(args)
     })
   end
 
-  return smelt.layout.diff({
-    old = content,
-    new = apply_edit(content, old_string, new_string, do_all),
-    path = path,
-    anchor = old_string,
-  })
+  return diff_from_content(path, content, apply_edit(content, old_string, new_string, do_all), old_string)
+end
+
+local function draft_placeholder(args)
+  local path = args.file_path or ""
+  local target = path ~= "" and (" for " .. smelt.path.display(path)) or ""
+  return smelt.layout.text("Preparing edit preview" .. target .. "...")
 end
 
 local function line_label(count, label)
@@ -70,14 +81,18 @@ end
 
 transcript_defaults.__tool_body_renderers.edit_file = function(block)
   local args = block.args or {}
+  if block.draft and not block.draft_finished then
+    return draft_placeholder(args)
+  end
+
   local meta = block.output and block.output.metadata
   if meta then
-    return smelt.layout.diff({
-      old = meta.old_content or args.old_string or "",
-      new = meta.new_content or args.new_string or "",
-      path = meta.path or args.file_path or "",
-      anchor = args.old_string or "",
-    })
+    return diff_from_content(
+      meta.path or args.file_path or "",
+      meta.old_content or args.old_string or "",
+      meta.new_content or args.new_string or "",
+      args.old_string or ""
+    )
   end
   return planned_diff(args)
 end

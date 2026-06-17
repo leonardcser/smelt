@@ -72,7 +72,7 @@ smelt.transcript = smelt.transcript or {}
 ---@field bucket? string|string[] Stable field names used to split adjacent matching runs.
 ---@field render fun(group: table, ctx: smelt.transcript.Context): table Virtual group renderer.
 
-local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v1"
+local DEFAULT_RENDERER_CACHE_KEY = "smelt.transcript.defaults:v2"
 local transcript = smelt.transcript
 local base_renderer = transcript.__get_renderer and transcript.__get_renderer() or nil
 local base_renderer_cache_key = nil

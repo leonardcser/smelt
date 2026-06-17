@@ -125,8 +125,19 @@ pub fn build_diff_ir_ext(
     anchor: &str,
     syntax_ext: Option<&str>,
 ) -> DiffIr {
+    build_diff_ir_ext_with_base(old, new, path, anchor, syntax_ext, None)
+}
+
+pub fn build_diff_ir_ext_with_base(
+    old: &str,
+    new: &str,
+    path: &str,
+    anchor: &str,
+    syntax_ext: Option<&str>,
+    file_content: Option<&str>,
+) -> DiffIr {
     let _perf = smelt_perf::perf::begin("render:build_diff_ir");
-    let dv = compute_diff_view(old, new, path, anchor);
+    let dv = compute_diff_view(old, new, path, anchor, file_content);
     let file_lines: Vec<&str> = dv.file_content.lines().collect();
     let lookup = if !anchor.is_empty() { anchor } else { old };
     let lookup_indent = lookup
@@ -247,8 +258,17 @@ fn change(tag: ChangeTag, value: &str) -> DiffChange {
     }
 }
 
-fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffViewData {
-    let file_content = std::fs::read_to_string(path).unwrap_or_default();
+fn compute_diff_view(
+    old: &str,
+    new: &str,
+    path: &str,
+    anchor: &str,
+    file_content: Option<&str>,
+) -> DiffViewData {
+    let explicit_full_file = file_content.is_some();
+    let file_content = file_content
+        .map(str::to_string)
+        .unwrap_or_else(|| std::fs::read_to_string(path).unwrap_or_default());
     let file_lines_count = file_content.lines().count();
     let lookup = if !anchor.is_empty() {
         anchor
@@ -268,7 +288,9 @@ fn compute_diff_view(old: &str, new: &str, path: &str, anchor: &str) -> DiffView
 
     let old_line_count = old.lines().count();
     let new_line_count = new.lines().count();
-    let is_full_file = old_line_count == file_lines_count || new_line_count == file_lines_count;
+    let is_full_file = explicit_full_file
+        || old_line_count == file_lines_count
+        || new_line_count == file_lines_count;
     let projected_file_lines_count = projected_file_line_count(
         file_lines_count,
         old_line_count,
@@ -1408,6 +1430,30 @@ mod tests {
         }
         assert!(saw_delete, "expected a delete line");
         assert!(saw_insert, "expected an insert line");
+    }
+
+    #[test]
+    fn full_file_diff_can_use_pre_edit_content_after_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        let old = "fn main() {\n    let x = 1;\n}\n";
+        let new = "fn main() {\n    let x = 42;\n    println!(\"{x}\");\n}\n";
+
+        std::fs::write(&path, old).unwrap();
+        let before = build_diff_ir(old, new, path.to_str().unwrap(), "    let x = 1;\n");
+
+        std::fs::write(&path, new).unwrap();
+        let after = build_diff_ir_ext_with_base(
+            old,
+            new,
+            path.to_str().unwrap(),
+            "    let x = 1;\n",
+            None,
+            Some(old),
+        );
+
+        assert_eq!(format!("{:?}", before.lines), format!("{:?}", after.lines));
+        assert_eq!(before.max_display_lineno, after.max_display_lineno);
     }
 
     #[test]
