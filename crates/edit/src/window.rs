@@ -3116,7 +3116,7 @@ fn snap_col_past_chrome(buf: &Buffer, logical_row: usize, col: u16) -> u16 {
         .next_back();
     match last_selectable_edge {
         Some(edge) if col > edge => edge,
-        None => u16::from(line_width == 1),
+        None => line_width,
         _ => col.min(line_width),
     }
 }
@@ -5189,6 +5189,25 @@ mod tests {
             line3_len,
             "l at end of line should stay put"
         );
+    }
+
+    #[test]
+    fn cursor_snap_places_all_chrome_rows_after_leading_chrome() {
+        let mut buf = make_buf(vec!["│ ".into()]);
+        buf.add_highlight_group_with_meta(
+            0,
+            0,
+            2,
+            smelt_buffer::theme::intern("Normal"),
+            smelt_buffer::buffer::SpanMeta {
+                selectable: false,
+                copy_as: None,
+            },
+        );
+
+        assert_eq!(snap_col_past_chrome(&buf, 0, 0), 2);
+        assert_eq!(snap_col_past_chrome(&buf, 0, 1), 2);
+        assert_eq!(snap_col_past_chrome(&buf, 0, 2), 2);
     }
 
     #[test]
