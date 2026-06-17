@@ -19,6 +19,7 @@ struct ToolDraft {
     preview: DraftJsonPreview,
     finished: bool,
     last_render: Option<Instant>,
+    rendered_args: bool,
 }
 
 impl ToolDraft {
@@ -33,6 +34,10 @@ impl ToolDraft {
         } else {
             false
         }
+    }
+
+    fn has_args(&self) -> bool {
+        !self.preview.raw_arguments.is_empty() || !self.preview.args.is_empty()
     }
 
     fn snapshot(&self, stream_id: String) -> ToolDraftSnapshot {
@@ -85,9 +90,17 @@ impl ToolDraftController {
             draft.preview.append(&delta);
         }
         draft.finished |= finished;
-        draft
-            .should_render(now, force_render || finished)
-            .then(|| draft.snapshot(stream_id))
+        let has_args = draft.has_args();
+        let should_render = draft.should_render(
+            now,
+            force_render || finished || (has_args && !draft.rendered_args),
+        );
+        if should_render {
+            draft.rendered_args |= has_args;
+            Some(draft.snapshot(stream_id))
+        } else {
+            None
+        }
     }
 
     fn remove_by_stream_id(&mut self, stream_id: &str) {
@@ -555,6 +568,46 @@ mod tests {
             preview.append(chunk);
         }
         preview.args
+    }
+
+    #[test]
+    fn first_argument_delta_renders_even_inside_throttle() {
+        let mut controller = ToolDraftController::default();
+        let now = Instant::now();
+
+        let initial = controller.update(
+            ToolDraftEvent {
+                stream_id: "s".into(),
+                call_id: Some("c".into()),
+                tool_name: Some("bash".into()),
+                delta: None,
+                arguments: None,
+                finished: false,
+            },
+            now,
+            true,
+        );
+        assert!(initial.is_some());
+
+        let update = controller
+            .update(
+                ToolDraftEvent {
+                    stream_id: "s".into(),
+                    call_id: Some("c".into()),
+                    tool_name: Some("bash".into()),
+                    delta: Some(r#"{"command":"echo hi"#.into()),
+                    arguments: None,
+                    finished: false,
+                },
+                now,
+                false,
+            )
+            .expect("first argument content should render immediately");
+
+        assert_eq!(
+            update.args.get("command").and_then(|value| value.as_str()),
+            Some("echo hi")
+        );
     }
 
     #[test]

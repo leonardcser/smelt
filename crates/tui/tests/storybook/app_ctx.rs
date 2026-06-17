@@ -207,6 +207,26 @@ impl AppStoryCtx {
         });
     }
 
+    /// Emit one in-flight streaming tool-call draft delta without the finished
+    /// event. This captures the state users see while arguments are still
+    /// arriving from the provider.
+    pub fn tool_draft_delta(&mut self, tool_name: &str, args_json_delta: &str) {
+        self.call_counter += 1;
+        let stream_id = format!("draft-{}", self.call_counter);
+        let call_id = format!("{tool_name}-draft-{}", self.call_counter);
+        self.engine(EngineEvent::ToolCallDraftStarted {
+            stream_id: stream_id.clone(),
+            call_id: Some(call_id.clone()),
+            tool_name: Some(tool_name.into()),
+        });
+        self.engine(EngineEvent::ToolCallDraftDelta {
+            stream_id,
+            call_id: Some(call_id),
+            tool_name: Some(tool_name.into()),
+            delta: args_json_delta.into(),
+        });
+    }
+
     fn tool_call_full(
         &mut self,
         tool_name: &str,

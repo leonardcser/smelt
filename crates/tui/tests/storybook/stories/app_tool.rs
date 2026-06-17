@@ -75,6 +75,19 @@ app_story!(write_file_tool_states, |ctx| {
     ctx.assert_snapshot_named("collapsed");
 });
 
+app_story!(streaming_tool_draft_syntax_highlighting, |ctx| {
+    ctx.set_viewport(78, 14);
+    ctx.tool_draft_delta(
+        "write_file",
+        r#"{"file_path":"src/live.rs","content":"pub fn live(name: &str) -> String {\n    format!(\"hello, {name}\")"#,
+    );
+    ctx.tool_draft_delta(
+        "bash",
+        r#"{"command":"cargo test -p smelt-tui app::drafts -- --nocapture"#,
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(edit_file_tool_states, |ctx| {
     ctx.set_viewport(84, 30);
     ctx.tool_draft(
