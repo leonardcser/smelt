@@ -63,12 +63,6 @@ local function planned_diff(args)
   return diff_from_content(path, content, apply_edit(content, old_string, new_string, do_all), old_string)
 end
 
-local function draft_placeholder(args)
-  local path = args.file_path or ""
-  local target = path ~= "" and (" for " .. smelt.path.display(path)) or ""
-  return smelt.layout.text("Preparing edit preview" .. target .. "...")
-end
-
 local function line_label(count, label)
   return tostring(count) .. " " .. label .. (count == 1 and "" or "s")
 end
@@ -82,7 +76,7 @@ end
 transcript_defaults.__tool_body_renderers.edit_file = function(block)
   local args = block.args or {}
   if block.draft and not block.draft_finished then
-    return draft_placeholder(args)
+    return nil
   end
 
   local meta = block.output and block.output.metadata
