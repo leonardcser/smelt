@@ -3,19 +3,69 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{mpsc, Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 const RESCAN_DEBOUNCE: Duration = Duration::from_millis(150);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(35);
+const GIT_LS_FILES_TIMEOUT: Duration = Duration::from_secs(5);
 const PARTIAL_PUBLISH_START: usize = 2_000;
+
+const NOISY_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".jj",
+    "node_modules",
+    "bower_components",
+    "jspm_packages",
+    "target",
+    "build",
+    "dist",
+    "out",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".angular",
+    ".astro",
+    ".parcel-cache",
+    ".turbo",
+    ".vite",
+    "coverage",
+    ".nyc_output",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    ".hypothesis",
+    ".venv",
+    "venv",
+    "env",
+    ".gradle",
+    ".idea",
+    ".metadata",
+    ".settings",
+    ".classpath",
+    ".project",
+    ".stack-work",
+    "_build",
+    "deps",
+    "CMakeFiles",
+    "cmake-build-debug",
+    "cmake-build-release",
+    "DerivedData",
+    "Pods",
+];
 
 #[derive(Debug)]
 pub struct WorkspaceFiles {
     projects: HashMap<PathBuf, ProjectSearch>,
     roots: HashMap<PathBuf, PathBuf>,
+    git_roots: HashSet<PathBuf>,
     search_worker: SearchWorker,
 }
 
@@ -25,6 +75,12 @@ struct ProjectSearch {
     state: SharedProjectState,
     worker_tx: mpsc::Sender<WorkerMsg>,
     _watcher: Option<RecommendedWatcher>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectKind {
+    Git,
+    Filesystem,
 }
 
 #[derive(Debug)]
@@ -304,6 +360,7 @@ impl WorkspaceFiles {
         Self {
             projects: HashMap::new(),
             roots: HashMap::new(),
+            git_roots: HashSet::new(),
             search_worker: SearchWorker::new(),
         }
     }
@@ -413,8 +470,13 @@ impl WorkspaceFiles {
         }
 
         let state = Arc::new(RwLock::new(ProjectState::new_scanning()));
-        let worker_tx = spawn_project_worker(root.to_path_buf(), Arc::clone(&state));
-        let watcher = start_watcher(root, worker_tx.clone(), Arc::clone(&state));
+        let kind = if self.git_roots.contains(root) {
+            ProjectKind::Git
+        } else {
+            ProjectKind::Filesystem
+        };
+        let worker_tx = spawn_project_worker(root.to_path_buf(), kind, Arc::clone(&state));
+        let watcher = start_watcher(root, kind, worker_tx.clone(), Arc::clone(&state));
         self.projects.insert(
             root.to_path_buf(),
             ProjectSearch {
@@ -432,7 +494,12 @@ impl WorkspaceFiles {
         if let Some(root) = self.roots.get(&cwd) {
             return root.clone();
         }
-        let root = engine::paths::git_root(&cwd).unwrap_or_else(|| cwd.clone());
+        let root = if let Some(root) = engine::paths::git_root(&cwd) {
+            self.git_roots.insert(root.clone());
+            root
+        } else {
+            cwd.clone()
+        };
         self.roots.insert(cwd, root.clone());
         root
     }
@@ -462,6 +529,10 @@ fn search_snapshot_response(
     request: &SearchRequest,
 ) -> SearchResponse {
     smelt_perf::perf::record_value("workspace_files:entries", snapshot.entries.len() as u64);
+    if let Some(item) = exact_path_item(root, &request.query, request.include_dirs) {
+        return exact_path_response(root, snapshot, request, item);
+    }
+
     let ranked = {
         let _perf = smelt_perf::perf::begin("workspace_files:rank");
         rank_entries_window(
@@ -502,6 +573,43 @@ fn search_snapshot_response(
         root: root.to_path_buf(),
         items,
         total_matched: ranked.total,
+        total_files: snapshot.files,
+        total_dirs: snapshot.dirs,
+        scanned: snapshot.scanned,
+        scanning: snapshot.scanning,
+        searching: false,
+        ready: snapshot.warmup_complete && !snapshot.scanning,
+        message,
+    }
+}
+
+fn exact_path_response(
+    root: &Path,
+    snapshot: &ProjectSnapshot,
+    request: &SearchRequest,
+    item: Item,
+) -> SearchResponse {
+    let items = if request.offset == 0 && request.limit > 0 {
+        vec![item]
+    } else {
+        Vec::new()
+    };
+    let message = if items.is_empty() {
+        snapshot.last_error.clone().or_else(|| {
+            Some(if snapshot.scanning {
+                "indexing workspace…".to_string()
+            } else {
+                "no matches".to_string()
+            })
+        })
+    } else {
+        snapshot.last_error.clone()
+    };
+
+    SearchResponse {
+        root: root.to_path_buf(),
+        items,
+        total_matched: 1,
         total_files: snapshot.files,
         total_dirs: snapshot.dirs,
         scanned: snapshot.scanned,
@@ -575,10 +683,14 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchJob>, mpsc::Receiver<SearchCompl
     (job_tx, completion_rx)
 }
 
-fn spawn_project_worker(root: PathBuf, state: SharedProjectState) -> mpsc::Sender<WorkerMsg> {
+fn spawn_project_worker(
+    root: PathBuf,
+    kind: ProjectKind,
+    state: SharedProjectState,
+) -> mpsc::Sender<WorkerMsg> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        scan_project(&root, &state);
+        scan_project(&root, kind, &state);
         while let Ok(WorkerMsg::Rescan) = rx.recv() {
             loop {
                 match rx.recv_timeout(RESCAN_DEBOUNCE) {
@@ -587,7 +699,7 @@ fn spawn_project_worker(root: PathBuf, state: SharedProjectState) -> mpsc::Sende
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                 }
             }
-            scan_project(&root, &state);
+            scan_project(&root, kind, &state);
         }
     });
     tx
@@ -595,6 +707,7 @@ fn spawn_project_worker(root: PathBuf, state: SharedProjectState) -> mpsc::Sende
 
 fn start_watcher(
     root: &Path,
+    kind: ProjectKind,
     tx: mpsc::Sender<WorkerMsg>,
     state: SharedProjectState,
 ) -> Option<RecommendedWatcher> {
@@ -602,7 +715,7 @@ fn start_watcher(
     let mut watcher = match RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| {
             let Ok(event) = res else { return };
-            if relevant_event(&watch_root, &event) {
+            if relevant_event(&watch_root, kind, &event) {
                 let _ = tx.send(WorkerMsg::Rescan);
             }
         },
@@ -623,40 +736,220 @@ fn start_watcher(
     }
 }
 
-fn scan_project(root: &Path, state: &SharedProjectState) {
+fn scan_project(root: &Path, kind: ProjectKind, state: &SharedProjectState) {
     if let Ok(mut state) = state.write() {
         state.scanning = true;
         state.scanned = 0;
         state.last_error = None;
     }
 
-    let mut entries = Vec::new();
+    let scan = match kind {
+        ProjectKind::Git => scan_git_project(root),
+        ProjectKind::Filesystem => scan_filesystem_project(root, state),
+    };
+    publish_scan(
+        state,
+        ScanPublish {
+            entries: scan.entries,
+            files: scan.files,
+            dirs: scan.dirs,
+            scanned: scan.scanned,
+            scanning: false,
+            warmup_complete: true,
+            error: scan.error,
+        },
+    );
+}
+
+struct ScanResult {
+    entries: Vec<FileEntry>,
+    files: usize,
+    dirs: usize,
+    scanned: usize,
+    error: Option<String>,
+}
+
+impl ScanResult {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            files: 0,
+            dirs: 0,
+            scanned: 0,
+            error: None,
+        }
+    }
+
+    fn finish(mut self) -> Self {
+        self.entries.sort_by(|a, b| {
+            a.path
+                .cmp(&b.path)
+                .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+        });
+        self
+    }
+}
+
+fn scan_git_project(root: &Path) -> ScanResult {
+    let tracked = match git_ls_files(root, &["--cached", "--recurse-submodules"])
+        .or_else(|_| git_ls_files(root, &["--cached"]))
+    {
+        Ok(paths) => paths,
+        Err(err) => {
+            let mut scan = ScanResult::new();
+            scan.error = Some(format!("git ls-files failed: {err}"));
+            return scan.finish();
+        }
+    };
+    let (untracked, error) = match git_ls_files(root, &["--others", "--exclude-standard"]) {
+        Ok(paths) => (paths, None),
+        Err(err) => (
+            Vec::new(),
+            Some(format!("git ls-files --others failed: {err}")),
+        ),
+    };
+
+    let mut scan = ScanResult::new();
+    scan.error = error;
     let mut seen = HashSet::new();
-    let mut files = 0;
-    let mut dirs = 0;
-    let mut scanned = 0;
+    for path in tracked {
+        add_existing_file(root, &mut scan, &mut seen, path);
+    }
+    for path in untracked {
+        if !has_noisy_parent(&path) {
+            add_existing_file(root, &mut scan, &mut seen, path);
+        }
+    }
+    scan.finish()
+}
+
+fn git_ls_files(root: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let stdout = git_ls_files_stdout(root, args)?;
+    Ok(stdout
+        .split(|b| *b == 0)
+        .filter(|raw| !raw.is_empty())
+        .filter_map(|raw| normalize_git_path(&String::from_utf8_lossy(raw)))
+        .collect())
+}
+
+fn git_ls_files_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let (stdout_path, stdout_file) = create_git_stdout_file()?;
+    let spawn = std::process::Command::new("git")
+        .arg("ls-files")
+        .args(args)
+        .arg("-z")
+        .current_dir(root)
+        .stdout(std::process::Stdio::from(stdout_file))
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match spawn {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = std::fs::remove_file(&stdout_path);
+            return Err(err.to_string());
+        }
+    };
+
+    let deadline = Instant::now() + GIT_LS_FILES_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&stdout_path);
+                return Err(format!(
+                    "timed out after {}s",
+                    GIT_LS_FILES_TIMEOUT.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&stdout_path);
+                return Err(err.to_string());
+            }
+        }
+    };
+
+    let stdout = std::fs::read(&stdout_path).map_err(|err| err.to_string());
+    let _ = std::fs::remove_file(&stdout_path);
+    if !status.success() {
+        return Err(status.to_string());
+    }
+    stdout
+}
+
+fn create_git_stdout_file() -> Result<(PathBuf, std::fs::File), String> {
+    for attempt in 0..16 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "smelt-git-ls-files-{}-{nanos}-{attempt}.out",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+    Err("could not create git ls-files output file".to_string())
+}
+
+fn add_existing_file(root: &Path, scan: &mut ScanResult, seen: &mut HashSet<String>, path: String) {
+    let full_path = root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    if full_path.is_file() {
+        add_parent_dirs(scan, seen, &path);
+        add_scan_entry(scan, seen, path, ItemKind::File);
+    }
+}
+
+fn scan_filesystem_project(root: &Path, state: &SharedProjectState) -> ScanResult {
+    let mut scan = ScanResult::new();
+    let mut seen = HashSet::new();
     let mut next_publish = PARTIAL_PUBLISH_START;
-    let mut error = None;
 
     let mut builder = WalkBuilder::new(root);
     let scan_root = root.to_path_buf();
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     builder
-        .standard_filters(true)
+        .standard_filters(false)
         .hidden(false)
-        .follow_links(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .parents(false)
+        .follow_links(true)
         .filter_entry(move |entry| {
-            entry.path() == scan_root
-                || relative_slash_path(&scan_root, entry.path())
-                    .map(|path| !is_noisy_relative_path(&path))
-                    .unwrap_or(true)
+            if entry.path() == scan_root {
+                return true;
+            }
+            let Some(path) = relative_slash_path(&scan_root, entry.path()) else {
+                return true;
+            };
+            let is_noisy_dir = entry
+                .file_type()
+                .map(|file_type| file_type.is_dir() && is_noisy_relative_path(&path))
+                .unwrap_or(false);
+            !is_noisy_dir
+                && !is_symlink_escape(&canonical_root, entry.path(), entry.path_is_symlink())
         });
 
     for result in builder.build() {
         let entry = match result {
             Ok(entry) => entry,
             Err(err) => {
-                if error.is_none() {
-                    error = Some(err.to_string());
+                if scan.error.is_none() {
+                    scan.error = Some(err.to_string());
                 }
                 continue;
             }
@@ -670,56 +963,58 @@ fn scan_project(root: &Path, state: &SharedProjectState) {
         let Some(path) = relative_slash_path(root, entry.path()) else {
             continue;
         };
-        if path.is_empty() || !seen.insert(path.clone()) {
-            continue;
+        if file_type.is_dir() {
+            add_scan_entry(&mut scan, &mut seen, path, ItemKind::Dir);
+        } else if file_type.is_file() {
+            add_scan_entry(&mut scan, &mut seen, path, ItemKind::File);
         }
 
-        let kind = if file_type.is_dir() {
-            dirs += 1;
-            ItemKind::Dir
-        } else if file_type.is_file() {
-            files += 1;
-            ItemKind::File
-        } else {
-            continue;
-        };
-        scanned += 1;
-        entries.push(FileEntry::new(path, kind));
-
-        if scanned >= next_publish {
+        if scan.scanned >= next_publish {
             publish_scan(
                 state,
                 ScanPublish {
-                    entries: entries.clone(),
-                    files,
-                    dirs,
-                    scanned,
+                    entries: scan.entries.clone(),
+                    files: scan.files,
+                    dirs: scan.dirs,
+                    scanned: scan.scanned,
                     scanning: true,
                     warmup_complete: false,
                     error: None,
                 },
             );
-            next_publish = next_publish.saturating_mul(2).max(scanned + 1);
+            next_publish = next_publish.saturating_mul(2).max(scan.scanned + 1);
         }
     }
 
-    entries.sort_by(|a, b| {
-        a.path
-            .cmp(&b.path)
-            .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
-    });
-    publish_scan(
-        state,
-        ScanPublish {
-            entries,
-            files,
-            dirs,
-            scanned,
-            scanning: false,
-            warmup_complete: true,
-            error,
-        },
-    );
+    scan.finish()
+}
+
+fn add_parent_dirs(scan: &mut ScanResult, seen: &mut HashSet<String>, path: &str) {
+    for (idx, ch) in path.char_indices() {
+        if ch == '/' {
+            add_scan_entry(scan, seen, path[..idx].to_string(), ItemKind::Dir);
+        }
+    }
+}
+
+fn add_scan_entry(scan: &mut ScanResult, seen: &mut HashSet<String>, path: String, kind: ItemKind) {
+    if path.is_empty() || !seen.insert(format!("{}:{path}", kind.as_str())) {
+        return;
+    }
+    match kind {
+        ItemKind::File => scan.files += 1,
+        ItemKind::Dir => scan.dirs += 1,
+    }
+    scan.scanned += 1;
+    scan.entries.push(FileEntry::new(path, kind));
+}
+
+fn normalize_git_path(path: &str) -> Option<String> {
+    let path = path.trim_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    slash_path(Path::new(path))
 }
 
 struct ScanPublish {
@@ -940,6 +1235,24 @@ fn search_item(kind: ItemKind, path: String, score: i32) -> Item {
     }
 }
 
+fn exact_path_item(root: &Path, query: &str, include_dirs: bool) -> Option<Item> {
+    let query = query.trim();
+    if query.is_empty() || query.contains("://") {
+        return None;
+    }
+    let relative = safe_relative_path(query).ok()?;
+    let path = slash_path(&relative)?;
+    let full_path = root.join(&relative);
+    let kind = if full_path.is_file() {
+        ItemKind::File
+    } else if include_dirs && full_path.is_dir() {
+        ItemKind::Dir
+    } else {
+        return None;
+    };
+    Some(search_item(kind, path, i32::MAX))
+}
+
 impl FileEntry {
     fn new(path: String, kind: ItemKind) -> Self {
         let lower_path = path.to_lowercase();
@@ -1013,28 +1326,47 @@ fn kind_rank(kind: ItemKind) -> u8 {
     }
 }
 
-fn relevant_event(root: &Path, event: &notify::Event) -> bool {
+fn relevant_event(root: &Path, kind: ProjectKind, event: &notify::Event) -> bool {
     if matches!(event.kind, EventKind::Access(_)) {
         return false;
     }
     if let EventKind::Modify(notify::event::ModifyKind::Metadata(_)) = event.kind {
         return false;
     }
-    event.paths.is_empty()
-        || event.paths.iter().any(|path| {
-            relative_slash_path(root, path)
-                .map(|path| !is_noisy_relative_path(&path))
-                .unwrap_or(true)
-        })
+    match kind {
+        ProjectKind::Git => true,
+        ProjectKind::Filesystem => {
+            event.paths.is_empty()
+                || event.paths.iter().any(|path| {
+                    relative_slash_path(root, path)
+                        .map(|path| !is_noisy_relative_path(&path))
+                        .unwrap_or(true)
+                })
+        }
+    }
 }
 
 fn is_noisy_relative_path(path: &str) -> bool {
-    path.split('/').any(|component| {
-        matches!(
-            component,
-            ".git" | "node_modules" | "target" | ".next" | "__pycache__"
-        )
-    })
+    path.split('/').any(is_noisy_component)
+}
+
+fn has_noisy_parent(path: &str) -> bool {
+    path.rsplit_once('/')
+        .map(|(parent, _)| is_noisy_relative_path(parent))
+        .unwrap_or(false)
+}
+
+fn is_noisy_component(component: &str) -> bool {
+    NOISY_DIRS.contains(&component) || component.starts_with("bazel-")
+}
+
+fn is_symlink_escape(canonical_root: &Path, path: &Path, path_is_symlink: bool) -> bool {
+    if !path_is_symlink {
+        return false;
+    }
+    std::fs::canonicalize(path)
+        .map(|target| !target.starts_with(canonical_root))
+        .unwrap_or(true)
 }
 
 fn normalize_cwd(cwd: &Path) -> PathBuf {
@@ -1051,6 +1383,19 @@ fn normalize_cwd(cwd: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_git(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    fn init_git(dir: &Path) -> bool {
+        run_git(dir, &["init", "--quiet"])
+    }
 
     #[test]
     fn safe_relative_path_rejects_workspace_escape() {
@@ -1099,8 +1444,38 @@ mod tests {
     fn noisy_path_filter_is_relative_to_workspace() {
         assert!(is_noisy_relative_path("target/debug/app"));
         assert!(is_noisy_relative_path("src/node_modules/pkg/index.js"));
+        assert!(is_noisy_relative_path("web/.next/server/app.js"));
+        assert!(is_noisy_relative_path("bazel-smelt/bin/app"));
+        assert!(is_noisy_relative_path("ios/DerivedData/build.log"));
         assert!(!is_noisy_relative_path("src/main.rs"));
         assert!(!is_noisy_relative_path("workspace-target/src/main.rs"));
+    }
+
+    #[test]
+    fn watcher_filters_noisy_paths_only_for_filesystem_projects() {
+        let root = PathBuf::from("/workspace");
+        let noisy_event = notify::Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![root.join("target/kept.txt")],
+            attrs: Default::default(),
+        };
+        assert!(relevant_event(&root, ProjectKind::Git, &noisy_event));
+        assert!(!relevant_event(
+            &root,
+            ProjectKind::Filesystem,
+            &noisy_event
+        ));
+
+        let source_event = notify::Event {
+            kind: EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![root.join("src/main.rs")],
+            attrs: Default::default(),
+        };
+        assert!(relevant_event(
+            &root,
+            ProjectKind::Filesystem,
+            &source_event
+        ));
     }
 
     #[test]
@@ -1113,6 +1488,31 @@ mod tests {
         files.warmup(project.path()).unwrap();
         assert_eq!(files.projects.len(), 1);
         wait_until_ready(&mut files, project.path());
+    }
+
+    #[test]
+    fn scanner_finds_files_outside_git_repo() {
+        let project = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        let response = files
+            .search(SearchRequest {
+                query: "main".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+            })
+            .unwrap();
+
+        assert!(
+            response.items.iter().any(|item| item.path == "src/main.rs"),
+            "response: {response:#?}"
+        );
     }
 
     #[test]
@@ -1141,6 +1541,252 @@ mod tests {
                 .any(|item| item.path == ".github/workflows/ci.yml"),
             "response: {response:#?}"
         );
+    }
+
+    #[test]
+    fn git_scan_includes_tracked_files_inside_ignored_directories() {
+        let project = tempfile::tempdir().unwrap();
+        if !init_git(project.path()) {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join(".gitignore"), "tasks/\n").unwrap();
+        std::fs::create_dir_all(project.path().join("roles/developer/tasks")).unwrap();
+        std::fs::write(
+            project.path().join("roles/developer/tasks/main.yml"),
+            "---\n",
+        )
+        .unwrap();
+        assert!(run_git(
+            project.path(),
+            &["add", "-f", "roles/developer/tasks/main.yml"]
+        ));
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        for query in ["tasks", "main"] {
+            let response = files
+                .search(SearchRequest {
+                    query: query.to_string(),
+                    cwd: project.path().to_path_buf(),
+                    limit: 20,
+                    offset: 0,
+                    include_dirs: false,
+                })
+                .unwrap();
+
+            assert!(
+                response
+                    .items
+                    .iter()
+                    .any(|item| item.path == "roles/developer/tasks/main.yml"),
+                "query {query:?} response: {response:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_scan_includes_untracked_nonignored_files() {
+        let project = tempfile::tempdir().unwrap();
+        if !init_git(project.path()) {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("src")).unwrap();
+        std::fs::write(project.path().join("src/new_file.rs"), "fn main() {}\n").unwrap();
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        let response = files
+            .search(SearchRequest {
+                query: "new_file".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+            })
+            .unwrap();
+
+        assert!(
+            response
+                .items
+                .iter()
+                .any(|item| item.path == "src/new_file.rs"),
+            "response: {response:#?}"
+        );
+    }
+
+    #[test]
+    fn git_scan_prunes_untracked_noisy_dirs_but_keeps_tracked_files() {
+        let project = tempfile::tempdir().unwrap();
+        if !init_git(project.path()) {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("target/debug")).unwrap();
+        std::fs::write(project.path().join("target/debug/generated.log"), "noise\n").unwrap();
+        std::fs::write(project.path().join("target/kept.txt"), "tracked\n").unwrap();
+        assert!(run_git(project.path(), &["add", "-f", "target/kept.txt"]));
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        let noisy = files
+            .search(SearchRequest {
+                query: "generated".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+            })
+            .unwrap();
+        assert!(noisy.items.is_empty(), "response: {noisy:#?}");
+
+        let tracked = files
+            .search(SearchRequest {
+                query: "kept".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+            })
+            .unwrap();
+        assert!(
+            tracked
+                .items
+                .iter()
+                .any(|item| item.path == "target/kept.txt"),
+            "response: {tracked:#?}"
+        );
+    }
+
+    #[test]
+    fn ignored_untracked_files_require_exact_path() {
+        let project = tempfile::tempdir().unwrap();
+        if !init_git(project.path()) {
+            return;
+        }
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join(".gitignore"), "ignored/\n").unwrap();
+        std::fs::create_dir_all(project.path().join("ignored")).unwrap();
+        std::fs::write(project.path().join("ignored/secret.txt"), "secret\n").unwrap();
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        let fuzzy = files
+            .search(SearchRequest {
+                query: "secret".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+            })
+            .unwrap();
+        assert!(fuzzy.items.is_empty(), "response: {fuzzy:#?}");
+
+        let exact = files
+            .search(SearchRequest {
+                query: "ignored/secret.txt".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+            })
+            .unwrap();
+        assert_eq!(exact.items[0].path, "ignored/secret.txt");
+    }
+
+    #[test]
+    fn non_git_scan_ignores_gitignore_files() {
+        let project = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join(".gitignore"), "tasks/\n").unwrap();
+        std::fs::create_dir_all(project.path().join("roles/developer/tasks")).unwrap();
+        std::fs::write(
+            project.path().join("roles/developer/tasks/main.yml"),
+            "---\n",
+        )
+        .unwrap();
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        let response = files
+            .search(SearchRequest {
+                query: "main".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+            })
+            .unwrap();
+
+        assert!(
+            response
+                .items
+                .iter()
+                .any(|item| item.path == "roles/developer/tasks/main.yml"),
+            "response: {response:#?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanner_follows_workspace_symlinked_directories() {
+        let project = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("shared/tasks")).unwrap();
+        std::fs::write(project.path().join("shared/tasks/main.yml"), "---\n").unwrap();
+        std::fs::create_dir_all(project.path().join("roles/developer")).unwrap();
+        std::os::unix::fs::symlink(
+            project.path().join("shared/tasks"),
+            project.path().join("roles/developer/tasks"),
+        )
+        .unwrap();
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        for query in ["tasks", "main"] {
+            let response = files
+                .search(SearchRequest {
+                    query: query.to_string(),
+                    cwd: project.path().to_path_buf(),
+                    limit: 20,
+                    offset: 0,
+                    include_dirs: false,
+                })
+                .unwrap();
+
+            assert!(
+                response
+                    .items
+                    .iter()
+                    .any(|item| item.path == "roles/developer/tasks/main.yml"),
+                "query {query:?} response: {response:#?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanner_skips_symlinked_directories_outside_workspace() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("leaked.yml"), "---\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("outside")).unwrap();
+
+        let mut files = WorkspaceFiles::new(state.path().to_path_buf());
+        wait_until_ready(&mut files, project.path());
+        let response = files
+            .search(SearchRequest {
+                query: "leaked".to_string(),
+                cwd: project.path().to_path_buf(),
+                limit: 20,
+                offset: 0,
+                include_dirs: false,
+            })
+            .unwrap();
+
+        assert!(response.items.is_empty(), "response: {response:#?}");
     }
 
     #[test]
