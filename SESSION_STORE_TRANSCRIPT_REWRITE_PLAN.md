@@ -343,7 +343,7 @@ Internal rules:
 
 ### Legacy migration policy
 
-Startup launches a low-priority background migrator after first paint. It scans `sessions/*` and imports old formats into `session.db` without blocking UI startup. On-demand migration during resume is allowed, but not sufficient: dormant old sessions must migrate before legacy readers can be removed.
+Startup launches a low-priority background migrator after first paint. It scans `sessions/*` and imports old formats into `session.db` without blocking UI startup. On-demand migration during resume is allowed, but not sufficient: dormant old sessions must migrate before legacy readers can be considered for COMPAT removal.
 
 Import-only legacy inputs:
 
@@ -361,8 +361,8 @@ Migration rules:
 4. Import request audit into `request_attempts` and request/response objects.
 5. Generate `transcript_blocks` and search rows.
 6. Write/refresh `meta.json` from `session_state`.
-7. Keep legacy files for at least one compatibility window.
-8. Provide JSONL export before removing legacy readers. Do not add public migrate/doctor commands initially unless alpha feedback shows they are needed.
+7. Keep legacy files unless the user explicitly exports/deletes them; compatibility importers are tracked with `COMPAT` ids in `docs/compat.md`.
+8. Provide JSONL export before any compatibility-reader removal. Do not add public migrate/doctor commands initially unless alpha feedback shows they are needed.
 
 ## Transcript Blocks and Display Document
 
@@ -827,7 +827,7 @@ Acceptance:
 - Scrollbar is approximate but stable and refines after navigation.
 - Search in huge sessions does not layout the whole transcript.
 
-### Phase I: Cleanup and compatibility removal
+### Phase I: Cleanup and compatibility isolation
 
 Deliverables:
 
@@ -837,12 +837,12 @@ Deliverables:
 - Delete eager resume transcript build path.
 - Delete old full-history save path.
 - Remove `requests.jsonl` live writer.
-- Remove legacy JSON importers after the compatibility window and migration/export requirements are satisfied.
+- Keep legacy JSON importers isolated at the storage boundary, marked with the existing `COMPAT` ids in `docs/compat.md`, and out of the hot load/save/render paths. Do not remove them as part of this phase unless the compatibility window is explicitly closed.
 
 Acceptance:
 
-- Architecture has one clear path for load/save/render/audit.
-- Compatibility code is isolated, documented, and then removed on schedule.
+- Architecture has one clear path for canonical load/save/render/audit.
+- Compatibility code is isolated, documented with `COMPAT` ids, and removable on an explicit schedule.
 - Code is simpler than before: fewer full clones, fewer global rebuilds, fewer cache validity branches, and no custom database implemented in files.
 
 
