@@ -584,6 +584,93 @@ mod tests {
     }
 
     #[test]
+    fn session_snapshot_append_replaces_stale_descriptor_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let first = protocol::HistoryItem::user(protocol::Content::text("first"));
+        let second = protocol::HistoryItem::user(protocol::Content::text("second"));
+        let mut snapshot = SessionSnapshot {
+            state: SessionState {
+                id: "s1".into(),
+                title: Some("title".into()),
+                slug: Some("title".into()),
+                cwd: Some("/tmp/project".into()),
+                mode: Some("normal".into()),
+                model: Some("model-a".into()),
+                accounting_json: None,
+                checkpoint_json: None,
+                revision: 0,
+                history_len: 1,
+                created_at: 10,
+                updated_at: 20,
+            },
+            meta_json: Some(serde_json::json!({"id": "s1", "schema_version": 2})),
+            history_start_idx: 0,
+            history_len: 1,
+            history: vec![first],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+
+        let first_report = db.save_session_snapshot(&snapshot, None).unwrap();
+        db.replace_transcript_descriptor_records(&[
+            TranscriptDescriptorRecord {
+                block_idx: 0,
+                history_idx: Some(0),
+                kind: "user".into(),
+                tool_call_id: None,
+                tool_name: None,
+                content_hash: "11".into(),
+                estimated_text_bytes: 14,
+                preview_text: "first detailed".into(),
+                search_text: "first detailed".into(),
+                descriptor_json: serde_json::json!({"Text": {"content": "first detailed"}})
+                    .to_string(),
+                origin_json: None,
+                tool_state_json: None,
+            },
+            TranscriptDescriptorRecord {
+                block_idx: 1,
+                history_idx: None,
+                kind: "thinking".into(),
+                tool_call_id: None,
+                tool_name: None,
+                content_hash: "12".into(),
+                estimated_text_bytes: 14,
+                preview_text: "synthetic tail".into(),
+                search_text: "synthetic tail".into(),
+                descriptor_json: serde_json::json!({"Text": {"content": "synthetic tail"}})
+                    .to_string(),
+                origin_json: None,
+                tool_state_json: None,
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            db.search_blob().unwrap(),
+            "first detailed\nsynthetic tail\n"
+        );
+
+        snapshot.history_start_idx = 1;
+        snapshot.history = vec![second];
+        snapshot.history_len = 2;
+        snapshot.state.history_len = 2;
+        snapshot.state.updated_at = 30;
+        let append = db
+            .save_session_snapshot(&snapshot, Some(first_report.revision))
+            .unwrap();
+
+        assert_eq!(append.history_unchanged, 1);
+        assert_eq!(append.history_inserted, 1);
+        assert_eq!(db.search_blob().unwrap(), "first detailed\nsecond\nuser\n");
+        assert_eq!(
+            db.load_session_snapshot().unwrap().unwrap().history.len(),
+            2
+        );
+    }
+
+    #[test]
     fn transcript_descriptors_roundtrip_and_feed_search_candidates() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();

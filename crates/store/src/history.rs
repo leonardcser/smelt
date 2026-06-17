@@ -71,10 +71,20 @@ pub(crate) fn replace_history_suffix(
     items: &[HistoryItem],
     compression: ObjectCompression,
 ) -> Result<()> {
+    let start_idx_sql = checked_i64(start_idx as u64, "start_idx")?;
     conn.execute(
-        "DELETE FROM history_items WHERE idx >= ?1",
-        [checked_i64(start_idx as u64, "start_idx")?],
+        "DELETE FROM transcript_search
+         WHERE block_idx >= ?1
+            OR block_idx IN (
+                SELECT block_idx FROM transcript_blocks WHERE history_idx >= ?1
+            )",
+        [start_idx_sql],
     )?;
+    conn.execute(
+        "DELETE FROM transcript_blocks WHERE block_idx >= ?1 OR history_idx >= ?1",
+        [start_idx_sql],
+    )?;
+    conn.execute("DELETE FROM history_items WHERE idx >= ?1", [start_idx_sql])?;
     for (offset, item) in items.iter().enumerate() {
         write_history_item(conn, start_idx + offset, item, compression)?;
     }
