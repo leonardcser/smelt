@@ -249,9 +249,13 @@ fn measure_layout_ir_full_with_gutter(
             measure_layout_ir_full_with_gutter(child, child_width, spec_width, inline_options)
         }
         BlockLayout::RowPrefix { child, spec } => {
-            let prefix_width = row_prefix_width(spec);
-            let child_width = child_width_after_gutter(width, prefix_width);
-            measure_layout_ir_full_with_gutter(child, child_width, gutter_cells, inline_options)
+            if let Some(rows) = measure_row_prefix_special(child, spec, width, inline_options) {
+                rows
+            } else {
+                let prefix_width = row_prefix_width(spec);
+                let child_width = child_width_after_gutter(width, prefix_width);
+                measure_layout_ir_full_with_gutter(child, child_width, gutter_cells, inline_options)
+            }
         }
         BlockLayout::Panel { child, spec } => measure_ir_panel(child, spec, width, inline_options),
         BlockLayout::Style { child, .. } => {
@@ -414,10 +418,10 @@ fn measure_text_spec(spec: &TextSpec, width: u16) -> u16 {
         .sum()
 }
 
-fn wrap_styled_runs(
+fn wrap_styled_runs_with_widths(
     spans: &[protocol::StyledSpan],
-    width: u16,
-    continuation_indent: u16,
+    first_width: u16,
+    continuation_width: u16,
 ) -> Vec<Vec<WrappedRun<usize>>> {
     if spans.is_empty() {
         return vec![Vec::new()];
@@ -429,12 +433,23 @@ fn wrap_styled_runs(
             .map(|(idx, span)| InlineRun::new(span.text.clone(), idx, BreakPolicy::BreakOnSpaces))
             .collect(),
     );
+    line.wrap_fragments_with_widths(
+        first_width.max(1) as usize,
+        continuation_width.max(1) as usize,
+    )
+}
+
+fn wrap_styled_runs(
+    spans: &[protocol::StyledSpan],
+    width: u16,
+    continuation_indent: u16,
+) -> Vec<Vec<WrappedRun<usize>>> {
     let width = width.max(1) as usize;
     let indent = continuation_indent as usize;
     let continuation_width = width
         .saturating_sub(indent.min(width.saturating_sub(1)))
         .max(1);
-    line.wrap_fragments_with_widths(width, continuation_width)
+    wrap_styled_runs_with_widths(spans, width as u16, continuation_width as u16)
 }
 
 fn runs_continuation_indent(spec: &RunsSpec, width: u16) -> u16 {
@@ -856,6 +871,182 @@ fn print_row_chrome(out: &mut LineBuilder, chrome: RowChrome<'_>) {
     }
 }
 
+fn row_prefix_child_widths(spec: &RowPrefixSpec, width: u16) -> (u16, u16) {
+    let first = styled_spans_width(&spec.first).min(u16::MAX as usize) as u16;
+    let rest = styled_spans_width(&spec.rest).min(u16::MAX as usize) as u16;
+    (
+        child_width_after_gutter(width, first),
+        child_width_after_gutter(width, rest),
+    )
+}
+
+struct RowPrefixRunRow<'a> {
+    spans: &'a [protocol::StyledSpan],
+    fragments: Vec<WrappedRun<usize>>,
+    soft_wrap: bool,
+}
+
+fn row_prefix_runs_wrapped_rows(
+    spec: &RunsSpec,
+    first_width: u16,
+    rest_width: u16,
+) -> Vec<RowPrefixRunRow<'_>> {
+    let mut rows = Vec::new();
+    for spans in &spec.lines.0 {
+        let line_first_width = if rows.is_empty() {
+            first_width
+        } else {
+            rest_width
+        };
+        let wrapped = wrap_styled_runs_with_widths(spans, line_first_width, rest_width);
+        for (idx, fragments) in wrapped.into_iter().enumerate() {
+            rows.push(RowPrefixRunRow {
+                spans: spans.as_slice(),
+                fragments,
+                soft_wrap: idx > 0,
+            });
+        }
+    }
+    rows
+}
+
+fn measure_row_prefix_runs(spec: &RunsSpec, first_width: u16, rest_width: u16) -> u16 {
+    row_prefix_runs_wrapped_rows(spec, first_width, rest_width)
+        .len()
+        .min(u16::MAX as usize) as u16
+}
+
+fn measure_row_prefix_special(
+    child: &LayoutIr,
+    prefix: &RowPrefixSpec,
+    width: u16,
+    _inline_options: &InlineOptions,
+) -> Option<u16> {
+    let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
+    match child {
+        BlockLayout::Leaf(IrLeaf::Runs(spec)) => {
+            Some(measure_row_prefix_runs(spec, first_width, rest_width))
+        }
+        BlockLayout::Cap { child, spec } => {
+            let BlockLayout::Leaf(IrLeaf::Runs(runs)) = child.as_ref() else {
+                return None;
+            };
+            let child_rows = measure_row_prefix_runs(runs, first_width, rest_width);
+            Some(cap_rows(child_rows, spec).len().min(u16::MAX as usize) as u16)
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_row_prefix_runs(
+    out: &mut LineBuilder,
+    spec: &RunsSpec,
+    prefix: &RowPrefixSpec,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    gutter: Option<&GutterSpec>,
+) -> u16 {
+    let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
+    let rows = row_prefix_runs_wrapped_rows(spec, first_width, rest_width);
+    let default_hl = spec.hl_group.as_deref();
+    let mut written = 0u16;
+    for (source_row, row) in rows
+        .iter()
+        .enumerate()
+        .skip(row_start as usize)
+        .take(row_count as usize)
+    {
+        if let Some(gutter) = gutter {
+            print_row_chrome(out, RowChrome::Gutter(gutter));
+        }
+        let row_prefix = if source_row == 0 {
+            &prefix.first
+        } else {
+            &prefix.rest
+        };
+        print_row_chrome(out, RowChrome::Prefix(row_prefix));
+        if row.soft_wrap {
+            out.mark_soft_wrap_continuation();
+        }
+        for fragment in &row.fragments {
+            let Some(span) = row.spans.get(fragment.run_index) else {
+                continue;
+            };
+            print_styled_span_range(out, span, default_hl, fragment.range.clone());
+        }
+        out.newline();
+        written = written.saturating_add(1);
+    }
+    written
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_row_prefix_runs_cap(
+    out: &mut LineBuilder,
+    runs: &RunsSpec,
+    cap: &smelt_core::content::block_layout::CapSpec,
+    prefix: &RowPrefixSpec,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    gutter: Option<&GutterSpec>,
+) -> u16 {
+    let (first_width, rest_width) = row_prefix_child_widths(prefix, width);
+    let child_rows = measure_row_prefix_runs(runs, first_width, rest_width);
+    let rows = cap_rows(child_rows, cap);
+    let mut written = 0u16;
+    for (output_row, row) in rows
+        .into_iter()
+        .enumerate()
+        .skip(row_start as usize)
+        .take(row_count as usize)
+    {
+        match row {
+            CapRow::Child(child_row) => {
+                written = written.saturating_add(render_row_prefix_runs(
+                    out, runs, prefix, width, child_row, 1, gutter,
+                ));
+            }
+            CapRow::Marker {
+                skipped,
+                kept,
+                total,
+                direction,
+                ..
+            } => {
+                if let Some(gutter) = gutter {
+                    print_row_chrome(out, RowChrome::Gutter(gutter));
+                }
+                let row_prefix = if output_row == 0 {
+                    &prefix.first
+                } else {
+                    &prefix.rest
+                };
+                print_row_chrome(out, RowChrome::Prefix(row_prefix));
+                render_cap_marker_text(out, skipped, kept, total, direction);
+                written = written.saturating_add(1);
+            }
+        }
+    }
+    written
+}
+
+fn render_cap_marker_text(
+    out: &mut LineBuilder,
+    skipped: u16,
+    kept: u16,
+    total: Option<u64>,
+    direction: &str,
+) {
+    out.push_dim();
+    let text = cap_marker_text(skipped, kept, total, direction);
+    out.print(&text);
+    out.pop_style();
+    out.newline();
+}
+
 // Row prefixes are applied after the child has chosen and capped its rows, so
 // the renderer first materializes only the requested child rows into a scratch
 // buffer, then replays those rows with chrome attached. The replay preserves row
@@ -872,6 +1063,21 @@ fn render_ir_row_prefix(
     history: Option<&BlockHistory>,
     inline_options: &InlineOptions,
 ) -> u16 {
+    if let BlockLayout::Leaf(IrLeaf::Runs(runs)) = child {
+        return render_row_prefix_runs(out, runs, spec, width, row_start, row_count, gutter);
+    }
+    if let BlockLayout::Cap {
+        child: cap_child,
+        spec: cap_spec,
+    } = child
+    {
+        if let BlockLayout::Leaf(IrLeaf::Runs(runs)) = cap_child.as_ref() {
+            return render_row_prefix_runs_cap(
+                out, runs, cap_spec, spec, width, row_start, row_count, gutter,
+            );
+        }
+    }
+
     let prefix_width = row_prefix_width(spec);
     let child_width = child_width_after_gutter(width, prefix_width);
     let theme = out.theme().clone();
@@ -1359,7 +1565,14 @@ fn render_cap_marker(
     if let Some(gutter) = gutter.filter(|g| g.styled) {
         out.print_gutter(&gutter.text);
     }
-    let text = if direction == "above" {
+    let text = cap_marker_text(skipped, kept, total, direction);
+    out.print(&text);
+    out.pop_style();
+    out.newline();
+}
+
+fn cap_marker_text(skipped: u16, kept: u16, total: Option<u64>, direction: &str) -> String {
+    if direction == "above" {
         if let Some(total) = total {
             format!(
                 "… showing last {} of {}",
@@ -1382,10 +1595,7 @@ fn render_cap_marker(
             "… {} {direction}",
             pluralize(skipped as usize, "line", "lines")
         )
-    };
-    out.print(&text);
-    out.pop_style();
-    out.newline();
+    }
 }
 
 fn solve_ir_hbox_widths(

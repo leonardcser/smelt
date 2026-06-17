@@ -8,14 +8,19 @@ dim: 62 18
   0   7  10 fg=Rgb { r: 255, g: 255, b: 255 }
   0  17   3 fg=Rgb { r: 253, g: 151, b: 31 }
   0  20  41 fg=Rgb { r: 255, g: 255, b: 255 }
+  1   0   2 attrs=dim
   1   2  59 fg=Rgb { r: 255, g: 255, b: 255 }
+  2   0   2 attrs=dim
   2   2   6 fg=Rgb { r: 255, g: 255, b: 255 }
   3   2  15 attrs=dim
   5   0   1 fg=AnsiValue(77)
   5   1   5 attrs=dim
+  6   0   7 attrs=dim
+  7   0   7 attrs=dim
   8   2   7 attrs=dim
  10   0   1 fg=AnsiValue(77)
  10   1   5 attrs=dim
+ 11   0   7 attrs=dim
  12   2   7 attrs=dim
  14   0   1 fg=AnsiValue(237)
  14   1   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold

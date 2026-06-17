@@ -348,9 +348,12 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_thinking_blocks_gap() {
+    fn adjacent_thinking_blocks_only_gap_before_new_titles() {
         let gap = gap_between(&thinking("titled"), &thinking("untitled"));
-        assert_eq!(gap, 1, "Thinking→Thinking gap = 1");
+        assert_eq!(gap, 0, "Thinking→Thinking gap without new title = 0");
+
+        let titled_gap = gap_between(&thinking("untitled"), &thinking("**New title**\n\nbody"));
+        assert_eq!(titled_gap, 1, "Thinking→Thinking gap before new title = 1");
     }
 
     fn tool_start_row(blocks: &[Block], flushed_at: &[usize]) -> u16 {

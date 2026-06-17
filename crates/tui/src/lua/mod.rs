@@ -1046,11 +1046,22 @@ mod tests {
         let BlockLayout::Vbox(items) = layout else {
             panic!("expected tool vbox, got {layout:?}");
         };
-        let BlockLayout::Cap { child, .. } = &items[0] else {
-            panic!("expected capped header, got {:?}", items[0]);
+        let (header, prefixed) = match &items[0] {
+            BlockLayout::Cap { child, .. } => (child.as_ref(), false),
+            BlockLayout::RowPrefix { child, spec } => {
+                assert!(
+                    spec.rest.iter().any(|span| !span.text.is_empty()),
+                    "expected continued header rows to keep prefix indentation"
+                );
+                let BlockLayout::Cap { child, .. } = child.as_ref() else {
+                    panic!("expected capped prefixed header, got {:?}", items[0]);
+                };
+                (child.as_ref(), true)
+            }
+            other => panic!("expected capped header, got {other:?}"),
         };
-        let BlockLayout::Hbox(items) = child.as_ref() else {
-            panic!("expected dynamic elapsed hbox header, got {child:?}");
+        let BlockLayout::Hbox(items) = header else {
+            panic!("expected dynamic elapsed hbox header, got {header:?}");
         };
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].constraint, Constraint::Fit);
@@ -1059,7 +1070,9 @@ mod tests {
         let BlockLayout::Leaf(LuaLeaf::Runs(spec)) = &items[0].layout else {
             panic!("expected runs header leaf, got {:?}", items[0].layout);
         };
-        assert!(spec.continuation_indent > 0);
+        if !prefixed {
+            assert!(spec.continuation_indent > 0);
+        }
         let BlockLayout::Leaf(LuaLeaf::Elapsed(spec)) = &items[2].layout else {
             panic!("expected elapsed header leaf, got {:?}", items[2].layout);
         };
