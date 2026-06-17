@@ -136,14 +136,15 @@ It does **not** send `ToolOutcome.metadata` to the provider. Therefore large met
 Current transcript projection is partly lazy and now uses a mixed estimated/exact height index:
 
 - `plan_projection_measured` prepares the row index without globally measuring every missing node at `crates/tui/src/content/transcript_buf.rs`.
-- The projection planner estimates missing heights, exactifies the visible + overscan node range, then replans against the refined prefix rows.
-- Exact APIs such as full block layout, full row builds, range materialization, and copy still exactify the rows they need before returning content.
+- The projection planner estimates missing heights from descriptor text/tool output, exactifies the visible + overscan node range, then replans against the refined prefix rows.
+- Exact APIs such as full block layout, full row builds, range materialization, and copy exactify the rows they need before returning content.
+- Search indexes descriptor/provider text first and falls back to local exact display refinement for renderer-only chrome.
 - Visible projection itself remains bounded and materializes only the planned node range.
 
 Remaining problems:
 
 - Cold arbitrary row jumps are approximate until local refinement catches up.
-- Search still builds a display search index through TUI history rather than SQLite candidates.
+- Search candidates are still in-memory TUI candidates, not SQLite FTS/candidate rows.
 - Persisted display caches help only when keys match and the full exact row index is accepted.
 
 ### Existing UI seams that we should keep
@@ -808,7 +809,7 @@ Acceptance:
 
 ### Phase H: Progressive height, navigation, copy, and search
 
-Status: partial. Transcript projection now prepares a mixed estimated/exact row index instead of measuring every missing height before first paint. Visible planning exact-measures the visible + overscan node range and replans after refinement, so a cold tail render of a large transcript does not measure every block. `TranscriptDocument::snapshot` reports an estimated row count, while visible materialization, row-range display, copy, fold targeting, and resize anchors exactify the rows or anchor nodes they consume. Remaining work: rename/split the internal `ExactRowIndex` into the planned `TranscriptHeightIndex`, load descriptor records directly from SQLite, keep large tool metadata object-backed through render/copy/search, and replace TUI display-index search with SQLite candidate search plus local exact refinement.
+Status: partial. Transcript projection now prepares `TranscriptHeightIndex`, a mixed estimated/exact row index, instead of measuring every missing height before first paint. Visible planning exact-measures the visible + overscan node range and replans after refinement, so a cold tail render of a large transcript does not measure every block. Estimates use descriptor text and tool output line counts before falling back to measured samples. `TranscriptDocument::snapshot` reports an estimated row count, while visible materialization, row-range display, copy, fold targeting, and resize anchors exactify the rows or anchor nodes they consume. Search now builds in-memory semantic candidates before exact display refinement, including renderer-only fallback scans. Remaining work: load descriptor records directly from SQLite, keep large tool metadata object-backed through render/copy/search, and replace TUI in-memory search candidates with SQLite FTS/candidate rows.
 
 Deliverables:
 

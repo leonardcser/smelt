@@ -51,7 +51,7 @@ struct VisibleProjectionState {
 
 #[derive(Default)]
 struct MeasurementIndexStore {
-    active: ExactRowIndex,
+    active: TranscriptHeightIndex,
     entries: Vec<DisplayRowIndexEntry>,
 }
 
@@ -100,8 +100,8 @@ impl RowIndexKey {
 }
 
 #[derive(Default)]
-struct ExactRowIndex {
-    nodes: Vec<ExactNodeRow>,
+struct TranscriptHeightIndex {
+    nodes: Vec<TranscriptHeightNode>,
     prefix_rows: Vec<RowIndex>,
     prefix_dirty: bool,
     generation: u64,
@@ -111,27 +111,20 @@ struct ExactRowIndex {
     width: u16,
 }
 
-struct ExactNodeRow {
+struct TranscriptHeightNode {
     id: RenderNodeId,
     key: NodeLayoutKey,
     estimated_height: RowIndex,
     exact_height: Option<RowIndex>,
 }
 
-#[derive(serde::Serialize)]
-struct SemanticLayoutNodeKey {
-    id: RenderNodeId,
-    key: NodeLayoutKey,
-    exact_height: Option<RowIndex>,
-}
-
-impl ExactNodeRow {
+impl TranscriptHeightNode {
     fn measured_or_estimated_height(&self) -> RowIndex {
         self.exact_height.unwrap_or(self.estimated_height)
     }
 }
 
-impl ExactRowIndex {
+impl TranscriptHeightIndex {
     fn is_current(&self, plan: &RenderPlan, key: RowIndexKey) -> bool {
         self.generation == plan.fingerprint
             && self.renderer_generation == key.renderer_generation
@@ -179,14 +172,14 @@ impl ExactRowIndex {
             };
             let old_same_index = old_nodes.get(index).filter(|node| node.id == id);
             let estimated_height = old_same_index
-                .map(ExactNodeRow::measured_or_estimated_height)
+                .map(TranscriptHeightNode::measured_or_estimated_height)
                 .or_else(|| {
                     old_nodes
                         .iter()
                         .find(|node| node.id == id)
-                        .map(ExactNodeRow::measured_or_estimated_height)
+                        .map(TranscriptHeightNode::measured_or_estimated_height)
                 })
-                .unwrap_or(1);
+                .unwrap_or_else(|| estimate_node_height(history, plan, index, node_key));
             let same_previous = index == 0
                 || old_nodes
                     .get(index.saturating_sub(1))
@@ -195,7 +188,7 @@ impl ExactRowIndex {
             let exact_height = old_same_index
                 .filter(|node| node.key == node_key && same_previous)
                 .and_then(|node| node.exact_height);
-            self.nodes.push(ExactNodeRow {
+            self.nodes.push(TranscriptHeightNode {
                 id,
                 key: node_key,
                 estimated_height,
@@ -266,6 +259,7 @@ impl ExactRowIndex {
             }
             if node.key != node_key {
                 node.key = node_key;
+                node.estimated_height = estimate_node_height(history, plan, index, node_key);
                 node.exact_height = None;
                 prev_key_changed = true;
                 prefix_dirty = true;
@@ -286,10 +280,10 @@ impl ExactRowIndex {
             else {
                 return false;
             };
-            self.nodes.push(ExactNodeRow {
+            self.nodes.push(TranscriptHeightNode {
                 id,
                 key: node_key,
-                estimated_height: 1,
+                estimated_height: estimate_node_height(history, plan, index, node_key),
                 exact_height: None,
             });
         }
@@ -346,7 +340,7 @@ impl ExactRowIndex {
         self.prefix_dirty |= changed;
     }
 
-    fn semantic_layout_hash(&self) -> u64 {
+    fn search_layout_hash(&self) -> u64 {
         smelt_core::utils::hash_serializable(&(
             self.generation,
             self.renderer_generation,
@@ -355,11 +349,7 @@ impl ExactRowIndex {
             self.width,
             self.nodes
                 .iter()
-                .map(|node| SemanticLayoutNodeKey {
-                    id: node.id,
-                    key: node.key,
-                    exact_height: node.exact_height,
-                })
+                .map(|node| (node.id, node.key))
                 .collect::<Vec<_>>(),
         ))
     }
@@ -433,7 +423,7 @@ impl ExactRowIndex {
             if cached.key != node_key {
                 return false;
             }
-            nodes.push(ExactNodeRow {
+            nodes.push(TranscriptHeightNode {
                 id,
                 key: node_key,
                 estimated_height: cached.exact_height,
@@ -485,12 +475,12 @@ impl ExactRowIndex {
 
 impl MeasurementIndexStore {
     fn clear(&mut self) {
-        self.active = ExactRowIndex::default();
+        self.active = TranscriptHeightIndex::default();
         self.entries.clear();
     }
 
     fn clear_active(&mut self) {
-        self.active = ExactRowIndex::default();
+        self.active = TranscriptHeightIndex::default();
     }
 
     fn hydrate(&mut self, entries: Vec<DisplayRowIndexEntry>) {
@@ -611,6 +601,13 @@ pub(crate) struct ProjectionPlan {
     scroll_top: RowIndex,
     viewport_rows: u16,
     node_range: std::ops::Range<usize>,
+}
+
+struct ProjectionRequest {
+    key: ProjectKey,
+    scroll_target: ScrollTarget,
+    viewport_rows: u16,
+    resize_anchor: Option<ResizeAnchor>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -767,6 +764,53 @@ fn base_layout_key(width: u16) -> LayoutKey {
         content_hash: 0,
         sidecar_hash: 0,
     }
+}
+
+fn estimate_text_rows(text: &str, width: u16) -> RowIndex {
+    let width = usize::from(width.max(1));
+    text.lines()
+        .map(|line| {
+            let cells = smelt_buffer::text::byte_to_cell(line, line.len());
+            cells.max(1).div_ceil(width) as RowIndex
+        })
+        .sum::<RowIndex>()
+        .max(1)
+}
+
+fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> RowIndex {
+    let tool_output = history
+        .tool_call_id(id)
+        .and_then(|call_id| history.tool_state(call_id))
+        .and_then(|state| state.output.as_ref())
+        .map(|output| output.content.as_str());
+    tool_output
+        .map(|text| estimate_text_rows(text, width))
+        .or_else(|| {
+            history
+                .raw_text(id)
+                .map(|text| estimate_text_rows(&text, width))
+        })
+        .unwrap_or(1)
+}
+
+fn estimate_node_height(
+    history: &BlockHistory,
+    plan: &RenderPlan,
+    index: usize,
+    key: NodeLayoutKey,
+) -> RowIndex {
+    let rows = match plan.node(index) {
+        Some(RenderNode::Block { id, .. }) => estimate_block_text_rows(history, *id, key.width),
+        Some(RenderNode::Group { child_ids, .. }) => child_ids
+            .iter()
+            .map(|id| estimate_block_text_rows(history, *id, key.width))
+            .sum::<RowIndex>()
+            .max(1),
+        None => 1,
+    };
+    let rows = key.view_state.measured_height(rows as u64) as RowIndex;
+    let gap = plan.rendered_node_gap(history, index, rows as usize) as RowIndex;
+    gap.saturating_add(rows).max(1)
 }
 
 fn subtract_byte_range(ranges: &mut Vec<std::ops::Range<usize>>, remove: std::ops::Range<usize>) {
@@ -1554,29 +1598,18 @@ impl TranscriptProjection {
         layout
     }
 
-    fn exact_search_layout(
-        &self,
-        generation: u64,
-        history: &BlockHistory,
-    ) -> TranscriptSearchLayout {
+    fn search_layout(&self, generation: u64, history: &BlockHistory) -> TranscriptSearchLayout {
         let mut entries = Vec::with_capacity(self.measurements.active.nodes.len());
         let mut running_total: RowIndex = 0;
         for (i, measured_node) in self.measurements.active.nodes.iter().enumerate() {
-            debug_assert!(
-                measured_node.exact_height.is_some(),
-                "search layout requested before height measurement"
-            );
-            let Some(exact_height) = measured_node.exact_height else {
-                continue;
-            };
+            let height = measured_node.measured_or_estimated_height();
             let gap = (self
                 .render_plan
-                .rendered_node_gap(history, i, exact_height as usize)
-                as RowIndex)
-                .min(exact_height);
+                .rendered_node_gap(history, i, height as usize) as RowIndex)
+                .min(height);
             running_total = running_total.saturating_add(gap);
             let first_row = running_total;
-            let rows = exact_height.saturating_sub(gap);
+            let rows = height.saturating_sub(gap);
             let block_ids = match self.render_plan.node(i) {
                 Some(RenderNode::Block { id, .. }) => vec![*id],
                 Some(RenderNode::Group { child_ids, .. }) => child_ids.clone(),
@@ -1860,7 +1893,7 @@ impl TranscriptProjection {
         }
         if let ScrollTarget::Visible(ScrollAnchor::Row(row)) = scroll_target {
             let end = row.saturating_add(viewport_rows.max(1) as RowIndex);
-            let _ = self.exactify_row_range(env.clone(), history, 0..end);
+            let _ = self.exactify_row_range(env.clone(), history, row..end);
         }
         let key = self.project_key(
             width,
@@ -1872,11 +1905,13 @@ impl TranscriptProjection {
         self.plan_projection_progressive(
             env,
             history,
-            key,
-            scroll_target,
-            viewport_rows,
             theme,
-            resize_anchor,
+            ProjectionRequest {
+                key,
+                scroll_target,
+                viewport_rows,
+                resize_anchor,
+            },
         )
     }
 
@@ -1899,41 +1934,37 @@ impl TranscriptProjection {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn plan_projection_progressive(
         &mut self,
         env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
-        mut key: ProjectKey,
-        scroll_target: ScrollTarget,
-        viewport_rows: u16,
         theme: &Theme,
-        resize_anchor: Option<ResizeAnchor>,
+        mut request: ProjectionRequest,
     ) -> ProjectionPlan {
         let mut plan = self.plan_projection_from_prepared(
             history,
-            key,
-            scroll_target,
-            viewport_rows,
+            request.key,
+            request.scroll_target,
+            request.viewport_rows,
             theme,
-            resize_anchor,
+            request.resize_anchor,
         );
         for _ in 0..8 {
             let changed = self.exactify_node_range(env.clone(), history, plan.node_range());
-            key = self.project_key(
-                key.width,
+            request.key = self.project_key(
+                request.key.width,
                 env.renderer_generation,
                 env.renderer_cache_key,
-                scroll_target,
-                viewport_rows,
+                request.scroll_target,
+                request.viewport_rows,
             );
             let refined = self.plan_projection_from_prepared(
                 history,
-                key,
-                scroll_target,
-                viewport_rows,
+                request.key,
+                request.scroll_target,
+                request.viewport_rows,
                 theme,
-                resize_anchor,
+                request.resize_anchor,
             );
             if !changed
                 && refined.node_range == plan.node_range
@@ -1944,20 +1975,20 @@ impl TranscriptProjection {
             plan = refined;
         }
         let _ = self.exactify_node_range(env, history, plan.node_range());
-        key = self.project_key(
-            key.width,
+        request.key = self.project_key(
+            request.key.width,
             plan.key.renderer_generation,
             plan.key.renderer_cache_key,
-            scroll_target,
-            viewport_rows,
+            request.scroll_target,
+            request.viewport_rows,
         );
         self.plan_projection_from_prepared(
             history,
-            key,
-            scroll_target,
-            viewport_rows,
+            request.key,
+            request.scroll_target,
+            request.viewport_rows,
             theme,
-            resize_anchor,
+            request.resize_anchor,
         )
     }
 
@@ -2103,11 +2134,13 @@ impl TranscriptProjection {
             plan = self.plan_projection_progressive(
                 current_env.clone(),
                 history,
-                key,
-                plan.scroll_target,
-                plan.viewport_rows,
                 theme,
-                None,
+                ProjectionRequest {
+                    key,
+                    scroll_target: plan.scroll_target,
+                    viewport_rows: plan.viewport_rows,
+                    resize_anchor: None,
+                },
             );
         }
 
@@ -2379,9 +2412,10 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
     ) -> TranscriptSearchLayout {
-        self.rebuild_row_index(lua, history, width);
-        let generation = self.measurements.active.semantic_layout_hash();
-        self.exact_search_layout(generation, history)
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env, history, width);
+        let generation = self.measurements.active.search_layout_hash();
+        self.search_layout(generation, history)
     }
 
     /// Render the full transcript history into a regular buffer. This is for
@@ -3904,6 +3938,26 @@ mod tests {
                     == "background processes finished: 2, 1 failed: 2 exited with code 7")
         );
         assert!(rows.iter().any(|line| line == "legacy process note"));
+    }
+
+    #[test]
+    fn search_layout_uses_estimates_without_measuring_every_block() {
+        let mut transcript = Transcript::new();
+        for i in 0..100 {
+            transcript.push(Block::Text {
+                content: format!("line {i} alpha"),
+            });
+        }
+        let mut projection = TranscriptProjection::new();
+
+        let layout = projection.materialize_search_layout(&test_lua(), &mut transcript.history, 80);
+
+        assert_eq!(layout.entries.len(), 100);
+        assert!(layout.entries.iter().any(|entry| entry.first_row > 0));
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.display_layouts, 0);
+        assert_eq!(counters.exact_height_measured_blocks, 0);
     }
 
     #[test]

@@ -489,6 +489,19 @@ impl TranscriptBlockDescriptor {
         crate::utils::hash_serializable(self)
     }
 
+    pub fn raw_text(&self) -> Option<String> {
+        match self {
+            Self::User { text, .. } => Some(text.clone()),
+            Self::Mode { text, icon, .. } => Some(format!("{icon}{text}")),
+            Self::ProcessStatus { text, .. } => Some(text.clone()),
+            Self::Thinking { content } | Self::Text { content } => Some(content.clone()),
+            Self::CodeLine { content, .. } => Some(content.clone()),
+            Self::Exec { command, output } => Some(format!("$ {command}\n{output}")),
+            Self::Compacted { summary } => Some(summary.clone()),
+            Self::ToolCall { .. } => None,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Self::User { .. } => "user",
@@ -631,6 +644,13 @@ impl BlockEntry {
         matches!(self, Self::Materialized(Block::ToolDraft { .. }))
     }
 
+    fn raw_text(&self) -> Option<String> {
+        match self {
+            Self::Materialized(block) => block.raw_text(),
+            Self::Descriptor(block) => block.descriptor.raw_text(),
+        }
+    }
+
     fn descriptor(&self) -> TranscriptBlockDescriptor {
         match self {
             Self::Materialized(block) => TranscriptBlockDescriptor::from_block(block.clone()),
@@ -717,6 +737,10 @@ impl BlockHistory {
 
     pub fn block(&self, id: BlockId) -> Option<&Block> {
         self.entries.get(&id).map(BlockEntry::block)
+    }
+
+    pub fn raw_text(&self, id: BlockId) -> Option<String> {
+        self.entries.get(&id).and_then(BlockEntry::raw_text)
     }
 
     pub fn block_kind(&self, id: BlockId) -> Option<&'static str> {

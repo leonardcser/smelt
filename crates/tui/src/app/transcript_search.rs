@@ -2,7 +2,7 @@ use crate::app::search::{doc_range_for_match, row_match_is_selectable, SearchDir
 use crate::app::TuiApp;
 use crate::content::render_plan::RenderNodeId;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
-use crate::smelt_edit::{DisplayRow, DocPosition, DocRange, RowIndex, Theme};
+use crate::smelt_edit::{DisplayRow, DocPosition, DocRange, RowIndex};
 use smelt_core::transcript_model::{BlockId, LayoutKey};
 use std::collections::HashMap;
 
@@ -34,6 +34,7 @@ struct TranscriptSearchEntry {
     block_ids: Vec<BlockId>,
     first_row: RowIndex,
     rows: RowIndex,
+    search_text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,7 +103,7 @@ impl TranscriptSearchIndex {
         let mut postings: Vec<&Vec<usize>> = Vec::with_capacity(grams.len());
         for gram in grams {
             let Some(list) = self.trigrams.get(&gram) else {
-                return Vec::new();
+                return (0..self.entries.len()).collect();
             };
             postings.push(list);
         }
@@ -114,6 +115,13 @@ impl TranscriptSearchIndex {
                 break;
             }
         }
+        let mut seen = vec![false; self.entries.len()];
+        for entry in &out {
+            if let Some(slot) = seen.get_mut(*entry) {
+                *slot = true;
+            }
+        }
+        out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
         out
     }
 }
@@ -150,6 +158,7 @@ fn push_search_entry(
         block_ids: layout_entry.block_ids.clone(),
         first_row: layout_entry.first_row,
         rows: layout_entry.rows,
+        search_text: search_text.clone(),
     });
     for gram in unique_trigrams(&search_text) {
         trigrams.entry(gram).or_default().push(entry_index);
@@ -175,20 +184,25 @@ impl TuiApp {
         }
     }
 
-    fn transcript_search_text_for_entry(
-        &mut self,
-        entry: &TranscriptSearchLayoutEntry,
-        width: u16,
-        theme: &Theme,
-    ) -> String {
-        let display = self.transcript.display_rows_for_range(
-            &self.lua,
-            width,
-            theme,
-            entry.first_row,
-            entry.rows,
-        );
-        display.selectable_text()
+    fn transcript_search_text_for_entry(&self, entry: &TranscriptSearchLayoutEntry) -> String {
+        let history = self.transcript.history();
+        let mut text = String::new();
+        for id in &entry.block_ids {
+            let block_text = history
+                .tool_call_id(*id)
+                .and_then(|call_id| history.tool_state(call_id))
+                .and_then(|state| state.output.as_ref())
+                .map(|output| output.content.clone())
+                .or_else(|| history.raw_text(*id));
+            let Some(block_text) = block_text else {
+                continue;
+            };
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&block_text);
+        }
+        text
     }
 
     fn ensure_transcript_search_index(&mut self) -> Option<&TranscriptSearchIndex> {
@@ -208,10 +222,9 @@ impl TuiApp {
             return self.search.transcript_index.as_ref();
         }
 
-        let theme = self.ui.theme().clone();
         if let Some(index) = self.search.transcript_index.take() {
             if let Some(index) = index.append_from_layout(key, &layout, |layout_entry| {
-                self.transcript_search_text_for_entry(layout_entry, width, &theme)
+                self.transcript_search_text_for_entry(layout_entry)
             }) {
                 self.search.transcript_index = Some(index);
                 record_index_size(self.search.transcript_index.as_ref()?);
@@ -223,7 +236,7 @@ impl TuiApp {
         self.search.transcript_index = Some(build_transcript_search_index(
             key,
             &layout,
-            |layout_entry| self.transcript_search_text_for_entry(layout_entry, width, &theme),
+            |layout_entry| self.transcript_search_text_for_entry(layout_entry),
         ));
         record_index_size(self.search.transcript_index.as_ref()?);
         self.search.transcript_index.as_ref()
@@ -437,12 +450,12 @@ impl TuiApp {
         entry_index: usize,
     ) {
         let _perf = smelt_perf::perf::begin("search:transcript:scan_candidate");
-        let Some((first_row, rows)) = self
+        let Some((first_row, rows, search_text)) = self
             .search
             .transcript_index
             .as_ref()
             .and_then(|index| index.entries.get(entry_index))
-            .map(|entry| (entry.first_row, entry.rows))
+            .map(|entry| (entry.first_row, entry.rows, entry.search_text.clone()))
         else {
             return;
         };
@@ -454,11 +467,24 @@ impl TuiApp {
         if rows == 0 {
             return;
         }
+        let mut semantic_found = Vec::new();
+        for (offset, line) in search_text.lines().enumerate() {
+            let row = DisplayRow::new(line.to_string(), std::iter::once(0..line.len()).collect());
+            collect_row_matches(
+                first_row.saturating_add(offset as RowIndex),
+                &row,
+                query,
+                &mut semantic_found,
+            );
+        }
         let display = self.transcript_rows_and_breaks_range(first_row, rows);
         let mut found = Vec::new();
         for (offset, row) in display.rows.iter().enumerate() {
             let row_index = first_row.saturating_add(offset as RowIndex);
             collect_row_matches(row_index, row, query, &mut found);
+        }
+        if found.is_empty() {
+            found = semantic_found;
         }
         merge_doc_ranges(&mut session.matches, found);
         smelt_perf::perf::record_value(
