@@ -25,6 +25,7 @@ export function renderRequests(requests) {
 
 export function renderRequestPanel(type, entry, index) {
   if (!entry) return `<div class="empty">Request no longer available.</div>`;
+  if (entry.payload_error && type !== "summary") return `<div class="empty">Failed to load request payload: ${escapeHtml(entry.payload_error)}</div>`;
   if (type === "messages") return renderMessages(entry);
   if (type === "response") return renderResponse(entry, index);
   if (type === "error") return renderError(entry.error);
@@ -46,7 +47,7 @@ function filterRequests(requests) {
   return requests.map((entry, index) => ({ entry, index })).filter(({ entry }) => {
     if (status === "errors" && !entry.error) return false;
     if (status === "ok" && entry.error) return false;
-    if (status === "raw" && !entry.response?.raw) return false;
+    if (status === "raw" && !(entry.response?.raw || entry.has_raw_response)) return false;
     if (!q) return true;
     return requestSearchText(entry).includes(q);
   });
@@ -65,8 +66,11 @@ function requestSearchText(entry) {
     entry.http_status,
     entry.error?.kind,
     entry.error?.message,
+    entry.error_summary,
     entry.response?.content,
     entry.response?.reasoning,
+    entry.response_summary,
+    entry.raw_body_size,
     ...messages,
   ].filter(Boolean).join(" ").toLowerCase();
   searchText.set(entry, text);
@@ -138,7 +142,8 @@ function renderMessages(entry) {
       ${message.tool_call_id ? `<div class="muted mono">tool_call_id ${escapeHtml(message.tool_call_id)}</div>` : ""}
     </div>
   </article>`).join("");
-  return `<div class="timeline">${system}${messages || `<div class="empty">No provider messages captured.</div>`}</div>`;
+  const fallback = entry.body ? `<details class="tool-call"><summary>Raw request body</summary><div class="tool-inner">${highlightedJson(entry.body)}</div></details>` : `<div class="empty">No provider messages captured.</div>`;
+  return `<div class="timeline">${system}${messages || fallback}</div>`;
 }
 
 function renderResponse(entry, index) {

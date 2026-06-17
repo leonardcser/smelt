@@ -470,6 +470,11 @@ impl HeadlessApp {
                     self.sink.log_retry(*attempt, *delay_ms);
                 }
                 EngineEvent::HistoryUpdated { .. } => {}
+                EngineEvent::RequestAuditError { message } => {
+                    if self.sink.format == OutputFormat::Text {
+                        self.sink.log_error(message);
+                    }
+                }
                 EngineEvent::TurnError { message } => {
                     if self.sink.format == OutputFormat::Text {
                         self.sink.log_error(message);

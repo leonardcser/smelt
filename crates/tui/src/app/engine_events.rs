@@ -284,6 +284,10 @@ impl TuiApp {
                 });
                 SessionControl::Continue
             }
+            EngineEvent::RequestAuditError { message } => {
+                self.notify_warn(message);
+                SessionControl::Continue
+            }
             EngineEvent::ProcessCompleted { id, exit_code } => {
                 self.handle_process_completed(id, exit_code);
                 SessionControl::Continue
@@ -398,29 +402,30 @@ impl TuiApp {
     /// Handle engine events that arrive when no turn is active.
     pub(crate) fn handle_idle_engine_event(&mut self, ev: EngineEvent) {
         match ev {
-        // Stale history snapshots from cancelled/completed turns would overwrite a freshly cleared history.
-        EngineEvent::HistoryUpdated { .. } => {}
-        EngineEvent::TurnComplete { history, .. }
-            // Persist final messages from a cancelled turn without rebuilding the screen.
-            if !history.is_empty() =>
-        {
-            self.set_history(history);
-            self.save_session();
+            // Stale history snapshots from cancelled/completed turns would overwrite a freshly cleared history.
+            EngineEvent::HistoryUpdated { .. } => {}
+            EngineEvent::TurnComplete { history, .. } if !history.is_empty() => {
+                // Persist final messages from a cancelled turn without rebuilding the screen.
+                self.set_history(history);
+                self.save_session();
+            }
+            EngineEvent::EngineAskDelta { id, delta } => {
+                self.lua.fire_ask_delta_callback(id, &delta);
+            }
+            EngineEvent::EngineAskResponse { id, message, error } => {
+                self.lua.fire_ask_callback(id, message.as_ref(), error);
+            }
+            EngineEvent::ProcessCompleted { id, exit_code } => {
+                self.handle_process_completed(id, exit_code);
+            }
+            EngineEvent::TurnError { message } => {
+                self.working.finish(TurnOutcome::Interrupted);
+                self.notify_error_sticky(message);
+            }
+            EngineEvent::RequestAuditError { message } => {
+                self.notify_warn(message);
+            }
+            _ => {}
         }
-        EngineEvent::EngineAskDelta { id, delta } => {
-            self.lua.fire_ask_delta_callback(id, &delta);
-        }
-        EngineEvent::EngineAskResponse { id, message, error } => {
-            self.lua.fire_ask_callback(id, message.as_ref(), error);
-        }
-        EngineEvent::ProcessCompleted { id, exit_code } => {
-            self.handle_process_completed(id, exit_code);
-        }
-        EngineEvent::TurnError { message } => {
-            self.working.finish(TurnOutcome::Interrupted);
-            self.notify_error_sticky(message);
-        }
-        _ => {}
-    }
     }
 }

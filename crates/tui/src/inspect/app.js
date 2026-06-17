@@ -22,6 +22,7 @@ const state = {
 
 const sessionCache = new Map();
 const sessionInflight = new Map();
+const requestPayloadInflight = new Map();
 const sessionSearchText = new WeakMap();
 let selectionToken = 0;
 let sidebarRenderTimer = 0;
@@ -87,8 +88,11 @@ function wireEvents() {
       article.querySelectorAll(".request-body").forEach((el) => { el.hidden = el !== panel; });
       if (!panel.dataset.rendered) {
         const index = Number(requestTab.dataset.requestIndex);
+        const type = requestTab.dataset.requestPanel;
         const entry = state.requests[index];
-        panel.innerHTML = renderRequestPanel(requestTab.dataset.requestPanel, entry, index);
+        panel.innerHTML = `<div class="empty">Loading request payload…</div>`;
+        if (type !== "summary") await ensureRequestPayload(index);
+        panel.innerHTML = renderRequestPanel(type, entry, index);
         panel.dataset.rendered = "true";
       }
       await highlightJsonBlocks(panel);
@@ -200,6 +204,44 @@ async function fetchSessionData(id) {
 
   sessionInflight.set(id, promise);
   return promise;
+}
+
+async function ensureRequestPayload(index) {
+  const entry = state.requests[index];
+  if (!entry || entry.payload_loaded || !entry.id || !state.selectedId) return;
+  const key = `${state.selectedId}:${entry.id}`;
+  let inflight = requestPayloadInflight.get(key);
+  if (!inflight) {
+    inflight = fetch(`/api/sessions/${encodeURIComponent(state.selectedId)}/requests/${encodeURIComponent(entry.id)}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`request payload HTTP ${response.status}`);
+        return response.json();
+      })
+      .then((payload) => {
+        mergeRequestPayload(entry, payload);
+        return payload;
+      })
+      .catch((error) => {
+        entry.payload_error = error.message;
+      })
+      .finally(() => {
+        requestPayloadInflight.delete(key);
+      });
+    requestPayloadInflight.set(key, inflight);
+  }
+  await inflight;
+}
+
+function mergeRequestPayload(entry, payload) {
+  entry.payload_loaded = true;
+  if (!payload || typeof payload !== "object") return;
+  if (payload.body !== undefined && payload.body !== null) {
+    entry.body = payload.body;
+    if (!entry.messages && Array.isArray(payload.body.messages)) entry.messages = payload.body.messages;
+    if (!entry.tools && Array.isArray(payload.body.tools)) entry.tools = payload.body.tools;
+  }
+  if (payload.response !== undefined && payload.response !== null) entry.response = payload.response;
+  if (payload.error !== undefined && payload.error !== null) entry.error = payload.error;
 }
 
 function scheduleSidebarRender(focusId = null) {

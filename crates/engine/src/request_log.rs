@@ -1,7 +1,6 @@
 //! Persistent provider request audit for session introspection.
 
 use protocol::request_log::{RequestError, RequestLogEntry, RequestResponse};
-use protocol::{Message, ToolDef};
 use std::path::Path;
 
 /// Append one request attempt to the session's SQLite request audit.
@@ -10,12 +9,10 @@ pub fn append(
     ctx: RequestContext,
     info: &crate::provider::RequestAttemptInfo<'_>,
     pricing: &crate::pricing::ResolvedPricing,
-) {
+) -> Result<i64, smelt_store::StoreError> {
     let entry = build_entry(ctx, info, pricing);
-    let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) else {
-        return;
-    };
-    let _ = db.append_request_attempt(&entry);
+    let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
+    db.append_request_attempt(&entry)
 }
 
 /// Static context for a logical request.
@@ -26,9 +23,6 @@ pub struct RequestContext {
     pub ask_id: Option<u64>,
     pub history_len: Option<usize>,
     pub background: bool,
-    pub system_prompt: Option<String>,
-    pub messages: Option<Vec<Message>>,
-    pub tools: Option<Vec<ToolDef>>,
 }
 
 fn build_entry(
@@ -101,9 +95,9 @@ fn build_entry(
             .get("stream")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        system_prompt: ctx.system_prompt,
-        messages: ctx.messages,
-        tools: ctx.tools,
+        system_prompt: None,
+        messages: None,
+        tools: None,
         response,
         usage,
         cost_usd,
@@ -162,7 +156,7 @@ mod tests {
     use super::*;
     use crate::pricing::{ModelPricing, PricingSource, ResolvedPricing};
     use crate::provider::{LLMResponse, ProviderError, ProviderKind, RequestAttemptInfo};
-    use protocol::{Message, TokenUsage};
+    use protocol::TokenUsage;
 
     fn zero_pricing() -> ResolvedPricing {
         ResolvedPricing {
@@ -233,11 +227,8 @@ mod tests {
             ask_id: None,
             history_len: Some(3),
             background: false,
-            system_prompt: Some("sys".into()),
-            messages: Some(vec![Message::user(protocol::Content::text("hi"))]),
-            tools: None,
         };
-        append(session_dir, ctx, &info, &zero_pricing());
+        append(session_dir, ctx, &info, &zero_pricing()).unwrap();
 
         let err = ProviderError::Network("timeout".into());
         let info_err = RequestAttemptInfo {
@@ -259,11 +250,8 @@ mod tests {
             ask_id: None,
             history_len: Some(3),
             background: false,
-            system_prompt: None,
-            messages: None,
-            tools: None,
         };
-        append(session_dir, ctx_err, &info_err, &zero_pricing());
+        append(session_dir, ctx_err, &info_err, &zero_pricing()).unwrap();
 
         let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
         let attempts = db

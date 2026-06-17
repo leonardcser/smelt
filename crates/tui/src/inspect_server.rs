@@ -392,7 +392,12 @@ async fn route(path: &str) -> (&'static str, &'static str, String) {
         match suffix {
             None | Some("") => session_detail(id).await,
             Some("summary") => session_summary(id).await,
-            Some("requests") => session_requests(id).await,
+            Some("requests") => match segments.next() {
+                Some(request_id) if !request_id.is_empty() => {
+                    session_request_payload(id, request_id).await
+                }
+                _ => session_requests(id).await,
+            },
             _ => not_found(),
         }
     } else if path == "/api/sessions" {
@@ -489,16 +494,15 @@ fn session_requests_json(id: &str) -> std::result::Result<String, String> {
     let db_path = session_dir(id).join("session.db");
     if db_path.is_file() {
         let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
-        let mut jsonl = Vec::new();
-        db.export_requests_jsonl(&mut jsonl)
+        let attempts = db
+            .query_request_attempts(&smelt_store::RequestAuditQuery {
+                limit: u32::MAX,
+                order: smelt_store::RequestAuditOrder::OldestFirst,
+                ..Default::default()
+            })
             .map_err(|err| err.to_string())?;
-        let text = String::from_utf8(jsonl).map_err(|err| err.to_string())?;
-        let lines: Vec<serde_json::Value> = text
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        return serde_json::to_string(&lines).map_err(|err| err.to_string());
+        let values: Vec<serde_json::Value> = attempts.iter().map(request_summary_json).collect();
+        return serde_json::to_string(&values).map_err(|err| err.to_string());
     }
 
     let path = session_dir(id).join("requests.jsonl");
@@ -512,6 +516,112 @@ fn session_requests_json(id: &str) -> std::result::Result<String, String> {
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
     serde_json::to_string(&lines).map_err(|err| err.to_string())
+}
+
+async fn session_request_payload(
+    id: &str,
+    request_id: &str,
+) -> (&'static str, &'static str, String) {
+    let id = id.to_string();
+    let request_id = request_id.to_string();
+    let payload =
+        match tokio::task::spawn_blocking(move || request_payload_json(&id, &request_id)).await {
+            Ok(result) => result,
+            Err(e) => return server_error(&e.to_string()),
+        };
+    match payload {
+        Ok(Some(body)) => ("200 OK", "application/json", body),
+        Ok(None) => not_found(),
+        Err(e) => server_error(&e),
+    }
+}
+
+fn request_payload_json(id: &str, request_id: &str) -> std::result::Result<Option<String>, String> {
+    let attempt_id = request_id
+        .parse::<i64>()
+        .map_err(|err| format!("invalid request id: {err}"))?;
+    let db_path = session_dir(id).join("session.db");
+    if !db_path.is_file() {
+        return Ok(None);
+    }
+    let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
+    let Some(payloads) = db
+        .request_payloads(attempt_id)
+        .map_err(|err| err.to_string())?
+    else {
+        return Ok(None);
+    };
+    serde_json::to_string(&serde_json::json!({
+        "body": payloads.body,
+        "response": payloads.response,
+        "error": payloads.error,
+    }))
+    .map(Some)
+    .map_err(|err| err.to_string())
+}
+
+fn request_summary_json(entry: &smelt_store::RequestAuditSummary) -> serde_json::Value {
+    let elapsed_ms = entry
+        .completed_at
+        .map(|completed_at| completed_at.saturating_sub(entry.started_at));
+    let error = entry.error_summary.as_ref().map(|message| {
+        serde_json::json!({
+            "message": message,
+        })
+    });
+    let response = entry.response_summary.as_ref().map(|content| {
+        serde_json::json!({
+            "content": content,
+        })
+    });
+    let mut value = serde_json::json!({
+        "id": entry.id,
+        "request_id": entry.request_id.clone(),
+        "kind": entry.kind.clone(),
+        "turn_id": entry.turn_id.clone(),
+        "ask_id": entry.ask_id.clone(),
+        "timestamp_ms": entry.started_at,
+        "provider_kind": entry.provider.clone(),
+        "api_base": entry.api_base.clone(),
+        "model": entry.model.clone(),
+        "url": entry.url.clone(),
+        "http_status": entry.http_status,
+        "history_len": entry.history_len,
+        "prompt_cache_key": entry.prompt_cache_key.clone(),
+        "stream": entry.stream,
+        "usage": entry.usage.clone(),
+        "cost_usd": entry.cost_usd,
+        "tokens_per_sec": entry.tokens_per_sec,
+        "elapsed_ms": elapsed_ms,
+        "attempt": entry.attempt,
+        "background": entry.background,
+        "raw_body_size": entry.raw_body_size,
+        "has_body": entry.body_hash.is_some(),
+        "has_response": entry.response_hash.is_some(),
+        "has_error": entry.error_hash.is_some(),
+        "has_raw_response": entry.response_hash.is_some(),
+        "response": response,
+        "error": error,
+    });
+    remove_null_json_fields(&mut value);
+    value
+}
+
+fn remove_null_json_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|_, child| !child.is_null());
+            for child in map.values_mut() {
+                remove_null_json_fields(child);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                remove_null_json_fields(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn session_dir(id: &str) -> PathBuf {

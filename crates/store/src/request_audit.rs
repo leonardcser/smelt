@@ -93,29 +93,115 @@ pub struct RequestAuditPayloads {
     pub error: Option<Value>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RequestAuditRecord {
+    pub request_id: Option<String>,
+    pub kind: Option<String>,
+    pub turn_id: Option<String>,
+    pub ask_id: Option<String>,
+    pub started_at: i64,
+    pub completed_at: Option<i64>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub history_len: Option<i64>,
+    pub body: Option<Value>,
+    pub response: Option<Value>,
+    pub error: Option<Value>,
+    pub error_summary: Option<String>,
+    pub background: bool,
+    pub api_base: Option<String>,
+    pub url: Option<String>,
+    pub http_status: Option<i64>,
+    pub prompt_cache_key: Option<String>,
+    pub stream: bool,
+    pub attempt: i64,
+    pub response_summary: Option<String>,
+    pub usage: Option<TokenUsage>,
+    pub cost_usd: Option<f64>,
+    pub tokens_per_sec: Option<f64>,
+}
+
+impl RequestAuditRecord {
+    fn from_entry(entry: &RequestLogEntry) -> Result<Self> {
+        let started_at = checked_i64(entry.timestamp_ms, "started_at")?;
+        let completed_at = entry
+            .elapsed_ms
+            .map(|elapsed| entry.timestamp_ms.saturating_add(elapsed))
+            .map(|value| checked_i64(value, "completed_at"))
+            .transpose()?;
+        let response = entry
+            .response
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        let error = entry.error.as_ref().map(serde_json::to_value).transpose()?;
+        Ok(Self {
+            request_id: Some(entry.request_id.to_string()),
+            kind: Some(entry.kind.clone()),
+            turn_id: entry.turn_id.map(|id| id.to_string()),
+            ask_id: entry.ask_id.map(|id| id.to_string()),
+            started_at,
+            completed_at,
+            provider: Some(entry.provider_kind.clone()),
+            model: Some(entry.model.clone()),
+            history_len: entry.history_len.map(|value| value as i64),
+            body: Some(entry.body.clone()),
+            response,
+            error,
+            error_summary: entry.error.as_ref().map(request_error_summary),
+            background: entry.background,
+            api_base: Some(entry.api_base.clone()),
+            url: Some(entry.url.clone()),
+            http_status: entry.http_status.map(i64::from),
+            prompt_cache_key: entry.prompt_cache_key.clone(),
+            stream: entry.stream,
+            attempt: i64::from(entry.attempt),
+            response_summary: entry.response.as_ref().and_then(response_summary),
+            usage: entry.usage.clone(),
+            cost_usd: entry.cost_usd,
+            tokens_per_sec: entry.tokens_per_sec,
+        })
+    }
+}
+
+pub(crate) fn import_request_value(
+    conn: &Connection,
+    value: &Value,
+    compression: ObjectCompression,
+) -> Result<i64> {
+    insert_request_record(conn, legacy_record(value)?, compression)
+}
+
 pub(crate) fn append_request_attempt(
     conn: &Connection,
     entry: &RequestLogEntry,
     compression: ObjectCompression,
 ) -> Result<i64> {
-    let body_bytes = serde_json::to_vec(&entry.body)?;
-    let body = object::put_object(conn, "request_body", &body_bytes, compression)?;
+    insert_request_record(conn, RequestAuditRecord::from_entry(entry)?, compression)
+}
+
+fn insert_request_record(
+    conn: &Connection,
+    record: RequestAuditRecord,
+    compression: ObjectCompression,
+) -> Result<i64> {
+    let body_hash = put_json_object(conn, record.body.as_ref(), "request_body", compression)?;
     let response_hash = put_json_object(
         conn,
-        entry.response.as_ref(),
+        record.response.as_ref(),
         "request_response",
         compression,
     )?;
-    let error_hash = put_json_object(conn, entry.error.as_ref(), "request_error", compression)?;
-    let started_at = checked_i64(entry.timestamp_ms, "started_at")?;
-    let completed_at = entry
-        .elapsed_ms
-        .map(|elapsed| entry.timestamp_ms.saturating_add(elapsed))
-        .map(|value| checked_i64(value, "completed_at"))
-        .transpose()?;
-    let raw_body_size = checked_i64(body.raw_size(), "raw_body_size")?;
-    let cost_micros = cost_micros(entry.cost_usd)?;
-    let stats_json = entry
+    let error_hash = put_json_object(conn, record.error.as_ref(), "request_error", compression)?;
+    let raw_body_size = body_hash
+        .as_ref()
+        .and_then(|hash| object::object_meta(conn, hash).transpose())
+        .transpose()?
+        .map(|meta| meta.raw_size)
+        .unwrap_or_default();
+    let raw_body_size = checked_i64(raw_body_size, "raw_body_size")?;
+    let cost_micros = cost_micros(record.cost_usd)?;
+    let stats_json = record
         .usage
         .as_ref()
         .map(serde_json::to_string)
@@ -130,40 +216,42 @@ pub(crate) fn append_request_attempt(
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                    ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
-            entry.request_id.to_string(),
-            entry.turn_id.map(|id| id.to_string()),
-            entry.ask_id.map(|id| id.to_string()),
-            started_at,
-            completed_at,
-            &entry.provider_kind,
-            &entry.model,
-            entry.history_len.map(|value| value as i64),
-            body.hash(),
+            record.request_id,
+            record.turn_id,
+            record.ask_id,
+            record.started_at,
+            record.completed_at,
+            record.provider,
+            record.model,
+            record.history_len,
+            body_hash.as_deref(),
             response_hash.as_deref(),
             error_hash.as_deref(),
-            &entry.kind,
-            entry.error.as_ref().map(request_error_summary),
-            entry.background as i64,
+            record.kind,
+            record.error_summary,
+            record.background as i64,
             raw_body_size,
-            &entry.api_base,
-            &entry.url,
-            entry.http_status.map(i64::from),
-            entry.prompt_cache_key.as_deref(),
-            entry.stream as i64,
-            i64::from(entry.attempt),
-            entry.response.as_ref().and_then(response_summary),
+            record.api_base,
+            record.url,
+            record.http_status,
+            record.prompt_cache_key,
+            record.stream as i64,
+            record.attempt,
+            record.response_summary,
         ],
     )?;
     let request_attempt_id = conn.last_insert_rowid();
-    insert_request_ref(conn, request_attempt_id, body.hash(), "body")?;
+    if let Some(hash) = body_hash.as_deref() {
+        insert_request_ref(conn, request_attempt_id, hash, "body")?;
+    }
     if let Some(hash) = response_hash.as_deref() {
         insert_request_ref(conn, request_attempt_id, hash, "response")?;
     }
     if let Some(hash) = error_hash.as_deref() {
         insert_request_ref(conn, request_attempt_id, hash, "error")?;
     }
-    if entry.usage.is_some() || cost_micros.is_some() || entry.tokens_per_sec.is_some() {
-        let usage = entry.usage.as_ref();
+    if record.usage.is_some() || cost_micros.is_some() || record.tokens_per_sec.is_some() {
+        let usage = record.usage.as_ref();
         conn.execute(
             "INSERT OR REPLACE INTO request_stats (
                 request_attempt_id, input_tokens, output_tokens, cached_input_tokens,
@@ -188,7 +276,7 @@ pub(crate) fn append_request_attempt(
                 usage
                     .and_then(|usage| usage.cache_write_tokens)
                     .map(i64::from),
-                entry.tokens_per_sec,
+                record.tokens_per_sec,
             ],
         )?;
     }
@@ -325,6 +413,54 @@ pub(crate) fn request_attempts(
         .map_err(Into::into)
 }
 
+fn legacy_record(value: &Value) -> Result<RequestAuditRecord> {
+    let started_at = value
+        .get("timestamp_ms")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let completed_at = value
+        .get("elapsed_ms")
+        .and_then(Value::as_i64)
+        .map(|elapsed| started_at.saturating_add(elapsed));
+    let usage = value
+        .get("usage")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?;
+    Ok(RequestAuditRecord {
+        request_id: scalar_string(value.get("request_id")),
+        kind: optional_string(value, "kind"),
+        turn_id: scalar_string(value.get("turn_id")),
+        ask_id: scalar_string(value.get("ask_id")),
+        started_at,
+        completed_at,
+        provider: optional_string_multi(value, &["provider_kind", "provider"]),
+        model: optional_string(value, "model"),
+        history_len: value.get("history_len").and_then(Value::as_i64),
+        body: value.get("body").cloned(),
+        response: value.get("response").cloned(),
+        error: value.get("error").cloned(),
+        error_summary: request_error_value_summary(value.get("error")),
+        background: value
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        api_base: optional_string(value, "api_base"),
+        url: optional_string(value, "url"),
+        http_status: value.get("http_status").and_then(Value::as_i64),
+        prompt_cache_key: optional_string(value, "prompt_cache_key"),
+        stream: value
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        attempt: value.get("attempt").and_then(Value::as_i64).unwrap_or(1),
+        response_summary: request_response_value_summary(value.get("response")),
+        usage,
+        cost_usd: value.get("cost_usd").and_then(Value::as_f64),
+        tokens_per_sec: value.get("tokens_per_sec").and_then(Value::as_f64),
+    })
+}
+
 pub(crate) fn request_payloads(
     conn: &Connection,
     request_attempt_id: i64,
@@ -369,12 +505,7 @@ fn put_json_object<T: serde::Serialize>(
     ))
 }
 
-pub(crate) fn insert_request_ref(
-    conn: &Connection,
-    request_id: i64,
-    hash: &str,
-    role: &str,
-) -> Result<()> {
+fn insert_request_ref(conn: &Connection, request_id: i64, hash: &str, role: &str) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO request_object_refs (request_attempt_id, object_hash, role)
          VALUES (?1, ?2, ?3)",
@@ -400,6 +531,44 @@ fn request_error_summary(error: &protocol::request_log::RequestError) -> String 
     } else {
         error.message.clone()
     }
+}
+
+fn request_error_value_summary(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("kind").and_then(Value::as_str))
+        .map(ToString::to_string)
+}
+
+fn request_response_value_summary(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    value
+        .get("content")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("reasoning").and_then(Value::as_str))
+        .map(|text| preview(text, 512))
+}
+
+fn scalar_string(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn optional_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn optional_string_multi(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| optional_string(value, key))
 }
 
 fn response_summary(response: &protocol::request_log::RequestResponse) -> Option<String> {

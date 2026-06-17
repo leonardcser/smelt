@@ -328,10 +328,7 @@ fn spawn_engine_ask(
     let cache_ttl_long = config.cache_ttl_long;
     tokio::spawn(async move {
         messages.insert(0, protocol::Message::system(&system));
-        let log_messages = messages.clone();
         let log_session_dir = session_dir.clone();
-        let log_system = system.clone();
-        let log_tools = tools.clone();
         let ask_id = id;
 
         let mut opts = ChatOptions::new(&cancel);
@@ -381,6 +378,7 @@ fn spawn_engine_ask(
                 opts.on_delta = Some(&on_delta);
             }
             let log_pricing = pricing.clone();
+            let audit_tx = tx.clone();
             let on_attempt = move |info: crate::provider::RequestAttemptInfo<'_>| {
                 let resolved = crate::pricing::resolve(
                     info.model,
@@ -395,11 +393,14 @@ fn spawn_engine_ask(
                     ask_id: Some(ask_id),
                     history_len: None,
                     background: true,
-                    system_prompt: Some(log_system.clone()),
-                    messages: Some(log_messages.clone()),
-                    tools: Some(log_tools.clone()),
                 };
-                crate::request_log::append(&log_session_dir, ctx, &info, &resolved);
+                if let Err(err) =
+                    crate::request_log::append(&log_session_dir, ctx, &info, &resolved)
+                {
+                    let _ = audit_tx.send(EngineEvent::RequestAuditError {
+                        message: format!("request audit write failed: {err}"),
+                    });
+                }
             };
             opts.on_attempt = Some(&on_attempt);
             provider
@@ -2252,8 +2253,7 @@ impl<'a> Turn<'a> {
                 self.provider.model_config(),
             );
             let session_dir = self.session_dir.clone();
-            let system_prompt = self.system_prompt.clone();
-            let tools = self.tools.clone();
+            let event_tx = self.event_tx.clone();
             let turn_id = self.turn_id;
             let history_len = self.history.len();
             // Convert the engine's `Vec<HistoryItem>` to the wire-format
@@ -2262,7 +2262,6 @@ impl<'a> Turn<'a> {
             // `ToolInvocation`s inline), so the resulting Message slice
             // satisfies "assistant tool_calls followed by tool_results".
             let wire_messages = protocol::history_to_messages(&self.history);
-            let log_wire_messages = wire_messages.clone();
             let on_attempt = move |info: crate::provider::RequestAttemptInfo<'_>| {
                 let ctx = crate::request_log::RequestContext {
                     request_id: turn_id,
@@ -2271,11 +2270,12 @@ impl<'a> Turn<'a> {
                     ask_id: None,
                     history_len: Some(history_len),
                     background: false,
-                    system_prompt: Some(system_prompt.clone()),
-                    messages: Some(log_wire_messages.clone()),
-                    tools: Some(tools.clone()),
                 };
-                crate::request_log::append(&session_dir, ctx, &info, &pricing);
+                if let Err(err) = crate::request_log::append(&session_dir, ctx, &info, &pricing) {
+                    let _ = event_tx.send(EngineEvent::RequestAuditError {
+                        message: format!("request audit write failed: {err}"),
+                    });
+                }
             };
             let opts = ChatOptions {
                 cancel: &self.cancel,

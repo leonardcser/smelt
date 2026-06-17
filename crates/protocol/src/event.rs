@@ -287,6 +287,10 @@ pub enum EngineEvent {
     /// LLM call failed, engine is retrying.
     Retrying { delay_ms: u64, attempt: u32 },
 
+    /// Request audit persistence failed. The turn can continue, but request
+    /// inspection for this attempt may be incomplete.
+    RequestAuditError { message: String },
+
     /// A background process has finished.
     ProcessCompleted { id: String, exit_code: Option<i32> },
 
