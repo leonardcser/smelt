@@ -133,6 +133,8 @@ pub fn migrate_session_dir_to_db(
 fn migrate_session_dir_to_db_inner(
     dir_path: &Path,
 ) -> SessionMigrationResult<SessionMigrationOutcome> {
+    crate::session::cleanup_stale_import_temp_files(dir_path);
+
     if dir_path.join("session.db").is_file() {
         return Ok(SessionMigrationOutcome::Skipped);
     }

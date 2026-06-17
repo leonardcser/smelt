@@ -1418,6 +1418,8 @@ pub(crate) fn import_legacy_session_to_db(
     dir_path: &Path,
     session: &Session,
 ) -> Result<(), smelt_store::StoreError> {
+    cleanup_stale_import_temp_files(dir_path);
+
     let db_path = dir_path.join("session.db");
     if db_path.is_file() {
         return Ok(());
@@ -1468,10 +1470,82 @@ pub(crate) fn import_legacy_session_to_db(
     }
 }
 
+// Import temps are only published after SQLite is closed and hard-linked into place.
+// A short grace period plus live-PID check keeps concurrent imports safe while
+// allowing crashed migrations to be collected on the next scan.
+const STALE_IMPORT_TEMP_MS: u64 = 10 * 60 * 1000;
+
+pub(crate) fn cleanup_stale_import_temp_files(dir_path: &Path) -> usize {
+    cleanup_stale_import_temp_files_before(dir_path, now_ms(), STALE_IMPORT_TEMP_MS)
+}
+
+fn cleanup_stale_import_temp_files_before(dir_path: &Path, now_ms: u64, stale_ms: u64) -> usize {
+    let Ok(entries) = fs::read_dir(dir_path) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(temp) = import_temp_name(name) else {
+            continue;
+        };
+        if now_ms.saturating_sub(temp.started_at_ms) < stale_ms {
+            continue;
+        }
+        if import_process_is_alive(temp.pid) {
+            continue;
+        }
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+struct ImportTempName {
+    pid: u32,
+    started_at_ms: u64,
+}
+
+fn import_temp_name(name: &str) -> Option<ImportTempName> {
+    let rest = name.strip_prefix("session.db.import-")?;
+    let tmp_idx = rest.find(".tmp")?;
+    let suffix = &rest[tmp_idx..];
+    if !matches!(suffix, ".tmp" | ".tmp-wal" | ".tmp-shm" | ".tmp-journal") {
+        return None;
+    }
+    let stem = &rest[..tmp_idx];
+    let mut parts = stem.split('-');
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    let started_at_ms = parts.next()?.parse::<u64>().ok()?;
+    parts.next()?.parse::<usize>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(ImportTempName { pid, started_at_ms })
+}
+
+#[cfg(target_os = "linux")]
+fn import_process_is_alive(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn import_process_is_alive(_pid: u32) -> bool {
+    false
+}
+
 fn cleanup_sqlite_files(path: &Path) {
     let _ = fs::remove_file(path);
     let _ = fs::remove_file(sqlite_sidecar_path(path, "wal"));
     let _ = fs::remove_file(sqlite_sidecar_path(path, "shm"));
+    let _ = fs::remove_file(sqlite_sidecar_path(path, "journal"));
 }
 
 fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
@@ -2129,6 +2203,66 @@ mod tests {
         let migrated = load_db_session(dir.path()).expect("load migrated db session");
         assert_eq!(migrated.title.as_deref(), Some("split title"));
         assert_eq!(migrated.history.len(), 1);
+    }
+
+    #[test]
+    fn cleans_stale_import_temp_files_only() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let stale = dir.path().join("session.db.import-4294967295-1000-0.tmp");
+        let stale_wal = dir
+            .path()
+            .join("session.db.import-4294967295-1000-0.tmp-wal");
+        let stale_shm = dir
+            .path()
+            .join("session.db.import-4294967295-1000-0.tmp-shm");
+        let stale_journal = dir
+            .path()
+            .join("session.db.import-4294967295-1000-0.tmp-journal");
+        let fresh = dir.path().join("session.db.import-4294967295-9500-0.tmp");
+        let normal_db = dir.path().join("session.db");
+        let unrelated = dir.path().join("session.db.import-not-a-temp.tmp");
+        for path in [
+            &stale,
+            &stale_wal,
+            &stale_shm,
+            &stale_journal,
+            &fresh,
+            &normal_db,
+            &unrelated,
+        ] {
+            fs::write(path, b"x").expect("write temp");
+        }
+
+        let removed = cleanup_stale_import_temp_files_before(dir.path(), 10_000, 1_000);
+
+        assert_eq!(removed, 4);
+        assert!(!stale.exists());
+        assert!(!stale_wal.exists());
+        assert!(!stale_shm.exists());
+        assert!(!stale_journal.exists());
+        assert!(fresh.exists());
+        assert!(normal_db.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn migration_scan_cleans_stale_import_temps_in_skipped_sessions() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let session_dir = root.path().join("existing");
+        fs::create_dir(&session_dir).expect("session dir");
+        fs::write(
+            session_dir.join("session.db"),
+            b"not checked by skipped migration",
+        )
+        .expect("write db marker");
+        let stale = session_dir.join("session.db.import-4294967295-1000-0.tmp");
+        fs::write(&stale, b"x").expect("write stale temp");
+
+        let report = crate::session_migration::migrate_all_sessions_in_dir(root.path());
+
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.skipped, 1);
+        assert!(!stale.exists());
     }
 
     #[test]

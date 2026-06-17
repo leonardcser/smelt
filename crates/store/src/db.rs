@@ -744,6 +744,9 @@ mod tests {
             "model": "model-a",
             "url": "https://example.test/v1/chat/completions",
             "body": {"model": "model-a", "messages": [{"role": "user", "content": "hi"}]},
+            "system_prompt": "legacy prompt duplicate",
+            "messages": [{"role": "user", "content": "hi from top-level duplicate"}],
+            "tools": [{"type": "function", "function": {"name": "echo"}}],
             "response": {"content": "hello", "raw": {"id": "resp"}},
             "usage": {"prompt_tokens": 10, "completion_tokens": 5},
             "elapsed_ms": 40,
@@ -804,6 +807,35 @@ mod tests {
         assert_eq!(attempts[0].request_id.as_deref(), Some("7"));
         assert_eq!(attempts[0].provider.as_deref(), Some("openai"));
         assert!(attempts[0].raw_body_size > 0);
+
+        let payloads = db.request_payloads(attempts[0].id).unwrap().unwrap();
+        assert_eq!(payloads.body.as_ref().unwrap(), &request["body"]);
+        assert!(payloads
+            .body
+            .as_ref()
+            .unwrap()
+            .get("system_prompt")
+            .is_none());
+        assert_eq!(payloads.response.as_ref().unwrap(), &request["response"]);
+        assert!(payloads.error.is_none());
+        let request_ref_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM request_object_refs WHERE request_attempt_id = ?1",
+                [attempts[0].id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(request_ref_count, 2);
+        let duplicate_request_object_count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM objects WHERE kind IN ('request_messages', 'request_system_prompt', 'request_tools')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duplicate_request_object_count, 0);
 
         let mut exported_requests = Vec::new();
         db.export_requests_jsonl(&mut exported_requests).unwrap();
