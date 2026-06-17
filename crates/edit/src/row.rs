@@ -1,7 +1,7 @@
 use std::ops::Range;
 
-use crate::{BufId, WinId};
-use smelt_buffer::buffer::CopyOutput;
+use crate::{text, BufId, WinId};
+use smelt_buffer::buffer::{CopyOutput, SpanAction};
 use smelt_term::Rect;
 
 pub type RowIndex = u64;
@@ -49,6 +49,13 @@ pub enum RowBreak {
     Hard,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayAction {
+    pub cell_start: usize,
+    pub cell_end: usize,
+    pub action: SpanAction,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayRow {
     pub text: String,
@@ -57,6 +64,8 @@ pub struct DisplayRow {
     pub break_before: Option<RowBreak>,
     /// Byte ranges in `text` that are selectable/searchable display text.
     pub selectable_ranges: Vec<Range<usize>>,
+    /// Cell ranges in `text` that trigger actions such as opening links/files.
+    pub actions: Vec<DisplayAction>,
 }
 
 impl DisplayRow {
@@ -65,7 +74,13 @@ impl DisplayRow {
             text,
             break_before: None,
             selectable_ranges,
+            actions: Vec::new(),
         }
+    }
+
+    pub fn with_actions(mut self, actions: Vec<DisplayAction>) -> Self {
+        self.actions = actions;
+        self
     }
 
     pub fn with_break_before(mut self, break_before: RowBreak) -> Self {
@@ -84,6 +99,21 @@ pub trait DisplayDocument {
     fn snapshot(&mut self) -> DisplaySnapshot;
     fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows;
     fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput>;
+
+    fn action_at(&mut self, pos: DocPosition) -> Option<SpanAction> {
+        let row = self
+            .materialize(pos.row..pos.row.saturating_add(1))
+            .rows
+            .into_iter()
+            .next()?;
+        let byte_col = text::snap(&row.text, pos.byte_col.min(row.text.len()));
+        let cell = text::byte_to_cell(&row.text, byte_col);
+        row.actions
+            .into_iter()
+            .rev()
+            .find(|action| cell >= action.cell_start && cell < action.cell_end)
+            .map(|action| action.action)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -220,5 +250,61 @@ mod tests {
         assert_eq!(rows.materialized_range(), 8..10);
         assert!(rows.contains_abs_row(9));
         assert!(!rows.contains_abs_row(10));
+    }
+
+    #[test]
+    fn display_document_action_at_uses_row_actions() {
+        struct Doc {
+            row: DisplayRow,
+        }
+
+        impl DisplayDocument for Doc {
+            fn snapshot(&mut self) -> DisplaySnapshot {
+                DisplaySnapshot {
+                    generation: 0,
+                    total_rows: 1,
+                }
+            }
+
+            fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+                if range.contains(&0) {
+                    DisplayRows {
+                        rows: vec![self.row.clone()],
+                    }
+                } else {
+                    DisplayRows::empty()
+                }
+            }
+
+            fn copy_range(&mut self, _range: TextRange) -> Option<CopyOutput> {
+                None
+            }
+        }
+
+        let action = SpanAction::OpenUrl("https://example.test".into());
+        let mut doc = Doc {
+            row: DisplayRow::new("open link".into(), std::iter::once(0..9).collect()).with_actions(
+                vec![DisplayAction {
+                    cell_start: 5,
+                    cell_end: 9,
+                    action: action.clone(),
+                }],
+            ),
+        };
+
+        assert_eq!(
+            doc.action_at(DocPosition {
+                row: 0,
+                byte_col: 6
+            }),
+            Some(action)
+        );
+        assert_eq!(
+            doc.action_at(DocPosition {
+                row: 0,
+                byte_col: 4
+            }),
+            None
+        );
     }
 }

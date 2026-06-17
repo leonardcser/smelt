@@ -1,6 +1,5 @@
 use super::*;
 use crate::row::{DisplayDocument, DisplayRow, DisplayRows, TextRange};
-use smelt_buffer::buffer::SpanAction;
 use smelt_buffer::kill_ring::YANK_FLASH_DURATION;
 use std::ops::Range;
 use std::time::Instant;
@@ -291,37 +290,47 @@ impl Window {
             .then_some(self.row_text_state().cursor)
     }
 
-    pub fn row_action_at_cursor(&self, buf: &Buffer) -> Option<SpanAction> {
-        let state = *self.row_text_state();
-        if !state.active {
-            return None;
+    pub fn viewer_doc_cursor(&self, buf: &Buffer) -> Option<DocPosition> {
+        if let Some(cursor) = self.row_cursor() {
+            return Some(cursor);
         }
-        self.row_action_at_position(buf, state.cursor)
+        let (row, byte_col) = buf.display_byte_pos(self.cpos());
+        Some(DocPosition {
+            row: row as RowIndex,
+            byte_col,
+        })
     }
 
-    pub fn row_action_at_mouse(
+    pub fn viewer_doc_pos_at_mouse(
         &mut self,
         buf: &Buffer,
         event: MouseEvent,
         viewport: WindowViewport,
-    ) -> Option<SpanAction> {
-        if !self.row_text_state().active {
+    ) -> Option<DocPosition> {
+        let rel_row = match viewport.hit(event.row, event.column) {
+            Some(ViewportHit::Content { row, .. }) => row,
+            _ => return None,
+        };
+        let total_rows = if self.row_text_state().active {
+            self.row_text_state().materialized.total_rows
+        } else {
+            self.visual_row_total(buf)
+        };
+        if total_rows == 0 || self.scroll_top.saturating_add(rel_row as RowIndex) >= total_rows {
             return None;
         }
-        let pos = self.row_doc_pos_at_mouse(buf, event, viewport);
-        self.row_action_at_position(buf, pos)
-    }
-
-    fn row_action_at_position(&self, buf: &Buffer, pos: DocPosition) -> Option<SpanAction> {
-        let state = *self.row_text_state();
-        if !state.materialized.contains_abs_row(pos.row) {
+        if self.row_text_state().active {
+            return Some(self.row_doc_pos_at_mouse(buf, event, viewport));
+        }
+        let hit = self.text_hit_at_mouse(buf, event, viewport);
+        if matches!(hit.kind, TextHitKind::Outside) {
             return None;
         }
-        let local = state.materialized.local_row(pos.row);
-        let line = buf.get_line(row_to_usize(local))?;
-        let byte_col = text::snap(line, pos.byte_col.min(line.len()));
-        let cell = text::byte_to_cell(line, byte_col);
-        buf.action_at_cell(row_to_usize(local), cell)
+        let (row, byte_col) = buf.display_byte_pos(hit.cpos);
+        Some(DocPosition {
+            row: row as RowIndex,
+            byte_col,
+        })
     }
 
     pub fn drag_active(&self) -> bool {

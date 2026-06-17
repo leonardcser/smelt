@@ -568,20 +568,25 @@ impl TuiApp {
             return None;
         }
 
-        if self.transcript_win().has_materialized_rows() {
-            if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
-                && me.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                let action = {
-                    let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-                    win.expect("transcript window")
-                        .row_action_at_mouse(buf?, me, viewport)
-                };
-                if let Some(action) = action {
-                    self.dispatch_span_action(action);
-                    return None;
-                }
+        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left))
+            && me.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            let pos = {
+                let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
+                win.expect("transcript window")
+                    .viewer_doc_pos_at_mouse(buf?, me, viewport)
+            }?;
+            let action = {
+                let mut doc = crate::smelt_edit::HostDisplayDocument::new(self, win_id);
+                crate::smelt_edit::DisplayDocument::action_at(&mut doc, pos)
+            };
+            if let Some(action) = action {
+                self.dispatch_span_action(action);
+                return None;
             }
+        }
+
+        if self.transcript_win().has_materialized_rows() {
             let now = self.core.clock.instant_now();
             let range = {
                 let mouse_ctx = crate::smelt_edit::MouseCtx {

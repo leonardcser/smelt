@@ -204,6 +204,92 @@ fn sticky_notification_waits_for_escape() {
     assert!(app.state().notification.is_none());
 }
 
+fn first_transcript_action_position(
+    app: &mut TestApp,
+) -> (
+    crate::smelt_edit::DocPosition,
+    smelt_core::buffer::SpanAction,
+) {
+    let total_rows = app.app.transcript_total_rows();
+    for row in 0..total_rows {
+        let display_rows = app.app.transcript_rows_and_breaks_range(row, 1);
+        let Some(display_row) = display_rows.rows.into_iter().next() else {
+            continue;
+        };
+        let Some(action) = display_row.actions.into_iter().next() else {
+            continue;
+        };
+        let byte_col = crate::smelt_edit::text::cell_to_byte(&display_row.text, action.cell_start);
+        return (
+            crate::smelt_edit::DocPosition { row, byte_col },
+            action.action,
+        );
+    }
+    panic!("transcript did not expose any display action");
+}
+
+#[test]
+fn short_transcript_display_document_surfaces_actions() {
+    let url = "https://example.test/short";
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(80, 16);
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: format!("short [link]({url})"),
+        });
+    app.render_silent();
+    assert!(
+        !app.app.transcript_win().has_materialized_rows(),
+        "short transcript should exercise the normal-buffer document path"
+    );
+
+    let (pos, action) = first_transcript_action_position(&mut app);
+    assert_eq!(
+        action,
+        smelt_core::buffer::SpanAction::OpenUrl(url.to_string())
+    );
+    let mut doc =
+        crate::smelt_edit::HostDisplayDocument::new(&mut app.app, crate::app::TRANSCRIPT_WIN);
+    assert_eq!(
+        crate::smelt_edit::DisplayDocument::action_at(&mut doc, pos),
+        Some(smelt_core::buffer::SpanAction::OpenUrl(url.to_string()))
+    );
+}
+
+#[test]
+fn row_backed_transcript_display_document_surfaces_actions() {
+    let url = "https://example.test/row-backed";
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(80, 16);
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Text {
+            content: format!("head [link]({url})"),
+        });
+    for i in 0..120 {
+        app.app
+            .push_block(smelt_core::transcript_model::Block::Text {
+                content: format!("tail {i}"),
+            });
+    }
+    app.render_silent();
+    assert!(
+        app.app.transcript_win().has_materialized_rows(),
+        "large transcript should exercise the row-backed document path"
+    );
+
+    let (pos, action) = first_transcript_action_position(&mut app);
+    assert_eq!(
+        action,
+        smelt_core::buffer::SpanAction::OpenUrl(url.to_string())
+    );
+    let mut doc =
+        crate::smelt_edit::HostDisplayDocument::new(&mut app.app, crate::app::TRANSCRIPT_WIN);
+    assert_eq!(
+        crate::smelt_edit::DisplayDocument::action_at(&mut doc, pos),
+        Some(smelt_core::buffer::SpanAction::OpenUrl(url.to_string()))
+    );
+}
+
 #[test]
 fn transcript_vim_gg_g_and_count_g_use_row_document() {
     let mut app = row_document_transcript_app(100, true);

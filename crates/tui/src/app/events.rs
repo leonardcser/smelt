@@ -1401,15 +1401,19 @@ impl TuiApp {
         };
 
         if matches!(command, ViewerCommand::OpenAction) {
-            let action = {
+            let pos = {
                 let Some(win) = self.ui.win(win_id) else {
                     return Status::Ignored;
                 };
                 let Some(buf) = self.ui.buf(buf_id) else {
                     return Status::Ignored;
                 };
-                win.row_action_at_cursor(buf)
+                win.viewer_doc_cursor(buf)
             };
+            let action = pos.and_then(|pos| {
+                let mut doc = crate::smelt_edit::HostDisplayDocument::new(self, win_id);
+                crate::smelt_edit::DisplayDocument::action_at(&mut doc, pos)
+            });
             if let Some(action) = action {
                 self.dispatch_span_action(action);
             } else {

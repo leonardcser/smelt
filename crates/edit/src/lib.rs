@@ -68,8 +68,8 @@ pub use overlay::{
     ResizeConfig, ResizeEdges,
 };
 pub use row::{
-    row_to_usize, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocPosition, DocRange,
-    MaterializeRequest, MaterializedRows, RowBreak, RowIndex, TextRange,
+    row_to_usize, DisplayAction, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot,
+    DocPosition, DocRange, MaterializeRequest, MaterializedRows, RowBreak, RowIndex, TextRange,
 };
 pub use vim::VimMode;
 pub use window::{
@@ -143,6 +143,23 @@ pub fn selectable_byte_ranges_for_line(
         }
     }
     ranges
+}
+
+/// Cell ranges in `line` that trigger span actions.
+pub fn display_actions_for_spans(spans: &[smelt_buffer::buffer::Span]) -> Vec<DisplayAction> {
+    spans
+        .iter()
+        .filter_map(|span| {
+            let action = span.meta.action.clone()?;
+            let cell_start = span.col_start as usize;
+            let cell_end = span.col_end as usize;
+            (cell_start < cell_end).then_some(DisplayAction {
+                cell_start,
+                cell_end,
+                action,
+            })
+        })
+        .collect()
 }
 
 use std::collections::HashMap;
@@ -2506,11 +2523,30 @@ pub trait UiHost {
         count: RowIndex,
     ) -> Option<DisplayRows> {
         let ui = self.ui();
-        let buf_id = ui.win(win)?.buf;
+        let (buf_id, materialized) = {
+            let win = ui.win(win)?;
+            (win.buf, win.materialized_rows())
+        };
         let buf = ui.buf(buf_id)?;
         let rows = buf.lines();
-        let start_idx = row_to_usize(start).min(rows.len());
-        let end = row_to_usize(start.saturating_add(count)).min(rows.len());
+        let (start_idx, end) = if let Some(materialized) = materialized {
+            let requested = start..start.saturating_add(count);
+            let available = materialized.materialized_range();
+            let clipped_start = requested.start.max(available.start);
+            let clipped_end = requested.end.min(available.end);
+            if clipped_start >= clipped_end {
+                return Some(DisplayRows::empty());
+            }
+            (
+                row_to_usize(materialized.local_row(clipped_start)).min(rows.len()),
+                row_to_usize(materialized.local_row(clipped_end)).min(rows.len()),
+            )
+        } else {
+            (
+                row_to_usize(start).min(rows.len()),
+                row_to_usize(start.saturating_add(count)).min(rows.len()),
+            )
+        };
         let text_rows = rows[start_idx..end].to_vec();
         let display_rows: Vec<DisplayRow> = text_rows
             .iter()
@@ -2518,7 +2554,8 @@ pub trait UiHost {
             .map(|(offset, row)| {
                 let spans = buf.highlights_at(start_idx + offset);
                 let display_row =
-                    DisplayRow::new(row.clone(), selectable_byte_ranges_for_line(row, &spans));
+                    DisplayRow::new(row.clone(), selectable_byte_ranges_for_line(row, &spans))
+                        .with_actions(display_actions_for_spans(&spans));
                 if offset == 0 {
                     display_row
                 } else {
@@ -2529,10 +2566,13 @@ pub trait UiHost {
         Some(DisplayRows { rows: display_rows })
     }
 
-    /// Total rows for a row-backed document. `None` means `win` is backed by its
-    /// materialized buffer and `Window::scroll_row_total` is authoritative.
-    fn document_total_rows(&mut self, _win: WinId) -> Option<RowIndex> {
-        None
+    /// Total rows for a row-backed document. `None` means callers should use
+    /// the backing buffer's line count.
+    fn document_total_rows(&mut self, win: WinId) -> Option<RowIndex> {
+        self.ui()
+            .win(win)?
+            .materialized_rows()
+            .map(|rows| rows.total_rows)
     }
 
     /// Copy an absolute document range for a row-backed window. `None` falls back to
@@ -3064,6 +3104,101 @@ mod tests {
                 gutters: layout::Gutters::default(),
             },
         ));
+    }
+
+    #[test]
+    fn host_display_document_surfaces_buffer_actions() {
+        let mut ui = make_ui();
+        let win = WinId(42);
+        register_window(&mut ui, win);
+        let buf_id = ui.win(win).unwrap().buf;
+        let action = smelt_buffer::buffer::SpanAction::OpenUrl("https://example.test".into());
+        {
+            let buf = ui.buf_mut(buf_id).unwrap();
+            buf.set_all_lines(vec!["open link".into()]);
+            buf.add_highlight_group_with_meta(
+                0,
+                5,
+                9,
+                smelt_buffer::theme::intern("SmeltLink"),
+                smelt_buffer::buffer::SpanMeta::action(action.clone()),
+            );
+        }
+
+        let mut doc = HostDisplayDocument::new(&mut ui, win);
+
+        assert_eq!(
+            DisplayDocument::action_at(
+                &mut doc,
+                DocPosition {
+                    row: 0,
+                    byte_col: 6
+                }
+            ),
+            Some(action)
+        );
+        assert_eq!(
+            DisplayDocument::action_at(
+                &mut doc,
+                DocPosition {
+                    row: 0,
+                    byte_col: 4
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn host_display_document_maps_materialized_rows_to_buffer_actions() {
+        let mut ui = make_ui();
+        let win = WinId(42);
+        register_window(&mut ui, win);
+        let buf_id = ui.win(win).unwrap().buf;
+        let action = smelt_buffer::buffer::SpanAction::OpenUrl("https://example.test".into());
+        {
+            let buf = ui.buf_mut(buf_id).unwrap();
+            buf.set_all_lines(vec!["zero".into(), "open link".into()]);
+            buf.add_highlight_group_with_meta(
+                1,
+                5,
+                9,
+                smelt_buffer::theme::intern("SmeltLink"),
+                smelt_buffer::buffer::SpanMeta::action(action.clone()),
+            );
+        }
+        ui.win_mut(win)
+            .unwrap()
+            .apply_materialized_rows(MaterializedRows {
+                clamped_scroll: 40,
+                row_base: 40,
+                total_rows: 100,
+                materialized_rows: 2,
+            });
+
+        let mut doc = HostDisplayDocument::new(&mut ui, win);
+
+        assert_eq!(doc.snapshot().total_rows, 100);
+        assert_eq!(
+            DisplayDocument::action_at(
+                &mut doc,
+                DocPosition {
+                    row: 39,
+                    byte_col: 6
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            DisplayDocument::action_at(
+                &mut doc,
+                DocPosition {
+                    row: 41,
+                    byte_col: 6
+                }
+            ),
+            Some(action)
+        );
     }
 
     #[test]

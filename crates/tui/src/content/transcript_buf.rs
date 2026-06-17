@@ -2323,6 +2323,7 @@ impl TranscriptProjection {
             return DisplayRows::empty();
         }
         let mut soft_wrapped = vec![false; materialized.texts.len()];
+        let mut actions = vec![Vec::new(); materialized.texts.len()];
         let mut selectable_ranges: Vec<Vec<std::ops::Range<usize>>> = materialized
             .texts
             .iter()
@@ -2338,6 +2339,9 @@ impl TranscriptProjection {
             if let Some(slot) = soft_wrapped.get_mut(p.row) {
                 *slot = p.decoration.soft_wrapped;
             }
+            if let Some(slot) = actions.get_mut(p.row) {
+                *slot = crate::smelt_edit::display_actions_for_spans(&p.highlights);
+            }
             if let (Some(row), Some(slot)) = (
                 materialized.texts.get(p.row),
                 selectable_ranges.get_mut(p.row),
@@ -2349,9 +2353,10 @@ impl TranscriptProjection {
             .iter()
             .cloned()
             .zip(selectable_ranges[local_start..local_end].iter().cloned())
+            .zip(actions[local_start..local_end].iter().cloned())
             .enumerate()
-            .map(|(offset, (text, selectable_ranges))| {
-                let row = DisplayRow::new(text, selectable_ranges);
+            .map(|(offset, ((text, selectable_ranges), actions))| {
+                let row = DisplayRow::new(text, selectable_ranges).with_actions(actions);
                 if offset == 0 {
                     row
                 } else if soft_wrapped[local_start + offset] {

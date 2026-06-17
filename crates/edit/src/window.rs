@@ -3873,31 +3873,6 @@ mod tests {
     }
 
     #[test]
-    fn row_text_action_at_cursor_uses_materialized_row() {
-        let mut w = make_win();
-        let mut buf = make_buf(vec!["zero".into(), "open link".into()]);
-        let action = smelt_buffer::buffer::SpanAction::OpenUrl("https://example.test".into());
-        buf.add_highlight_group_with_meta(
-            1,
-            5,
-            9,
-            smelt_buffer::theme::intern("SmeltLink"),
-            smelt_buffer::buffer::SpanMeta::action(action.clone()),
-        );
-        w.apply_materialized_rows(MaterializedRows {
-            clamped_scroll: 40,
-            row_base: 40,
-            total_rows: 100,
-            materialized_rows: 2,
-        });
-        let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(41), 10, now);
-        w.execute_row_viewer_command(&buf, ViewerCommand::MoveCursorCol(6), 10, now);
-
-        assert_eq!(w.row_action_at_cursor(&buf), Some(action));
-    }
-
-    #[test]
     fn row_text_yank_selection_returns_doc_range() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
