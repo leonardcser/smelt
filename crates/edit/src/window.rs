@@ -15,7 +15,10 @@ use smelt_term::layout::{Gutters, Rect};
 use std::sync::Arc;
 
 mod row_text;
-pub use row_text::{RowTextState, RowYankFlash, ViewerCommand, ViewerCopy, ViewerKeyResult};
+pub use row_text::{
+    resolve_row_document_viewer_command, RowTextState, RowYankFlash, ViewerCommand, ViewerCopy,
+    ViewerKeyResult,
+};
 
 /// Per-frame paint context for `Window::render`.
 #[derive(Default, Clone)]

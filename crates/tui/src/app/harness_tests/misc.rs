@@ -224,6 +224,65 @@ fn transcript_vim_gg_g_and_count_g_use_row_document() {
 }
 
 #[test]
+fn transcript_h_and_l_move_row_cursor_horizontally() {
+    let mut app = row_document_transcript_app(100, true);
+    let materialized_head = transcript_buffer_lines(&app, 1).pop().unwrap_or_default();
+
+    app.type_char('g');
+    app.type_char('g');
+
+    let start = app.app.transcript_win().row_cursor().unwrap();
+    assert_eq!(start.row, 0);
+    let row = app
+        .app
+        .transcript_rows_and_breaks_range(start.row, 1)
+        .into_text_rows()
+        .pop()
+        .expect("absolute transcript row");
+    assert_ne!(row, materialized_head, "row 0 must be off-materialized");
+    assert!(row.len() > 1, "row must allow horizontal motion: {row:?}");
+
+    app.type_char('l');
+    assert_eq!(
+        app.app.transcript_win().row_cursor().unwrap().byte_col,
+        crate::smelt_edit::text::next_char_boundary(&row, start.byte_col)
+    );
+
+    app.type_char('h');
+    assert_eq!(
+        app.app.transcript_win().row_cursor().unwrap().byte_col,
+        start.byte_col
+    );
+}
+
+#[test]
+fn transcript_line_end_uses_absolute_row_text() {
+    let mut app = row_document_transcript_app(100, true);
+    let materialized_head = transcript_buffer_lines(&app, 1).pop().unwrap_or_default();
+
+    app.type_char('g');
+    app.type_char('g');
+
+    let start = app.app.transcript_win().row_cursor().unwrap();
+    assert_eq!(start.row, 0);
+    let row = app
+        .app
+        .transcript_rows_and_breaks_range(start.row, 1)
+        .into_text_rows()
+        .pop()
+        .expect("absolute transcript row");
+    assert_ne!(row, materialized_head, "row 0 must be off-materialized");
+    assert!(!row.is_empty(), "row must have an end: {row:?}");
+
+    app.type_char('$');
+
+    assert_eq!(
+        app.app.transcript_win().row_cursor().unwrap().byte_col,
+        crate::smelt_edit::text::prev_char_boundary(&row, row.len())
+    );
+}
+
+#[test]
 fn transcript_user_resize_keeps_viewport_top_content_stable() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(56, 20);

@@ -1,4 +1,5 @@
 use super::*;
+use crate::row::{DisplayDocument, DisplayRow, DisplayRows, TextRange};
 use smelt_buffer::buffer::SpanAction;
 use smelt_buffer::kill_ring::YANK_FLASH_DURATION;
 use std::ops::Range;
@@ -42,6 +43,154 @@ pub enum ViewerKeyResult {
 pub enum ViewerCopy {
     Bytes(Range<usize>),
     Rows(DocRange),
+}
+
+pub fn resolve_row_document_viewer_command<D: DisplayDocument + ?Sized>(
+    doc: &mut D,
+    command: ViewerCommand,
+    cursor: DocPosition,
+    vim_mode: VimMode,
+) -> Option<ViewerCommand> {
+    #[derive(Clone, Copy)]
+    enum WordKind {
+        Forward,
+        Backward,
+        End,
+    }
+
+    let total_rows = doc.snapshot().total_rows;
+    if total_rows == 0 {
+        return None;
+    }
+    let mut pos = cursor;
+    pos.row = pos.row.min(total_rows.saturating_sub(1));
+
+    if let ViewerCommand::MoveCursorCol(delta) = command {
+        let line = document_row_text(doc, pos.row)?;
+        pos.byte_col = text::snap(&line, pos.byte_col.min(line.len()));
+        if delta < 0 {
+            for _ in 0..delta.unsigned_abs() {
+                pos.byte_col = text::prev_char_boundary(&line, pos.byte_col);
+            }
+        } else {
+            for _ in 0..delta as usize {
+                pos.byte_col = text::next_char_boundary(&line, pos.byte_col);
+            }
+            if !matches!(vim_mode, VimMode::Visual | VimMode::VisualLine)
+                && pos.byte_col > 0
+                && pos.byte_col >= line.len()
+            {
+                pos.byte_col = text::prev_char_boundary(&line, line.len());
+            }
+        }
+        return Some(ViewerCommand::GotoPosition(pos));
+    }
+
+    if let ViewerCommand::LineEnd = command {
+        let line = document_row_text(doc, pos.row)?;
+        pos.byte_col = if matches!(vim_mode, VimMode::Normal) && !line.is_empty() {
+            text::prev_char_boundary(&line, line.len())
+        } else {
+            line.len()
+        };
+        return Some(ViewerCommand::GotoPosition(pos));
+    }
+
+    let (kind, count) = match command {
+        ViewerCommand::WordForward(count) => (WordKind::Forward, count.max(1)),
+        ViewerCommand::WordBackward(count) => (WordKind::Backward, count.max(1)),
+        ViewerCommand::WordEnd(count) => (WordKind::End, count.max(1)),
+        _ => return Some(command),
+    };
+
+    for _ in 0..count {
+        match kind {
+            WordKind::Forward => {
+                let line = document_row_text(doc, pos.row)?;
+                let col = text::word_forward_pos(&line, pos.byte_col, text::CharClass::Word);
+                if col < line.len() || pos.row.saturating_add(1) >= total_rows {
+                    pos.byte_col = col;
+                } else {
+                    pos.row = pos.row.saturating_add(1).min(total_rows.saturating_sub(1));
+                    pos.byte_col = 0;
+                }
+            }
+            WordKind::Backward => {
+                let line = document_row_text(doc, pos.row)?;
+                let col = text::word_backward_pos(&line, pos.byte_col, text::CharClass::Word);
+                if col > 0 || pos.row == 0 {
+                    pos.byte_col = col;
+                } else {
+                    pos.row = pos.row.saturating_sub(1);
+                    pos.byte_col = document_row_text(doc, pos.row)?.len();
+                }
+            }
+            WordKind::End => {
+                let line = document_row_text(doc, pos.row)?;
+                let col = text::word_end_pos(&line, pos.byte_col, text::CharClass::Word);
+                if col > pos.byte_col || pos.row.saturating_add(1) >= total_rows {
+                    pos.byte_col = col;
+                } else {
+                    pos.row = pos.row.saturating_add(1).min(total_rows.saturating_sub(1));
+                    pos.byte_col = 0;
+                }
+            }
+        }
+    }
+
+    Some(ViewerCommand::GotoPosition(pos))
+}
+
+fn document_row_text<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<String> {
+    doc.materialize(row..row.saturating_add(1))
+        .rows
+        .into_iter()
+        .next()
+        .map(|row| row.text)
+}
+
+fn resolve_materialized_row_viewer_command(
+    buf: &Buffer,
+    materialized: MaterializedRows,
+    command: ViewerCommand,
+    cursor: DocPosition,
+    vim_mode: VimMode,
+) -> Option<ViewerCommand> {
+    let mut doc = MaterializedBufferDocument { buf, materialized };
+    resolve_row_document_viewer_command(&mut doc, command, cursor, vim_mode)
+}
+
+struct MaterializedBufferDocument<'a> {
+    buf: &'a Buffer,
+    materialized: MaterializedRows,
+}
+
+impl DisplayDocument for MaterializedBufferDocument<'_> {
+    fn snapshot(&mut self) -> crate::DisplaySnapshot {
+        crate::DisplaySnapshot {
+            generation: 0,
+            total_rows: self.materialized.total_rows,
+        }
+    }
+
+    fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+        let rows = range
+            .filter_map(|row| {
+                if !self.materialized.contains_abs_row(row) {
+                    return None;
+                }
+                let local = self.materialized.local_row(row);
+                self.buf
+                    .get_line(row_to_usize(local))
+                    .map(|line| DisplayRow::new(line.to_string(), Vec::new()))
+            })
+            .collect();
+        DisplayRows { rows }
+    }
+
+    fn copy_range(&mut self, _range: TextRange) -> Option<crate::CopyOutput> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -843,6 +992,14 @@ impl Window {
             return None;
         }
         let current = state.cursor;
+        let command = resolve_materialized_row_viewer_command(
+            buf,
+            state.materialized,
+            command,
+            current,
+            self.vim_mode(),
+        )
+        .unwrap_or(command);
         let mut next = current;
         let mut copy = None;
         match command {
@@ -895,20 +1052,6 @@ impl Window {
             }
             ViewerCommand::LineStart => {
                 next.byte_col = 0;
-                state.preferred_cell_col = None;
-            }
-            ViewerCommand::LineEnd => {
-                let local = state.materialized.local_row(current.row);
-                next.byte_col = buf
-                    .get_line(row_to_usize(local))
-                    .map(|line| {
-                        if matches!(self.vim_mode(), VimMode::Normal) && !line.is_empty() {
-                            text::prev_char_boundary(line, line.len())
-                        } else {
-                            line.len()
-                        }
-                    })
-                    .unwrap_or(0);
                 state.preferred_cell_col = None;
             }
             ViewerCommand::StartVisual => {
@@ -990,88 +1133,11 @@ impl Window {
                 let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
                 self.pan_by_columns(delta, viewport_cols);
             }
-            ViewerCommand::MoveCursorCol(delta) => {
-                let local = state.materialized.local_row(next.row);
-                if let Some(line) = buf.get_line(row_to_usize(local)) {
-                    let old = next.byte_col;
-                    if delta < 0 {
-                        for _ in 0..(-delta) as usize {
-                            next.byte_col = text::prev_char_boundary(line, next.byte_col);
-                        }
-                    } else {
-                        for _ in 0..delta as usize {
-                            next.byte_col = text::next_char_boundary(line, next.byte_col);
-                        }
-                    }
-                    // In Normal mode `l` must stop on the last character of the
-                    // line, not move past it. Visual/VisualLine allow the
-                    // cursor to sit past the last char so the selection is
-                    // inclusive.
-                    if !matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine)
-                        && delta > 0
-                        && next.byte_col > 0
-                        && next.byte_col >= line.len()
-                    {
-                        next.byte_col = text::prev_char_boundary(line, line.len());
-                    }
-                    // Update the preferred cell from the new byte position so
-                    // vertical motion preserves the intended column, but only
-                    // when the cursor actually moved (vim curswant semantics).
-                    if next.byte_col != old {
-                        if let Some(cell) = self.row_position_cell(state, buf, next) {
-                            state.preferred_cell_col = Some(cell);
-                        }
-                    }
-                }
-            }
-            ViewerCommand::WordForward(count) => {
-                for _ in 0..count.max(1) {
-                    let local = state.materialized.local_row(next.row);
-                    if let Some(line) = buf.get_line(row_to_usize(local)) {
-                        let col =
-                            text::word_forward_pos(line, next.byte_col, text::CharClass::Word);
-                        if col < line.len() || next.row + 1 >= total_rows {
-                            next.byte_col = col;
-                        } else {
-                            next.row = next.row.saturating_add(1).min(total_rows.saturating_sub(1));
-                            next.byte_col = 0;
-                        }
-                    }
-                }
-            }
-            ViewerCommand::WordEnd(count) => {
-                for _ in 0..count.max(1) {
-                    let local = state.materialized.local_row(next.row);
-                    if let Some(line) = buf.get_line(row_to_usize(local)) {
-                        let col = text::word_end_pos(line, next.byte_col, text::CharClass::Word);
-                        if col > next.byte_col || next.row + 1 >= total_rows {
-                            next.byte_col = col;
-                        } else {
-                            next.row = next.row.saturating_add(1).min(total_rows.saturating_sub(1));
-                            next.byte_col = 0;
-                        }
-                    }
-                }
-            }
-            ViewerCommand::WordBackward(count) => {
-                for _ in 0..count.max(1) {
-                    let local = state.materialized.local_row(next.row);
-                    if let Some(line) = buf.get_line(row_to_usize(local)) {
-                        let col =
-                            text::word_backward_pos(line, next.byte_col, text::CharClass::Word);
-                        if col > 0 || next.row == 0 {
-                            next.byte_col = col;
-                        } else {
-                            next.row = next.row.saturating_sub(1);
-                            let prev_local = state.materialized.local_row(next.row);
-                            next.byte_col = buf
-                                .get_line(row_to_usize(prev_local))
-                                .map(|line| line.len())
-                                .unwrap_or(0);
-                        }
-                    }
-                }
-            }
+            ViewerCommand::LineEnd
+            | ViewerCommand::MoveCursorCol(_)
+            | ViewerCommand::WordForward(_)
+            | ViewerCommand::WordEnd(_)
+            | ViewerCommand::WordBackward(_) => {}
             ViewerCommand::OpenAction => {}
             ViewerCommand::ClearSelection => {
                 state.selection_anchor = None;

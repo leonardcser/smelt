@@ -1512,78 +1512,12 @@ impl TuiApp {
         win_id: crate::smelt_edit::WinId,
         command: crate::smelt_edit::ViewerCommand,
     ) -> Option<crate::smelt_edit::ViewerCommand> {
-        use crate::smelt_edit::{text, DocPosition, UiHost, ViewerCommand};
-
-        #[derive(Clone, Copy)]
-        enum WordKind {
-            Forward,
-            Backward,
-            End,
-        }
-
-        let (kind, count) = match command {
-            ViewerCommand::WordForward(count) => (WordKind::Forward, count.max(1)),
-            ViewerCommand::WordBackward(count) => (WordKind::Backward, count.max(1)),
-            ViewerCommand::WordEnd(count) => (WordKind::End, count.max(1)),
-            _ => return Some(command),
+        let (cursor, vim_mode) = {
+            let win = self.ui.win(win_id)?;
+            (win.row_cursor()?, win.vim_mode())
         };
-        let total_rows = UiHost::document_total_rows(self, win_id)?;
-        if total_rows == 0 {
-            return None;
-        }
-        let mut pos = self.ui.win(win_id)?.row_cursor()?;
-        pos.row = pos.row.min(total_rows.saturating_sub(1));
-
-        for _ in 0..count {
-            match kind {
-                WordKind::Forward => {
-                    let line = self.row_line(win_id, pos.row)?;
-                    let col = text::word_forward_pos(&line, pos.byte_col, text::CharClass::Word);
-                    if col < line.len() || pos.row + 1 >= total_rows {
-                        pos.byte_col = col;
-                    } else {
-                        pos.row = pos.row.saturating_add(1).min(total_rows.saturating_sub(1));
-                        pos.byte_col = 0;
-                    }
-                }
-                WordKind::Backward => {
-                    let line = self.row_line(win_id, pos.row)?;
-                    let col = text::word_backward_pos(&line, pos.byte_col, text::CharClass::Word);
-                    if col > 0 || pos.row == 0 {
-                        pos.byte_col = col;
-                    } else {
-                        pos.row = pos.row.saturating_sub(1);
-                        pos.byte_col = self.row_line(win_id, pos.row)?.len();
-                    }
-                }
-                WordKind::End => {
-                    let line = self.row_line(win_id, pos.row)?;
-                    let col = text::word_end_pos(&line, pos.byte_col, text::CharClass::Word);
-                    if col > pos.byte_col || pos.row + 1 >= total_rows {
-                        pos.byte_col = col;
-                    } else {
-                        pos.row = pos.row.saturating_add(1).min(total_rows.saturating_sub(1));
-                        pos.byte_col = 0;
-                    }
-                }
-            }
-        }
-
-        Some(ViewerCommand::GotoPosition(DocPosition {
-            row: pos.row,
-            byte_col: pos.byte_col,
-        }))
-    }
-
-    fn row_line(
-        &mut self,
-        win_id: crate::smelt_edit::WinId,
-        row: crate::smelt_edit::RowIndex,
-    ) -> Option<String> {
-        crate::smelt_edit::UiHost::display_rows_for_range(self, win_id, row, 1)?
-            .into_text_rows()
-            .into_iter()
-            .next()
+        let mut doc = crate::smelt_edit::HostDisplayDocument::new(self, win_id);
+        crate::smelt_edit::resolve_row_document_viewer_command(&mut doc, command, cursor, vim_mode)
     }
 
     /// Keymap-driven dispatcher: looks up the binding under the window's
