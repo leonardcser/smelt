@@ -543,6 +543,35 @@ mod tests {
         assert!(mode_blocks(&app.app).is_empty());
     }
 
+    #[test]
+    fn mode_change_after_rewinding_to_first_turn_does_not_push_mode_block() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![
+            protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "Current working directory: /tmp.",
+            )),
+            protocol::HistoryItem::user(Content::text("first")),
+            protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("reply")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        app.app.restore_screen();
+        let first_turn_block = app.app.user_turns()[0].0;
+
+        app.app.rewind_to(first_turn_block);
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+
+        assert!(mode_blocks(&app.app).is_empty());
+        assert_eq!(
+            app.app.core.session.history,
+            vec![protocol::HistoryItem::note(protocol::HistoryNote::context(
+                "Current working directory: /tmp.",
+            ))]
+        );
+    }
+
     #[tokio::test]
     async fn shell_escape_uses_cwd_captured_at_submission() {
         struct CwdGuard {

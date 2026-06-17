@@ -564,8 +564,16 @@ impl TuiApp {
         self.prompt_work_state().is_busy()
     }
 
+    pub(crate) fn has_visible_session_history(&self) -> bool {
+        self.core
+            .session
+            .history
+            .iter()
+            .any(protocol::HistoryItem::is_transcript_visible)
+    }
+
     pub(crate) fn can_continue_turn(&self) -> bool {
-        !self.core.session.history.is_empty()
+        self.has_visible_session_history()
     }
 
     pub(crate) fn queue_input_for_request(&mut self, queued: QueuedInput) -> bool {
@@ -696,7 +704,7 @@ impl TuiApp {
 
     pub(crate) fn append_context_note(&mut self, text: String) {
         let append = PendingHistoryAppend::context(text);
-        if self.agent_is_running() || !self.core.session.history.is_empty() {
+        if self.agent_is_running() || self.has_visible_session_history() {
             self.queue_history_append(append);
         } else {
             self.replace_or_push_pending_history_append(append);
@@ -764,7 +772,7 @@ impl TuiApp {
                 .send(protocol::UiCommand::AppendHistoryItem {
                     append: history_append,
                 });
-        } else if !self.core.session.history.is_empty() {
+        } else if self.has_visible_session_history() {
             let result = self.apply_history_append_to_history(&history_append);
             if let Some(block) = append.transcript_block(&self.lua) {
                 self.commit_history_append_block(block, replace_note_kind, result);

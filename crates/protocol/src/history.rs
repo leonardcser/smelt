@@ -402,6 +402,13 @@ impl HistoryItem {
         }
     }
 
+    pub fn is_transcript_visible(&self) -> bool {
+        !matches!(
+            self,
+            HistoryItem::System { .. } | HistoryItem::Note(HistoryNote::Context { .. })
+        )
+    }
+
     pub fn note_text(&self) -> Option<&str> {
         match self {
             HistoryItem::Note(note) => Some(note.text()),
