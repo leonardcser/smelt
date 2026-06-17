@@ -88,7 +88,7 @@ fn strip_location_suffix(text: &str) -> (&str, Option<u32>, Option<u32>) {
     let Some((path, last_text)) = text.rsplit_once(':') else {
         return (text, None, None);
     };
-    let Some(last) = parse_location_number(last_text) else {
+    let Some(last) = parse_location_number_or_range_start(last_text) else {
         return (text, None, None);
     };
     if let Some((path, line_text)) = path.rsplit_once(':') {
@@ -97,6 +97,14 @@ fn strip_location_suffix(text: &str) -> (&str, Option<u32>, Option<u32>) {
         }
     }
     (path, Some(last), None)
+}
+
+fn parse_location_number_or_range_start(text: &str) -> Option<u32> {
+    let Some((line, end)) = text.split_once('-') else {
+        return parse_location_number(text);
+    };
+    parse_location_number(end)?;
+    parse_location_number(line)
 }
 
 fn parse_location_number(text: &str) -> Option<u32> {
@@ -162,6 +170,24 @@ mod tests {
                 path: file,
                 line: Some(12),
                 col: Some(3),
+            })
+        );
+    }
+
+    #[test]
+    fn action_for_destination_resolves_relative_file_line_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("src/lib.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let options = file_icon_options(Some(dir.path().to_path_buf()));
+
+        assert_eq!(
+            action_for_destination("src/lib.rs:226-240", &options),
+            Some(SpanAction::OpenFile {
+                path: file,
+                line: Some(226),
+                col: None,
             })
         );
     }

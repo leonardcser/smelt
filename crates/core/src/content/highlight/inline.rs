@@ -1243,6 +1243,30 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_file_icon_allows_line_range_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("commands.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let text = format!("{}:226-240", file.display());
+        let options = file_icon_options(true, Some(dir.path().to_path_buf()));
+        let spans = parse_inline_spans_with_options(&format!("`{text}`"), false, &options);
+
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, expected_icon_text(&file, &options));
+        assert!(!spans[0].meta.selectable);
+        assert_eq!(spans[1].text, text);
+        assert_eq!(
+            spans[1].meta.action,
+            Some(SpanAction::OpenFile {
+                path: file,
+                line: Some(226),
+                col: None,
+            })
+        );
+        assert_eq!(spans[1].style.group, Some(intern("SmeltLink")));
+    }
+
+    #[test]
     fn inline_code_file_icons_are_setting_gated() {
         let cwd = std::env::current_dir().unwrap();
         let options = file_icon_options(false, Some(cwd));
