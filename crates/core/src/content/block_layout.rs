@@ -167,6 +167,7 @@ pub enum CapMarker {
 pub struct CapSpec {
     pub rows: u16,
     pub keep: CapKeep,
+    pub total_rows: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

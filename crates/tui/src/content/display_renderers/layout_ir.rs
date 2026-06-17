@@ -1033,6 +1033,8 @@ enum CapRow {
     Child(u16),
     Marker {
         skipped: u16,
+        kept: u16,
+        total: Option<u64>,
         direction: &'static str,
     },
 }
@@ -1048,6 +1050,8 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
             if truncated && marker == Some(CapMarker::Above) {
                 rows.push(CapRow::Marker {
                     skipped: child_rows.saturating_sub(kept),
+                    kept,
+                    total: None,
                     direction: "above",
                 });
             }
@@ -1055,6 +1059,8 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
             if truncated && marker == Some(CapMarker::Below) {
                 rows.push(CapRow::Marker {
                     skipped: child_rows.saturating_sub(kept),
+                    kept,
+                    total: None,
                     direction: "below",
                 });
             }
@@ -1064,6 +1070,8 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
             if truncated && marker == Some(CapMarker::Above) {
                 rows.push(CapRow::Marker {
                     skipped: child_rows.saturating_sub(kept),
+                    kept,
+                    total: spec.total_rows.filter(|total| *total > kept as u64),
                     direction: "above",
                 });
             }
@@ -1071,6 +1079,8 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
             if truncated && marker == Some(CapMarker::Below) {
                 rows.push(CapRow::Marker {
                     skipped: child_rows.saturating_sub(kept),
+                    kept,
+                    total: None,
                     direction: "below",
                 });
             }
@@ -1085,6 +1095,8 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
                 if marker {
                     rows.push(CapRow::Marker {
                         skipped: child_rows.saturating_sub(spec.rows),
+                        kept: spec.rows,
+                        total: None,
                         direction: "omitted",
                     });
                 }
@@ -1129,8 +1141,13 @@ fn render_ir_cap(
                     inline_options,
                 ));
             }
-            CapRow::Marker { skipped, direction } => {
-                render_cap_marker(out, skipped, direction, gutter);
+            CapRow::Marker {
+                skipped,
+                kept,
+                total,
+                direction,
+            } => {
+                render_cap_marker(out, skipped, kept, total, direction, gutter);
                 written = written.saturating_add(1);
             }
         }
@@ -1141,6 +1158,8 @@ fn render_ir_cap(
 fn render_cap_marker(
     out: &mut LineBuilder,
     skipped: u16,
+    kept: u16,
+    total: Option<u64>,
     direction: &str,
     gutter: Option<&GutterSpec>,
 ) {
@@ -1151,7 +1170,20 @@ fn render_cap_marker(
     if let Some(gutter) = gutter.filter(|g| g.styled) {
         out.print_gutter(&gutter.text);
     }
-    let text = if direction == "omitted" {
+    let text = if direction == "above" {
+        if let Some(total) = total {
+            format!(
+                "… showing last {} of {}",
+                kept,
+                pluralize(total as usize, "line", "lines")
+            )
+        } else {
+            format!(
+                "… {} {direction}",
+                pluralize(skipped as usize, "line", "lines")
+            )
+        }
+    } else if direction == "omitted" {
         format!(
             "… {} omitted …",
             pluralize(skipped as usize, "line", "lines")
@@ -1439,7 +1471,7 @@ fn emit_clipped(
 mod tests {
     use super::*;
     use crate::smelt_edit::{BufCreateOpts, BufId, Buffer, Theme};
-    use smelt_core::content::block_layout::LayoutLeaf;
+    use smelt_core::content::block_layout::{CapKeep, CapMarker, CapSpec, LayoutLeaf, TextSpec};
 
     fn render_lines(layout: &LayoutIr, width: u16) -> Vec<String> {
         let theme = Theme::default();
@@ -1481,5 +1513,28 @@ mod tests {
             ]
         );
         assert_eq!(measure_layout_ir(&layout, 20), 3);
+    }
+
+    #[test]
+    fn cap_tail_marker_uses_total_rows_when_available() {
+        let layout = BlockLayout::Cap {
+            child: Box::new(BlockLayout::Leaf(LayoutLeaf::Text(TextSpec {
+                content: "one\ntwo\nthree\nfour".into(),
+                hl_group: None,
+                ansi: false,
+            }))),
+            spec: CapSpec {
+                rows: 2,
+                keep: CapKeep::Tail {
+                    marker: Some(CapMarker::Above),
+                },
+                total_rows: Some(100),
+            },
+        };
+
+        assert_eq!(
+            render_lines(&layout, 80),
+            vec!["… showing last 2 of 100 lines", "three", "four"]
+        );
     }
 }

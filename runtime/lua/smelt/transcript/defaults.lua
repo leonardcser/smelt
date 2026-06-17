@@ -310,6 +310,15 @@ end
 --- Render raw tool output without gutter using generic layout primitives: text and
 --- a rendered-row cap. Body renderers use this for expanded/tail previews.
 ---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): table
+local function output_total_rows(output)
+  local metadata = output and output.metadata
+  local display_count = type(metadata) == "table" and metadata.display_count or nil
+  if type(display_count) ~= "table" then return nil end
+  local unit = display_count.unit
+  if unit ~= "line" and unit ~= "lines" then return nil end
+  return tonumber(display_count.value)
+end
+
 function smelt.transcript.defaults.render_tool_output_tail(output, ctx, opts)
   opts = opts or {}
   ctx = ctx or {}
@@ -329,6 +338,7 @@ function smelt.transcript.defaults.render_tool_output_tail(output, ctx, opts)
       rows = rows,
       keep = opts.keep or "tail",
       marker = opts.marker or "above",
+      total_rows = opts.total_rows or output_total_rows(output),
     }
   )
 end

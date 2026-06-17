@@ -422,11 +422,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "cap",
-        "Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head`, `tail`, or `head_tail`; edge caps accept `opts.marker = \"above\" | \"below\"`; `head_tail` uses `opts.head_rows` and accepts `opts.marker = \"middle\"`.",
+        "Cap a child by rendered rows. `opts.rows` is numeric; `opts.keep` is `head`, `tail`, or `head_tail`; edge caps accept `opts.marker = \"above\" | \"below\"`; `head_tail` uses `opts.head_rows` and accepts `opts.marker = \"middle\"`. `opts.total_rows` may provide the full source row count for clearer tail markers.",
         &["child", "opts"],
         |_, (child, opts): (mlua::Value, mlua::Table)| -> LuaResult<LuaBlockLayout> {
             let child = layout_from_value(child, "cap")?;
             let rows = opts.get::<Option<u16>>("rows")?.unwrap_or(20);
+            let total_rows = opts.get::<Option<u64>>("total_rows")?;
             let keep_label = opts
                 .get::<Option<String>>("keep")?
                 .unwrap_or_else(|| "head".to_string());
@@ -450,7 +451,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             };
             Ok(LuaBlockLayout(BlockLayout::Cap {
                 child: Box::new(child),
-                spec: CapSpec { rows, keep },
+                spec: CapSpec {
+                    rows,
+                    keep,
+                    total_rows,
+                },
             }))
         },
     )?;
