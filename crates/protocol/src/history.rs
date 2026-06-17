@@ -126,6 +126,9 @@ pub enum HistoryNote {
         mode: Option<String>,
         text: String,
     },
+    Context {
+        text: String,
+    },
     ProcessStatus {
         text: String,
         #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -137,6 +140,7 @@ pub enum HistoryNote {
 #[serde(rename_all = "snake_case")]
 pub enum HistoryNoteKind {
     ModeChange,
+    Context,
     ProcessStatus,
 }
 
@@ -214,6 +218,10 @@ impl HistoryNote {
         }
     }
 
+    pub fn context(text: impl Into<String>) -> Self {
+        Self::Context { text: text.into() }
+    }
+
     pub fn process_status(text: impl Into<String>) -> Self {
         Self::ProcessStatus {
             text: text.into(),
@@ -238,34 +246,38 @@ impl HistoryNote {
     pub fn kind(&self) -> HistoryNoteKind {
         match self {
             HistoryNote::ModeChange { .. } => HistoryNoteKind::ModeChange,
+            HistoryNote::Context { .. } => HistoryNoteKind::Context,
             HistoryNote::ProcessStatus { .. } => HistoryNoteKind::ProcessStatus,
         }
     }
 
     pub fn text(&self) -> &str {
         match self {
-            HistoryNote::ModeChange { text, .. } | HistoryNote::ProcessStatus { text, .. } => text,
+            HistoryNote::ModeChange { text, .. }
+            | HistoryNote::Context { text }
+            | HistoryNote::ProcessStatus { text, .. } => text,
         }
     }
 
     pub fn mode(&self) -> Option<&str> {
         match self {
             HistoryNote::ModeChange { mode, .. } => mode.as_deref(),
-            HistoryNote::ProcessStatus { .. } => None,
+            HistoryNote::Context { .. } | HistoryNote::ProcessStatus { .. } => None,
         }
     }
 
     pub fn process_status_event_ref(&self) -> Option<&ProcessStatusEvent> {
         match self {
             HistoryNote::ProcessStatus { event, .. } => event.as_ref(),
-            HistoryNote::ModeChange { .. } => None,
+            HistoryNote::ModeChange { .. } | HistoryNote::Context { .. } => None,
         }
     }
 
     pub fn to_model_text(&self) -> String {
         match self {
-            HistoryNote::ModeChange { text, .. } => crate::mode::mode_change_note(text),
-            HistoryNote::ProcessStatus { text, .. } => crate::mode::process_status_note(text),
+            HistoryNote::ModeChange { text, .. } => crate::note::mode_change_note(text),
+            HistoryNote::Context { text } => crate::note::context_note(text),
+            HistoryNote::ProcessStatus { text, .. } => crate::note::process_status_note(text),
         }
     }
 }
@@ -520,10 +532,10 @@ use crate::message::{Message, Role};
 
 pub fn note_from_user_content(content: &Content) -> Option<HistoryNote> {
     let text = content.text_content();
-    if let Some(note) = text.strip_prefix(crate::mode::MODE_NOTE_PREFIX) {
+    if let Some(note) = text.strip_prefix(crate::note::MODE_NOTE_PREFIX) {
         return Some(HistoryNote::mode_change(note.trim().to_string()));
     }
-    if let Some(note) = text.strip_prefix(crate::mode::PROCESS_STATUS_NOTE_PREFIX) {
+    if let Some(note) = text.strip_prefix(crate::note::PROCESS_STATUS_NOTE_PREFIX) {
         return Some(HistoryNote::process_status(note.trim().to_string()));
     }
     None
@@ -876,14 +888,14 @@ mod tests {
         assert!(matches!(messages[0].role, Role::User));
         assert!(messages[0].content.as_ref().is_some_and(|content| content
             .text_content()
-            .starts_with(crate::mode::MODE_NOTE_PREFIX)));
+            .starts_with(crate::note::MODE_NOTE_PREFIX)));
         assert_eq!(history_from_messages(messages), vec![item]);
     }
 
     #[test]
     fn user_content_helper_classifies_reserved_notes() {
         let process = history_item_from_user_content(Content::text(
-            crate::mode::process_status_note("Background process 751225 exited with code 1."),
+            crate::note::process_status_note("Background process 751225 exited with code 1."),
         ));
         assert_eq!(
             process,
@@ -892,12 +904,29 @@ mod tests {
             ))
         );
 
-        let mode = history_item_from_user_content(Content::text(crate::mode::mode_change_note(
+        let mode = history_item_from_user_content(Content::text(crate::note::mode_change_note(
             "now in apply mode.",
         )));
         assert_eq!(
             mode,
             HistoryItem::note(HistoryNote::mode_change("now in apply mode."))
+        );
+    }
+
+    #[test]
+    fn context_notes_use_stable_model_prefix() {
+        let note = HistoryNote::context("Current working directory: /work.");
+        assert_eq!(
+            note.to_model_text(),
+            "[smelt:context] Current working directory: /work."
+        );
+        assert_eq!(
+            history_to_messages(&[HistoryItem::note(note.clone())])[0]
+                .content
+                .as_ref()
+                .map(Content::text_content)
+                .as_deref(),
+            Some("[smelt:context] Current working directory: /work.")
         );
     }
 

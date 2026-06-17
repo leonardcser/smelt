@@ -61,7 +61,71 @@ app_story!(present_plan_tool_block, |ctx| {
     ctx.assert_snapshot();
 });
 
-// ── edit_file ─────────────────────────────────────────────────────
+// ── managed worktree / cwd tools ─────────────────────────────────
+
+app_story!(enter_worktree_tool_compacted, |ctx| {
+    ctx.set_viewport(86, 10);
+    ctx.tool_call_with_metadata(
+        "enter_worktree",
+        &[("name", json!("Native worktree support")), ("base", json!("main"))],
+        "entered managed worktree native-worktree-support\npath: /repo/.worktrees/native-worktree-support\nbranch: native-worktree-support\nbase: main",
+        json!({
+            "name": "native-worktree-support",
+            "path": "/repo/.worktrees/native-worktree-support",
+            "branch": "native-worktree-support",
+            "base": "main",
+            "created": true,
+        }),
+        Some(1280),
+    );
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot();
+});
+
+app_story!(enter_worktree_tool_expanded, |ctx| {
+    ctx.set_viewport(86, 12);
+    ctx.tool_call_with_metadata(
+        "enter_worktree",
+        &[("name", json!("Native worktree support")), ("base", json!("main"))],
+        "entered managed worktree native-worktree-support\npath: /repo/.worktrees/native-worktree-support\nbranch: native-worktree-support\nbase: main",
+        json!({
+            "name": "native-worktree-support",
+            "path": "/repo/.worktrees/native-worktree-support",
+            "branch": "native-worktree-support",
+            "base": "main",
+            "created": true,
+        }),
+        Some(1280),
+    );
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+    ctx.assert_snapshot();
+});
+
+app_story!(switch_cwd_tool_compacted, |ctx| {
+    ctx.set_viewport(86, 10);
+    ctx.tool_call_with_metadata(
+        "switch_cwd",
+        &[("path", json!("/repo/.worktrees/native-worktree-support"))],
+        "cwd: /repo/.worktrees/native-worktree-support",
+        json!({ "cwd": "/repo/.worktrees/native-worktree-support" }),
+        Some(85),
+    );
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot();
+});
+
+app_story!(switch_cwd_tool_expanded, |ctx| {
+    ctx.set_viewport(86, 10);
+    ctx.tool_call_with_metadata(
+        "switch_cwd",
+        &[("path", json!("/repo/.worktrees/native-worktree-support"))],
+        "cwd: /repo/.worktrees/native-worktree-support",
+        json!({ "cwd": "/repo/.worktrees/native-worktree-support" }),
+        Some(85),
+    );
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+    ctx.assert_snapshot();
+});
 
 app_story!(edit_file_tool_block_with_diff_gutter, |ctx| {
     // The dialog stories cover the gutterless preview body. In the

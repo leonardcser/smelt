@@ -12,6 +12,7 @@ pub mod app;
 pub mod auto_reload;
 pub(crate) mod commands;
 pub(crate) mod content;
+pub(crate) mod context_notes;
 pub mod event_source;
 pub(crate) mod format;
 pub mod inspect_server;

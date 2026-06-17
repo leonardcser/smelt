@@ -108,7 +108,8 @@ fn fallback_transcript_index_for_history_index(
 
 fn fallback_history_item_block_count(item: &HistoryItem) -> usize {
     match item {
-        HistoryItem::User { .. } | HistoryItem::Note(_) => 1,
+        HistoryItem::User { .. } => 1,
+        HistoryItem::Note(note) => usize::from(note.kind() != protocol::HistoryNoteKind::Context),
         HistoryItem::System { .. } => 0,
         HistoryItem::Assistant(turn) => {
             let reasoning_blocks = turn
@@ -127,13 +128,14 @@ fn fallback_history_item_block_count(item: &HistoryItem) -> usize {
 pub(crate) fn history_note_to_block(
     lua: &crate::lua::LuaRuntime,
     note: &protocol::HistoryNote,
-) -> Block {
+) -> Option<Block> {
     match note.kind() {
-        protocol::HistoryNoteKind::ModeChange => lua.mode_block(note.mode(), note.text()),
-        protocol::HistoryNoteKind::ProcessStatus => Block::ProcessStatus {
+        protocol::HistoryNoteKind::ModeChange => Some(lua.mode_block(note.mode(), note.text())),
+        protocol::HistoryNoteKind::Context => None,
+        protocol::HistoryNoteKind::ProcessStatus => Some(Block::ProcessStatus {
             text: note.text().to_string(),
             event: note.process_status_event_ref().cloned(),
-        },
+        }),
     }
 }
 
@@ -143,10 +145,10 @@ fn push_note_block(
     history_index: usize,
     note: &protocol::HistoryNote,
 ) {
-    transcript.push_with_origin(
-        history_note_to_block(lua, note),
-        smelt_core::BlockOrigin::History(history_index),
-    );
+    let Some(block) = history_note_to_block(lua, note) else {
+        return;
+    };
+    transcript.push_with_origin(block, smelt_core::BlockOrigin::History(history_index));
 }
 
 fn push_user_block(
@@ -307,6 +309,20 @@ mod tests {
             }
             other => panic!("expected tool call, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn context_notes_do_not_render_in_transcript() {
+        let lua = crate::lua::LuaRuntime::new();
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session
+            .history
+            .push(HistoryItem::note(protocol::HistoryNote::context(
+                "Current working directory: /tmp.",
+            )));
+
+        let transcript = build_transcript_from_session(&lua, &session);
+        assert!(transcript.history.order.is_empty());
     }
 
     #[test]

@@ -227,6 +227,11 @@ settings! {
     /// TTL; `true` opts into the 1-hour TTL. Has no effect on
     /// non-Anthropic providers.
     cache_ttl_long:        Bool   = false;
+    /// Root directory for managed git worktrees. Relative paths are resolved
+    /// inside the git root and contain worktrees directly; absolute paths are
+    /// external roots and get a per-repository bucket. Supports leading `~`,
+    /// `$VAR`, and `${VAR}` expansion; relative roots may not escape the repo.
+    worktree_root:         String = ".worktrees";
     /// Autoupgrade behavior. `"off"` skips checks; `"notify"` shows a
     /// pill when an update is available; `"auto"` installs in
     /// background on detection.

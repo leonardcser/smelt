@@ -1,5 +1,5 @@
-//! Path manipulation primitives. Pure logic - does not touch the filesystem
-//! except for `canonical`.
+//! Path manipulation primitives. These avoid touching the filesystem except for
+//! `canonical`; `expand` reads process environment variables and the home dir.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -75,24 +75,16 @@ pub(crate) fn relative(base: impl AsRef<Path>, target: impl AsRef<Path>) -> Path
     out
 }
 
-/// Expand a leading `~` to the home directory. Returns input unchanged when
-/// no home is available or path does not start with `~`.
-pub(crate) fn expand_home(input: impl AsRef<Path>) -> PathBuf {
-    let path = input.as_ref();
-    let Some(rest) = path.strip_prefix("~").ok().or_else(|| {
-        if path == Path::new("~") {
-            Some(Path::new(""))
-        } else {
-            None
-        }
-    }) else {
-        return path.to_path_buf();
-    };
-    match dirs::home_dir() {
-        Some(home) if rest.as_os_str().is_empty() => home,
-        Some(home) => home.join(rest),
-        None => path.to_path_buf(),
-    }
+/// Expand config-path syntax without touching the filesystem: leading `~`,
+/// `$VAR`, and `${VAR}`. This does not invoke a shell, expand globs, or
+/// canonicalize symlinks.
+pub fn expand(input: impl AsRef<Path>) -> Result<PathBuf, String> {
+    let raw = input.as_ref().to_string_lossy();
+    let expanded = shellexpand::full(raw.as_ref()).map_err(|err| {
+        let name = err.var_name.to_string();
+        format!("environment variable {name} is not set")
+    })?;
+    Ok(normalize(Path::new(expanded.as_ref())))
 }
 
 #[cfg(test)]
@@ -134,15 +126,43 @@ mod tests {
     }
 
     #[test]
-    fn expand_home_replaces_leading_tilde() {
+    fn expand_config_path_expands_home() {
         let home = dirs::home_dir().expect("test env has HOME");
-        assert_eq!(expand_home("~"), home);
-        assert_eq!(expand_home("~/projects"), home.join("projects"));
+        assert_eq!(expand("~").unwrap(), home);
+        assert_eq!(expand("~/projects").unwrap(), home.join("projects"));
     }
 
     #[test]
-    fn expand_home_is_passthrough_for_non_tilde() {
-        assert_eq!(expand_home("/etc"), PathBuf::from("/etc"));
-        assert_eq!(expand_home("relative/path"), PathBuf::from("relative/path"));
+    fn expand_config_path_expands_home_and_env() {
+        std::env::set_var("SMELT_PATH_TEST_ROOT", "/tmp/smelt-path-test");
+        assert_eq!(
+            expand("$SMELT_PATH_TEST_ROOT/foo/../bar").unwrap(),
+            PathBuf::from("/tmp/smelt-path-test/bar")
+        );
+        assert_eq!(
+            expand("${SMELT_PATH_TEST_ROOT}/nested").unwrap(),
+            PathBuf::from("/tmp/smelt-path-test/nested")
+        );
+    }
+
+    #[test]
+    fn expand_config_path_errors_for_missing_env() {
+        std::env::remove_var("SMELT_PATH_TEST_MISSING");
+        let err = expand("$SMELT_PATH_TEST_MISSING/worktrees").unwrap_err();
+        assert!(err.contains("SMELT_PATH_TEST_MISSING"));
+    }
+
+    #[test]
+    fn expand_config_path_normalizes_relative_paths() {
+        assert_eq!(expand("foo/../bar").unwrap(), PathBuf::from("bar"));
+    }
+
+    #[test]
+    fn expand_config_path_is_passthrough_for_non_expanding_paths() {
+        assert_eq!(expand("/etc").unwrap(), PathBuf::from("/etc"));
+        assert_eq!(
+            expand("relative/path").unwrap(),
+            PathBuf::from("relative/path")
+        );
     }
 }

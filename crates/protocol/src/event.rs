@@ -470,6 +470,9 @@ pub enum UiCommand {
         system_prompt_override: Option<String>,
     },
 
+    /// Update the engine's cached cwd after the UI changes the process working directory.
+    SetCwd { cwd: String },
+
     /// One-shot LLM call initiated by Lua. The engine spawns a
     /// fire-and-forget request and returns the response as
     /// `EngineAskResponse`. `model` overrides the primary model when

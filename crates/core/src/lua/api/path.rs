@@ -39,9 +39,13 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "expand",
-        "Expand a leading `~` in `p` to the user's home directory.",
+        "Expand config-path syntax in `p`: leading `~`, `$VAR`, and `${VAR}`. Does not invoke a shell, expand globs, or canonicalize symlinks.",
         &["p"],
-        |_, p: String| -> LuaResult<String> { Ok(to_string(crate::path::expand_home(&p))) },
+        |_, p: String| -> LuaResult<String> {
+            crate::path::expand(&p)
+                .map(to_string)
+                .map_err(mlua::Error::external)
+        },
     )?;
 
     m.fn_(

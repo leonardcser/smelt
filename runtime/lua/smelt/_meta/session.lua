@@ -32,7 +32,7 @@ session.cost = nil
 ---@type fun(): integer
 session.created_at_ms = nil
 
---- Working directory the session was launched from. Stable across the session.
+--- Current working directory. Updated when Smelt enters a managed worktree.
 ---@type fun(): string
 session.cwd = nil
 
@@ -43,6 +43,11 @@ session.delete = nil
 --- Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).
 ---@type fun(): string
 session.dir = nil
+
+--- Create or open a managed git worktree, change the process cwd to it, and refresh session cwd, engine cwd, and workspace permissions. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. Returns `{ name, branch, path, base, created }`.
+---@see smelt.settings.worktree_root
+---@type fun(opts: table?): table
+session.enter_worktree = nil
 
 --- Fork the current session: clone its messages into a new session id and switch to it. Useful for branching off an experiment without losing the original timeline.
 ---@type fun(): nil
@@ -83,6 +88,10 @@ session.rewind_to = nil
 --- Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.
 ---@type fun(title: string, slug: string, history_len: integer): nil
 session.set_title_for_history = nil
+
+--- Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions. Returns `{ cwd }`.
+---@type fun(path: string): table
+session.switch_cwd = nil
 
 --- Currently-assembled system prompt sent on the next turn. Reflects every prompt section (base, skills, instructions). Useful for auxiliary LLM calls that want to share the main turn's prompt-cache slot.
 ---@type fun(): string

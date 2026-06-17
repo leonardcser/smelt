@@ -23,6 +23,61 @@ impl TuiApp {
         }
     }
 
+    /// Change the process and app working directory together. This is used by
+    /// managed worktree entry: relative shell commands, session metadata,
+    /// runtime cwd, and workspace permissions all move as one visible
+    /// transition. Cacheable prompt inputs stay stable; the model learns the
+    /// new cwd through a context note instead.
+    pub(crate) fn change_cwd(&mut self, path: std::path::PathBuf) -> Result<(), String> {
+        let cwd = self.set_process_and_runtime_cwd(path)?;
+        self.refresh_workspace_permissions(&cwd);
+        self.publish_cwd_change();
+        Ok(())
+    }
+
+    fn set_process_and_runtime_cwd(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> Result<std::path::PathBuf, String> {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        std::env::set_current_dir(&path).map_err(|e| format!("set cwd {}: {e}", path.display()))?;
+        let cwd = std::env::current_dir().unwrap_or(path);
+        std::env::set_var("PWD", &cwd);
+        self.cwd = cwd.to_string_lossy().into_owned();
+        self.core.env.set_cwd(cwd.clone());
+        self.core.session.cwd = Some(self.cwd.clone());
+        self.core.cells.publish_if_changed("cwd", self.cwd.clone());
+        let branch = engine::paths::git_branch(&cwd).unwrap_or_default();
+        self.core.cells.publish_if_changed("branch", branch);
+        Ok(cwd)
+    }
+
+    fn refresh_workspace_permissions(&mut self, cwd: &std::path::Path) {
+        let workspace = engine::paths::git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+        let mut permissions = self.core.permissions.as_ref().clone();
+        permissions.set_workspace(workspace);
+        let rules = smelt_core::permissions::store::load(&self.cwd);
+        let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
+        permissions
+            .approvals
+            .write()
+            .unwrap()
+            .load_workspace(ws_tools, ws_dirs);
+        self.core.permissions = std::sync::Arc::new(permissions);
+        if let Some(turn) = self.agent.as_mut() {
+            turn.permissions = self.core.permissions.clone();
+        }
+    }
+
+    fn publish_cwd_change(&mut self) {
+        self.core.engine.send(protocol::UiCommand::SetCwd {
+            cwd: self.cwd.clone(),
+        });
+        self.ensure_current_context_note();
+        self.session_dirty = true;
+        self.save_session();
+    }
+
     /// `/reload` entry point. Wraps [`Self::bring_up_lua`] (the
     /// shared cold-start + reload pipeline) with a user-facing toast.
     pub(crate) fn reload_lua(&mut self) {

@@ -42,13 +42,10 @@ impl PromptSections {
     }
 }
 
-fn base_section(cwd: &std::path::Path) -> String {
-    format!(
-        "You are an expert coding agent running in the user's terminal. You help with \
+fn base_section(_cwd: &std::path::Path) -> String {
+    "You are an expert coding agent running in the user's terminal. You help with \
          software engineering tasks: reading code, finding bugs, explaining patterns, and \
          implementing changes.\n\
-         \n\
-         Working directory: {cwd}\n\
          \n\
          # Tools\n\
          - Use dedicated tools over bash: read_file instead of cat, edit_file instead of sed, \
@@ -81,9 +78,14 @@ fn base_section(cwd: &std::path::Path) -> String {
          - Read relevant files before making suggestions. Use glob and grep to search efficiently.\n\
          - Start debugging with the simplest root cause hypothesis. Diagnose first, fix once. \
          If a fix doesn't work, re-examine assumptions rather than guessing again.\n\
-         - Never create files unless absolutely necessary. Prefer editing existing files.",
-        cwd = cwd.display(),
-    )
+         - Never create files unless absolutely necessary. Prefer editing existing files.\n\
+         \n\
+         # Managed worktrees\n\
+         If working in a Smelt-managed worktree and the user asks to merge, land, or move it back \
+         to the base branch without specifying a strategy, default to rebase + fast-forward. Before \
+         removing a managed worktree, use the switch_cwd tool to move Smelt's cwd back to the base \
+         checkout. Use squash only if the user explicitly asks for squash."
+        .to_string()
 }
 
 fn interactive_behavior() -> &'static str {
@@ -134,6 +136,7 @@ pub(crate) fn build_defaults(
     );
 
     let _ = mode; // mode no longer feeds the cacheable system prompt
+
     if let Some(skills) = skill_section {
         if !skills.is_empty() {
             ps.set("skills", skills.to_string());
@@ -288,9 +291,24 @@ mod tests {
     }
 
     #[test]
-    fn build_defaults_base_section_embeds_the_cwd() {
+    fn build_defaults_base_section_does_not_embed_the_cwd() {
         let ps = build_defaults(Path::new("/some/where"), mode("normal"), true, None, None);
         let base = &ps.sections.iter().find(|(n, _)| n == "base").unwrap().1;
-        assert!(base.contains("/some/where"), "got: {base}");
+        assert!(!base.contains("/some/where"), "got: {base}");
+    }
+
+    #[test]
+    fn build_defaults_is_byte_stable_across_cwds() {
+        let a = build_defaults(Path::new("/one"), mode("normal"), true, None, None).assemble();
+        let b = build_defaults(Path::new("/two"), mode("normal"), true, None, None).assemble();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn build_defaults_includes_static_managed_worktree_guidance() {
+        let ps = build_defaults(Path::new("/work"), mode("normal"), true, None, None).assemble();
+        assert!(ps.contains("# Managed worktrees"));
+        assert!(ps.contains("default to rebase + fast-forward"));
+        assert!(ps.contains("switch_cwd"));
     }
 }

@@ -58,6 +58,8 @@ impl TuiApp {
         self.clear_prompt_prediction();
         self.sleep_inhibit.acquire();
         self.begin_turn();
+        self.ensure_current_context_note();
+        self.apply_pending_history_appends_for_request();
     }
 
     fn publish_turn_input(&mut self, submitted: Option<String>) {
@@ -192,10 +194,9 @@ impl TuiApp {
     ) -> TurnState {
         self.invalidate_prompt_prediction();
         self.prepare_user_visible_turn();
-        self.push_block(crate::app::history::history_note_to_block(
-            &self.lua,
-            &history_note,
-        ));
+        if let Some(block) = crate::app::history::history_note_to_block(&self.lua, &history_note) {
+            self.push_block(block);
+        }
         if !history_note.text().is_empty() {
             self.core
                 .session

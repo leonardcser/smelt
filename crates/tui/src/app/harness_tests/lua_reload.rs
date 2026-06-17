@@ -42,6 +42,72 @@ fn lua_config_session_and_transcript_contracts_are_available() {
 }
 
 #[test]
+fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
+    struct CwdGuard {
+        cwd: std::path::PathBuf,
+        pwd: Option<std::ffi::OsString>,
+    }
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.cwd);
+            match &self.pwd {
+                Some(pwd) => std::env::set_var("PWD", pwd),
+                None => std::env::remove_var("PWD"),
+            }
+        }
+    }
+
+    let home_guard = test_home_guard();
+    let target_dir = tempfile::TempDir::new().expect("create switch cwd tempdir");
+    let _cwd_guard = CwdGuard {
+        cwd: std::env::current_dir().expect("capture process cwd"),
+        pwd: std::env::var_os("PWD"),
+    };
+    let mut app = TestApp::builder().build_with_test_home_guard(&home_guard);
+    let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
+    let expected = target.to_string_lossy().into_owned();
+
+    app.app
+        .lua
+        .lua
+        .globals()
+        .set("__switch_cwd_target", expected.clone())
+        .expect("set Lua target cwd");
+    let _ = app.drain_engine_sends();
+
+    assert!(app.run_lua(
+        r#"
+            local out = smelt.session.switch_cwd(_G.__switch_cwd_target)
+            assert(out.cwd == _G.__switch_cwd_target)
+            assert(smelt.session.cwd() == _G.__switch_cwd_target)
+        "#,
+    ));
+
+    assert_eq!(app.app.cwd, expected);
+    assert_eq!(app.app.core.session.cwd.as_deref(), Some(expected.as_str()));
+    assert_eq!(app.app.core.env.cwd(), target);
+    assert_eq!(std::env::current_dir().expect("process cwd"), target);
+    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
+    assert_eq!(
+        app.app.core.cells.get::<String>("cwd").as_deref(),
+        Some(expected.as_str())
+    );
+    assert!(app
+        .app
+        .pending_history_appends
+        .iter()
+        .any(|pending| matches!(
+            pending.history_item(),
+            protocol::HistoryItem::Note(protocol::HistoryNote::Context { ref text })
+                if text == &format!("Current working directory: {expected}.")
+        )));
+    assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
+        cmd,
+        protocol::UiCommand::SetCwd { cwd } if cwd == expected
+    )));
+}
+
+#[test]
 fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_baseline() {
     let mut app = TestApp::builder().build();
 

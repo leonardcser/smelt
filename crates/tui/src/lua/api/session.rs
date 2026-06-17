@@ -64,6 +64,7 @@ pub(crate) fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResul
 fn note_kind_to_lua(kind: protocol::HistoryNoteKind) -> &'static str {
     match kind {
         protocol::HistoryNoteKind::ModeChange => "mode_change",
+        protocol::HistoryNoteKind::Context => "context",
         protocol::HistoryNoteKind::ProcessStatus => "process_status",
     }
 }
@@ -187,9 +188,64 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     })?;
     m.fn_(
         "cwd",
-        "Working directory the session was launched from. Stable across the session.",
+        "Current working directory. Updated when Smelt enters a managed worktree.",
         &[],
         |_, ()| Ok(crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default()),
+    )?;
+    m.fn_(
+        "enter_worktree",
+        "Create or open a managed git worktree, change the process cwd to it, and refresh session cwd, engine cwd, and workspace permissions. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. Returns `{ name, branch, path, base, created }`.",
+        &["opts"],
+        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
+            let name: String = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("name").ok().flatten())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| mlua::Error::external("name is required"))?;
+            let base: Option<String> = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<String>>("base").ok().flatten())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let cwd = crate::lua::try_with_app(|app| std::path::PathBuf::from(&app.cwd))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let worktree_root = crate::lua::try_with_app(|app| {
+                std::path::PathBuf::from(&app.core.config.settings.worktree_root)
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from(".worktrees"));
+            let info = smelt_core::worktree::enter_or_create(
+                &cwd,
+                smelt_core::worktree::WorktreeSpec {
+                    name: Some(name.as_str()),
+                    base: base.as_deref(),
+                    root: Some(worktree_root.as_path()),
+                },
+            )
+            .map_err(mlua::Error::external)?;
+            crate::lua::with_app(|app| app.change_cwd(info.path.clone()))
+                .map_err(mlua::Error::external)?;
+            let out = lua.create_table()?;
+            out.set("name", info.name)?;
+            out.set("branch", info.branch)?;
+            out.set("path", info.path.display().to_string())?;
+            out.set("base", info.base)?;
+            out.set("created", info.created)?;
+            Ok(out)
+        },
+    )?;
+    m.fn_(
+        "switch_cwd",
+        "Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions. Returns `{ cwd }`.",
+        &["path"],
+        |lua, path: String| -> LuaResult<mlua::Table> {
+            let path = std::path::PathBuf::from(path.trim());
+            crate::lua::with_app(|app| app.change_cwd(path)).map_err(mlua::Error::external)?;
+            let cwd = crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default();
+            let out = lua.create_table()?;
+            out.set("cwd", cwd)?;
+            Ok(out)
+        },
     )?;
     m.fn_(
         "system",

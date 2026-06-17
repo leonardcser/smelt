@@ -4,6 +4,7 @@
 //! - [`content`]: multipart message content (text + images)
 //! - [`message`]: `Message`, `Role`, tool calls, tool outcomes
 //! - [`mode`]: agent modes and reasoning effort levels
+//! - [`note`]: stable markers for synthetic model-visible history notes
 //! - [`usage`]: token usage, turn metadata, per-turn overrides
 //! - [`event`]: the wire contract - `EngineEvent` and `UiCommand`
 
@@ -13,6 +14,7 @@ pub mod history;
 pub mod message;
 pub mod mode;
 pub mod model;
+pub mod note;
 pub mod request_log;
 pub mod style;
 pub mod usage;
@@ -31,11 +33,12 @@ pub use history::{
     ProcessStatusEvent, ToolInvocation,
 };
 pub use message::{FunctionCall, Message, ReasoningBlock, Role, ToolCall, ToolOutcome};
-pub use mode::{
-    mode_change_note, process_status_note, AgentMode, ReasoningEffort, MODE_NOTE_PREFIX,
+pub use mode::{AgentMode, ReasoningEffort};
+pub use model::ModelMetadata;
+pub use note::{
+    context_note, mode_change_note, process_status_note, CONTEXT_NOTE_PREFIX, MODE_NOTE_PREFIX,
     PROCESS_STATUS_NOTE_PREFIX,
 };
-pub use model::ModelMetadata;
 pub use style::{StyledLines, StyledSpan};
 pub use usage::{
     ModelConfigOverrides, PermissionOverrides, RuleSetOverride, ThinkingBudgets, TokenUsage,

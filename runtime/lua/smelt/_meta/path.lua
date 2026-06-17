@@ -27,7 +27,7 @@ path.config_dir = nil
 ---@type fun(p: string): string
 path.display = nil
 
---- Expand a leading `~` in `p` to the user's home directory.
+--- Expand config-path syntax in `p`: leading `~`, `$VAR`, and `${VAR}`. Does not invoke a shell, expand globs, or canonicalize symlinks.
 ---@type fun(p: string): string
 path.expand = nil
 

@@ -60,7 +60,7 @@ Unix-epoch timestamp (milliseconds) at which this session was started.
 fun(): string
 ```
 
-Working directory the session was launched from. Stable across the session.
+Current working directory. Updated when Smelt enters a managed worktree.
 
 ## `smelt.session.delete`
 
@@ -77,6 +77,14 @@ fun(): string
 ```
 
 Absolute path of the on-disk session directory (transcript JSONL, attachments, ledger).
+
+## `smelt.session.enter_worktree`
+
+```lua
+fun(opts: table?): table
+```
+
+Create or open a managed git worktree, change the process cwd to it, and refresh session cwd, engine cwd, and workspace permissions. `opts.name` is required and is normalized to a safe lowercase folder/branch name. New worktrees are created under `smelt.settings.worktree_root`: relative roots are resolved inside the git root, absolute roots use a per-repository bucket. Returns `{ name, branch, path, base, created }`.
 
 ## `smelt.session.fork`
 
@@ -157,6 +165,14 @@ fun(title: string, slug: string, history_len: integer): nil
 ```
 
 Set the session title and slug for a specific history length. Intended for title/session metadata plugins that compute metadata for an already-submitted turn.
+
+## `smelt.session.switch_cwd`
+
+```lua
+fun(path: string): table
+```
+
+Change Smelt's process working directory and refresh session cwd, engine cwd, and workspace permissions. Returns `{ cwd }`.
 
 ## `smelt.session.system`
 

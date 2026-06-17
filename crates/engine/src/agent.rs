@@ -141,6 +141,9 @@ pub(crate) async fn engine_task(
                         config.skill_section = skill_section;
                         config.system_prompt_override = system_prompt_override;
                     }
+                    UiCommand::SetCwd { cwd } => {
+                        config.cwd = std::path::PathBuf::from(cwd);
+                    }
                     UiCommand::SetMode { .. } => {}
                     UiCommand::Cancel => {
                         bg_cancel.cancel();

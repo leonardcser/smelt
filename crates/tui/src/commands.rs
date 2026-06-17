@@ -207,11 +207,13 @@ impl TuiApp {
         let kill = std::sync::Arc::new(tokio::sync::Notify::new());
         let kill2 = kill.clone();
         let cmd = cmd.to_string();
+        let cwd = std::path::PathBuf::from(&self.cwd);
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let child = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
+                .current_dir(&cwd)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn();
@@ -539,6 +541,52 @@ mod tests {
 
         assert!(app.app.core.session.history.is_empty());
         assert!(mode_blocks(&app.app).is_empty());
+    }
+
+    #[tokio::test]
+    async fn shell_escape_uses_cwd_captured_at_submission() {
+        struct CwdGuard {
+            cwd: std::path::PathBuf,
+            pwd: Option<std::ffi::OsString>,
+        }
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.cwd);
+                match &self.pwd {
+                    Some(pwd) => std::env::set_var("PWD", pwd),
+                    None => std::env::remove_var("PWD"),
+                }
+            }
+        }
+
+        let _guard = CwdGuard {
+            cwd: std::env::current_dir().expect("capture process cwd"),
+            pwd: std::env::var_os("PWD"),
+        };
+        let shell_cwd = tempfile::TempDir::new().expect("shell cwd");
+        let later_cwd = tempfile::TempDir::new().expect("later cwd");
+        let shell_cwd = std::fs::canonicalize(shell_cwd.path()).expect("canonical shell cwd");
+        let later_cwd = std::fs::canonicalize(later_cwd.path()).expect("canonical later cwd");
+
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.cwd = shell_cwd.to_string_lossy().into_owned();
+        let mut handle = app
+            .app
+            .start_shell_escape("pwd")
+            .expect("shell escape starts");
+        std::env::set_current_dir(&later_cwd).expect("move process cwd after submission");
+
+        let mut output = Vec::new();
+        while let Some(event) = handle.rx.recv().await {
+            match event {
+                ExecEvent::Output(line) => output.push(line),
+                ExecEvent::Done(code) => {
+                    assert_eq!(code, Some(0));
+                    break;
+                }
+            }
+        }
+        assert_eq!(output, vec![shell_cwd.to_string_lossy().into_owned()]);
     }
 
     #[test]

@@ -52,7 +52,7 @@ Return a user-friendly rendering of `p` for UI display (e.g. with the home dir a
 fun(p: string): string
 ```
 
-Expand a leading `~` in `p` to the user's home directory.
+Expand config-path syntax in `p`: leading `~`, `$VAR`, and `${VAR}`. Does not invoke a shell, expand globs, or canonicalize symlinks.
 
 ## `smelt.path.extension`
 

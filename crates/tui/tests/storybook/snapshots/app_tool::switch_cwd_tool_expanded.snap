@@ -1,0 +1,14 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+* switch_cwd /repo/.worktrees/native-worktree-support
+
+
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                     1:1 100%

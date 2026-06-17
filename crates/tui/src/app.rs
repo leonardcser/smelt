@@ -469,6 +469,13 @@ impl PendingHistoryAppend {
         }
     }
 
+    pub(crate) fn context(text: String) -> Self {
+        Self {
+            item: protocol::HistoryItem::note(protocol::HistoryNote::context(text)),
+            replace_note_kind: Some(protocol::HistoryNoteKind::Context),
+        }
+    }
+
     pub(crate) fn process_status(note: protocol::HistoryNote) -> Self {
         Self {
             item: protocol::HistoryItem::note(note),
@@ -481,7 +488,7 @@ impl PendingHistoryAppend {
         self.item.clone()
     }
 
-    pub(crate) fn transcript_block(&self, lua: &crate::lua::LuaRuntime) -> Block {
+    pub(crate) fn transcript_block(&self, lua: &crate::lua::LuaRuntime) -> Option<Block> {
         crate::app::history::history_note_to_block(
             lua,
             self.item
@@ -650,6 +657,52 @@ impl TuiApp {
         protocol::AgentMode::parse(mode).unwrap_or_else(protocol::AgentMode::normal)
     }
 
+    pub(crate) fn current_context_note_text(&self) -> String {
+        crate::context_notes::cwd_note(
+            std::path::Path::new(&self.cwd),
+            std::path::Path::new(&self.core.config.settings.worktree_root),
+        )
+    }
+
+    fn latest_context_note_text(&self) -> Option<&str> {
+        self.pending_history_appends
+            .iter()
+            .rev()
+            .filter(|pending| {
+                pending.replacement_note_kind() == Some(protocol::HistoryNoteKind::Context)
+            })
+            .filter_map(|pending| pending.item.as_note())
+            .map(protocol::HistoryNote::text)
+            .next()
+            .or_else(|| {
+                self.core
+                    .session
+                    .history
+                    .iter()
+                    .rev()
+                    .filter_map(protocol::HistoryItem::as_note)
+                    .find(|note| note.kind() == protocol::HistoryNoteKind::Context)
+                    .map(protocol::HistoryNote::text)
+            })
+    }
+
+    pub(crate) fn ensure_current_context_note(&mut self) {
+        let text = self.current_context_note_text();
+        if self.latest_context_note_text() == Some(text.as_str()) {
+            return;
+        }
+        self.append_context_note(text);
+    }
+
+    pub(crate) fn append_context_note(&mut self, text: String) {
+        let append = PendingHistoryAppend::context(text);
+        if self.agent_is_running() || !self.core.session.history.is_empty() {
+            self.queue_history_append(append);
+        } else {
+            self.replace_or_push_pending_history_append(append);
+        }
+    }
+
     fn queue_pending_history_append(
         &mut self,
         append: PendingHistoryAppend,
@@ -713,11 +766,9 @@ impl TuiApp {
                 });
         } else if !self.core.session.history.is_empty() {
             let result = self.apply_history_append_to_history(&history_append);
-            self.commit_history_append_block(
-                append.transcript_block(&self.lua),
-                replace_note_kind,
-                result,
-            );
+            if let Some(block) = append.transcript_block(&self.lua) {
+                self.commit_history_append_block(block, replace_note_kind, result);
+            }
         } else if let Some(kind) = replace_note_kind {
             self.pending_history_appends
                 .retain(|pending| pending.replacement_note_kind() != Some(kind));

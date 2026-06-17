@@ -700,11 +700,9 @@ impl TuiApp {
             let history_append = append.history_append(mode_base);
             let replace_note_kind = history_append.replacement_note_kind();
             let result = self.apply_history_append_to_history(&history_append);
-            self.commit_history_append_block(
-                append.transcript_block(&self.lua),
-                replace_note_kind,
-                result,
-            );
+            if let Some(block) = append.transcript_block(&self.lua) {
+                self.commit_history_append_block(block, replace_note_kind, result);
+            }
         }
     }
 
@@ -722,11 +720,9 @@ impl TuiApp {
         } else {
             protocol::HistoryAppendResult::Pushed
         };
-        self.commit_history_append_block(
-            append.transcript_block(&self.lua),
-            append.replacement_note_kind(),
-            result,
-        );
+        if let Some(block) = append.transcript_block(&self.lua) {
+            self.commit_history_append_block(block, append.replacement_note_kind(), result);
+        }
     }
 
     pub(crate) fn commit_history_append_block(

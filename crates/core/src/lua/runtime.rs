@@ -3251,7 +3251,7 @@ mod tests {
     #[test]
     fn clear_lua_handles_drops_every_registry() {
         let rt = LuaRuntime::new();
-        let builtin_group_count = rt.transcript_group_specs().len();
+        let baseline_groups = rt.transcript_group_specs().len();
         rt.lua
             .load(
                 r#"
@@ -3271,7 +3271,7 @@ mod tests {
         assert!(!rt.shared.hooks.tool_before.is_empty());
         assert!(!rt.shared.hooks.lifecycle.is_empty());
         let specs = rt.transcript_group_specs();
-        assert_eq!(specs.len(), builtin_group_count + 1);
+        assert_eq!(specs.len(), baseline_groups + 1);
         assert!(specs.iter().any(|spec| spec.name == "batch"));
 
         rt.shared.clear_lua_handles();

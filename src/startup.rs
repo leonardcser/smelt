@@ -17,6 +17,115 @@ pub fn resolve_api_key(key_env: &str) -> Result<String, String> {
     }
 }
 
+pub fn resolve_project_cwd<I, S>(args: I, mut cwd: std::path::PathBuf) -> std::path::PathBuf
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString>,
+{
+    let bootstrap = scan_bootstrap_args(args);
+    if let Some(ref requested) = bootstrap.worktree {
+        enter_startup_worktree(&mut cwd, requested, bootstrap.worktree_root.as_deref());
+    }
+    cwd
+}
+
+fn enter_startup_worktree(cwd: &mut std::path::PathBuf, requested: &str, root: Option<&str>) {
+    let requested = requested.trim();
+    let root = root.map(std::path::PathBuf::from);
+    let spec = smelt_core::worktree::WorktreeSpec {
+        name: (!requested.is_empty()).then_some(requested),
+        base: None,
+        root: root.as_deref(),
+    };
+    match smelt_core::worktree::enter_or_create(cwd, spec) {
+        Ok(info) => {
+            if let Err(e) = std::env::set_current_dir(&info.path) {
+                eprintln!(
+                    "error: failed to enter worktree {}: {e}",
+                    info.path.display()
+                );
+                std::process::exit(1);
+            }
+            *cwd = std::env::current_dir().unwrap_or(info.path);
+        }
+        Err(e) => {
+            eprintln!("error: --worktree: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BootstrapArgs {
+    worktree: Option<String>,
+    worktree_root: Option<String>,
+}
+
+fn scan_bootstrap_args<I, S>(args: I) -> BootstrapArgs
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString>,
+{
+    let mut worktree = None;
+    let mut worktree_root = None;
+    let mut after_separator = false;
+    let mut iter = args.into_iter().map(Into::into).skip(1).peekable();
+    while let Some(arg) = iter.next() {
+        let s = arg.to_string_lossy();
+        if matches!(s.as_ref(), "--help" | "-h" | "--version" | "-v") {
+            return BootstrapArgs::default();
+        }
+        if s == "--" {
+            after_separator = true;
+            continue;
+        }
+        if after_separator {
+            continue;
+        }
+        if s == "--set" {
+            if let Some(next) = iter.next() {
+                let next = next.to_string_lossy();
+                if let Some(value) = next.strip_prefix("worktree_root=") {
+                    worktree_root = Some(value.to_string());
+                }
+            }
+            continue;
+        }
+        if let Some(value) = s.strip_prefix("--set=worktree_root=") {
+            worktree_root = Some(value.to_string());
+            continue;
+        }
+        if s == "--worktree" || s == "-w" {
+            let value = iter
+                .peek()
+                .and_then(|next| {
+                    let next = next.to_string_lossy();
+                    (!next.starts_with('-')).then(|| next.to_string())
+                })
+                .unwrap_or_default();
+            if worktree.is_none() {
+                worktree = Some(value);
+            }
+            continue;
+        }
+        if let Some(value) = s.strip_prefix("--worktree=") {
+            if worktree.is_none() {
+                worktree = Some(value.to_string());
+            }
+            continue;
+        }
+        if let Some(value) = s.strip_prefix("-w") {
+            if !value.is_empty() && worktree.is_none() {
+                worktree = Some(value.to_string());
+            }
+        }
+    }
+    BootstrapArgs {
+        worktree,
+        worktree_root,
+    }
+}
+
 /// Fully resolved startup parameters, produced by [`resolve`] before the engine starts.
 pub struct ResolvedStartup {
     pub cfg: smelt_core::config::Config,
@@ -375,5 +484,77 @@ pub async fn resolve(
         reasoning_effort,
         reasoning_cycle,
         startup_auth_error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bootstrap(args: &[&str]) -> BootstrapArgs {
+        scan_bootstrap_args(args.iter().copied())
+    }
+
+    #[test]
+    fn bootstrap_args_detect_worktree_forms() {
+        assert_eq!(
+            bootstrap(&["smelt", "--worktree"]).worktree,
+            Some("".into())
+        );
+        assert_eq!(
+            bootstrap(&["smelt", "--worktree", "feature"]).worktree,
+            Some("feature".into())
+        );
+        assert_eq!(
+            bootstrap(&["smelt", "--worktree=feature"]).worktree,
+            Some("feature".into())
+        );
+        assert_eq!(
+            bootstrap(&["smelt", "-w", "feature"]).worktree,
+            Some("feature".into())
+        );
+        assert_eq!(
+            bootstrap(&["smelt", "-wfeature"]).worktree,
+            Some("feature".into())
+        );
+    }
+
+    #[test]
+    fn bootstrap_args_detect_worktree_root_set_override() {
+        assert_eq!(
+            bootstrap(&[
+                "smelt",
+                "--set",
+                "worktree_root=/tmp/worktrees",
+                "--worktree"
+            ])
+            .worktree_root,
+            Some("/tmp/worktrees".into())
+        );
+        assert_eq!(
+            bootstrap(&[
+                "smelt",
+                "--set=worktree_root=.agent/worktrees",
+                "--worktree"
+            ])
+            .worktree_root,
+            Some(".agent/worktrees".into())
+        );
+    }
+
+    #[test]
+    fn bootstrap_args_ignore_worktree_for_help_version_and_separator() {
+        assert_eq!(
+            bootstrap(&["smelt", "--help", "--worktree=x"]),
+            BootstrapArgs::default()
+        );
+        assert_eq!(
+            bootstrap(&["smelt", "--worktree=x", "-v"]),
+            BootstrapArgs::default()
+        );
+        assert_eq!(
+            bootstrap(&["smelt", "--", "--worktree=x"]),
+            BootstrapArgs::default()
+        );
     }
 }

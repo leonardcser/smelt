@@ -21,6 +21,15 @@ pub struct Args {
     message: Option<String>,
     #[arg(long, value_name = "PATH", help = "Path to a custom init.lua")]
     config: Option<String>,
+    #[arg(
+        short = 'w',
+        long = "worktree",
+        value_name = "NAME",
+        num_args = 0..=1,
+        default_missing_value = "",
+        help = "Start in a managed git worktree, optionally named NAME"
+    )]
+    worktree: Option<String>,
     #[arg(long)]
     api_base: Option<String>,
     #[arg(long)]
@@ -229,7 +238,10 @@ async fn main() {
     let mut lua_runtime = tui::lua::LuaRuntime::new();
     lua_runtime.load_bundled_early();
     lua_runtime.load_early_init();
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = startup::resolve_project_cwd(
+        std::env::args_os(),
+        std::env::current_dir().unwrap_or_default(),
+    );
     lua_runtime.load_project_early_init(&cwd);
 
     let lua_flag_specs: Vec<tui::CliFlagSpec> = lua_runtime
