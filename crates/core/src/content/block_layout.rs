@@ -89,10 +89,8 @@ pub struct ElapsedSpec {
 /// Width-dependent horizontal separator leaf.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SeparatorSpec {
-    pub label: String,
+    pub label: Vec<protocol::StyledSpan>,
     pub dim: bool,
-    #[serde(default)]
-    pub label_selectable: bool,
 }
 
 /// Full-width background panel wrapper.

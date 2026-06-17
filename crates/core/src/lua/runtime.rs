@@ -8,7 +8,7 @@ use std::time::Instant;
 use include_dir::{include_dir, Dir, DirEntry};
 use mlua::prelude::*;
 
-use crate::content::block_layout::{BlockLayout, LuaLeaf, TextSpec};
+use crate::content::block_layout::{BlockLayout, LuaLeaf, SeparatorSpec, TextSpec};
 use crate::content::display_safe_text;
 use crate::lua::{
     json_to_lua, LuaShared, TaskCompletion, TaskDriveOutput, TaskEvent, ToolEnv, ToolExecResult,
@@ -2354,6 +2354,16 @@ fn layout_text(content: impl Into<String>, hl_group: Option<&str>, ansi: bool) -
     }))
 }
 
+fn layout_separator(label: impl Into<String>) -> BlockLayout {
+    BlockLayout::Leaf(LuaLeaf::Separator(SeparatorSpec {
+        label: vec![protocol::StyledSpan {
+            text: label.into(),
+            ..Default::default()
+        }],
+        dim: true,
+    }))
+}
+
 fn fallback_transcript_group_layout(name: &str) -> BlockLayout {
     layout_text(
         format!("{name} group render error"),
@@ -2447,7 +2457,7 @@ fn fallback_transcript_layout(
             BlockLayout::Vbox(items)
         }
         Block::Compacted { summary } => {
-            let mut items = vec![layout_text(" compacted ", None, false)];
+            let mut items = vec![layout_separator(" compacted ")];
             if !matches!(view_state, crate::transcript_model::ViewState::Collapsed) {
                 items.push(layout_text(summary.clone(), None, false));
             }

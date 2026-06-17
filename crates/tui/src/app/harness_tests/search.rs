@@ -163,6 +163,36 @@ fn transcript_search_finds_compacted_divider_label() {
 }
 
 #[test]
+fn transcript_search_excludes_compacted_separator_chrome() {
+    let mut app = searchable_transcript_app();
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Compacted {
+            summary: "archived earlier turns".into(),
+        });
+    app.render_silent();
+
+    let row = app
+        .app
+        .transcript_rows_and_breaks_range(0, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(row.contains('─'), "expected separator chrome: {row:?}");
+
+    app.type_char('/');
+    app.type_text("─");
+    app.press(KeyCode::Enter);
+
+    assert!(app
+        .app
+        .search
+        .session
+        .as_ref()
+        .and_then(|session| session.current_range())
+        .is_none());
+}
+
+#[test]
 fn transcript_search_finds_lua_rendered_collapsed_tool_detail() {
     let mut app = searchable_transcript_app();
     let mut args = std::collections::HashMap::new();

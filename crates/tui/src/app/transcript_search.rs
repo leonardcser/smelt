@@ -188,7 +188,7 @@ impl TuiApp {
             entry.first_row,
             entry.rows,
         );
-        selectable_display_text(&display.rows)
+        display.selectable_text()
     }
 
     fn ensure_transcript_search_index(&mut self) -> Option<&TranscriptSearchIndex> {
@@ -466,18 +466,6 @@ impl TuiApp {
             session.matches.len() as u64,
         );
     }
-}
-
-fn selectable_display_text(rows: &[DisplayRow]) -> String {
-    rows.iter()
-        .flat_map(|row| {
-            row.selectable_ranges.iter().filter_map(|range| {
-                let text = smelt_buffer::text::slice(&row.text, range.clone());
-                (!text.is_empty()).then(|| text.to_string())
-            })
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn collect_row_matches(

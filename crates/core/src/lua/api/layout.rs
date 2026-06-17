@@ -307,26 +307,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "separator",
-        "Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true; `opts.label_selectable = true` makes only the label searchable/selectable.",
+        "Full-width horizontal separator. `opts.label` is centered in the row and accepts the same styled span shape as `smelt.layout.line`; generated line fill is chrome and is not searchable/selectable. `opts.dim` defaults to true.",
         &["opts"],
         |_, opts: Option<mlua::Table>| -> LuaResult<LuaBlockLayout> {
-            let label = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<String>>("label").ok().flatten())
-                .unwrap_or_default();
+            let label = match opts.as_ref() {
+                Some(opts) => opts.get::<mlua::Value>("label")?,
+                None => mlua::Value::Nil,
+            };
             let dim = opts
                 .as_ref()
                 .and_then(|t| t.get::<Option<bool>>("dim").ok().flatten())
                 .unwrap_or(true);
-            let label_selectable = opts
-                .as_ref()
-                .and_then(|t| t.get::<Option<bool>>("label_selectable").ok().flatten())
-                .unwrap_or(false);
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Separator(
                 SeparatorSpec {
-                    label,
+                    label: crate::lua::styled_line_from_lua(label, "smelt.layout.separator")?,
                     dim,
-                    label_selectable,
                 },
             ))))
         },

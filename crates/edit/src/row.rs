@@ -104,6 +104,19 @@ impl DisplayRows {
         self.rows.iter().map(|row| row.text.clone()).collect()
     }
 
+    pub fn selectable_text(&self) -> String {
+        self.rows
+            .iter()
+            .flat_map(|row| {
+                row.selectable_ranges.iter().filter_map(|range| {
+                    let text = smelt_buffer::text::slice(&row.text, range.clone());
+                    (!text.is_empty()).then(|| text.to_string())
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     pub fn soft_breaks(&self) -> Vec<usize> {
         self.breaks(RowBreak::Soft)
     }

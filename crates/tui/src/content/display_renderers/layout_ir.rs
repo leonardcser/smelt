@@ -496,9 +496,7 @@ fn render_line_spec(
         out.print_gutter(&gutter.text);
     }
     let default_hl = spec.hl_group.as_deref();
-    for span in &spec.spans {
-        print_styled_span_range(out, span, default_hl, 0..span.text.len());
-    }
+    print_styled_spans(out, &spec.spans, default_hl);
     out.newline();
     1
 }
@@ -753,16 +751,12 @@ fn render_separator_spec(
     if spec.dim {
         out.push_dim();
     }
-    let label_width = display_width(&spec.label);
+    let label_width = styled_spans_width(&spec.label);
     let remaining = (width as usize).saturating_sub(label_width);
     let left = remaining / 2;
     let right = remaining - left;
     out.print_gutter(&"─".repeat(left));
-    if spec.label_selectable {
-        out.print(&spec.label);
-    } else {
-        out.print_gutter(&spec.label);
-    }
+    print_styled_spans(out, &spec.label, None);
     out.print_gutter(&"─".repeat(right));
     if spec.dim {
         out.pop_style();
@@ -839,6 +833,20 @@ fn apply_temp_decoration(
         if let Some(bg) = dec.fill_bg {
             out.fill_line_bg(bg);
         }
+    }
+}
+
+fn styled_spans_width(spans: &[protocol::StyledSpan]) -> usize {
+    spans.iter().map(|span| display_width(&span.text)).sum()
+}
+
+fn print_styled_spans(
+    out: &mut LineBuilder,
+    spans: &[protocol::StyledSpan],
+    default_hl: Option<&str>,
+) {
+    for span in spans {
+        print_styled_span_range(out, span, default_hl, 0..span.text.len());
     }
 }
 
@@ -1268,7 +1276,7 @@ fn intrinsic_leaf_width(leaf: &IrLeaf, total_width: u16) -> u16 {
             .max()
             .unwrap_or(0),
         IrLeaf::Elapsed(_) => 8,
-        IrLeaf::Separator(spec) => display_width_u16(&spec.label),
+        IrLeaf::Separator(spec) => styled_spans_width(&spec.label).min(u16::MAX as usize) as u16,
         IrLeaf::SourceView(_) => total_width,
     }
 }
