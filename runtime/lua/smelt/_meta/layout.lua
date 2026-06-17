@@ -51,6 +51,10 @@ layout.markdown = nil
 ---@type fun(child: any, opts: table?): smelt.layout.Node
 layout.panel = nil
 
+--- Apply row chrome to `child` after the child has produced rows. `opts.first` is a styled line or string for row 1; `opts.rest` is used for every later row and defaults to `opts.first`. Prefix spans keep their own `selectable` flags: set `selectable = false` for pure chrome, leave it true for copyable labels. The widest prefix consumes display width before wrapping/measuring the child, so prefixed rows stay within the layout width. Put this outside `layout.cap` when cap markers should inherit the same row chrome.
+---@type fun(child: any, opts: table): smelt.layout.Node
+layout.row_prefix = nil
+
 --- Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { { text=..., syntax?, hl?, fg?, bg?, dim?, bold?, italic?, selectable?, title_suffix? }, ... }, ... }`). `opts.hl_group` / `opts.hl` supplies a default theme group for spans without `hl`; `opts.continuation_indent` indents soft-wrapped continuation rows by display columns.
 ---@type fun(lines: any, opts: table?): smelt.layout.Node
 layout.runs = nil

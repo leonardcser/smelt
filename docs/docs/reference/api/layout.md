@@ -116,6 +116,16 @@ Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
 Render `child` inside a full-width background panel. `opts.hl_group` / `opts.hl` names the panel highlight group; `opts.padding` defaults to 1 cell/row.
 
+## `smelt.layout.row_prefix`
+
+```lua
+fun(child: any, opts: table): smelt.layout.Node
+```
+
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Apply row chrome to `child` after the child has produced rows. `opts.first` is a styled line or string for row 1; `opts.rest` is used for every later row and defaults to `opts.first`. Prefix spans keep their own `selectable` flags: set `selectable = false` for pure chrome, leave it true for copyable labels. The widest prefix consumes display width before wrapping/measuring the child, so prefixed rows stay within the layout width. Put this outside `layout.cap` when cap markers should inherit the same row chrome.
+
 ## `smelt.layout.runs`
 
 ```lua

@@ -2,8 +2,8 @@
 
 use crate::content::block_layout::{
     BlockLayout, CapKeep, CapMarker, CapSpec, CodeSpec, Constraint, DiffSpec, ElapsedSpec,
-    FileViewSpec, GutterSpec, HboxItem, LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RunsSpec,
-    SeparatorSpec, StyleSpec, TextSpec,
+    FileViewSpec, GutterSpec, HboxItem, LineSpec, LuaLeaf, MarkdownSpec, PanelSpec, RowPrefixSpec,
+    RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
 };
 use crate::lua::doc::Tier;
 use crate::lua::module::LuaMod;
@@ -427,6 +427,32 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
             Ok(LuaBlockLayout(BlockLayout::Gutter {
                 child: Box::new(child),
                 spec: GutterSpec { text, styled },
+            }))
+        },
+    )?;
+    m.fn_(
+        "row_prefix",
+        "Apply row chrome to `child` after the child has produced rows. `opts.first` is a styled line or string for row 1; `opts.rest` is used for every later row and defaults to `opts.first`. Prefix spans keep their own `selectable` flags: set `selectable = false` for pure chrome, leave it true for copyable labels. The widest prefix consumes display width before wrapping/measuring the child, so prefixed rows stay within the layout width. Put this outside `layout.cap` when cap markers should inherit the same row chrome.",
+        &["child", "opts"],
+        |_, (child, opts): (mlua::Value, mlua::Table)| -> LuaResult<LuaBlockLayout> {
+            let child = layout_from_value(child, "row_prefix")?;
+            let first_value: mlua::Value = opts.get("first")?;
+            let rest_value: mlua::Value = opts.get("rest")?;
+            let first = crate::lua::styled_line_from_lua(
+                first_value,
+                "smelt.layout.row_prefix",
+            )?;
+            let rest = if matches!(rest_value, mlua::Value::Nil) {
+                first.clone()
+            } else {
+                crate::lua::styled_line_from_lua(
+                    rest_value,
+                    "smelt.layout.row_prefix",
+                )?
+            };
+            Ok(LuaBlockLayout(BlockLayout::RowPrefix {
+                child: Box::new(child),
+                spec: RowPrefixSpec { first, rest },
             }))
         },
     )?;

@@ -789,6 +789,8 @@ Declarative, width-independent content layout primitives for transcript/tool dis
   Markdown layout leaf.
 - `smelt.layout.panel` :: `fun(child: any, opts: table?): smelt.layout.Node`
   Render `child` inside a full-width background panel.
+- `smelt.layout.row_prefix` :: `fun(child: any, opts: table): smelt.layout.Node`
+  Apply row chrome to `child` after the child has produced rows.
 - `smelt.layout.runs` :: `fun(lines: any, opts: table?): smelt.layout.Node`
   Styled inline text layout leaf.
 - `smelt.layout.separator` :: `fun(opts: table?): smelt.layout.Node`

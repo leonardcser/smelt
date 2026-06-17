@@ -110,6 +110,28 @@ app_story!(bash_multiline_header_indent, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(bash_multiline_header_capped, |ctx| {
+    ctx.set_viewport(86, 12);
+    ctx.run_lua(
+        r#"
+        smelt.settings.transcript = {
+          limits = { tool_header_rows = 3 },
+        }
+        smelt.transcript.invalidate_renderer()
+        "#,
+    );
+    ctx.tool_call(
+        "bash",
+        &[(
+            "command",
+            json!("line one\nline two\nline three\nline four\nline five\nline six"),
+        )],
+        "done",
+        Some(42_000),
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(transcript_settings_view_and_limits, |ctx| {
     ctx.set_viewport(86, 14);
     ctx.run_lua(

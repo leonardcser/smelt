@@ -181,6 +181,17 @@ pub struct GutterSpec {
     pub styled: bool,
 }
 
+/// Leading row chrome applied after capping/wrapping. This is the general form
+/// of transcript row prefixes; [`GutterSpec`] is the fixed-text shorthand used
+/// by older renderers. The first rendered row receives `first`; every later row
+/// receives `rest`. Prefix spans keep their own selectability so callers can
+/// choose between copyable labels and pure chrome.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RowPrefixSpec {
+    pub first: Vec<protocol::StyledSpan>,
+    pub rest: Vec<protocol::StyledSpan>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Constraint {
     /// Fixed width in display columns.
@@ -208,6 +219,10 @@ pub enum BlockLayout<L = LuaLeaf> {
     Gutter {
         child: Box<BlockLayout<L>>,
         spec: GutterSpec,
+    },
+    RowPrefix {
+        child: Box<BlockLayout<L>>,
+        spec: RowPrefixSpec,
     },
     Panel {
         child: Box<BlockLayout<L>>,
@@ -248,6 +263,7 @@ impl<L> BlockLayout<L> {
                 }
             }
             BlockLayout::Gutter { child, .. }
+            | BlockLayout::RowPrefix { child, .. }
             | BlockLayout::Panel { child, .. }
             | BlockLayout::Style { child, .. }
             | BlockLayout::Cap { child, .. } => {

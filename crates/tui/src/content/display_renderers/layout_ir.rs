@@ -4,7 +4,7 @@ use smelt_core::buffer::SpanMeta;
 use smelt_core::content::ansi::{emit_ansi_row, wrap_ansi};
 use smelt_core::content::block_layout::{
     solve_hbox_widths_with_fit, BlockLayout, CodeSpec, ElapsedSpec, GutterSpec, IrLeaf, LayoutIr,
-    LineSpec, MarkdownSpec, PanelSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
+    LineSpec, MarkdownSpec, PanelSpec, RowPrefixSpec, RunsSpec, SeparatorSpec, StyleSpec, TextSpec,
 };
 use smelt_core::content::builder::{display_width, LineBuilder};
 use smelt_core::content::code_block::{measure_code_block, parse_code_block};
@@ -129,6 +129,17 @@ fn render_layout_ir_range(
                 inline_options,
             )
         }
+        BlockLayout::RowPrefix { child, spec } => render_ir_row_prefix(
+            out,
+            child,
+            spec,
+            width,
+            row_start,
+            row_count,
+            gutter,
+            history,
+            inline_options,
+        ),
         BlockLayout::Panel { child, spec } => render_ir_panel(
             out,
             child,
@@ -236,6 +247,11 @@ fn measure_layout_ir_full_with_gutter(
             let spec_width = display_width_u16(&spec.text);
             let child_width = child_width_after_gutter(width, spec_width);
             measure_layout_ir_full_with_gutter(child, child_width, spec_width, inline_options)
+        }
+        BlockLayout::RowPrefix { child, spec } => {
+            let prefix_width = row_prefix_width(spec);
+            let child_width = child_width_after_gutter(width, prefix_width);
+            measure_layout_ir_full_with_gutter(child, child_width, gutter_cells, inline_options)
         }
         BlockLayout::Panel { child, spec } => measure_ir_panel(child, spec, width, inline_options),
         BlockLayout::Style { child, .. } => {
@@ -811,7 +827,7 @@ fn render_via_temp(
     let mut rows = 0u16;
     for row in row_start..end {
         if let Some(gutter) = gutter {
-            print_temp_gutter(out, gutter);
+            print_row_chrome(out, RowChrome::Gutter(gutter));
         }
         apply_temp_decoration(out, &buf, row as usize, true);
         emit_buffer_row_clipped(&buf, row, width, out);
@@ -821,15 +837,87 @@ fn render_via_temp(
     rows
 }
 
-fn print_temp_gutter(out: &mut LineBuilder, gutter: &GutterSpec) {
-    if gutter.styled {
-        out.print_gutter(&gutter.text);
-    } else {
-        out.save_style();
-        out.reset_style();
-        out.print_gutter(&gutter.text);
-        out.pop_style();
+#[derive(Clone, Copy)]
+enum RowChrome<'a> {
+    Gutter(&'a GutterSpec),
+    Prefix(&'a [protocol::StyledSpan]),
+}
+
+fn print_row_chrome(out: &mut LineBuilder, chrome: RowChrome<'_>) {
+    match chrome {
+        RowChrome::Gutter(gutter) if gutter.styled => out.print_gutter(&gutter.text),
+        RowChrome::Gutter(gutter) => {
+            out.save_style();
+            out.reset_style();
+            out.print_gutter(&gutter.text);
+            out.pop_style();
+        }
+        RowChrome::Prefix(prefix) => print_styled_spans(out, prefix, None),
     }
+}
+
+// Row prefixes are applied after the child has chosen and capped its rows, so
+// the renderer first materializes only the requested child rows into a scratch
+// buffer, then replays those rows with chrome attached. The replay preserves row
+// decorations and copy/source metadata via `apply_temp_decoration`.
+#[allow(clippy::too_many_arguments)]
+fn render_ir_row_prefix(
+    out: &mut LineBuilder,
+    child: &LayoutIr,
+    spec: &RowPrefixSpec,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    gutter: Option<&GutterSpec>,
+    history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
+) -> u16 {
+    let prefix_width = row_prefix_width(spec);
+    let child_width = child_width_after_gutter(width, prefix_width);
+    let theme = out.theme().clone();
+    let inherited_style = out.current_style();
+    let mut buf = smelt_core::buffer::Buffer::new(
+        smelt_core::buffer::BufId(0),
+        smelt_core::buffer::BufCreateOpts::default(),
+    );
+    let outcome = {
+        let mut col = LineBuilder::new(&mut buf, &theme, child_width);
+        col.push(None, inherited_style);
+        render_layout_ir_range(
+            &mut col,
+            child,
+            child_width,
+            row_start,
+            row_count,
+            None,
+            history,
+            inline_options,
+        );
+        col.finish()
+    };
+    if outcome.was_wrapped {
+        out.mark_wrapped();
+    }
+
+    let total = outcome.line_count.min(u16::MAX as usize) as u16;
+    let mut rows = 0u16;
+    for row in 0..total {
+        if let Some(gutter) = gutter {
+            print_row_chrome(out, RowChrome::Gutter(gutter));
+        }
+        let source_row = row_start.saturating_add(row);
+        let prefix = if source_row == 0 {
+            &spec.first
+        } else {
+            &spec.rest
+        };
+        print_row_chrome(out, RowChrome::Prefix(prefix));
+        apply_temp_decoration(out, &buf, row as usize, true);
+        emit_buffer_row_clipped(&buf, row, child_width, out);
+        out.newline();
+        rows = rows.saturating_add(1);
+    }
+    rows
 }
 
 fn apply_temp_decoration(
@@ -1331,6 +1419,9 @@ fn intrinsic_layout_width(layout: &LayoutIr, total_width: u16) -> u16 {
         BlockLayout::Gutter { child, spec } => {
             display_width_u16(&spec.text).saturating_add(intrinsic_layout_width(child, total_width))
         }
+        BlockLayout::RowPrefix { child, spec } => {
+            row_prefix_width(spec).saturating_add(intrinsic_layout_width(child, total_width))
+        }
         BlockLayout::Panel { child, spec } => intrinsic_layout_width(child, total_width)
             .saturating_add(spec.padding.saturating_mul(2)),
         BlockLayout::Style { child, .. } | BlockLayout::Cap { child, .. } => {
@@ -1445,6 +1536,12 @@ fn render_ir_hbox(
 
 fn gutter_width(gutter: Option<&GutterSpec>) -> u16 {
     gutter.map(|g| display_width_u16(&g.text)).unwrap_or(0)
+}
+
+fn row_prefix_width(spec: &RowPrefixSpec) -> u16 {
+    styled_spans_width(&spec.first)
+        .max(styled_spans_width(&spec.rest))
+        .min(u16::MAX as usize) as u16
 }
 
 fn display_width_u16(text: &str) -> u16 {

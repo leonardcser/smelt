@@ -114,6 +114,10 @@ transcript_defaults.__tool_body_renderers.bash = function(block, ctx)
   return transcript_defaults.render_tool_output({ content = content, is_error = output.is_error }, ctx)
 end
 
+transcript_defaults.__tool_header_rest_prefixes.bash = {
+  { text = "  ", selectable = false, dim = true },
+}
+
 smelt.tools.register(smelt.tools._with_watchdog({
   name = "bash",
   override = true,

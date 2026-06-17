@@ -1,0 +1,17 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 488
+expression: frame.text()
+---
+* bash line one
+  line two
+  line three
+  … 3 lines below
+  done
+
+
+
+─ ✿ working… ─────────────────────────────────────────────────────────────────────────
+
+──────────────────────────────────────────────────────────────────────────────────────
+ ○ normal                                                                     1:1 100%

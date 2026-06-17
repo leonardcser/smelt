@@ -4,6 +4,7 @@ smelt.transcript.defaults = smelt.transcript.defaults or {}
 local M = smelt.transcript.defaults
 M.__tool_body_renderers = M.__tool_body_renderers or {}
 M.__tool_collapsed_details = M.__tool_collapsed_details or {}
+M.__tool_header_rest_prefixes = M.__tool_header_rest_prefixes or {}
 
 local layout = smelt.layout
 
@@ -130,7 +131,7 @@ function smelt.transcript.defaults.render_tool_full(block, ctx)
 end
 
 local tool_header_lines
-local tool_header_indent
+local tool_header_rest_prefix
 local tool_header_prefix
 
 --- Render the default one-line tool header.
@@ -140,8 +141,8 @@ function smelt.transcript.defaults.render_tool_header(block, ctx, opts)
   opts = opts or {}
   local status = block.status or "pending"
   local hl = opts.hl or opts.hl_group or block.status_hl or status_hl[status]
-  local lines = tool_header_lines(block, status, hl)
-  local header = layout.runs(lines, { continuation_indent = tool_header_indent(block) })
+  local lines, tail, has_summary = tool_header_lines(block, status)
+  local header = layout.runs(lines)
   local show_elapsed = block.elapsed
     and status ~= "confirm"
     and (status == "pending" or (block.elapsed_text and block.elapsed_text ~= ""))
@@ -152,11 +153,17 @@ function smelt.transcript.defaults.render_tool_header(block, ctx, opts)
       { layout.elapsed(block.elapsed, { dim = true, selectable = false }), cols = 8 },
     })
   end
-  return layout.cap(header, {
-    rows = (ctx and ctx.limits and ctx.limits.tool_header_rows) or 20,
-    keep = "head",
-    marker = "below",
-  })
+  return layout.row_prefix(
+    layout.cap(header, {
+      rows = (ctx and ctx.limits and ctx.limits.tool_header_rows) or 20,
+      keep = "head",
+      marker = "below",
+    }),
+    {
+      first = tool_header_prefix(block, hl, tail, has_summary),
+      rest = tool_header_rest_prefix(block),
+    }
+  )
 end
 
 local function copy_table(t)
@@ -235,13 +242,14 @@ function tool_header_prefix(block, hl, tail, has_summary)
   return spans, display_width("* " .. tool_name .. " ")
 end
 
-function tool_header_indent(block)
-  if block.name == "bash" then return 2 end
+function tool_header_rest_prefix(block)
+  local custom = M.__tool_header_rest_prefixes[block.name or ""]
+  if custom then return copy_table(custom) end
   local _, width = tool_header_prefix(block, nil, true, false)
-  return width
+  return { { text = string.rep(" ", width), selectable = false, dim = true } }
 end
 
-function tool_header_lines(block, status, hl)
+function tool_header_lines(block, status)
   local lines = summary_lines(block.summary)
   local suffix = {}
 
@@ -266,17 +274,6 @@ function tool_header_lines(block, status, hl)
   local first = lines[1]
   local has_summary = has_text(first)
   local tail = has_summary or #suffix > 0
-  local prefix = tool_header_prefix(block, hl, tail, has_summary)
-  for i = #prefix, 1, -1 do
-    table.insert(first, 1, prefix[i])
-  end
-
-  if has_summary and #lines > 1 then
-    local indent = string.rep(" ", tool_header_indent(block))
-    for i = 2, #lines do
-      table.insert(lines[i], 1, { text = indent, selectable = false, dim = true })
-    end
-  end
 
   if #suffix > 0 then
     if has_summary then
@@ -291,7 +288,7 @@ function tool_header_lines(block, status, hl)
     end
   end
 
-  return lines
+  return lines, tail, has_summary
 end
 
 --- Return a compact tool detail for collapsed tool blocks.

@@ -882,6 +882,10 @@ fn compile_layout_ir_with_cache(
             child: Box::new(compile_layout_ir_with_cache(child, cache)?),
             spec: spec.clone(),
         }),
+        BlockLayout::RowPrefix { child, spec } => Ok(BlockLayout::RowPrefix {
+            child: Box::new(compile_layout_ir(child)?),
+            spec: spec.clone(),
+        }),
         BlockLayout::Panel { child, spec } => Ok(BlockLayout::Panel {
             child: Box::new(compile_layout_ir_with_cache(child, cache)?),
             spec: spec.clone(),
