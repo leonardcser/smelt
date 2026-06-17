@@ -378,6 +378,15 @@ impl TuiApp {
                     .cloned()
             })
             .collect();
+        let dirty_from = self
+            .core
+            .session
+            .history
+            .iter()
+            .zip(history.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+        self.mark_history_dirty_from(dirty_from);
         self.core
             .session
             .merge_model_history_snapshot(engine::SUMMARY_PREFIX, history);
@@ -402,12 +411,31 @@ impl TuiApp {
         );
     }
 
+    fn mark_history_dirty_from(&mut self, idx: usize) {
+        self.session_dirty = true;
+        self.dirty_history_from = Some(
+            self.dirty_history_from
+                .map_or(idx, |current| current.min(idx)),
+        );
+    }
+
     pub(crate) fn apply_history_append_to_history(
         &mut self,
         append: &protocol::HistoryAppend,
     ) -> protocol::HistoryAppendResult {
-        self.session_dirty = true;
-        protocol::apply_history_append(&mut self.core.session.history, append)
+        let old_len = self.core.session.history.len();
+        let result = protocol::apply_history_append(&mut self.core.session.history, append);
+        match result {
+            protocol::HistoryAppendResult::Unchanged => {}
+            protocol::HistoryAppendResult::Pushed => {
+                self.mark_history_dirty_from(old_len);
+            }
+            protocol::HistoryAppendResult::ReplacedLast
+            | protocol::HistoryAppendResult::RemovedLast => {
+                self.mark_history_dirty_from(old_len.saturating_sub(1));
+            }
+        }
+        result
     }
 
     pub(crate) fn sync_session_snapshot(&mut self) {
@@ -656,6 +684,7 @@ impl TuiApp {
         );
         self.persisted_fingerprints = persisted_fingerprints;
         self.session_dirty = false;
+        self.dirty_history_from = None;
         self.persisted_display_cache_generation = self.transcript.display_cache_generation();
     }
 
@@ -694,19 +723,27 @@ impl TuiApp {
             && blobs.is_empty()
         {
             self.session_dirty = false;
+            self.dirty_history_from = None;
             self.persisted_display_cache_generation = display_cache_generation;
             smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             return;
         }
+        let history_start_idx = if self.persisted_fingerprints.is_some() {
+            self.dirty_history_from.unwrap_or(session.history.len())
+        } else {
+            0
+        };
         self.core.session = session.clone();
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = Some(session.clone());
         }
         self.persisted_fingerprints = fingerprints;
         self.session_dirty = false;
+        self.dirty_history_from = None;
         self.persisted_display_cache_generation = display_cache_generation;
         self.persister.save(crate::persist::PersistRequest {
             session,
+            history_start_idx,
             blobs,
             display_cache,
         });
@@ -849,6 +886,7 @@ impl TuiApp {
         };
 
         self.core.session.history.truncate(hist_idx);
+        self.mark_history_dirty_from(hist_idx);
         let keep_checkpoint_at_boundary = turn_text.is_some()
             && self
                 .core
@@ -867,6 +905,7 @@ impl TuiApp {
 
     pub(crate) fn rewind_to_start(&mut self) {
         self.core.session.history.clear();
+        self.mark_history_dirty_from(0);
         self.core.session.checkpoint = None;
         self.core.session.turn_metas.clear();
         self.core.session.clear_context_snapshots();

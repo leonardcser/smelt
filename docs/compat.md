@@ -19,9 +19,8 @@ with `COMPAT(<id>)`.
 
 ## session-json-monolith
 
-- Remove after: two alpha releases after `meta.json` + `history.jsonl` session
-  storage ships
-- Why: load old monolithic `session.json` files, migrate them to split JSONL
+- Remove after: two alpha releases after SQLite session storage ships
+- Why: load old monolithic `session.json` files, import them to canonical SQLite
   storage on open, then remove the monolith
 - Code:
   - `crates/core/src/session.rs`: `load_session_files`,

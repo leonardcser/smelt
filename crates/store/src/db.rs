@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 
@@ -201,6 +202,10 @@ impl SessionDb {
         legacy::import_session_dir(&self.conn, session_dir.as_ref(), self.object_compression)
     }
 
+    pub fn import_legacy_requests_jsonl(&self, session_dir: impl AsRef<Path>) -> Result<usize> {
+        legacy::import_requests_jsonl(&self.conn, session_dir.as_ref(), self.object_compression)
+    }
+
     pub fn export_history_jsonl(&self, out: impl Write) -> Result<()> {
         legacy::export_history_jsonl(&self.conn, out)
     }
@@ -243,6 +248,25 @@ impl SessionDb {
             &self.conn,
             snapshot,
             expected_revision,
+            None,
+            self.object_compression,
+        )
+    }
+
+    pub fn save_session_snapshot_as_writer(
+        &self,
+        snapshot: &SessionSnapshot,
+    ) -> Result<SessionSaveReport> {
+        let lease = self.current_process_writer_lease()?;
+        let expected_revision = self
+            .session_state()?
+            .as_ref()
+            .map_or(0, |state| state.revision);
+        session_snapshot::save_session_snapshot(
+            &self.conn,
+            snapshot,
+            Some(expected_revision),
+            Some(&lease),
             self.object_compression,
         )
     }
@@ -257,6 +281,27 @@ impl SessionDb {
 
     pub fn search_blob(&self) -> Result<String> {
         session_snapshot::search_blob(&self.conn)
+    }
+    fn current_process_writer_lease(&self) -> Result<WriterLease> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".to_string());
+        let pid = std::process::id();
+        let owner_id = format!("{hostname}:{pid}");
+        let started_at = self
+            .writer_lease()?
+            .filter(|lease| lease.owner_id == owner_id)
+            .map_or(now, |lease| lease.started_at);
+        Ok(WriterLease {
+            owner_id,
+            hostname,
+            pid,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            started_at,
+            heartbeat_at: now,
+        })
     }
 }
 
@@ -438,6 +483,8 @@ mod tests {
                 updated_at: 20,
             },
             meta_json: Some(serde_json::json!({"id": "s1", "schema_version": 2})),
+            history_start_idx: 0,
+            history_len: 1,
             history: vec![first.clone()],
             turn_metas: Vec::new(),
             metadata_snapshots: Vec::new(),
@@ -471,7 +518,9 @@ mod tests {
             .unwrap();
         assert_eq!(first_created_at, second_created_at);
 
-        snapshot.history.push(second);
+        snapshot.history_start_idx = 1;
+        snapshot.history = vec![second];
+        snapshot.history_len = 2;
         snapshot.state.history_len = 2;
         snapshot.state.updated_at = 30;
         let append = db

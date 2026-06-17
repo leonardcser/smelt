@@ -99,6 +99,7 @@ pub struct TuiApp {
     pub(crate) session_save_pending: bool,
     pub(crate) persisted_fingerprints: Option<PersistFingerprints>,
     pub(crate) session_dirty: bool,
+    pub(crate) dirty_history_from: Option<usize>,
     pub(crate) persisted_display_cache_generation: u64,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
@@ -1096,6 +1097,7 @@ impl TuiApp {
             session_save_pending: false,
             persisted_fingerprints: None,
             session_dirty: false,
+            dirty_history_from: None,
             persisted_display_cache_generation: 0,
             last_width: term_w,
             last_height: term_h,
@@ -1642,6 +1644,15 @@ impl TuiApp {
         );
     }
 
+    pub(crate) fn drain_persist_errors(&mut self) {
+        for err in self.persister.drain_errors() {
+            self.notify_error_sticky(format!(
+                "failed to save session {}: {}",
+                err.session_id, err.message
+            ));
+        }
+    }
+
     pub(crate) fn notify_error(&mut self, message: String) {
         self.record_notice(
             smelt_core::messages::MessageKind::Error,
@@ -1991,6 +2002,7 @@ impl TuiApp {
                 break 'main;
             }
             self.tick_timers();
+            self.drain_persist_errors();
             self.publish_diff_cells();
             self.drain_cells_pending();
             self.drive_lua_tasks();

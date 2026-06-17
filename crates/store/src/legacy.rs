@@ -232,12 +232,13 @@ fn import_session_dir_inner(
     report.transcript_blocks = report.history_items;
     let state = session_state_from_json(&meta_value, report.history_items as u64)?;
     meta::upsert_session_state(conn, &state)?;
+    let canonical_meta = canonical_meta_from_legacy(&meta_value, report.history_items as u64);
     meta::set_meta(
         conn,
         session_snapshot::SESSION_META_JSON_KEY,
-        &serde_json::to_string(&meta_value)?,
+        &serde_json::to_string(&canonical_meta)?,
     )?;
-    report.request_attempts = import_requests(conn, session_dir, compression)?;
+    report.request_attempts = import_requests_jsonl(conn, session_dir, compression)?;
     report.objects = conn.query_row("SELECT COUNT(*) FROM objects", [], |row| {
         row.get::<_, i64>(0)
     })? as usize;
@@ -326,6 +327,32 @@ fn import_source(session_dir: &Path) -> &'static str {
     }
 }
 
+fn canonical_meta_from_legacy(value: &Value, history_len: u64) -> Value {
+    let mut meta = value.clone();
+    if let Value::Object(map) = &mut meta {
+        map.insert("schema_version".into(), Value::from(2));
+        map.remove("history");
+        map.remove("messages");
+        map.entry("metadata_snapshots")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        map.entry("turn_metas")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(context_snapshots) = map.remove("context_snapshots") {
+            map.entry("accounting_snapshots")
+                .or_insert(context_snapshots);
+        } else {
+            map.entry("accounting_snapshots")
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
+        map.entry("session_usage")
+            .or_insert_with(|| serde_json::json!({}));
+        map.entry("session_cost_usd").or_insert(Value::from(0.0));
+        map.entry("text_bytes").or_insert(Value::Null);
+        map.entry("history_len").or_insert(Value::from(history_len));
+    }
+    meta
+}
+
 fn session_state_from_json(value: &Value, history_len: u64) -> Result<SessionState> {
     let id = value
         .get("id")
@@ -359,7 +386,7 @@ fn optional_u64(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(Value::as_u64)
 }
 
-fn import_requests(
+pub(crate) fn import_requests_jsonl(
     conn: &Connection,
     session_dir: &Path,
     compression: ObjectCompression,

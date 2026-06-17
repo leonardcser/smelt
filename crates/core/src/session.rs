@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::BufRead;
+#[cfg(test)]
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1154,12 +1156,22 @@ pub fn save(session: &Session, store: &crate::attachment::AttachmentStore) {
 /// Write the canonical SQLite session store. Assumes blobs are already flushed.
 /// Safe to call from a background thread.
 pub fn save_with_blobs(session: &Session, url_to_blob: &std::collections::HashMap<String, String>) {
-    let _ = save_with_blobs_result(session, url_to_blob);
+    if let Err(err) = save_with_blobs_result(session, url_to_blob) {
+        eprintln!("smelt: failed to save session {}: {err}", session.id);
+    }
 }
 
 pub fn save_with_blobs_result(
     session: &Session,
     url_to_blob: &std::collections::HashMap<String, String>,
+) -> Result<smelt_store::SessionSaveReport, smelt_store::StoreError> {
+    save_with_blobs_result_with_history_start(session, url_to_blob, 0)
+}
+
+pub fn save_with_blobs_result_with_history_start(
+    session: &Session,
+    url_to_blob: &std::collections::HashMap<String, String>,
+    history_start_idx: usize,
 ) -> Result<smelt_store::SessionSaveReport, smelt_store::StoreError> {
     let _perf = smelt_perf::perf::begin("session:write");
     let session_dir = dir_for(session);
@@ -1175,9 +1187,8 @@ pub fn save_with_blobs_result(
     };
 
     let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
-    ensure_writer_lease(&db)?;
-    let snapshot = session_store_snapshot(&session_out)?;
-    let report = db.save_session_snapshot(&snapshot, None)?;
+    let snapshot = session_store_snapshot(&session_out, history_start_idx)?;
+    let report = db.save_session_snapshot_as_writer(&snapshot)?;
     write_meta(&session_dir, &session_out.meta());
     let blob = db
         .search_blob()
@@ -1186,21 +1197,12 @@ pub fn save_with_blobs_result(
     Ok(report)
 }
 
-fn write_split_session_files(session_dir: &std::path::Path, session: &Session, ts: u64) {
-    if let Some(meta_json) = encode_session_jsonl_meta(session) {
-        atomic_write(&session_dir.join("meta.json"), meta_json.as_bytes(), ts);
-    }
-    if let Some(history_jsonl) = encode_history_jsonl(&session.history) {
-        atomic_write(&session_dir.join("history.jsonl"), &history_jsonl, ts);
-    }
-    let blob = build_search_blob(&session.history);
-    atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), ts);
-}
-
 fn session_store_snapshot(
     session: &Session,
+    history_start_idx: usize,
 ) -> Result<smelt_store::SessionSnapshot, smelt_store::StoreError> {
     let meta_json = serde_json::to_value(SessionJsonlMeta::from(session))?;
+    let history_start_idx = history_start_idx.min(session.history.len());
     Ok(smelt_store::SessionSnapshot {
         state: smelt_store::SessionState {
             id: session.id.clone(),
@@ -1221,7 +1223,9 @@ fn session_store_snapshot(
             updated_at: session.updated_at_ms as i64,
         },
         meta_json: Some(meta_json),
-        history: session.history.clone(),
+        history_start_idx,
+        history_len: session.history.len(),
+        history: session.history[history_start_idx..].to_vec(),
         turn_metas: snapshot_values(&session.turn_metas)?,
         metadata_snapshots: snapshot_values(&session.metadata_snapshots)?,
         accounting_snapshots: snapshot_values(&session.context_snapshots)?,
@@ -1237,35 +1241,13 @@ fn snapshot_values<T: Serialize>(
         .collect()
 }
 
-fn ensure_writer_lease(db: &smelt_store::SessionDb) -> Result<(), smelt_store::StoreError> {
-    const STALE_AFTER_SECS: i64 = 30 * 60;
-    let now = (now_ms() / 1000) as i64;
-    let pid = std::process::id();
-    if let Some(lease) = db.writer_lease()? {
-        let stale = now.saturating_sub(lease.heartbeat_at) > STALE_AFTER_SECS;
-        if lease.pid != pid && !stale {
-            return Err(smelt_store::StoreError::Integrity(format!(
-                "session has active writer lease from pid {} on {}",
-                lease.pid, lease.hostname
-            )));
-        }
-    }
-    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".to_string());
-    db.set_writer_lease(&smelt_store::WriterLease {
-        owner_id: format!("{hostname}:{pid}"),
-        hostname,
-        pid,
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
-        started_at: now,
-        heartbeat_at: now,
-    })
-}
-
+#[cfg(test)]
 fn encode_session_jsonl_meta(session: &Session) -> Option<String> {
     let _perf = smelt_perf::perf::begin("session:write:encode_meta_json");
     serde_json::to_string(&SessionJsonlMeta::from(session)).ok()
 }
 
+#[cfg(test)]
 fn encode_history_jsonl(history: &[HistoryItem]) -> Option<Vec<u8>> {
     let _perf = smelt_perf::perf::begin("session:write:encode_history_jsonl");
     let mut out = Vec::new();
@@ -1325,10 +1307,15 @@ fn load_legacy_session_files(dir_path: &std::path::Path) -> Option<Session> {
     } else {
         (load_legacy_json_session(dir_path)?, true)
     };
+    if let Err(err) = import_legacy_session_to_db(dir_path, &session) {
+        eprintln!(
+            "smelt: failed to import legacy session {} to sqlite: {err}",
+            session.id
+        );
+    }
     if loaded_legacy_json {
         migrate_legacy_json_session(dir_path, &session);
     }
-    let _ = import_legacy_session_to_db(dir_path);
 
     internalize_session_blobs(dir_path, session)
 }
@@ -1421,14 +1408,26 @@ fn snapshots_from_values<T: for<'de> Deserialize<'de>>(
         .map(HistorySnapshots::from_vec)
 }
 
-fn import_legacy_session_to_db(dir_path: &std::path::Path) -> Result<(), smelt_store::StoreError> {
+fn import_legacy_session_to_db(
+    dir_path: &std::path::Path,
+    session: &Session,
+) -> Result<(), smelt_store::StoreError> {
     let db_path = dir_path.join("session.db");
     if db_path.is_file() {
         return Ok(());
     }
     let db = smelt_store::SessionDb::open(&db_path)?;
-    db.import_legacy_session_dir(dir_path)?;
-    Ok(())
+    let result = (|| {
+        let snapshot = session_store_snapshot(session, 0)?;
+        db.save_session_snapshot_as_writer(&snapshot)?;
+        db.import_legacy_requests_jsonl(dir_path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        drop(db);
+        let _ = fs::remove_file(&db_path);
+    }
+    result
 }
 
 fn load_jsonl_session(dir_path: &std::path::Path) -> Option<Session> {
@@ -1484,12 +1483,17 @@ fn load_legacy_json_session(dir_path: &std::path::Path) -> Option<Session> {
     Some(session)
 }
 
-// COMPAT(session-json-monolith): rewrite old monolithic sessions to the
-// canonical split storage as soon as they are opened.
+// COMPAT(session-json-monolith): import old monolithic sessions to SQLite as
+// soon as they are opened, then remove the monolith once sidecars exist.
 fn migrate_legacy_json_session(dir_path: &std::path::Path, session: &Session) {
-    let _perf = smelt_perf::perf::begin("session:load:migrate_jsonl");
-    write_split_session_files(dir_path, session, now_ms());
-    if dir_path.join("meta.json").is_file() && dir_path.join("history.jsonl").is_file() {
+    let _perf = smelt_perf::perf::begin("session:load:migrate_sqlite");
+    write_meta(dir_path, &session.meta());
+    atomic_write(
+        &dir_path.join("content.txt"),
+        build_search_blob(&session.history).as_bytes(),
+        now_ms(),
+    );
+    if dir_path.join("session.db").is_file() && dir_path.join("meta.json").is_file() {
         let _ = fs::remove_file(dir_path.join("session.json"));
     }
 }
@@ -1891,7 +1895,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_json_session_migrates_to_split_storage() {
+    fn legacy_json_session_migrates_to_sqlite_storage() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut s = fixture_session();
         s.history.push(user_item("legacy prompt"));
@@ -1902,17 +1906,19 @@ mod tests {
         .expect("write legacy session");
 
         let loaded = load_legacy_json_session(dir.path()).expect("load legacy session");
+        import_legacy_session_to_db(dir.path(), &loaded).expect("import sqlite");
         migrate_legacy_json_session(dir.path(), &loaded);
 
+        assert!(dir.path().join("session.db").is_file());
         assert!(dir.path().join("meta.json").is_file());
-        assert!(dir.path().join("history.jsonl").is_file());
+        assert!(!dir.path().join("history.jsonl").exists());
         assert!(!dir.path().join("session.json").exists());
-        let migrated = load_jsonl_session(dir.path()).expect("load migrated session");
+        let migrated = load_db_session(dir.path()).expect("load migrated session");
         assert_eq!(migrated.history.len(), 1);
     }
 
     #[test]
-    fn stale_split_session_falls_back_to_legacy_json_and_migrates() {
+    fn stale_split_session_falls_back_to_legacy_json_and_migrates_to_sqlite() {
         let dir = tempfile::tempdir().expect("temp dir");
         let mut s = fixture_session();
         s.id = "stale-split".into();
@@ -1938,10 +1944,11 @@ mod tests {
 
         assert_eq!(loaded.title.as_deref(), Some("legacy title"));
         assert_eq!(loaded.history.len(), 1);
+        assert!(dir.path().join("session.db").is_file());
         assert!(dir.path().join("meta.json").is_file());
         assert!(dir.path().join("history.jsonl").is_file());
         assert!(!dir.path().join("session.json").exists());
-        let migrated = load_jsonl_session(dir.path()).expect("load migrated split session");
+        let migrated = load_db_session(dir.path()).expect("load migrated db session");
         assert_eq!(migrated.title.as_deref(), Some("legacy title"));
         assert_eq!(migrated.history.len(), 1);
     }
@@ -1955,7 +1962,7 @@ mod tests {
         s.history.push(user_item("hello sqlite"));
         s.record_context_tokens(42);
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.save_session_snapshot(&session_store_snapshot(&s).unwrap(), None)
+        db.save_session_snapshot(&session_store_snapshot(&s, 0).unwrap(), None)
             .unwrap();
 
         let loaded = load_session_files(dir.path()).expect("load db session");

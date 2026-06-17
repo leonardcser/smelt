@@ -4,7 +4,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{to_sql_error, Result};
+use crate::error::{to_sql_error, Result, StoreError};
 use crate::object::checked_i64;
 use crate::schema::SCHEMA_VERSION;
 
@@ -76,6 +76,24 @@ pub(crate) fn writer_lease(conn: &Connection) -> Result<Option<WriterLease>> {
     meta(conn, "writer_lease")?
         .map(|value| serde_json::from_str(&value).map_err(Into::into))
         .transpose()
+}
+
+pub(crate) fn acquire_writer_lease(
+    conn: &Connection,
+    lease: &WriterLease,
+    stale_after_secs: i64,
+) -> Result<()> {
+    if let Some(existing) = writer_lease(conn)? {
+        let stale = lease.heartbeat_at.saturating_sub(existing.heartbeat_at) > stale_after_secs;
+        let same_owner = existing.owner_id == lease.owner_id;
+        if !same_owner && !stale {
+            return Err(StoreError::Integrity(format!(
+                "session has active writer lease from pid {} on {}",
+                existing.pid, existing.hostname
+            )));
+        }
+    }
+    set_writer_lease(conn, lease)
 }
 
 pub(crate) fn clear_writer_lease(conn: &Connection) -> Result<()> {
