@@ -502,7 +502,10 @@ impl TuiApp {
             }
         };
 
-        let meta = self.pending_turn_meta.take().unwrap_or(meta);
+        let mut meta = self.pending_turn_meta.take().unwrap_or(meta);
+        if meta.display_tps.is_none() {
+            meta.display_tps = meta.avg_tps.or_else(|| self.working.display_tps());
+        }
         self.session_dirty = true;
         self.core
             .session
@@ -511,7 +514,7 @@ impl TuiApp {
         if matches!(end, TurnEnd::Complete) {
             self.apply_pending_history_appends_for_request();
         }
-        self.snapshot_accounting();
+        self.snapshot_context();
         self.save_session();
         start_queued
     }

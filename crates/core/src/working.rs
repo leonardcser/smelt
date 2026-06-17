@@ -71,8 +71,9 @@ impl LiveTurn {
     }
 }
 
-/// Archived metadata from the last completed turn. Shown in the
-/// status bar until the next `begin()`.
+/// Archived metadata from the last completed turn. Outcome and elapsed are
+/// shown while idle; token speed is also mirrored into `last_reported_tps` so
+/// the statusline can keep showing it across turn boundaries.
 struct LastTurn {
     outcome: TurnOutcome,
     elapsed: Duration,
@@ -82,6 +83,8 @@ struct LastTurn {
 pub struct WorkingState {
     live: Option<LiveTurn>,
     last: Option<LastTurn>,
+    /// Most recent non-background token speed reported by the engine.
+    last_reported_tps: Option<f64>,
     clock: Arc<dyn Clock>,
 }
 
@@ -90,6 +93,7 @@ impl WorkingState {
         Self {
             live: None,
             last: None,
+            last_reported_tps: None,
             clock,
         }
     }
@@ -120,22 +124,28 @@ impl WorkingState {
     /// Archive the live turn's metadata as `last` and clear live.
     pub fn finish(&mut self, outcome: TurnOutcome) -> TurnMeta {
         let now = self.clock.instant_now();
+        let previous_tps = self.last_reported_tps;
         let (elapsed, avg_tps) = match self.live.take() {
             Some(live) => (live.effective_elapsed(now), avg(&live.tps_samples)),
             None => (Duration::ZERO, None),
         };
+        let display_tps = avg_tps.or(previous_tps);
+        if avg_tps.is_some() {
+            self.last_reported_tps = avg_tps;
+        }
         self.last = Some(LastTurn {
             outcome,
             elapsed,
             avg_tps,
         });
-        turn_meta_for(outcome, elapsed, avg_tps)
+        turn_meta_for(outcome, elapsed, avg_tps, display_tps)
     }
 
     /// Archive the live turn's metadata and keep its elapsed timer running for
     /// the next queued turn.
     pub fn finish_and_continue(&mut self, outcome: TurnOutcome, phase: TurnPhase) -> TurnMeta {
         let now = self.clock.instant_now();
+        let previous_tps = self.last_reported_tps;
         let retry_deadline = retry_deadline_for(phase, now);
         let Some(live) = self.live.as_mut() else {
             debug_assert!(false, "finish_and_continue called without a live turn");
@@ -145,6 +155,10 @@ impl WorkingState {
         };
         let elapsed = live.effective_elapsed(now);
         let avg_tps = avg(&live.tps_samples);
+        let display_tps = avg_tps.or(previous_tps);
+        if avg_tps.is_some() {
+            self.last_reported_tps = avg_tps;
+        }
         self.last = Some(LastTurn {
             outcome,
             elapsed,
@@ -153,12 +167,13 @@ impl WorkingState {
         live.phase = phase;
         live.retry_deadline = retry_deadline;
         live.tps_samples.clear();
-        turn_meta_for(outcome, elapsed, avg_tps)
+        turn_meta_for(outcome, elapsed, avg_tps, display_tps)
     }
 
     pub fn clear(&mut self) {
         self.live = None;
         self.last = None;
+        self.last_reported_tps = None;
     }
 
     /// Whether the status bar currently displays a frame-by-frame
@@ -233,7 +248,21 @@ impl WorkingState {
     pub fn record_tokens_per_sec(&mut self, tps: f64) {
         if let Some(live) = self.live.as_mut() {
             live.tps_samples.push(tps);
+            self.last_reported_tps = avg(&live.tps_samples);
         }
+    }
+
+    /// Token speed for the status line. While a new turn is running but has
+    /// not reported a sample yet, keep showing the most recent observed value
+    /// instead of dropping the segment.
+    pub fn display_tps(&self) -> Option<f64> {
+        if let Some(live) = self.live.as_ref() {
+            return avg(&live.tps_samples).or(self.last_reported_tps);
+        }
+        self.last
+            .as_ref()
+            .and_then(|last| last.avg_tps)
+            .or(self.last_reported_tps)
     }
 
     /// Elapsed time for the display: paused-aware elapsed for a live turn,
@@ -272,19 +301,27 @@ impl WorkingState {
 
     pub fn turn_meta(&self) -> Option<TurnMeta> {
         if let Some(live) = self.live.as_ref() {
+            let avg_tps = avg(&live.tps_samples);
             return Some(turn_meta_for(
                 TurnOutcome::Done,
                 live.effective_elapsed(self.clock.instant_now()),
-                avg(&live.tps_samples),
+                avg_tps,
+                avg_tps.or(self.last_reported_tps),
             ));
         }
-        self.last
-            .as_ref()
-            .map(|last| turn_meta_for(last.outcome, last.elapsed, last.avg_tps))
+        self.last.as_ref().map(|last| {
+            turn_meta_for(
+                last.outcome,
+                last.elapsed,
+                last.avg_tps,
+                last.avg_tps.or(self.last_reported_tps),
+            )
+        })
     }
 
     pub fn restore_from_turn_meta(&mut self, meta: &TurnMeta) {
         self.live = None;
+        self.last_reported_tps = meta.display_tps.or(meta.avg_tps);
         self.last = Some(LastTurn {
             outcome: if meta.interrupted {
                 TurnOutcome::Interrupted
@@ -297,10 +334,16 @@ impl WorkingState {
     }
 }
 
-fn turn_meta_for(outcome: TurnOutcome, elapsed: Duration, avg_tps: Option<f64>) -> TurnMeta {
+fn turn_meta_for(
+    outcome: TurnOutcome,
+    elapsed: Duration,
+    avg_tps: Option<f64>,
+    display_tps: Option<f64>,
+) -> TurnMeta {
     TurnMeta {
         elapsed_ms: elapsed.as_millis() as u64,
         avg_tps,
+        display_tps,
         interrupted: matches!(outcome, TurnOutcome::Interrupted),
         tool_elapsed: std::collections::HashMap::new(),
     }
@@ -446,11 +489,13 @@ mod tests {
     fn clear_drops_both_live_and_last() {
         let (_clock, mut s) = fixture();
         s.begin(TurnPhase::Working);
+        s.record_tokens_per_sec(10.0);
         s.finish(TurnOutcome::Done);
         s.clear();
         assert!(!s.is_animating());
         assert!(s.turn_meta().is_none());
         assert!(s.elapsed().is_none());
+        assert!(s.display_tps().is_none());
     }
 
     #[test]
@@ -462,6 +507,55 @@ mod tests {
         s.record_tokens_per_sec(3.0);
         let meta = s.turn_meta().unwrap();
         assert_eq!(meta.avg_tps, Some(2.0));
+        assert_eq!(s.display_tps(), Some(2.0));
+    }
+
+    #[test]
+    fn display_tps_survives_new_turn_until_new_sample() {
+        let (_clock, mut s) = fixture();
+        s.begin(TurnPhase::Working);
+        s.record_tokens_per_sec(10.0);
+        s.record_tokens_per_sec(30.0);
+        s.finish(TurnOutcome::Done);
+        assert_eq!(s.display_tps(), Some(20.0));
+
+        s.begin(TurnPhase::Working);
+        assert_eq!(s.display_tps(), Some(20.0));
+        assert!(s.turn_meta().unwrap().avg_tps.is_none());
+
+        s.record_tokens_per_sec(50.0);
+        assert_eq!(s.display_tps(), Some(50.0));
+    }
+
+    #[test]
+    fn display_tps_survives_turn_without_samples() {
+        let (_clock, mut s) = fixture();
+        s.begin(TurnPhase::Working);
+        s.record_tokens_per_sec(12.0);
+        s.finish(TurnOutcome::Done);
+
+        s.begin(TurnPhase::Working);
+        let meta = s.finish(TurnOutcome::Done);
+        assert!(meta.avg_tps.is_none());
+        assert_eq!(meta.display_tps, Some(12.0));
+        assert_eq!(s.display_tps(), Some(12.0));
+    }
+
+    #[test]
+    fn restore_from_turn_meta_uses_display_tps_snapshot() {
+        let (_clock, mut s) = fixture();
+        let meta = TurnMeta {
+            elapsed_ms: 200,
+            avg_tps: None,
+            display_tps: Some(18.0),
+            interrupted: false,
+            tool_elapsed: std::collections::HashMap::new(),
+        };
+
+        s.restore_from_turn_meta(&meta);
+
+        assert_eq!(s.turn_meta().unwrap().avg_tps, None);
+        assert_eq!(s.display_tps(), Some(18.0));
     }
 
     #[test]
@@ -542,6 +636,7 @@ mod tests {
         let meta = TurnMeta {
             elapsed_ms: 1500,
             avg_tps: Some(42.0),
+            display_tps: Some(42.0),
             interrupted: false,
             tool_elapsed: std::collections::HashMap::new(),
         };
@@ -550,6 +645,7 @@ mod tests {
         let round = s.turn_meta().unwrap();
         assert_eq!(round.elapsed_ms, 1500);
         assert_eq!(round.avg_tps, Some(42.0));
+        assert_eq!(s.display_tps(), Some(42.0));
         assert!(!round.interrupted);
     }
 
@@ -559,6 +655,7 @@ mod tests {
         let meta = TurnMeta {
             elapsed_ms: 200,
             avg_tps: None,
+            display_tps: None,
             interrupted: true,
             tool_elapsed: std::collections::HashMap::new(),
         };
@@ -574,6 +671,7 @@ mod tests {
         let meta = TurnMeta {
             elapsed_ms: 0,
             avg_tps: None,
+            display_tps: None,
             interrupted: false,
             tool_elapsed: std::collections::HashMap::new(),
         };

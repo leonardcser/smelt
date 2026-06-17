@@ -301,6 +301,7 @@ impl TuiApp {
                 let payload = meta.clone().unwrap_or(protocol::TurnMeta {
                     elapsed_ms: 0,
                     avg_tps: None,
+                    display_tps: None,
                     interrupted: false,
                     tool_elapsed: std::collections::HashMap::new(),
                 });

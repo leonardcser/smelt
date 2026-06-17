@@ -48,10 +48,11 @@ impl From<&ContextCheckpoint> for ContextSnapshotKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccountingSnapshot {
-    #[serde(default)]
-    pub cost_usd: f64,
-    pub session_usage: TokenUsage,
+pub struct ContextSnapshot {
+    /// Legacy spend reading from older `accounting_snapshots` entries. New
+    /// snapshots keep cumulative spend only at the session level.
+    #[serde(default, rename = "cost_usd", skip_serializing)]
+    legacy_cost_usd: f64,
     pub context_tokens: Option<u32>,
     pub context_tokens_history_len: Option<usize>,
     /// Sticky display reading at this history point. This can differ from the
@@ -61,11 +62,10 @@ pub struct AccountingSnapshot {
     pub checkpoint: Option<ContextSnapshotKey>,
 }
 
-impl AccountingSnapshot {
+impl ContextSnapshot {
     fn from_session(session: &Session) -> Self {
         Self {
-            cost_usd: session.session_cost_usd,
-            session_usage: session.session_usage.clone(),
+            legacy_cost_usd: 0.0,
             context_tokens: session.context_tokens,
             context_tokens_history_len: session.context_tokens_history_len,
             display_context_tokens: session.display_context_tokens,
@@ -129,7 +129,7 @@ pub struct Session {
     pub first_user_message: Option<String>,
     /// Title/slug snapshots keyed by semantic history length. Rewind restores
     /// the latest snapshot at or before the retained history boundary.
-    pub metadata_snapshots: Vec<(usize, SessionMetadataSnapshot)>,
+    pub metadata_snapshots: HistorySnapshots<SessionMetadataSnapshot>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub mode: Option<String>,
@@ -148,10 +148,11 @@ pub struct Session {
     /// It may lag the current history while a new request is in flight.
     pub display_context_tokens: Option<u32>,
     /// Per-turn metadata, keyed by `history.len()` at turn-complete time.
-    pub turn_metas: Vec<(usize, TurnMeta)>,
-    /// Cost and token accounting snapshots, keyed by `history.len()` at
-    /// turn-complete time. Used to restore usage and context baselines after rewind.
-    pub accounting_snapshots: Vec<(usize, AccountingSnapshot)>,
+    pub turn_metas: HistorySnapshots<TurnMeta>,
+    /// Context snapshots keyed by `history.len()` at turn-complete time.
+    /// Rewind uses these to restore context baselines; session cost and
+    /// cumulative usage remain spent counters for the whole session.
+    pub context_snapshots: HistorySnapshots<ContextSnapshot>,
     /// Running session cost in USD; updated incrementally as token usage events arrive.
     pub session_cost_usd: f64,
     /// Cumulative token usage across every turn this session has made;
@@ -205,8 +206,8 @@ struct SessionWire {
     pub cost_snapshots: Vec<(usize, f64)>,
     #[serde(default)]
     pub turn_metas: Vec<(usize, TurnMeta)>,
-    #[serde(default)]
-    pub accounting_snapshots: Vec<(usize, AccountingSnapshot)>,
+    #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
+    pub context_snapshots: Vec<(usize, ContextSnapshot)>,
     #[serde(default)]
     pub session_cost_usd: f64,
     #[serde(default)]
@@ -224,7 +225,7 @@ struct SessionWireV2 {
     #[serde(default)]
     pub first_user_message: Option<String>,
     #[serde(default)]
-    pub metadata_snapshots: Vec<(usize, SessionMetadataSnapshot)>,
+    pub metadata_snapshots: HistorySnapshots<SessionMetadataSnapshot>,
     #[serde(default)]
     pub created_at_ms: u64,
     #[serde(default)]
@@ -250,9 +251,9 @@ struct SessionWireV2 {
     #[serde(default)]
     pub display_context_tokens: Option<u32>,
     #[serde(default)]
-    pub turn_metas: Vec<(usize, TurnMeta)>,
-    #[serde(default)]
-    pub accounting_snapshots: Vec<(usize, AccountingSnapshot)>,
+    pub turn_metas: HistorySnapshots<TurnMeta>,
+    #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
+    pub context_snapshots: HistorySnapshots<ContextSnapshot>,
     #[serde(default)]
     pub session_cost_usd: f64,
     #[serde(default)]
@@ -275,65 +276,156 @@ fn remap_msg_to_hist<T: Clone>(
     snapshots: &[(usize, T)],
     msg_to_hist: &[usize],
     hist_len: usize,
-) -> Vec<(usize, T)> {
-    snapshots
-        .iter()
-        .map(|(msg_pos, v)| {
-            let hist_pos = if *msg_pos == 0 {
-                0
-            } else if *msg_pos <= msg_to_hist.len() {
-                // Snapshot was taken AT messages.len() == msg_pos, i.e.
-                // after the (msg_pos-1)th message landed. The equivalent
-                // history-space key is one past the history index of the
-                // last absorbed message.
-                msg_to_hist[*msg_pos - 1] + 1
-            } else {
-                hist_len
-            };
-            (hist_pos, v.clone())
-        })
-        .collect()
+) -> HistorySnapshots<T> {
+    HistorySnapshots::from_vec(
+        snapshots
+            .iter()
+            .map(|(msg_pos, v)| {
+                let hist_pos = if *msg_pos == 0 {
+                    0
+                } else if *msg_pos <= msg_to_hist.len() {
+                    // Snapshot was taken AT messages.len() == msg_pos, i.e.
+                    // after the (msg_pos-1)th message landed. The equivalent
+                    // history-space key is one past the history index of the
+                    // last absorbed message.
+                    msg_to_hist[*msg_pos - 1] + 1
+                } else {
+                    hist_len
+                };
+                (hist_pos, v.clone())
+            })
+            .collect(),
+    )
 }
 
-fn truncate_snapshots_after<T>(snapshots: &mut Vec<(usize, T)>, hist_idx: usize) {
-    while snapshots.last().is_some_and(|(len, _)| *len > hist_idx) {
-        snapshots.pop();
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HistorySnapshots<T>(Vec<(usize, T)>);
+
+impl<T> Default for HistorySnapshots<T> {
+    fn default() -> Self {
+        Self(Vec::new())
     }
 }
 
-// COMPAT(session-v1-messages): rebuild accounting from old cost-only snapshots.
-fn legacy_accounting_snapshots(
+impl<T> HistorySnapshots<T> {
+    pub fn from_vec(entries: Vec<(usize, T)>) -> Self {
+        Self(entries)
+    }
+
+    pub fn into_vec(self) -> Vec<(usize, T)> {
+        self.0
+    }
+
+    pub fn as_slice(&self) -> &[(usize, T)] {
+        &self.0
+    }
+
+    pub fn push(&mut self, entry: (usize, T)) {
+        self.0.push(entry);
+    }
+
+    pub fn upsert_truncating_after(&mut self, len: usize, value: T) {
+        self.truncate_after(len);
+        if let Some((existing_len, existing)) = self.0.last_mut() {
+            if *existing_len == len {
+                *existing = value;
+                return;
+            }
+        }
+        self.push((len, value));
+    }
+
+    pub fn truncate_after(&mut self, len: usize) {
+        while self.0.last().is_some_and(|(entry_len, _)| *entry_len > len) {
+            self.0.pop();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn last(&self) -> Option<&(usize, T)> {
+        self.0.last()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, (usize, T)> {
+        self.0.iter()
+    }
+}
+
+impl<T: Clone> HistorySnapshots<T> {
+    pub fn last_value_cloned(&self) -> Option<T> {
+        self.0.last().map(|(_, value)| value.clone())
+    }
+}
+
+impl<'a, T> IntoIterator for &'a HistorySnapshots<T> {
+    type Item = &'a (usize, T);
+    type IntoIter = std::slice::Iter<'a, (usize, T)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<T> std::ops::Index<usize> for HistorySnapshots<T> {
+    type Output = (usize, T);
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
+impl<T> From<Vec<(usize, T)>> for HistorySnapshots<T> {
+    fn from(value: Vec<(usize, T)>) -> Self {
+        Self::from_vec(value)
+    }
+}
+
+// COMPAT(session-v1-messages): rebuild context snapshots from old cost-only snapshots.
+fn legacy_context_snapshots(
     cost_snapshots: Vec<(usize, f64)>,
     context_tokens: Option<u32>,
     context_tokens_history_len: Option<usize>,
     display_context_tokens: Option<u32>,
-) -> Vec<(usize, AccountingSnapshot)> {
-    cost_snapshots
-        .into_iter()
-        .map(|(len, cost_usd)| {
-            let (context_tokens, context_tokens_history_len, display_context_tokens) =
-                if context_tokens_history_len == Some(len) {
-                    (
+) -> HistorySnapshots<ContextSnapshot> {
+    HistorySnapshots::from_vec(
+        cost_snapshots
+            .into_iter()
+            .map(|(len, cost_usd)| {
+                let (context_tokens, context_tokens_history_len, display_context_tokens) =
+                    if context_tokens_history_len == Some(len) {
+                        (
+                            context_tokens,
+                            context_tokens_history_len,
+                            display_context_tokens,
+                        )
+                    } else {
+                        (None, None, None)
+                    };
+                (
+                    len,
+                    ContextSnapshot {
+                        legacy_cost_usd: cost_usd,
                         context_tokens,
                         context_tokens_history_len,
                         display_context_tokens,
-                    )
-                } else {
-                    (None, None, None)
-                };
-            (
-                len,
-                AccountingSnapshot {
-                    cost_usd,
-                    session_usage: TokenUsage::default(),
-                    context_tokens,
-                    context_tokens_history_len,
-                    display_context_tokens,
-                    checkpoint: None,
-                },
-            )
-        })
-        .collect()
+                        checkpoint: None,
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
 impl From<SessionWire> for Session {
@@ -345,21 +437,21 @@ impl From<SessionWire> for Session {
         let context_tokens_history_len = w.context_tokens_history_len;
         let display_context_tokens = w.display_context_tokens.or(context_tokens);
         let cost_snapshots = remap_msg_to_hist(&w.cost_snapshots, &table, hist_len);
-        let accounting_snapshots = remap_msg_to_hist(&w.accounting_snapshots, &table, hist_len);
-        let accounting_snapshots = if accounting_snapshots.is_empty() {
-            legacy_accounting_snapshots(
-                cost_snapshots,
+        let context_snapshots = remap_msg_to_hist(&w.context_snapshots, &table, hist_len);
+        let context_snapshots = if context_snapshots.is_empty() {
+            legacy_context_snapshots(
+                cost_snapshots.into_vec(),
                 context_tokens,
                 context_tokens_history_len,
                 display_context_tokens,
             )
         } else {
-            accounting_snapshots
+            context_snapshots
         };
         let session_cost_usd = if w.session_cost_usd == 0.0 {
-            accounting_snapshots
+            context_snapshots
                 .last()
-                .map(|(_, snapshot)| snapshot.cost_usd)
+                .map(|(_, snapshot)| snapshot.legacy_cost_usd)
                 .unwrap_or(w.session_cost_usd)
         } else {
             w.session_cost_usd
@@ -379,7 +471,7 @@ impl From<SessionWire> for Session {
             cwd: w.cwd,
             parent_id: w.parent_id,
             turn_metas: remap_msg_to_hist(&w.turn_metas, &table, hist_len),
-            accounting_snapshots,
+            context_snapshots,
             history,
             checkpoint: w.checkpoint,
             context_tokens,
@@ -396,6 +488,15 @@ impl From<SessionWireV2> for Session {
         let context_tokens = w.context_tokens;
         let display_context_tokens = w.display_context_tokens.or(context_tokens);
         let metadata_snapshots = w.metadata_snapshots;
+        let context_snapshots = w.context_snapshots;
+        let session_cost_usd = if w.session_cost_usd == 0.0 {
+            context_snapshots
+                .last()
+                .map(|(_, snapshot)| snapshot.legacy_cost_usd)
+                .unwrap_or(w.session_cost_usd)
+        } else {
+            w.session_cost_usd
+        };
         Self {
             id: w.id,
             title: w.title,
@@ -415,8 +516,8 @@ impl From<SessionWireV2> for Session {
             context_tokens_history_len: w.context_tokens_history_len,
             display_context_tokens,
             turn_metas: w.turn_metas,
-            accounting_snapshots: w.accounting_snapshots,
-            session_cost_usd: w.session_cost_usd,
+            context_snapshots,
+            session_cost_usd,
             session_usage: w.session_usage,
         }
     }
@@ -444,7 +545,7 @@ impl From<&Session> for SessionWireV2 {
             context_tokens_history_len: s.context_tokens_history_len,
             display_context_tokens: s.display_context_tokens,
             turn_metas: s.turn_metas.clone(),
-            accounting_snapshots: s.accounting_snapshots.clone(),
+            context_snapshots: s.context_snapshots.clone(),
             session_cost_usd: s.session_cost_usd,
             session_usage: s.session_usage.clone(),
         }
@@ -520,7 +621,7 @@ struct SessionJsonlMeta {
     #[serde(default)]
     pub first_user_message: Option<String>,
     #[serde(default)]
-    pub metadata_snapshots: Vec<(usize, SessionMetadataSnapshot)>,
+    pub metadata_snapshots: HistorySnapshots<SessionMetadataSnapshot>,
     #[serde(default)]
     pub created_at_ms: u64,
     #[serde(default)]
@@ -544,9 +645,9 @@ struct SessionJsonlMeta {
     #[serde(default)]
     pub display_context_tokens: Option<u32>,
     #[serde(default)]
-    pub turn_metas: Vec<(usize, TurnMeta)>,
-    #[serde(default)]
-    pub accounting_snapshots: Vec<(usize, AccountingSnapshot)>,
+    pub turn_metas: HistorySnapshots<TurnMeta>,
+    #[serde(default, rename = "accounting_snapshots", alias = "context_snapshots")]
+    pub context_snapshots: HistorySnapshots<ContextSnapshot>,
     #[serde(default)]
     pub session_cost_usd: f64,
     #[serde(default)]
@@ -576,7 +677,7 @@ impl From<&Session> for SessionJsonlMeta {
             context_tokens_history_len: s.context_tokens_history_len,
             display_context_tokens: s.display_context_tokens,
             turn_metas: s.turn_metas.clone(),
-            accounting_snapshots: s.accounting_snapshots.clone(),
+            context_snapshots: s.context_snapshots.clone(),
             session_cost_usd: s.session_cost_usd,
             session_usage: s.session_usage.clone(),
             text_bytes: Some(compute_text_bytes(&s.history)),
@@ -605,7 +706,7 @@ impl SessionJsonlMeta {
             context_tokens_history_len: self.context_tokens_history_len,
             display_context_tokens: self.display_context_tokens.or(self.context_tokens),
             turn_metas: self.turn_metas,
-            accounting_snapshots: self.accounting_snapshots,
+            context_snapshots: self.context_snapshots,
             session_cost_usd: self.session_cost_usd,
             session_usage: self.session_usage,
         }
@@ -624,7 +725,7 @@ impl Session {
             title: None,
             slug: None,
             first_user_message: None,
-            metadata_snapshots: Vec::new(),
+            metadata_snapshots: HistorySnapshots::default(),
             created_at_ms: now,
             updated_at_ms: now,
             mode: None,
@@ -637,8 +738,8 @@ impl Session {
             context_tokens: None,
             context_tokens_history_len: None,
             display_context_tokens: None,
-            turn_metas: Vec::new(),
-            accounting_snapshots: Vec::new(),
+            turn_metas: HistorySnapshots::default(),
+            context_snapshots: HistorySnapshots::default(),
             session_cost_usd: 0.0,
             session_usage: TokenUsage::default(),
         }
@@ -693,27 +794,20 @@ impl Session {
         self.checkpoint.as_ref().map(ContextSnapshotKey::from)
     }
 
-    pub fn snapshot_accounting(&mut self) {
-        let snapshot = AccountingSnapshot::from_session(self);
-        self.accounting_snapshots
-            .push((self.history.len(), snapshot));
+    pub fn snapshot_context(&mut self) {
+        let snapshot = ContextSnapshot::from_session(self);
+        self.context_snapshots.push((self.history.len(), snapshot));
     }
 
     pub fn snapshot_metadata_at(&mut self, hist_idx: usize) {
         let snapshot = SessionMetadataSnapshot::from_session(self);
-        truncate_snapshots_after(&mut self.metadata_snapshots, hist_idx);
-        if let Some((len, existing)) = self.metadata_snapshots.last_mut() {
-            if *len == hist_idx {
-                *existing = snapshot;
-                return;
-            }
-        }
-        self.metadata_snapshots.push((hist_idx, snapshot));
+        self.metadata_snapshots
+            .upsert_truncating_after(hist_idx, snapshot);
     }
 
     pub fn restore_metadata_after_rewind(&mut self, hist_idx: usize) {
-        truncate_snapshots_after(&mut self.metadata_snapshots, hist_idx);
-        if let Some((_, snapshot)) = self.metadata_snapshots.last().cloned() {
+        self.metadata_snapshots.truncate_after(hist_idx);
+        if let Some(snapshot) = self.metadata_snapshots.last_value_cloned() {
             self.apply_metadata_snapshot(snapshot);
         } else {
             self.clear_metadata();
@@ -721,8 +815,8 @@ impl Session {
     }
 
     pub fn prune_metadata_snapshots(&mut self, hist_idx: usize) {
-        truncate_snapshots_after(&mut self.metadata_snapshots, hist_idx);
-        if let Some((_, snapshot)) = self.metadata_snapshots.last().cloned() {
+        self.metadata_snapshots.truncate_after(hist_idx);
+        if let Some(snapshot) = self.metadata_snapshots.last_value_cloned() {
             self.apply_metadata_snapshot(snapshot);
         }
     }
@@ -730,6 +824,24 @@ impl Session {
     pub fn clear_metadata_snapshots(&mut self) {
         self.metadata_snapshots.clear();
         self.clear_metadata();
+    }
+
+    pub fn restore_rewindable_snapshots_after_rewind(
+        &mut self,
+        hist_idx: usize,
+        keep_checkpoint_at_boundary: bool,
+    ) -> Option<TurnMeta> {
+        self.turn_metas.truncate_after(hist_idx);
+        self.restore_context_after_rewind(hist_idx, keep_checkpoint_at_boundary);
+        self.restore_metadata_after_rewind(hist_idx);
+        self.turn_metas.last_value_cloned()
+    }
+
+    pub fn prune_rewindable_snapshots(&mut self, hist_idx: usize) -> Option<TurnMeta> {
+        self.turn_metas.truncate_after(hist_idx);
+        self.prune_context_snapshots(hist_idx);
+        self.prune_metadata_snapshots(hist_idx);
+        self.turn_metas.last_value_cloned()
     }
 
     fn apply_metadata_snapshot(&mut self, snapshot: SessionMetadataSnapshot) {
@@ -744,49 +856,31 @@ impl Session {
         self.first_user_message = None;
     }
 
-    pub fn clear_accounting_snapshots(&mut self) {
-        self.accounting_snapshots.clear();
-        self.session_cost_usd = 0.0;
-        self.session_usage = TokenUsage::default();
+    pub fn clear_context_snapshots(&mut self) {
+        self.context_snapshots.clear();
     }
 
-    pub fn restore_accounting_after_rewind(
+    pub fn restore_context_after_rewind(
         &mut self,
         hist_idx: usize,
         keep_checkpoint_at_boundary: bool,
     ) {
         let checkpoint_fallback =
             self.clear_checkpoint_for_rewind(hist_idx, keep_checkpoint_at_boundary);
-        truncate_snapshots_after(&mut self.accounting_snapshots, hist_idx);
-        if let Some((_, snapshot)) = self.accounting_snapshots.last().cloned() {
-            self.apply_accounting_snapshot(&snapshot);
-        } else {
-            self.session_cost_usd = 0.0;
-            self.session_usage = TokenUsage::default();
-        }
+        self.context_snapshots.truncate_after(hist_idx);
         self.restore_context_tokens_after_rewind(hist_idx, checkpoint_fallback);
     }
 
-    pub fn prune_accounting_snapshots(&mut self, hist_idx: usize) {
-        truncate_snapshots_after(&mut self.accounting_snapshots, hist_idx);
-        if let Some((_, snapshot)) = self.accounting_snapshots.last().cloned() {
-            self.apply_accounting_snapshot(&snapshot);
+    pub fn prune_context_snapshots(&mut self, hist_idx: usize) {
+        self.context_snapshots.truncate_after(hist_idx);
+        if !self.context_snapshots.is_empty() {
             self.restore_context_tokens_after_rewind(hist_idx, None);
-        } else {
-            self.session_cost_usd = 0.0;
-            self.session_usage = TokenUsage::default();
-            if self
-                .context_tokens_history_len
-                .is_some_and(|len| len > hist_idx)
-            {
-                self.clear_context_tokens();
-            }
+        } else if self
+            .context_tokens_history_len
+            .is_some_and(|len| len > hist_idx)
+        {
+            self.clear_context_tokens();
         }
-    }
-
-    fn apply_accounting_snapshot(&mut self, snapshot: &AccountingSnapshot) {
-        self.session_cost_usd = snapshot.cost_usd;
-        self.session_usage = snapshot.session_usage.clone();
     }
 
     fn restore_context_tokens_after_rewind(
@@ -796,7 +890,7 @@ impl Session {
     ) {
         let checkpoint = self.checkpoint_snapshot_key();
         let snapshot = self
-            .accounting_snapshots
+            .context_snapshots
             .iter()
             .rev()
             .find(|(_, snapshot)| {
@@ -820,12 +914,12 @@ impl Session {
             } else {
                 self.clear_context_tokens();
             }
-        } else if self.accounting_snapshots.is_empty()
+        } else if self.context_snapshots.is_empty()
             && self
                 .context_tokens_history_len
                 .is_some_and(|len| len <= hist_idx)
         {
-            // COMPAT(session-v1-messages): old sessions may not have accounting
+            // COMPAT(session-v1-messages): old sessions may not have context
             // snapshots; keep a baseline that still fits the rewound history.
         } else {
             self.clear_context_tokens();
@@ -898,7 +992,7 @@ impl Session {
         // The next provider response is the first authoritative baseline
         // token reading for checkpointed model history.
         self.clear_context_tokens_baseline();
-        self.snapshot_accounting();
+        self.snapshot_context();
         true
     }
 
@@ -993,7 +1087,7 @@ impl Session {
             context_tokens_history_len: self.context_tokens_history_len,
             display_context_tokens: self.display_context_tokens,
             turn_metas: self.turn_metas.clone(),
-            accounting_snapshots: self.accounting_snapshots.clone(),
+            context_snapshots: self.context_snapshots.clone(),
             session_cost_usd: self.session_cost_usd,
             session_usage: self.session_usage.clone(),
         }
@@ -1819,20 +1913,20 @@ mod tests {
     }
 
     #[test]
-    fn restore_accounting_after_rewind_restores_authoritative_context_snapshot() {
+    fn restore_context_after_rewind_restores_authoritative_context_snapshot() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
         s.context_tokens = Some(710);
         s.context_tokens_history_len = Some(2);
-        s.snapshot_accounting();
+        s.snapshot_context();
 
         s.history.extend([user_item("c"), assistant_text_item("d")]);
         s.context_tokens = Some(700);
         s.context_tokens_history_len = Some(4);
-        s.snapshot_accounting();
+        s.snapshot_context();
 
         s.history.truncate(2);
-        s.restore_accounting_after_rewind(2, false);
+        s.restore_context_after_rewind(2, false);
 
         assert_eq!(s.context_tokens, Some(710));
         assert_eq!(s.context_tokens_history_len, Some(2));
@@ -1840,19 +1934,19 @@ mod tests {
     }
 
     #[test]
-    fn restore_accounting_after_rewind_restores_display_context_snapshot() {
+    fn restore_context_after_rewind_restores_display_context_snapshot() {
         let mut s = fixture_session();
         s.history = vec![user_item("a"), assistant_text_item("b")];
         s.record_context_tokens(710);
         s.clear_context_tokens_baseline();
-        s.snapshot_accounting();
+        s.snapshot_context();
 
         s.history.extend([user_item("c"), assistant_text_item("d")]);
         s.record_context_tokens(700);
-        s.snapshot_accounting();
+        s.snapshot_context();
 
         s.history.truncate(2);
-        s.restore_accounting_after_rewind(2, false);
+        s.restore_context_after_rewind(2, false);
 
         assert_eq!(s.context_tokens, None);
         assert_eq!(s.context_tokens_history_len, None);
@@ -2282,16 +2376,15 @@ mod tests {
         });
         let s: Session = serde_json::from_value(json).unwrap();
         assert_eq!(s.history.len(), 2);
-        assert_eq!(s.accounting_snapshots.len(), 1);
-        assert_eq!(s.accounting_snapshots[0].0, 2);
-        assert_eq!(s.accounting_snapshots[0].1.cost_usd, 0.5);
+        assert_eq!(s.context_snapshots.len(), 1);
+        assert_eq!(s.context_snapshots[0].0, 2);
         assert_eq!(s.session_cost_usd, 0.5);
     }
 
     #[test]
     fn session_round_trips_through_wire_form_preserving_history_and_snapshots() {
         // Verify lossless save → load → save: native history rows,
-        // snapshot keys, costs, and context tokens all survive a
+        // snapshot keys, session cost, and context tokens all survive a
         // round-trip through the current `history: Vec<HistoryItem>`
         // on-disk JSON shape.
         let inv_ok = ToolInvocation {
@@ -2332,29 +2425,28 @@ mod tests {
         original.session_cost_usd = 1.25;
         original.session_usage.prompt_tokens = Some(10);
         original.session_usage.completion_tokens = Some(2);
-        original.snapshot_accounting();
+        original.snapshot_context();
 
         let json = serde_json::to_string(&original).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let snapshot = &value["accounting_snapshots"][0][1];
+        assert!(snapshot.get("cost_usd").is_none());
+        assert!(snapshot.get("session_usage").is_none());
         let round: Session = serde_json::from_str(&json).unwrap();
 
         assert_eq!(round.history, original.history);
         assert_eq!(
-            round.accounting_snapshots.len(),
-            original.accounting_snapshots.len()
+            round.context_snapshots.len(),
+            original.context_snapshots.len()
         );
         assert_eq!(round.context_tokens, original.context_tokens);
         assert_eq!(
             round.context_tokens_history_len,
             original.context_tokens_history_len
         );
-        assert_eq!(round.accounting_snapshots.len(), 1);
-        assert_eq!(round.accounting_snapshots[0].0, 3);
-        assert_eq!(round.accounting_snapshots[0].1.context_tokens, Some(200));
-        assert_eq!(round.accounting_snapshots[0].1.cost_usd, 1.25);
-        assert_eq!(
-            round.accounting_snapshots[0].1.session_usage.prompt_tokens,
-            Some(10)
-        );
+        assert_eq!(round.context_snapshots.len(), 1);
+        assert_eq!(round.context_snapshots[0].0, 3);
+        assert_eq!(round.context_snapshots[0].1.context_tokens, Some(200));
         assert_eq!(round.session_cost_usd, original.session_cost_usd);
         assert_eq!(round.id, original.id);
     }
@@ -2386,6 +2478,7 @@ mod tests {
         let meta = protocol::TurnMeta {
             elapsed_ms: 100,
             avg_tps: None,
+            display_tps: None,
             interrupted: false,
             tool_elapsed: [("c1".to_string(), 42u64)].into_iter().collect(),
         };

@@ -1117,11 +1117,7 @@ impl TuiApp {
             .unwrap_or(0);
         self.core.cells.publish_if_changed("spinner_frame", frame);
 
-        let tps = self
-            .working
-            .turn_meta()
-            .and_then(|m| m.avg_tps)
-            .unwrap_or(0.0);
+        let tps = self.working.display_tps().unwrap_or(0.0);
         self.core.cells.publish_if_changed("tps", tps);
 
         let task_label = self.task_label.clone().unwrap_or_default();

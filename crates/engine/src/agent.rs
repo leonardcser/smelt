@@ -974,6 +974,7 @@ impl<'a> Turn<'a> {
         TurnMeta {
             elapsed_ms: elapsed.as_millis() as u64,
             avg_tps,
+            display_tps: None,
             interrupted,
             tool_elapsed: self.tool_elapsed.clone(),
         }

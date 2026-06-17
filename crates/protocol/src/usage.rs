@@ -56,7 +56,12 @@ impl TokenUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnMeta {
     pub elapsed_ms: u64,
+    /// Average token speed reported by this turn itself.
     pub avg_tps: Option<f64>,
+    /// Token speed displayed at this history point. This may carry the last
+    /// observed speed forward when a turn completes without its own sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_tps: Option<f64>,
     pub interrupted: bool,
     /// Per-tool-call elapsed times, keyed by call_id.
     #[serde(default)]

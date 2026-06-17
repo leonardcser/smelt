@@ -532,6 +532,9 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         if let Some(tps) = m.avg_tps {
             let _ = t.set("avg_tps", tps);
         }
+        if let Some(tps) = m.display_tps {
+            let _ = t.set("display_tps", tps);
+        }
         let _ = t.set("interrupted", m.interrupted);
         if let Ok(tools) = lua.create_table() {
             for (k, v) in &m.tool_elapsed {
@@ -1153,6 +1156,7 @@ mod tests {
             Rc::new(TurnMeta {
                 elapsed_ms: 12000,
                 avg_tps: Some(33.5),
+                display_tps: Some(33.5),
                 interrupted: false,
                 tool_elapsed,
             }),
@@ -1198,6 +1202,7 @@ mod tests {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("elapsed_ms").unwrap(), 12000);
                 assert!((t.get::<f64>("avg_tps").unwrap() - 33.5).abs() < f64::EPSILON);
+                assert!((t.get::<f64>("display_tps").unwrap() - 33.5).abs() < f64::EPSILON);
                 assert!(!t.get::<bool>("interrupted").unwrap());
                 let tools: mlua::Table = t.get("tool_elapsed").unwrap();
                 assert_eq!(tools.get::<i64>("call_42").unwrap(), 1500);
@@ -1285,6 +1290,7 @@ mod tests {
             Rc::new(TurnMeta {
                 elapsed_ms: 100,
                 avg_tps: None,
+                display_tps: None,
                 interrupted: false,
                 tool_elapsed: std::collections::HashMap::new(),
             }),
