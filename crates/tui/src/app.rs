@@ -202,10 +202,13 @@ type AutoReloadSetup = Option<(
 )>;
 type AutoReloadSetupRx = tokio::sync::oneshot::Receiver<AutoReloadSetup>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Notification {
     pub(crate) win: crate::smelt_edit::WinId,
     pub(crate) lifetime: NotificationLifetime,
+    pub(crate) kind: smelt_core::messages::MessageKind,
+    pub(crate) summary: String,
+    pub(crate) rendered_width: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1764,67 +1767,16 @@ impl TuiApp {
         body: &str,
         lifetime: NotificationLifetime,
     ) {
-        use smelt_core::messages::MessageKind;
         if let Some(notification) = self.notification.take() {
             self.close_overlay_leaf(notification.win);
         }
 
-        let label = match kind {
-            MessageKind::Info => "info",
-            MessageKind::Warning => "warn",
-            MessageKind::Error => "error",
-        };
-        let indent = "  ";
-        let gap = "  ";
-
-        // The toast is a single visible row anchored over the prompt-above
-        // region. A multi-line body (e.g. an error with a traceback) would
-        // wrap past that row and obliterate the prompt bar underneath, so
-        // collapse to the first line and clamp to terminal width.
         let summary = body.lines().next().unwrap_or("");
-        let prefix_w = indent.len() + label.len() + gap.len();
-        let term_w = self.ui.terminal_size().0 as usize;
-        let available = term_w.saturating_sub(prefix_w);
-        let summary =
-            smelt_core::content::width::truncate_with_right_padding(summary, available, 2, "…");
-        let line = format!("{indent}{label}{gap}{}", summary.text);
-
+        let width = self.ui.terminal_size().0 as usize;
         let buf = self
             .ui
             .buf_create(crate::smelt_edit::BufCreateOpts::default());
-
-        let label_start = indent.len() as u16;
-        let label_end = label_start + label.len() as u16;
-        let msg_start = label_end + gap.len() as u16;
-        let msg_end = msg_start + summary.body.chars().count() as u16;
-
-        let label_color = match kind {
-            MessageKind::Error => self.ui.theme().get("ErrorMsg").fg,
-            MessageKind::Warning => self.ui.theme().get("WarningMsg").fg,
-            MessageKind::Info => None,
-        };
-        if let Some(b) = self.ui.buf_mut(buf) {
-            b.set_all_lines(vec![line]);
-            b.add_highlight(
-                0,
-                label_start,
-                label_end,
-                crate::smelt_edit::SpanStyle {
-                    fg: label_color,
-                    bold: true,
-                    ..Default::default()
-                },
-            );
-            b.add_highlight(
-                0,
-                msg_start,
-                msg_end,
-                crate::smelt_edit::SpanStyle {
-                    dim: true,
-                    ..Default::default()
-                },
-            );
-        }
+        Self::write_notification_buf(&mut self.ui, buf, kind, summary, width);
 
         let Some(win) = self.ui.win_open_split(
             buf,
@@ -1857,7 +1809,83 @@ impl TuiApp {
                 // never obscures a modal asking for input.
                 .with_z(40),
         );
-        self.notification = Some(Notification { win, lifetime });
+        self.notification = Some(Notification {
+            win,
+            lifetime,
+            kind,
+            summary: summary.to_string(),
+            rendered_width: width,
+        });
+    }
+
+    fn notification_parts(
+        kind: smelt_core::messages::MessageKind,
+        summary: &str,
+        width: usize,
+    ) -> (String, u16, u16, u16, u16) {
+        use smelt_core::messages::MessageKind;
+
+        let label = match kind {
+            MessageKind::Info => "info",
+            MessageKind::Warning => "warn",
+            MessageKind::Error => "error",
+        };
+        let indent = "  ";
+        let gap = "  ";
+
+        // The toast is a single visible row and clamps to the current
+        // viewport width.
+        let prefix_w = indent.len() + label.len() + gap.len();
+        let available = width.saturating_sub(prefix_w);
+        let summary =
+            smelt_core::content::width::truncate_with_right_padding(summary, available, 2, "…");
+        let line = format!("{indent}{label}{gap}{}", summary.text);
+
+        let label_start = indent.len() as u16;
+        let label_end = label_start + label.len() as u16;
+        let msg_start = label_end + gap.len() as u16;
+        let msg_end = msg_start + summary.body.chars().count() as u16;
+        (line, label_start, label_end, msg_start, msg_end)
+    }
+
+    pub(crate) fn write_notification_buf(
+        ui: &mut crate::smelt_edit::Ui,
+        buf: crate::smelt_edit::BufId,
+        kind: smelt_core::messages::MessageKind,
+        summary: &str,
+        width: usize,
+    ) {
+        use smelt_core::messages::MessageKind;
+
+        let (line, label_start, label_end, msg_start, msg_end) =
+            Self::notification_parts(kind, summary, width);
+        let label_color = match kind {
+            MessageKind::Error => ui.theme().get("ErrorMsg").fg,
+            MessageKind::Warning => ui.theme().get("WarningMsg").fg,
+            MessageKind::Info => None,
+        };
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines(vec![line]);
+            b.add_highlight(
+                0,
+                label_start,
+                label_end,
+                crate::smelt_edit::SpanStyle {
+                    fg: label_color,
+                    bold: true,
+                    ..Default::default()
+                },
+            );
+            b.add_highlight(
+                0,
+                msg_start,
+                msg_end,
+                crate::smelt_edit::SpanStyle {
+                    dim: true,
+                    ..Default::default()
+                },
+            );
+        }
     }
 
     pub(crate) fn dismiss_notification(&mut self) {
@@ -1870,6 +1898,7 @@ impl TuiApp {
         let now = self.core.clock.instant_now();
         if self
             .notification
+            .as_ref()
             .is_some_and(|notification| notification.lifetime.is_expired(now))
         {
             self.dismiss_notification();
@@ -1881,12 +1910,15 @@ impl TuiApp {
     pub(crate) fn notification_expiry_delay(&self) -> Option<Duration> {
         let now = self.core.clock.instant_now();
         self.notification
+            .as_ref()
             .and_then(|notification| notification.lifetime.expiry_delay(now))
     }
 
     #[cfg(any(test, feature = "harness"))]
     pub(crate) fn notification_win(&self) -> Option<crate::smelt_edit::WinId> {
-        self.notification.map(|notification| notification.win)
+        self.notification
+            .as_ref()
+            .map(|notification| notification.win)
     }
 
     pub(crate) fn set_task_label(&mut self, label: String) {

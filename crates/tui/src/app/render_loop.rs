@@ -139,6 +139,7 @@ impl TuiApp {
         // transcript through the generic `Ui` path while paint callbacks still
         // invoke Lua without borrowing all of `self`.
         let transcript = &mut self.transcript;
+        let notification = &mut self.notification;
         let paint_registry = &self.paint_registry;
         let lua = &self.lua;
         let theme = self.ui.theme().clone();
@@ -154,6 +155,22 @@ impl TuiApp {
         let _ = ui.render_with_paints_prepared(
             out,
             |ui, request| {
+                if let Some(notification) = notification
+                    .as_mut()
+                    .filter(|notification| notification.win == request.win)
+                {
+                    let width = request.content_width as usize;
+                    if width != notification.rendered_width {
+                        crate::app::TuiApp::write_notification_buf(
+                            ui,
+                            request.buf,
+                            notification.kind,
+                            &notification.summary,
+                            width,
+                        );
+                        notification.rendered_width = width;
+                    }
+                }
                 if request.win != crate::app::TRANSCRIPT_WIN {
                     return;
                 }

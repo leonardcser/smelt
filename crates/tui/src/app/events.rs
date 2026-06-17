@@ -928,7 +928,7 @@ impl TuiApp {
     }
 
     fn handle_notification_key(&mut self, key: KeyEvent) -> Option<EventOutcome> {
-        let notification = self.notification?;
+        let notification = self.notification.as_ref()?;
         if key.code == KeyCode::Esc && key.modifiers == KeyModifiers::NONE {
             if matches!(self.app_focus, crate::app::AppFocus::Prompt)
                 && self.prompt_escape_owned_by_vim()
