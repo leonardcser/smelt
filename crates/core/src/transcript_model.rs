@@ -387,6 +387,15 @@ pub enum TranscriptBlockDescriptor {
         content: String,
         lang: String,
     },
+    ToolDraft {
+        stream_id: String,
+        call_id: Option<String>,
+        name: String,
+        summary: protocol::StyledLines,
+        args: HashMap<String, serde_json::Value>,
+        raw_arguments: String,
+        finished: bool,
+    },
     ToolCall {
         call_id: String,
         name: String,
@@ -419,6 +428,23 @@ impl TranscriptBlockDescriptor {
             Block::Thinking { content } => Self::Thinking { content },
             Block::Text { content } => Self::Text { content },
             Block::CodeLine { content, lang } => Self::CodeLine { content, lang },
+            Block::ToolDraft {
+                stream_id,
+                call_id,
+                name,
+                summary,
+                args,
+                raw_arguments,
+                finished,
+            } => Self::ToolDraft {
+                stream_id,
+                call_id,
+                name,
+                summary,
+                args,
+                raw_arguments,
+                finished,
+            },
             Block::ToolCall {
                 call_id,
                 name,
@@ -464,6 +490,23 @@ impl TranscriptBlockDescriptor {
                 content: content.clone(),
                 lang: lang.clone(),
             },
+            Self::ToolDraft {
+                stream_id,
+                call_id,
+                name,
+                summary,
+                args,
+                raw_arguments,
+                finished,
+            } => Block::ToolDraft {
+                stream_id: stream_id.clone(),
+                call_id: call_id.clone(),
+                name: name.clone(),
+                summary: summary.clone(),
+                args: args.clone(),
+                raw_arguments: raw_arguments.clone(),
+                finished: *finished,
+            },
             Self::ToolCall {
                 call_id,
                 name,
@@ -498,7 +541,7 @@ impl TranscriptBlockDescriptor {
             Self::CodeLine { content, .. } => Some(content.clone()),
             Self::Exec { command, output } => Some(format!("$ {command}\n{output}")),
             Self::Compacted { summary } => Some(summary.clone()),
-            Self::ToolCall { .. } => None,
+            Self::ToolDraft { .. } | Self::ToolCall { .. } => None,
         }
     }
 
@@ -510,7 +553,7 @@ impl TranscriptBlockDescriptor {
             Self::Thinking { .. } => "thinking",
             Self::Text { .. } => "assistant",
             Self::CodeLine { .. } => "code",
-            Self::ToolCall { .. } => "tool",
+            Self::ToolDraft { .. } | Self::ToolCall { .. } => "tool",
             Self::Exec { .. } => "exec",
             Self::Compacted { .. } => "compacted",
         }
@@ -518,13 +561,14 @@ impl TranscriptBlockDescriptor {
 
     pub fn tool_name(&self) -> Option<&str> {
         match self {
-            Self::ToolCall { name, .. } => Some(name.as_str()),
+            Self::ToolDraft { name, .. } | Self::ToolCall { name, .. } => Some(name.as_str()),
             _ => None,
         }
     }
 
     pub fn tool_call_id(&self) -> Option<&str> {
         match self {
+            Self::ToolDraft { call_id, .. } => call_id.as_deref(),
             Self::ToolCall { call_id, .. } => Some(call_id.as_str()),
             _ => None,
         }
@@ -541,7 +585,7 @@ impl TranscriptBlockDescriptor {
 
     pub fn arg_field(&self, arg: &str) -> Option<&serde_json::Value> {
         match self {
-            Self::ToolCall { args, .. } => args.get(arg),
+            Self::ToolDraft { args, .. } | Self::ToolCall { args, .. } => args.get(arg),
             _ => None,
         }
     }
@@ -760,9 +804,7 @@ impl BlockHistory {
     }
 
     pub fn is_tool_draft(&self, id: BlockId) -> bool {
-        self.entries
-            .get(&id)
-            .is_some_and(BlockEntry::is_tool_draft)
+        self.entries.get(&id).is_some_and(BlockEntry::is_tool_draft)
     }
 
     pub fn process_field(&self, id: BlockId, field: &str) -> Option<String> {
@@ -1084,11 +1126,11 @@ impl BlockHistory {
     }
 
     pub(crate) fn remove_block(&mut self, id: BlockId) {
-        if !self.blocks.contains_key(&id) {
+        if !self.entries.contains_key(&id) {
             return;
         }
         self.order.retain(|candidate| *candidate != id);
-        self.blocks.remove(&id);
+        self.entries.remove(&id);
         self.content_hashes.remove(&id);
         self.statuses.remove(&id);
         self.origins.remove(&id);
