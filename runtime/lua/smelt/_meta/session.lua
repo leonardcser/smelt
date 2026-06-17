@@ -61,6 +61,10 @@ session.history = nil
 ---@type fun(): string
 session.id = nil
 
+--- Return current session metadata as a table. Includes id, title, slug, timestamps, paths, parent id, model/mode, usage counts, and current worktree context.
+---@type fun(): table
+session.info = nil
+
 --- List persisted sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, and `size_bytes` when available.
 ---@type fun(): table
 session.list = nil

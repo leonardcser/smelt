@@ -66,10 +66,10 @@ local function header_for(label_w)
 end
 
 local function panel_title()
-	return {
+	return smelt.dialog.title({
 		{ text = " performance ", bold = true },
-		{ text = "(F12 to close) ", fg = "grey", dim = true },
-	}
+		{ text = "(F12 to close) ", fg = "grey" },
+	})
 end
 
 local function current_layout(win)

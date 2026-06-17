@@ -122,6 +122,16 @@ block above `NAV_KEYS` for every accepted `opts` field. Returns the
 value resolved from `on_submit` (defaults to the highlighted item) or
 `nil` on dismiss.
 
+## `smelt.dialog.title`
+
+```lua
+fun(title: string|table, opts?: { pad?: boolean }): table|string|nil
+```
+
+Return a title spec styled for dialog/window chrome. Use this for raw
+overlays or layout leaves that should match dialog title treatment;
+`smelt.dialog.open` applies it automatically to its own title and panels.
+
 ## `smelt.dialog.viewer`
 
 ```lua

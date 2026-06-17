@@ -13,13 +13,13 @@ local state = smelt.state("debug_panel")
 local NS_HL = smelt.ns("smelt.debug_panel")
 
 local PANEL_W = 52
-local PANEL_H = 20
+local PANEL_H = 24
 
 local function panel_title()
-	return {
+	return smelt.dialog.title({
 		{ text = " debug ", bold = true },
-		{ text = "(F3 to close) ", fg = "grey", dim = true },
-	}
+		{ text = "(F3 to close) ", fg = "grey" },
+	})
 end
 
 local function fmt_bool(v)
@@ -87,6 +87,12 @@ local function compose_lines(win)
 	local tokens = smelt.session.tokens()
 	local turns = smelt.session.turns()
 	local messages = smelt.session.messages()
+	local session_id = smelt.session.id()
+	local session_title = smelt.session.title()
+	local cwd = smelt.session.cwd()
+	local worktree_managed = smelt.cell("cwd_managed_worktree"):get()
+	local worktree_path = smelt.cell("cwd_worktree_path"):get()
+	local worktree_name = smelt.cell("cwd_worktree"):get()
 	local work_state = smelt.cell("work_state"):get() or "idle"
 	local compact = smelt.state("compact")
 
@@ -97,10 +103,20 @@ local function compose_lines(win)
 	add_kv(lines, spans, "provider", provider, width)
 	add_kv(lines, spans, "api_base", api_base, width)
 	add_kv(lines, spans, "mode", mode .. (reasoning ~= "off" and " / " .. reasoning or ""), width)
+	add_kv(lines, spans, "session_id", session_id, width)
+	if session_title then
+		add_kv(lines, spans, "title", session_title, width)
+	end
+	add_kv(lines, spans, "cwd", cwd, width)
+	if worktree_managed then
+		local worktree_display = worktree_path and worktree_path ~= "" and worktree_path or worktree_name
+		add_kv(lines, spans, "worktree", worktree_display, width)
+	end
 
 	local ctx_str
-	if ctx and window and window > 0 then
-		ctx_str = string.format("%s / %s (%s)", smelt.text.format_tokens(ctx), smelt.text.format_tokens(window), fmt_pct(ctx, window))
+	if window and window > 0 then
+		local used = ctx or 0
+		ctx_str = string.format("%s / %s (%s)", smelt.text.format_tokens(used), smelt.text.format_tokens(window), fmt_pct(used, window))
 	elseif ctx then
 		ctx_str = smelt.text.format_tokens(ctx)
 	else

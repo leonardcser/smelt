@@ -75,6 +75,13 @@ dialog.open_handle = nil
 ---@type fun(opts: smelt.dialog.PickerOpts): any
 dialog.picker = nil
 
+--- Return a title spec styled for dialog/window chrome. Use this for raw
+--- overlays or layout leaves that should match dialog title treatment;
+--- `smelt.dialog.open` applies it automatically to its own title and panels.
+---@see smelt.dialog.open
+---@type fun(title: string|table, opts?: { pad?: boolean }): table|string|nil
+dialog.title = nil
+
 --- Open a read-only content dialog. Pass `text` for plain text, `lines` for
 --- plain line tables, `styled` for styled lines, or `buf` for a live buffer the
 --- caller will update after opening. Returns `(handle, buf, leaf)`.

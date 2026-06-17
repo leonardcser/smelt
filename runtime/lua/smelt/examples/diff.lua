@@ -95,21 +95,21 @@ local function open(filepath)
 	local right_win = smelt.win.new(right_buf, win_opts)
 
 	local overlay = smelt.overlay.new({
-		title = {
+		title = smelt.dialog.title({
 			{ text = " diff ", fg = "green", bold = true },
 			{ text = rel .. " ", fg = "white" },
-			{ text = "(esc to close) ", fg = "grey", dim = true },
-		},
+			{ text = "(esc to close) ", fg = "grey" },
+		}),
 		anchor = "center",
 		width = "90%",
 		height = "85%",
 		layout = smelt.ui.layout.hbox({
 			{
-				smelt.ui.layout.leaf(left_win, { title = { { text = " HEAD ", fg = "red", dim = true } } }),
+				smelt.ui.layout.leaf(left_win, { title = smelt.dialog.title({ { text = " HEAD ", fg = "red" } }) }),
 				width = "fill",
 			},
 			{
-				smelt.ui.layout.leaf(right_win, { title = { { text = " working ", fg = "green", dim = true } } }),
+				smelt.ui.layout.leaf(right_win, { title = smelt.dialog.title({ { text = " working ", fg = "green" } }) }),
 				width = "fill",
 			},
 		}, { gap = 1 }),

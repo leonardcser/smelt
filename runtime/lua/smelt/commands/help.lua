@@ -224,7 +224,7 @@ smelt.cmd.register("help", function()
       height = "75%",
       layout = smelt.ui.layout.leaf(leaf, {
         border = { all = "Comment" },
-        title = " help ",
+        title = smelt.dialog.title(" help "),
       }),
     })
 

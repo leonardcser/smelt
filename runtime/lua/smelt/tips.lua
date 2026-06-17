@@ -254,7 +254,7 @@ M.register({
 M.register({
   id = "commands.discover",
   key = "/",
-  text = "try /resume, /compact, /fork, /ps, /color, /trust",
+  text = "try /resume, /session, /compact, /fork, /ps, /color",
 })
 
 M.register({

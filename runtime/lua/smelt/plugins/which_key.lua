@@ -39,10 +39,10 @@ local function collect_rows(pending)
 end
 
 local function title(pending)
-	return {
+	return smelt.dialog.title({
 		{ text = " which-key ", bold = true },
-		{ text = pending .. " ", fg = "grey", dim = true },
-	}
+		{ text = pending .. " ", fg = "grey" },
+	})
 end
 
 local function close()

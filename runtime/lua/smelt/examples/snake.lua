@@ -264,10 +264,10 @@ local function open()
 	STATE.paint = smelt.paint.register(paint, { name = "smelt.snake.paint" })
 
 	smelt.overlay.new({
-		title = {
+		title = smelt.dialog.title({
 			{ text = " snake ", fg = "green", bold = true },
-			{ text = "(F11 to close) ", fg = "grey", dim = true },
-		},
+			{ text = "(F11 to close) ", fg = "grey" },
+		}),
 		border = { all = "Comment" },
 		layout = smelt.ui.layout.vbox({
 			{

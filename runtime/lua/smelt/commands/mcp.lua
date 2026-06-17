@@ -107,7 +107,7 @@ smelt.cmd.register("mcp", function()
       height = "75%",
       layout = smelt.ui.layout.leaf(leaf, {
         border = { all = "Comment" },
-        title = " mcp ",
+        title = smelt.dialog.title(" mcp "),
       }),
     })
 

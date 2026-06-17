@@ -61,6 +61,29 @@ pub(crate) fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResul
     Ok(tbl)
 }
 
+fn usage_to_lua(lua: &Lua, usage: &protocol::TokenUsage) -> LuaResult<mlua::Table> {
+    let t = lua.create_table()?;
+    let input = usage.prompt_tokens.unwrap_or(0);
+    let output = usage.completion_tokens.unwrap_or(0);
+    let cache_read = usage.cache_read_tokens.unwrap_or(0);
+    let cache_write = usage.cache_write_tokens.unwrap_or(0);
+    let reasoning = usage.reasoning_tokens.unwrap_or(0);
+    t.set("input", input)?;
+    t.set("output", output)?;
+    t.set("cache_read", cache_read)?;
+    t.set("cache_write", cache_write)?;
+    t.set("reasoning", reasoning)?;
+    t.set("total", input + output)?;
+    // The denominator is input + cache_read: input is the count of tokens the
+    // provider had to read fresh, cache_read is the count served from cache.
+    // Together they cover the prefix this turn consumed.
+    let denom = input as u64 + cache_read as u64;
+    if denom > 0 {
+        t.set("cache_hit_ratio", cache_read as f64 / denom as f64)?;
+    }
+    Ok(t)
+}
+
 fn note_kind_to_lua(kind: protocol::HistoryNoteKind) -> &'static str {
     match kind {
         protocol::HistoryNoteKind::ModeChange => "mode_change",
@@ -273,28 +296,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         |lua, ()| -> LuaResult<mlua::Table> {
             let usage = crate::lua::try_with_app(|app| app.core.session.session_usage.clone())
                 .unwrap_or_default();
-            let t = lua.create_table()?;
-            let input = usage.prompt_tokens.unwrap_or(0);
-            let output = usage.completion_tokens.unwrap_or(0);
-            let cache_read = usage.cache_read_tokens.unwrap_or(0);
-            let cache_write = usage.cache_write_tokens.unwrap_or(0);
-            let reasoning = usage.reasoning_tokens.unwrap_or(0);
-            t.set("input", input)?;
-            t.set("output", output)?;
-            t.set("cache_read", cache_read)?;
-            t.set("cache_write", cache_write)?;
-            t.set("reasoning", reasoning)?;
-            t.set("total", input + output)?;
-            // The denominator is input + cache_read: input is the count of
-            // tokens the provider had to read fresh, cache_read is the count
-            // served from cache. Together they cover the prefix this turn
-            // consumed. A ratio of 1.0 means a perfect hit; 0.0 means a
-            // full re-process.
-            let denom = input as u64 + cache_read as u64;
-            if denom > 0 {
-                t.set("cache_hit_ratio", cache_read as f64 / denom as f64)?;
-            }
-            Ok(t)
+            usage_to_lua(lua, &usage)
         },
     )?;
     m.fn_(
@@ -320,6 +322,52 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |_, ()| -> LuaResult<u64> {
             Ok(crate::lua::try_with_app(|app| app.core.session.created_at_ms).unwrap_or_default())
+        },
+    )?;
+    m.fn_(
+        "info",
+        "Return current session metadata as a table. Includes id, title, slug, timestamps, paths, parent id, model/mode, usage counts, and current worktree context.",
+        &[],
+        |lua, ()| -> LuaResult<mlua::Table> {
+            let out = lua.create_table()?;
+            if let Some(result) = crate::lua::try_with_app(|app| -> LuaResult<()> {
+                let session = &app.core.session;
+                out.set("id", session.id.as_str())?;
+                out.set("dir", smelt_core::session::dir_for(session).display().to_string())?;
+                out.set("title", session.title.as_deref())?;
+                out.set("slug", session.slug.as_deref())?;
+                out.set("first_user_message", session.first_user_message.as_deref())?;
+                out.set("parent_id", session.parent_id.as_deref())?;
+                out.set("created_at_ms", session.created_at_ms)?;
+                out.set("updated_at_ms", session.updated_at_ms)?;
+                out.set("cwd", app.cwd.as_str())?;
+                out.set("session_cwd", session.cwd.as_deref())?;
+                out.set("model", app.core.config.model.as_str())?;
+                out.set("provider", app.core.config.provider_type.as_str())?;
+                out.set("api_base", app.core.config.api_base.as_str())?;
+                out.set("mode", app.core.config.mode.as_str())?;
+                out.set("reasoning", app.core.config.reasoning_effort.label())?;
+                out.set("context_tokens", session.display_context_tokens())?;
+                out.set("context_window", app.core.config.context_window)?;
+                out.set("cost", session.session_cost_usd)?;
+                out.set("history_count", session.history.len())?;
+                out.set("message_count", protocol::history_to_messages(&session.history).len())?;
+                out.set("turn_count", app.user_turns().len())?;
+
+                out.set("tokens", usage_to_lua(lua, &session.session_usage)?)?;
+
+                let worktree = lua.create_table()?;
+                worktree.set("managed", app.cwd_managed_worktree)?;
+                worktree.set("project", app.cwd_project.as_str())?;
+                worktree.set("branch", app.cwd_branch.as_str())?;
+                worktree.set("name", app.cwd_worktree.as_str())?;
+                worktree.set("path", app.cwd_worktree_path.as_str())?;
+                out.set("worktree", worktree)?;
+                Ok(())
+            }) {
+                result?;
+            }
+            Ok(out)
         },
     )?;
     m.fn_(

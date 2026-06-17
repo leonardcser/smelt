@@ -1216,6 +1216,8 @@ Modal overlay builders.
   Non-coroutine open.
 - `smelt.dialog.picker` :: `fun(opts: smelt.dialog.PickerOpts): any`
   Coroutine-blocking Telescope-style picker.
+- `smelt.dialog.title` :: `fun(title: string|table, opts?: { pad?: boolean }): table|string|nil`
+  Return a title spec styled for dialog/window chrome.
 - `smelt.dialog.viewer` :: `fun(opts: table): table, smelt.buf.Buf, smelt.win.Win`
   Open a read-only content dialog.
 
@@ -1471,6 +1473,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Return the semantic session history as compaction-safe items.
 - `smelt.session.id` :: `fun(): string`
   Stable session id (matches the on-disk session filename).
+- `smelt.session.info` :: `fun(): table`
+  Return current session metadata as a table.
 - `smelt.session.list` :: `fun(): table`
   List persisted sessions other than the current one.
 - `smelt.session.load` :: `fun(id: string): nil`

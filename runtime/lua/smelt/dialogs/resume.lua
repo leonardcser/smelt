@@ -378,11 +378,11 @@ smelt.cmd.register("resume", function()
 
     local list_layout = smelt.ui.layout.leaf(list_leaf, {
       border = { all = "Comment" },
-      title = " sessions ",
+      title = smelt.dialog.title(" sessions "),
     })
     local input_layout = smelt.ui.layout.leaf(input_leaf, {
       border = { all = "Comment" },
-      title = " filter ",
+      title = smelt.dialog.title(" filter "),
     })
     local left = smelt.ui.layout.vbox({
       { list_layout,  height = "fill" },
@@ -394,7 +394,7 @@ smelt.cmd.register("resume", function()
         { left, width = "40%" },
         { smelt.ui.layout.leaf(preview_leaf, {
             border = { all = "Comment" },
-            title = " transcript ",
+            title = smelt.dialog.title(" transcript "),
           }), width = "fill" },
       }, { gap = 0, padding = 0 })
     end

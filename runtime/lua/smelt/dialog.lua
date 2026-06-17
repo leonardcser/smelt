@@ -566,6 +566,48 @@ local function with_chrome(spec)
   return spec
 end
 
+local function copy_title_span(span)
+  if type(span) == "string" then
+    return { text = span, dim = true }
+  end
+  if type(span) ~= "table" then return span end
+  local out = {}
+  for k, v in pairs(span) do out[k] = v end
+  out.dim = true
+  return out
+end
+
+--- Return a title spec styled for dialog/window chrome. Use this for raw
+--- overlays or layout leaves that should match dialog title treatment;
+--- `smelt.dialog.open` applies it automatically to its own title and panels.
+---@type fun(title: string|table, opts?: { pad?: boolean }): table|string|nil
+function smelt.dialog.title(title, opts)
+  opts = opts or {}
+  if title == nil or title == "" then return title end
+
+  local spans
+  if type(title) == "string" then
+    spans = { { text = title, dim = true } }
+  elseif type(title) == "table" then
+    if title.text ~= nil then
+      spans = { copy_title_span(title) }
+    elseif #title > 0 then
+      spans = {}
+      for _, span in ipairs(title) do spans[#spans + 1] = copy_title_span(span) end
+    else
+      return title
+    end
+  else
+    return title
+  end
+
+  if opts.pad then
+    table.insert(spans, 1, { text = " " })
+    spans[#spans + 1] = { text = " " }
+  end
+  return spans
+end
+
 local function open_overlay(opts)
   if opts.height ~= nil and opts.max_height ~= nil then
     error("smelt.dialog: use `height` (fixed) or `max_height` (fit to content), not both", 3)
@@ -595,7 +637,7 @@ local function open_overlay(opts)
       leaves[#leaves + 1] = p.leaf
       local leaf_node = smelt.ui.layout.leaf(p.leaf, {
         border              = p.border,
-        title               = p.title,
+        title               = smelt.dialog.title(p.title),
         collapse_when_empty = p.collapse_when_empty or false,
       })
       layout_items[i] = { leaf_node, height = p.height or default_panel_height }
@@ -610,22 +652,7 @@ local function open_overlay(opts)
   -- title content. Callers MUST NOT pad - pass `"messages"` not `" messages "`,
   -- and for multi-span titles drop the leading space on the first span and the
   -- trailing space on the last span.
-  --   - bare string: rendered dim and padded with a space on each side.
-  --   - table with `text` key (single span): wrapped between two raw space spans.
-  --   - table sequence (multi-span): same - leading/trailing space spans added.
-  local title = opts.title
-  if type(title) == "string" and title ~= "" then
-    title = { { text = " " }, { text = title, dim = true }, { text = " " } }
-  elseif type(title) == "table" then
-    if title.text ~= nil then
-      title = { { text = " " }, title, { text = " " } }
-    elseif #title > 0 then
-      local padded = { { text = " " } }
-      for _, span in ipairs(title) do table.insert(padded, span) end
-      table.insert(padded, { text = " " })
-      title = padded
-    end
-  end
+  local title = smelt.dialog.title(opts.title, { pad = true })
 
   local panel_vbox
   if #top_items > 0 and #bottom_items > 0 then

@@ -110,6 +110,14 @@ fun(): string
 
 Stable session id (matches the on-disk session filename).
 
+## `smelt.session.info`
+
+```lua
+fun(): table
+```
+
+Return current session metadata as a table. Includes id, title, slug, timestamps, paths, parent id, model/mode, usage counts, and current worktree context.
+
 ## `smelt.session.list`
 
 ```lua

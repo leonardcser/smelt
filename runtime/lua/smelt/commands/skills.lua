@@ -56,7 +56,7 @@ smelt.cmd.register("skills", function()
       height = "75%",
       layout = smelt.ui.layout.leaf(leaf, {
         border = { all = "Comment" },
-        title = " skills ",
+        title = smelt.dialog.title(" skills "),
       }),
     })
 
