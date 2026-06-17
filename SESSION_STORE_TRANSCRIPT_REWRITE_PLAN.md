@@ -133,17 +133,17 @@ It does **not** send `ToolOutcome.metadata` to the provider. Therefore large met
 
 ### Transcript projection
 
-Current transcript projection is partly lazy but still globally exact:
+Current transcript projection is partly lazy and now uses a mixed estimated/exact height index:
 
-- `plan_projection_measured` calls `rebuild_row_index_with_env` before viewport planning at `crates/tui/src/content/transcript_buf.rs:1705`.
-- `rebuild_row_index_with_env` collects all missing nodes and measures every missing height at `crates/tui/src/content/transcript_buf.rs:1310`.
-- `plan_projection_from_prepared` uses exact `total_rows` and exact prefix rows at `crates/tui/src/content/transcript_buf.rs:1783`.
-- Visible projection itself is bounded and materializes a node range at `crates/tui/src/content/transcript_buf.rs:1944`.
+- `plan_projection_measured` prepares the row index without globally measuring every missing node at `crates/tui/src/content/transcript_buf.rs`.
+- The projection planner estimates missing heights, exactifies the visible + overscan node range, then replans against the refined prefix rows.
+- Exact APIs such as full block layout, full row builds, range materialization, and copy still exactify the rows they need before returning content.
+- Visible projection itself remains bounded and materializes only the planned node range.
 
-Problems:
+Remaining problems:
 
-- Visible rendering is lazy, but exact height calculation is global.
-- Large sessions block on exact measurement even when only the tail is visible.
+- Cold arbitrary row jumps are approximate until local refinement catches up.
+- Search still builds a display search index through TUI history rather than SQLite candidates.
 - Persisted display caches help only when keys match and the full exact row index is accepted.
 
 ### Existing UI seams that we should keep
@@ -807,6 +807,8 @@ Acceptance:
 - There is a clear deletion path for `build_transcript_from_session`, resumed `BlockHistory`, and old projection entry points.
 
 ### Phase H: Progressive height, navigation, copy, and search
+
+Status: partial. Transcript projection now prepares a mixed estimated/exact row index instead of measuring every missing height before first paint. Visible planning exact-measures the visible + overscan node range and replans after refinement, so a cold tail render of a large transcript does not measure every block. `TranscriptDocument::snapshot` reports an estimated row count, while visible materialization, row-range display, copy, fold targeting, and resize anchors exactify the rows or anchor nodes they consume. Remaining work: rename/split the internal `ExactRowIndex` into the planned `TranscriptHeightIndex`, load descriptor records directly from SQLite, keep large tool metadata object-backed through render/copy/search, and replace TUI display-index search with SQLite candidate search plus local exact refinement.
 
 Deliverables:
 

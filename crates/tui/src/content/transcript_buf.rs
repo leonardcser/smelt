@@ -320,6 +320,32 @@ impl ExactRowIndex {
         self.prefix_rows.last().copied().unwrap_or(0)
     }
 
+    fn calibrate_estimates_from_exact(&mut self) {
+        let mut measured = 0usize;
+        let mut total: RowIndex = 0;
+        for node in &self.nodes {
+            if let Some(height) = node.exact_height {
+                measured += 1;
+                total = total.saturating_add(height);
+            }
+        }
+        if measured == 0 {
+            return;
+        }
+        let estimate = total
+            .saturating_add(measured as RowIndex - 1)
+            .saturating_div(measured as RowIndex)
+            .max(1);
+        let mut changed = false;
+        for node in &mut self.nodes {
+            if node.exact_height.is_none() && node.estimated_height != estimate {
+                node.estimated_height = estimate;
+                changed = true;
+            }
+        }
+        self.prefix_dirty |= changed;
+    }
+
     fn semantic_layout_hash(&self) -> u64 {
         smelt_core::utils::hash_serializable(&(
             self.generation,
@@ -563,6 +589,7 @@ struct ProjectKey {
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
     presentation_generation: u64,
+    row_generation: u64,
     mode: ProjectionMode,
 }
 
@@ -1244,19 +1271,19 @@ impl TranscriptProjection {
         self.rebuild_row_index_with_env(env, history, width);
     }
 
-    fn rebuild_row_index_with_env(
+    fn prepare_row_index_with_env(
         &mut self,
         env: TranscriptRenderEnv<'_>,
         history: &mut BlockHistory,
         width: u16,
-    ) {
-        let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index");
+    ) -> RowIndexKey {
+        let _perf = smelt_perf::perf::begin("transcript:prepare_row_index");
         smelt_perf::perf::record_value(
-            "transcript:rebuild_row_index:blocks",
+            "transcript:prepare_row_index:blocks",
             history.order.len() as u64,
         );
         smelt_perf::perf::record_value(
-            "transcript:rebuild_row_index:generation",
+            "transcript:prepare_row_index:generation",
             history.generation(),
         );
         let renderer_generation = env.renderer_generation;
@@ -1280,11 +1307,11 @@ impl TranscriptProjection {
                 row_key,
             );
         smelt_perf::perf::record_value(
-            "transcript:rebuild_row_index:reused_index",
+            "transcript:prepare_row_index:reused_index",
             u64::from(reused_index),
         );
         if !reused_index {
-            let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:rebuild_index");
+            let _perf = smelt_perf::perf::begin("transcript:prepare_row_index:rebuild_index");
             self.measurements.active.rebuild_if_stale(
                 history,
                 &plan,
@@ -1292,27 +1319,137 @@ impl TranscriptProjection {
                 &self.presentation,
                 row_key,
             );
+        } else {
+            self.measurements.active.refresh_prefix_rows();
         }
-        if self.measurements.active.is_exact_for(&plan, row_key) {
-            if reused_index {
-                self.measurements.active.refresh_prefix_rows();
+        row_key
+    }
+
+    fn missing_node_indices(&self) -> Vec<usize> {
+        let _perf = smelt_perf::perf::begin("transcript:row_index:collect_missing");
+        (0..self.measurements.active.nodes.len())
+            .filter(|&i| {
+                self.measurements
+                    .active
+                    .nodes
+                    .get(i)
+                    .is_some_and(|node| node.exact_height.is_none())
+            })
+            .collect()
+    }
+
+    fn exactify_node_indices(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        history: &BlockHistory,
+        indices: Vec<usize>,
+    ) -> bool {
+        let missing: Vec<usize> = indices
+            .into_iter()
+            .filter(|&i| {
+                self.measurements
+                    .active
+                    .nodes
+                    .get(i)
+                    .is_some_and(|node| node.exact_height.is_none())
+            })
+            .collect();
+        smelt_perf::perf::record_value(
+            "transcript:row_index:exactify_missing",
+            missing.len() as u64,
+        );
+        if missing.is_empty() {
+            return false;
+        }
+        let renderer_generation = env.renderer_generation;
+        let renderer_cache_key = env.renderer_cache_key;
+        self.ensure_node_indices(env, history, missing.iter().copied());
+        let mut changed = false;
+        for i in missing {
+            changed |= self.measure_cached_layout_height(
+                history,
+                i,
+                renderer_generation,
+                renderer_cache_key,
+            );
+        }
+        if changed {
+            self.measurements.active.calibrate_estimates_from_exact();
+            self.measurements.active.refresh_prefix_rows();
+        }
+        changed
+    }
+
+    fn exactify_node_range(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        history: &BlockHistory,
+        range: std::ops::Range<usize>,
+    ) -> bool {
+        let end = range.end.min(self.measurements.active.nodes.len());
+        if range.start >= end {
+            return false;
+        }
+        self.exactify_node_indices(env, history, (range.start..end).collect())
+    }
+
+    fn exactify_row_range(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        history: &BlockHistory,
+        rows: std::ops::Range<RowIndex>,
+    ) -> std::ops::Range<usize> {
+        if rows.start >= rows.end {
+            return 0..0;
+        }
+        let mut node_range = self.measurements.active.node_range_for_rows(rows.clone());
+        for _ in 0..8 {
+            let changed = self.exactify_node_range(env.clone(), history, node_range.clone());
+            let total_rows = self.measurements.active.total_rows();
+            let end = rows.end.min(total_rows);
+            let refined = if rows.start < end {
+                self.measurements
+                    .active
+                    .node_range_for_rows(rows.start..end)
+            } else {
+                0..0
+            };
+            if !changed && refined == node_range {
+                return refined;
             }
+            node_range = refined;
+        }
+        let _ = self.exactify_node_range(env, history, node_range.clone());
+        self.measurements.active.refresh_prefix_rows();
+        let total_rows = self.measurements.active.total_rows();
+        let end = rows.end.min(total_rows);
+        if rows.start < end {
+            self.measurements
+                .active
+                .node_range_for_rows(rows.start..end)
+        } else {
+            0..0
+        }
+    }
+
+    fn rebuild_row_index_with_env(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        history: &mut BlockHistory,
+        width: u16,
+    ) {
+        let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index");
+        let row_key = self.prepare_row_index_with_env(env.clone(), history, width);
+        if self
+            .measurements
+            .active
+            .is_exact_for(&self.render_plan, row_key)
+        {
             self.measurements.remember_active();
             return;
         }
 
-        let missing: Vec<usize> = {
-            let _perf = smelt_perf::perf::begin("transcript:rebuild_row_index:collect_missing");
-            (0..self.measurements.active.nodes.len())
-                .filter(|&i| {
-                    self.measurements
-                        .active
-                        .nodes
-                        .get(i)
-                        .is_some_and(|node| node.exact_height.is_none())
-                })
-                .collect()
-        };
+        let missing = self.missing_node_indices();
         smelt_perf::perf::record_value(
             "transcript:rebuild_row_index:missing",
             missing.len() as u64,
@@ -1327,11 +1464,7 @@ impl TranscriptProjection {
                 *last as u64,
             );
         }
-        self.ensure_node_indices(env, history, missing.iter().copied());
-        for i in missing {
-            self.measure_cached_layout_height(history, i, renderer_generation, renderer_cache_key);
-        }
-        self.measurements.active.refresh_prefix_rows();
+        self.exactify_node_indices(env, history, missing);
         self.measurements.remember_active();
     }
 
@@ -1466,6 +1599,18 @@ impl TranscriptProjection {
         }
     }
 
+    pub(crate) fn estimated_total_rows(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+    ) -> RowIndex {
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env, history, width);
+        self.measurements.active.total_rows()
+    }
+
+    #[cfg(test)]
     pub(crate) fn exact_total_rows(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
@@ -1483,7 +1628,9 @@ impl TranscriptProjection {
         width: u16,
         row: RowIndex,
     ) -> Option<TranscriptNodeRow> {
-        self.rebuild_row_index(lua, history, width);
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env.clone(), history, width);
+        self.exactify_row_range(env, history, row..row.saturating_add(1));
         self.node_at_prepared_row(history, row)
     }
 
@@ -1704,15 +1851,106 @@ impl TranscriptProjection {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
         let resize_anchor = self.resize_anchor_for(width, scroll_target);
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
-        self.rebuild_row_index_with_env(env.clone(), history, width);
-        let key = ProjectKey {
+        self.prepare_row_index_with_env(env.clone(), history, width);
+        if let Some(anchor) = resize_anchor {
+            if let Some(index) = self.measurements.active.block_index(anchor.id) {
+                let _ =
+                    self.exactify_node_range(env.clone(), history, index..index.saturating_add(1));
+            }
+        }
+        if let ScrollTarget::Visible(ScrollAnchor::Row(row)) = scroll_target {
+            let end = row.saturating_add(viewport_rows.max(1) as RowIndex);
+            let _ = self.exactify_row_range(env.clone(), history, 0..end);
+        }
+        let key = self.project_key(
+            width,
+            env.renderer_generation,
+            env.renderer_cache_key,
+            scroll_target,
+            viewport_rows,
+        );
+        self.plan_projection_progressive(
+            env,
+            history,
+            key,
+            scroll_target,
+            viewport_rows,
+            theme,
+            resize_anchor,
+        )
+    }
+
+    fn project_key(
+        &self,
+        width: u16,
+        renderer_generation: u64,
+        renderer_cache_key: Option<u64>,
+        scroll_target: ScrollTarget,
+        viewport_rows: u16,
+    ) -> ProjectKey {
+        ProjectKey {
             generation: self.render_plan.fingerprint,
             width,
-            renderer_generation: env.renderer_generation,
-            renderer_cache_key: env.renderer_cache_key,
+            renderer_generation,
+            renderer_cache_key,
             presentation_generation: self.presentation.generation(),
+            row_generation: self.display_cache_generation,
             mode: scroll_target.mode(viewport_rows),
-        };
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_projection_progressive(
+        &mut self,
+        env: TranscriptRenderEnv<'_>,
+        history: &BlockHistory,
+        mut key: ProjectKey,
+        scroll_target: ScrollTarget,
+        viewport_rows: u16,
+        theme: &Theme,
+        resize_anchor: Option<ResizeAnchor>,
+    ) -> ProjectionPlan {
+        let mut plan = self.plan_projection_from_prepared(
+            history,
+            key,
+            scroll_target,
+            viewport_rows,
+            theme,
+            resize_anchor,
+        );
+        for _ in 0..8 {
+            let changed = self.exactify_node_range(env.clone(), history, plan.node_range());
+            key = self.project_key(
+                key.width,
+                env.renderer_generation,
+                env.renderer_cache_key,
+                scroll_target,
+                viewport_rows,
+            );
+            let refined = self.plan_projection_from_prepared(
+                history,
+                key,
+                scroll_target,
+                viewport_rows,
+                theme,
+                resize_anchor,
+            );
+            if !changed
+                && refined.node_range == plan.node_range
+                && refined.scroll_top == plan.scroll_top
+            {
+                return refined;
+            }
+            plan = refined;
+        }
+        let _ = self.exactify_node_range(env, history, plan.node_range());
+        key = self.project_key(
+            key.width,
+            plan.key.renderer_generation,
+            plan.key.renderer_cache_key,
+            scroll_target,
+            viewport_rows,
+        );
         self.plan_projection_from_prepared(
             history,
             key,
@@ -1852,17 +2090,18 @@ impl TranscriptProjection {
             || current_env.renderer_generation != plan.key.renderer_generation
             || current_env.renderer_cache_key != plan.key.renderer_cache_key
             || self.presentation.generation() != plan.key.presentation_generation
+            || self.display_cache_generation != plan.key.row_generation
         {
-            self.rebuild_row_index_with_env(current_env.clone(), history, plan.key.width);
-            let key = ProjectKey {
-                generation: self.render_plan.fingerprint,
-                width: plan.key.width,
-                renderer_generation: current_env.renderer_generation,
-                renderer_cache_key: current_env.renderer_cache_key,
-                presentation_generation: self.presentation.generation(),
-                mode: plan.scroll_target.mode(plan.viewport_rows),
-            };
-            plan = self.plan_projection_from_prepared(
+            self.prepare_row_index_with_env(current_env.clone(), history, plan.key.width);
+            let key = self.project_key(
+                plan.key.width,
+                current_env.renderer_generation,
+                current_env.renderer_cache_key,
+                plan.scroll_target,
+                plan.viewport_rows,
+            );
+            plan = self.plan_projection_progressive(
+                current_env.clone(),
                 history,
                 key,
                 plan.scroll_target,
@@ -1901,6 +2140,7 @@ impl TranscriptProjection {
             || prev.renderer_generation != key.renderer_generation
             || prev.renderer_cache_key != key.renderer_cache_key
             || prev.presentation_generation != key.presentation_generation
+            || prev.row_generation != key.row_generation
         {
             return None;
         }
@@ -2290,7 +2530,9 @@ impl TranscriptProjection {
             return DisplayRows::empty();
         }
 
-        self.rebuild_row_index(lua, history, width);
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env.clone(), history, width);
+        let _ = self.exactify_row_range(env.clone(), history, 0..end);
         let total_rows = self.measurements.active.total_rows();
         if total_rows == 0 || start >= total_rows {
             return DisplayRows::empty();
@@ -2376,7 +2618,10 @@ impl TranscriptProjection {
         if (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col) {
             return CopyOutput::default();
         }
-        self.rebuild_row_index(lua, history, width);
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env.clone(), history, width);
+        let requested_end_row = range.end.row.saturating_add(1);
+        let _ = self.exactify_row_range(env.clone(), history, range.start.row..requested_end_row);
         let total_rows = self.measurements.active.total_rows();
         if total_rows == 0 || range.start.row >= total_rows {
             return CopyOutput::default();
@@ -2411,7 +2656,7 @@ impl TranscriptProjection {
         }
 
         let start_local = row_to_usize(range.start.row.saturating_sub(row_base));
-        let end_local = row_to_usize(range.end.row.saturating_sub(row_base));
+        let end_local = row_to_usize(end_row.saturating_sub(row_base));
         let start = scratch.byte_at_display_byte_pos(start_local, range.start.byte_col);
         let end = scratch.byte_at_display_byte_pos(end_local, range.end.byte_col);
         let clipboard = copy_byte_range(&scratch, start, end);
@@ -4435,7 +4680,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_tail_projection_uses_exact_total_rows_before_fast_scroll() {
+    fn cold_tail_projection_refines_visible_heights_without_global_measurement() {
         let mut transcript = Transcript::new();
         for i in 0..120 {
             let content = (0..5)
@@ -4447,7 +4692,7 @@ mod tests {
         let theme = Theme::default();
         let mut projection = TranscriptProjection::new();
         let mut buf = Buffer::new(crate::smelt_edit::BufId(14), Default::default());
-        let expected_total = 120 * 5 + 119;
+        let exact_total = 120 * 5 + 119;
 
         let tail = projection.project(
             &mut buf,
@@ -4457,10 +4702,19 @@ mod tests {
             ScrollTarget::visible_tail(),
             10,
         );
-        assert_eq!(tail.total_rows, expected_total);
-        assert_eq!(tail.clamped_scroll, expected_total.saturating_sub(10));
 
-        let target = tail.clamped_scroll.saturating_sub(220);
+        assert!(tail.total_rows >= exact_total);
+        assert!(tail.total_rows > 10);
+        assert_eq!(tail.clamped_scroll, tail.total_rows.saturating_sub(10));
+        assert!(buf.lines().iter().any(|line| line == "block 119 line 4"));
+        assert!(!buf.lines().iter().any(|line| line == "block 0 line 0"));
+        assert!(
+            projection.counters().exact_height_measured_blocks < transcript.history.order.len(),
+            "cold tail projection should not measure every block: {:?}",
+            projection.counters()
+        );
+
+        let target = tail.clamped_scroll.saturating_sub(30);
         assert!(target > 0);
         let scrolled = projection.project(
             &mut buf,
@@ -4473,7 +4727,6 @@ mod tests {
 
         assert_eq!(scrolled.clamped_scroll, target);
         assert!(scrolled.row_base > 0);
-        assert!(buf.lines().iter().any(|line| line == "block 82 line 0"));
         assert!(!buf.lines().iter().any(|line| line == "block 0 line 0"));
     }
 

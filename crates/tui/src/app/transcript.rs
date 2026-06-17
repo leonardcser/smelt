@@ -79,13 +79,13 @@ impl TranscriptView {
             .build_rows(lua, &mut self.transcript.history, width, theme)
     }
 
-    pub(crate) fn exact_total_rows(
+    pub(crate) fn estimated_total_rows(
         &mut self,
         lua: &LuaRuntime,
         width: u16,
     ) -> crate::smelt_edit::RowIndex {
         self.projection
-            .exact_total_rows(lua, &mut self.transcript.history, width)
+            .estimated_total_rows(lua, &mut self.transcript.history, width)
     }
 
     pub(crate) fn materialize_block_layout(
@@ -338,7 +338,7 @@ impl DisplayDocument for TranscriptDocument<'_> {
     fn snapshot(&mut self) -> DisplaySnapshot {
         DisplaySnapshot {
             generation: self.view.display_cache_generation(),
-            total_rows: self.view.exact_total_rows(self.lua, self.width),
+            total_rows: self.view.estimated_total_rows(self.lua, self.width),
         }
     }
 
