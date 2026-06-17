@@ -3,6 +3,17 @@
 use crate::app::TuiApp;
 use smelt_core::transcript_model::ConfirmChoice;
 
+enum LuaReloadKind {
+    Manual,
+    AutoConfig,
+}
+
+impl LuaReloadKind {
+    fn refresh_agent_inputs(&self) -> bool {
+        matches!(self, Self::Manual)
+    }
+}
+
 impl TuiApp {
     /// Run a Lua command line through the shared dispatcher. Bare names (`"btw foo"`)
     /// are normalized to prompt-command syntax so Lua APIs keep their historical shape,
@@ -103,20 +114,20 @@ impl TuiApp {
     /// `/reload` entry point. Wraps [`Self::bring_up_lua`] (the
     /// shared cold-start + reload pipeline) with a user-facing toast.
     pub(crate) fn reload_lua(&mut self) {
-        self.reload_lua_inner(true);
+        self.reload_lua_inner(LuaReloadKind::Manual);
     }
 
     /// Auto-reload entry point for Lua config edits. Keeps prompt inputs stable
     /// so changing AGENTS.md, skills, or `--system-prompt` only affects the
     /// agent after a manual `/reload`.
     pub(crate) fn reload_lua_config(&mut self) {
-        self.reload_lua_inner(false);
+        self.reload_lua_inner(LuaReloadKind::AutoConfig);
     }
 
-    fn reload_lua_inner(&mut self, refresh_agent_inputs: bool) {
+    fn reload_lua_inner(&mut self, kind: LuaReloadKind) {
         self.pending_lua_reload = false;
         self.pending_lua_reload_refresh_agent_inputs = false;
-        let err = self.bring_up_lua("reload", refresh_agent_inputs);
+        let err = self.bring_up_lua("reload", kind.refresh_agent_inputs());
         match err {
             Some(e) => self.notify_error_sticky(format!("lua reload: {e}")),
             None => self.notify("lua reloaded".into()),
@@ -162,10 +173,14 @@ impl TuiApp {
         if !self.pending_lua_reload || !self.can_reload_lua_now() {
             return false;
         }
-        let refresh_agent_inputs = self.pending_lua_reload_refresh_agent_inputs;
+        let kind = if self.pending_lua_reload_refresh_agent_inputs {
+            LuaReloadKind::Manual
+        } else {
+            LuaReloadKind::AutoConfig
+        };
         self.pending_lua_reload = false;
         self.pending_lua_reload_refresh_agent_inputs = false;
-        self.reload_lua_inner(refresh_agent_inputs);
+        self.reload_lua_inner(kind);
         true
     }
 

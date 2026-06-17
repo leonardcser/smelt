@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn lua_config_auto_reload_success_notifies_for_real_edits() {
+    let mut app = TestApp::builder().build();
+    assert!(app.state().notification.is_none());
+
+    crate::lua::with_app_ptr(&mut app.app, |app| {
+        app.reload_lua_config();
+    });
+
+    assert!(app.state().notification.is_some());
+}
+
+#[test]
+fn manual_lua_reload_success_notifies() {
+    let mut app = TestApp::builder().build();
+
+    crate::lua::with_app_ptr(&mut app.app, |app| {
+        app.reload_lua();
+    });
+
+    assert!(app.state().notification.is_some());
+}
+
+#[test]
 fn lua_config_session_and_transcript_contracts_are_available() {
     let mut app = TestApp::builder().build();
     app.push_user_block("hello from lua api test");

@@ -250,6 +250,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watcher_does_not_replay_changes_from_before_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.lua");
+        std::fs::write(&init, "before = true\n").unwrap();
+
+        let (_handle, mut rx) = spawn(WatchPaths {
+            global_config: Some(dir.path().to_path_buf()),
+            project_config: None,
+        })
+        .expect("watcher starts");
+
+        assert!(tokio::time::timeout(DEBOUNCE * 2, rx.recv()).await.is_err());
+
+        std::fs::write(&init, "after = true\n").unwrap();
+        assert!(tokio::time::timeout(DEBOUNCE * 8, rx.recv())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn debounce_loop_coalesces_bursts() {
         let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel();
         let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel();

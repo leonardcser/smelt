@@ -1916,13 +1916,6 @@ impl TuiApp {
         }
 
         let mut auto_reload_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>> = None;
-        if self.core.config.settings.auto_reload {
-            let paths = crate::auto_reload::WatchPaths::discover(std::path::Path::new(&self.cwd));
-            if let Some((handle, rx)) = crate::auto_reload::spawn(paths) {
-                self.auto_reload = Some(handle);
-                auto_reload_rx = Some(rx);
-            }
-        }
 
         let mut term_events = match crate::term_input::TerminalInput::spawn() {
             Ok(input) => input,
@@ -1953,6 +1946,16 @@ impl TuiApp {
         let load_err = crate::lua::with_app_ptr(self, |app| app.bring_up_lua("launch", true));
         if let Some(err) = load_err {
             self.notify_error_sticky(format!("lua init: {err}"));
+        }
+
+        // Start watching after cold-start Lua has finished so launch-time
+        // config setup cannot immediately schedule a redundant reload.
+        if self.core.config.settings.auto_reload {
+            let paths = crate::auto_reload::WatchPaths::discover(std::path::Path::new(&self.cwd));
+            if let Some((handle, rx)) = crate::auto_reload::spawn(paths) {
+                self.auto_reload = Some(handle);
+                auto_reload_rx = Some(rx);
+            }
         }
 
         // Auto-submit initial message if provided (e.g. `agent "fix the bug"`).
