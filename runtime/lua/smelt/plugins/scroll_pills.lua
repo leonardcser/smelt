@@ -104,6 +104,21 @@ local function open_bottom()
   })
 end
 
+local function transcript_cursor_rows(scroll)
+  if smelt.focus() ~= "transcript" or not state.transcript_win then return nil, nil end
+  local row = state.transcript_win:cursor()
+  local rect = state.transcript_win:rect()
+  if row == nil or scroll == nil or rect == nil or not scroll.top or not scroll.viewport then return nil, nil end
+  local screen_row = row - scroll.top
+  if screen_row < 0 or screen_row >= scroll.viewport then return nil, nil end
+  return screen_row, rect.row + screen_row
+end
+
+local function cursor_under_bottom_pill(scroll)
+  local screen_row = transcript_cursor_rows(scroll)
+  return screen_row ~= nil and scroll and scroll.viewport and screen_row == scroll.viewport - 1
+end
+
 -- ── Top pill: "jump to last user message" ─────────────────────────────
 
 -- Most-recent user block at-or-above the viewport top. Hidden when that
@@ -172,11 +187,8 @@ local function paint_top_row(width, label)
 end
 
 local function cursor_under_top_pill(scroll)
-  if smelt.focus() ~= "transcript" or not state.transcript_win then return false end
-  local row = state.transcript_win:cursor()
-  local rect = state.transcript_win:rect()
-  if row == nil or scroll == nil or rect == nil then return false end
-  return rect.row + row - scroll.top == TOP_PILL_ROW
+  local _, terminal_row = transcript_cursor_rows(scroll)
+  return terminal_row == TOP_PILL_ROW
 end
 
 local function refresh_top(scroll)
@@ -204,7 +216,7 @@ local function refresh()
   end
 
   local scroll = state.transcript_win:scroll()
-  if should_show_bottom(scroll) then
+  if should_show_bottom(scroll) and not cursor_under_bottom_pill(scroll) then
     open_bottom()
   else
     close_bottom()
@@ -220,6 +232,8 @@ smelt.lifecycle.on_ready(function()
   state.transcript_win = smelt.win.transcript()
   state.transcript_win:on("scrolled", refresh)
   state.transcript_win:on("resized", refresh)
+  state.transcript_win:on("focus", refresh)
+  state.transcript_win:on("blur", refresh)
   refresh()
 end)
 
@@ -230,6 +244,10 @@ smelt.cell("history"):subscribe(function(payload)
   if payload and payload.kind == "cleared" then close_all() end
 end)
 smelt.cell("session_started"):subscribe(close_all)
+
+smelt.cell("cursor_pos"):subscribe(function()
+  if smelt.focus() == "transcript" then refresh() end
+end)
 
 -- Jump to bottom when the user submits a message so the new turn is visible.
 smelt.cell("input_submit"):subscribe(function()

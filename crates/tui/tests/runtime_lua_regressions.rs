@@ -6,6 +6,7 @@ const BANNER_PLUGIN_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins
 const WEB_FETCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_fetch.lua");
 const TRANSCRIPT_DEFAULTS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/transcript/defaults.lua");
+const SCROLL_PILLS_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/scroll_pills.lua");
 
 #[test]
 fn session_tree_orders_nested_forks_and_prefixes() {
@@ -242,4 +243,135 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
 
     assert_eq!(first_tick, 1);
     assert_eq!(second_tick, 2);
+}
+
+#[test]
+fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        local active = {}
+        local cells = {}
+        local handlers = {}
+        local focus = "transcript"
+        local cursor = 14
+        local blocks = {}
+        local scroll = {
+          top = 10,
+          viewport = 5,
+          total = 30,
+          max = 25,
+          overflow = true,
+          follow = false,
+          at_top = false,
+          at_bottom = false,
+        }
+        local rect = { row = 0, col = 0, width = 30, height = 5 }
+        local transcript_win = {}
+        function transcript_win:cursor() return cursor end
+        function transcript_win:rect() return rect end
+        function transcript_win:scroll() return scroll end
+        function transcript_win:on(event, fn) handlers[event] = fn end
+        function transcript_win:reveal() end
+
+        smelt = {
+          focus = function() return focus end,
+          ns = function(name) return name end,
+          text = {
+            width = function(text) return #text end,
+            fit = function(text) return text end,
+          },
+          buf = {
+            new = function()
+              return {
+                lines = function() end,
+                clear_ns = function() end,
+                mark = function() end,
+              }
+            end,
+          },
+          win = {
+            new = function()
+              return { on = function() end }
+            end,
+            transcript = function() return transcript_win end,
+          },
+          overlay = {
+            new = function(opts)
+              active[opts.name] = (active[opts.name] or 0) + 1
+              local name = opts.name
+              return {
+                close = function()
+                  active[name] = math.max((active[name] or 0) - 1, 0)
+                end,
+              }
+            end,
+          },
+          ui = { layout = { leaf = function() return {} end } },
+          transcript = { blocks = function() return blocks end },
+          cell = function(name)
+            return {
+              subscribe = function(_, fn) cells[name] = fn end,
+            }
+          end,
+          lifecycle = {
+            on_ready = function(fn) fn() end,
+          },
+        }
+
+        function __active(name) return (active[name] or 0) > 0 end
+        function __set_cursor(row) cursor = row end
+        function __set_focus(value) focus = value end
+        function __set_blocks(value) blocks = value end
+        function __event(name) assert(handlers[name], name)() end
+        function __publish(name) assert(cells[name], name)() end
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+
+    lua.load(SCROLL_PILLS_LUA)
+        .exec()
+        .expect("load scroll pills plugin");
+
+    let bottom_under_cursor: bool = lua
+        .load(r#"return __active("smelt.scroll_pills.bottom")"#)
+        .eval()
+        .expect("read bottom overlay state");
+    assert!(!bottom_under_cursor);
+
+    let (top_under_cursor, top_after_cursor_move): (bool, bool) = lua
+        .load(
+            r#"
+            __set_blocks({ { idx = 1, role = "user", first_line = "previous message", first_row = 5 } })
+            __set_cursor(10)
+            __event("scrolled")
+            local under = __active("smelt.scroll_pills.top")
+            __set_cursor(11)
+            __publish("cursor_pos")
+            return under, __active("smelt.scroll_pills.top")
+            "#,
+        )
+        .eval()
+        .expect("drive top pill refresh");
+    assert!(!top_under_cursor);
+    assert!(top_after_cursor_move);
+
+    let (bottom_after_blur, bottom_after_focus): (bool, bool) = lua
+        .load(
+            r#"
+            __set_cursor(14)
+            __event("scrolled")
+            __set_focus("prompt")
+            __event("blur")
+            local after_blur = __active("smelt.scroll_pills.bottom")
+            __set_focus("transcript")
+            __event("focus")
+            return after_blur, __active("smelt.scroll_pills.bottom")
+            "#,
+        )
+        .eval()
+        .expect("drive bottom pill focus refresh");
+    assert!(bottom_after_blur);
+    assert!(!bottom_after_focus);
 }

@@ -1098,6 +1098,10 @@ Bundled default transcript renderers.
   Render a compact ordered child list for collapsed group nodes.
 - `smelt.transcript.defaults.render_group_children` :: `fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render all group children through the bundled default block renderer.
+- `smelt.transcript.defaults.render_llm_markdown` :: `fun(content: string?, opts: table?): smelt.layout.Node`
+  Render LLM-authored Markdown with the shared transcript Markdown path.
+- `smelt.transcript.defaults.render_llm_markdown_tail` :: `fun(content: string?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node`
+  Render capped LLM-authored Markdown for tool bodies and other long outputs.
 - `smelt.transcript.defaults.render_mode` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`
   Render a mode note.
 - `smelt.transcript.defaults.render_process_status` :: `fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node`

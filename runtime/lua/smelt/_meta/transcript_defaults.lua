@@ -48,6 +48,14 @@ transcript_defaults.render_group_child_list = nil
 ---@type fun(group: smelt.transcript.Group, ctx: smelt.transcript.Context): smelt.layout.Node
 transcript_defaults.render_group_children = nil
 
+--- Render LLM-authored Markdown with the shared transcript Markdown path.
+---@type fun(content: string?, opts: table?): smelt.layout.Node
+transcript_defaults.render_llm_markdown = nil
+
+--- Render capped LLM-authored Markdown for tool bodies and other long outputs.
+---@type fun(content: string?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
+transcript_defaults.render_llm_markdown_tail = nil
+
 --- Render a mode note.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 transcript_defaults.render_mode = nil

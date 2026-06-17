@@ -361,10 +361,7 @@ impl TuiApp {
         self.reveal_position(
             target,
             range.start,
-            crate::app::reveal::RevealOptions {
-                top_padding: search_top_padding(target),
-                cursor: true,
-            },
+            crate::app::reveal::RevealOptions::avoid_edge_chrome(target),
         );
     }
 }
@@ -447,8 +444,4 @@ fn visible_buffer_matches(
         }
     }
     matches
-}
-
-fn search_top_padding(win: WinId) -> RowIndex {
-    (win == crate::app::TRANSCRIPT_WIN) as RowIndex
 }

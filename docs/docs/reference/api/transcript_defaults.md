@@ -107,6 +107,26 @@ Types: [`smelt.transcript.Group`](types.md#smelttranscriptgroup), [`smelt.transc
 
 Render all group children through the bundled default block renderer.
 
+## `smelt.transcript.defaults.render_llm_markdown`
+
+```lua
+fun(content: string?, opts: table?): smelt.layout.Node
+```
+
+Types: [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Render LLM-authored Markdown with the shared transcript Markdown path.
+
+## `smelt.transcript.defaults.render_llm_markdown_tail`
+
+```lua
+fun(content: string?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
+```
+
+Types: [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
+
+Render capped LLM-authored Markdown for tool bodies and other long outputs.
+
 ## `smelt.transcript.defaults.render_mode`
 
 ```lua

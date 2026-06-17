@@ -94,6 +94,41 @@ fn transcript_search_jump_keeps_match_below_top_overlay() {
 }
 
 #[test]
+fn transcript_search_jump_keeps_match_above_bottom_overlay() {
+    let mut app = row_document_transcript_app(100, true);
+    app.type_char('g');
+    app.type_char('g');
+
+    app.type_char('/');
+    app.type_text("row 090");
+    app.press(KeyCode::Enter);
+
+    let match_row = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .unwrap()
+        .current_range()
+        .unwrap()
+        .rows()
+        .unwrap()
+        .start
+        .row;
+    let viewport_rows = app
+        .app
+        .transcript_win()
+        .viewport
+        .map(|v| v.rect.height as crate::smelt_edit::RowIndex)
+        .unwrap_or(1);
+    assert_eq!(transcript_row_cursor_row(&app), match_row);
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        match_row.saturating_sub(viewport_rows.saturating_sub(2))
+    );
+}
+
+#[test]
 fn transcript_reveal_api_keeps_cursor_below_top_padding() {
     let mut app = row_document_transcript_app(100, true);
     app.type_char('G');
@@ -102,6 +137,44 @@ fn transcript_reveal_api_keeps_cursor_below_top_padding() {
 
     assert_eq!(transcript_row_cursor_row(&app), 10);
     assert_eq!(app.app.transcript_win().scroll_top(), 9);
+}
+
+#[test]
+fn transcript_reveal_api_keeps_cursor_above_bottom_padding() {
+    let mut app = row_document_transcript_app(100, true);
+    app.type_char('g');
+    app.type_char('g');
+
+    assert!(app.run_lua("smelt.win.transcript():reveal(90, { bottom_padding = 1 })"));
+
+    let viewport_rows = app
+        .app
+        .transcript_win()
+        .viewport
+        .map(|v| v.rect.height as crate::smelt_edit::RowIndex)
+        .unwrap_or(1);
+    assert_eq!(transcript_row_cursor_row(&app), 90);
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        90u64.saturating_sub(viewport_rows.saturating_sub(2))
+    );
+}
+
+#[test]
+fn transcript_cursor_api_reads_absolute_row_after_scroll() {
+    let mut app = row_document_transcript_app(100, true);
+    app.type_char('g');
+    app.type_char('g');
+
+    assert!(app.run_lua(
+        r#"
+        smelt.win.transcript():reveal(90)
+        _G.transcript_cursor_row = smelt.win.transcript():cursor()
+        "#
+    ));
+
+    assert_eq!(transcript_row_cursor_row(&app), 90);
+    assert_eq!(app.lua_int_global("transcript_cursor_row"), Some(90));
 }
 
 #[test]

@@ -403,7 +403,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         let mut new_abs: Option<usize> = None;
         let (win, buf) = ctx.ui.win_and_buf_mut(ctx.win, buf_id);
         if let (Some(win), Some(buf)) = (win, buf) {
-            let abs = win.cursor_row();
+            let abs = win.cursor_abs_row();
             let max = line_count.saturating_sub(1) as RowIndex;
             let target = add_signed_row(abs, delta).min(max);
             if target == abs {
@@ -456,7 +456,7 @@ pub(crate) fn configure_list_leaf(app: &mut TuiApp, leaf: WinId, initial_cursor:
         let abs = ctx
             .ui
             .win(ctx.win)
-            .map(|w| w.cursor_row() as usize)
+            .map(|w| w.cursor_abs_row() as usize)
             .unwrap_or(0);
         CallbackResult::Event(WinEvent::Submit, Payload::Selection { index: abs })
     }));
@@ -512,7 +512,7 @@ fn apply_cursor(app: &mut TuiApp, leaf: WinId, target: RowIndex) {
     let (Some(win), Some(buf)) = (win, buf) else {
         return;
     };
-    let abs = win.cursor_row();
+    let abs = win.cursor_abs_row();
     if abs == target {
         return;
     }
@@ -553,7 +553,7 @@ pub(crate) fn set_cursor_row(app: &mut TuiApp, leaf: WinId, row: RowIndex) {
 
 /// Read the current cursor row of `leaf` (0-based), or `None` if the leaf doesn't exist.
 pub(crate) fn cursor_row(app: &TuiApp, leaf: WinId) -> Option<RowIndex> {
-    app.ui.win(leaf).map(|w| w.cursor_row())
+    app.ui.win(leaf).map(|w| w.cursor_abs_row())
 }
 
 fn add_signed_row(row: RowIndex, delta: isize) -> RowIndex {
