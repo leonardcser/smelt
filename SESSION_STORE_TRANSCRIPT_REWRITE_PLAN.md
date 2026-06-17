@@ -790,7 +790,7 @@ Acceptance:
 
 ### Phase G: Lazy transcript descriptors
 
-Status: complete. Transcript block state now supports descriptor records that preserve block order, origin, tool sidecar state, content hashes, and descriptor-only metadata lookup without materializing `Block` values. The resume rebuild path installs descriptor-backed blocks for restored user, assistant-text, tool, mode, process-status, and compaction entries, while live/streaming blocks stay materialized. `TranscriptDocument` is the concrete `DisplayDocument` adapter used by the TUI row-document seam for transcript total rows, range materialization, and copy. Exact global height measurement remains Phase H's responsibility, so current first paint can still measure all nodes even though restored block payloads are descriptor-backed until layout/copy needs them.
+Status: partial. Transcript block state now supports descriptor records that preserve block order, origin, tool sidecar state, content hashes, and descriptor-only metadata lookup without materializing `Block` values. The resume rebuild path installs descriptor-backed blocks for restored user, assistant-text, tool, mode, process-status, and compaction entries, while live/streaming blocks stay materialized. `TranscriptDocument` is the concrete `DisplayDocument` adapter used by the TUI row-document seam for transcript total rows, range materialization, and copy. Descriptor hashes are computed without constructing a `Block`, and tool sidecar hashes include metadata because Lua renderers may display it. Remaining work: load descriptor records directly from SQLite instead of reconstructing them from a loaded `Session`, make large tool metadata object-backed at render time rather than eagerly rehydrated, and move first paint off exact global height measurement in Phase H.
 
 Deliverables:
 
@@ -810,9 +810,11 @@ Acceptance:
 
 Deliverables:
 
+- Load transcript descriptor records from `transcript_blocks`/object refs without requiring a fully rehydrated `Session.history`.
 - Replace exact-only row indexing with `TranscriptHeightIndex`.
 - Estimate missing heights and exact-measure visible + overscan only before first paint.
 - Harden stable selection anchors, drag autoscroll, copy exactification, and word/line selection across materialized ranges.
+- Materialize large tool metadata objects only for visible rendering, exact copy, or search refinement.
 - Search through SQLite candidates first, then local exact display refinement.
 
 Acceptance:

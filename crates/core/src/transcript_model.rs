@@ -113,6 +113,7 @@ impl ToolState {
         struct DisplayOutput<'a> {
             content: &'a str,
             is_error: bool,
+            metadata_hash: Option<u64>,
         }
 
         #[derive(serde::Serialize)]
@@ -127,6 +128,10 @@ impl ToolState {
             output: self.output.as_ref().map(|output| DisplayOutput {
                 content: output.content.as_str(),
                 is_error: output.is_error,
+                metadata_hash: output
+                    .metadata
+                    .as_ref()
+                    .map(crate::utils::hash_serializable),
             }),
             user_message: &self.user_message,
         })
@@ -481,7 +486,7 @@ impl TranscriptBlockDescriptor {
     }
 
     fn content_hash(&self) -> u64 {
-        self.to_block().content_hash()
+        crate::utils::hash_serializable(self)
     }
 
     pub fn kind(&self) -> &'static str {
@@ -532,6 +537,8 @@ impl TranscriptBlockDescriptor {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptBlockRecord {
     pub descriptor: TranscriptBlockDescriptor,
+    #[serde(default)]
+    pub content_hash: u64,
     pub origin: Option<BlockOrigin>,
     pub tool_state: Option<(String, ToolState)>,
 }
@@ -753,6 +760,7 @@ impl BlockHistory {
                 });
                 Some(TranscriptBlockRecord {
                     descriptor,
+                    content_hash: self.content_hash(*id),
                     origin: self.origins.get(id).copied(),
                     tool_state,
                 })
@@ -768,7 +776,8 @@ impl BlockHistory {
                 history.tool_states.insert(call_id.clone(), state);
                 history.tool_display_hashes.insert(call_id, hash);
             }
-            history.add_descriptor(None, record.descriptor, record.origin);
+            let content_hash = (record.content_hash != 0).then_some(record.content_hash);
+            history.add_descriptor(None, record.descriptor, record.origin, content_hash);
         }
         history
     }
@@ -852,8 +861,9 @@ impl BlockHistory {
         idx: Option<usize>,
         descriptor: TranscriptBlockDescriptor,
         origin: Option<BlockOrigin>,
+        content_hash: Option<u64>,
     ) -> BlockId {
-        let hash = descriptor.content_hash();
+        let hash = content_hash.unwrap_or_else(|| descriptor.content_hash());
         let id = BlockId(self.next_id);
         self.next_id += 1;
         match idx {
@@ -883,7 +893,7 @@ impl BlockHistory {
         descriptor: TranscriptBlockDescriptor,
         origin: BlockOrigin,
     ) -> BlockId {
-        self.add_descriptor(None, descriptor, Some(origin))
+        self.add_descriptor(None, descriptor, Some(origin), None)
     }
 
     pub(crate) fn insert_checkpoint_marker(
@@ -996,7 +1006,7 @@ impl BlockHistory {
         let hash = state.display_hash();
         self.tool_states.insert(call_id.clone(), state);
         self.tool_display_hashes.insert(call_id, hash);
-        self.add_descriptor(None, descriptor, Some(origin))
+        self.add_descriptor(None, descriptor, Some(origin), None)
     }
 
     pub fn update_tool_state(
@@ -1390,7 +1400,21 @@ mod tests {
     }
 
     #[test]
-    fn tool_display_hash_ignores_metadata() {
+    fn descriptor_hash_matches_materialized_block_hash() {
+        let descriptor = TranscriptBlockDescriptor::ToolCall {
+            call_id: "call-1".into(),
+            name: "read_file".into(),
+            summary: "read".into(),
+            args: HashMap::from([("path".into(), serde_json::json!("/tmp/a"))]),
+        };
+        assert_eq!(
+            descriptor.content_hash(),
+            descriptor.to_block().content_hash()
+        );
+    }
+
+    #[test]
+    fn tool_display_hash_includes_display_metadata() {
         let mut a = pending_state();
         a.status = ToolStatus::Ok;
         a.output = Some(Box::new(ToolOutput {
@@ -1404,6 +1428,9 @@ mod tests {
             "new_content": "c".repeat(32 * 1024),
         }));
 
+        assert_ne!(a.display_hash(), b.display_hash());
+
+        b.output.as_mut().unwrap().metadata = a.output.as_ref().unwrap().metadata.clone();
         assert_eq!(a.display_hash(), b.display_hash());
 
         b.output.as_mut().unwrap().content.push_str(" changed");
