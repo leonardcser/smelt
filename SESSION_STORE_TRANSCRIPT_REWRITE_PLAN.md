@@ -138,14 +138,13 @@ Current transcript projection is partly lazy and now uses a mixed estimated/exac
 - `plan_projection_measured` prepares the row index without globally measuring every missing node at `crates/tui/src/content/transcript_buf.rs`.
 - The projection planner estimates missing heights from descriptor text/tool output, exactifies the visible + overscan node range, then replans against the refined prefix rows.
 - Exact APIs such as full block layout, full row builds, range materialization, and copy exactify the rows they need before returning content.
-- Search indexes descriptor/provider text first, asks SQLite `transcript_search` for preferred candidates when available, and falls back to local exact display refinement for renderer-only chrome.
+- Search indexes canonical descriptor text, including built-in renderer chrome such as compacted dividers and tool display counts. It asks SQLite `transcript_search` for preferred candidates when available, intersects local semantic trigrams otherwise, and only exact-refines those candidate rows through display rendering.
 - Visible projection itself remains bounded and materializes only the planned node range.
 
 Remaining problems:
 
 - Cold arbitrary row jumps are approximate until local refinement catches up.
-- Core session resume still rehydrates provider `Session.history`; descriptor rows now avoid rebuilding `BlockHistory` from it, but the model history load path is not lazy yet.
-- Search still keeps an in-memory fallback candidate list after SQLite candidates so renderer-only chrome remains searchable.
+- Core session resume still rehydrates provider `Session.history`; descriptor rows avoid rebuilding `BlockHistory` from it, but the model history load path is not lazy yet.
 - Persisted display caches help only when keys match and the full exact row index is accepted.
 
 ### Existing UI seams that we should keep
@@ -810,7 +809,7 @@ Acceptance:
 
 ### Phase H: Progressive height, navigation, copy, and search
 
-Status: partial. Transcript projection now prepares `TranscriptHeightIndex`, a mixed estimated/exact row index, instead of measuring every missing height before first paint. Visible planning exact-measures the visible + overscan node range and replans after refinement, so a cold tail render of a large transcript does not measure every block. Estimates use descriptor text and tool output line counts before falling back to measured samples. `TranscriptDocument::snapshot` reports an estimated row count, while visible materialization, row-range display, copy, fold targeting, and resize anchors exactify the rows or anchor nodes they consume. Search now asks SQLite `transcript_search` for preferred candidates, builds in-memory semantic fallback candidates, and uses local exact display refinement for renderer-only chrome. Remaining work: make provider history loading lazy instead of fully rehydrating `Session.history`, keep large tool metadata object-backed through descriptor load/render/copy/search, and replace the in-memory fallback with a real SQLite FTS/candidate index once renderer-only chrome has durable candidate rows.
+Status: complete for the progressive transcript scope. Transcript projection prepares `TranscriptHeightIndex`, a mixed estimated/exact row index, instead of measuring every missing height before first paint. Visible planning exact-measures the visible + overscan node range and replans after refinement, so a cold tail render of a large transcript does not measure every block. Estimates use descriptor text and tool output line counts before falling back to measured samples. `TranscriptDocument::snapshot` reports an estimated row count, while visible materialization, row-range display, copy, fold targeting, and resize anchors exactify the rows or anchor nodes they consume. Search now asks SQLite `transcript_search` for preferred candidates, indexes canonical descriptor search text locally, includes built-in renderer chrome in persisted/searchable descriptor rows, and exact-refines only candidate rows through display rendering instead of appending the whole transcript as a fallback. Broader storage cleanup remains outside this phase: core provider history still loads into `Session.history`, and full deletion of eager compatibility paths is tracked by Phase I.
 
 Deliverables:
 
@@ -946,4 +945,4 @@ Success target:
 - `RowTextState` in `crates/edit/src/window/row_text.rs:38` already distinguishes document rows from backing-buffer rows. This is important for cross-window selection correctness.
 - `handle_content_mouse` in `crates/tui/src/app/mouse.rs:541` already delegates materialized row copy through `copy_document_range`, which is the correct seam for exactifying copy ranges.
 - Current transcript `display_rows_for_range` and `copy_range` force full row-index rebuilds. These should become range-exactifying operations.
-- Current search layout is exact/global. Replace it with candidate search + local display refinement.
+- Current transcript search uses SQLite/semantic candidates plus local display refinement; future work should replace the substring candidate table with FTS if query latency warrants it.

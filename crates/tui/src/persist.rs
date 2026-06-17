@@ -219,12 +219,8 @@ fn transcript_descriptor_row(
         .map(serde_json::to_string)
         .transpose()?;
     let search_text = record
-        .tool_state
-        .as_ref()
-        .and_then(|(_, state)| state.output.as_ref())
-        .map(|output| output.content.clone())
-        .or_else(|| record.descriptor.raw_text())
-        .unwrap_or_default();
+        .descriptor
+        .search_text(record.tool_state.as_ref().map(|(_, state)| state));
     let history_idx = match record.origin {
         Some(BlockOrigin::History(idx)) => Some(idx as u64),
         _ => None,

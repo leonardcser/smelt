@@ -108,13 +108,14 @@ impl TranscriptSearchIndex {
         }
         let grams = unique_trigrams(query);
         if grams.is_empty() {
-            out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
+            if out.is_empty() {
+                out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
+            }
             return out;
         }
         let mut postings: Vec<&Vec<usize>> = Vec::with_capacity(grams.len());
         for gram in grams {
             let Some(list) = self.trigrams.get(&gram) else {
-                out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
                 return out;
             };
             postings.push(list);
@@ -133,7 +134,6 @@ impl TranscriptSearchIndex {
                 out.push(entry);
             }
         }
-        out.extend((0..self.entries.len()).filter(|entry| !seen[*entry]));
         out
     }
 }
@@ -200,13 +200,7 @@ impl TuiApp {
         let history = self.transcript.history();
         let mut text = String::new();
         for id in &entry.block_ids {
-            let block_text = history
-                .tool_call_id(*id)
-                .and_then(|call_id| history.tool_state(call_id))
-                .and_then(|state| state.output.as_ref())
-                .map(|output| output.content.clone())
-                .or_else(|| history.raw_text(*id));
-            let Some(block_text) = block_text else {
+            let Some(block_text) = history.search_text(*id) else {
                 continue;
             };
             if !text.is_empty() {
@@ -570,4 +564,59 @@ fn unique_trigrams(text: &str) -> Vec<u32> {
     grams.sort_unstable();
     grams.dedup();
     grams
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::transcript_model::ViewState;
+
+    fn test_index(texts: &[&str]) -> TranscriptSearchIndex {
+        let mut entries = Vec::new();
+        let mut trigrams = HashMap::new();
+        for (i, search_text) in texts.iter().enumerate() {
+            let id = BlockId::new(i as u64);
+            let layout_entry = TranscriptSearchLayoutEntry {
+                id: RenderNodeId::Block(id),
+                key: LayoutKey {
+                    width: 80,
+                    view_state: ViewState::Expanded,
+                    content_hash: i as u64,
+                    sidecar_hash: 0,
+                },
+                block_ids: vec![id],
+                first_row: i as RowIndex,
+                rows: 1,
+            };
+            push_search_entry(
+                &mut entries,
+                &mut trigrams,
+                &layout_entry,
+                (*search_text).to_string(),
+            );
+        }
+        TranscriptSearchIndex {
+            key: TranscriptSearchKey {
+                layout_generation: 1,
+                width: 80,
+            },
+            extends: None,
+            entries,
+            trigrams,
+        }
+    }
+
+    #[test]
+    fn candidate_entries_do_not_append_everything_after_trigram_hits() {
+        let index = test_index(&["alpha needle", "renderer only", "other text"]);
+        assert_eq!(index.candidate_entries("needle", None), vec![0]);
+        assert!(index.candidate_entries("absent", None).is_empty());
+    }
+
+    #[test]
+    fn candidate_entries_keep_sqlite_preferred_without_full_fallback() {
+        let index = test_index(&["alpha", "renderer only", "other text"]);
+        assert_eq!(index.candidate_entries("absent", Some(&[1])), vec![1]);
+        assert_eq!(index.candidate_entries("al", Some(&[0])), vec![0]);
+    }
 }
