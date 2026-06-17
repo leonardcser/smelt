@@ -514,7 +514,7 @@ end
 --- Render a compacted-history marker.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): table
 function smelt.transcript.defaults.render_compacted(block, ctx)
-  local separator = layout.separator({ label = " compacted ", dim = true })
+  local separator = layout.separator({ label = " compacted ", dim = true, label_selectable = true })
   if ctx and ctx.view_state == "collapsed" then return separator end
 
   local items = { separator }

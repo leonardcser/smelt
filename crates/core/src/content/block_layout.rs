@@ -91,6 +91,8 @@ pub struct ElapsedSpec {
 pub struct SeparatorSpec {
     pub label: String,
     pub dim: bool,
+    #[serde(default)]
+    pub label_selectable: bool,
 }
 
 /// Full-width background panel wrapper.

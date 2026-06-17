@@ -55,7 +55,7 @@ layout.panel = nil
 ---@type fun(lines: any, opts: table?): table
 layout.runs = nil
 
---- Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.
+--- Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true; `opts.label_selectable = true` makes only the label searchable/selectable.
 ---@type fun(opts: table?): table
 layout.separator = nil
 

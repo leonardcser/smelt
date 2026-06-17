@@ -1,5 +1,16 @@
 use super::*;
 
+fn searchable_transcript_app() -> TestApp {
+    let mut app = TestApp::builder().with_vim(true).build();
+    app.app.handle_resize(80, 16);
+    app.app.app_focus = AppFocus::Content;
+    app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
+    let win = app.app.transcript_win_mut();
+    win.set_vim_enabled(true);
+    win.set_vim_mode(VimMode::Normal);
+    app
+}
+
 #[test]
 fn transcript_search_opens_status_input_and_repeats_matches() {
     let mut app = row_document_transcript_app(20, true);
@@ -119,6 +130,82 @@ fn transcript_search_paints_visible_matches_and_esc_clears() {
         .range_layer(crate::smelt_edit::RangeLayer::Search)
         .is_empty());
     assert!(app.app.search.session.is_none());
+}
+
+#[test]
+fn transcript_search_finds_compacted_divider_label() {
+    let mut app = searchable_transcript_app();
+    app.app
+        .push_block(smelt_core::transcript_model::Block::Compacted {
+            summary: "archived earlier turns".into(),
+        });
+    app.render_silent();
+
+    app.type_char('/');
+    app.type_text("compacted");
+    app.press(KeyCode::Enter);
+
+    let range = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .and_then(|session| session.current_range())
+        .and_then(|range| range.rows())
+        .expect("compacted divider search match");
+    let row = app
+        .app
+        .transcript_rows_and_breaks_range(range.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(row.contains("compacted"), "matched row: {row:?}");
+}
+
+#[test]
+fn transcript_search_finds_lua_rendered_collapsed_tool_detail() {
+    let mut app = searchable_transcript_app();
+    let mut args = std::collections::HashMap::new();
+    args.insert("pattern".to_string(), serde_json::json!("needle"));
+    app.app.start_tool(
+        "glob-call-1".into(),
+        "glob".into(),
+        protocol::StyledLines::from_plain("**/*.rs"),
+        args,
+    );
+    app.app.finish_tool(
+        "glob-call-1",
+        smelt_core::transcript_model::ToolStatus::Ok,
+        Some(Box::new(smelt_core::transcript_model::ToolOutput {
+            content: "src/a.rs\nsrc/b.rs".into(),
+            is_error: false,
+            metadata: Some(serde_json::json!({
+                "display_count": { "value": 12, "unit": "file" }
+            })),
+        })),
+        None,
+    );
+    app.render_silent();
+
+    app.type_char('/');
+    app.type_text("12 files");
+    app.press(KeyCode::Enter);
+
+    let range = app
+        .app
+        .search
+        .session
+        .as_ref()
+        .and_then(|session| session.current_range())
+        .and_then(|range| range.rows())
+        .expect("collapsed tool detail search match");
+    let row = app
+        .app
+        .transcript_rows_and_breaks_range(range.start.row, 1)
+        .into_text_rows()
+        .pop()
+        .unwrap_or_default();
+    assert!(row.contains("12 files"), "matched row: {row:?}");
 }
 
 #[test]

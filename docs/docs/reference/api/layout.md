@@ -108,7 +108,7 @@ Styled inline text layout leaf. `lines` is a string or styled-lines table (`{ { 
 fun(opts: table?): table
 ```
 
-Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.
+Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true; `opts.label_selectable = true` makes only the label searchable/selectable.
 
 ## `smelt.layout.style`
 

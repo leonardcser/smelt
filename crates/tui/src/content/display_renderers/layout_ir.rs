@@ -758,7 +758,11 @@ fn render_separator_spec(
     let left = remaining / 2;
     let right = remaining - left;
     out.print_gutter(&"─".repeat(left));
-    out.print_gutter(&spec.label);
+    if spec.label_selectable {
+        out.print(&spec.label);
+    } else {
+        out.print_gutter(&spec.label);
+    }
     out.print_gutter(&"─".repeat(right));
     if spec.dim {
         out.pop_style();

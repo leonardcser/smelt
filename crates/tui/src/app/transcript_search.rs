@@ -2,8 +2,8 @@ use crate::app::search::{doc_range_for_match, row_match_is_selectable, SearchDir
 use crate::app::TuiApp;
 use crate::content::render_plan::RenderNodeId;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
-use crate::smelt_edit::{DisplayRow, DocPosition, DocRange, RowIndex};
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey};
+use crate::smelt_edit::{DisplayRow, DocPosition, DocRange, RowIndex, Theme};
+use smelt_core::transcript_model::{BlockId, LayoutKey};
 use std::collections::HashMap;
 
 const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
@@ -47,7 +47,7 @@ impl TranscriptSearchIndex {
         mut self,
         key: TranscriptSearchKey,
         layout: &TranscriptSearchLayout,
-        history: &BlockHistory,
+        mut search_text_for_entry: impl FnMut(&TranscriptSearchLayoutEntry) -> String,
     ) -> Option<Self> {
         if self.key.width != key.width {
             return None;
@@ -70,7 +70,13 @@ impl TranscriptSearchIndex {
 
         let _perf = smelt_perf::perf::begin("search:transcript:index_extend");
         for layout_entry in &layout.entries[old_len..] {
-            push_search_entry(&mut self.entries, &mut self.trigrams, history, layout_entry)?;
+            let search_text = search_text_for_entry(layout_entry);
+            push_search_entry(
+                &mut self.entries,
+                &mut self.trigrams,
+                layout_entry,
+                search_text,
+            );
         }
         self.key = key;
         self.extends = Some(old_key);
@@ -115,14 +121,13 @@ impl TranscriptSearchIndex {
 fn build_transcript_search_index(
     key: TranscriptSearchKey,
     layout: &TranscriptSearchLayout,
-    history: &BlockHistory,
+    mut search_text_for_entry: impl FnMut(&TranscriptSearchLayoutEntry) -> String,
 ) -> TranscriptSearchIndex {
     let mut entries = Vec::with_capacity(layout.entries.len());
     let mut trigrams: HashMap<u32, Vec<usize>> = HashMap::new();
     for layout_entry in &layout.entries {
-        if push_search_entry(&mut entries, &mut trigrams, history, layout_entry).is_none() {
-            continue;
-        }
+        let search_text = search_text_for_entry(layout_entry);
+        push_search_entry(&mut entries, &mut trigrams, layout_entry, search_text);
     }
     TranscriptSearchIndex {
         key,
@@ -135,20 +140,9 @@ fn build_transcript_search_index(
 fn push_search_entry(
     entries: &mut Vec<TranscriptSearchEntry>,
     trigrams: &mut HashMap<u32, Vec<usize>>,
-    history: &BlockHistory,
     layout_entry: &TranscriptSearchLayoutEntry,
-) -> Option<()> {
-    let search_text = layout_entry
-        .block_ids
-        .iter()
-        .map(|id| {
-            history
-                .blocks
-                .get(id)
-                .map(|block| block_search_text(history, block))
-        })
-        .collect::<Option<Vec<_>>>()?
-        .join("\n");
+    search_text: String,
+) {
     let entry_index = entries.len();
     entries.push(TranscriptSearchEntry {
         id: layout_entry.id,
@@ -160,7 +154,6 @@ fn push_search_entry(
     for gram in unique_trigrams(&search_text) {
         trigrams.entry(gram).or_default().push(entry_index);
     }
-    Some(())
 }
 
 fn record_index_size(index: &TranscriptSearchIndex) {
@@ -182,6 +175,22 @@ impl TuiApp {
         }
     }
 
+    fn transcript_search_text_for_entry(
+        &mut self,
+        entry: &TranscriptSearchLayoutEntry,
+        width: u16,
+        theme: &Theme,
+    ) -> String {
+        let display = self.transcript.display_rows_for_range(
+            &self.lua,
+            width,
+            theme,
+            entry.first_row,
+            entry.rows,
+        );
+        selectable_display_text(&display.rows)
+    }
+
     fn ensure_transcript_search_index(&mut self) -> Option<&TranscriptSearchIndex> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
@@ -199,9 +208,11 @@ impl TuiApp {
             return self.search.transcript_index.as_ref();
         }
 
-        let history = self.transcript.history();
+        let theme = self.ui.theme().clone();
         if let Some(index) = self.search.transcript_index.take() {
-            if let Some(index) = index.append_from_layout(key, &layout, history) {
+            if let Some(index) = index.append_from_layout(key, &layout, |layout_entry| {
+                self.transcript_search_text_for_entry(layout_entry, width, &theme)
+            }) {
                 self.search.transcript_index = Some(index);
                 record_index_size(self.search.transcript_index.as_ref()?);
                 return self.search.transcript_index.as_ref();
@@ -209,7 +220,11 @@ impl TuiApp {
         }
 
         let _perf = smelt_perf::perf::begin("search:transcript:index_build");
-        self.search.transcript_index = Some(build_transcript_search_index(key, &layout, history));
+        self.search.transcript_index = Some(build_transcript_search_index(
+            key,
+            &layout,
+            |layout_entry| self.transcript_search_text_for_entry(layout_entry, width, &theme),
+        ));
         record_index_size(self.search.transcript_index.as_ref()?);
         self.search.transcript_index.as_ref()
     }
@@ -453,6 +468,18 @@ impl TuiApp {
     }
 }
 
+fn selectable_display_text(rows: &[DisplayRow]) -> String {
+    rows.iter()
+        .flat_map(|row| {
+            row.selectable_ranges.iter().filter_map(|range| {
+                let text = smelt_buffer::text::slice(&row.text, range.clone());
+                (!text.is_empty()).then(|| text.to_string())
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn collect_row_matches(
     row_index: RowIndex,
     row: &DisplayRow,
@@ -500,45 +527,4 @@ fn unique_trigrams(text: &str) -> Vec<u32> {
     grams.sort_unstable();
     grams.dedup();
     grams
-}
-
-fn block_search_text(
-    history: &smelt_core::transcript_model::BlockHistory,
-    block: &Block,
-) -> String {
-    match block {
-        Block::User { text, image_labels } => {
-            if image_labels.is_empty() {
-                text.clone()
-            } else {
-                format!("{}\n{}", text, image_labels.join("\n"))
-            }
-        }
-        Block::Mode { text, icon, .. } => format!("{icon}{text}"),
-        Block::ProcessStatus { text, .. } => text.clone(),
-        Block::Thinking { content } | Block::Text { content } | Block::CodeLine { content, .. } => {
-            content.clone()
-        }
-        Block::ToolCall {
-            call_id,
-            name,
-            summary,
-            args,
-        } => {
-            let output = history
-                .tool_state(call_id)
-                .and_then(|state| state.output.as_ref())
-                .map(|output| output.content.as_str())
-                .unwrap_or("");
-            format!(
-                "{}\n{}\n{:?}\n{}",
-                name,
-                summary.as_plain_text(),
-                args,
-                output
-            )
-        }
-        Block::Exec { command, output } => format!("$ {command}\n{output}"),
-        Block::Compacted { summary } => summary.clone(),
-    }
 }

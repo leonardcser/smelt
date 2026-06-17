@@ -307,7 +307,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "separator",
-        "Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true.",
+        "Full-width horizontal separator. `opts.label` is centered in the row; `opts.dim` defaults to true; `opts.label_selectable = true` makes only the label searchable/selectable.",
         &["opts"],
         |_, opts: Option<mlua::Table>| -> LuaResult<LuaBlockLayout> {
             let label = opts
@@ -318,8 +318,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 .as_ref()
                 .and_then(|t| t.get::<Option<bool>>("dim").ok().flatten())
                 .unwrap_or(true);
+            let label_selectable = opts
+                .as_ref()
+                .and_then(|t| t.get::<Option<bool>>("label_selectable").ok().flatten())
+                .unwrap_or(false);
             Ok(LuaBlockLayout(BlockLayout::Leaf(LuaLeaf::Separator(
-                SeparatorSpec { label, dim },
+                SeparatorSpec {
+                    label,
+                    dim,
+                    label_selectable,
+                },
             ))))
         },
     )?;
