@@ -739,10 +739,31 @@ pub fn gap_between(above: &Block, below: &Block) -> u16 {
     ) {
         return 0;
     }
+    if matches!(
+        (above, below),
+        (Block::Thinking { .. }, Block::Thinking { .. })
+    ) {
+        return if starts_with_thinking_title(below) {
+            1
+        } else {
+            0
+        };
+    }
     if matches!(below, Block::Text { .. } | Block::CodeLine { .. }) && ends_with_heading(above) {
         return 0;
     }
     1
+}
+
+fn starts_with_thinking_title(block: &Block) -> bool {
+    let Block::Thinking { content } = block else {
+        return false;
+    };
+    content
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .and_then(crate::content::markdown_stream::thinking_title)
+        .is_some()
 }
 
 fn ends_with_heading(block: &Block) -> bool {
@@ -1218,8 +1239,19 @@ mod tests {
     }
 
     #[test]
-    fn gap_between_thinking_blocks_is_one() {
-        assert_eq!(gap_between(&thinking("a"), &thinking("b")), 1);
+    fn gap_between_thinking_blocks_only_separates_new_titles() {
+        assert_eq!(gap_between(&thinking("a"), &thinking("b")), 0);
+        assert_eq!(
+            gap_between(
+                &thinking("a"),
+                &thinking("**Assessing directory exclusions**\n\nbody")
+            ),
+            1
+        );
+        assert_eq!(
+            gap_between(&thinking("**First title**\nbody"), &thinking("body")),
+            0
+        );
     }
 
     #[test]

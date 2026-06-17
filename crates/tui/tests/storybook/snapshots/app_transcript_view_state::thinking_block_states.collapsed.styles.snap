@@ -5,8 +5,8 @@ expression: frame.styles_text()
 dim: 56 18
   0   0  25 attrs=dim|italic
   1   0  23 attrs=dim|italic
-  3   0  10 attrs=dim|italic
-  4   0  23 attrs=dim|italic
+  2   0  10 attrs=dim|italic
+  3   0  23 attrs=dim|italic
  14   0   1 fg=AnsiValue(237)
  14   1   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold
  14   2   1 fg=Rgb { r: 175, g: 175, b: 175 } attrs=bold

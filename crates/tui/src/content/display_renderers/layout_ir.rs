@@ -13,7 +13,7 @@ use smelt_core::content::highlight::{
     InlineOptions, InlineSpan, InlineSyntax,
 };
 use smelt_core::content::inline_line::{BreakPolicy, InlineLine, InlineRun, WrappedRun};
-use smelt_core::theme::intern;
+use smelt_core::theme::{intern, Theme};
 use smelt_core::transcript_model::{BlockHistory, ToolStatus};
 
 pub(crate) fn render_layout_ir_into(out: &mut LineBuilder, layout: &LayoutIr, width: u16) -> u16 {
@@ -244,7 +244,10 @@ fn measure_layout_ir_full_with_gutter(
         BlockLayout::Cap { child, spec } => {
             let child_rows =
                 measure_layout_ir_full_with_gutter(child, width, gutter_cells, inline_options);
-            cap_rows(child_rows, spec).len().min(u16::MAX as usize) as u16
+            let theme = Theme::default();
+            cap_rows_for_child(child_rows, spec, child, width, None, inline_options, &theme)
+                .len()
+                .min(u16::MAX as usize) as u16
         }
     }
 }
@@ -1061,6 +1064,7 @@ enum CapRow {
         kept: u16,
         total: Option<u64>,
         direction: &'static str,
+        omitted: Option<(u16, u16)>,
     },
 }
 
@@ -1078,6 +1082,7 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
                     kept,
                     total: None,
                     direction: "above",
+                    omitted: None,
                 });
             }
             rows.extend((0..kept).map(CapRow::Child));
@@ -1087,6 +1092,7 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
                     kept,
                     total: None,
                     direction: "below",
+                    omitted: None,
                 });
             }
         }
@@ -1098,6 +1104,7 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
                     kept,
                     total: spec.total_rows.filter(|total| *total > kept as u64),
                     direction: "above",
+                    omitted: None,
                 });
             }
             rows.extend((child_rows.saturating_sub(kept)..child_rows).map(CapRow::Child));
@@ -1107,6 +1114,7 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
                     kept,
                     total: None,
                     direction: "below",
+                    omitted: None,
                 });
             }
         }
@@ -1123,6 +1131,7 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
                         kept: spec.rows,
                         total: None,
                         direction: "omitted",
+                        omitted: Some((head_rows, child_rows.saturating_sub(tail_rows))),
                     });
                 }
                 rows.extend((child_rows.saturating_sub(tail_rows)..child_rows).map(CapRow::Child));
@@ -1130,6 +1139,63 @@ fn cap_rows(child_rows: u16, spec: &smelt_core::content::block_layout::CapSpec) 
         }
     }
     rows
+}
+
+fn cap_rows_for_child(
+    child_rows: u16,
+    spec: &smelt_core::content::block_layout::CapSpec,
+    child: &LayoutIr,
+    width: u16,
+    history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
+    theme: &Theme,
+) -> Vec<CapRow> {
+    let mut rows = cap_rows(child_rows, spec);
+    rows.retain(|row| match row {
+        CapRow::Marker {
+            direction: "omitted",
+            omitted: Some((start, end)),
+            ..
+        } => omitted_rows_have_visible_text(
+            child,
+            width,
+            *start,
+            *end,
+            history,
+            inline_options,
+            theme,
+        ),
+        _ => true,
+    });
+    rows
+}
+
+fn omitted_rows_have_visible_text(
+    child: &LayoutIr,
+    width: u16,
+    start: u16,
+    end: u16,
+    history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
+    theme: &Theme,
+) -> bool {
+    if start >= end {
+        return false;
+    }
+    let mut buf = smelt_core::buffer::Buffer::new(smelt_core::buffer::BufId(0), Default::default());
+    let mut out = LineBuilder::new(&mut buf, theme, width);
+    let rows = render_layout_ir_range(
+        &mut out,
+        child,
+        width,
+        start,
+        end.saturating_sub(start),
+        None,
+        history,
+        inline_options,
+    );
+    out.finish();
+    rows > 0 && (0..rows as usize).any(|row| !buf.get_line(row).unwrap_or("").trim().is_empty())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1146,7 +1212,16 @@ fn render_ir_cap(
 ) -> u16 {
     let child_rows =
         measure_layout_ir_full_with_gutter(child, width, gutter_width(gutter), inline_options);
-    let rows = cap_rows(child_rows, spec);
+    let theme = out.theme().clone();
+    let rows = cap_rows_for_child(
+        child_rows,
+        spec,
+        child,
+        width,
+        history,
+        inline_options,
+        &theme,
+    );
     let mut written = 0u16;
     for row in rows
         .into_iter()
@@ -1171,6 +1246,7 @@ fn render_ir_cap(
                 kept,
                 total,
                 direction,
+                ..
             } => {
                 render_cap_marker(out, skipped, kept, total, direction, gutter);
                 written = written.saturating_add(1);

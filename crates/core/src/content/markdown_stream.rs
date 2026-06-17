@@ -67,6 +67,12 @@ struct MarkdownStreamState {
     active: Option<ActiveMarkdownBlock>,
 }
 
+impl MarkdownStreamKind {
+    fn uses_thinking_section_policy(self) -> bool {
+        matches!(self, Self::Thinking)
+    }
+}
+
 enum ActiveMarkdownBlock {
     Paragraph {
         content: String,
@@ -149,7 +155,10 @@ impl MarkdownStream {
         let kind = self.kind;
         match self.state.active.as_mut() {
             Some(ActiveMarkdownBlock::Paragraph { content, id }) => {
-                if opening_fence_candidate(&self.state.current_line) != Candidate::Not {
+                if opening_fence_candidate(&self.state.current_line) != Candidate::Not
+                    || (kind.uses_thinking_section_policy()
+                        && thinking_title_candidate(&self.state.current_line) != Candidate::Not)
+                {
                     Self::sync_text(kind, history, id, content.clone());
                 } else {
                     Self::sync_text(
@@ -253,8 +262,20 @@ impl MarkdownStream {
             }
             Some(ActiveMarkdownBlock::Paragraph { mut content, id }) => {
                 if line.trim().is_empty() {
-                    self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
-                    self.finish_active(history);
+                    if self.kind.uses_thinking_section_policy() {
+                        append_line(&mut content, line);
+                        self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                    } else {
+                        self.state.active = Some(ActiveMarkdownBlock::Paragraph { content, id });
+                        self.finish_active(history);
+                    }
+                } else if self.kind.uses_thinking_section_policy() && thinking_title(line).is_some()
+                {
+                    Self::finish_text(self.kind, history, id, content);
+                    self.state.active = Some(ActiveMarkdownBlock::Paragraph {
+                        content: line.to_string(),
+                        id: None,
+                    });
                 } else if let Some(fence) = markdown_opening_fence(line) {
                     append_line(&mut content, line);
                     self.state.active = Some(ActiveMarkdownBlock::Code { content, fence, id });
@@ -354,6 +375,34 @@ fn append_line(content: &mut String, line: &str) {
         content.push('\n');
     }
     content.push_str(line);
+}
+
+pub(crate) fn thinking_title(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let inner = trimmed.strip_prefix("**")?.strip_suffix("**")?;
+    (!inner.trim().is_empty()).then_some(inner.trim())
+}
+
+fn thinking_title_candidate(line: &str) -> Candidate {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Candidate::Not;
+    }
+    let Some(inner) = trimmed.strip_prefix("**") else {
+        return Candidate::Not;
+    };
+    if inner.is_empty() || "**".starts_with(inner) {
+        return Candidate::Pending;
+    }
+    if trimmed.ends_with("**") {
+        if thinking_title(line).is_some() {
+            Candidate::Complete
+        } else {
+            Candidate::Not
+        }
+    } else {
+        Candidate::Pending
+    }
 }
 
 pub fn markdown_opening_fence(line: &str) -> Option<MarkdownFence> {
@@ -506,10 +555,21 @@ mod tests {
         (MarkdownStream::new(), BlockHistory::new())
     }
 
+    fn thinking_setup() -> (MarkdownStream, BlockHistory) {
+        (MarkdownStream::thinking(), BlockHistory::new())
+    }
+
     fn text_at(history: &BlockHistory, index: usize) -> &str {
         match history.block_at(index) {
             Block::Text { content } => content,
             block => panic!("expected text block, got {block:?}"),
+        }
+    }
+
+    fn thinking_at(history: &BlockHistory, index: usize) -> &str {
+        match history.block_at(index) {
+            Block::Thinking { content } => content,
+            block => panic!("expected thinking block, got {block:?}"),
         }
     }
 
@@ -562,6 +622,55 @@ mod tests {
         assert_eq!(text_at(&history, 0), "```\ninside");
         stream.append(&mut history, "text");
         assert_eq!(text_at(&history, 0), "```\ninside\n```text");
+    }
+
+    #[test]
+    fn thinking_preserves_blank_lines_inside_block() {
+        let (mut stream, mut history) = thinking_setup();
+        stream.append(&mut history, "first paragraph\n\nsecond paragraph");
+        stream.flush(&mut history);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            thinking_at(&history, 0),
+            "first paragraph\n\nsecond paragraph"
+        );
+    }
+
+    #[test]
+    fn thinking_bold_title_starts_new_block() {
+        let (mut stream, mut history) = thinking_setup();
+        stream.append(
+            &mut history,
+            "first paragraph\n\nsecond paragraph\n**Assessing directory exclusions**\n\nbody",
+        );
+        stream.flush(&mut history);
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            thinking_at(&history, 0),
+            "first paragraph\n\nsecond paragraph"
+        );
+        assert_eq!(
+            thinking_at(&history, 1),
+            "**Assessing directory exclusions**\n\nbody"
+        );
+    }
+
+    #[test]
+    fn streaming_thinking_title_does_not_preview_as_previous_paragraph() {
+        let (mut stream, mut history) = thinking_setup();
+        stream.append(&mut history, "previous sentence.\n**Assessing");
+        assert_eq!(history.len(), 1);
+        assert_eq!(thinking_at(&history, 0), "previous sentence.");
+
+        stream.append(&mut history, " directory exclusions**\nbody");
+        stream.flush(&mut history);
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            thinking_at(&history, 1),
+            "**Assessing directory exclusions**\nbody"
+        );
     }
 
     #[test]

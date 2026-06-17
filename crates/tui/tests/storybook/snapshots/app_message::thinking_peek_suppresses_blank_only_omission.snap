@@ -1,0 +1,16 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+│ first paragraph
+│ second paragraph
+│ third paragraph
+│ fourth paragraph
+
+
+
+
+─ ✿ working… ───────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+ ○ normal                                                       1:1 100%

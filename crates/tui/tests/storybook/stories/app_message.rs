@@ -86,6 +86,30 @@ app_story!(thinking_streams_table_in_tiny_deltas, |ctx| {
     assert!(frame.contains("1") && frame.contains("2"), "frame: {frame}");
 });
 
+app_story!(thinking_peek_suppresses_blank_only_omission, |ctx| {
+    ctx.set_viewport(72, 12);
+    ctx.engine(EngineEvent::ThinkingDelta {
+        delta: "first paragraph\n\nsecond paragraph\nthird paragraph\nfourth paragraph".into(),
+    });
+    ctx.run_lua("smelt.transcript.fold_kind('thinking', 'peek')");
+    ctx.assert_snapshot();
+});
+
+app_story!(thinking_stream_title_sections, |ctx| {
+    ctx.set_viewport(88, 16);
+    ctx.engine(EngineEvent::ThinkingDelta {
+        delta: concat!(
+            "I’m thinking about deriving directories from paths.\n\n",
+            "Regarding the watcher, it needs to rescan on changes.\n",
+            "**Assessing directory exclusions**\n\n",
+            "I'm considering which directories to include or exclude."
+        )
+        .into(),
+    });
+    ctx.run_lua("smelt.transcript.fold_all('open')");
+    ctx.assert_snapshot();
+});
+
 // ── User messages ─────────────────────────────────────────────────
 
 app_story!(user_message_block_single_line, |ctx| {
