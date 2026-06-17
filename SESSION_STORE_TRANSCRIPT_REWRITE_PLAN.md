@@ -842,6 +842,8 @@ Acceptance:
 
 ### Phase I: Cleanup and compatibility isolation
 
+Status: implemented in this branch. The old `session.ir.bin` module, reader/writer, format constants, persisted display-layout payloads, and persisted exact row-index save path are gone. Runtime open/search paths now ensure or trigger legacy-to-SQLite migration before loading from SQLite instead of returning a directly loaded legacy `Session`. Background migration reports completion to the TUI, clears resume-preview cache state, and only shows a toast when at least one session migrated or failed.
+
 Deliverables:
 
 - Delete manifest/segment store code and file artifact store code after SQLite import paths replace them.
@@ -874,7 +876,7 @@ Response:
 
 Response:
 
-- Use calibrated estimates and persisted exact samples.
+- Use calibrated estimates and in-memory exact samples.
 - Keep local anchor stable by block id + row offset after measuring.
 - Update scrollbar smoothly after render; do not move visible content unexpectedly once anchored.
 
@@ -882,7 +884,7 @@ Response:
 
 Response:
 
-- Exact persisted heights require matching renderer cache key.
+- Exact height reuse requires matching renderer identity. Phase I keeps this reuse in memory only; any future persisted cache must use a new cache identity and can be deleted/rebuilt freely.
 - Missing/unstable renderer cache keys fall back to estimates + visible exact measurement.
 - Cache format itself is disposable.
 

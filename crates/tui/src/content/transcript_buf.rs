@@ -1,6 +1,6 @@
 use super::display_layout::{
-    measure_block, render_block_into, CompileJob, DisplayModel, DisplayRowIndexEntry,
-    DisplayRowIndexNode, MeasureCtx, RenderCtx, TranscriptRenderEnv,
+    measure_block, render_block_into, CompileJob, DisplayModel, MeasureCtx, RenderCtx,
+    TranscriptRenderEnv,
 };
 use crate::content::render_plan::{
     NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptDefaultViewPolicy,
@@ -26,7 +26,7 @@ pub(crate) struct TranscriptProjection {
     active_width: u16,
     visible: VisibleProjectionState,
     measurements: MeasurementIndexStore,
-    display_cache_generation: u64,
+    projection_generation: u64,
     renderer_generation: Option<u64>,
     renderer_cache_key: Option<u64>,
     inline_options: InlineOptions,
@@ -80,6 +80,21 @@ struct RowIndexKey {
     renderer_cache_key: Option<u64>,
     presentation_generation: u64,
     base_key: LayoutKey,
+}
+
+#[derive(Clone)]
+struct DisplayRowIndexEntry {
+    width: u16,
+    renderer_generation: u64,
+    renderer_cache_key: Option<u64>,
+    nodes: Vec<DisplayRowIndexNode>,
+}
+
+#[derive(Clone)]
+struct DisplayRowIndexNode {
+    id: RenderNodeId,
+    key: NodeLayoutKey,
+    exact_height: u64,
 }
 
 impl RowIndexKey {
@@ -483,42 +498,10 @@ impl MeasurementIndexStore {
         self.active = TranscriptHeightIndex::default();
     }
 
-    fn hydrate(&mut self, entries: Vec<DisplayRowIndexEntry>) {
-        self.entries = entries;
-    }
-
     fn remember_active(&mut self) {
         if let Some(entry) = self.active.cache_entry() {
             upsert_row_index_entry(&mut self.entries, entry);
         }
-    }
-
-    fn export_entries(
-        &self,
-        history: &BlockHistory,
-        plan: &RenderPlan,
-        policy: &TranscriptDefaultViewPolicy,
-        presentation: &TranscriptPresentationState,
-        renderer_generation: Option<u64>,
-        renderer_cache_key: Option<u64>,
-    ) -> Vec<DisplayRowIndexEntry> {
-        let mut entries: Vec<DisplayRowIndexEntry> = self
-            .entries
-            .iter()
-            .filter(|entry| {
-                row_index_entry_matches_renderer(entry, renderer_generation, renderer_cache_key)
-                    && row_index_entry_matches(history, plan, policy, presentation, entry)
-            })
-            .cloned()
-            .collect();
-        if let Some(current) = self.active.cache_entry() {
-            if row_index_entry_matches_renderer(&current, renderer_generation, renderer_cache_key)
-                && row_index_entry_matches(history, plan, policy, presentation, &current)
-            {
-                upsert_row_index_entry(&mut entries, current);
-            }
-        }
-        entries
     }
 
     fn find_entry(
@@ -894,41 +877,6 @@ fn row_offset_for_display_offset(
     row as RowIndex
 }
 
-fn row_index_entry_matches(
-    history: &BlockHistory,
-    plan: &RenderPlan,
-    policy: &TranscriptDefaultViewPolicy,
-    presentation: &TranscriptPresentationState,
-    entry: &DisplayRowIndexEntry,
-) -> bool {
-    if entry.nodes.len() != plan.len() {
-        return false;
-    }
-    let base_key = base_layout_key(entry.width);
-    entry.nodes.iter().enumerate().all(|(index, node)| {
-        plan.node_id(index) == Some(node.id)
-            && plan.node_key(policy, history, presentation, index, base_key) == Some(node.key)
-    })
-}
-
-fn row_index_entry_matches_renderer(
-    entry: &DisplayRowIndexEntry,
-    generation: Option<u64>,
-    cache_key: Option<u64>,
-) -> bool {
-    if entry.renderer_cache_key.is_none() {
-        return false;
-    }
-    match generation {
-        Some(generation) => {
-            cache_key.is_some()
-                && entry.renderer_generation == generation
-                && entry.renderer_cache_key == cache_key
-        }
-        None => true,
-    }
-}
-
 fn upsert_row_index_entry(entries: &mut Vec<DisplayRowIndexEntry>, entry: DisplayRowIndexEntry) {
     if let Some(existing) = entries.iter_mut().find(|existing| {
         existing.width == entry.width
@@ -979,7 +927,7 @@ impl TranscriptProjection {
             active_width: 0,
             visible: VisibleProjectionState::default(),
             measurements: MeasurementIndexStore::default(),
-            display_cache_generation: 0,
+            projection_generation: 0,
             renderer_generation: None,
             renderer_cache_key: None,
             inline_options: InlineOptions::default(),
@@ -1002,7 +950,7 @@ impl TranscriptProjection {
             self.measurements.clear();
             self.clear_visible_state();
             self.visible.full_rows = None;
-            self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
+            self.projection_generation = self.projection_generation.wrapping_add(1);
         }
         let group_generation = lua.transcript_group_generation();
         let group_cache_key = lua.transcript_group_cache_key();
@@ -1040,67 +988,11 @@ impl TranscriptProjection {
         self.measurements.clear();
         self.clear_visible_state();
         self.visible.full_rows = None;
-        self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
+        self.projection_generation = self.projection_generation.wrapping_add(1);
     }
 
-    pub(crate) fn hydrate_display_cache(
-        &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        history: &BlockHistory,
-        data: crate::content::display_cache::DisplayCacheData,
-    ) -> usize {
-        self.refresh_render_plan(lua, history);
-        let crate::content::display_cache::DisplayCacheData {
-            row_indexes,
-            display_layouts,
-        } = data;
-        let hydrated_layouts = self.display_layouts.hydrate_from_cache(
-            history,
-            &self.render_plan,
-            &self.default_view_policy,
-            &self.presentation,
-            display_layouts,
-        );
-        self.measurements.hydrate(row_indexes);
-        smelt_perf::perf::record_value(
-            "transcript:display_model_cache:loaded",
-            hydrated_layouts as u64,
-        );
-        smelt_perf::perf::record_value(
-            "transcript:row_index_cache:loaded",
-            self.measurements.entries.len() as u64,
-        );
-        self.row_index_cache_entries(history).len()
-    }
-
-    pub(crate) fn display_cache_data(
-        &mut self,
-        lua: &smelt_core::lua::runtime::LuaRuntime,
-        history: &BlockHistory,
-    ) -> crate::content::display_cache::DisplayCacheData {
-        self.refresh_render_plan(lua, history);
-        if !self.persisted_display_cache_enabled() {
-            return crate::content::display_cache::DisplayCacheData::default();
-        }
-        crate::content::display_cache::DisplayCacheData {
-            row_indexes: self.row_index_cache_entries(history),
-            display_layouts: self.display_layouts.cache_entries(
-                history,
-                &self.render_plan,
-                &self.default_view_policy,
-                &self.presentation,
-                self.renderer_generation,
-                self.renderer_cache_key,
-            ),
-        }
-    }
-
-    pub(crate) fn display_cache_generation(&self) -> u64 {
-        self.display_cache_generation
-    }
-
-    fn persisted_display_cache_enabled(&self) -> bool {
-        self.render_plan.group_generation == 0 || self.render_plan.group_cache_key.is_some()
+    pub(crate) fn projection_generation(&self) -> u64 {
+        self.projection_generation
     }
 
     pub(crate) fn invalidate_renderer_if_changed(
@@ -1122,22 +1014,8 @@ impl TranscriptProjection {
         self.measurements.clear();
         self.clear_visible_state();
         self.visible.full_rows = None;
-        self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
+        self.projection_generation = self.projection_generation.wrapping_add(1);
         true
-    }
-
-    fn row_index_cache_entries(&mut self, history: &BlockHistory) -> Vec<DisplayRowIndexEntry> {
-        if !self.persisted_display_cache_enabled() {
-            return Vec::new();
-        }
-        self.measurements.export_entries(
-            history,
-            &self.render_plan,
-            &self.default_view_policy,
-            &self.presentation,
-            self.renderer_generation,
-            self.renderer_cache_key,
-        )
     }
 
     /// Snapshot of the visibly laid-out blocks: `(BlockId, first_row, rows)`.
@@ -1171,7 +1049,7 @@ impl TranscriptProjection {
         let compiled = jobs.len();
         self.display_layouts.compile_and_insert(env, jobs);
         if compiled > 0 {
-            self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
+            self.projection_generation = self.projection_generation.wrapping_add(1);
         }
         #[cfg(test)]
         {
@@ -1551,7 +1429,7 @@ impl TranscriptProjection {
     fn set_exact_height(&mut self, index: usize, rows: RowIndex) {
         let measured = self.measurements.active.set_exact_height(index, rows);
         if measured {
-            self.display_cache_generation = self.display_cache_generation.wrapping_add(1);
+            self.projection_generation = self.projection_generation.wrapping_add(1);
         }
         #[cfg(test)]
         if measured {
@@ -1929,7 +1807,7 @@ impl TranscriptProjection {
             renderer_generation,
             renderer_cache_key,
             presentation_generation: self.presentation.generation(),
-            row_generation: self.display_cache_generation,
+            row_generation: self.projection_generation,
             mode: scroll_target.mode(viewport_rows),
         }
     }
@@ -2121,7 +1999,7 @@ impl TranscriptProjection {
             || current_env.renderer_generation != plan.key.renderer_generation
             || current_env.renderer_cache_key != plan.key.renderer_cache_key
             || self.presentation.generation() != plan.key.presentation_generation
-            || self.display_cache_generation != plan.key.row_generation
+            || self.projection_generation != plan.key.row_generation
         {
             self.prepare_row_index_with_env(current_env.clone(), history, plan.key.width);
             let key = self.project_key(
@@ -3496,53 +3374,6 @@ mod tests {
     }
 
     #[test]
-    fn group_without_cache_key_skips_persisted_display_cache() {
-        let lua = test_lua();
-        lua.lua
-            .load(
-                r#"
-                smelt.transcript.groups.register({
-                  name = "uncached-tools",
-                  selector = { kind = "tool", terminal = true },
-                  min = 2,
-                  render = function(group, ctx)
-                    local _ = group
-                    local _ = ctx
-                    return smelt.layout.text("uncached group")
-                  end,
-                })
-                "#,
-            )
-            .exec()
-            .expect("register uncached group");
-        let mut transcript = Transcript::new();
-        let mut parser = StreamParser::new();
-        push_tool(
-            &mut parser,
-            &mut transcript.history,
-            "call-1",
-            "first",
-            ToolStatus::Ok,
-        );
-        push_tool(
-            &mut parser,
-            &mut transcript.history,
-            "call-2",
-            "second",
-            ToolStatus::Ok,
-        );
-        let theme = Theme::default();
-        let mut projection = TranscriptProjection::new();
-
-        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
-        let cache = projection.display_cache_data(&lua, &transcript.history);
-
-        assert!(rows.iter().any(|line| line == "uncached group"));
-        assert!(cache.row_indexes.is_empty());
-        assert!(cache.display_layouts.is_empty());
-    }
-
-    #[test]
     fn grouped_node_gap_uses_semantic_child_boundary() {
         let lua = test_lua();
         lua.lua
@@ -4166,193 +3997,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_row_index_round_trips_through_display_cache() {
-        let mut transcript = Transcript::new();
-        for i in 0..100 {
-            transcript.push(Block::Text {
-                content: format!("line {i}"),
-            });
-        }
-        let lua = test_lua();
-        let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
-        assert_eq!(total, 199);
-        let cache = projection.display_cache_data(&lua, &transcript.history);
-        assert_eq!(cache.row_indexes.len(), 1);
-        assert_eq!(cache.display_layouts.len(), 100);
-        assert!(cache
-            .row_indexes
-            .iter()
-            .all(|entry| entry.renderer_cache_key.is_some()));
-        assert!(cache
-            .display_layouts
-            .iter()
-            .all(|entry| entry.key.renderer_cache_key.is_some()));
-
-        let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&lua, &transcript.history, cache);
-        hydrated.reset_counters();
-
-        assert_eq!(
-            hydrated.exact_total_rows(&test_lua(), &mut transcript.history, 80),
-            total
-        );
-        assert_eq!(
-            hydrated.counters(),
-            TranscriptProjectionCounters::default(),
-            "hydrated exact row index should avoid compiling or measuring blocks"
-        );
-    }
-
-    #[test]
-    fn display_layouts_round_trip_without_row_index_recompilation() {
-        let lua = test_lua();
-        let mut transcript = Transcript::new();
-        for i in 0..100 {
-            transcript.push(Block::Text {
-                content: format!("line {i}"),
-            });
-        }
-        let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
-        let mut cache = projection.display_cache_data(&lua, &transcript.history);
-        assert_eq!(cache.display_layouts.len(), 100);
-        cache.row_indexes.clear();
-
-        let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&lua, &transcript.history, cache);
-        assert_eq!(hydrated.display_layouts_len(), 100);
-        hydrated.reset_counters();
-
-        assert_eq!(
-            hydrated.exact_total_rows(&lua, &mut transcript.history, 80),
-            total
-        );
-        let counters = hydrated.counters();
-        assert_eq!(
-            counters.display_layouts, 0,
-            "hydrated DisplayIR should avoid Lua recompilation"
-        );
-        assert_eq!(
-            counters.exact_height_measured_blocks, 100,
-            "without a row index, hydrated DisplayIR still needs exact measurement"
-        );
-    }
-
-    #[test]
-    fn renderer_without_cache_key_skips_persisted_display_cache() {
-        let lua = test_lua();
-        lua.lua
-            .load(
-                r#"
-                smelt.transcript.set_renderer(function(block, ctx)
-                  local _ = ctx
-                  return smelt.layout.text(block.content or block.text or "")
-                end)
-                "#,
-            )
-            .exec()
-            .expect("set renderer");
-        assert_eq!(lua.transcript_renderer_cache_key(), None);
-
-        let mut transcript = Transcript::new();
-        transcript.push(Block::Text {
-            content: "hello".into(),
-        });
-        let mut projection = TranscriptProjection::new();
-        assert_eq!(
-            projection.exact_total_rows(&lua, &mut transcript.history, 80),
-            1
-        );
-        assert_eq!(projection.display_layouts_len(), 1);
-
-        let cache = projection.display_cache_data(&lua, &transcript.history);
-        assert!(cache.row_indexes.is_empty());
-        assert!(cache.display_layouts.is_empty());
-    }
-
-    #[test]
-    fn renderer_cache_key_mismatch_rejects_display_cache_entries() {
-        let lua = test_lua();
-        let mut transcript = Transcript::new();
-        for i in 0..20 {
-            transcript.push(Block::Text {
-                content: format!("line {i}"),
-            });
-        }
-        let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
-        let mut cache = projection.display_cache_data(&lua, &transcript.history);
-        assert_eq!(cache.row_indexes.len(), 1);
-        assert_eq!(cache.display_layouts.len(), 20);
-        for entry in &mut cache.row_indexes {
-            entry.renderer_cache_key = entry.renderer_cache_key.map(|key| key.wrapping_add(1));
-        }
-        for entry in &mut cache.display_layouts {
-            entry.key.renderer_cache_key =
-                entry.key.renderer_cache_key.map(|key| key.wrapping_add(1));
-        }
-
-        let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&lua, &transcript.history, cache);
-        hydrated.reset_counters();
-
-        assert_eq!(
-            hydrated.exact_total_rows(&lua, &mut transcript.history, 80),
-            total
-        );
-        let counters = hydrated.counters();
-        assert_eq!(
-            counters.display_layouts, 20,
-            "renderer-cache-key mismatch must recompile persisted DisplayIR"
-        );
-        assert_eq!(
-            counters.exact_height_measured_blocks, 20,
-            "renderer-cache-key mismatch must reject persisted row indexes"
-        );
-    }
-
-    #[test]
-    fn renderer_generation_mismatch_rejects_display_cache_entries() {
-        let lua = test_lua();
-        let mut transcript = Transcript::new();
-        for i in 0..20 {
-            transcript.push(Block::Text {
-                content: format!("line {i}"),
-            });
-        }
-        let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
-        let mut cache = projection.display_cache_data(&lua, &transcript.history);
-        assert_eq!(cache.row_indexes.len(), 1);
-        assert_eq!(cache.display_layouts.len(), 20);
-        for entry in &mut cache.row_indexes {
-            entry.renderer_generation = entry.renderer_generation.wrapping_add(1);
-        }
-        for entry in &mut cache.display_layouts {
-            entry.key.renderer_generation = entry.key.renderer_generation.wrapping_add(1);
-        }
-
-        let mut hydrated = TranscriptProjection::new();
-        hydrated.hydrate_display_cache(&lua, &transcript.history, cache);
-        hydrated.reset_counters();
-
-        assert_eq!(
-            hydrated.exact_total_rows(&lua, &mut transcript.history, 80),
-            total
-        );
-        let counters = hydrated.counters();
-        assert_eq!(
-            counters.display_layouts, 20,
-            "renderer-generation mismatch must recompile persisted DisplayIR"
-        );
-        assert_eq!(
-            counters.exact_height_measured_blocks, 20,
-            "renderer-generation mismatch must reject persisted row indexes"
-        );
-    }
-
-    #[test]
     fn incremental_row_index_only_measures_appended_blocks() {
         let mut projection = TranscriptProjection::new();
         let mut transcript = Transcript::new();
@@ -4427,7 +4071,7 @@ mod tests {
         projection.reset_counters();
 
         transcript.history.order.remove(10);
-        transcript.history.invalidate_display_cache();
+        transcript.history.mark_changed();
         projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
 
         let counters = projection.counters();
@@ -5600,15 +5244,11 @@ mod tests {
         generated_bytes: usize,
         blocks: usize,
         total_rows: RowIndex,
-        cache_row_indexes: usize,
-        cache_display_layouts: usize,
         first_ms: f64,
         resize_ms: f64,
         theme_ms: f64,
         scroll12_ms: f64,
         visible_ms: f64,
-        hydrated_full_ms: f64,
-        hydrated_ir_only_ms: f64,
         no_cache_ms: f64,
         allocs: u64,
         bytes_allocated: u64,
@@ -5619,10 +5259,6 @@ mod tests {
         theme_counters: TranscriptProjectionCounters,
         scroll_counters: TranscriptProjectionCounters,
         visible_counters: TranscriptProjectionCounters,
-        hydrated_full_loaded_rows: usize,
-        hydrated_full_counters: TranscriptProjectionCounters,
-        hydrated_ir_loaded_rows: usize,
-        hydrated_ir_counters: TranscriptProjectionCounters,
         no_cache_counters: TranscriptProjectionCounters,
     }
 
@@ -5792,22 +5428,15 @@ mod tests {
             40,
         );
         let first_ms = elapsed_ms(first_start.elapsed());
-        let cache = projection.display_cache_data(&lua, &transcript.history);
         smelt_core::session::save_with_blobs(&session, &std::collections::HashMap::new());
-        crate::content::display_cache::write_for_session(&session, &cache);
 
         let load_start = std::time::Instant::now();
         let loaded = smelt_core::session::load(&session.id).expect("load benchmark session");
         let load_ms = elapsed_ms(load_start.elapsed());
-        let cache_start = std::time::Instant::now();
-        let loaded_cache = crate::content::display_cache::read_for_session(&loaded);
-        let cache_read_ms = elapsed_ms(cache_start.elapsed());
         let rebuild_start = std::time::Instant::now();
         let mut resumed = crate::app::history::build_transcript_from_session(&lua, &loaded);
         let rebuild_ms = elapsed_ms(rebuild_start.elapsed());
         let mut resumed_projection = TranscriptProjection::new();
-        let hydrated_rows =
-            resumed_projection.hydrate_display_cache(&lua, &resumed.history, loaded_cache);
         let mut resumed_buf = Buffer::new(crate::smelt_edit::BufId(92), Default::default());
         let render_start = std::time::Instant::now();
         let resumed_rows = project_with_lua(
@@ -5822,20 +5451,17 @@ mod tests {
         );
         let render_ms = elapsed_ms(render_start.elapsed());
         assert_eq!(resumed_rows.total_rows, first.total_rows);
-        assert_eq!(hydrated_rows, 1);
         smelt_core::session::delete(&session.id);
         smelt_perf::perf::set_enabled(false);
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_SAMPLE target_bytes={} history_items={} rows={} build_ms={:.3} first_ms={:.3} load_ms={:.3} cache_read_ms={:.3} rebuild_ms={:.3} hydrated_rows={} render_ms={:.3}",
+            "TRANSCRIPT_TRUE_RESUME_SAMPLE target_bytes={} history_items={} rows={} build_ms={:.3} first_ms={:.3} load_ms={:.3} rebuild_ms={:.3} render_ms={:.3}",
             target_bytes,
             history_items,
             first.total_rows,
             build_ms,
             first_ms,
             load_ms,
-            cache_read_ms,
             rebuild_ms,
-            hydrated_rows,
             render_ms,
         );
     }
@@ -5868,7 +5494,6 @@ mod tests {
         let first_ms = elapsed_ms(first_start.elapsed());
         let first_alloc = smelt_perf::alloc::delta(alloc_start, smelt_perf::alloc::snapshot());
         let first_counters = cold.counters();
-        let cache = cold.display_cache_data(&lua, &transcript.history);
 
         cold.reset_counters();
         let resize_start = std::time::Instant::now();
@@ -5932,46 +5557,6 @@ mod tests {
         let visible_ms = elapsed_ms(visible_start.elapsed());
         let visible_counters = cold.counters();
 
-        let mut hydrated_full = TranscriptProjection::new();
-        let hydrated_full_loaded_rows =
-            hydrated_full.hydrate_display_cache(&lua, &transcript.history, cache.clone());
-        hydrated_full.reset_counters();
-        let mut hydrated_full_buf = Buffer::new(crate::smelt_edit::BufId(78), Default::default());
-        let hydrated_full_start = std::time::Instant::now();
-        let hydrated_full_projection = project_with_lua(
-            &mut hydrated_full,
-            &lua,
-            &mut hydrated_full_buf,
-            &mut transcript.history,
-            100,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
-        );
-        let hydrated_full_ms = elapsed_ms(hydrated_full_start.elapsed());
-        let hydrated_full_counters = hydrated_full.counters();
-
-        let mut ir_only_cache = cache.clone();
-        ir_only_cache.row_indexes.clear();
-        let mut hydrated_ir = TranscriptProjection::new();
-        let hydrated_ir_loaded_rows =
-            hydrated_ir.hydrate_display_cache(&lua, &transcript.history, ir_only_cache);
-        hydrated_ir.reset_counters();
-        let mut hydrated_ir_buf = Buffer::new(crate::smelt_edit::BufId(79), Default::default());
-        let hydrated_ir_start = std::time::Instant::now();
-        let hydrated_ir_projection = project_with_lua(
-            &mut hydrated_ir,
-            &lua,
-            &mut hydrated_ir_buf,
-            &mut transcript.history,
-            100,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
-        );
-        let hydrated_ir_only_ms = elapsed_ms(hydrated_ir_start.elapsed());
-        let hydrated_ir_counters = hydrated_ir.counters();
-
         let mut no_cache = TranscriptProjection::new();
         let mut no_cache_buf = Buffer::new(crate::smelt_edit::BufId(80), Default::default());
         let no_cache_start = std::time::Instant::now();
@@ -5994,8 +5579,6 @@ mod tests {
         assert!(resized.total_rows > 0);
         assert_eq!(themed.total_rows, resized.total_rows);
         assert!(!visible.rows.is_empty());
-        assert_eq!(hydrated_full_projection.total_rows, first.total_rows);
-        assert_eq!(hydrated_ir_projection.total_rows, first.total_rows);
         assert_eq!(no_cache_projection.total_rows, first.total_rows);
         assert_eq!(first_counters.display_layouts, blocks);
         assert_eq!(resize_counters.display_layouts, 0);
@@ -6004,9 +5587,6 @@ mod tests {
         assert_eq!(scroll_counters.exact_height_measured_blocks, 0);
         assert_eq!(visible_counters.display_layouts, 0);
         assert_eq!(visible_counters.exact_height_measured_blocks, 0);
-        assert_eq!(hydrated_full_counters.display_layouts, 0);
-        assert_eq!(hydrated_full_counters.exact_height_measured_blocks, 0);
-        assert_eq!(hydrated_ir_counters.display_layouts, 0);
         assert_eq!(no_cache_counters.display_layouts, blocks);
 
         smelt_perf::alloc::set_enabled(false);
@@ -6018,15 +5598,11 @@ mod tests {
             generated_bytes,
             blocks,
             total_rows: first.total_rows,
-            cache_row_indexes: cache.row_indexes.len(),
-            cache_display_layouts: cache.display_layouts.len(),
             first_ms,
             resize_ms,
             theme_ms,
             scroll12_ms,
             visible_ms,
-            hydrated_full_ms,
-            hydrated_ir_only_ms,
             no_cache_ms,
             allocs: first_alloc.allocs,
             bytes_allocated: first_alloc.bytes_allocated,
@@ -6037,10 +5613,6 @@ mod tests {
             theme_counters,
             scroll_counters,
             visible_counters,
-            hydrated_full_loaded_rows,
-            hydrated_full_counters,
-            hydrated_ir_loaded_rows,
-            hydrated_ir_counters,
             no_cache_counters,
         }
     }
@@ -6079,18 +5651,6 @@ mod tests {
                 .map(|sample| sample.visible_ms)
                 .collect::<Vec<_>>(),
         );
-        let hydrated_full = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.hydrated_full_ms)
-                .collect::<Vec<_>>(),
-        );
-        let hydrated_ir = MetricStats::from(
-            &samples
-                .iter()
-                .map(|sample| sample.hydrated_ir_only_ms)
-                .collect::<Vec<_>>(),
-        );
         let no_cache = MetricStats::from(
             &samples
                 .iter()
@@ -6099,7 +5659,7 @@ mod tests {
         );
         let sample = samples[0];
         eprintln!(
-            "| {:<18} | {:>8.2} | {:>6} | {:>8} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} |",
+            "| {:<18} | {:>8.2} | {:>6} | {:>8} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} |",
             workload.name,
             sample.input_bytes as f64 / (1024.0 * 1024.0),
             sample.blocks,
@@ -6109,20 +5669,16 @@ mod tests {
             theme.display(),
             scroll.display(),
             visible.display(),
-            hydrated_full.display(),
-            hydrated_ir.display(),
             no_cache.display(),
         );
         eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_SUMMARY workload={} runs={} input_bytes={} generated_bytes={} blocks={} rows={} cache_row_indexes={} cache_display_layouts={} first_mean_ms={:.3} first_stddev_ms={:.3} resize_mean_ms={:.3} resize_stddev_ms={:.3} theme_mean_ms={:.3} theme_stddev_ms={:.3} scroll12_mean_ms={:.3} scroll12_stddev_ms={:.3} visible_mean_ms={:.3} visible_stddev_ms={:.3} hydrated_full_mean_ms={:.3} hydrated_full_stddev_ms={:.3} hydrated_ir_only_mean_ms={:.3} hydrated_ir_only_stddev_ms={:.3} no_cache_mean_ms={:.3} no_cache_stddev_ms={:.3} allocs={} bytes_allocated={} visible_rows={} scroll_materialized_rows={} first_min_ms={:.3} first_max_ms={:.3}",
+            "TRANSCRIPT_LAYOUT_BENCH_SUMMARY workload={} runs={} input_bytes={} generated_bytes={} blocks={} rows={} first_mean_ms={:.3} first_stddev_ms={:.3} resize_mean_ms={:.3} resize_stddev_ms={:.3} theme_mean_ms={:.3} theme_stddev_ms={:.3} scroll12_mean_ms={:.3} scroll12_stddev_ms={:.3} visible_mean_ms={:.3} visible_stddev_ms={:.3} no_cache_mean_ms={:.3} no_cache_stddev_ms={:.3} allocs={} bytes_allocated={} visible_rows={} scroll_materialized_rows={} first_min_ms={:.3} first_max_ms={:.3}",
             workload.name,
             samples.len(),
             sample.input_bytes,
             sample.generated_bytes,
             sample.blocks,
             sample.total_rows,
-            sample.cache_row_indexes,
-            sample.cache_display_layouts,
             first.mean,
             first.stddev,
             resize.mean,
@@ -6133,10 +5689,6 @@ mod tests {
             scroll.stddev,
             visible.mean,
             visible.stddev,
-            hydrated_full.mean,
-            hydrated_full.stddev,
-            hydrated_ir.mean,
-            hydrated_ir.stddev,
             no_cache.mean,
             no_cache.stddev,
             sample.allocs,
@@ -6147,17 +5699,13 @@ mod tests {
             first.max,
         );
         eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_COUNTERS workload={} first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} hydrated_full_loaded_rows={} hydrated_full={:?} hydrated_ir_loaded_rows={} hydrated_ir={:?} no_cache={:?}",
+            "TRANSCRIPT_LAYOUT_BENCH_COUNTERS workload={} first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} no_cache={:?}",
             workload.name,
             sample.first_counters,
             sample.resize_counters,
             sample.theme_counters,
             sample.scroll_counters,
             sample.visible_counters,
-            sample.hydrated_full_loaded_rows,
-            sample.hydrated_full_counters,
-            sample.hydrated_ir_loaded_rows,
-            sample.hydrated_ir_counters,
             sample.no_cache_counters,
         );
     }
@@ -6173,10 +5721,10 @@ mod tests {
             workloads.len()
         );
         eprintln!(
-            "| workload           |      MiB | blocks |     rows |     first ms |    resize ms |     theme ms |   scroll12 ms |   visible ms |  fullcache ms |    ironly ms |   nocache ms |"
+            "| workload           |      MiB | blocks |     rows |     first ms |    resize ms |     theme ms |   scroll12 ms |   visible ms |   nocache ms |"
         );
         eprintln!(
-            "|--------------------|----------|--------|----------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|"
+            "|--------------------|----------|--------|----------|--------------|--------------|--------------|--------------|--------------|--------------|"
         );
         for workload in workloads {
             let _warmup = run_transcript_bench_sample(workload);
@@ -6184,7 +5732,7 @@ mod tests {
             for run in 0..runs {
                 let sample = run_transcript_bench_sample(workload);
                 eprintln!(
-                    "TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload={} run={} input_bytes={} generated_bytes={} blocks={} rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} hydrated_full_ms={:.3} hydrated_ir_only_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={}",
+                    "TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload={} run={} input_bytes={} generated_bytes={} blocks={} rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={}",
                     workload.name,
                     run + 1,
                     sample.input_bytes,
@@ -6196,8 +5744,6 @@ mod tests {
                     sample.theme_ms,
                     sample.scroll12_ms,
                     sample.visible_ms,
-                    sample.hydrated_full_ms,
-                    sample.hydrated_ir_only_ms,
                     sample.no_cache_ms,
                     sample.allocs,
                     sample.bytes_allocated,
@@ -6228,20 +5774,16 @@ mod tests {
         };
         let sample = run_transcript_bench_sample(workload);
         eprintln!(
-            "TRANSCRIPT_LAYOUT_BASELINE input_bytes={} generated_bytes={} blocks={} total_rows={} cache_row_indexes={} cache_display_layouts={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} hydrated_full_ms={:.3} hydrated_ir_only_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={} visible_rows={} scroll_materialized_rows={}",
+            "TRANSCRIPT_LAYOUT_BASELINE input_bytes={} generated_bytes={} blocks={} total_rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={} visible_rows={} scroll_materialized_rows={}",
             sample.input_bytes,
             sample.generated_bytes,
             sample.blocks,
             sample.total_rows,
-            sample.cache_row_indexes,
-            sample.cache_display_layouts,
             sample.first_ms,
             sample.resize_ms,
             sample.theme_ms,
             sample.scroll12_ms,
             sample.visible_ms,
-            sample.hydrated_full_ms,
-            sample.hydrated_ir_only_ms,
             sample.no_cache_ms,
             sample.allocs,
             sample.bytes_allocated,
@@ -6249,16 +5791,12 @@ mod tests {
             sample.scroll_materialized_rows,
         );
         eprintln!(
-            "TRANSCRIPT_LAYOUT_COUNTERS first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} hydrated_full_loaded_rows={} hydrated_full={:?} hydrated_ir_loaded_rows={} hydrated_ir={:?} no_cache={:?}",
+            "TRANSCRIPT_LAYOUT_COUNTERS first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} no_cache={:?}",
             sample.first_counters,
             sample.resize_counters,
             sample.theme_counters,
             sample.scroll_counters,
             sample.visible_counters,
-            sample.hydrated_full_loaded_rows,
-            sample.hydrated_full_counters,
-            sample.hydrated_ir_loaded_rows,
-            sample.hydrated_ir_counters,
             sample.no_cache_counters,
         );
     }

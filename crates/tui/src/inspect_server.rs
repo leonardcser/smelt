@@ -3,10 +3,8 @@
 //! Serves an embedded single-page application plus a small read-only JSON
 //! API backed by `smelt_core::session` and `smelt_store`.
 
-use protocol::request_log::RequestLogEntry;
 use protocol::TokenUsage;
 use serde::Serialize;
-use std::io::{BufRead, BufReader as StdBufReader};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -491,31 +489,24 @@ async fn session_requests(id: &str) -> (&'static str, &'static str, String) {
 }
 
 fn session_requests_json(id: &str) -> std::result::Result<String, String> {
-    let db_path = session_dir(id).join("session.db");
-    if db_path.is_file() {
-        let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
-        let attempts = db
-            .query_request_attempts(&smelt_store::RequestAuditQuery {
-                limit: u32::MAX,
-                order: smelt_store::RequestAuditOrder::OldestFirst,
-                ..Default::default()
-            })
-            .map_err(|err| err.to_string())?;
-        let values: Vec<serde_json::Value> = attempts.iter().map(request_summary_json).collect();
-        return serde_json::to_string(&values).map_err(|err| err.to_string());
+    let dir = session_dir(id);
+    let db_path = dir.join("session.db");
+    if !db_path.is_file() {
+        let _ = smelt_core::session::migrate_session_dir_to_db(&dir);
     }
-
-    let path = session_dir(id).join("requests.jsonl");
-    if !path.exists() {
+    if !db_path.is_file() {
         return Ok("[]".to_string());
     }
-    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    let lines: Vec<serde_json::Value> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    serde_json::to_string(&lines).map_err(|err| err.to_string())
+    let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
+    let attempts = db
+        .query_request_attempts(&smelt_store::RequestAuditQuery {
+            limit: u32::MAX,
+            order: smelt_store::RequestAuditOrder::OldestFirst,
+            ..Default::default()
+        })
+        .map_err(|err| err.to_string())?;
+    let values: Vec<serde_json::Value> = attempts.iter().map(request_summary_json).collect();
+    serde_json::to_string(&values).map_err(|err| err.to_string())
 }
 
 async fn session_request_payload(
@@ -686,36 +677,20 @@ fn project_labels(cwd: Option<&str>) -> (Option<String>, Option<String>) {
 
 fn request_stats_for_session(id: &str) -> RequestStats {
     let db_path = session_dir(id).join("session.db");
-    if db_path.is_file() {
-        if let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) {
-            if let Ok(attempts) = db.query_request_attempts(&smelt_store::RequestAuditQuery {
-                limit: u32::MAX,
-                order: smelt_store::RequestAuditOrder::OldestFirst,
-                ..Default::default()
-            }) {
-                let mut stats = RequestStats::default();
-                for attempt in attempts {
-                    stats.record_summary(&attempt);
-                }
-                return stats;
+    if let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) {
+        if let Ok(attempts) = db.query_request_attempts(&smelt_store::RequestAuditQuery {
+            limit: u32::MAX,
+            order: smelt_store::RequestAuditOrder::OldestFirst,
+            ..Default::default()
+        }) {
+            let mut stats = RequestStats::default();
+            for attempt in attempts {
+                stats.record_summary(&attempt);
             }
+            return stats;
         }
     }
-
-    let path = session_dir(id).join("requests.jsonl");
-    let Ok(file) = std::fs::File::open(path) else {
-        return RequestStats::default();
-    };
-    let mut stats = RequestStats::default();
-    for entry in StdBufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<RequestLogEntry>(&line).ok())
-    {
-        stats.record(&entry);
-    }
-    stats
+    RequestStats::default()
 }
 
 impl RequestStats {
@@ -746,37 +721,6 @@ impl RequestStats {
             max_opt_u64(self.latest_timestamp_ms, Some(entry.started_at as u64));
         self.latest_provider_kind = entry.provider.clone();
         self.latest_model = entry.model.clone();
-    }
-
-    fn record(&mut self, entry: &RequestLogEntry) {
-        self.request_count += 1;
-        if entry.error.is_some() {
-            self.error_count += 1;
-        }
-        if entry.stream {
-            self.streaming_count += 1;
-        }
-        if entry
-            .response
-            .as_ref()
-            .and_then(|response| response.raw.as_ref())
-            .is_some()
-        {
-            self.raw_response_count += 1;
-        }
-        self.total_cost_usd += entry.cost_usd.unwrap_or(0.0);
-        self.total_elapsed_ms += entry.elapsed_ms.unwrap_or(0);
-        if let Some(usage) = entry.usage.as_ref() {
-            self.add_usage(usage);
-            if usage.context_tokens.is_some() {
-                self.latest_context_tokens = usage.context_tokens;
-            }
-            self.max_context_tokens = max_opt(self.max_context_tokens, usage.context_tokens);
-        }
-        self.first_request_ms = min_opt(self.first_request_ms, Some(entry.timestamp_ms));
-        self.latest_timestamp_ms = max_opt_u64(self.latest_timestamp_ms, Some(entry.timestamp_ms));
-        self.latest_provider_kind = Some(entry.provider_kind.clone());
-        self.latest_model = Some(entry.model.clone());
     }
 
     fn add_usage(&mut self, usage: &TokenUsage) {

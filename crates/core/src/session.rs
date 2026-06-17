@@ -168,9 +168,9 @@ const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
 
 pub use crate::session_migration::{
     export_history_jsonl, export_requests_jsonl, migrate_all_sessions_once,
-    migrate_session_dir_to_db, spawn_background_migration, SessionMigrationBatchReport,
-    SessionMigrationError, SessionMigrationFailure, SessionMigrationOutcome, SessionMigrationState,
-    SessionMigrationStatus,
+    migrate_session_dir_to_db, spawn_background_migration, spawn_background_migration_with_report,
+    SessionMigrationBatchReport, SessionMigrationError, SessionMigrationFailure,
+    SessionMigrationOutcome, SessionMigrationState, SessionMigrationStatus,
 };
 
 // COMPAT(session-v1-messages): load old session.json files that stored
@@ -1297,38 +1297,10 @@ fn load_exact(id: &str) -> Option<Session> {
 }
 
 fn load_session_files(dir_path: &std::path::Path) -> Option<Session> {
-    if let Some(session) = load_db_session(dir_path) {
-        internalize_session_blobs(dir_path, session)
-    } else {
-        load_legacy_session_files(dir_path)
+    if !dir_path.join("session.db").is_file() {
+        let _ = crate::session_migration::migrate_session_dir_to_db(dir_path);
     }
-}
-
-fn load_legacy_session_files(dir_path: &std::path::Path) -> Option<Session> {
-    let has_split = dir_path.join("history.jsonl").is_file();
-    let has_legacy = dir_path.join("session.json").is_file();
-    let (session, loaded_legacy_json) = if has_split {
-        match load_jsonl_session(dir_path) {
-            Some(session) => (session, false),
-            // COMPAT(session-json-monolith): pre-release split sidecars may be
-            // stale while a valid monolithic session.json is still present.
-            None if has_legacy => (load_legacy_json_session(dir_path)?, true),
-            None => return None,
-        }
-    } else {
-        (load_legacy_json_session(dir_path)?, true)
-    };
-    if let Err(err) = import_legacy_session_to_db(dir_path, &session) {
-        eprintln!(
-            "smelt: failed to import legacy session {} to sqlite: {err}",
-            session.id
-        );
-    }
-    if loaded_legacy_json {
-        migrate_legacy_json_session(dir_path, &session);
-    }
-
-    internalize_session_blobs(dir_path, session)
+    load_db_session(dir_path).and_then(|session| internalize_session_blobs(dir_path, session))
 }
 
 fn internalize_session_blobs(dir_path: &std::path::Path, mut session: Session) -> Option<Session> {
@@ -1576,12 +1548,8 @@ pub(crate) fn read_jsonl_session(
     Ok(meta.into_session(history))
 }
 
-fn load_jsonl_session(dir_path: &Path) -> Option<Session> {
-    read_jsonl_session(dir_path).ok()
-}
-
-// COMPAT(session-json-monolith): load old monolithic session.json files during
-// the alpha migration to meta.json + history.jsonl.
+// COMPAT(session-json-monolith): read old monolithic session.json files only as
+// migration input for canonical SQLite storage.
 pub(crate) fn read_legacy_json_session(
     dir_path: &Path,
 ) -> crate::session_migration::SessionMigrationResult<Session> {
@@ -1614,12 +1582,8 @@ pub(crate) fn read_legacy_json_session(
     Ok(session)
 }
 
-fn load_legacy_json_session(dir_path: &Path) -> Option<Session> {
-    read_legacy_json_session(dir_path).ok()
-}
-
 // COMPAT(session-json-monolith): import old monolithic sessions to SQLite as
-// soon as they are opened, then remove the monolith once sidecars exist.
+// soon as they are opened, then remove the monolith once SQLite and sidecars exist.
 pub(crate) fn migrate_legacy_json_session(dir_path: &Path, session: &Session) {
     let _perf = smelt_perf::perf::begin("session:load:migrate_sqlite");
     write_generated_sidecars(dir_path, session);
@@ -1688,8 +1652,9 @@ pub fn list_sessions() -> Vec<SessionMeta> {
     out
 }
 
-/// COMPAT(session-search-sidecar-missing): uses `meta.json` when present;
-/// falls back to `session.json` and regenerates the sidecar for older sessions.
+/// COMPAT(session-search-sidecar-missing): uses `meta.json` when present,
+/// reads canonical SQLite metadata when available, and keeps a lightweight
+/// legacy `session.json` metadata fallback until background migration has run.
 fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
     let meta = if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
         if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
@@ -1834,12 +1799,13 @@ fn backfill_text_bytes(session_dir: &std::path::Path, meta: &mut SessionMeta) {
             return;
         }
     }
-    let Some(session) =
-        load_jsonl_session(session_dir).or_else(|| load_legacy_json_session(session_dir))
-    else {
+    let _ = crate::session_migration::migrate_session_dir_to_db(session_dir);
+    let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) else {
         return;
     };
-    let bytes = compute_text_bytes(&session.history);
+    let Ok(bytes) = db.history_text_bytes() else {
+        return;
+    };
     meta.text_bytes = Some(bytes);
     write_meta(session_dir, meta);
 }
@@ -1865,8 +1831,8 @@ fn build_search_blob(history: &[HistoryItem]) -> String {
 
 /// Read the searchable text blob for `id`.
 ///
-/// COMPAT(session-search-sidecar-missing): falls back to regenerating from
-/// session history and caching to disk when the `content.txt` sidecar is missing.
+/// COMPAT(session-search-sidecar-missing): reads canonical SQLite search text,
+/// migrating legacy inputs first when necessary, then writes `content.txt`.
 pub fn load_search_blob(id: &str) -> Option<String> {
     let _perf = smelt_perf::perf::begin("session:load_search_blob");
     let session_dir = sessions_dir().join(id);
@@ -1879,11 +1845,14 @@ pub fn load_search_blob(id: &str) -> Option<String> {
             return Some(blob);
         }
     }
-    let session =
-        load_jsonl_session(&session_dir).or_else(|| load_legacy_json_session(&session_dir))?;
-    let blob = build_search_blob(&session.history);
-    atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
-    Some(blob)
+    let _ = crate::session_migration::migrate_session_dir_to_db(&session_dir);
+    if let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) {
+        if let Ok(blob) = db.search_blob() {
+            atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
+            return Some(blob);
+        }
+    }
+    None
 }
 
 /// Parallel batch read of search blobs. Returns `(id, blob)` pairs; missing
@@ -2053,7 +2022,7 @@ mod tests {
         fs::write(dir.path().join("meta.json"), meta).expect("write meta");
         fs::write(dir.path().join("history.jsonl"), history).expect("write history");
 
-        let loaded = load_jsonl_session(dir.path()).expect("load jsonl session");
+        let loaded = read_jsonl_session(dir.path()).expect("load jsonl session");
         assert_eq!(loaded.title.as_deref(), Some("JSONL"));
         assert_eq!(loaded.context_tokens, Some(42));
         assert_eq!(loaded.current_context_tokens(), Some(42));
@@ -2074,7 +2043,7 @@ mod tests {
         )
         .expect("write legacy session");
 
-        let loaded = load_legacy_json_session(dir.path()).expect("load legacy session");
+        let loaded = read_legacy_json_session(dir.path()).expect("load legacy session");
         import_legacy_session_to_db(dir.path(), &loaded).expect("import sqlite");
         migrate_legacy_json_session(dir.path(), &loaded);
 

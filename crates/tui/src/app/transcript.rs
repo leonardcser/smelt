@@ -33,32 +33,10 @@ impl TranscriptView {
         }
     }
 
-    pub(crate) fn from_transcript_with_display_cache_and_inline_options(
-        lua: &LuaRuntime,
-        transcript: Transcript,
-        display_cache: crate::content::display_cache::DisplayCacheData,
-        inline_options: InlineOptions,
-    ) -> Self {
-        let mut view = Self::from_transcript(transcript);
-        view.set_inline_options(inline_options);
-        view.projection
-            .hydrate_display_cache(lua, &view.transcript.history, display_cache);
-        view
-    }
-
-    pub(crate) fn replace_transcript_with_display_cache(
-        &mut self,
-        lua: &LuaRuntime,
-        transcript: Transcript,
-        display_cache: crate::content::display_cache::DisplayCacheData,
-    ) {
+    pub(crate) fn replace_transcript(&mut self, transcript: Transcript) {
         let inline_options = self.projection.inline_options().clone();
-        *self = Self::from_transcript_with_display_cache_and_inline_options(
-            lua,
-            transcript,
-            display_cache,
-            inline_options,
-        );
+        *self = Self::from_transcript(transcript);
+        self.set_inline_options(inline_options);
     }
 
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
@@ -254,16 +232,8 @@ impl TranscriptView {
         &mut self.transcript.history
     }
 
-    pub(crate) fn display_cache_data(
-        &mut self,
-        lua: &LuaRuntime,
-    ) -> crate::content::display_cache::DisplayCacheData {
-        self.projection
-            .display_cache_data(lua, &self.transcript.history)
-    }
-
-    pub(crate) fn display_cache_generation(&self) -> u64 {
-        self.projection.display_cache_generation()
+    pub(crate) fn projection_generation(&self) -> u64 {
+        self.projection.projection_generation()
     }
 
     pub(crate) fn invalidate_renderer_if_changed(
@@ -337,7 +307,7 @@ impl<'a> TranscriptDocument<'a> {
 impl DisplayDocument for TranscriptDocument<'_> {
     fn snapshot(&mut self) -> DisplaySnapshot {
         DisplaySnapshot {
-            generation: self.view.display_cache_generation(),
+            generation: self.view.projection_generation(),
             total_rows: self.view.estimated_total_rows(self.lua, self.width),
         }
     }
@@ -376,6 +346,11 @@ impl ResumePreviewCache {
             order: VecDeque::new(),
             limit,
         }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.views.clear();
+        self.order.clear();
     }
 
     pub(crate) fn take(&mut self, key: &str) -> Option<TranscriptView> {

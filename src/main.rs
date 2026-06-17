@@ -427,8 +427,6 @@ async fn main() {
         std::process::exit(1);
     }
 
-    smelt_core::session::spawn_background_migration();
-
     let shared_session: Arc<Mutex<Option<smelt_core::session::Session>>> =
         Arc::new(Mutex::new(None));
     let headless_cancel = Arc::new(tokio::sync::Notify::new());
@@ -600,6 +598,7 @@ async fn main() {
     };
 
     if args.headless {
+        smelt_core::session::spawn_background_migration();
         let output_format = match args.format {
             OutputFormat::Text => smelt_core::OutputFormat::Text,
             OutputFormat::Json => smelt_core::OutputFormat::Json,
@@ -679,6 +678,10 @@ async fn main() {
             remember: cfg.remember.clone(),
             context_window: None,
         };
+        let (session_migration_tx, session_migration_rx) = tokio::sync::mpsc::unbounded_channel();
+        smelt_core::session::spawn_background_migration_with_report(move |report| {
+            let _ = session_migration_tx.send(report);
+        });
         let mut app = tui::app::TuiApp::new(
             app_config,
             engine_handle,
@@ -689,6 +692,7 @@ async fn main() {
             project_trust,
             Arc::clone(&clock),
             Arc::clone(&env),
+            Some(session_migration_rx),
         );
         app.core.skills = Some(Arc::clone(&skill_loader));
         app.core.mcp = Some(Arc::clone(&mcp_manager));

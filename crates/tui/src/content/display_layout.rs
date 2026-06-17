@@ -1,6 +1,5 @@
 use crate::content::render_plan::{
-    NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptDefaultViewPolicy,
-    TranscriptPresentationState,
+    NodeLayoutKey, RenderNode, RenderNodeId, TranscriptDefaultViewPolicy,
 };
 use crate::smelt_edit::{Buffer, Theme};
 use smelt_core::content::block_layout::{
@@ -10,7 +9,7 @@ use smelt_core::content::builder::{LineBuilder, Outcome};
 use smelt_core::content::highlight::InlineOptions;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::theme::intern;
-use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ToolState, ViewState};
+use smelt_core::transcript_model::{Block, BlockHistory, BlockId, ToolState, ViewState};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) const DISPLAY_RENDERER_VERSION: u64 = 10;
@@ -111,28 +110,6 @@ impl<'a> TranscriptRenderEnv<'a> {
             renderer_cache_key,
         }
     }
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DisplayRowIndexEntry {
-    pub(crate) width: u16,
-    pub(crate) renderer_generation: u64,
-    pub(crate) renderer_cache_key: Option<u64>,
-    pub(crate) nodes: Vec<DisplayRowIndexNode>,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DisplayRowIndexNode {
-    pub(crate) id: RenderNodeId,
-    pub(crate) key: NodeLayoutKey,
-    pub(crate) exact_height: u64,
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DisplayLayoutCacheEntry {
-    pub(crate) id: RenderNodeId,
-    pub(crate) key: DisplayCacheKey,
-    pub(crate) layout: LayoutIr,
 }
 
 pub(crate) enum CompileJob {
@@ -358,74 +335,6 @@ impl DisplayModel {
         jobs
     }
 
-    pub(crate) fn hydrate_from_cache(
-        &mut self,
-        history: &BlockHistory,
-        plan: &RenderPlan,
-        policy: &TranscriptDefaultViewPolicy,
-        presentation: &TranscriptPresentationState,
-        entries: Vec<DisplayLayoutCacheEntry>,
-    ) -> usize {
-        let mut hydrated = 0usize;
-        for entry in entries {
-            if !display_layout_entry_matches_history(history, plan, policy, presentation, &entry) {
-                continue;
-            }
-            self.blocks.insert(
-                entry.id,
-                CachedLayout {
-                    key: entry.key,
-                    layout: entry.layout,
-                },
-            );
-            hydrated += 1;
-        }
-        smelt_perf::perf::record_value("transcript:display_model:hydrated", hydrated as u64);
-        hydrated
-    }
-
-    pub(crate) fn cache_entries(
-        &self,
-        history: &BlockHistory,
-        plan: &RenderPlan,
-        policy: &TranscriptDefaultViewPolicy,
-        presentation: &TranscriptPresentationState,
-        renderer_generation: Option<u64>,
-        renderer_cache_key: Option<u64>,
-    ) -> Vec<DisplayLayoutCacheEntry> {
-        if renderer_generation.is_some() && renderer_cache_key.is_none() {
-            return Vec::new();
-        }
-        let mut entries = Vec::new();
-        for id in plan.ids() {
-            let Some(cached) = self.blocks.get(&id) else {
-                continue;
-            };
-            if cached.key.renderer_cache_key.is_none() {
-                continue;
-            }
-            if renderer_generation
-                .is_some_and(|generation| cached.key.renderer_generation != generation)
-            {
-                continue;
-            }
-            if renderer_cache_key
-                .is_some_and(|cache_key| cached.key.renderer_cache_key != Some(cache_key))
-            {
-                continue;
-            }
-            let entry = DisplayLayoutCacheEntry {
-                id,
-                key: cached.key,
-                layout: cached.layout.clone(),
-            };
-            if display_layout_entry_matches_history(history, plan, policy, presentation, &entry) {
-                entries.push(entry);
-            }
-        }
-        entries
-    }
-
     pub(crate) fn compile_and_insert(
         &mut self,
         env: TranscriptRenderEnv<'_>,
@@ -476,64 +385,6 @@ fn cache_source_views_for_block(block: &Block) -> bool {
             ..
         }
     )
-}
-
-fn display_layout_entry_matches_history(
-    history: &BlockHistory,
-    plan: &RenderPlan,
-    policy: &TranscriptDefaultViewPolicy,
-    presentation: &TranscriptPresentationState,
-    entry: &DisplayLayoutCacheEntry,
-) -> bool {
-    if entry.key.renderer_version != DISPLAY_RENDERER_VERSION {
-        return false;
-    }
-    if entry.key.renderer_cache_key.is_none() {
-        return false;
-    }
-    if !plan.contains_id(entry.id) {
-        return false;
-    }
-    match entry.id {
-        RenderNodeId::Block(block_id) => {
-            let Some(call_id) = history.tool_call_id(block_id) else {
-                if history.content_hash(block_id) != entry.key.content_hash {
-                    return false;
-                }
-                return entry.key.sidecar_hash == 0;
-            };
-            if history.content_hash(block_id) != entry.key.content_hash {
-                return false;
-            }
-            let sidecar_hash = history
-                .tool_state(call_id)
-                .map(ToolState::display_hash)
-                .unwrap_or(0);
-            sidecar_hash == entry.key.sidecar_hash
-        }
-        RenderNodeId::Group(_) => plan
-            .nodes
-            .iter()
-            .position(|node| node.id() == entry.id)
-            .and_then(|index| {
-                plan.node_key(
-                    policy,
-                    history,
-                    presentation,
-                    index,
-                    LayoutKey {
-                        width: 0,
-                        view_state: ViewState::Expanded,
-                        content_hash: 0,
-                        sidecar_hash: 0,
-                    },
-                )
-            })
-            .is_some_and(|key| {
-                key.content_hash == entry.key.content_hash
-                    && key.sidecar_hash == entry.key.sidecar_hash
-            }),
-    }
 }
 
 #[cfg(test)]

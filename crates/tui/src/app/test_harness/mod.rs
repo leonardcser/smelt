@@ -236,6 +236,7 @@ impl TestAppBuilder {
             smelt_core::trust::TrustState::NoContent,
             Arc::clone(&clock) as Arc<dyn engine::clock::Clock>,
             env,
+            None,
         );
 
         // Match production startup: re-run bootstrap + autoload + init.lua

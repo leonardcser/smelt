@@ -203,11 +203,18 @@ pub(crate) fn migrate_all_sessions_in_dir(dir: &Path) -> SessionMigrationBatchRe
 }
 
 pub fn spawn_background_migration() {
+    spawn_background_migration_with_report(|_| {});
+}
+
+pub fn spawn_background_migration_with_report(
+    on_report: impl FnOnce(SessionMigrationBatchReport) + Send + 'static,
+) {
     let _ = std::thread::Builder::new()
         .name("smelt-session-migration".to_string())
         .spawn(|| {
             let report = migrate_all_sessions_once();
             log_migration_batch_report(&report);
+            on_report(report);
         });
 }
 

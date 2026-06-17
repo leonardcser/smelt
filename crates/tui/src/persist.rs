@@ -22,7 +22,6 @@ pub(crate) struct PersistRequest {
     pub(crate) session: Session,
     pub(crate) history_start_idx: usize,
     pub(crate) blobs: Vec<Blob>,
-    pub(crate) display_cache: crate::content::display_cache::DisplayCacheData,
     pub(crate) descriptor_records: Vec<TranscriptBlockRecord>,
 }
 
@@ -145,14 +144,6 @@ fn write(req: &PersistRequest) -> Result<(), String> {
         "persist:write:history_items",
         req.session.history.len() as u64,
     );
-    smelt_perf::perf::record_value(
-        "persist:write:display_cache_row_indexes",
-        req.display_cache.row_indexes.len() as u64,
-    );
-    smelt_perf::perf::record_value(
-        "persist:write:display_cache_display_layouts",
-        req.display_cache.display_layouts.len() as u64,
-    );
     smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
     let session_dir = session::dir_for(&req.session);
     std::fs::create_dir_all(&session_dir)
@@ -167,7 +158,6 @@ fn write(req: &PersistRequest) -> Result<(), String> {
     .map_err(|err| format!("save session database: {err}"))?;
     write_transcript_descriptors(&session_dir, &req.descriptor_records)
         .map_err(|err| format!("save transcript descriptors: {err}"))?;
-    crate::content::display_cache::write_for_session(&req.session, &req.display_cache);
     Ok(())
 }
 

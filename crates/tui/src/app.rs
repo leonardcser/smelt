@@ -97,10 +97,9 @@ pub struct TuiApp {
     pub(crate) sleep_inhibit: crate::sleep_inhibit::SleepInhibitor,
     pub(crate) persister: crate::persist::Persister,
     pub(crate) session_save_pending: bool,
-    pub(crate) persisted_fingerprints: Option<PersistFingerprints>,
+    pub(crate) persisted_fingerprint: Option<Vec<u8>>,
     pub(crate) session_dirty: bool,
     pub(crate) dirty_history_from: Option<usize>,
-    pub(crate) persisted_display_cache_generation: u64,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,
@@ -108,6 +107,9 @@ pub struct TuiApp {
     pub(crate) pending_history_appends: Vec<PendingHistoryAppend>,
     process_completion_rx:
         tokio::sync::mpsc::UnboundedReceiver<smelt_core::process::ProcessCompletion>,
+    session_migration_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<smelt_core::session::SessionMigrationBatchReport>,
+    >,
     pub(crate) context_tokens_updated_this_turn: bool,
     pub(crate) cancel_generation: u64,
     /// Set while routing an engine event whose `TurnState` has been moved
@@ -257,12 +259,6 @@ pub struct PlaceholderOpts {
 #[cfg(any(test, feature = "harness"))]
 pub(crate) use queue::MAX_QUEUED_MESSAGES;
 pub(crate) use queue::{InputQueues, QueueStage, QueuedInput, QueuedTurnOptions};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PersistFingerprints {
-    pub(crate) session: Vec<u8>,
-    pub(crate) display_cache: Vec<u8>,
-}
 
 pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
 
@@ -902,6 +898,9 @@ impl TuiApp {
         project_trust: smelt_core::trust::TrustState,
         clock: Arc<dyn engine::clock::Clock>,
         env: Arc<engine::env::RuntimeEnv>,
+        session_migration_rx: Option<
+            tokio::sync::mpsc::UnboundedReceiver<smelt_core::session::SessionMigrationBatchReport>,
+        >,
     ) -> Self {
         let host_rx = engine.take_host_rx();
         let input = PromptState::new();
@@ -1095,16 +1094,16 @@ impl TuiApp {
             sleep_inhibit: crate::sleep_inhibit::SleepInhibitor::new(),
             persister: crate::persist::Persister::spawn(),
             session_save_pending: false,
-            persisted_fingerprints: None,
+            persisted_fingerprint: None,
             session_dirty: false,
             dirty_history_from: None,
-            persisted_display_cache_generation: 0,
             last_width: term_w,
             last_height: term_h,
             next_turn_id: 1,
             pending_turn_meta: None,
             pending_history_appends: Vec::new(),
             process_completion_rx,
+            session_migration_rx,
             context_tokens_updated_this_turn: false,
             cancel_generation: 0,
             dispatching_turn_id: None,
@@ -1649,6 +1648,27 @@ impl TuiApp {
             self.notify_error_sticky(format!(
                 "failed to save session {}: {}",
                 err.session_id, err.message
+            ));
+        }
+    }
+
+    pub(crate) fn handle_session_migration_report(
+        &mut self,
+        report: smelt_core::session::SessionMigrationBatchReport,
+    ) {
+        self.resume_preview_cache.clear();
+        if report.migrated == 0 && report.failed == 0 {
+            return;
+        }
+        if report.failed > 0 {
+            self.notify_error_sticky(format!(
+                "session migration completed: {} migrated, {} failed",
+                report.migrated, report.failed
+            ));
+        } else {
+            self.notify(format!(
+                "session migration completed: {} migrated",
+                report.migrated
             ));
         }
     }
@@ -2208,6 +2228,16 @@ impl TuiApp {
 
                 Some(completion) = self.process_completion_rx.recv() => {
                     self.handle_process_completed(completion.id, completion.exit_code);
+                }
+
+                Some(report) = async {
+                    match self.session_migration_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.handle_session_migration_report(report);
+                    self.render_normal();
                 }
 
                 Some(ev) = self.core.engine.recv() => {

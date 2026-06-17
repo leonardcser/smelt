@@ -746,7 +746,8 @@ impl BlockHistory {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    pub fn invalidate_display_cache(&mut self) {
+    /// Marks externally-mutated history as changed so snapshots and projections rebuild.
+    pub fn mark_changed(&mut self) {
         self.bump_generation();
     }
 

@@ -680,15 +680,11 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     }
                     cached_key = Some(cache_key);
                     if cached_view.is_none() {
-                        let display_cache = crate::content::display_cache::read_for_session(&session);
-                        cached_view = Some(
-                            crate::app::transcript::TranscriptView::from_transcript_with_display_cache_and_inline_options(
-                                &app.lua,
-                                crate::app::history::build_transcript_from_session(&app.lua, &session),
-                                display_cache,
-                                app.inline_options(),
-                            ),
+                        let mut view = crate::app::transcript::TranscriptView::from_transcript(
+                            crate::app::history::build_transcript_from_session(&app.lua, &session),
                         );
+                        view.set_inline_options(app.inline_options());
+                        cached_view = Some(view);
                     }
                 }
 
