@@ -78,9 +78,10 @@ and anthropic-compatible providers that support `reasoning_effort`. For OpenAI,
 
 ## Sessions
 
-| Flag                        | Description                        |
-| --------------------------- | ---------------------------------- |
-| `-r, --resume [SESSION_ID]` | Resume a session (picker if no ID) |
+| Flag                        | Description                                              |
+| --------------------------- | -------------------------------------------------------- |
+| `-r, --resume [SESSION_ID]` | Resume a session (picker if no ID)                       |
+| `-w, --worktree [NAME]`     | Start in a managed git worktree, optionally named `NAME` |
 
 ## Runtime
 

@@ -106,9 +106,10 @@ Per-model overrides:
 
 #### Pricing
 
-Cost tracking is built in for popular models (GPT, Claude, DeepSeek). Codex and
-Copilot models are zero-cost (included with your subscription). The session cost
-is shown in the status bar and the running total appears in `/stats`.
+Cost tracking is built in for popular models (GPT, Claude, DeepSeek).
+Subscription-backed providers such as Codex, Copilot, and Kimi Code are shown as
+zero-cost because they are included with your subscription. The session cost is
+shown in the status bar and the running total appears in `/stats`.
 
 For models not in the built-in table, or to override built-in prices, set cost
 fields on the model config. All values are USD per 1 million tokens. Unknown
@@ -229,27 +230,28 @@ smelt.settings.show_tps = true
 Set settings from `init.lua`, the `--set` CLI flag, or any Lua context. Unknown
 keys raise at the access site; type mismatches raise on assignment.
 
-| Key                          | Type      | Default    | Description                                                                                                                                                                                                                                   |
-| ---------------------------- | --------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `vim`                        | `boolean` | `false`    | Vi keybindings in the prompt                                                                                                                                                                                                                  |
-| `auto_compact`               | `boolean` | `true`     | Auto-summarize when active request context usage crosses `compact_threshold` (forced on in headless)                                                                                                                                          |
-| `compact_threshold`          | `number`  | `0.80`     | Fraction of the active context window at which auto-compact fires before oversized requests (0 < x ≤ 1)                                                                                                                                       |
-| `compact_keep_recent_groups` | `number`  | `1`        | Minimum number of trailing message groups kept verbatim after compaction; a group is a user message, a plain assistant message, or an assistant tool-use step with its tool outputs                                                           |
-| `show_tps`                   | `boolean` | `true`     | Tokens/sec in status bar                                                                                                                                                                                                                      |
-| `show_tokens`                | `boolean` | `true`     | Context token count in status bar                                                                                                                                                                                                             |
-| `show_cost`                  | `boolean` | `true`     | Session cost in status bar                                                                                                                                                                                                                    |
-| `show_prediction`            | `boolean` | `true`     | Ghost-text input predictions                                                                                                                                                                                                                  |
-| `show_tips`                  | `boolean` | `true`     | Curated discovery tips in the start banner and prompt chrome                                                                                                                                                                                  |
-| `file_icons`                 | `boolean` | `false`    | Show Nerd Font file-type icons before inline-code paths that point at existing files                                                                                                                                                          |
-| `file_icon_colors`           | `boolean` | `true`     | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled                                                                                                                                                       |
-| `show_slug`                  | `boolean` | `true`     | Task-slug label in status bar                                                                                                                                                                                                                 |
-| `restrict_to_workspace`      | `boolean` | `true`     | Downgrade Allow to Ask for paths outside the workspace                                                                                                                                                                                        |
-| `redact_secrets`             | `boolean` | `true`     | Scrub detected secrets from user input and tool results before they reach the LLM                                                                                                                                                             |
-| `auto_reload`                | `boolean` | `false`    | Watch `~/.config/smelt/`, `.smelt/`, `AGENTS.md`, and `--system-prompt` and fire `/reload` on change                                                                                                                                          |
-| `cache_ttl_long`             | `boolean` | `false`    | Opt the Anthropic prompt cache into the 1-hour TTL (default is the 5-minute ephemeral TTL). No effect on non-Anthropic providers                                                                                                              |
-| `autoupgrade`                | `string`  | `"notify"` | `"off"` no checks; `"notify"` show pill + banner subtitle when a new build is available; `"auto"` install in background as soon as an update is detected. Automatic background checks stay quiet on transient fetch failures and retry later. |
-| `autoupgrade_channel`        | `string`  | `"stable"` | `"stable"` downloads tagged prebuilt tarballs (any tag, including `alpha`/`beta` prereleases); `"unstable"` follows `main` HEAD via `cargo install`                                                                                           |
-| `autoupgrade_interval`       | `number`  | `3600`     | Seconds between background autoupgrade checks. Clamped to a 60 s minimum to avoid hammering GitHub                                                                                                                                            |
+| Key                          | Type      | Default        | Description                                                                                                                                                                                                                                   |
+| ---------------------------- | --------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vim`                        | `boolean` | `false`        | Vi keybindings in the prompt                                                                                                                                                                                                                  |
+| `auto_compact`               | `boolean` | `true`         | Auto-summarize when active request context usage crosses `compact_threshold` (forced on in headless)                                                                                                                                          |
+| `compact_threshold`          | `number`  | `0.80`         | Fraction of the active context window at which auto-compact fires before oversized requests (0 < x ≤ 1)                                                                                                                                       |
+| `compact_keep_recent_groups` | `number`  | `1`            | Minimum number of trailing message groups kept verbatim after compaction; a group is a user message, a plain assistant message, or an assistant tool-use step with its tool outputs                                                           |
+| `show_tps`                   | `boolean` | `true`         | Tokens/sec in status bar                                                                                                                                                                                                                      |
+| `show_tokens`                | `boolean` | `true`         | Context token count in status bar                                                                                                                                                                                                             |
+| `show_cost`                  | `boolean` | `true`         | Session cost in status bar                                                                                                                                                                                                                    |
+| `show_prediction`            | `boolean` | `true`         | Ghost-text input predictions                                                                                                                                                                                                                  |
+| `show_tips`                  | `boolean` | `true`         | Curated discovery tips in the start banner and prompt chrome                                                                                                                                                                                  |
+| `file_icons`                 | `boolean` | `false`        | Show Nerd Font file-type icons before inline-code paths that point at existing files                                                                                                                                                          |
+| `file_icon_colors`           | `boolean` | `true`         | Color inline-code file icons with nvim-web-devicons colors when `file_icons` is enabled                                                                                                                                                       |
+| `show_slug`                  | `boolean` | `true`         | Task-slug label in status bar                                                                                                                                                                                                                 |
+| `restrict_to_workspace`      | `boolean` | `true`         | Downgrade Allow to Ask for paths outside the workspace                                                                                                                                                                                        |
+| `redact_secrets`             | `boolean` | `true`         | Scrub detected secrets from user input and tool results before they reach the LLM                                                                                                                                                             |
+| `auto_reload`                | `boolean` | `false`        | Watch `~/.config/smelt/`, `.smelt/`, `AGENTS.md`, and `--system-prompt` and fire `/reload` on change                                                                                                                                          |
+| `cache_ttl_long`             | `boolean` | `false`        | Opt the Anthropic prompt cache into the 1-hour TTL (default is the 5-minute ephemeral TTL). No effect on non-Anthropic providers                                                                                                              |
+| `worktree_root`              | `string`  | `".worktrees"` | Root directory for managed git worktrees. Relative paths are resolved inside the git root; absolute paths use a per-repository bucket. Supports `~`, `$VAR`, and `${VAR}` expansion                                                           |
+| `autoupgrade`                | `string`  | `"notify"`     | `"off"` no checks; `"notify"` show pill + banner subtitle when a new build is available; `"auto"` install in background as soon as an update is detected. Automatic background checks stay quiet on transient fetch failures and retry later. |
+| `autoupgrade_channel`        | `string`  | `"stable"`     | `"stable"` downloads tagged prebuilt tarballs (any tag, including `alpha`/`beta` prereleases); `"unstable"` follows `main` HEAD via `cargo install`                                                                                           |
+| `autoupgrade_interval`       | `number`  | `3600`         | Seconds between background autoupgrade checks. Clamped to a 60 s minimum to avoid hammering GitHub                                                                                                                                            |
 
 `smelt.settings.transcript` is an additional Lua table for transcript display
 preferences. It is not a scalar `--set` key. Use `view` to set default fold
@@ -402,30 +404,23 @@ All runtime data is stored under the XDG base directories:
 | `$XDG_CACHE_HOME/smelt/web/`        | HTTP/pricing cache                                                                |
 | `$XDG_CACHE_HOME/smelt/`            | `copilot_models.json` and other discovered model caches                           |
 
-Codex OAuth tokens are stored in the system keyring (service:
-`smelt-codex-auth`). If the keyring is unavailable, tokens fall back to
-`$XDG_STATE_HOME/smelt/codex_auth.json` (mode `0600`).
-
-GitHub Copilot OAuth tokens are stored in the system keyring (service:
-`smelt-copilot-auth`). If the keyring is unavailable, they fall back to
-`$XDG_STATE_HOME/smelt/copilot_auth.json` (mode `0600`).
+OAuth-backed providers store their login state under Smelt's runtime data and
+can be managed with `smelt auth`.
 
 ## Environment Variables
 
-| Variable               | Purpose                                                       |
-| ---------------------- | ------------------------------------------------------------- |
-| `XDG_CONFIG_HOME`      | Config directory (default: `~/.config`)                       |
-| `XDG_STATE_HOME`       | State directory (default: `~/.local/state`)                   |
-| `XDG_CACHE_HOME`       | Cache directory (default: `~/.cache`)                         |
-| `XDG_DATA_HOME`        | Data directory (default: `~/.local/share`)                    |
-| `HOME`                 | Used as a fallback when XDG variables are unset               |
-| `COLORFGBG`            | Terminal color hint (fallback for dark/light detection)       |
-| `TERM`                 | Terminal type (`dumb` skips color detection)                  |
-| `NO_COLOR`             | Disable ANSI colors                                           |
-| `FORCE_COLOR`          | Force ANSI colors regardless of TTY detection                 |
-| `EDITOR`               | Editor for `Ctrl+X Ctrl+E` and vim `v`                        |
-| `SMELT_CODEX_TOKENS`   | Inline JSON Codex auth payload (overrides keyring and disk)   |
-| `SMELT_COPILOT_TOKENS` | Inline JSON Copilot auth payload (overrides keyring and disk) |
+| Variable          | Purpose                                                 |
+| ----------------- | ------------------------------------------------------- |
+| `XDG_CONFIG_HOME` | Config directory (default: `~/.config`)                 |
+| `XDG_STATE_HOME`  | State directory (default: `~/.local/state`)             |
+| `XDG_CACHE_HOME`  | Cache directory (default: `~/.cache`)                   |
+| `XDG_DATA_HOME`   | Data directory (default: `~/.local/share`)              |
+| `HOME`            | Used as a fallback when XDG variables are unset         |
+| `COLORFGBG`       | Terminal color hint (fallback for dark/light detection) |
+| `TERM`            | Terminal type (`dumb` skips color detection)            |
+| `NO_COLOR`        | Disable ANSI colors                                     |
+| `FORCE_COLOR`     | Force ANSI colors regardless of TTY detection           |
+| `EDITOR`          | Editor for `Ctrl+X Ctrl+E` and vim `v`                  |
 
 ## CLI Flags
 

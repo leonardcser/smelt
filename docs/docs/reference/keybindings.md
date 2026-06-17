@@ -227,7 +227,7 @@ The completer pops up when typing `/` (commands) or `@` (file references).
 | Permissions | `dd` / `⌫`        | Delete permission        |
 | Ps          | `⌫`               | Kill process             |
 | Resume      | `Alt+D`           | Delete session           |
-| Resume      | `Alt+W`           | Toggle workspace filter  |
+| Resume      | `Ctrl+W`          | Toggle workspace filter  |
 | Resume      | (type)            | Fuzzy filter             |
 | Rewind      | `↑` / `↓`         | Select turn              |
 | Rewind      | `Enter`           | Rewind to turn           |

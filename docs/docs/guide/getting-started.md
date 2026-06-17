@@ -54,11 +54,8 @@ once, pick the provider, then start smelt with no extra flags:
     smelt
     ```
 
-    The login flow stores OAuth credentials in Smelt's state directory and
-    registers the `kimi-code` provider automatically. Kimi Code uses the
-    Anthropic messages API with Smelt-owned OAuth credentials; it does not read
-    Kimi CLI credential storage. `/usage` reads Kimi Code subscription usage
-    from the Kimi API.
+    After login, Smelt registers the `kimi-code` provider automatically. Start
+    Smelt with no flags to use it.
 
 === ":simple-github: GitHub Copilot"
 

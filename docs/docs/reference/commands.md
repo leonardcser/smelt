@@ -5,7 +5,7 @@ Type `/` to open the command picker with fuzzy search.
 ## Built-in Commands
 
 | Command                   | Description                                                          |
-| ------------------------- | -------------------------------------------------------------------- | ------ | -------- | ------------------------------------------------ | ---------------------------- |
+| ------------------------- | -------------------------------------------------------------------- |
 | `/clear`, `/new`          | Start a new conversation                                             |
 | `/rewind`                 | Rewind to a previous turn (same as `Esc Esc`)                        |
 | `/resume`                 | Resume a saved session                                               |
@@ -16,8 +16,8 @@ Type `/` to open the command picker with fuzzy search.
 | `/color [name]`           | Set session color                                                    |
 | `/stats`                  | Show token usage statistics                                          |
 | `/usage`, `/cost`         | Show session cost and active-provider usage limits                   |
-| `/thinking [open          | close                                                                | peek   | toggle]` | Set thinking block presentation for this session |
-| `/reasoning [off          | low                                                                  | medium | high     | max]`                                            | Set or show reasoning effort |
+| `/thinking [mode]`        | Set thinking block presentation: `open`, `close`, `peek`, `toggle`   |
+| `/reasoning [level]`      | Set or show reasoning effort: `off`, `low`, `medium`, `high`, `max`  |
 | `/permissions`            | Manage saved permissions                                             |
 | `/ps`                     | Manage background processes                                          |
 | `/history`                | Fuzzy-search prompt history (also `Ctrl+R`)                          |
@@ -64,7 +64,7 @@ All fields are optional:
 | ------------------ | --------------------------------------------------------------------------------------------------------- |
 | `description`      | Shown in the `/` picker                                                                                   |
 | `model`            | Override model for this command. Prefer `provider_name/model_name`; bare names work only when unambiguous |
-| `provider`         | Legacy compatibility field to narrow a bare `model` reference                                             |
+| `provider`         | Provider name used to resolve a bare `model` reference                                                    |
 | `temperature`      | Sampling temperature                                                                                      |
 | `top_p`            | Top-p (nucleus) sampling                                                                                  |
 | `top_k`            | Top-k sampling                                                                                            |

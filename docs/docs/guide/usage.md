@@ -92,7 +92,7 @@ the selection.
 - `Ctrl+Enter` / `Ctrl+Q` while busy: steer the current response
 - `Enter` on an empty prompt: send the next queued message immediately
 - `Esc`: bring queued messages back into the prompt so you can edit them
-- `Esc Esc`: cancel active work _and_ unqueue everything
+- `Esc Esc`: cancel active work, or rewind when idle
 
 ## Sessions
 
