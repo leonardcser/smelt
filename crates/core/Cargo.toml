@@ -36,6 +36,7 @@ neo_frizbee = "0.10"
 notify = { workspace = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 shellexpand = "3.1.2"
+smelt-store = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

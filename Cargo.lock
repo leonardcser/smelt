@@ -2659,6 +2659,7 @@ dependencies = [
  "smelt-lua-doc-derive",
  "smelt-perf",
  "smelt-protocol",
+ "smelt-store",
  "syntect",
  "tempfile",
  "tokio",

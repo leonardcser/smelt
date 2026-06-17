@@ -11,6 +11,7 @@ use crate::meta::{self, SessionMeta, SessionState, WriterLease};
 use crate::object::{self, ObjectMeta, StoredObject};
 use crate::request_audit::{self, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary};
 use crate::schema;
+use crate::session_snapshot::{self, SessionSaveReport, SessionSnapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenMode {
@@ -232,6 +233,31 @@ impl SessionDb {
     ) -> Result<Option<RequestAuditPayloads>> {
         request_audit::request_payloads(&self.conn, request_attempt_id)
     }
+
+    pub fn save_session_snapshot(
+        &self,
+        snapshot: &SessionSnapshot,
+        expected_revision: Option<u64>,
+    ) -> Result<SessionSaveReport> {
+        session_snapshot::save_session_snapshot(
+            &self.conn,
+            snapshot,
+            expected_revision,
+            self.object_compression,
+        )
+    }
+
+    pub fn load_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {
+        session_snapshot::load_session_snapshot(&self.conn)
+    }
+
+    pub fn history_text_bytes(&self) -> Result<u64> {
+        session_snapshot::history_text_bytes(&self.conn)
+    }
+
+    pub fn search_blob(&self) -> Result<String> {
+        session_snapshot::search_blob(&self.conn)
+    }
 }
 
 fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
@@ -388,6 +414,77 @@ mod tests {
         assert_eq!(report.samples.len(), 2);
         assert!(report.supports_policy(DEFAULT_ZSTD_MIN_SAVINGS_PERCENT));
         assert!(report.compression_ratio_percent() < 50);
+    }
+
+    #[test]
+    fn session_snapshot_save_appends_only_changed_history_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let first = protocol::HistoryItem::user(protocol::Content::text("first"));
+        let second = protocol::HistoryItem::user(protocol::Content::text("second"));
+        let mut snapshot = SessionSnapshot {
+            state: SessionState {
+                id: "s1".into(),
+                title: Some("title".into()),
+                slug: Some("title".into()),
+                cwd: Some("/tmp/project".into()),
+                mode: Some("normal".into()),
+                model: Some("model-a".into()),
+                accounting_json: Some(serde_json::json!({"prompt_tokens": 1})),
+                checkpoint_json: None,
+                revision: 0,
+                history_len: 1,
+                created_at: 10,
+                updated_at: 20,
+            },
+            meta_json: Some(serde_json::json!({"id": "s1", "schema_version": 2})),
+            history: vec![first.clone()],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+
+        let first_report = db.save_session_snapshot(&snapshot, None).unwrap();
+        assert_eq!(first_report.history_inserted, 1);
+        assert_eq!(first_report.history_deleted, 0);
+        assert!(first_report.changed);
+        let first_created_at: i64 = db
+            .connection()
+            .query_row(
+                "SELECT created_at FROM history_items WHERE idx = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let no_op = db.save_session_snapshot(&snapshot, None).unwrap();
+        assert_eq!(no_op.history_inserted, 0);
+        assert_eq!(no_op.history_deleted, 0);
+        assert!(!no_op.changed);
+        let second_created_at: i64 = db
+            .connection()
+            .query_row(
+                "SELECT created_at FROM history_items WHERE idx = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(first_created_at, second_created_at);
+
+        snapshot.history.push(second);
+        snapshot.state.history_len = 2;
+        snapshot.state.updated_at = 30;
+        let append = db
+            .save_session_snapshot(&snapshot, Some(no_op.revision))
+            .unwrap();
+        assert_eq!(append.history_unchanged, 1);
+        assert_eq!(append.history_inserted, 1);
+        assert_eq!(append.history_deleted, 0);
+        assert_eq!(
+            db.load_session_snapshot().unwrap().unwrap().history.len(),
+            2
+        );
+        assert_eq!(db.search_blob().unwrap(), "first\nuser\nsecond\nuser\n");
     }
 
     #[test]

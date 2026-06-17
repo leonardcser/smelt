@@ -752,6 +752,8 @@ Acceptance:
 
 ### Phase E: Session save/load cutover
 
+Status: complete. New session saves write canonical `session.db` history rows, transcript/search rows, snapshot tables, request audit preservation, and generated `meta.json`/`content.txt` sidecars. Loading prefers SQLite and imports legacy split/monolithic sessions into SQLite on open. Saves compare existing row hashes, append unchanged prefixes only, delete rewritten suffixes on rewind, and enforce active writer leases before writing.
+
 Deliverables:
 
 - Save new session history into `history_items` and `transcript_blocks`.
