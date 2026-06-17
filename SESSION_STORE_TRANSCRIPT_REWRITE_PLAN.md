@@ -26,7 +26,8 @@ The immediate motivating profile is a resumed session whose `history.jsonl` is ~
 4. **Do worthwhile large work now**
    - Do not defer a refactor only because it is large.
    - If a rename, split, or deletion makes the final architecture easier to reason about, include it.
-   - Delete obsolete compatibility or cache paths as soon as the replacement is proven.
+   - Delete obsolete cache paths as soon as the replacement is proven.
+   - Keep legacy session compatibility isolated and `COMPAT`-tracked until the compatibility window is explicitly closed.
 
 5. **Preserve interaction correctness**
    - Visible transcript rows must be exact.
