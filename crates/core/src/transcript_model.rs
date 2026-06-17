@@ -194,6 +194,17 @@ pub enum Block {
 }
 
 impl Block {
+    pub(crate) fn normalize_content(self) -> Self {
+        match self {
+            Block::Thinking { content } => Block::Thinking {
+                content: crate::content::markdown_stream::normalize_thinking_title_spacing(
+                    &content,
+                ),
+            },
+            other => other,
+        }
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             Block::User { .. } => "user",
@@ -412,6 +423,17 @@ pub enum TranscriptBlockDescriptor {
 }
 
 impl TranscriptBlockDescriptor {
+    fn normalize_content(self) -> Self {
+        match self {
+            Self::Thinking { content } => Self::Thinking {
+                content: crate::content::markdown_stream::normalize_thinking_title_spacing(
+                    &content,
+                ),
+            },
+            other => other,
+        }
+    }
+
     pub fn from_block(block: Block) -> Self {
         match block {
             Block::User { text, image_labels } => Self::User { text, image_labels },
@@ -914,6 +936,7 @@ impl BlockHistory {
         block: Block,
         origin: Option<BlockOrigin>,
     ) -> BlockId {
+        let block = block.normalize_content();
         let hash = block.content_hash();
         let id = BlockId(self.next_id);
         self.next_id += 1;
@@ -937,7 +960,12 @@ impl BlockHistory {
         origin: Option<BlockOrigin>,
         content_hash: Option<u64>,
     ) -> BlockId {
-        let hash = content_hash.unwrap_or_else(|| descriptor.content_hash());
+        let normalized = descriptor.normalize_content();
+        let normalized_hash = normalized.content_hash();
+        let hash = content_hash
+            .filter(|hash| *hash == normalized_hash)
+            .unwrap_or(normalized_hash);
+        let descriptor = normalized;
         let id = BlockId(self.next_id);
         self.next_id += 1;
         match idx {
@@ -1105,6 +1133,7 @@ impl BlockHistory {
         if !self.entries.contains_key(&id) {
             return;
         }
+        let block = block.normalize_content();
         let hash = block.content_hash();
         if self.content_hashes.get(&id) == Some(&hash) {
             self.entries.insert(id, BlockEntry::Materialized(block));
@@ -1587,6 +1616,39 @@ mod tests {
             content: "ponder".into(),
         };
         assert_eq!(block.raw_text().as_deref(), Some("ponder"));
+    }
+
+    #[test]
+    fn block_history_normalizes_thinking_title_spacing() {
+        let mut history = BlockHistory::new();
+        let id = history.push(Block::Thinking {
+            content: "**Plan**\n\nbody".into(),
+        });
+
+        assert_eq!(
+            history.block(id),
+            Some(&Block::Thinking {
+                content: "**Plan**\nbody".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn descriptor_history_normalizes_thinking_title_spacing() {
+        let mut history = BlockHistory::new();
+        let id = history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::Thinking {
+                content: "**Plan**\n\nbody".into(),
+            },
+            BlockOrigin::History(0),
+        );
+
+        assert_eq!(
+            history.block(id),
+            Some(&Block::Thinking {
+                content: "**Plan**\nbody".into(),
+            })
+        );
     }
 
     #[test]

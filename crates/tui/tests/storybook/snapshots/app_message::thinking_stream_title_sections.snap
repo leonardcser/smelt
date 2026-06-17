@@ -1,5 +1,6 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 508
 expression: frame.text()
 ---
 │ I’m thinking about deriving directories from paths.
@@ -7,8 +8,8 @@ expression: frame.text()
 │ Regarding the watcher, it needs to rescan on changes.
 
 │ Assessing directory exclusions
-│
 │ I'm considering which directories to include or exclude.
+
 
 
 

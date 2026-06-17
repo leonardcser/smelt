@@ -73,6 +73,21 @@ impl MarkdownStreamKind {
     }
 }
 
+pub(crate) fn normalize_thinking_title_spacing(content: &str) -> String {
+    let mut lines = Vec::new();
+    let mut drop_blank_after_title = false;
+
+    for line in content.split('\n') {
+        if drop_blank_after_title && line.trim().is_empty() {
+            continue;
+        }
+        drop_blank_after_title = thinking_title(line).is_some();
+        lines.push(line);
+    }
+
+    lines.join("\n")
+}
+
 enum ActiveMarkdownBlock {
     Paragraph {
         content: String,
@@ -653,8 +668,21 @@ mod tests {
         );
         assert_eq!(
             thinking_at(&history, 1),
-            "**Assessing directory exclusions**\n\nbody"
+            "**Assessing directory exclusions**\nbody"
         );
+    }
+
+    #[test]
+    fn thinking_title_spacing_removes_blank_before_body() {
+        assert_eq!(
+            normalize_thinking_title_spacing("**Assessing directory exclusions**\n\nbody"),
+            "**Assessing directory exclusions**\nbody"
+        );
+        assert_eq!(
+            normalize_thinking_title_spacing("first paragraph\n\nsecond paragraph"),
+            "first paragraph\n\nsecond paragraph"
+        );
+        assert_eq!(normalize_thinking_title_spacing("body\n"), "body\n");
     }
 
     #[test]
