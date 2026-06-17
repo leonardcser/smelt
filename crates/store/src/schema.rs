@@ -211,5 +211,5 @@ CREATE INDEX IF NOT EXISTS transcript_search_history_idx ON transcript_search(hi
 "#;
 
 const MIGRATION_2: &str = r#"
-ALTER TABLE request_attempts ADD COLUMN raw_json_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT;
+ALTER TABLE request_attempts ADD COLUMN kind TEXT;
 "#;

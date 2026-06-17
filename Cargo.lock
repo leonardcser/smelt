@@ -2730,6 +2730,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smelt-protocol",
  "tempfile",
  "zstd",
 ]

@@ -2,11 +2,12 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+use protocol::{history_from_messages, HistoryItem, Message};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use crate::compression::ObjectCompression;
-use crate::error::Result;
+use crate::error::{Result, StoreError};
 use crate::meta::{self, SessionState};
 use crate::object::{self, checked_i64, sha256_hex};
 
@@ -39,19 +40,9 @@ pub(crate) fn import_session_dir(
     session_dir: &Path,
     compression: ObjectCompression,
 ) -> Result<LegacyImportReport> {
-    conn.execute_batch(
-        "BEGIN IMMEDIATE;
-         DELETE FROM request_stats;
-         DELETE FROM request_object_refs;
-         DELETE FROM request_attempts;
-         DELETE FROM transcript_search;
-         DELETE FROM transcript_blocks;
-         DELETE FROM history_object_refs;
-         DELETE FROM history_items;
-         DELETE FROM session_state;
-         DELETE FROM objects;",
-    )?;
-    let result = import_session_dir_inner(conn, session_dir, compression);
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = ensure_empty_import_target(conn)
+        .and_then(|()| import_session_dir_inner(conn, session_dir, compression));
     match result {
         Ok(report) => {
             conn.execute_batch("COMMIT")?;
@@ -62,6 +53,24 @@ pub(crate) fn import_session_dir(
             Err(err)
         }
     }
+}
+
+fn ensure_empty_import_target(conn: &Connection) -> Result<()> {
+    for table in [
+        "history_items",
+        "request_attempts",
+        "session_state",
+        "objects",
+    ] {
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
+        if count != 0 {
+            return Err(StoreError::Integrity(format!(
+                "cannot import legacy session into non-empty database; table {table} has {count} rows"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn export_history_jsonl(conn: &Connection, mut out: impl Write) -> Result<()> {
@@ -78,8 +87,8 @@ pub(crate) fn export_history_jsonl(conn: &Connection, mut out: impl Write) -> Re
 
 pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> Result<()> {
     let mut stmt = conn.prepare(
-        "SELECT raw_json_hash, body_hash, response_hash, error_hash, request_id, started_at,
-                provider, model, history_len, error_summary, background
+        "SELECT body_hash, response_hash, error_hash, request_id, kind, turn_id, ask_id, started_at,
+                completed_at, provider, model, history_len, error_summary, background
          FROM request_attempts
          ORDER BY started_at, id",
     )?;
@@ -90,44 +99,47 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
             row.get::<_, Option<String>>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
-            row.get::<_, i64>(5)?,
+            row.get::<_, Option<String>>(5)?,
             row.get::<_, Option<String>>(6)?,
-            row.get::<_, Option<String>>(7)?,
+            row.get::<_, i64>(7)?,
             row.get::<_, Option<i64>>(8)?,
             row.get::<_, Option<String>>(9)?,
-            row.get::<_, i64>(10)?,
+            row.get::<_, Option<String>>(10)?,
+            row.get::<_, Option<i64>>(11)?,
+            row.get::<_, Option<String>>(12)?,
+            row.get::<_, i64>(13)?,
         ))
     })?;
 
     for row in rows {
         let (
-            raw_json_hash,
             body_hash,
             response_hash,
             error_hash,
             request_id,
+            kind,
+            turn_id,
+            ask_id,
             started_at,
+            completed_at,
             provider,
             model,
             history_len,
             error_summary,
             background,
         ) = row?;
-        if let Some(hash) = raw_json_hash {
-            if let Some(bytes) = object_bytes_by_hash(conn, &hash)? {
-                out.write_all(&bytes)?;
-                out.write_all(b"\n")?;
-                continue;
-            }
-        }
+        let elapsed_ms = completed_at.map(|completed| completed.saturating_sub(started_at));
 
         let mut value = json!({
             "request_id": request_id,
+            "kind": kind,
+            "turn_id": turn_id,
+            "ask_id": ask_id,
             "timestamp_ms": started_at,
             "provider_kind": provider,
             "model": model,
             "history_len": history_len,
-            "error": error_summary,
+            "elapsed_ms": elapsed_ms,
             "background": background != 0,
         });
         if let Some(hash) = body_hash {
@@ -138,7 +150,10 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
         }
         if let Some(hash) = error_hash {
             insert_json_object(conn, &mut value, "error", &hash)?;
+        } else if let Some(summary) = error_summary {
+            value["error"] = json!({ "message": summary });
         }
+        remove_null_fields(&mut value);
         serde_json::to_writer(&mut out, &value)?;
         out.write_all(b"\n")?;
     }
@@ -176,14 +191,13 @@ fn import_session_dir_inner(
     session_dir: &Path,
     compression: ObjectCompression,
 ) -> Result<LegacyImportReport> {
-    let (meta_value, history_values) = read_legacy_history_inputs(session_dir)?;
-    let history_len = history_values.len() as u64;
-    let state = session_state_from_json(&meta_value, history_len)?;
-    meta::upsert_session_state(conn, &state)?;
+    let meta_value = read_legacy_meta(session_dir)?;
 
     let mut report = LegacyImportReport::default();
-    report.history_items = import_history(conn, &history_values, compression)?;
+    report.history_items = import_legacy_history(conn, session_dir, compression)?;
     report.transcript_blocks = report.history_items;
+    let state = session_state_from_json(&meta_value, report.history_items as u64)?;
+    meta::upsert_session_state(conn, &state)?;
     report.request_attempts = import_requests(conn, session_dir, compression)?;
     report.objects = conn.query_row("SELECT COUNT(*) FROM objects", [], |row| {
         row.get::<_, i64>(0)
@@ -193,29 +207,12 @@ fn import_session_dir_inner(
     Ok(report)
 }
 
-fn read_legacy_history_inputs(session_dir: &Path) -> Result<(Value, Vec<Value>)> {
+fn read_legacy_meta(session_dir: &Path) -> Result<Value> {
     let meta_path = session_dir.join("meta.json");
-    let history_path = session_dir.join("history.jsonl");
-    if meta_path.is_file() && history_path.is_file() {
-        let meta_value = read_json_file(&meta_path)?;
-        let history_values = read_jsonl_file(&history_path)?;
-        return Ok((meta_value, history_values));
+    if meta_path.is_file() && session_dir.join("history.jsonl").is_file() {
+        return read_json_file(&meta_path);
     }
-
-    let session_path = session_dir.join("session.json");
-    let session_value = read_json_file(&session_path)?;
-    let history_values = session_value
-        .get("history")
-        .and_then(Value::as_array)
-        .cloned()
-        .or_else(|| {
-            session_value
-                .get("messages")
-                .and_then(Value::as_array)
-                .cloned()
-        })
-        .unwrap_or_default();
-    Ok((session_value, history_values))
+    read_json_file(&session_dir.join("session.json"))
 }
 
 fn read_json_file(path: &Path) -> Result<Value> {
@@ -223,18 +220,63 @@ fn read_json_file(path: &Path) -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn read_jsonl_file(path: &Path) -> Result<Vec<Value>> {
+fn import_legacy_history(
+    conn: &Connection,
+    session_dir: &Path,
+    compression: ObjectCompression,
+) -> Result<usize> {
+    let history_path = session_dir.join("history.jsonl");
+    if history_path.is_file() {
+        return import_history_jsonl(conn, &history_path, compression);
+    }
+
+    let session_value = read_json_file(&session_dir.join("session.json"))?;
+    if let Some(history) = session_value.get("history") {
+        let items: Vec<HistoryItem> = serde_json::from_value(history.clone())?;
+        return import_history_items(conn, items.into_iter(), compression);
+    }
+    if let Some(messages) = session_value.get("messages") {
+        let messages: Vec<Message> = serde_json::from_value(messages.clone())?;
+        return import_history_items(
+            conn,
+            history_from_messages(messages).into_iter(),
+            compression,
+        );
+    }
+    Ok(0)
+}
+
+fn import_history_jsonl(
+    conn: &Connection,
+    path: &Path,
+    compression: ObjectCompression,
+) -> Result<usize> {
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
-    let mut values = Vec::new();
+    let mut count = 0usize;
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        values.push(serde_json::from_str(&line)?);
+        let item: HistoryItem = serde_json::from_str(&line)?;
+        import_history_item(conn, count, item, compression)?;
+        count += 1;
     }
-    Ok(values)
+    Ok(count)
+}
+
+fn import_history_items(
+    conn: &Connection,
+    items: impl Iterator<Item = HistoryItem>,
+    compression: ObjectCompression,
+) -> Result<usize> {
+    let mut count = 0usize;
+    for item in items {
+        import_history_item(conn, count, item, compression)?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn import_source(session_dir: &Path) -> &'static str {
@@ -278,42 +320,39 @@ fn optional_u64(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(Value::as_u64)
 }
 
-fn import_history(
+fn import_history_item(
     conn: &Connection,
-    history_values: &[Value],
+    idx: usize,
+    item: HistoryItem,
     compression: ObjectCompression,
-) -> Result<usize> {
-    for (idx, value) in history_values.iter().enumerate() {
-        let mut normalized = value.clone();
-        let mut refs = Vec::new();
-        normalize_metadata(conn, idx as i64, &mut normalized, compression, &mut refs)?;
-        let json = serde_json::to_string(&normalized)?;
-        let hash = sha256_hex(json.as_bytes());
-        let kind = normalized
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let search_text = collect_text(&normalized, 64 * 1024);
+) -> Result<()> {
+    let mut normalized = serde_json::to_value(item)?;
+    let mut refs = Vec::new();
+    normalize_metadata(conn, &mut normalized, compression, &mut refs)?;
+    let json = serde_json::to_string(&normalized)?;
+    let hash = sha256_hex(json.as_bytes());
+    let kind = normalized
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let search_text = collect_text(&normalized, 64 * 1024);
+    conn.execute(
+        "INSERT INTO history_items (idx, kind, json, hash, search_text, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())",
+        params![idx as i64, kind, json, hash, search_text],
+    )?;
+    for (hash, role) in refs {
         conn.execute(
-            "INSERT INTO history_items (idx, kind, json, hash, search_text, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())",
-            params![idx as i64, kind, json, hash, search_text],
+            "INSERT OR IGNORE INTO history_object_refs (history_idx, object_hash, role)
+             VALUES (?1, ?2, ?3)",
+            params![idx as i64, hash, role],
         )?;
-        for (hash, role) in refs {
-            conn.execute(
-                "INSERT OR IGNORE INTO history_object_refs (history_idx, object_hash, role)
-                 VALUES (?1, ?2, ?3)",
-                params![idx as i64, hash, role],
-            )?;
-        }
-        insert_transcript_block(conn, idx as i64, kind, &normalized, &search_text, &hash)?;
     }
-    Ok(history_values.len())
+    insert_transcript_block(conn, idx as i64, kind, &normalized, &search_text, &hash)
 }
 
 fn normalize_metadata(
     conn: &Connection,
-    history_idx: i64,
     value: &mut Value,
     compression: ObjectCompression,
     refs: &mut Vec<(String, &'static str)>,
@@ -332,20 +371,15 @@ fn normalize_metadata(
                             object::put_object(conn, "tool_metadata", &bytes, compression)?;
                         refs.push((object.hash().to_string(), "metadata"));
                         *child = object_ref_json(object.hash(), object.raw_size());
-                        conn.execute(
-                            "INSERT OR REPLACE INTO metadata_snapshots (history_idx, metadata_json, created_at)
-                             VALUES (?1, ?2, unixepoch())",
-                            params![history_idx, String::from_utf8_lossy(&bytes)],
-                        )?;
                         continue;
                     }
                 }
-                normalize_metadata(conn, history_idx, child, compression, refs)?;
+                normalize_metadata(conn, child, compression, refs)?;
             }
         }
         Value::Array(items) => {
             for child in items {
-                normalize_metadata(conn, history_idx, child, compression, refs)?;
+                normalize_metadata(conn, child, compression, refs)?;
             }
         }
         _ => {}
@@ -412,7 +446,7 @@ fn import_requests(
             continue;
         }
         let value: Value = serde_json::from_str(&line)?;
-        insert_request_attempt(conn, &value, line.as_bytes(), compression)?;
+        insert_request_attempt(conn, &value, compression)?;
         count += 1;
     }
     Ok(count)
@@ -421,10 +455,8 @@ fn import_requests(
 fn insert_request_attempt(
     conn: &Connection,
     value: &Value,
-    raw_line: &[u8],
     compression: ObjectCompression,
 ) -> Result<()> {
-    let raw_object = object::put_object(conn, "request_log_entry", raw_line, compression)?;
     let body_hash = put_json_object(conn, value.get("body"), "request_body", compression)?;
     let response_hash =
         put_json_object(conn, value.get("response"), "request_response", compression)?;
@@ -445,7 +477,7 @@ fn insert_request_attempt(
     conn.execute(
         "INSERT INTO request_attempts (
             request_id, turn_id, ask_id, started_at, completed_at, provider, model,
-            history_len, body_hash, response_hash, error_hash, raw_json_hash,
+            history_len, body_hash, response_hash, error_hash, kind,
             error_summary, background, raw_body_size
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
@@ -457,10 +489,10 @@ fn insert_request_attempt(
             optional_string_multi(value, &["provider_kind", "provider"]),
             optional_string(value, "model"),
             value.get("history_len").and_then(Value::as_i64),
-            body_hash,
-            response_hash,
-            error_hash,
-            raw_object.hash(),
+            body_hash.clone(),
+            response_hash.clone(),
+            error_hash.clone(),
+            optional_string(value, "kind"),
             request_error_summary(value.get("error")),
             value
                 .get("background")
@@ -470,15 +502,14 @@ fn insert_request_attempt(
         ],
     )?;
     let request_attempt_id = conn.last_insert_rowid();
-    insert_request_ref(conn, request_attempt_id, raw_object.hash(), "raw_log_entry")?;
-    if let Some(hash) = value_hash(value.get("body"), conn, "request_body", compression)? {
-        insert_request_ref(conn, request_attempt_id, &hash, "body")?;
+    if let Some(hash) = &body_hash {
+        insert_request_ref(conn, request_attempt_id, hash, "body")?;
     }
-    if let Some(hash) = value_hash(value.get("response"), conn, "request_response", compression)? {
-        insert_request_ref(conn, request_attempt_id, &hash, "response")?;
+    if let Some(hash) = &response_hash {
+        insert_request_ref(conn, request_attempt_id, hash, "response")?;
     }
-    if let Some(hash) = value_hash(value.get("error"), conn, "request_error", compression)? {
-        insert_request_ref(conn, request_attempt_id, &hash, "error")?;
+    if let Some(hash) = &error_hash {
+        insert_request_ref(conn, request_attempt_id, hash, "error")?;
     }
     if let Some(usage) = value.get("usage") {
         conn.execute(
@@ -563,7 +594,7 @@ fn collect_text_inner(value: &Value, out: &mut String, max_bytes: usize) {
                 out.push('\n');
             }
             out.push_str(text);
-            out.truncate(max_bytes.min(out.len()));
+            truncate_utf8(out, max_bytes);
         }
         Value::Array(values) => {
             for value in values {
@@ -580,6 +611,20 @@ fn collect_text_inner(value: &Value, out: &mut String, max_bytes: usize) {
         }
         _ => {}
     }
+}
+
+fn truncate_utf8(text: &mut String, max_bytes: usize) {
+    if text.len() <= max_bytes {
+        return;
+    }
+    let mut end = 0;
+    for (idx, _) in text.char_indices() {
+        if idx > max_bytes {
+            break;
+        }
+        end = idx;
+    }
+    text.truncate(end);
 }
 
 fn preview(text: &str, max_bytes: usize) -> String {
@@ -634,6 +679,23 @@ fn rehydrate_object_refs(conn: &Connection, value: &mut Value) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+fn remove_null_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.retain(|_, child| !child.is_null());
+            for child in map.values_mut() {
+                remove_null_fields(child);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                remove_null_fields(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn object_bytes_by_hash(conn: &Connection, hash: &str) -> Result<Option<Vec<u8>>> {

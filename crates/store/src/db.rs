@@ -472,6 +472,14 @@ mod tests {
             serde_json::from_slice(exported_history.strip_suffix(b"\n").unwrap()).unwrap();
         assert_eq!(exported_history_value, history_item);
 
+        let snapshot_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM metadata_snapshots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(snapshot_count, 0);
+
         let attempts = db.request_attempts().unwrap();
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].request_id.as_deref(), Some("7"));
@@ -482,7 +490,63 @@ mod tests {
         db.export_requests_jsonl(&mut exported_requests).unwrap();
         let exported_request_value: serde_json::Value =
             serde_json::from_slice(exported_requests.strip_suffix(b"\n").unwrap()).unwrap();
-        assert_eq!(exported_request_value, request);
+        assert_eq!(exported_request_value["body"], request["body"]);
+        assert_eq!(exported_request_value["response"], request["response"]);
+        assert_eq!(exported_request_value["kind"], request["kind"]);
+        assert_eq!(
+            exported_request_value["provider_kind"],
+            request["provider_kind"]
+        );
+    }
+
+    #[test]
+    fn refuses_to_import_into_nonempty_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy-session");
+        fs::create_dir(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("session.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "old1",
+                "history": [{"kind": "user", "content": "hello"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.put_object_uncompressed("test", b"existing").unwrap();
+        let err = db.import_legacy_session_dir(&legacy_dir).unwrap_err();
+        assert!(err.to_string().contains("non-empty database"));
+    }
+
+    #[test]
+    fn import_search_text_truncates_on_utf8_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy-session");
+        fs::create_dir(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("session.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "unicode1",
+                "history": [{"kind": "user", "content": "é".repeat(70_000)}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        db.import_legacy_session_dir(&legacy_dir).unwrap();
+        let search_text: String = db
+            .connection()
+            .query_row(
+                "SELECT search_text FROM history_items WHERE idx = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(search_text.len() <= 64 * 1024);
+        assert!(search_text.ends_with('é'));
     }
 
     #[test]
@@ -490,10 +554,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let legacy_dir = dir.path().join("legacy-session");
         fs::create_dir(&legacy_dir).unwrap();
-        let first =
-            serde_json::json!({"kind": "user", "content": {"kind": "text", "text": "hello"}});
-        let second =
-            serde_json::json!({"kind": "assistant", "content": {"kind": "text", "text": "hi"}});
+        let first = serde_json::json!({"kind": "user", "content": "hello"});
+        let second = serde_json::json!({"kind": "assistant", "content": "hi"});
         fs::write(
             legacy_dir.join("session.json"),
             serde_json::to_vec(&serde_json::json!({
