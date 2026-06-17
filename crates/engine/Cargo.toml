@@ -8,6 +8,7 @@ name = "engine"
 
 [dependencies]
 smelt-protocol = { workspace = true }
+smelt-store = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "net", "process"] }
 reqwest = { workspace = true, features = ["stream"] }
 serde = { workspace = true }

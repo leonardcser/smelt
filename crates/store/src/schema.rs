@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -51,6 +51,11 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     if current < 2 {
         conn.execute_batch(MIGRATION_2)?;
         set_user_version(conn, 2)?;
+        current = 2;
+    }
+    if current < 3 {
+        conn.execute_batch(MIGRATION_3)?;
+        set_user_version(conn, 3)?;
     }
     conn.execute(
         "INSERT INTO store_meta (key, value, updated_at)
@@ -212,4 +217,21 @@ CREATE INDEX IF NOT EXISTS transcript_search_history_idx ON transcript_search(hi
 
 const MIGRATION_2: &str = r#"
 ALTER TABLE request_attempts ADD COLUMN kind TEXT;
+"#;
+
+const MIGRATION_3: &str = r#"
+ALTER TABLE request_attempts ADD COLUMN api_base TEXT;
+ALTER TABLE request_attempts ADD COLUMN url TEXT;
+ALTER TABLE request_attempts ADD COLUMN http_status INTEGER;
+ALTER TABLE request_attempts ADD COLUMN prompt_cache_key TEXT;
+ALTER TABLE request_attempts ADD COLUMN stream INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE request_attempts ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE request_attempts ADD COLUMN response_summary TEXT;
+ALTER TABLE request_stats ADD COLUMN context_tokens INTEGER;
+ALTER TABLE request_stats ADD COLUMN cache_write_tokens INTEGER;
+ALTER TABLE request_stats ADD COLUMN tokens_per_sec REAL;
+CREATE INDEX IF NOT EXISTS request_attempts_url_idx ON request_attempts(url);
+CREATE INDEX IF NOT EXISTS request_stats_input_tokens_idx ON request_stats(input_tokens DESC);
+CREATE INDEX IF NOT EXISTS request_stats_output_tokens_idx ON request_stats(output_tokens DESC);
+CREATE INDEX IF NOT EXISTS request_stats_total_cost_idx ON request_stats(total_cost_micros DESC);
 "#;

@@ -1,6 +1,5 @@
 -- Optional plugin: `/inspect` opens a local web UI for browsing sessions,
--- their history, and the exact provider requests/responses logged to
--- `requests.jsonl`.
+-- their history, and provider request/response audit data.
 
 local M = {}
 local notify = smelt.notify.scoped("inspect")

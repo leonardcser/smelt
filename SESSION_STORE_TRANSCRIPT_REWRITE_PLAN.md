@@ -733,6 +733,8 @@ Acceptance:
 
 ### Phase D: Request audit writer cutover
 
+Status: complete. Live engine request audit now opens the per-session `session.db` and appends request attempts through `SessionDb::append_request_attempt` instead of appending `requests.jsonl`. Request bodies, parsed responses, and errors are stored as content-addressed objects with indexed request metadata, inline response/error summaries, token/cost stats, and lazy payload loading through `request_payloads`. `RequestAuditQuery` supports filtering by time, request id, turn/ask id, provider/model, errors, body size, token minimums, and cost minimums. The inspector reads SQLite metadata for session-list stats and uses DB JSONL export for request detail when `session.db` exists; legacy `requests.jsonl` remains an import/fallback input only.
+
 Deliverables:
 
 - Replace new `requests.jsonl` writes with `RequestAuditStore` writes to SQLite.

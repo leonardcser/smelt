@@ -1,8 +1,7 @@
 //! Local HTTP server for the `/inspect` session introspection UI.
 //!
 //! Serves an embedded single-page application plus a small read-only JSON
-//! API backed by `smelt_core::session`. The engine writes `requests.jsonl`
-//! directly; this module only reads it.
+//! API backed by `smelt_core::session` and `smelt_store`.
 
 use protocol::request_log::RequestLogEntry;
 use protocol::TokenUsage;
@@ -475,24 +474,44 @@ async fn session_summary(id: &str) -> (&'static str, &'static str, String) {
 }
 
 async fn session_requests(id: &str) -> (&'static str, &'static str, String) {
+    let id = id.to_string();
+    let requests = match tokio::task::spawn_blocking(move || session_requests_json(&id)).await {
+        Ok(result) => result,
+        Err(e) => return server_error(&e.to_string()),
+    };
+    match requests {
+        Ok(body) => ("200 OK", "application/json", body),
+        Err(e) => server_error(&e),
+    }
+}
+
+fn session_requests_json(id: &str) -> std::result::Result<String, String> {
+    let db_path = session_dir(id).join("session.db");
+    if db_path.is_file() {
+        let db = smelt_store::SessionDb::open_read_only(&db_path).map_err(|err| err.to_string())?;
+        let mut jsonl = Vec::new();
+        db.export_requests_jsonl(&mut jsonl)
+            .map_err(|err| err.to_string())?;
+        let text = String::from_utf8(jsonl).map_err(|err| err.to_string())?;
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        return serde_json::to_string(&lines).map_err(|err| err.to_string());
+    }
+
     let path = session_dir(id).join("requests.jsonl");
     if !path.exists() {
-        return ("200 OK", "application/json", "[]".to_string());
+        return Ok("[]".to_string());
     }
-    match tokio::fs::read_to_string(&path).await {
-        Ok(text) => {
-            let lines: Vec<serde_json::Value> = text
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| serde_json::from_str(line).ok())
-                .collect();
-            match serde_json::to_string(&lines) {
-                Ok(body) => ("200 OK", "application/json", body),
-                Err(e) => server_error(&e.to_string()),
-            }
-        }
-        Err(e) => server_error(&e.to_string()),
-    }
+    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    serde_json::to_string(&lines).map_err(|err| err.to_string())
 }
 
 fn session_dir(id: &str) -> PathBuf {
@@ -556,6 +575,23 @@ fn project_labels(cwd: Option<&str>) -> (Option<String>, Option<String>) {
 }
 
 fn request_stats_for_session(id: &str) -> RequestStats {
+    let db_path = session_dir(id).join("session.db");
+    if db_path.is_file() {
+        if let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) {
+            if let Ok(attempts) = db.query_request_attempts(&smelt_store::RequestAuditQuery {
+                limit: u32::MAX,
+                order: smelt_store::RequestAuditOrder::OldestFirst,
+                ..Default::default()
+            }) {
+                let mut stats = RequestStats::default();
+                for attempt in attempts {
+                    stats.record_summary(&attempt);
+                }
+                return stats;
+            }
+        }
+    }
+
     let path = session_dir(id).join("requests.jsonl");
     let Ok(file) = std::fs::File::open(path) else {
         return RequestStats::default();
@@ -573,6 +609,35 @@ fn request_stats_for_session(id: &str) -> RequestStats {
 }
 
 impl RequestStats {
+    fn record_summary(&mut self, entry: &smelt_store::RequestAuditSummary) {
+        self.request_count += 1;
+        if entry.error_summary.is_some() {
+            self.error_count += 1;
+        }
+        if entry.stream {
+            self.streaming_count += 1;
+        }
+        if entry.response_hash.is_some() {
+            self.raw_response_count += 1;
+        }
+        self.total_cost_usd += entry.cost_usd.unwrap_or(0.0);
+        if let Some(completed_at) = entry.completed_at {
+            self.total_elapsed_ms += completed_at.saturating_sub(entry.started_at) as u64;
+        }
+        if let Some(usage) = entry.usage.as_ref() {
+            self.add_usage(usage);
+            if usage.context_tokens.is_some() {
+                self.latest_context_tokens = usage.context_tokens;
+            }
+            self.max_context_tokens = max_opt(self.max_context_tokens, usage.context_tokens);
+        }
+        self.first_request_ms = min_opt(self.first_request_ms, Some(entry.started_at as u64));
+        self.latest_timestamp_ms =
+            max_opt_u64(self.latest_timestamp_ms, Some(entry.started_at as u64));
+        self.latest_provider_kind = entry.provider.clone();
+        self.latest_model = entry.model.clone();
+    }
+
     fn record(&mut self, entry: &RequestLogEntry) {
         self.request_count += 1;
         if entry.error.is_some() {

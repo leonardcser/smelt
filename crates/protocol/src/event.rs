@@ -524,8 +524,8 @@ pub enum UiCommand {
         /// cache shard as the main turn.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         session_id: String,
-        /// On-disk directory for this session. The engine writes the
-        /// `requests.jsonl` sidecar here for introspection.
+        /// On-disk directory for this session. The engine writes the SQLite
+        /// request audit here for introspection.
         session_dir: PathBuf,
         /// Emit incremental text deltas as `EngineAskDelta` events.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]

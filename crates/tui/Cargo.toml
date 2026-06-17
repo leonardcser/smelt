@@ -11,6 +11,7 @@ name = "tui"
 smelt-protocol = { workspace = true }
 smelt-engine = { workspace = true }
 smelt-core = { workspace = true }
+smelt-store = { workspace = true }
 smelt-perf = { workspace = true }
 smelt-buffer = { workspace = true }
 smelt-term = { workspace = true }

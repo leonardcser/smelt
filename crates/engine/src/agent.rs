@@ -204,8 +204,8 @@ pub(crate) struct AskTask {
     /// Session id forwarded as `prompt_cache_key` to OpenAI / Codex so
     /// the EngineAsk hits the same cache shard as the main turn.
     pub session_id: String,
-    /// On-disk directory for this session. Used to write the
-    /// `requests.jsonl` introspection sidecar.
+    /// On-disk directory for this session. Used to write the SQLite request
+    /// audit for introspection.
     pub session_dir: std::path::PathBuf,
     /// Whether text deltas for this auxiliary request should be forwarded
     /// as `EngineAskDelta` events.
@@ -689,8 +689,8 @@ struct Turn<'a> {
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
     session_id: String,
-    /// On-disk directory for this session. Used to write the
-    /// `requests.jsonl` introspection sidecar.
+    /// On-disk directory for this session. Used to write the SQLite request
+    /// audit for introspection.
     session_dir: std::path::PathBuf,
     started_at: Instant,
     tps_samples: Vec<f64>,

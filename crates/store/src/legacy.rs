@@ -88,9 +88,12 @@ pub(crate) fn export_history_jsonl(conn: &Connection, mut out: impl Write) -> Re
 pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT body_hash, response_hash, error_hash, request_id, kind, turn_id, ask_id, started_at,
-                completed_at, provider, model, history_len, error_summary, background
-         FROM request_attempts
-         ORDER BY started_at, id",
+                completed_at, provider, model, history_len, error_summary, background,
+                api_base, url, http_status, prompt_cache_key, stream, attempt,
+                s.stats_json, s.total_cost_micros, s.tokens_per_sec
+         FROM request_attempts a
+         LEFT JOIN request_stats s ON s.request_attempt_id = a.id
+         ORDER BY started_at, a.id",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -108,6 +111,15 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
             row.get::<_, Option<i64>>(11)?,
             row.get::<_, Option<String>>(12)?,
             row.get::<_, i64>(13)?,
+            row.get::<_, Option<String>>(14)?,
+            row.get::<_, Option<String>>(15)?,
+            row.get::<_, Option<i64>>(16)?,
+            row.get::<_, Option<String>>(17)?,
+            row.get::<_, i64>(18)?,
+            row.get::<_, i64>(19)?,
+            row.get::<_, Option<String>>(20)?,
+            row.get::<_, Option<i64>>(21)?,
+            row.get::<_, Option<f64>>(22)?,
         ))
     })?;
 
@@ -127,8 +139,22 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
             history_len,
             error_summary,
             background,
+            api_base,
+            url,
+            http_status,
+            prompt_cache_key,
+            stream,
+            attempt,
+            stats_json,
+            total_cost_micros,
+            tokens_per_sec,
         ) = row?;
         let elapsed_ms = completed_at.map(|completed| completed.saturating_sub(started_at));
+        let usage: Option<Value> = stats_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
+        let cost_usd = total_cost_micros.map(|micros| micros as f64 / 1_000_000.0);
 
         let mut value = json!({
             "request_id": request_id,
@@ -137,9 +163,18 @@ pub(crate) fn export_requests_jsonl(conn: &Connection, mut out: impl Write) -> R
             "ask_id": ask_id,
             "timestamp_ms": started_at,
             "provider_kind": provider,
+            "api_base": api_base,
             "model": model,
+            "url": url,
+            "http_status": http_status,
             "history_len": history_len,
+            "prompt_cache_key": prompt_cache_key,
+            "stream": stream != 0,
+            "usage": usage,
+            "cost_usd": cost_usd,
+            "tokens_per_sec": tokens_per_sec,
             "elapsed_ms": elapsed_ms,
+            "attempt": attempt,
             "background": background != 0,
         });
         if let Some(hash) = body_hash {
@@ -477,9 +512,11 @@ fn insert_request_attempt(
     conn.execute(
         "INSERT INTO request_attempts (
             request_id, turn_id, ask_id, started_at, completed_at, provider, model,
-            history_len, body_hash, response_hash, error_hash, kind,
-            error_summary, background, raw_body_size
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            history_len, body_hash, response_hash, error_hash, kind, error_summary,
+            background, raw_body_size, api_base, url, http_status, prompt_cache_key,
+            stream, attempt, response_summary
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                   ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             scalar_string(value.get("request_id")),
             scalar_string(value.get("turn_id")),
@@ -499,6 +536,16 @@ fn insert_request_attempt(
                 .and_then(Value::as_bool)
                 .unwrap_or(false) as i64,
             checked_i64(raw_body_size, "raw_body_size")?,
+            optional_string(value, "api_base"),
+            optional_string(value, "url"),
+            value.get("http_status").and_then(Value::as_i64),
+            optional_string(value, "prompt_cache_key"),
+            value
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) as i64,
+            value.get("attempt").and_then(Value::as_i64).unwrap_or(1),
+            request_response_summary(value.get("response")),
         ],
     )?;
     let request_attempt_id = conn.last_insert_rowid();
@@ -511,11 +558,32 @@ fn insert_request_attempt(
     if let Some(hash) = &error_hash {
         insert_request_ref(conn, request_attempt_id, hash, "error")?;
     }
-    if let Some(usage) = value.get("usage") {
+    if value.get("usage").is_some()
+        || value.get("cost_usd").is_some()
+        || value.get("tokens_per_sec").is_some()
+    {
+        let usage = value.get("usage");
         conn.execute(
-            "INSERT OR REPLACE INTO request_stats (request_attempt_id, stats_json)
-             VALUES (?1, ?2)",
-            params![request_attempt_id, serde_json::to_string(usage)?],
+            "INSERT OR REPLACE INTO request_stats (
+                request_attempt_id, input_tokens, output_tokens, cached_input_tokens,
+                reasoning_tokens, total_cost_micros, stats_json, context_tokens,
+                cache_write_tokens, tokens_per_sec
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                request_attempt_id,
+                usage_u32(usage, "prompt_tokens").map(i64::from),
+                usage_u32(usage, "completion_tokens").map(i64::from),
+                usage_u32(usage, "cache_read_tokens").map(i64::from),
+                usage_u32(usage, "reasoning_tokens").map(i64::from),
+                value
+                    .get("cost_usd")
+                    .and_then(Value::as_f64)
+                    .map(|cost| (cost * 1_000_000.0).round() as i64),
+                usage.map(serde_json::to_string).transpose()?,
+                usage_u32(usage, "context_tokens").map(i64::from),
+                usage_u32(usage, "cache_write_tokens").map(i64::from),
+                value.get("tokens_per_sec").and_then(Value::as_f64),
+            ],
         )?;
     }
     Ok(())
@@ -563,6 +631,22 @@ fn request_error_summary(value: Option<&Value>) -> Option<String> {
         .and_then(Value::as_str)
         .or_else(|| value.get("kind").and_then(Value::as_str))
         .map(ToString::to_string)
+}
+
+fn request_response_summary(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    value
+        .get("content")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("reasoning").and_then(Value::as_str))
+        .map(|text| preview(text, 512))
+}
+
+fn usage_u32(usage: Option<&Value>, key: &str) -> Option<u32> {
+    usage
+        .and_then(|usage| usage.get(key))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 fn scalar_string(value: Option<&Value>) -> Option<String> {

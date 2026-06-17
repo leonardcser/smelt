@@ -1,14 +1,14 @@
 //! Persistent log of provider requests/responses for session introspection.
 //!
-//! Written by the engine as a `requests.jsonl` sidecar next to `meta.json`
-//! and `history.jsonl`. One entry per logical request attempt, so retries and
-//! auxiliary `EngineAsk` calls are all captured.
+//! Stored by the engine in the per-session SQLite request audit. One entry per
+//! logical request attempt, so retries and auxiliary `EngineAsk` calls are all
+//! captured. The same shape is used for optional JSONL debug export.
 
 use crate::message::{Message, ToolCall};
 use crate::usage::TokenUsage;
 use serde::{Deserialize, Serialize};
 
-/// One provider request attempt, written as a single JSON line.
+/// One provider request attempt, suitable for SQLite audit storage and JSONL export.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestLogEntry {
     /// Stable id: `turn_id` for main turns, `ask_id` for auxiliary requests.

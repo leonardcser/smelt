@@ -1,33 +1,21 @@
-//! Persistent `requests.jsonl` sidecar for session introspection.
+//! Persistent provider request audit for session introspection.
 
 use protocol::request_log::{RequestError, RequestLogEntry, RequestResponse};
 use protocol::{Message, ToolDef};
-use std::io::Write;
 use std::path::Path;
 
-/// Append one request attempt to the session's `requests.jsonl`.
+/// Append one request attempt to the session's SQLite request audit.
 pub fn append(
     session_dir: &Path,
     ctx: RequestContext,
     info: &crate::provider::RequestAttemptInfo<'_>,
     pricing: &crate::pricing::ResolvedPricing,
 ) {
-    let path = session_dir.join("requests.jsonl");
-    let Some(parent) = path.parent() else { return };
-    let _ = std::fs::create_dir_all(parent);
-
     let entry = build_entry(ctx, info, pricing);
-    let Ok(line) = serde_json::to_string(&entry) else {
+    let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) else {
         return;
     };
-    let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
-        return;
-    };
-    let _ = writeln!(f, "{line}");
+    let _ = db.append_request_attempt(&entry);
 }
 
 /// Static context for a logical request.
@@ -175,7 +163,6 @@ mod tests {
     use crate::pricing::{ModelPricing, PricingSource, ResolvedPricing};
     use crate::provider::{LLMResponse, ProviderError, ProviderKind, RequestAttemptInfo};
     use protocol::{Message, TokenUsage};
-    use std::io::Read;
 
     fn zero_pricing() -> ResolvedPricing {
         ResolvedPricing {
@@ -278,27 +265,32 @@ mod tests {
         };
         append(session_dir, ctx_err, &info_err, &zero_pricing());
 
-        let path = session_dir.join("requests.jsonl");
-        let mut file = std::fs::File::open(&path).unwrap();
-        let mut contents = String::new();
-        file.read_to_string(&mut contents).unwrap();
-        let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(lines.len(), 2);
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
+        let attempts = db
+            .query_request_attempts(&smelt_store::RequestAuditQuery {
+                order: smelt_store::RequestAuditOrder::OldestFirst,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert!(!session_dir.join("requests.jsonl").exists());
 
-        let first: RequestLogEntry = serde_json::from_str(lines[0]).unwrap();
-        assert_eq!(first.request_id, 7);
-        assert_eq!(first.kind, "turn");
+        let first = &attempts[0];
+        assert_eq!(first.request_id.as_deref(), Some("7"));
+        assert_eq!(first.kind.as_deref(), Some("turn"));
         assert_eq!(first.attempt, 1);
-        assert_eq!(
-            first.response.as_ref().unwrap().content,
-            Some("hello".into())
-        );
         assert_eq!(first.usage.as_ref().unwrap().prompt_tokens, Some(10));
-        assert!(first.error.is_none());
+        assert!(first.error_summary.is_none());
+        let first_payloads = db.request_payloads(first.id).unwrap().unwrap();
+        let response: RequestResponse =
+            serde_json::from_value(first_payloads.response.unwrap()).unwrap();
+        assert_eq!(response.content, Some("hello".into()));
 
-        let second: RequestLogEntry = serde_json::from_str(lines[1]).unwrap();
+        let second = &attempts[1];
         assert_eq!(second.attempt, 2);
-        assert!(second.response.is_none());
-        assert_eq!(second.error.as_ref().unwrap().kind, "network");
+        assert!(second.response_hash.is_none());
+        let second_payloads = db.request_payloads(second.id).unwrap().unwrap();
+        let error: RequestError = serde_json::from_value(second_payloads.error.unwrap()).unwrap();
+        assert_eq!(error.kind, "network");
     }
 }

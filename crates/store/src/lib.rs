@@ -4,6 +4,7 @@ mod error;
 mod legacy;
 mod meta;
 mod object;
+mod request_audit;
 mod schema;
 
 pub use compression::{
@@ -15,4 +16,7 @@ pub use error::{Result, StoreError};
 pub use legacy::{LegacyImportReport, RequestAttemptSummary};
 pub use meta::{SessionMeta, SessionState, WriterLease};
 pub use object::{ObjectCodec, ObjectMeta, StoredObject};
+pub use request_audit::{
+    RequestAuditOrder, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary,
+};
 pub use schema::SCHEMA_VERSION;

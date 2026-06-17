@@ -9,6 +9,7 @@ use crate::error::{Result, StoreError};
 use crate::legacy::{self, LegacyImportReport, RequestAttemptSummary};
 use crate::meta::{self, SessionMeta, SessionState, WriterLease};
 use crate::object::{self, ObjectMeta, StoredObject};
+use crate::request_audit::{self, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary};
 use crate::schema;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -210,6 +211,27 @@ impl SessionDb {
     pub fn request_attempts(&self) -> Result<Vec<RequestAttemptSummary>> {
         legacy::request_attempts(&self.conn)
     }
+
+    pub fn append_request_attempt(
+        &self,
+        entry: &protocol::request_log::RequestLogEntry,
+    ) -> Result<i64> {
+        request_audit::append_request_attempt(&self.conn, entry, self.object_compression)
+    }
+
+    pub fn query_request_attempts(
+        &self,
+        query: &RequestAuditQuery,
+    ) -> Result<Vec<RequestAuditSummary>> {
+        request_audit::request_attempts(&self.conn, query)
+    }
+
+    pub fn request_payloads(
+        &self,
+        request_attempt_id: i64,
+    ) -> Result<Option<RequestAuditPayloads>> {
+        request_audit::request_payloads(&self.conn, request_attempt_id)
+    }
 }
 
 fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
@@ -234,7 +256,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        benchmark_zstd_compression, ObjectCodec, DEFAULT_ZSTD_LEVEL,
+        benchmark_zstd_compression, ObjectCodec, RequestAuditOrder, DEFAULT_ZSTD_LEVEL,
         DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
     };
 
@@ -366,6 +388,82 @@ mod tests {
         assert_eq!(report.samples.len(), 2);
         assert!(report.supports_policy(DEFAULT_ZSTD_MIN_SAVINGS_PERCENT));
         assert!(report.compression_ratio_percent() < 50);
+    }
+
+    #[test]
+    fn appends_request_audit_to_sqlite_objects_and_queries_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let body = serde_json::json!({"model": "model-a", "messages": [{"role": "user", "content": "hi"}]});
+        let entry = protocol::request_log::RequestLogEntry {
+            request_id: 9,
+            kind: "turn".into(),
+            turn_id: Some(9),
+            ask_id: None,
+            history_len: Some(4),
+            timestamp_ms: 1000,
+            provider_kind: "openai".into(),
+            api_base: "https://api.example.test".into(),
+            model: "model-a".into(),
+            url: "https://api.example.test/v1/chat/completions".into(),
+            http_status: Some(200),
+            body: body.clone(),
+            prompt_cache_key: Some("session-9".into()),
+            stream: true,
+            system_prompt: Some("duplicated prompt context is intentionally not stored".into()),
+            messages: Some(vec![protocol::Message::user(protocol::Content::text("hi"))]),
+            tools: None,
+            response: Some(protocol::request_log::RequestResponse {
+                content: Some("hello".into()),
+                reasoning: None,
+                tool_calls: None,
+                raw: Some(serde_json::json!({"id": "resp-1"})),
+            }),
+            usage: Some(protocol::TokenUsage {
+                context_tokens: Some(20),
+                prompt_tokens: Some(10),
+                completion_tokens: Some(5),
+                cache_read_tokens: Some(2),
+                cache_write_tokens: Some(1),
+                reasoning_tokens: Some(3),
+            }),
+            cost_usd: Some(0.000123),
+            tokens_per_sec: Some(42.0),
+            elapsed_ms: Some(250),
+            attempt: 1,
+            error: None,
+            background: false,
+        };
+
+        let id = db.append_request_attempt(&entry).unwrap();
+        let attempts = db
+            .query_request_attempts(&RequestAuditQuery {
+                request_id: Some("9".into()),
+                min_input_tokens: Some(10),
+                min_cost_micros: Some(123),
+                order: RequestAuditOrder::OldestFirst,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].id, id);
+        assert_eq!(attempts[0].provider.as_deref(), Some("openai"));
+        assert!(attempts[0].stream);
+        assert_eq!(
+            attempts[0].usage.as_ref().unwrap().cache_write_tokens,
+            Some(1)
+        );
+        assert_eq!(attempts[0].cost_usd, Some(0.000123));
+
+        let payloads = db.request_payloads(id).unwrap().unwrap();
+        assert_eq!(payloads.body.unwrap(), body);
+        assert_eq!(payloads.response.unwrap()["raw"]["id"], "resp-1");
+        assert!(payloads.error.is_none());
+        let object_count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM objects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(object_count, 2);
     }
 
     #[test]

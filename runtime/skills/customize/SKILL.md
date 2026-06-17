@@ -456,7 +456,7 @@ Shipped but not autoloaded. Add `require("smelt.plugins.<name>")` to `~/.config/
 
 | Plugin | Summary |
 | --- | --- |
-| `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and the exact provider requests/responses logged to `requests.jsonl`. |
+| `smelt.plugins.inspect` | Optional plugin: `/inspect` opens a local web UI for browsing sessions, their history, and provider request/response audit data. |
 | `smelt.plugins.which_key` | Which-key style popup for pending global Lua keymaps. |
 
 <!-- PLUGINS_END -->
