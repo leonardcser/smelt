@@ -76,8 +76,9 @@ impl TuiApp {
         let worktree_root = std::path::Path::new(&self.core.config.settings.worktree_root);
         let ctx = smelt_core::worktree::project_context(cwd, Some(worktree_root));
         let mut permissions = self.core.permissions.as_ref().clone();
+        let roots = ctx.allowed_roots.clone();
         permissions.set_allowed_roots(ctx.active_root, ctx.allowed_roots);
-        let rules = smelt_core::permissions::store::load(&self.cwd);
+        let rules = smelt_core::permissions::store::load_for_roots(&self.cwd, &roots);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
         permissions
             .approvals

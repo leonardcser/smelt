@@ -1,7 +1,7 @@
-use crate::config;
+use crate::{config, permissions::workspace};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A single persisted workspace permission rule.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +75,40 @@ pub fn load(cwd: &str) -> Vec<Rule> {
     };
     let store: Store = serde_json::from_str(&contents).unwrap_or_default();
     store.rules
+}
+
+pub fn load_for_roots(cwd: &str, roots: &[PathBuf]) -> Vec<Rule> {
+    let mut loaded: Vec<PathBuf> = Vec::new();
+    let mut rules = Vec::new();
+    for root in std::iter::once(Path::new(cwd).to_path_buf()).chain(roots.iter().cloned()) {
+        if loaded
+            .iter()
+            .any(|existing| workspace::paths_equivalent(existing, &root))
+        {
+            continue;
+        }
+        merge_rules(&mut rules, load(&root.to_string_lossy()));
+        loaded.push(root);
+    }
+    rules
+}
+
+fn merge_rules(rules: &mut Vec<Rule>, incoming: Vec<Rule>) {
+    for rule in incoming {
+        if let Some(existing) = rules.iter_mut().find(|existing| existing.tool == rule.tool) {
+            if rule.patterns.is_empty() || existing.patterns.is_empty() {
+                existing.patterns.clear();
+            } else {
+                for pattern in rule.patterns {
+                    if !existing.patterns.contains(&pattern) {
+                        existing.patterns.push(pattern);
+                    }
+                }
+            }
+        } else {
+            rules.push(rule);
+        }
+    }
 }
 
 pub fn save(cwd: &str, rules: &[Rule]) {
@@ -155,6 +189,72 @@ pub fn into_approvals(rules: &[Rule]) -> (HashMap<String, Vec<glob::Pattern>>, V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_rules_combines_workspace_roots() {
+        let mut rules = vec![
+            Rule {
+                tool: "directory".into(),
+                patterns: vec!["/tmp".into()],
+            },
+            Rule {
+                tool: "bash".into(),
+                patterns: vec!["git status".into()],
+            },
+        ];
+        merge_rules(
+            &mut rules,
+            vec![
+                Rule {
+                    tool: "directory".into(),
+                    patterns: vec!["/var/tmp".into(), "/tmp".into()],
+                },
+                Rule {
+                    tool: "bash".into(),
+                    patterns: vec!["git diff".into()],
+                },
+            ],
+        );
+
+        assert_eq!(
+            rules
+                .iter()
+                .find(|rule| rule.tool == "directory")
+                .unwrap()
+                .patterns,
+            vec!["/tmp".to_string(), "/var/tmp".to_string()]
+        );
+        assert_eq!(
+            rules
+                .iter()
+                .find(|rule| rule.tool == "bash")
+                .unwrap()
+                .patterns,
+            vec!["git status".to_string(), "git diff".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_rules_blanket_tool_wins() {
+        let mut rules = vec![Rule {
+            tool: "bash".into(),
+            patterns: vec!["git status".into()],
+        }];
+        merge_rules(
+            &mut rules,
+            vec![Rule {
+                tool: "bash".into(),
+                patterns: Vec::new(),
+            }],
+        );
+
+        assert!(rules
+            .iter()
+            .find(|rule| rule.tool == "bash")
+            .unwrap()
+            .patterns
+            .is_empty());
+    }
 
     #[test]
     fn encode_decode_roundtrip() {

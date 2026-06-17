@@ -669,7 +669,10 @@ impl TuiApp {
     }
 
     fn reload_workspace_permissions(&mut self) {
-        let rules = smelt_core::permissions::store::load(&self.cwd);
+        let cwd = std::path::Path::new(&self.cwd);
+        let worktree_root = std::path::Path::new(&self.core.config.settings.worktree_root);
+        let ctx = smelt_core::worktree::project_context(cwd, Some(worktree_root));
+        let rules = smelt_core::permissions::store::load_for_roots(&self.cwd, &ctx.allowed_roots);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
         self.core
             .permissions

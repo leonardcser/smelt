@@ -465,6 +465,7 @@ async fn main() {
         &lua_tool_defaults,
         lua_mode_behaviors,
     );
+    let permission_roots = project_context.allowed_roots.clone();
     permissions.set_allowed_roots(project_context.active_root, project_context.allowed_roots);
     permissions.set_restrict_to_workspace(settings.restrict_to_workspace);
     permissions.set_paths_fn(std::sync::Arc::new(|name, args| {
@@ -473,7 +474,7 @@ async fn main() {
     }));
     {
         let cwd_str = cwd.to_string_lossy();
-        let rules = smelt_core::permissions::store::load(&cwd_str);
+        let rules = smelt_core::permissions::store::load_for_roots(&cwd_str, &permission_roots);
         let (ws_tools, ws_dirs) = smelt_core::permissions::store::into_approvals(&rules);
         permissions
             .approvals
