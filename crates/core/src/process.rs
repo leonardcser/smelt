@@ -33,9 +33,10 @@ pub(crate) struct Output {
 
 /// Spawn `cmd` with `args` and wait for completion, honoring a
 /// `CancellationToken`. The caller can short-circuit a long-running
-/// child by cancelling the token - the child's process group receives
-/// SIGTERM (then SIGKILL on the standard escalation) and the future
-/// resolves with `RunOutcome::Cancelled` once the wait completes.
+/// child by cancelling the token - the child starts in its own session, so
+/// it has no controlling terminal and its process group can receive SIGTERM
+/// (then SIGKILL on the standard escalation). The future resolves with
+/// `RunOutcome::Cancelled` once the wait completes.
 /// Stdout/stderr are read concurrently so the child can't deadlock on
 /// a full pipe.
 pub(crate) async fn run_async(
@@ -63,8 +64,7 @@ pub(crate) async fn run_async(
         .stdin(stdin_kind)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    command.process_group(0);
+    configure_child_session(&mut command);
 
     let mut child = command.spawn()?;
 
@@ -201,6 +201,39 @@ impl Default for ShellSpec {
     }
 }
 
+/// Configure a command so its child has no controlling terminal on Unix.
+///
+/// The child starts as a new session leader. Interactive programs that try to
+/// open `/dev/tty` fail instead of taking over Smelt's terminal while the tool
+/// waits on captured pipes. This is a no-op on non-Unix platforms.
+pub fn without_controlling_terminal(command: &mut std::process::Command) {
+    configure_without_controlling_terminal(command);
+}
+
+#[cfg(unix)]
+fn configure_without_controlling_terminal(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `pre_exec` runs in the forked child before exec. The closure only
+    // calls async-signal-safe `setsid` and builds an `io::Error` on failure, then
+    // returns to the standard spawn path.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_without_controlling_terminal(_command: &mut std::process::Command) {}
+
+fn configure_child_session(command: &mut tokio::process::Command) {
+    without_controlling_terminal(command.as_std_mut());
+}
+
 pub fn spawn_shell_child(command: &str, shell: &ShellSpec) -> io::Result<Child> {
     let mut cmd = tokio::process::Command::new(&shell.program);
     for a in &shell.args {
@@ -210,14 +243,14 @@ pub fn spawn_shell_child(command: &str, shell: &ShellSpec) -> io::Result<Child> 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    cmd.process_group(0);
+    configure_child_session(&mut cmd);
     cmd.spawn()
 }
 
 /// Spawn `<shell> <args...> command`, stream lines through `on_line`, return
 /// aggregated output once the child exits or the timeout expires. Child runs
-/// in its own process group so the whole group can be signalled on cancel/timeout.
+/// in its own session so it has no controlling terminal, and its process group
+/// can be signalled on cancel/timeout.
 /// `shell` is the wrapping program (default `sh -c`); callers swap it to e.g.
 /// `("/bin/zsh", &["-fc"])` to run user-shell commands.
 pub async fn run_streaming_with_shell(
@@ -350,8 +383,8 @@ fn kill_process_group(_child: &tokio::process::Child) {}
 /// SIGKILL variant used by the process registry stop path (skips SIGTERM grace period).
 #[cfg(unix)]
 fn kill_group_pid_sigkill(pid: u32) {
-    // SAFETY: background children are spawned with process_group(0), so the
-    // child's pid is also the process group id.
+    // SAFETY: background children start in their own session, whose session
+    // leader pid is also the process group id.
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
@@ -887,6 +920,25 @@ mod tests {
         assert_eq!(id, pid.to_string());
         assert_eq!(registry.running_count(), 1);
         let _ = registry.stop(&id).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_child_cannot_open_controlling_terminal() {
+        let out = run_streaming_with_shell(
+            "cat /dev/tty",
+            StreamConfig {
+                timeout: Duration::from_secs(1),
+                shell: ShellSpec::default(),
+                cancel: None,
+                detach_on_timeout: None,
+            },
+            |_| {},
+        )
+        .await;
+
+        assert!(!out.timed_out, "child blocked on /dev/tty");
+        assert!(out.is_error);
     }
 
     #[tokio::test]

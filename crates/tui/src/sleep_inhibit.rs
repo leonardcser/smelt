@@ -89,8 +89,6 @@ fn spawn_inhibitor() -> Option<std::process::Child> {
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn spawn_inhibitor() -> Option<std::process::Child> {
-    use std::os::unix::process::CommandExt;
-
     let mut cmd = std::process::Command::new("systemd-inhibit");
     cmd.args([
         "--what=idle:sleep",
@@ -103,13 +101,7 @@ fn spawn_inhibitor() -> Option<std::process::Child> {
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null());
 
-    // New session: no controlling terminal, prevents polkit from opening /dev/tty.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    smelt_core::process::without_controlling_terminal(&mut cmd);
 
     cmd.spawn().ok()
 }
