@@ -284,6 +284,7 @@ app_story!(resume_dialog, |ctx| {
             parent_id: parent_id.map(str::to_string),
             context_tokens: None,
             text_bytes: Some(bytes),
+            migration: None,
         };
         let json = serde_json::to_string(&meta).expect("serialize SessionMeta fixture");
         ctx.write_session_meta(id, &json);

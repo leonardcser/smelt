@@ -3,6 +3,7 @@ mod startup;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use crossterm::ExecutableCommand;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[global_allocator]
@@ -125,8 +126,33 @@ enum ColorMode {
 enum Commands {
     /// Manage provider authentication (add providers, Codex or Copilot login/logout)
     Auth,
+    /// Export canonical session data as JSONL
+    Export(ExportArgs),
     /// Start the local session/request inspector web UI
     Inspect(InspectArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct ExportArgs {
+    #[command(subcommand)]
+    command: ExportCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ExportCommand {
+    /// Export semantic history rows as JSONL
+    History(ExportJsonlArgs),
+    /// Export request audit entries as JSONL
+    Requests(ExportJsonlArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct ExportJsonlArgs {
+    /// Session id or unique prefix to export
+    session: String,
+    /// Output file path. Defaults to stdout.
+    #[arg(long, short)]
+    output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -200,6 +226,36 @@ async fn run_inspect_command(args: InspectArgs) {
     server.stop().await;
 }
 
+fn run_export_command(args: ExportArgs) {
+    let result = match args.command {
+        ExportCommand::History(args) => export_jsonl(args, |session, out| {
+            smelt_core::session::export_history_jsonl(session, out)
+        }),
+        ExportCommand::Requests(args) => export_jsonl(args, |session, out| {
+            smelt_core::session::export_requests_jsonl(session, out)
+        }),
+    };
+    if let Err(err) = result {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    }
+}
+
+fn export_jsonl<F>(args: ExportJsonlArgs, export: F) -> Result<(), String>
+where
+    F: FnOnce(&str, &mut dyn std::io::Write) -> Result<(), String>,
+{
+    if let Some(path) = args.output {
+        let mut file = std::fs::File::create(&path)
+            .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
+        export(&args.session, &mut file)
+    } else {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        export(&args.session, &mut handle)
+    }
+}
+
 #[tokio::main]
 async fn main() {
     std::panic::set_hook(Box::new(|info| {
@@ -260,6 +316,10 @@ async fn main() {
         match command {
             Commands::Auth => {
                 setup::run_auth_command().await;
+                return;
+            }
+            Commands::Export(export_args) => {
+                run_export_command(export_args);
                 return;
             }
             Commands::Inspect(inspect_args) => {
@@ -366,6 +426,8 @@ async fn main() {
         );
         std::process::exit(1);
     }
+
+    smelt_core::session::spawn_background_migration();
 
     let shared_session: Arc<Mutex<Option<smelt_core::session::Session>>> =
         Arc::new(Mutex::new(None));

@@ -772,6 +772,8 @@ Acceptance:
 
 ### Phase F: Background all-session migration
 
+Status: complete. Startup now launches a bounded background worker that scans session directories and imports missing `session.db` files from legacy `session.json` or split `meta.json` + `history.jsonl` sources. Failed imports write retryable `migration.json` status without deleting legacy inputs, resume metadata exposes pending/failed status, `/resume` marks migration warnings, and `smelt export history|requests <session>` exports canonical SQLite data as JSONL.
+
 Deliverables:
 
 - Startup migration worker scans all sessions and imports missing DBs in the background.

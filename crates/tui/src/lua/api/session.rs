@@ -569,7 +569,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "list",
-        "List persisted sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, and `size_bytes` when available.",
+        "List persisted sessions other than the current one. Each row carries `id`, `title`, `subtitle`, `cwd`, `parent_id`, `updated_at_ms`, `created_at_ms`, `size_bytes` when available, and `migration_status` / `migration_message` when a legacy import is pending or failed.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let current_id =
@@ -591,6 +591,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 row.set("created_at_ms", meta.created_at_ms)?;
                 if let Some(size) = meta.text_bytes {
                     row.set("size_bytes", size)?;
+                }
+                if let Some(migration) = meta.migration {
+                    row.set("migration_status", migration.state)?;
+                    if let Some(message) = migration.message {
+                        row.set("migration_message", message)?;
+                    }
+                    if migration.updated_at_ms > 0 {
+                        row.set("migration_updated_at_ms", migration.updated_at_ms)?;
+                    }
                 }
                 out.set(idx, row)?;
                 idx += 1;

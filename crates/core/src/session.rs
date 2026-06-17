@@ -7,10 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::BufRead;
-#[cfg(test)]
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -164,6 +162,8 @@ pub struct Session {
 }
 
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 2;
+const MIGRATION_STATUS_FILE: &str = "migration.json";
+const MAX_MIGRATION_FAILURE_LOGS: usize = 5;
 
 // COMPAT(session-v1-messages): load old session.json files that stored
 // provider-style messages instead of native HistoryItem rows.
@@ -582,6 +582,36 @@ impl<'de> Deserialize<'de> for Session {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMigrationStatus {
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMigrationOutcome {
+    Migrated,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionMigrationFailure {
+    pub id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionMigrationBatchReport {
+    pub scanned: usize,
+    pub skipped: usize,
+    pub migrated: usize,
+    pub failed: usize,
+    pub failures: Vec<SessionMigrationFailure>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
@@ -611,6 +641,8 @@ pub struct SessionMeta {
     /// Populated in `meta.json` so the resume dialog avoids loading session history.
     #[serde(default)]
     pub text_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration: Option<SessionMigrationStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -763,6 +795,7 @@ impl Session {
             parent_id: self.parent_id.clone(),
             context_tokens: self.display_context_tokens(),
             text_bytes: Some(compute_text_bytes(&self.history)),
+            migration: None,
         }
     }
 
@@ -1408,8 +1441,17 @@ fn snapshots_from_values<T: for<'de> Deserialize<'de>>(
         .map(HistorySnapshots::from_vec)
 }
 
+fn write_generated_sidecars(dir_path: &Path, session: &Session) {
+    write_meta(dir_path, &session.meta());
+    atomic_write(
+        &dir_path.join("content.txt"),
+        build_search_blob(&session.history).as_bytes(),
+        now_ms(),
+    );
+}
+
 fn import_legacy_session_to_db(
-    dir_path: &std::path::Path,
+    dir_path: &Path,
     session: &Session,
 ) -> Result<(), smelt_store::StoreError> {
     let db_path = dir_path.join("session.db");
@@ -1430,7 +1472,189 @@ fn import_legacy_session_to_db(
     result
 }
 
-fn load_jsonl_session(dir_path: &std::path::Path) -> Option<Session> {
+pub fn migrate_session_dir_to_db(dir_path: &Path) -> Result<SessionMigrationOutcome, String> {
+    let result = migrate_session_dir_to_db_inner(dir_path);
+    match &result {
+        Ok(SessionMigrationOutcome::Migrated) => {
+            let _ = fs::remove_file(dir_path.join(MIGRATION_STATUS_FILE));
+        }
+        Ok(SessionMigrationOutcome::Skipped) => {}
+        Err(message) => write_migration_status(
+            dir_path,
+            &SessionMigrationStatus {
+                state: "failed".to_string(),
+                message: Some(message.clone()),
+                updated_at_ms: now_ms(),
+            },
+        ),
+    }
+    result
+}
+
+fn migrate_session_dir_to_db_inner(dir_path: &Path) -> Result<SessionMigrationOutcome, String> {
+    if dir_path.join("session.db").is_file() {
+        return Ok(SessionMigrationOutcome::Skipped);
+    }
+
+    let has_split = dir_path.join("history.jsonl").is_file();
+    let has_legacy = dir_path.join("session.json").is_file();
+    if !has_split && !has_legacy {
+        return Ok(SessionMigrationOutcome::Skipped);
+    }
+
+    let (session, loaded_legacy_json) = if has_split {
+        match load_jsonl_session(dir_path) {
+            Some(session) => (session, false),
+            None if has_legacy => (
+                load_legacy_json_session(dir_path)
+                    .ok_or_else(|| "failed to load legacy session.json fallback".to_string())?,
+                true,
+            ),
+            None => return Err("failed to load legacy meta.json + history.jsonl".to_string()),
+        }
+    } else {
+        (
+            load_legacy_json_session(dir_path)
+                .ok_or_else(|| "failed to load legacy session.json".to_string())?,
+            true,
+        )
+    };
+
+    import_legacy_session_to_db(dir_path, &session).map_err(|err| err.to_string())?;
+    if loaded_legacy_json {
+        migrate_legacy_json_session(dir_path, &session);
+    } else {
+        write_generated_sidecars(dir_path, &session);
+    }
+    Ok(SessionMigrationOutcome::Migrated)
+}
+
+pub fn migrate_all_sessions_once() -> SessionMigrationBatchReport {
+    migrate_all_sessions_in_dir(&sessions_dir())
+}
+
+fn migrate_all_sessions_in_dir(dir: &Path) -> SessionMigrationBatchReport {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return SessionMigrationBatchReport::default();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            path.is_dir().then_some(path)
+        })
+        .collect();
+    paths.sort();
+
+    let mut report = SessionMigrationBatchReport::default();
+    for path in paths {
+        report.scanned += 1;
+        match migrate_session_dir_to_db(&path) {
+            Ok(SessionMigrationOutcome::Migrated) => report.migrated += 1,
+            Ok(SessionMigrationOutcome::Skipped) => report.skipped += 1,
+            Err(message) => {
+                report.failed += 1;
+                if report.failures.len() < MAX_MIGRATION_FAILURE_LOGS {
+                    let id = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("<unknown>")
+                        .to_string();
+                    report
+                        .failures
+                        .push(SessionMigrationFailure { id, message });
+                }
+            }
+        }
+    }
+    report
+}
+
+pub fn spawn_background_migration() {
+    let _ = std::thread::Builder::new()
+        .name("smelt-session-migration".to_string())
+        .spawn(|| {
+            let report = migrate_all_sessions_once();
+            log_migration_batch_report(&report);
+        });
+}
+
+fn log_migration_batch_report(report: &SessionMigrationBatchReport) {
+    if report.migrated == 0 && report.failed == 0 {
+        return;
+    }
+    eprintln!(
+        "smelt: session migration: scanned {}, migrated {}, skipped {}, failed {}",
+        report.scanned, report.migrated, report.skipped, report.failed
+    );
+    for failure in &report.failures {
+        eprintln!(
+            "smelt: session migration failed for {}: {}",
+            failure.id, failure.message
+        );
+    }
+    let omitted = report.failed.saturating_sub(report.failures.len());
+    if omitted > 0 {
+        eprintln!("smelt: session migration: {omitted} additional failures omitted");
+    }
+}
+
+pub fn export_history_jsonl(id_or_prefix: &str, out: impl Write) -> Result<(), String> {
+    let db = db_for_export(id_or_prefix)?;
+    db.export_history_jsonl(out).map_err(|err| err.to_string())
+}
+
+pub fn export_requests_jsonl(id_or_prefix: &str, out: impl Write) -> Result<(), String> {
+    let db = db_for_export(id_or_prefix)?;
+    db.export_requests_jsonl(out).map_err(|err| err.to_string())
+}
+
+fn db_for_export(id_or_prefix: &str) -> Result<smelt_store::SessionDb, String> {
+    let id = resolve_prefix(id_or_prefix)
+        .ok_or_else(|| format!("session not found or prefix is ambiguous: {id_or_prefix}"))?;
+    let dir = sessions_dir().join(&id);
+    if !dir.join("session.db").is_file() {
+        match migrate_session_dir_to_db(&dir)? {
+            SessionMigrationOutcome::Migrated => {}
+            SessionMigrationOutcome::Skipped => {
+                return Err(format!("session {id} has no sqlite database to export"));
+            }
+        }
+    }
+    smelt_store::SessionDb::open_read_only(dir.join("session.db")).map_err(|err| err.to_string())
+}
+
+fn write_migration_status(dir_path: &Path, status: &SessionMigrationStatus) {
+    if let Ok(json) = serde_json::to_vec(status) {
+        atomic_write(&dir_path.join(MIGRATION_STATUS_FILE), &json, now_ms());
+    }
+}
+
+fn read_migration_status(dir_path: &Path) -> Option<SessionMigrationStatus> {
+    let contents = fs::read_to_string(dir_path.join(MIGRATION_STATUS_FILE)).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+fn migration_status_for_dir(dir_path: &Path) -> Option<SessionMigrationStatus> {
+    if dir_path.join("session.db").is_file() {
+        return None;
+    }
+    if let Some(status) = read_migration_status(dir_path) {
+        return Some(status);
+    }
+    if dir_path.join("history.jsonl").is_file() || dir_path.join("session.json").is_file() {
+        return Some(SessionMigrationStatus {
+            state: "pending".to_string(),
+            message: None,
+            updated_at_ms: 0,
+        });
+    }
+    None
+}
+
+// COMPAT(session-split-jsonl): import pre-SQLite meta.json + history.jsonl
+// sessions into canonical SQLite storage during the alpha migration window.
+fn load_jsonl_session(dir_path: &Path) -> Option<Session> {
     let meta_contents = {
         let _perf = smelt_perf::perf::begin("session:load:read_meta_json");
         fs::read_to_string(dir_path.join("meta.json")).ok()?
@@ -1485,14 +1709,9 @@ fn load_legacy_json_session(dir_path: &std::path::Path) -> Option<Session> {
 
 // COMPAT(session-json-monolith): import old monolithic sessions to SQLite as
 // soon as they are opened, then remove the monolith once sidecars exist.
-fn migrate_legacy_json_session(dir_path: &std::path::Path, session: &Session) {
+fn migrate_legacy_json_session(dir_path: &Path, session: &Session) {
     let _perf = smelt_perf::perf::begin("session:load:migrate_sqlite");
-    write_meta(dir_path, &session.meta());
-    atomic_write(
-        &dir_path.join("content.txt"),
-        build_search_blob(&session.history).as_bytes(),
-        now_ms(),
-    );
+    write_generated_sidecars(dir_path, session);
     if dir_path.join("session.db").is_file() && dir_path.join("meta.json").is_file() {
         let _ = fs::remove_file(dir_path.join("session.json"));
     }
@@ -1561,31 +1780,68 @@ pub fn list_sessions() -> Vec<SessionMeta> {
 /// COMPAT(session-search-sidecar-missing): uses `meta.json` when present;
 /// falls back to `session.json` and regenerates the sidecar for older sessions.
 fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
-    if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
+    let meta = if let Ok(contents) = fs::read_to_string(path.join("meta.json")) {
         if let Ok(mut meta) = serde_json::from_str::<SessionMeta>(&contents) {
             if meta.text_bytes.is_none() {
                 backfill_text_bytes(&path, &mut meta);
             }
-            return Some(meta);
+            Some(meta)
+        } else {
+            None
         }
-    }
-    if let Some(meta) = load_meta_from_db(&path) {
+    } else {
+        None
+    };
+    let meta = if let Some(meta) = meta {
+        meta
+    } else if let Some(meta) = load_meta_from_db(&path) {
         write_meta(&path, &meta);
-        return Some(meta);
-    }
-    let contents = fs::read_to_string(path.join("session.json")).ok()?;
-    let session: Session = serde_json::from_str(&contents).ok()?;
-    let mut meta = session.meta();
-    if meta.id.is_empty() {
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            meta.id = name.to_string();
+        meta
+    } else if let Some(session) = fs::read_to_string(path.join("session.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Session>(&contents).ok())
+    {
+        let mut meta = session.meta();
+        if meta.id.is_empty() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                meta.id = name.to_string();
+            }
         }
-    }
-    write_meta(&path, &meta);
-    Some(meta)
+        write_meta(&path, &meta);
+        meta
+    } else {
+        return migration_meta_for_dir(&path);
+    };
+    Some(with_migration_status(&path, meta))
 }
 
-fn load_meta_from_db(path: &std::path::Path) -> Option<SessionMeta> {
+fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
+    let migration = migration_status_for_dir(path)?;
+    let id = path.file_name().and_then(|name| name.to_str())?.to_string();
+    Some(SessionMeta {
+        id,
+        title: None,
+        slug: None,
+        first_user_message: None,
+        created_at_ms: 0,
+        updated_at_ms: migration.updated_at_ms,
+        mode: None,
+        reasoning_effort: None,
+        model: None,
+        cwd: None,
+        parent_id: None,
+        context_tokens: None,
+        text_bytes: None,
+        migration: Some(migration),
+    })
+}
+
+fn with_migration_status(path: &Path, mut meta: SessionMeta) -> SessionMeta {
+    meta.migration = migration_status_for_dir(path);
+    meta
+}
+
+fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
     let db_path = path.join("session.db");
     if !db_path.is_file() {
         return None;
@@ -1608,6 +1864,7 @@ fn load_meta_from_db(path: &std::path::Path) -> Option<SessionMeta> {
                 parent_id: meta.parent_id,
                 context_tokens: meta.display_context_tokens.or(meta.context_tokens),
                 text_bytes: Some(db.history_text_bytes().ok()?),
+                migration: None,
             });
         }
     }
@@ -1626,6 +1883,7 @@ fn load_meta_from_db(path: &std::path::Path) -> Option<SessionMeta> {
         parent_id: None,
         context_tokens: None,
         text_bytes: Some(db.history_text_bytes().ok()?),
+        migration: None,
     })
 }
 
@@ -1951,6 +2209,102 @@ mod tests {
         let migrated = load_db_session(dir.path()).expect("load migrated db session");
         assert_eq!(migrated.title.as_deref(), Some("legacy title"));
         assert_eq!(migrated.history.len(), 1);
+    }
+
+    #[test]
+    fn migration_helper_imports_split_session_to_sqlite() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut s = fixture_session();
+        s.id = "split-migrate".into();
+        s.title = Some("split title".into());
+        s.history.push(user_item("split prompt"));
+        fs::write(
+            dir.path().join("meta.json"),
+            encode_session_jsonl_meta(&s).expect("encode meta"),
+        )
+        .expect("write meta");
+        fs::write(
+            dir.path().join("history.jsonl"),
+            encode_history_jsonl(&s.history).expect("encode history"),
+        )
+        .expect("write history");
+
+        let outcome = migrate_session_dir_to_db(dir.path()).expect("migrate split");
+
+        assert_eq!(outcome, SessionMigrationOutcome::Migrated);
+        assert!(dir.path().join("session.db").is_file());
+        assert!(!dir.path().join(MIGRATION_STATUS_FILE).exists());
+        let migrated = load_db_session(dir.path()).expect("load migrated db session");
+        assert_eq!(migrated.title.as_deref(), Some("split title"));
+        assert_eq!(migrated.history.len(), 1);
+    }
+
+    #[test]
+    fn failed_migration_keeps_legacy_files_and_is_retryable() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(dir.path().join("session.json"), b"not json").expect("write invalid legacy");
+
+        let first = migrate_session_dir_to_db(dir.path()).expect_err("invalid legacy fails");
+        assert!(first.contains("failed to load legacy session.json"));
+        assert!(dir.path().join("session.json").is_file());
+        assert!(!dir.path().join("session.db").exists());
+        let failed = read_migration_status(dir.path()).expect("failure status");
+        assert_eq!(failed.state, "failed");
+        let listed = load_meta_for_dir(dir.path().to_path_buf()).expect("failure meta");
+        assert_eq!(listed.migration.as_ref().unwrap().state, "failed");
+
+        let mut s = fixture_session();
+        s.id = "retry-migrate".into();
+        s.history.push(user_item("fixed prompt"));
+        fs::write(
+            dir.path().join("session.json"),
+            serde_json::to_string(&s).expect("encode legacy session"),
+        )
+        .expect("write fixed legacy");
+
+        let retry = migrate_session_dir_to_db(dir.path()).expect("retry succeeds");
+        assert_eq!(retry, SessionMigrationOutcome::Migrated);
+        assert!(dir.path().join("session.db").is_file());
+        assert!(!dir.path().join(MIGRATION_STATUS_FILE).exists());
+    }
+
+    #[test]
+    fn migration_batch_counts_progress_and_bounds_failures() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let existing = root.path().join("existing");
+        fs::create_dir(&existing).expect("existing dir");
+        let mut s = fixture_session();
+        s.id = "existing".into();
+        let db = smelt_store::SessionDb::open(existing.join("session.db")).unwrap();
+        db.save_session_snapshot(&session_store_snapshot(&s, 0).unwrap(), None)
+            .unwrap();
+
+        let good = root.path().join("good");
+        fs::create_dir(&good).expect("good dir");
+        s.id = "good".into();
+        s.history.push(user_item("good prompt"));
+        fs::write(
+            good.join("session.json"),
+            serde_json::to_string(&s).expect("encode legacy session"),
+        )
+        .expect("write good legacy");
+
+        for idx in 0..7 {
+            let bad = root.path().join(format!("bad-{idx}"));
+            fs::create_dir(&bad).expect("bad dir");
+            fs::write(bad.join("session.json"), b"not json").expect("write bad legacy");
+        }
+
+        let report = migrate_all_sessions_in_dir(root.path());
+
+        assert_eq!(report.scanned, 9);
+        assert_eq!(report.migrated, 1);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.failed, 7);
+        assert_eq!(report.failures.len(), MAX_MIGRATION_FAILURE_LOGS);
+        assert!(good.join("session.db").is_file());
+        assert!(!good.join("session.json").exists());
+        assert!(root.path().join("bad-0/session.json").is_file());
     }
 
     #[test]
@@ -2388,6 +2742,7 @@ mod tests {
         assert_eq!(m.parent_id.as_deref(), Some("p1"));
         assert_eq!(m.context_tokens, Some(1234));
         assert_eq!(m.text_bytes, Some(2)); // "hi"
+        assert!(m.migration.is_none());
     }
 
     #[test]
@@ -2512,6 +2867,7 @@ mod tests {
             parent_id: None,
             context_tokens: None,
             text_bytes: None,
+            migration: None,
         };
         assert_eq!(session_updated_at(&m), 200);
         let m2 = SessionMeta {

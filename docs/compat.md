@@ -26,6 +26,15 @@ with `COMPAT(<id>)`.
   - `crates/core/src/session.rs`: `load_session_files`,
     `load_legacy_json_session`, `migrate_legacy_json_session`
 
+## session-split-jsonl
+
+- Remove after: two alpha releases after SQLite session storage ships
+- Why: import pre-SQLite `meta.json` + `history.jsonl` session directories to
+  canonical SQLite storage without requiring the user to open each session
+- Code:
+  - `crates/core/src/session.rs`: `load_jsonl_session`,
+    `migrate_session_dir_to_db`, `migrate_all_sessions_once`
+
 ## session-search-sidecar-missing
 
 - Remove after: old session dirs without `meta.json` / `content.txt` no longer

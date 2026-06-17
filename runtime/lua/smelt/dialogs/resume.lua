@@ -30,11 +30,18 @@ local function display_title(entry)
     raw = entry.title
   elseif not is_junk(entry.subtitle) then
     raw = entry.subtitle
-  else
-    return "Untitled"
   end
-  local line = raw:match("([^\n]*)") or raw
-  return (line:match("^%s*(.-)%s*$") or line)
+  local title = "Untitled"
+  if raw ~= nil then
+    local line = raw:match("([^\n]*)") or raw
+    title = line:match("^%s*(.-)%s*$") or line
+  end
+  if entry.migration_status == "failed" then
+    return title .. " [migration failed]"
+  elseif entry.migration_status == "pending" then
+    return title .. " [migrating]"
+  end
+  return title
 end
 
 local SIZE_WIDTH = 6
