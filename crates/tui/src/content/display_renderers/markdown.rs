@@ -703,6 +703,60 @@ mod tests {
     }
 
     #[test]
+    fn streamed_table_never_renders_raw_delimiter_row() {
+        fn rendered_rows(history: &smelt_core::transcript_model::BlockHistory) -> Vec<String> {
+            let mut rows = Vec::new();
+            for index in 0..history.len() {
+                if let smelt_core::transcript_model::Block::Text { content } =
+                    history.block_at(index)
+                {
+                    let block = render_test(80, |sink| {
+                        render_markdown_inner(sink, content, 80, "", false, None);
+                    });
+                    rows.extend(block.lines.into_iter().map(|line| line.text));
+                }
+            }
+            rows
+        }
+
+        let mut parser = smelt_core::content::stream_parser::StreamParser::new();
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        let mut previous_row_count = 0;
+
+        for (chunk, completes_table_row) in [
+            ("| a | b |", false),
+            ("\n|", false),
+            ("---", false),
+            ("|", false),
+            ("---", false),
+            ("|", false),
+            ("\n|", false),
+            (" 1 | 2 |", false),
+            ("\n", true),
+            ("\n|", false),
+            (" 3 |", false),
+            (" 4 |", false),
+            ("\n", true),
+        ] {
+            parser.append_streaming_text(&mut transcript.history, chunk);
+            let rows = rendered_rows(&transcript.history);
+            assert!(
+                !rows.iter().any(|row| row.contains("---")),
+                "rows: {rows:?}"
+            );
+            assert!(!rows.iter().any(|row| row.trim() == "|"), "rows: {rows:?}");
+            if !completes_table_row {
+                assert_eq!(
+                    rows.len(),
+                    previous_row_count,
+                    "chunk {chunk:?} changed rendered row count: {rows:?}"
+                );
+            }
+            previous_row_count = rows.len();
+        }
+    }
+
+    #[test]
     fn markdown_code_block_can_contain_shorter_fenced_block() {
         let md = "````markdown\n```rust\nfn main() {}\n```\n````";
         let block = render_test(80, |sink| {

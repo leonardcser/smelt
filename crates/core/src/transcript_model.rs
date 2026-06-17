@@ -699,18 +699,6 @@ pub struct ActiveThinking {
     pub streaming_id: Option<BlockId>,
 }
 
-pub struct ActiveText {
-    pub(crate) current_line: String,
-    pub(crate) paragraph: String,
-    pub(crate) in_code_block: Option<String>,
-    /// Backtick count of the opening fence (3 for ```, 4 for ````, etc.).
-    /// Used to match the correct closing fence for nested blocks.
-    pub(crate) fence_backticks: usize,
-    pub(crate) table_rows: Vec<String>,
-    pub(crate) streaming_id: Option<BlockId>,
-    pub(crate) table_streaming_id: Option<BlockId>,
-}
-
 /// Blank row gap before `below` given the preceding block. Most block
 /// transitions are separated by one blank row. Adjacent code lines and
 /// consecutive thinking blocks collapse, and markdown headings sit directly on

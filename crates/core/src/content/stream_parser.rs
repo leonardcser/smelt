@@ -1,17 +1,17 @@
 //! Streaming input adapter: accumulates character deltas, detects structural boundaries
 //! (paragraphs, code blocks, tables), and writes finished blocks into `BlockHistory`.
 
-use super::{markdown_closes_fence, markdown_opening_fence};
+use super::markdown_stream::MarkdownStream;
 use crate::transcript_model::{
-    ActiveText, ActiveThinking, ActiveTool, Block, BlockHistory, BlockId, Status, ToolOutput,
-    ToolOutputRef, ToolState, ToolStatus,
+    ActiveThinking, ActiveTool, Block, BlockHistory, BlockId, Status, ToolOutput, ToolOutputRef,
+    ToolState, ToolStatus,
 };
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 pub struct StreamParser {
     active_thinking: Option<ActiveThinking>,
-    active_text: Option<ActiveText>,
+    active_text: MarkdownStream,
     stream_exec_id: Option<BlockId>,
     active_tools: Vec<ActiveTool>,
 }
@@ -26,7 +26,7 @@ impl StreamParser {
     pub fn new() -> Self {
         Self {
             active_thinking: None,
-            active_text: None,
+            active_text: MarkdownStream::new(),
             stream_exec_id: None,
             active_tools: Vec::new(),
         }
@@ -73,7 +73,7 @@ impl StreamParser {
 
     pub fn clear(&mut self) {
         self.active_thinking = None;
-        self.active_text = None;
+        self.active_text.clear();
         self.active_tools.clear();
         self.stream_exec_id = None;
     }
@@ -91,7 +91,7 @@ impl StreamParser {
     }
 
     pub fn has_active_text(&self) -> bool {
-        self.active_text.is_some()
+        self.active_text.is_active()
     }
 
     pub fn active_thinking(&self) -> Option<&ActiveThinking> {
@@ -176,193 +176,12 @@ impl StreamParser {
         if self.active_thinking.is_some() {
             self.flush_streaming_thinking(history);
         }
-
-        let at = self.active_text.get_or_insert_with(|| ActiveText {
-            current_line: String::new(),
-            paragraph: String::new(),
-            in_code_block: None,
-            fence_backticks: 0,
-            table_rows: Vec::new(),
-            streaming_id: None,
-            table_streaming_id: None,
-        });
-
-        for ch in delta.chars() {
-            if ch == '\r' {
-                continue;
-            }
-            if ch == '\n' {
-                let line = std::mem::take(&mut at.current_line);
-                Self::process_text_line(history, at, &line);
-            } else {
-                at.current_line.push(ch);
-            }
-        }
-        Self::sync_streaming_text(history, at);
-    }
-
-    fn sync_streaming_text(history: &mut BlockHistory, at: &mut ActiveText) {
-        let in_table = !at.table_rows.is_empty() || Self::is_streaming_table_line(&at.current_line);
-        if in_table {
-            let mut content = String::new();
-            for row in &at.table_rows {
-                if !content.is_empty() {
-                    content.push('\n');
-                }
-                content.push_str(row);
-            }
-            if Self::is_streaming_table_line(&at.current_line) {
-                if !content.is_empty() {
-                    content.push('\n');
-                }
-                content.push_str(&at.current_line);
-            }
-            if content.is_empty() {
-                return;
-            }
-            let block = Block::Text { content };
-            if let Some(id) = at.table_streaming_id {
-                history.rewrite(id, block);
-            } else {
-                let id = history.push(block);
-                history.set_status(id, Status::Streaming);
-                at.table_streaming_id = Some(id);
-            }
-            return;
-        }
-        let preview = match (at.paragraph.is_empty(), at.current_line.is_empty()) {
-            (true, true) => None,
-            (true, false) => Some(at.current_line.clone()),
-            (false, true) => Some(at.paragraph.clone()),
-            (false, false) => Some(format!("{}\n{}", at.paragraph, at.current_line)),
-        };
-        let Some(content) = preview.filter(|t| !t.trim().is_empty()) else {
-            return;
-        };
-        let block = Block::Text { content };
-        if let Some(id) = at.streaming_id {
-            history.rewrite(id, block);
-        } else {
-            let id = history.push(block);
-            history.set_status(id, Status::Streaming);
-            at.streaming_id = Some(id);
-        }
-    }
-
-    fn process_text_line(history: &mut BlockHistory, at: &mut ActiveText, line: &str) {
-        if let Some((fence_len, info)) = markdown_opening_fence(line) {
-            if at.in_code_block.is_some() {
-                Self::append_paragraph_line(at, line);
-                if markdown_closes_fence(at.fence_backticks, line) {
-                    at.in_code_block = None;
-                    at.fence_backticks = 0;
-                }
-                return;
-            }
-
-            Self::flush_table(history, at);
-            Self::append_paragraph_line(at, line);
-            at.in_code_block = Some(info.to_string());
-            at.fence_backticks = fence_len;
-            return;
-        }
-
-        if at.in_code_block.is_some() {
-            Self::append_paragraph_line(at, line);
-            return;
-        }
-
-        if Self::is_streaming_table_line(line) {
-            Self::flush_paragraph(history, at);
-            at.table_rows.push(line.to_string());
-            return;
-        }
-
-        if line.trim().is_empty() {
-            if !at.table_rows.is_empty() {
-                return;
-            }
-            if !at.paragraph.is_empty() {
-                Self::flush_paragraph(history, at);
-            }
-            return;
-        }
-
-        Self::flush_table(history, at);
-
-        Self::append_paragraph_line(at, line);
-    }
-
-    // Streaming sees incomplete markdown, so final parsing remains in markdown_ir;
-    // this only keeps pipe-prefixed partial rows together while chunks arrive.
-    fn is_streaming_table_line(line: &str) -> bool {
-        line.trim_start().starts_with('|')
-    }
-
-    fn append_paragraph_line(at: &mut ActiveText, line: &str) {
-        if !at.paragraph.is_empty() {
-            at.paragraph.push('\n');
-        }
-        at.paragraph.push_str(line);
-    }
-
-    fn flush_table(history: &mut BlockHistory, at: &mut ActiveText) {
-        if !at.table_rows.is_empty() {
-            let content = std::mem::take(&mut at.table_rows).join("\n");
-            if let Some(id) = at.table_streaming_id.take() {
-                history.rewrite(id, Block::Text { content });
-                history.set_status(id, Status::Done);
-            } else {
-                history.push(Block::Text { content });
-            }
-        } else if let Some(id) = at.table_streaming_id.take() {
-            history.set_status(id, Status::Done);
-        }
-    }
-
-    fn flush_paragraph(history: &mut BlockHistory, at: &mut ActiveText) {
-        let para = std::mem::take(&mut at.paragraph);
-        let trimmed = para.trim().to_string();
-        if let Some(id) = at.streaming_id.take() {
-            if trimmed.is_empty() {
-                history.rewrite(
-                    id,
-                    Block::Text {
-                        content: String::new(),
-                    },
-                );
-            } else {
-                history.rewrite(id, Block::Text { content: trimmed });
-            }
-            history.set_status(id, Status::Done);
-        } else if !trimmed.is_empty() {
-            history.push(Block::Text { content: trimmed });
-        }
+        self.active_text.append(history, delta);
     }
 
     pub fn flush_streaming_text(&mut self, history: &mut BlockHistory) {
         self.flush_streaming_thinking(history);
-        if let Some(mut at) = self.active_text.take() {
-            if at.in_code_block.is_some() {
-                if !at.current_line.is_empty() {
-                    let line = std::mem::take(&mut at.current_line);
-                    Self::append_paragraph_line(&mut at, &line);
-                }
-                at.in_code_block = None;
-                at.fence_backticks = 0;
-            }
-            if !at.current_line.is_empty() && Self::is_streaming_table_line(&at.current_line) {
-                at.table_rows.push(std::mem::take(&mut at.current_line));
-            }
-            Self::flush_table(history, &mut at);
-            if !at.current_line.is_empty() {
-                if !at.paragraph.is_empty() {
-                    at.paragraph.push('\n');
-                }
-                at.paragraph.push_str(&at.current_line);
-            }
-            Self::flush_paragraph(history, &mut at);
-        }
+        self.active_text.flush(history);
     }
 
     // ── Tool lifecycle ──────────────────────────────────────────────
@@ -751,6 +570,53 @@ mod tests {
     }
 
     #[test]
+    fn streaming_opening_fence_is_not_shown_as_text() {
+        let (mut parser, mut history) = setup();
+        for chunk in ["`", "`", "`", "rust"] {
+            parser.append_streaming_text(&mut history, chunk);
+            assert_eq!(history.len(), 0);
+        }
+
+        parser.append_streaming_text(&mut history, "\nfn main() {}");
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "```rust\nfn main() {}".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn streaming_closing_fence_is_not_shown_as_text() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "```rust\nfn main() {}\n");
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "```rust\nfn main() {}".into(),
+            }
+        );
+
+        for chunk in ["`", "`", "`", "   "] {
+            parser.append_streaming_text(&mut history, chunk);
+            assert_eq!(
+                history.block_at(0),
+                &Block::Text {
+                    content: "```rust\nfn main() {}".into(),
+                }
+            );
+        }
+
+        parser.append_streaming_text(&mut history, "\nafter");
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "```rust\nfn main() {}\n```   \nafter".into(),
+            }
+        );
+    }
+
+    #[test]
     fn code_block_can_contain_shorter_fenced_block() {
         let (mut parser, mut history) = setup();
         parser.append_streaming_text(
@@ -843,7 +709,27 @@ mod tests {
         assert_eq!(history.status(history.order[0]), Status::Done);
     }
 
-    // -- Tool lifecycle -----------------------------------------------
+    #[test]
+    fn streaming_table_rows_are_not_shown_until_line_commit() {
+        let (mut parser, mut history) = setup();
+        parser.append_streaming_text(&mut history, "| a | b |");
+        assert_eq!(history.len(), 0);
+
+        for chunk in ["\n|", "---", "|", "---", "|", "\n|"] {
+            parser.append_streaming_text(&mut history, chunk);
+            assert_eq!(history.len(), 0);
+        }
+
+        parser.append_streaming_text(&mut history, " 1 | 2 |");
+        assert_eq!(history.len(), 0);
+        parser.append_streaming_text(&mut history, "\n");
+        assert_eq!(
+            history.block_at(0),
+            &Block::Text {
+                content: "| a | b |\n|---|---|\n| 1 | 2 |".into(),
+            }
+        );
+    }
 
     #[test]
     fn tool_start_flushes_active_text() {

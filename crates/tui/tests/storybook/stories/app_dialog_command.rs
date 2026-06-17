@@ -160,6 +160,32 @@ app_story!(btw_dialog_streaming_answer, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(btw_dialog_streams_table_in_tiny_deltas, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.push_user_turn("show table output");
+    ctx.push_assistant_text("Tables should stream without raw delimiter frames.");
+    ctx.run_command("btw show a tiny table");
+
+    let ask_id = ctx.pending_ask_id().expect("/btw registered ask callback");
+    for ch in "| A | B |\n|---|---|\n| 1 | 2 |\n".chars() {
+        ctx.engine(EngineEvent::EngineAskDelta {
+            id: ask_id,
+            delta: ch.to_string(),
+        });
+        let frame = ctx.frame_text();
+        let rows: Vec<&str> = frame.lines().collect();
+        assert!(
+            !rows.iter().any(|row| row.contains("---")),
+            "frame: {frame}"
+        );
+        assert!(!rows.iter().any(|row| row.trim() == "|"), "frame: {frame}");
+    }
+
+    let frame = ctx.frame_text();
+    assert!(frame.contains("A") && frame.contains("B"), "frame: {frame}");
+    assert!(frame.contains("1") && frame.contains("2"), "frame: {frame}");
+});
+
 app_story!(ask_user_question_dialog, |ctx| {
     ctx.set_viewport(80, 22);
     // ask_user_question's `execute` calls `smelt.dialog.open`; driving

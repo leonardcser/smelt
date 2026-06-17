@@ -12,6 +12,10 @@ pub mod width;
 
 pub use smelt_buffer::inline_line;
 pub mod markdown_ir;
+pub mod markdown_stream;
+pub use markdown_stream::{
+    markdown_closes_fence, markdown_opening_fence, FenceMarker, MarkdownFence,
+};
 pub use smelt_buffer::wrap;
 
 pub use crate::buffer::SpanMeta;
@@ -110,31 +114,6 @@ pub enum ColumnAlignment {
     Right,
 }
 
-/// A backtick fenced-code marker. `rest` is the text after the opening run.
-pub fn markdown_backtick_fence(line: &str) -> Option<(usize, &str)> {
-    let trimmed = line.trim_start();
-    let len = trimmed.bytes().take_while(|&b| b == b'`').count();
-    if len >= 3 {
-        Some((len, &trimmed[len..]))
-    } else {
-        None
-    }
-}
-
-/// Opening backtick fence and its info string.
-pub fn markdown_opening_fence(line: &str) -> Option<(usize, &str)> {
-    markdown_backtick_fence(line).map(|(len, rest)| (len, rest.trim()))
-}
-
-/// Closing backtick fence. Markdown closing fences may be followed only by spaces.
-pub fn markdown_closing_fence_len(line: &str) -> Option<usize> {
-    markdown_backtick_fence(line).and_then(|(len, rest)| rest.trim().is_empty().then_some(len))
-}
-
-pub fn markdown_closes_fence(opening_len: usize, line: &str) -> bool {
-    markdown_closing_fence_len(line).is_some_and(|len| len >= opening_len)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,25 +128,9 @@ mod tests {
     }
 
     #[test]
-    fn markdown_closing_fence_requires_only_trailing_space() {
-        assert_eq!(markdown_closing_fence_len("````   "), Some(4));
-        assert_eq!(markdown_closing_fence_len("````rust"), None);
-        assert_eq!(markdown_closing_fence_len("```` trailing"), None);
-    }
-
-    #[test]
-    fn markdown_closes_fence_requires_enough_backticks() {
-        assert!(markdown_closes_fence(4, "````"));
-        assert!(markdown_closes_fence(4, "`````"));
-        assert!(!markdown_closes_fence(4, "```"));
-        assert!(!markdown_closes_fence(4, "`````text"));
-    }
-
-    #[test]
     fn markdown_opening_fence_keeps_fence_length_and_info() {
-        assert_eq!(
-            markdown_opening_fence("  ````markdown"),
-            Some((4, "markdown"))
-        );
+        let fence = markdown_opening_fence("  ````markdown").unwrap();
+        assert_eq!(fence.len, 4);
+        assert_eq!(fence.info, "markdown");
     }
 }

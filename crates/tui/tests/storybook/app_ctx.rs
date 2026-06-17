@@ -422,6 +422,10 @@ impl AppStoryCtx {
         self.app.render_to_frame()
     }
 
+    pub fn frame_text(&mut self) -> String {
+        self.frame().text()
+    }
+
     pub fn assert_snapshot(&mut self) {
         let frame = self.frame();
         let suffix = if self.snapshot_index == 0 {
