@@ -196,7 +196,13 @@ M.register({
 M.register({
   id = "esc.esc.cancel",
   key = "esc esc",
-  text = "cancels the running turn, or rewinds the last turn when idle",
+  text = "cancels the running turn",
+})
+
+M.register({
+  id = "esc.esc.rewind",
+  key = "esc esc",
+  text = "when the agent is idle, rewinds the last turn",
 })
 
 M.register({
@@ -238,6 +244,11 @@ M.register({
 M.register({
   id = "settings.discover",
   text = "toggle settings like show_tokens, show_cost, vim, and auto_compact in init.lua",
+})
+
+M.register({
+  id = "settings.file_icons",
+  text = "set smelt.settings.file_icons = true if your terminal font supports Nerd Font icons",
 })
 
 M.register({
