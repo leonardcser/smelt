@@ -316,7 +316,7 @@ pub struct WindowTextState {
     /// Virtual row/document state for readonly viewers whose backing buffer is a
     /// materialized slice of a larger row space. `None` means the backing buffer
     /// is the full scrollable extent.
-    pub(crate) row_text: DocumentViewState,
+    pub(crate) document_view: DocumentViewState,
     /// Cell-column of the cursor within its visual row. Derived from `cpos`
     /// via `sync_from_cpos`.
     pub(crate) cursor_col: u16,
@@ -646,11 +646,11 @@ impl Window {
     }
 
     pub(crate) fn row_text_state(&self) -> &DocumentViewState {
-        &self.surface.text().row_text
+        &self.surface.text().document_view
     }
 
     pub(crate) fn row_text_state_mut(&mut self) -> &mut DocumentViewState {
-        &mut self.surface.text_mut().row_text
+        &mut self.surface.text_mut().document_view
     }
 
     pub fn document_view_state(&self) -> DocumentViewState {
@@ -1572,8 +1572,8 @@ impl Window {
         text.pending_press = None;
         text.pending_press_includes_cell = false;
         text.selection_anchor_includes_cell = false;
-        if text.row_text.active {
-            text.row_text.drag_endpoint = None;
+        if text.document_view.active {
+            text.document_view.drag_endpoint = None;
         }
     }
 
@@ -2104,12 +2104,12 @@ impl Window {
             let text = self.text_state_mut();
             text.cursor_row = row;
             text.cursor_col = col;
-            if text.row_text.active {
-                text.row_text.cursor = DocPosition {
-                    row: text.row_text.materialized.absolute_row(row),
+            if text.document_view.active {
+                text.document_view.cursor = DocPosition {
+                    row: text.document_view.materialized.absolute_row(row),
                     byte_col,
                 };
-                text.row_text.preferred_cell_col = Some(col as usize);
+                text.document_view.preferred_cell_col = Some(col as usize);
             }
         }
         let total_rows = self.scroll_row_total(buf);
