@@ -138,6 +138,8 @@ function smelt.confirm.open(handle_id)
     surface     = "selectable_text",
     readonly    = true,
     wrap        = false,
+    pad_left    = 0,
+    pad_right   = 0,
   })
   local allow_leaf, allow_buf = smelt.dialog.content({ wrap = false })
   allow_buf:styled({ { { text = "Allow?", style = { dim = true } } } })

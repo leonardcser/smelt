@@ -7,13 +7,16 @@ expression: frame.text()
 
 
 
+
+
+
 ──────────────────────────────────────────────────────────────────────
  edit_file: /tmp/smelt-storybook-nonexistent-session-93e4220e873c553
             8e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/2
             260618-083946-virtual-transcript-performance/plan.md
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
-  1 - # Plan
-  1 + # Updated plan
+ 1 - # Plan
+ 1 + # Updated plan
 ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
  Allow?
   1. allow once

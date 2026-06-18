@@ -70,10 +70,10 @@ end
 
 -- ── Buffer/leaf builders ──────────────────────────────────────────────
 --
--- Every helper here adds a one-cell gutter on the left AND the right so dialog
--- content never sits flush against the frame. The gutter is invariant: callers
--- must not pass `pad_left` / `pad_right`. Custom leaves built outside these
--- helpers and handed to `smelt.dialog.open` must follow the same rule.
+-- Most helpers add a one-cell gutter on the left and right so labels,
+-- menus, and inputs never sit flush against the frame. Content leaves can
+-- opt out for full-width previews, where padding would steal columns and
+-- create horizontal overflow.
 --
 -- Scrollbars: buffer-viewer leaves (`markdown`, `content`) inherit the default
 -- `scrollbar = true` from `smelt.win.new` so a thumb appears when content
@@ -460,7 +460,8 @@ end
 -- or `opts.text` to spin up a fresh read-only one. `opts.readonly` can
 -- force the backing buffer's readonly flag when a caller supplies `opts.buf`.
 -- `opts.interactive` enables focus + vim keymaps (when the user has vim mode
--- on); `opts.wrap` mirrors `smelt.win.new`. Returns `(leaf, buf)`.
+-- on); `opts.wrap` mirrors `smelt.win.new`. `opts.pad_left` / `opts.pad_right`
+-- override the dialog gutter. Returns `(leaf, buf)`.
 ---@type fun(opts: table?): smelt.win.Win, smelt.buf.Buf
 function smelt.dialog.content(opts)
   opts = opts or {}
@@ -483,8 +484,8 @@ function smelt.dialog.content(opts)
     region      = REGION,
     surface     = surface,
     vim_enabled = (opts.interactive and smelt.settings.vim) and true or false,
-    pad_left    = GUTTER,
-    pad_right   = GUTTER,
+    pad_left    = opts.pad_left or GUTTER,
+    pad_right   = opts.pad_right or GUTTER,
     wrap        = opts.wrap,
   })
   return leaf, buf
