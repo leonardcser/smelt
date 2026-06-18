@@ -18,7 +18,8 @@ General-purpose body leaf. Pass `opts.buf` to wrap an existing buffer
 or `opts.text` to spin up a fresh read-only one. `opts.readonly` can
 force the backing buffer's readonly flag when a caller supplies `opts.buf`.
 `opts.interactive` enables focus + vim keymaps (when the user has vim mode
-on); `opts.wrap` mirrors `smelt.win.new`. Returns `(leaf, buf)`.
+on); `opts.wrap` mirrors `smelt.win.new`. `opts.pad_left` / `opts.pad_right`
+override the dialog gutter. Returns `(leaf, buf)`.
 
 ## `smelt.dialog.current`
 
