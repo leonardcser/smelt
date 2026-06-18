@@ -79,6 +79,7 @@ nav = [
     { "`smelt.reasoning`" = "reference/api/reasoning.md" },
     { "`smelt.reg`" = "reference/api/reg.md" },
     { "`smelt.render`" = "reference/api/render.md" },
+    { "`smelt.search`" = "reference/api/search.md" },
     { "`smelt.session`" = "reference/api/session.md" },
     { "`smelt.settings`" = "reference/api/settings.md" },
     { "`smelt.shell`" = "reference/api/shell.md" },

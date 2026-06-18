@@ -1449,6 +1449,13 @@ Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`.
 - `smelt.render.text` :: `fun(buf: smelt.buf.Buf, content: string, opts: smelt.render.TextOpts?): nil`
   Paint plain text into a buffer.
 
+#### `smelt.search`
+
+Search controls for the active UI session.
+
+- `smelt.search.clear` :: `fun(): nil`
+  Clear the active search session and remove search highlights from its target window.
+
 #### `smelt.session`
 
 Current session metadata, turn list, message snapshots, rewind, and persisted session management.
