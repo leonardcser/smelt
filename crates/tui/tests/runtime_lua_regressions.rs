@@ -1,4 +1,5 @@
 const PS_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/ps.lua");
+const COPY_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/copy.lua");
 const LABEL_VALUE_LUA: &str = include_str!("../../../runtime/lua/smelt/label_value.lua");
 const SESSION_LUA: &str = include_str!("../../../runtime/lua/smelt/session.lua");
 const BANNER_LUA: &str = include_str!("../../../runtime/lua/smelt/banner.lua");
@@ -7,6 +8,113 @@ const WEB_FETCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_f
 const TRANSCRIPT_DEFAULTS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/transcript/defaults.lua");
 const SCROLL_PILLS_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/scroll_pills.lua");
+
+#[test]
+fn copy_command_copies_recent_conversation_messages() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        local notices = {}
+        local errors = {}
+        smelt = {
+          __commands = {},
+          __copied = nil,
+          __notices = notices,
+          __errors = errors,
+          cmd = {
+            register = function(name, fn, opts)
+              smelt.__commands[name] = { fn = fn, opts = opts }
+            end,
+          },
+          notify = {
+            scoped = function()
+              return setmetatable({
+                error = function(msg) errors[#errors + 1] = msg end,
+              }, {
+                __call = function(_, msg) notices[#notices + 1] = msg end,
+              })
+            end,
+          },
+          clipboard = {
+            write = function(text) smelt.__copied = text end,
+          },
+          session = {
+            conversation = function()
+              return {
+                { role = "user", content = "first user" },
+                { role = "assistant", content = "first assistant" },
+                { role = "user", content = "second user" },
+                { role = "assistant", content = "second assistant\n\n" },
+              }
+            end,
+          },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+    lua.load(COPY_LUA).exec().expect("load copy command");
+
+    let (one, two, assistant, yank): (String, String, String, String) = lua
+        .load(
+            r#"
+            smelt.__commands.copy.fn()
+            local one = smelt.__copied
+            smelt.__commands.copy.fn("2")
+            local two = smelt.__copied
+            smelt.__commands.copy.fn("--role assistant")
+            local assistant = smelt.__copied
+            smelt.__commands.yank.fn("--headers 1")
+            local yank = smelt.__copied
+            return one, two, assistant, yank
+            "#,
+        )
+        .eval()
+        .expect("run copy commands");
+
+    assert_eq!(one, "second assistant\n\n");
+    assert_eq!(
+        two,
+        "User:\nsecond user\n\nAssistant:\nsecond assistant\n\n"
+    );
+    assert_eq!(assistant, "second assistant\n\n");
+    assert_eq!(yank, "Assistant:\nsecond assistant\n\n");
+}
+
+#[test]
+fn copy_command_reports_invalid_arguments() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        local errors = {}
+        smelt = {
+          __commands = {},
+          __errors = errors,
+          cmd = { register = function(name, fn) smelt.__commands[name] = fn end },
+          notify = setmetatable({
+            error = function(msg) errors[#errors + 1] = msg end,
+          }, { __call = function() end }),
+          clipboard = { write = function() end },
+          session = { conversation = function() return {} end },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+    lua.load(COPY_LUA).exec().expect("load copy command");
+
+    let err: String = lua
+        .load(
+            r#"
+            smelt.__commands.copy("--role tool")
+            return smelt.__errors[1]
+            "#,
+        )
+        .eval()
+        .expect("run invalid copy command");
+
+    assert_eq!(err, "usage: /copy [--role user|assistant] [--headers] [N]");
+}
 
 #[test]
 fn session_tree_orders_nested_forks_and_prefixes() {

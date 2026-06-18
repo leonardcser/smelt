@@ -270,6 +270,12 @@ M.register({
 })
 
 M.register({
+  id = "commands.copy",
+  key = "/copy 3",
+  text = "copy the last message, or the last N messages, to the clipboard",
+})
+
+M.register({
   id = "config.reload",
   key = "f5",
   text = "reload Lua config without restarting",

@@ -1302,13 +1302,21 @@ mod tests {
     }
 
     #[test]
-    fn autoload_registers_export_command() {
+    fn autoload_registers_export_and_copy_commands() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
         assert!(
             rt.has_command("export"),
             "/export should be registered by the autoloaded plugin"
+        );
+        assert!(
+            rt.has_command("copy"),
+            "/copy should be registered by the autoloaded plugin"
+        );
+        assert!(
+            rt.has_command("yank"),
+            "/yank should be registered as a /copy alias"
         );
     }
 
