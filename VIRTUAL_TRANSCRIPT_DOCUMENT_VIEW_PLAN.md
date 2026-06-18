@@ -888,7 +888,7 @@ Required performance evidence:
 Suggested benchmark command for current coverage is the transcript layout/search suite, extended as needed:
 
 ```text
-cargo xtask bench-transcript-layout --runs 3 --workloads mixed_10mib,mixed_50mib --search --search-bytes 10485760
+cargo xtask bench-transcript-layout --runs 3 --workloads mixed_10mib,mixed_50mib --search --search-bytes 10485760 --resume --resume-bytes 10485760
 ```
 
 The benchmark should report at least:

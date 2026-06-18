@@ -7,6 +7,8 @@ pub fn run(args: Vec<String>) {
     let mut skip_nav = false;
     let mut search = false;
     let mut search_bytes: Option<String> = None;
+    let mut resume = false;
+    let mut resume_bytes: Option<String> = None;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -34,6 +36,13 @@ pub fn run(args: Vec<String>) {
             "--search-bytes" => {
                 search_bytes = Some(iter.next().unwrap_or_else(|| {
                     eprintln!("bench-transcript-layout: --search-bytes requires a value");
+                    std::process::exit(2);
+                }));
+            }
+            "--resume" => resume = true,
+            "--resume-bytes" => {
+                resume_bytes = Some(iter.next().unwrap_or_else(|| {
+                    eprintln!("bench-transcript-layout: --resume-bytes requires a value");
                     std::process::exit(2);
                 }));
             }
@@ -88,10 +97,39 @@ pub fn run(args: Vec<String>) {
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
+
+    if resume {
+        let mut cmd = Command::new("cargo");
+        cmd.args(["test", "-p", "smelt-tui"]);
+        if release {
+            cmd.arg("--release");
+        }
+        cmd.args([
+            "transcript_true_resume_benchmark_suite",
+            "--",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ]);
+        if let Some(bytes) = resume_bytes {
+            cmd.env("SMELT_TRANSCRIPT_RESUME_BENCH_BYTES", bytes);
+        }
+        eprintln!(
+            "running transcript resume benchmark: profile={}",
+            if release { "release" } else { "test/debug" },
+        );
+        let status = cmd.status().unwrap_or_else(|e| {
+            eprintln!("bench-transcript-layout: failed to run resume cargo test: {e}");
+            std::process::exit(1);
+        });
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+    }
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--debug]");
     eprintln!();
     eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -100,4 +138,6 @@ fn print_usage() {
     eprintln!("--skip-nav omits the app-level navigation/search suite for projection-only runs.");
     eprintln!("--search enables the large app-level transcript search benchmark.");
     eprintln!("--search-bytes N sets its generated transcript size; default is 50 MiB.");
+    eprintln!("--resume runs the true session resume benchmark after layout/search.");
+    eprintln!("--resume-bytes N sets its generated resume session size; default is 10 MiB.");
 }
