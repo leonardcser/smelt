@@ -13,14 +13,21 @@ pub struct TokenUsage {
     /// assistant output still occupy the next request's context window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_tokens: Option<u32>,
+    /// Non-cached input tokens billed at the normal input rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u32>,
+    /// Output tokens billed at the output rate. For providers that report
+    /// reasoning tokens as an output detail, this already includes them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens: Option<u32>,
+    /// Cached input tokens read from provider cache and billed at the cache-read rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u32>,
+    /// Input tokens written into provider cache and billed at the cache-write rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u32>,
+    /// Reasoning output tokens when the provider exposes them. This is a detail
+    /// of `completion_tokens`, not an additive billing bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u32>,
 }

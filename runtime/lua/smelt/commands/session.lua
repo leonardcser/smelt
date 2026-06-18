@@ -114,10 +114,11 @@ local function session_lines(info, width)
   add_header(lines, "usage")
   add_kv(lines, plain, "context", fmt_context(info.context_tokens, info.context_window), width)
   add_kv(lines, plain, "tokens", string.format(
-    "%s total  in=%s out=%s cr=%s cw=%s reasoning=%s",
-    fmt_tokens(tokens.total or 0),
+    "standard=%s input=%s output=%s cached=%s (read=%s write=%s) reasoning=%s",
+    fmt_tokens(tokens.standard_total or 0),
     fmt_tokens(tokens.input or 0),
     fmt_tokens(tokens.output or 0),
+    fmt_tokens(tokens.cached_input or 0),
     fmt_tokens(tokens.cache_read or 0),
     fmt_tokens(tokens.cache_write or 0),
     fmt_tokens(tokens.reasoning or 0)

@@ -91,6 +91,9 @@ local function aggregate(entries)
     calls = 0,
     prompt = 0,
     completion = 0,
+    cache_read = 0,
+    cache_write = 0,
+    reasoning = 0,
     cost = 0,
     by_model = {},
     by_day = {},
@@ -102,18 +105,27 @@ local function aggregate(entries)
   for _, e in ipairs(entries or {}) do
     local prompt = tonumber(e.prompt_tokens) or 0
     local completion = tonumber(e.completion_tokens) or 0
+    local cache_read = tonumber(e.cache_read_tokens) or 0
+    local cache_write = tonumber(e.cache_write_tokens) or 0
+    local reasoning = tonumber(e.reasoning_tokens) or 0
     local total = prompt + completion
     local c = tonumber(e.cost_usd) or 0
     local model = e.model or "unknown"
     stats.calls = stats.calls + 1
     stats.prompt = stats.prompt + prompt
     stats.completion = stats.completion + completion
+    stats.cache_read = stats.cache_read + cache_read
+    stats.cache_write = stats.cache_write + cache_write
+    stats.reasoning = stats.reasoning + reasoning
     stats.cost = stats.cost + c
 
-    local m = stats.by_model[model] or { model = model, calls = 0, prompt = 0, completion = 0, cost = 0 }
+    local m = stats.by_model[model] or { model = model, calls = 0, prompt = 0, completion = 0, cache_read = 0, cache_write = 0, reasoning = 0, cost = 0 }
     m.calls = m.calls + 1
     m.prompt = m.prompt + prompt
     m.completion = m.completion + completion
+    m.cache_read = m.cache_read + cache_read
+    m.cache_write = m.cache_write + cache_write
+    m.reasoning = m.reasoning + reasoning
     m.cost = m.cost + c
     stats.by_model[model] = m
 
@@ -151,11 +163,16 @@ end
 
 local function summary_lines(stats)
   local total = stats.prompt + stats.completion
+  local cached = stats.cache_read + stats.cache_write
   local items = {}
   if stats.cost > 0 then items[#items + 1] = { "total cost", cost(stats.cost) } end
   items[#items + 1] = { "calls", tostring(stats.calls) }
-  items[#items + 1] = { "tokens", string.format("%s (%s prompt + %s completion)", fmt(total), fmt(stats.prompt), fmt(stats.completion)) }
-  if stats.calls > 0 then items[#items + 1] = { "avg/call", fmt(total / stats.calls) .. " tokens" } end
+  items[#items + 1] = { "tokens", string.format("%s standard (%s input + %s output)", fmt(total), fmt(stats.prompt), fmt(stats.completion)) }
+  if cached > 0 then
+    items[#items + 1] = { "cached", string.format("%s (%s read + %s write)", fmt(cached), fmt(stats.cache_read), fmt(stats.cache_write)) }
+  end
+  if stats.reasoning > 0 then items[#items + 1] = { "reasoning", fmt(stats.reasoning) .. " output detail" } end
+  if stats.calls > 0 then items[#items + 1] = { "avg/call", fmt(total / stats.calls) .. " standard tokens" } end
   return kv_lines(items)
 end
 
@@ -169,7 +186,13 @@ local function model_lines(stats)
   table.sort(models, function(a, b) return a.total > b.total end)
 
   local show_cost = false
-  for _, m in ipairs(models) do if m.cost > 0 then show_cost = true end end
+  local show_cache = false
+  local show_reasoning = false
+  for _, m in ipairs(models) do
+    if m.cost > 0 then show_cost = true end
+    if (m.cache_read + m.cache_write) > 0 then show_cache = true end
+    if m.reasoning > 0 then show_reasoning = true end
+  end
 
   local model_width, calls_width, tokens_width, cost_width = 0, 0, 0, 0
   for _, m in ipairs(models) do
@@ -182,10 +205,12 @@ local function model_lines(stats)
   local lines = { row(span("", DIM)), row(span("per model", HEAD)) }
   for _, m in ipairs(models) do
     local value = string.format(
-      "%" .. calls_width .. "d calls  %" .. tokens_width .. "s tokens",
+      "%" .. calls_width .. "d calls  %" .. tokens_width .. "s standard",
       m.calls,
       fmt(m.total)
     )
+    if show_cache then value = value .. "  cached=" .. fmt(m.cache_read + m.cache_write) end
+    if show_reasoning then value = value .. "  reasoning=" .. fmt(m.reasoning) end
     if show_cost then value = value .. "  " .. string.format("%" .. cost_width .. "s", cost(m.cost)) end
     lines[#lines + 1] = row(span("  " .. string.format("%-" .. model_width .. "s", m.model) .. "  ", DIM), span(value, VALUE))
   end

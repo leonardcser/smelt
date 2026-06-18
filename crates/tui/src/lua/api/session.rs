@@ -63,21 +63,26 @@ pub(crate) fn messages_to_lua(lua: &Lua, msgs: &[protocol::Message]) -> LuaResul
 
 fn usage_to_lua(lua: &Lua, usage: &protocol::TokenUsage) -> LuaResult<mlua::Table> {
     let t = lua.create_table()?;
-    let input = usage.prompt_tokens.unwrap_or(0);
-    let output = usage.completion_tokens.unwrap_or(0);
-    let cache_read = usage.cache_read_tokens.unwrap_or(0);
-    let cache_write = usage.cache_write_tokens.unwrap_or(0);
-    let reasoning = usage.reasoning_tokens.unwrap_or(0);
+    let input = u64::from(usage.prompt_tokens.unwrap_or(0));
+    let output = u64::from(usage.completion_tokens.unwrap_or(0));
+    let cache_read = u64::from(usage.cache_read_tokens.unwrap_or(0));
+    let cache_write = u64::from(usage.cache_write_tokens.unwrap_or(0));
+    let reasoning = u64::from(usage.reasoning_tokens.unwrap_or(0));
+    let cached_input = cache_read + cache_write;
+    let input_total = input + cached_input;
+    let standard_total = input + output;
     t.set("input", input)?;
     t.set("output", output)?;
     t.set("cache_read", cache_read)?;
     t.set("cache_write", cache_write)?;
+    t.set("cached_input", cached_input)?;
+    t.set("input_total", input_total)?;
     t.set("reasoning", reasoning)?;
-    t.set("total", input + output)?;
+    t.set("standard_total", standard_total)?;
     // The denominator is input + cache_read: input is the count of tokens the
     // provider had to read fresh, cache_read is the count served from cache.
     // Together they cover the prefix this turn consumed.
-    let denom = input as u64 + cache_read as u64;
+    let denom = input + cache_read;
     if denom > 0 {
         t.set("cache_hit_ratio", cache_read as f64 / denom as f64)?;
     }
@@ -309,7 +314,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "tokens",
-        "Cumulative token usage across every turn this session has made. Returns a table with `input`, `output`, `cache_read`, `cache_write`, `reasoning`, `total` (input + output), and `cache_hit_ratio` (cache_read / (input + cache_read), `nil` if no input observed yet).",
+        "Cumulative token usage across every turn this session has made. Returns a table with `input` (non-cached input), `output`, `cache_read`, `cache_write`, `cached_input`, `input_total`, `reasoning` (output detail), `standard_total` (input + output), and `cache_hit_ratio` (cache_read / (input + cache_read), `nil` if no input observed yet).",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let usage = crate::lua::try_with_app(|app| app.core.session.session_usage.clone())

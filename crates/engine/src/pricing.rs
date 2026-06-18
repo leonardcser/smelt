@@ -18,12 +18,8 @@ impl ModelPricing {
         let output = usage.completion_tokens.unwrap_or(0) as f64;
         let cache_read = usage.cache_read_tokens.unwrap_or(0) as f64;
         let cache_write = usage.cache_write_tokens.unwrap_or(0) as f64;
-        // Reasoning tokens are billed at the output rate.
-        let reasoning = usage.reasoning_tokens.unwrap_or(0) as f64;
-
         (self.input * input
             + self.output * output
-            + self.output * reasoning
             + self.cache_read * cache_read
             + self.cache_write * cache_write)
             / 1_000_000.0
@@ -161,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn cost_bills_reasoning_at_output_rate() {
+    fn cost_treats_reasoning_as_output_detail() {
         let p = ModelPricing {
             input: 0.0,
             output: 2.0,
@@ -171,10 +167,10 @@ mod tests {
         let u = TokenUsage {
             context_tokens: None,
             prompt_tokens: None,
-            completion_tokens: None,
+            completion_tokens: Some(1_000_000),
             cache_read_tokens: None,
             cache_write_tokens: None,
-            reasoning_tokens: Some(1_000_000),
+            reasoning_tokens: Some(250_000),
         };
         assert!((p.cost(&u) - 2.0).abs() < 1e-9);
     }
@@ -188,7 +184,7 @@ mod tests {
             cache_write: 3.75,
         };
         let u = usage(1_000_000, 500_000, 200_000, 100_000, 50_000);
-        let expected = 3.0 + 6.0 * 0.5 + 0.3 * 0.2 + 3.75 * 0.1 + 6.0 * 0.05;
+        let expected = 3.0 + 6.0 * 0.5 + 0.3 * 0.2 + 3.75 * 0.1;
         assert!((p.cost(&u) - expected).abs() < 1e-9);
     }
 
