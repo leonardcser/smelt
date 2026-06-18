@@ -777,6 +777,88 @@ mod tests {
     }
 
     #[test]
+    fn search_next_match_skips_chrome_and_reports_utf8_byte_ranges() {
+        let hidden = "chrome βγ".to_string();
+        let visible = "select βγ here".to_string();
+        let start = visible.find("βγ").expect("query start");
+        let end = start + "βγ".len();
+        let mut doc = StaticRowsDocument::new(vec![
+            DisplayRow::new(hidden, std::iter::once(0.."chrome ".len()).collect()),
+            DisplayRow::new(visible, std::iter::once(start..end).collect()),
+        ]);
+
+        let found = doc.search_next_match(
+            "βγ",
+            DocPosition {
+                row: 0,
+                byte_col: 0,
+            },
+            true,
+            8,
+        );
+
+        assert_eq!(
+            found,
+            Some(DocRange {
+                start: DocPosition {
+                    row: 1,
+                    byte_col: start
+                },
+                end: DocPosition {
+                    row: 1,
+                    byte_col: end
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn display_rows_track_selectable_text_and_visual_breaks() {
+        let unicode = "α keep".to_string();
+        let soft = "wrapped".to_string();
+        let hard = "chrome visible".to_string();
+        let visible_start = "chrome ".len();
+        let rows = DisplayRows {
+            rows: vec![
+                DisplayRow::new(unicode.clone(), std::iter::once(0.."α".len()).collect()),
+                DisplayRow::new(soft.clone(), std::iter::once(0..soft.len()).collect())
+                    .with_break_before(RowBreak::Soft),
+                DisplayRow::new(
+                    hard.clone(),
+                    std::iter::once(visible_start..hard.len()).collect(),
+                )
+                .with_break_before(RowBreak::Hard),
+            ],
+        };
+
+        assert_eq!(rows.selectable_text(), "α\nwrapped\nvisible");
+        assert_eq!(rows.soft_breaks(), vec![unicode.len()]);
+        assert_eq!(rows.hard_breaks(), vec![unicode.len() + 1 + soft.len()]);
+    }
+
+    #[test]
+    fn display_document_action_at_snaps_stale_utf8_offsets() {
+        let action = SpanAction::OpenUrl("https://example.test/unicode".into());
+        let mut doc = StaticRowsDocument::new(vec![DisplayRow::new(
+            "α link".into(),
+            std::iter::once(0.."α link".len()).collect(),
+        )
+        .with_actions(vec![DisplayAction {
+            cell_start: 0,
+            cell_end: 1,
+            action: action.clone(),
+        }])]);
+
+        assert_eq!(
+            doc.action_at(DocPosition {
+                row: 0,
+                byte_col: 1,
+            }),
+            Some(action)
+        );
+    }
+
+    #[test]
     fn materialized_rows_translate_between_absolute_and_local_rows() {
         let rows = MaterializedRows {
             clamped_scroll: 105,
@@ -810,43 +892,16 @@ mod tests {
 
     #[test]
     fn display_document_action_at_uses_row_actions() {
-        struct Doc {
-            row: DisplayRow,
-        }
-
-        impl DisplayDocument for Doc {
-            fn snapshot(&mut self) -> DisplaySnapshot {
-                DisplaySnapshot {
-                    generation: 0,
-                    total_rows: 1,
-                }
-            }
-
-            fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
-                if range.contains(&0) {
-                    DisplayRows {
-                        rows: vec![self.row.clone()],
-                    }
-                } else {
-                    DisplayRows::empty()
-                }
-            }
-
-            fn copy_range(&mut self, _range: TextRange) -> Option<CopyOutput> {
-                None
-            }
-        }
-
         let action = SpanAction::OpenUrl("https://example.test".into());
-        let mut doc = Doc {
-            row: DisplayRow::new("open link".into(), std::iter::once(0..9).collect()).with_actions(
-                vec![DisplayAction {
-                    cell_start: 5,
-                    cell_end: 9,
-                    action: action.clone(),
-                }],
-            ),
-        };
+        let mut doc = StaticRowsDocument::new(vec![DisplayRow::new(
+            "open link".into(),
+            std::iter::once(0..9).collect(),
+        )
+        .with_actions(vec![DisplayAction {
+            cell_start: 5,
+            cell_end: 9,
+            action: action.clone(),
+        }])]);
 
         assert_eq!(
             doc.action_at(DocPosition {
