@@ -166,17 +166,6 @@ fn document_row_text<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) ->
         .map(|row| row.text)
 }
 
-fn resolve_materialized_row_viewer_command(
-    buf: &Buffer,
-    materialized: MaterializedRows,
-    command: DocumentCommand,
-    cursor: DocPosition,
-    vim_mode: VimMode,
-) -> Option<DocumentCommand> {
-    let mut doc = MaterializedBufferDocument { buf, materialized };
-    resolve_document_command(&mut doc, command, cursor, vim_mode)
-}
-
 struct MaterializedBufferDocument<'a> {
     buf: &'a Buffer,
     materialized: MaterializedRows,
@@ -814,40 +803,6 @@ impl Window {
         buf.get_line(row_to_usize(local)).map(str::len).unwrap_or(0)
     }
 
-    fn row_text_object_range(
-        &self,
-        state: &DocumentViewState,
-        buf: &Buffer,
-        cursor: DocPosition,
-        spec: crate::text_objects::TextObjectSpec,
-    ) -> Option<RowTextObjectSelection> {
-        if spec.kind == crate::text_objects::TextObjectKind::Paragraph {
-            return row_paragraph_text_object(state, buf, cursor, spec.inner);
-        }
-
-        let row_count = buf.line_count() as RowIndex;
-        if row_count == 0 {
-            return None;
-        }
-        let local = state
-            .materialized
-            .local_row(cursor.row)
-            .min(row_count.saturating_sub(1));
-        let line = buf.get_line(row_to_usize(local))?;
-        let col = text::snap(line, cursor.byte_col.min(line.len()));
-        let (start, end) = crate::text_objects::text_object_for_spec(line, col, spec)?;
-        let row = state.materialized.absolute_row(local);
-        Some(RowTextObjectSelection {
-            start: DocPosition {
-                row,
-                byte_col: start,
-            },
-            cursor: DocPosition { row, byte_col: end },
-            include_cursor_cell: false,
-            linewise: false,
-        })
-    }
-
     fn row_doc_pos_at_mouse(
         &mut self,
         buf: &Buffer,
@@ -1108,81 +1063,118 @@ impl Window {
         viewport_rows: u16,
         now: Instant,
     ) -> Option<DocRange> {
-        DocumentViewExecutor::new(self).execute(buf, command, viewport_rows, now)
-    }
-}
-
-pub struct DocumentViewExecutor<'a> {
-    window: &'a mut Window,
-}
-
-impl<'a> DocumentViewExecutor<'a> {
-    pub fn new(window: &'a mut Window) -> Self {
-        Self { window }
-    }
-
-    pub fn execute(
-        &mut self,
-        buf: &Buffer,
-        command: DocumentCommand,
-        viewport_rows: u16,
-        now: Instant,
-    ) -> Option<DocRange> {
-        if !self.window.row_text_state().active {
+        if !self.row_text_state().active {
             return None;
         }
-        let mut state = *self.window.row_text_state();
-        let total_rows = state.materialized.total_rows;
+        if let DocumentCommand::PanColumns(delta) = command {
+            let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
+            self.pan_by_columns(delta, viewport_cols);
+            return None;
+        }
+        let mut state = *self.row_text_state();
+        let materialized = state.materialized;
+        let mut document = MaterializedBufferDocument { buf, materialized };
+        let mut vim_mode = self.vim_mode();
+        let mut scroll_top = self.scroll_top;
+        let mut scroll_left = self.scroll_left;
+        let following_tail = self.is_following_tail();
+        let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
+        let copy = DocumentViewExecutor::execute(
+            &mut state,
+            &mut document,
+            command,
+            &mut vim_mode,
+            &mut scroll_top,
+            &mut scroll_left,
+            viewport_rows,
+            viewport_cols,
+            following_tail,
+            now,
+        );
+        *self.row_text_state_mut() = state;
+        if self.vim_mode() != vim_mode {
+            self.set_vim_mode(vim_mode);
+        }
+        self.scroll_left = scroll_left;
+        match command {
+            DocumentCommand::ScrollRows(_) => {
+                self.set_scroll(scroll_top, buf);
+                self.update_tail_state(buf, viewport_rows);
+            }
+            DocumentCommand::CenterScroll => self.pin_scroll(scroll_top),
+            DocumentCommand::PanColumns(_) => {}
+            _ => {
+                self.scroll_top = scroll_top;
+                self.pin_current_scroll();
+            }
+        }
+        copy
+    }
+}
+
+pub struct DocumentViewExecutor;
+
+impl DocumentViewExecutor {
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute<D: DisplayDocument + ?Sized>(
+        state: &mut DocumentViewState,
+        document: &mut D,
+        command: DocumentCommand,
+        vim_mode: &mut VimMode,
+        scroll_top: &mut RowIndex,
+        scroll_left: &mut u16,
+        viewport_rows: u16,
+        viewport_cols: u16,
+        following_tail: bool,
+        now: Instant,
+    ) -> Option<DocRange> {
+        if !state.active {
+            return None;
+        }
+        let total_rows = document.snapshot().total_rows;
+        state.materialized.total_rows = total_rows;
         if total_rows == 0 || viewport_rows == 0 {
             return None;
         }
-        let current = state.cursor;
-        let command = resolve_materialized_row_viewer_command(
-            buf,
-            state.materialized,
-            command,
-            current,
-            self.window.vim_mode(),
-        )
-        .unwrap_or(command);
+
+        let current = DocPosition {
+            row: state.cursor.row.min(total_rows.saturating_sub(1)),
+            byte_col: state.cursor.byte_col,
+        };
+        let command =
+            resolve_document_command(document, command, current, *vim_mode).unwrap_or(command);
         let mut next = current;
         let mut copy = None;
         match command {
             DocumentCommand::MoveRows(delta) => {
                 let row = add_signed_row(current.row, delta).min(total_rows.saturating_sub(1));
-                self.window
-                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
             }
             DocumentCommand::PageRows(delta) => {
                 let rows = (viewport_rows as isize).saturating_mul(delta);
                 let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
-                self.window
-                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
             }
             DocumentCommand::HalfPageRows(delta) => {
                 let rows = (viewport_rows as isize / 2).max(1).saturating_mul(delta);
                 let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
-                self.window
-                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
             }
             DocumentCommand::ScrollRows(delta) => {
                 let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
-                let cur_scroll =
-                    if self.window.is_following_tail() && self.window.scroll_top != max_scroll {
-                        max_scroll
-                    } else {
-                        self.window.scroll_top
-                    };
+                let cur_scroll = if following_tail && *scroll_top != max_scroll {
+                    max_scroll
+                } else {
+                    *scroll_top
+                };
                 let screen_row =
                     Window::screen_row_or_edge(current.row, cur_scroll, viewport_rows) as RowIndex;
                 let new_scroll = add_signed_row(cur_scroll, delta).min(max_scroll);
-                self.window.set_scroll(new_scroll, buf);
-                self.window.update_tail_state(buf, viewport_rows);
+                *scroll_top = new_scroll;
                 let row = new_scroll
                     .saturating_add(screen_row)
                     .min(total_rows.saturating_sub(1));
-                self.window
-                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
             }
             DocumentCommand::BufferStart => {
                 next.row = 0;
@@ -1193,8 +1185,7 @@ impl<'a> DocumentViewExecutor<'a> {
                 next.row = total_rows.saturating_sub(1);
             }
             DocumentCommand::GotoRow(row) => {
-                self.window
-                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                move_document_cursor_to_row_preserving_cell(document, state, &mut next, row);
             }
             DocumentCommand::GotoPosition(pos) => {
                 next.row = pos.row.min(total_rows.saturating_sub(1));
@@ -1218,9 +1209,8 @@ impl<'a> DocumentViewExecutor<'a> {
             }
             DocumentCommand::YankSelection => {
                 if let Some(anchor) = state.selection_anchor {
-                    let range = order_doc_range_including_cursor_cell(
-                        buf,
-                        state.materialized,
+                    let range = order_document_range_including_cursor_cell(
+                        document,
                         anchor,
                         current,
                         state.selection_includes_cursor_cell,
@@ -1277,15 +1267,14 @@ impl<'a> DocumentViewExecutor<'a> {
             }
             DocumentCommand::TextObject(object) => {
                 if let Some(selection) =
-                    self.window
-                        .row_text_object_range(&state, buf, current, object.spec())
+                    document_text_object_range(document, *state, current, object.spec())
                 {
                     state.selection_anchor = Some(selection.start);
                     state.cursor = selection.cursor;
                     next = selection.cursor;
                     state.selection_includes_cursor_cell = selection.include_cursor_cell;
                     if selection.linewise {
-                        self.window.set_vim_mode(VimMode::VisualLine);
+                        *vim_mode = VimMode::VisualLine;
                     }
                     state.yank_flash = None;
                     state.preferred_cell_col = None;
@@ -1294,12 +1283,11 @@ impl<'a> DocumentViewExecutor<'a> {
             DocumentCommand::CenterScroll => {
                 let half = viewport_rows as RowIndex / 2;
                 let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
-                self.window
-                    .pin_scroll(current.row.saturating_sub(half).min(max_scroll));
+                *scroll_top = current.row.saturating_sub(half).min(max_scroll);
             }
             DocumentCommand::PanColumns(delta) => {
-                let viewport_cols = self.window.viewport.map(|v| v.content_width).unwrap_or(0);
-                self.window.pan_by_columns(delta, viewport_cols);
+                *scroll_left =
+                    pan_document_columns(document, *state, *scroll_left, delta, viewport_cols);
             }
             DocumentCommand::LineEnd
             | DocumentCommand::MoveCursorCol(_)
@@ -1324,53 +1312,179 @@ impl<'a> DocumentViewExecutor<'a> {
                 | DocumentCommand::WordBackward(_)
                 | DocumentCommand::WordEnd(_)
         ) {
-            if let Some(cell) = self.window.row_position_cell(state, buf, next) {
+            if let Some(cell) = document_position_cell(document, next) {
                 state.preferred_cell_col = Some(cell);
             }
         }
         state.cursor = next;
-        *self.window.row_text_state_mut() = state;
         if !matches!(
             command,
             DocumentCommand::ScrollRows(_)
                 | DocumentCommand::CenterScroll
                 | DocumentCommand::PanColumns(_)
         ) {
-            self.window.scroll_top =
-                scroll_to_show(self.window.scroll_top, next.row, viewport_rows);
-            self.window.pin_current_scroll();
+            *scroll_top = scroll_to_show(*scroll_top, next.row, viewport_rows);
         }
         copy
     }
 }
 
-fn row_paragraph_text_object(
-    state: &DocumentViewState,
-    buf: &Buffer,
+fn move_document_cursor_to_row_preserving_cell<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    state: &mut DocumentViewState,
+    cursor: &mut DocPosition,
+    row: RowIndex,
+) {
+    let total_rows = document.snapshot().total_rows;
+    if total_rows == 0 {
+        return;
+    }
+    let row = row.min(total_rows.saturating_sub(1));
+    let cell = state
+        .preferred_cell_col
+        .or_else(|| document_position_cell(document, *cursor))
+        .unwrap_or(0);
+    cursor.row = row;
+    cursor.byte_col = document_byte_col_at_cell(document, row, cell).unwrap_or(0);
+    state.preferred_cell_col = Some(cell);
+}
+
+fn document_position_cell<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    position: DocPosition,
+) -> Option<usize> {
+    let row = document
+        .materialize(position.row..position.row.saturating_add(1))
+        .rows
+        .into_iter()
+        .next()?;
+    let byte_col = text::snap(&row.text, position.byte_col.min(row.text.len()));
+    Some(text::byte_to_cell(&row.text, byte_col))
+}
+
+fn document_byte_col_at_cell<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    row: RowIndex,
+    cell: usize,
+) -> Option<usize> {
+    let row = document
+        .materialize(row..row.saturating_add(1))
+        .rows
+        .into_iter()
+        .next()?;
+    Some(text::cell_to_byte(&row.text, cell))
+}
+
+fn order_document_range_including_cursor_cell<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    a: DocPosition,
+    b: DocPosition,
+    include_cursor_cell: bool,
+) -> DocRange {
+    if (a.row, a.byte_col) <= (b.row, b.byte_col) {
+        DocRange {
+            start: a,
+            end: advance_document_position_if_on_char(document, b, include_cursor_cell),
+        }
+    } else {
+        DocRange {
+            start: b,
+            end: advance_document_position_if_on_char(document, a, include_cursor_cell),
+        }
+    }
+}
+
+fn advance_document_position_if_on_char<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    mut pos: DocPosition,
+    advance: bool,
+) -> DocPosition {
+    if !advance {
+        return pos;
+    }
+    let Some(row) = document
+        .materialize(pos.row..pos.row.saturating_add(1))
+        .rows
+        .into_iter()
+        .next()
+    else {
+        return pos;
+    };
+    let byte_col = text::snap(&row.text, pos.byte_col.min(row.text.len()));
+    if byte_col < row.text.len() && row.text.as_bytes()[byte_col] != b'\n' {
+        pos.byte_col = text::next_char_boundary(&row.text, byte_col);
+    }
+    pos
+}
+
+fn document_text_object_range<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    state: DocumentViewState,
+    cursor: DocPosition,
+    spec: crate::text_objects::TextObjectSpec,
+) -> Option<RowTextObjectSelection> {
+    if spec.kind == crate::text_objects::TextObjectKind::Paragraph {
+        return document_paragraph_text_object(document, state, cursor, spec.inner);
+    }
+
+    let row = document
+        .materialize(cursor.row..cursor.row.saturating_add(1))
+        .rows
+        .into_iter()
+        .next()?;
+    let col = text::snap(&row.text, cursor.byte_col.min(row.text.len()));
+    let (start, end) = crate::text_objects::text_object_for_spec(&row.text, col, spec)?;
+    Some(RowTextObjectSelection {
+        start: DocPosition {
+            row: cursor.row,
+            byte_col: start,
+        },
+        cursor: DocPosition {
+            row: cursor.row,
+            byte_col: end,
+        },
+        include_cursor_cell: false,
+        linewise: false,
+    })
+}
+
+fn document_paragraph_text_object<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    state: DocumentViewState,
     cursor: DocPosition,
     inner: bool,
 ) -> Option<RowTextObjectSelection> {
-    let row_count = buf.line_count() as RowIndex;
-    if row_count == 0 {
+    let range = state.materialized.materialized_range();
+    if range.is_empty() || !range.contains(&cursor.row) {
         return None;
     }
-    let li = state
-        .materialized
-        .local_row(cursor.row)
-        .min(row_count.saturating_sub(1));
-    let lines: Vec<crate::text_objects::ParagraphLine> = (0..row_count)
+    let rows = document.materialize(range.clone()).rows;
+    if rows.is_empty() {
+        return None;
+    }
+    let local = row_to_usize(cursor.row.saturating_sub(range.start)).min(rows.len() - 1);
+    let lines: Vec<crate::text_objects::ParagraphLine> = rows
+        .iter()
         .map(|row| crate::text_objects::ParagraphLine {
-            is_blank: row_is_blank(buf, row),
+            is_blank: row.text.bytes().all(|b| matches!(b, b' ' | b'\t')),
         })
         .collect();
-    let range = crate::text_objects::paragraph_line_range(&lines, row_to_usize(li), inner)?;
+    let range = crate::text_objects::paragraph_line_range(&lines, local, inner)?;
     let last = range.end.saturating_sub(1) as RowIndex;
     let start = DocPosition {
-        row: state.materialized.absolute_row(range.start as RowIndex),
+        row: state
+            .materialized
+            .materialized_range()
+            .start
+            .saturating_add(range.start as RowIndex),
         byte_col: 0,
     };
     let cursor = DocPosition {
-        row: state.materialized.absolute_row(last),
+        row: state
+            .materialized
+            .materialized_range()
+            .start
+            .saturating_add(last),
         byte_col: 0,
     };
     Some(RowTextObjectSelection {
@@ -1381,10 +1495,27 @@ fn row_paragraph_text_object(
     })
 }
 
-fn row_is_blank(buf: &Buffer, row: RowIndex) -> bool {
-    buf.get_line(row_to_usize(row))
-        .map(|line| line.bytes().all(|b| matches!(b, b' ' | b'\t')))
-        .unwrap_or(true)
+fn pan_document_columns<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    state: DocumentViewState,
+    scroll_left: u16,
+    delta: isize,
+    viewport_cols: u16,
+) -> u16 {
+    if viewport_cols == 0 || delta == 0 {
+        return scroll_left;
+    }
+    let rows = document
+        .materialize(state.materialized.materialized_range())
+        .rows;
+    let max_width = rows
+        .iter()
+        .map(|row| text::byte_to_cell(&row.text, row.text.len()) as u16)
+        .max()
+        .unwrap_or(0);
+    let max_scroll = max_width.saturating_sub(viewport_cols);
+    let cur = scroll_left.min(max_scroll);
+    (cur as isize + delta).clamp(0, max_scroll as isize) as u16
 }
 
 fn order_doc_range_including_cursor_cell(
@@ -1426,4 +1557,215 @@ fn advance_doc_position_if_on_char(
         pos.byte_col = text::next_char_boundary(line, pos.byte_col);
     }
     pos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::row::{DisplayAction, StaticRowsDocument};
+    use smelt_buffer::buffer::SpanAction;
+
+    fn state_for_rows(total_rows: RowIndex) -> DocumentViewState {
+        DocumentViewState {
+            active: true,
+            materialized: MaterializedRows {
+                clamped_scroll: 0,
+                row_base: 0,
+                total_rows,
+                materialized_rows: total_rows,
+            },
+            ..DocumentViewState::default()
+        }
+    }
+
+    fn execute(
+        doc: &mut StaticRowsDocument,
+        state: &mut DocumentViewState,
+        command: DocumentCommand,
+        viewport_rows: u16,
+    ) -> Option<DocRange> {
+        let mut mode = VimMode::Normal;
+        let mut scroll_top = 0;
+        let mut scroll_left = 0;
+        DocumentViewExecutor::execute(
+            state,
+            doc,
+            command,
+            &mut mode,
+            &mut scroll_top,
+            &mut scroll_left,
+            viewport_rows,
+            80,
+            false,
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn document_executor_moves_by_rows_words_pages_and_edges() {
+        let mut doc = StaticRowsDocument::from_text_rows(vec![
+            "alpha beta".into(),
+            "gamma".into(),
+            "delta".into(),
+            "omega".into(),
+        ]);
+        let mut state = state_for_rows(4);
+
+        execute(&mut doc, &mut state, DocumentCommand::WordForward(1), 2);
+        assert_eq!(state.cursor.byte_col, "alpha ".len());
+
+        execute(&mut doc, &mut state, DocumentCommand::MoveRows(1), 2);
+        assert_eq!(state.cursor.row, 1);
+        assert_eq!(state.cursor.byte_col, "gamma".len());
+
+        execute(&mut doc, &mut state, DocumentCommand::PageRows(1), 2);
+        assert_eq!(state.cursor.row, 3);
+
+        execute(&mut doc, &mut state, DocumentCommand::BufferStart, 2);
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 0,
+                byte_col: 0
+            }
+        );
+
+        execute(&mut doc, &mut state, DocumentCommand::BufferEnd, 2);
+        assert_eq!(state.cursor.row, 3);
+    }
+
+    #[test]
+    fn document_executor_yanks_character_and_linewise_ranges() {
+        let mut doc =
+            StaticRowsDocument::from_text_rows(vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        let mut state = state_for_rows(3);
+
+        execute(&mut doc, &mut state, DocumentCommand::StartVisual, 3);
+        execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::GotoPosition(DocPosition {
+                row: 0,
+                byte_col: 2,
+            }),
+            3,
+        );
+        let range = execute(&mut doc, &mut state, DocumentCommand::YankSelection, 3)
+            .expect("characterwise range");
+        assert_eq!(
+            range.start,
+            DocPosition {
+                row: 0,
+                byte_col: 0
+            }
+        );
+        assert_eq!(
+            range.end,
+            DocPosition {
+                row: 0,
+                byte_col: 3
+            }
+        );
+
+        execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::GotoPosition(DocPosition {
+                row: 0,
+                byte_col: 0,
+            }),
+            3,
+        );
+        execute(&mut doc, &mut state, DocumentCommand::StartVisualLine, 3);
+        execute(&mut doc, &mut state, DocumentCommand::GotoRow(2), 3);
+        let range = execute(
+            &mut doc,
+            &mut state,
+            DocumentCommand::YankSelectionLinewise,
+            3,
+        )
+        .expect("linewise range");
+        assert_eq!(
+            range.start,
+            DocPosition {
+                row: 0,
+                byte_col: 0
+            }
+        );
+        assert_eq!(
+            range.end,
+            DocPosition {
+                row: 3,
+                byte_col: 0
+            }
+        );
+    }
+
+    #[test]
+    fn document_executor_selects_paragraph_text_objects() {
+        let mut doc = StaticRowsDocument::from_text_rows(vec![
+            "before".into(),
+            String::new(),
+            "para a".into(),
+            "para b".into(),
+            String::new(),
+        ]);
+        let mut state = state_for_rows(5);
+        state.cursor = DocPosition {
+            row: 2,
+            byte_col: 0,
+        };
+        let mut mode = VimMode::Visual;
+        let mut scroll_top = 0;
+        let mut scroll_left = 0;
+
+        DocumentViewExecutor::execute(
+            &mut state,
+            &mut doc,
+            DocumentCommand::TextObject(DocumentTextObject::new(true, 'p').unwrap()),
+            &mut mode,
+            &mut scroll_top,
+            &mut scroll_left,
+            5,
+            80,
+            false,
+            Instant::now(),
+        );
+
+        assert_eq!(mode, VimMode::VisualLine);
+        assert_eq!(
+            state.selection_anchor,
+            Some(DocPosition {
+                row: 2,
+                byte_col: 0
+            })
+        );
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 3,
+                byte_col: 0
+            }
+        );
+    }
+
+    #[test]
+    fn static_document_actions_resolve_through_display_document() {
+        let action = SpanAction::OpenUrl("https://example.test".into());
+        let row = DisplayRow::new("open link".into(), std::iter::once(0..9).collect())
+            .with_actions(vec![DisplayAction {
+                cell_start: 5,
+                cell_end: 9,
+                action: action.clone(),
+            }]);
+        let mut doc = StaticRowsDocument::new(vec![row]);
+
+        assert_eq!(
+            doc.action_at(DocPosition {
+                row: 0,
+                byte_col: 6
+            }),
+            Some(action)
+        );
+    }
 }

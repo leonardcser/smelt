@@ -17,7 +17,7 @@ use std::sync::Arc;
 mod row_text;
 pub use row_text::{
     resolve_document_command, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject,
-    DocumentViewState, RowYankFlash,
+    DocumentViewExecutor, DocumentViewState, RowYankFlash,
 };
 
 /// Per-frame paint context for `Window::render`.
