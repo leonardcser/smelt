@@ -2578,74 +2578,6 @@ pub trait UiHost {
     /// Last-painted viewport for `win`. Hosts override when they project geometry differently.
     fn viewport_for(&self, win: WinId) -> Option<WindowViewport>;
 
-    /// Display rows and row-local break metadata for a bounded range in `win`.
-    /// This is the primary host seam for off-viewport text access; row-backed
-    /// documents must override it with a range-aware implementation.
-    fn display_rows_for_range(
-        &mut self,
-        win: WinId,
-        start: RowIndex,
-        count: RowIndex,
-    ) -> Option<DisplayRows> {
-        let ui = self.ui();
-        let (buf_id, materialized) = {
-            let win = ui.win(win)?;
-            (win.buf, win.materialized_rows())
-        };
-        let buf = ui.buf(buf_id)?;
-        let rows = buf.lines();
-        let (start_idx, end) = if let Some(materialized) = materialized {
-            let requested = start..start.saturating_add(count);
-            let available = materialized.materialized_range();
-            let clipped_start = requested.start.max(available.start);
-            let clipped_end = requested.end.min(available.end);
-            if clipped_start >= clipped_end {
-                return Some(DisplayRows::empty());
-            }
-            (
-                row_to_usize(materialized.local_row(clipped_start)).min(rows.len()),
-                row_to_usize(materialized.local_row(clipped_end)).min(rows.len()),
-            )
-        } else {
-            (
-                row_to_usize(start).min(rows.len()),
-                row_to_usize(start.saturating_add(count)).min(rows.len()),
-            )
-        };
-        let text_rows = rows[start_idx..end].to_vec();
-        let display_rows: Vec<DisplayRow> = text_rows
-            .iter()
-            .enumerate()
-            .map(|(offset, row)| {
-                let spans = buf.highlights_at(start_idx + offset);
-                let display_row =
-                    DisplayRow::new(row.clone(), selectable_byte_ranges_for_line(row, &spans))
-                        .with_actions(display_actions_for_spans(&spans));
-                if offset == 0 {
-                    display_row
-                } else {
-                    display_row.with_break_before(RowBreak::Hard)
-                }
-            })
-            .collect();
-        Some(DisplayRows { rows: display_rows })
-    }
-
-    /// Total rows for a row-backed document. `None` means callers should use
-    /// the backing buffer's line count.
-    fn document_total_rows(&mut self, win: WinId) -> Option<RowIndex> {
-        self.ui()
-            .win(win)?
-            .materialized_rows()
-            .map(|rows| rows.total_rows)
-    }
-
-    /// Copy an absolute document range for a row-backed window. `None` falls back to
-    /// local buffer byte-range copy at the call site.
-    fn copy_document_range(&mut self, _win: WinId, _range: DocRange) -> Option<CopyOutput> {
-        None
-    }
-
     /// Last-painted visible row range for `win`.
     fn visible_range(&self, win: WinId) -> Option<std::ops::Range<RowIndex>> {
         let viewport = self.viewport_for(win)?;
@@ -2658,28 +2590,77 @@ pub trait UiHost {
     }
 }
 
-pub struct HostDisplayDocument<'a, H: UiHost + ?Sized> {
-    host: &'a mut H,
+fn display_rows_for_ui_range(
+    ui: &Ui,
+    win: WinId,
+    start: RowIndex,
+    count: RowIndex,
+) -> Option<DisplayRows> {
+    let (buf_id, materialized) = {
+        let win = ui.win(win)?;
+        (win.buf, win.materialized_rows())
+    };
+    let buf = ui.buf(buf_id)?;
+    let rows = buf.lines();
+    let (start_idx, end) = if let Some(materialized) = materialized {
+        let requested = start..start.saturating_add(count);
+        let available = materialized.materialized_range();
+        let clipped_start = requested.start.max(available.start);
+        let clipped_end = requested.end.min(available.end);
+        if clipped_start >= clipped_end {
+            return Some(DisplayRows::empty());
+        }
+        (
+            row_to_usize(materialized.local_row(clipped_start)).min(rows.len()),
+            row_to_usize(materialized.local_row(clipped_end)).min(rows.len()),
+        )
+    } else {
+        (
+            row_to_usize(start).min(rows.len()),
+            row_to_usize(start.saturating_add(count)).min(rows.len()),
+        )
+    };
+    let text_rows = rows[start_idx..end].to_vec();
+    let display_rows: Vec<DisplayRow> = text_rows
+        .iter()
+        .enumerate()
+        .map(|(offset, row)| {
+            let spans = buf.highlights_at(start_idx + offset);
+            let display_row =
+                DisplayRow::new(row.clone(), selectable_byte_ranges_for_line(row, &spans))
+                    .with_actions(display_actions_for_spans(&spans));
+            if offset == 0 {
+                display_row
+            } else {
+                display_row.with_break_before(RowBreak::Hard)
+            }
+        })
+        .collect();
+    Some(DisplayRows { rows: display_rows })
+}
+
+pub struct HostDisplayDocument<'a> {
+    ui: &'a mut Ui,
     win: WinId,
 }
 
-impl<'a, H: UiHost + ?Sized> HostDisplayDocument<'a, H> {
-    pub fn new(host: &'a mut H, win: WinId) -> Self {
-        Self { host, win }
+impl<'a> HostDisplayDocument<'a> {
+    pub fn new(ui: &'a mut Ui, win: WinId) -> Self {
+        Self { ui, win }
     }
 }
 
-impl<H: UiHost + ?Sized> DisplayDocument for HostDisplayDocument<'_, H> {
+impl DisplayDocument for HostDisplayDocument<'_> {
     fn snapshot(&mut self) -> DisplaySnapshot {
-        let total_rows = if let Some(total) = self.host.document_total_rows(self.win) {
-            total
-        } else {
-            let ui = self.host.ui();
-            ui.win(self.win)
-                .and_then(|win| ui.buf(win.buf))
-                .map(|buf| buf.line_count() as RowIndex)
-                .unwrap_or(0)
-        };
+        let total_rows = self
+            .ui
+            .win(self.win)
+            .and_then(|win| {
+                win.materialized_rows()
+                    .map(|rows| rows.total_rows)
+                    .or_else(|| self.ui.buf(win.buf).map(|buf| buf.line_count() as RowIndex))
+            })
+            .unwrap_or(0);
         DisplaySnapshot {
             generation: 0,
             total_rows,
@@ -2688,15 +2669,13 @@ impl<H: UiHost + ?Sized> DisplayDocument for HostDisplayDocument<'_, H> {
 
     fn materialize(&mut self, range: std::ops::Range<RowIndex>) -> DisplayRows {
         let count = range.end.saturating_sub(range.start);
-        self.host
-            .display_rows_for_range(self.win, range.start, count)
+        display_rows_for_ui_range(self.ui, self.win, range.start, count)
             .unwrap_or_else(DisplayRows::empty)
     }
 
     fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
         match range {
-            TextRange::Rows(range) => self.host.copy_document_range(self.win, range),
-            TextRange::Bytes(_) => None,
+            TextRange::Rows(_) | TextRange::Bytes(_) => None,
         }
     }
 }
@@ -5414,10 +5393,10 @@ mod tests {
         let rect = layout::Rect::new(0, 0, 20, 10);
         ui.win_mut(win).unwrap().viewport = Some(window::WindowViewport::new(rect, 20, 0, 0, None));
 
-        fn assert_default_shape(host: &mut dyn UiHost, win: WinId) {
-            let vp = host.viewport_for(win).unwrap();
+        fn assert_default_shape(ui: &Ui, win: WinId) {
+            let vp = UiHost::viewport_for(ui, win).unwrap();
             assert_eq!(vp.rect.width, 20);
-            let display_rows = host.display_rows_for_range(win, 1, 2).unwrap();
+            let display_rows = display_rows_for_ui_range(ui, win, 1, 2).unwrap();
             let display_text: Vec<_> = display_rows
                 .rows
                 .iter()
@@ -5429,12 +5408,12 @@ mod tests {
             // "world!\nok" - the join between the two ranged rows lives at
             // byte 6 and is a hard break for an unwrapped buffer.
         }
-        assert_default_shape(&mut ui, win);
+        assert_default_shape(&ui, win);
 
-        // Unknown window → `None` for bounded display access.
+        // Unknown window → `None` for viewport and bounded display access.
         let stranger = WinId(9999);
         assert!(UiHost::viewport_for(&ui, stranger).is_none());
-        assert!(UiHost::display_rows_for_range(&mut ui, stranger, 0, 1).is_none());
+        assert!(display_rows_for_ui_range(&ui, stranger, 0, 1).is_none());
     }
 
     #[test]

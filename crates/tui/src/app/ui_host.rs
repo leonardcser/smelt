@@ -1,5 +1,5 @@
 //! `UiHost` impl for `TuiApp`. Delegates window resource operations to
-//! `crate::smelt_edit::Ui`; document operations use the app document resolver.
+//! `crate::smelt_edit::Ui`.
 
 use crate::app::TuiApp;
 
@@ -40,29 +40,5 @@ impl crate::smelt_edit::UiHost for TuiApp {
         win: crate::smelt_edit::WinId,
     ) -> Option<crate::smelt_edit::WindowViewport> {
         self.ui.win(win).and_then(|w| w.viewport)
-    }
-    fn display_rows_for_range(
-        &mut self,
-        win: crate::smelt_edit::WinId,
-        start: crate::smelt_edit::RowIndex,
-        count: crate::smelt_edit::RowIndex,
-    ) -> Option<crate::smelt_edit::DisplayRows> {
-        self.materialize_document_rows(win, start, count)
-    }
-
-    fn document_total_rows(
-        &mut self,
-        win: crate::smelt_edit::WinId,
-    ) -> Option<crate::smelt_edit::RowIndex> {
-        self.document_snapshot_for_win(win)
-            .map(|snapshot| snapshot.total_rows)
-    }
-
-    fn copy_document_range(
-        &mut self,
-        win: crate::smelt_edit::WinId,
-        range: crate::smelt_edit::DocRange,
-    ) -> Option<crate::smelt_edit::CopyOutput> {
-        self.copy_document_rows(win, range)
     }
 }
