@@ -1,6 +1,7 @@
 use protocol::HistoryItem;
 use rusqlite::{params, Connection};
 use serde_json::Value;
+use smelt_perf::perf;
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
@@ -85,6 +86,15 @@ pub(crate) fn save_session_snapshot_in_transaction(
     writer_lease: Option<&WriterLease>,
     compression: ObjectCompression,
 ) -> Result<SessionSaveReport> {
+    let _perf = perf::begin("store:session:save_snapshot_transaction");
+    perf::record_value(
+        "store:session:dirty_suffix_history_rows",
+        snapshot.history.len() as u64,
+    );
+    perf::record_value(
+        "store:session:snapshot_total_history_rows",
+        snapshot.history_len as u64,
+    );
     if let Some(lease) = writer_lease {
         meta::acquire_writer_lease(conn, lease, 30 * 60)?;
     }
@@ -174,13 +184,15 @@ pub(crate) fn save_session_snapshot_in_transaction(
         }
     }
 
-    Ok(SessionSaveReport {
+    let report = SessionSaveReport {
         history_deleted,
         history_inserted,
         history_unchanged: common_len as u64,
         revision: state.revision,
         changed,
-    })
+    };
+    record_session_save_report(&report);
+    Ok(report)
 }
 
 pub(crate) fn save_session_history_suffix_in_transaction(
@@ -190,6 +202,15 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     writer_lease: Option<&WriterLease>,
     compression: ObjectCompression,
 ) -> Result<SessionSaveReport> {
+    let _perf = perf::begin("store:session:save_history_suffix_transaction");
+    perf::record_value(
+        "store:session:dirty_suffix_history_rows",
+        suffix.history.len() as u64,
+    );
+    perf::record_value(
+        "store:session:snapshot_total_history_rows",
+        suffix.history_len as u64,
+    );
     if let Some(lease) = writer_lease {
         meta::acquire_writer_lease(conn, lease, 30 * 60)?;
     }
@@ -250,13 +271,31 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     };
     meta::upsert_session_state(conn, &state)?;
 
-    Ok(SessionSaveReport {
+    let report = SessionSaveReport {
         history_deleted,
         history_inserted,
         history_unchanged: history_start as u64,
         revision: state.revision,
         changed,
-    })
+    };
+    record_session_save_report(&report);
+    Ok(report)
+}
+
+fn record_session_save_report(report: &SessionSaveReport) {
+    perf::record_value("store:session:history_rows_deleted", report.history_deleted);
+    perf::record_value(
+        "store:session:history_rows_inserted",
+        report.history_inserted,
+    );
+    perf::record_value(
+        "store:session:history_rows_unchanged",
+        report.history_unchanged,
+    );
+    perf::record_value(
+        "store:session:db_writes_changed",
+        if report.changed { 1 } else { 0 },
+    );
 }
 
 fn session_state_changed(current: Option<&SessionState>, next: &SessionState) -> bool {
@@ -398,6 +437,11 @@ fn sync_snapshot_table_suffix(
     start_idx: u64,
     rows: &[(u64, String)],
 ) -> Result<bool> {
+    let _perf = perf::begin("store:session:sync_snapshot_table_suffix");
+    perf::record_value(
+        "store:session:dirty_suffix_snapshot_rows",
+        rows.len() as u64,
+    );
     let existing = read_snapshot_rows_json_from(conn, table, start_idx)?;
     let common = existing
         .iter()
@@ -415,7 +459,7 @@ fn sync_snapshot_table_suffix(
         (None, None) => return Ok(false),
     };
     let delete_from = checked_i64(delete_from, table.idx_col())?;
-    conn.execute(table.delete_from_sql(), [delete_from])?;
+    let deleted = conn.execute(table.delete_from_sql(), [delete_from])?;
 
     for (idx, value) in &rows[common..] {
         conn.execute(
@@ -423,6 +467,11 @@ fn sync_snapshot_table_suffix(
             params![checked_i64(*idx, table.idx_col())?, value],
         )?;
     }
+    perf::record_value("store:session:snapshot_rows_deleted", deleted as u64);
+    perf::record_value(
+        "store:session:snapshot_rows_inserted",
+        rows[common..].len() as u64,
+    );
     Ok(true)
 }
 
@@ -436,8 +485,11 @@ fn read_snapshot_rows_json_from(
     let rows = stmt.query_map([start_idx], |row| {
         Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let rows = rows
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(crate::error::StoreError::from)?;
+    perf::record_value("store:session:snapshot_rows_read", rows.len() as u64);
+    Ok(rows)
 }
 
 fn snapshot_rows_json_from(rows: &[(u64, Value)], start_idx: u64) -> Result<Vec<(u64, String)>> {
@@ -448,22 +500,38 @@ fn snapshot_rows_json_from(rows: &[(u64, Value)], start_idx: u64) -> Result<Vec<
 }
 
 pub(crate) fn load_session_snapshot(conn: &Connection) -> Result<Option<SessionSnapshot>> {
+    let _perf = perf::begin("store:session:load_full_snapshot");
     let Some(state) = meta::session_state(conn)? else {
+        perf::record_value("store:session:full_snapshot_rows_read", 0);
         return Ok(None);
     };
     let meta_json = meta::meta(conn, SESSION_META_JSON_KEY)?
         .map(|value| serde_json::from_str(&value).map_err(StoreError::from))
         .transpose()?;
     let history = history::read_history_items(conn)?;
+    let turn_metas = read_snapshot_rows(conn, SnapshotTable::TurnMetas)?;
+    let metadata_snapshots = read_snapshot_rows(conn, SnapshotTable::MetadataSnapshots)?;
+    let accounting_snapshots = read_snapshot_rows(conn, SnapshotTable::AccountingSnapshots)?;
+    perf::record_value(
+        "store:session:full_snapshot_rows_read",
+        history.len() as u64,
+    );
+    perf::record_value(
+        "store:session:full_snapshot_table_rows_read",
+        turn_metas
+            .len()
+            .saturating_add(metadata_snapshots.len())
+            .saturating_add(accounting_snapshots.len()) as u64,
+    );
     Ok(Some(SessionSnapshot {
         state,
         meta_json,
         history_start_idx: 0,
         history_len: history.len(),
         history,
-        turn_metas: read_snapshot_rows(conn, SnapshotTable::TurnMetas)?,
-        metadata_snapshots: read_snapshot_rows(conn, SnapshotTable::MetadataSnapshots)?,
-        accounting_snapshots: read_snapshot_rows(conn, SnapshotTable::AccountingSnapshots)?,
+        turn_metas,
+        metadata_snapshots,
+        accounting_snapshots,
     }))
 }
 

@@ -192,12 +192,18 @@ fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize
     approx_bytes
 }
 
+fn transcript_perf_metric(label: &str) -> bool {
+    ["search:transcript", "session:", "store:", "transcript:"]
+        .iter()
+        .any(|prefix| label.starts_with(prefix))
+}
+
 fn search_perf_snapshot(label: &str) {
     let snapshot = smelt_perf::perf::snapshot();
     for row in snapshot
         .durations
         .iter()
-        .filter(|row| row.label.starts_with("search:transcript"))
+        .filter(|row| transcript_perf_metric(row.label))
     {
         eprintln!(
             "TRANSCRIPT_SEARCH_PERF_DURATION label={} metric={} count={} last_us={} total_us={} p95_us={} max_us={}",
@@ -207,7 +213,7 @@ fn search_perf_snapshot(label: &str) {
     for row in snapshot
         .values
         .iter()
-        .filter(|row| row.label.starts_with("search:transcript"))
+        .filter(|row| transcript_perf_metric(row.label))
     {
         eprintln!(
             "TRANSCRIPT_SEARCH_PERF_VALUE label={} metric={} count={} last={} total={} p95={} max={}",

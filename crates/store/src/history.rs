@@ -1,6 +1,7 @@
 use protocol::HistoryItem;
 use rusqlite::{params, params_from_iter, Connection, Statement};
 use serde_json::{json, Value};
+use smelt_perf::perf;
 use std::ops::Range;
 
 use crate::compression::ObjectCompression;
@@ -191,6 +192,8 @@ pub(crate) fn replace_history_suffix(
     items: &[HistoryItem],
     compression: ObjectCompression,
 ) -> Result<()> {
+    let _perf = perf::begin("store:history:replace_suffix");
+    perf::record_value("store:history:dirty_suffix_rows", items.len() as u64);
     let start_idx_sql = checked_i64(start_idx as u64, "start_idx")?;
     let preserve_through_block_idx = conn
         .query_row(
@@ -199,7 +202,7 @@ pub(crate) fn replace_history_suffix(
             |row| row.get::<_, Option<i64>>(0),
         )?
         .unwrap_or(-1);
-    conn.execute(
+    let search_deleted = conn.execute(
         "DELETE FROM transcript_search
          WHERE block_idx IN (
              SELECT block_idx FROM transcript_blocks
@@ -208,13 +211,14 @@ pub(crate) fn replace_history_suffix(
          )",
         params![start_idx_sql, preserve_through_block_idx],
     )?;
-    conn.execute(
+    let transcript_deleted = conn.execute(
         "DELETE FROM transcript_blocks
          WHERE history_idx >= ?1
             OR (history_idx IS NULL AND block_idx > ?2)",
         params![start_idx_sql, preserve_through_block_idx],
     )?;
-    conn.execute("DELETE FROM history_items WHERE idx >= ?1", [start_idx_sql])?;
+    let history_deleted =
+        conn.execute("DELETE FROM history_items WHERE idx >= ?1", [start_idx_sql])?;
     let first_block_idx = conn.query_row(
         "SELECT COALESCE(MAX(block_idx) + 1, 0) FROM transcript_blocks",
         [],
@@ -223,18 +227,32 @@ pub(crate) fn replace_history_suffix(
     for (block_idx, (offset, item)) in (first_block_idx..).zip(items.iter().enumerate()) {
         write_history_item_at_block(conn, start_idx + offset, block_idx, item, compression)?;
     }
+    perf::record_value(
+        "store:history:db_rows_deleted",
+        search_deleted
+            .saturating_add(transcript_deleted)
+            .saturating_add(history_deleted) as u64,
+    );
+    perf::record_value("store:history:db_rows_inserted", items.len() as u64);
     Ok(())
 }
 
 pub(crate) fn read_history_items(conn: &Connection) -> Result<Vec<HistoryItem>> {
+    let _perf = perf::begin("store:history:read_all");
     let mut stmt = conn.prepare("SELECT json FROM history_items ORDER BY idx")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut out = Vec::new();
+    let mut json_bytes = 0u64;
     for row in rows {
-        let mut value: Value = serde_json::from_str(&row?)?;
+        let json = row?;
+        json_bytes = json_bytes.saturating_add(json.len() as u64);
+        let mut value: Value = serde_json::from_str(&json)?;
         rehydrate_object_refs(conn, &mut value)?;
         out.push(serde_json::from_value(value)?);
     }
+    perf::record_value("store:history:rows_read", out.len() as u64);
+    perf::record_value("store:history:read_all_rows", out.len() as u64);
+    perf::record_value("store:history:json_bytes_read", json_bytes);
     Ok(out)
 }
 
@@ -242,7 +260,11 @@ pub(crate) fn read_history_items_range(
     conn: &Connection,
     range: Range<usize>,
 ) -> Result<Vec<HistoryItem>> {
+    let _perf = perf::begin("store:history:read_range");
     if range.end <= range.start {
+        perf::record_value("store:history:rows_read", 0);
+        perf::record_value("store:history:read_range_rows", 0);
+        perf::record_value("store:history:json_bytes_read", 0);
         return Ok(Vec::new());
     }
     let start = checked_i64(range.start as u64, "start_idx")?;
@@ -251,38 +273,51 @@ pub(crate) fn read_history_items_range(
         conn.prepare("SELECT json FROM history_items WHERE idx >= ?1 AND idx < ?2 ORDER BY idx")?;
     let rows = stmt.query_map(params![start, end], |row| row.get::<_, String>(0))?;
     let mut out = Vec::new();
+    let mut json_bytes = 0u64;
     for row in rows {
-        let mut value: Value = serde_json::from_str(&row?)?;
+        let json = row?;
+        json_bytes = json_bytes.saturating_add(json.len() as u64);
+        let mut value: Value = serde_json::from_str(&json)?;
         rehydrate_object_refs(conn, &mut value)?;
         out.push(serde_json::from_value(value)?);
     }
+    perf::record_value("store:history:rows_read", out.len() as u64);
+    perf::record_value("store:history:read_range_rows", out.len() as u64);
+    perf::record_value("store:history:json_bytes_read", json_bytes);
     Ok(out)
 }
 
 pub(crate) fn history_text_bytes(conn: &Connection) -> Result<u64> {
+    let _perf = perf::begin("store:history:text_bytes");
     let total: i64 = conn.query_row(
         "SELECT COALESCE(SUM(estimated_text_bytes), 0) FROM transcript_blocks",
         [],
         |row| row.get(0),
     )?;
+    perf::record_value("store:history:text_bytes", total.max(0) as u64);
     Ok(total as u64)
 }
 
 pub(crate) fn search_blob(conn: &Connection) -> Result<String> {
+    let _perf = perf::begin("store:transcript:search_blob_full");
     let mut stmt =
         conn.prepare("SELECT text FROM transcript_search WHERE text != '' ORDER BY block_idx")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut out = String::new();
+    let mut row_count = 0u64;
     for row in rows {
         let text = row?;
         if text.is_empty() {
             continue;
         }
+        row_count = row_count.saturating_add(1);
         out.push_str(&text);
         if !out.ends_with('\n') {
             out.push('\n');
         }
     }
+    perf::record_value("store:transcript:search_blob_rows_read", row_count);
+    perf::record_value("store:transcript:search_blob_bytes_read", out.len() as u64);
     Ok(out)
 }
 
@@ -325,12 +360,17 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
     records: &[TranscriptDescriptorRecord],
     compression: ObjectCompression,
 ) -> Result<()> {
+    let _perf = perf::begin("store:transcript:replace_descriptor_suffix");
+    perf::record_value(
+        "store:transcript:dirty_descriptor_suffix_rows",
+        records.len() as u64,
+    );
     let start_descriptor_idx = checked_i64(start_descriptor_idx as u64, "start_descriptor_idx")?;
-    conn.execute(
+    let search_deleted = conn.execute(
         "DELETE FROM transcript_search WHERE block_idx >= ?1",
         [start_descriptor_idx],
     )?;
-    conn.execute(
+    let descriptor_deleted = conn.execute(
         "DELETE FROM transcript_blocks WHERE block_idx >= ?1",
         [start_descriptor_idx],
     )?;
@@ -363,6 +403,14 @@ pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
             }
         }
     }
+    perf::record_value(
+        "store:transcript:descriptor_db_rows_deleted",
+        search_deleted.saturating_add(descriptor_deleted) as u64,
+    );
+    perf::record_value(
+        "store:transcript:descriptor_db_rows_inserted",
+        records.len() as u64,
+    );
     Ok(())
 }
 
@@ -414,6 +462,7 @@ pub(crate) fn transcript_descriptor_count(conn: &Connection) -> Result<usize> {
 pub(crate) fn read_transcript_descriptor_records(
     conn: &Connection,
 ) -> Result<Vec<TranscriptDescriptorRecord>> {
+    let _perf = perf::begin("store:transcript:read_descriptors_full");
     let mut stmt = conn.prepare(
         "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
                 estimated_text_bytes, preview_text, search_text, descriptor_json,
@@ -422,22 +471,31 @@ pub(crate) fn read_transcript_descriptor_records(
          WHERE descriptor_json IS NOT NULL
          ORDER BY block_idx",
     )?;
-    read_transcript_descriptor_records_from_stmt(
+    let records = read_transcript_descriptor_records_from_stmt(
         conn,
         &mut stmt,
         [],
         TranscriptDescriptorHydration::Hydrated,
-    )
+    )?;
+    perf::record_value(
+        "store:transcript:descriptors_full_loaded",
+        records.len() as u64,
+    );
+    Ok(records)
 }
 
 pub(crate) fn read_transcript_descriptor_slice(
     conn: &Connection,
     range: TranscriptDescriptorRange,
 ) -> Result<TranscriptDescriptorSlice> {
+    let _perf = perf::begin("store:transcript:read_descriptor_slice");
     let total_count = transcript_descriptor_count(conn)?;
     let start = range.start().get().min(total_count);
     let end = range.end().get().min(total_count);
     if start >= end {
+        perf::record_value("store:transcript:descriptor_slice_requested", 0);
+        perf::record_value("store:transcript:descriptors_loaded", 0);
+        perf::record_value("store:transcript:descriptor_json_bytes_loaded", 0);
         return Ok(TranscriptDescriptorSlice::new(
             TranscriptDescriptorIndex::new(start),
             total_count,
@@ -462,6 +520,10 @@ pub(crate) fn read_transcript_descriptor_slice(
         params![limit, offset],
         TranscriptDescriptorHydration::ObjectBacked,
     )?;
+    perf::record_value(
+        "store:transcript:descriptor_slice_requested",
+        end.saturating_sub(start) as u64,
+    );
     Ok(TranscriptDescriptorSlice::new(
         TranscriptDescriptorIndex::new(start),
         total_count,
@@ -474,6 +536,8 @@ pub(crate) fn read_transcript_descriptor_tail_slice(
     conn: &Connection,
     count: usize,
 ) -> Result<TranscriptDescriptorSlice> {
+    let _perf = perf::begin("store:transcript:read_descriptor_tail_slice");
+    perf::record_value("store:transcript:descriptor_tail_requested", count as u64);
     let total_count = transcript_descriptor_count(conn)?;
     let start = total_count.saturating_sub(count);
     read_transcript_descriptor_slice(
@@ -511,8 +575,13 @@ where
         })
     })?;
     let mut records = Vec::new();
+    let mut json_bytes = 0u64;
     for row in rows {
         let mut record = row?;
+        json_bytes = json_bytes.saturating_add(record.descriptor_json.len() as u64);
+        if let Some(json) = &record.tool_state_json {
+            json_bytes = json_bytes.saturating_add(json.len() as u64);
+        }
         if hydration.hydrates_objects() {
             let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
             rehydrate_object_refs(conn, &mut descriptor)?;
@@ -524,6 +593,18 @@ where
             }
         }
         records.push(record);
+    }
+    perf::record_value("store:transcript:descriptors_loaded", records.len() as u64);
+    perf::record_value("store:transcript:descriptor_json_bytes_loaded", json_bytes);
+    match hydration {
+        TranscriptDescriptorHydration::Hydrated => perf::record_value(
+            "store:transcript:descriptors_hydrated_loaded",
+            records.len() as u64,
+        ),
+        TranscriptDescriptorHydration::ObjectBacked => perf::record_value(
+            "store:transcript:descriptors_object_backed_loaded",
+            records.len() as u64,
+        ),
     }
     Ok(records)
 }
@@ -548,11 +629,16 @@ pub(crate) fn search_transcript_candidate_page(
     direction: TranscriptSearchDirection,
     limit: usize,
 ) -> Result<Vec<TranscriptSearchCandidate>> {
+    let _perf = perf::begin("store:transcript:search_candidates");
     if query.is_empty() || limit == 0 {
+        perf::record_value("store:transcript:search_candidate_rows_scanned", 0);
+        perf::record_value("store:transcript:search_candidates_loaded", 0);
         return Ok(Vec::new());
     }
     let terms = search_terms(query);
     if terms.is_empty() {
+        perf::record_value("store:transcript:search_candidate_rows_scanned", 0);
+        perf::record_value("store:transcript:search_candidates_loaded", 0);
         return Ok(Vec::new());
     }
     let term_count = terms.len();
@@ -599,6 +685,7 @@ pub(crate) fn search_transcript_candidate_page(
     let mut stmt = conn.prepare(&sql)?;
     let mut out = Vec::new();
     let mut offset = 0usize;
+    let mut scanned = 0usize;
     loop {
         let mut values = base_values.clone();
         values.push(SqlValue::from(checked_i64(
@@ -619,6 +706,7 @@ pub(crate) fn search_transcript_candidate_page(
         let mut fetched = 0usize;
         for row in rows {
             fetched += 1;
+            scanned = scanned.saturating_add(1);
             let (block_idx, history_idx, text) = row?;
             if text.contains(query) {
                 out.push(TranscriptSearchCandidate {
@@ -638,6 +726,14 @@ pub(crate) fn search_transcript_candidate_page(
     if matches!(direction, TranscriptSearchDirection::Backward) {
         out.reverse();
     }
+    perf::record_value(
+        "store:transcript:search_candidate_rows_scanned",
+        scanned as u64,
+    );
+    perf::record_value(
+        "store:transcript:search_candidates_loaded",
+        out.len() as u64,
+    );
     Ok(out)
 }
 

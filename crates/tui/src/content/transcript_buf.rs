@@ -2579,6 +2579,7 @@ impl TranscriptProjection {
         let end = rows.end;
         let count = end.saturating_sub(start);
         smelt_perf::perf::record_value("transcript:display_rows_for_range:rows", count);
+        smelt_perf::perf::record_value("transcript:exactified_rows", count);
         if count == 0 || end <= start {
             return DisplayRows::empty();
         }
@@ -2674,6 +2675,10 @@ impl TranscriptProjection {
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         self.prepare_row_index_with_env(env.clone(), history, width);
         let requested_end_row = range.end.row.saturating_add(1);
+        smelt_perf::perf::record_value(
+            "transcript:exactified_rows",
+            requested_end_row.saturating_sub(range.start.row),
+        );
         let _ = self.exactify_row_range(env.clone(), history, range.start.row..requested_end_row);
         let total_rows = self.measurements.active.total_rows();
         if total_rows == 0 || range.start.row >= total_rows {

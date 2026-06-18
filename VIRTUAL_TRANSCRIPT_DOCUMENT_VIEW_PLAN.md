@@ -800,6 +800,8 @@ Acceptance:
 
 ### Phase 7: Cleanup, compatibility isolation, and hard performance gates
 
+Status: in progress. Store-level performance counters now cover full and ranged history reads, descriptor full/slice/tail loads, object payload hydration and storage, search candidate paging, snapshot/full-session loads, dirty suffix size, and DB row write/delete counts. The transcript search benchmark prints `store:*`, `session:*`, and `transcript:*` perf rows in addition to `search:transcript*` rows so benchmark output exposes the storage hot-path counters added in this phase.
+
 Goal: delete old paths after the correct abstractions cover hot operations, and prove the application scales to very large sessions.
 
 Deliverables:
@@ -883,10 +885,10 @@ Required performance evidence:
 - Width change re-materializes visible ranges only.
 - Save after append writes only dirty suffix records and objects.
 
-Suggested benchmark command remains the session lifecycle benchmark, extended as needed:
+Suggested benchmark command for current coverage is the transcript layout/search suite, extended as needed:
 
 ```text
-cargo xtask bench-transcript-session --runs 3 --bytes 10485760
+cargo xtask bench-transcript-layout --runs 3 --workloads mixed_10mib,mixed_50mib --search --search-bytes 10485760
 ```
 
 The benchmark should report at least:

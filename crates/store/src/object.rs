@@ -1,5 +1,6 @@
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
+use smelt_perf::perf;
 
 use crate::compression::{accepts_compressed_size, ObjectCompression};
 use crate::error::{Result, StoreError};
@@ -72,6 +73,7 @@ pub(crate) fn put_object(
     bytes: &[u8],
     compression: ObjectCompression,
 ) -> Result<StoredObject> {
+    let _perf = perf::begin("store:object:put");
     let hash = sha256_hex(bytes);
     if let Some(meta) = object_meta(conn, &hash)? {
         let bytes = object_bytes(conn, &meta)?;
@@ -93,6 +95,9 @@ pub(crate) fn put_object(
             &stored_bytes,
         ),
     )?;
+    perf::record_value("store:object:db_rows_inserted", 1);
+    perf::record_value("store:object:raw_bytes_stored", bytes.len() as u64);
+    perf::record_value("store:object:bytes_stored", stored_bytes.len() as u64);
 
     let meta = object_meta(conn, &hash)?
         .ok_or_else(|| StoreError::Integrity(format!("object {hash} missing after insert")))?;
@@ -143,6 +148,7 @@ pub(crate) fn object_meta(conn: &Connection, hash: &str) -> Result<Option<Object
 }
 
 pub(crate) fn object_bytes(conn: &Connection, meta: &ObjectMeta) -> Result<Vec<u8>> {
+    let _perf = perf::begin("store:object:hydrate_bytes");
     let stored_bytes: Vec<u8> = conn.query_row(
         "SELECT bytes FROM objects WHERE hash = ?1",
         [&meta.hash],
@@ -156,6 +162,9 @@ pub(crate) fn object_bytes(conn: &Connection, meta: &ObjectMeta) -> Result<Vec<u
             meta.hash
         )));
     }
+    perf::record_value("store:object:payloads_loaded", 1);
+    perf::record_value("store:object:bytes_hydrated", bytes.len() as u64);
+    perf::record_value("store:object:bytes_read", stored_bytes.len() as u64);
     Ok(bytes)
 }
 

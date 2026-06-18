@@ -2692,6 +2692,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "smelt-perf",
  "smelt-protocol",
  "tempfile",
  "zstd",
