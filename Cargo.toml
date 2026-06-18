@@ -8,7 +8,7 @@ smelt-protocol = { path = "crates/protocol" }
 smelt-engine = { path = "crates/engine" }
 smelt-style = { path = "crates/style", version = "0.2.0" }
 smelt-ansi = { path = "crates/ansi", version = "0.1.0" }
-smelt-perf = { path = "crates/perf", version = "0.1.0" }
+smelt-perf = { path = "crates/perf", version = "0.1.1" }
 smelt-buffer = { path = "crates/buffer" }
 smelt-term = { path = "crates/term", version = "0.2.0" }
 smelt-edit = { path = "crates/edit" }
