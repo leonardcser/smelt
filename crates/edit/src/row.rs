@@ -6,6 +6,15 @@ use smelt_term::Rect;
 
 pub type RowIndex = u64;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DocumentHandle(pub u64);
+
+impl DocumentHandle {
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DocPosition {
     pub row: RowIndex,

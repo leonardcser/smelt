@@ -5,7 +5,7 @@ use super::vim::{self, Action, VimContext, VimMode, VimWindowState};
 use super::Buffer;
 use super::Clipboard;
 use super::{BufId, UndoHistory, WinId};
-use crate::row::{row_to_usize, DocPosition, DocRange, MaterializedRows, RowIndex};
+use crate::row::{row_to_usize, DocPosition, DocRange, DocumentHandle, MaterializedRows, RowIndex};
 use crate::Theme;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use smelt_buffer::buffer::{LineCursorPolicy, SelectionRange, VirtTextPos};
@@ -490,6 +490,9 @@ pub struct Window {
     /// focus. Live dashboard panes use this so periodic text refreshes don't
     /// make a stale byte-position cursor appear to jitter across changing rows.
     pub hide_cursor: bool,
+    /// Optional row-document backing. When present, semantic row operations resolve
+    /// through the host's document registry instead of treating the buffer as the source.
+    document_handle: Option<DocumentHandle>,
 
     range_layers: WindowRangeLayers,
 
@@ -545,6 +548,7 @@ impl Window {
             cursor_line: false,
             selection_highlight: false,
             hide_cursor: false,
+            document_handle: None,
             range_layers: WindowRangeLayers::default(),
             viewport: None,
             scroll_top: 0,
@@ -560,6 +564,14 @@ impl Window {
 
     pub fn id(&self) -> WinId {
         self.id
+    }
+
+    pub fn document_handle(&self) -> Option<DocumentHandle> {
+        self.document_handle
+    }
+
+    pub fn set_document_handle(&mut self, handle: Option<DocumentHandle>) {
+        self.document_handle = handle;
     }
 
     fn range_layer_slot(&self, layer: crate::RangeLayer) -> &Vec<SelectionRange> {

@@ -4,6 +4,15 @@
 
 use crate::app::TuiApp;
 
+impl TuiApp {
+    fn document_handle_for_win(
+        &self,
+        win: crate::smelt_edit::WinId,
+    ) -> Option<crate::smelt_edit::DocumentHandle> {
+        self.ui.win(win).and_then(|win| win.document_handle())
+    }
+}
+
 impl crate::smelt_edit::UiHost for TuiApp {
     fn ui(&mut self) -> &mut crate::smelt_edit::Ui {
         &mut self.ui
@@ -48,10 +57,11 @@ impl crate::smelt_edit::UiHost for TuiApp {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> Option<crate::smelt_edit::DisplayRows> {
-        if win == crate::app::TRANSCRIPT_WIN {
-            Some(self.transcript_rows_and_breaks_range(start, count))
-        } else {
-            crate::smelt_edit::UiHost::display_rows_for_range(&mut self.ui, win, start, count)
+        match self.document_handle_for_win(win) {
+            Some(crate::app::TRANSCRIPT_DOCUMENT) => {
+                Some(self.transcript_rows_and_breaks_range(start, count))
+            }
+            _ => crate::smelt_edit::UiHost::display_rows_for_range(&mut self.ui, win, start, count),
         }
     }
 
@@ -59,10 +69,9 @@ impl crate::smelt_edit::UiHost for TuiApp {
         &mut self,
         win: crate::smelt_edit::WinId,
     ) -> Option<crate::smelt_edit::RowIndex> {
-        if win == crate::app::TRANSCRIPT_WIN {
-            Some(self.transcript_total_rows())
-        } else {
-            crate::smelt_edit::UiHost::document_total_rows(&mut self.ui, win)
+        match self.document_handle_for_win(win) {
+            Some(crate::app::TRANSCRIPT_DOCUMENT) => Some(self.transcript_total_rows()),
+            _ => crate::smelt_edit::UiHost::document_total_rows(&mut self.ui, win),
         }
     }
 
@@ -71,10 +80,9 @@ impl crate::smelt_edit::UiHost for TuiApp {
         win: crate::smelt_edit::WinId,
         range: crate::smelt_edit::DocRange,
     ) -> Option<crate::smelt_edit::CopyOutput> {
-        if win == crate::app::TRANSCRIPT_WIN {
-            self.transcript_copy_range(range)
-        } else {
-            crate::smelt_edit::UiHost::copy_document_range(&mut self.ui, win, range)
+        match self.document_handle_for_win(win) {
+            Some(crate::app::TRANSCRIPT_DOCUMENT) => self.transcript_copy_range(range),
+            _ => crate::smelt_edit::UiHost::copy_document_range(&mut self.ui, win, range),
         }
     }
 }

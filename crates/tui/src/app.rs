@@ -294,7 +294,7 @@ pub struct PlaceholderOpts {
 pub(crate) use queue::MAX_QUEUED_MESSAGES;
 pub(crate) use queue::{InputQueues, QueueStage, QueuedInput, QueuedTurnOptions};
 
-pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_WIN};
+pub use well_known::{PROMPT_EDIT_BUF, PROMPT_WIN, TRANSCRIPT_DOCUMENT, TRANSCRIPT_WIN};
 
 /// Stack of live `smelt.work.busy` tokens. Each `push` returns a
 /// monotonic id consumed by `release`; the prompt top-bar indicator
@@ -1168,6 +1168,7 @@ impl TuiApp {
                 },
             ));
             if let Some(w) = ui.win_mut(crate::app::TRANSCRIPT_WIN) {
+                w.set_document_handle(Some(crate::app::TRANSCRIPT_DOCUMENT));
                 w.set_surface(crate::smelt_edit::WindowSurface::readonly_text());
                 w.set_vim_enabled(vim_enabled);
                 // Transcript blocks (code, diff) stamp `SourceLine` per row;

@@ -69,7 +69,7 @@ pub use overlay::{
 };
 pub use row::{
     row_to_usize, BufferDocument, DisplayAction, DisplayDocument, DisplayRow, DisplayRows,
-    DisplaySnapshot, DocPosition, DocRange, MaterializeRequest, MaterializedRows,
+    DisplaySnapshot, DocPosition, DocRange, DocumentHandle, MaterializeRequest, MaterializedRows,
     PreparedWindowRequest, RowBreak, RowIndex, StaticRowsDocument, TextRange,
 };
 pub use vim::VimMode;
