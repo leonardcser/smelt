@@ -18,6 +18,7 @@ pub use error::{Result, StoreError};
 pub use history::{
     TranscriptDescriptorHydration, TranscriptDescriptorIndex, TranscriptDescriptorRange,
     TranscriptDescriptorRecord, TranscriptDescriptorSlice, TranscriptSearchCandidate,
+    TranscriptSearchDirection,
 };
 pub use legacy::{LegacyImportReport, RequestAttemptSummary};
 pub use meta::{SessionMeta, SessionState, WriterLease};

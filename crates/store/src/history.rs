@@ -1,11 +1,12 @@
 use protocol::HistoryItem;
-use rusqlite::{params, Connection, Statement};
+use rusqlite::{params, params_from_iter, Connection, Statement};
 use serde_json::{json, Value};
 use std::ops::Range;
 
 use crate::compression::ObjectCompression;
 use crate::error::Result;
 use crate::object::{self, checked_i64, sha256_hex};
+use rusqlite::types::Value as SqlValue;
 
 pub(crate) const METADATA_OBJECT_MIN_BYTES: usize = 4 * 1024;
 pub(crate) const OBJECT_REF_KEY: &str = "$smelt_object_ref";
@@ -133,6 +134,12 @@ impl TranscriptDescriptorSlice {
 pub struct TranscriptSearchCandidate {
     pub block_idx: u64,
     pub history_idx: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriptSearchDirection {
+    Forward,
+    Backward,
 }
 
 pub(crate) fn history_hashes_from(
@@ -370,11 +377,7 @@ fn insert_transcript_descriptor_record(
             record.search_text,
         ],
     )?;
-    conn.execute(
-        "INSERT INTO transcript_search (block_idx, history_idx, text)
-         VALUES (?1, ?2, ?3)",
-        params![block_idx, history_idx, record.search_text],
-    )?;
+    insert_transcript_search(conn, block_idx, history_idx, &record.search_text)?;
     Ok(())
 }
 
@@ -508,23 +511,161 @@ pub(crate) fn search_transcript_candidates(
     conn: &Connection,
     query: &str,
 ) -> Result<Vec<TranscriptSearchCandidate>> {
-    if query.is_empty() {
+    search_transcript_candidate_page(
+        conn,
+        query,
+        None,
+        TranscriptSearchDirection::Forward,
+        usize::MAX,
+    )
+}
+
+pub(crate) fn search_transcript_candidate_page(
+    conn: &Connection,
+    query: &str,
+    origin_block_idx: Option<u64>,
+    direction: TranscriptSearchDirection,
+    limit: usize,
+) -> Result<Vec<TranscriptSearchCandidate>> {
+    if query.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    let mut stmt = conn.prepare(
-        "SELECT block_idx, history_idx
-         FROM transcript_search
-         WHERE instr(text, ?1) > 0
-         ORDER BY block_idx",
-    )?;
-    let rows = stmt.query_map([query], |row| {
-        Ok(TranscriptSearchCandidate {
-            block_idx: row.get::<_, i64>(0)? as u64,
-            history_idx: row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
-        })
+    let terms = search_terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let term_count = terms.len();
+    let placeholders = std::iter::repeat_n("?", terms.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order = match direction {
+        TranscriptSearchDirection::Forward => "ASC",
+        TranscriptSearchDirection::Backward => "DESC",
+    };
+    let origin_filter = match (origin_block_idx, direction) {
+        (Some(_), TranscriptSearchDirection::Forward) => "AND s.block_idx >= ?",
+        (Some(_), TranscriptSearchDirection::Backward) => "AND s.block_idx <= ?",
+        (None, _) => "",
+    };
+    let sql = format!(
+        "WITH matched(block_idx) AS (
+             SELECT block_idx
+             FROM transcript_search_terms
+             WHERE term IN ({placeholders})
+             GROUP BY block_idx
+             HAVING COUNT(*) = ?
+         )
+         SELECT s.block_idx, s.history_idx, s.text
+         FROM matched m
+         JOIN transcript_search s ON s.block_idx = m.block_idx
+         WHERE 1 = 1 {origin_filter}
+         ORDER BY s.block_idx {order}
+         LIMIT ?"
+    );
+    let mut values = terms.into_iter().map(SqlValue::from).collect::<Vec<_>>();
+    values.push(SqlValue::from(term_count as i64));
+    if let Some(origin) = origin_block_idx {
+        values.push(SqlValue::from(checked_i64(origin, "origin_block_idx")?));
+    }
+    let sql_limit = if limit == usize::MAX {
+        i64::MAX
+    } else {
+        checked_i64(limit.saturating_mul(16) as u64, "search_candidate_limit")?
+    };
+    values.push(SqlValue::from(sql_limit));
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values), |row| {
+        Ok((
+            row.get::<_, i64>(0)? as u64,
+            row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
+            row.get::<_, String>(2)?,
+        ))
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let mut out = Vec::new();
+    for row in rows {
+        let (block_idx, history_idx, text) = row?;
+        if text.contains(query) {
+            out.push(TranscriptSearchCandidate {
+                block_idx,
+                history_idx,
+            });
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    if matches!(direction, TranscriptSearchDirection::Backward) {
+        out.reverse();
+    }
+    Ok(out)
+}
+
+fn insert_transcript_search(
+    conn: &Connection,
+    block_idx: i64,
+    history_idx: Option<i64>,
+    text: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO transcript_search (block_idx, history_idx, text)
+         VALUES (?1, ?2, ?3)",
+        params![block_idx, history_idx, text],
+    )?;
+    insert_transcript_search_terms(conn, block_idx, text)
+}
+
+fn insert_transcript_search_terms(conn: &Connection, block_idx: i64, text: &str) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT OR IGNORE INTO transcript_search_terms (term, block_idx)
+         VALUES (?1, ?2)",
+    )?;
+    for term in index_terms(text) {
+        stmt.execute(params![term, block_idx])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn rebuild_transcript_search_terms(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM transcript_search_terms", [])?;
+    let mut stmt = conn.prepare("SELECT block_idx, text FROM transcript_search")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (block_idx, text) = row?;
+        insert_transcript_search_terms(conn, block_idx, &text)?;
+    }
+    Ok(())
+}
+
+fn search_terms(text: &str) -> Vec<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    grams_for_sizes(&chars, std::iter::once(chars.len().min(3)))
+}
+
+fn index_terms(text: &str) -> Vec<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+    grams_for_sizes(&chars, 1..=chars.len().min(3))
+}
+
+fn grams_for_sizes(chars: &[char], sizes: impl IntoIterator<Item = usize>) -> Vec<String> {
+    let mut terms = Vec::new();
+    for n in sizes {
+        terms.extend(
+            chars
+                .windows(n)
+                .map(|window| window.iter().collect::<String>()),
+        );
+    }
+    terms.sort_unstable();
+    terms.dedup();
+    terms
 }
 
 struct NormalizedHistoryItem {
@@ -668,11 +809,7 @@ fn insert_transcript_block(
             search_text
         ],
     )?;
-    conn.execute(
-        "INSERT INTO transcript_search (block_idx, history_idx, text)
-         VALUES (?1, ?2, ?3)",
-        params![block_idx, history_idx, search_text],
-    )?;
+    insert_transcript_search(conn, block_idx, Some(history_idx), search_text)?;
     Ok(())
 }
 

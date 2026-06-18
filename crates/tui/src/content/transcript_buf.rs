@@ -15,6 +15,7 @@ use smelt_buffer::coords::copy_byte_range;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::content::highlight::InlineOptions;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub(crate) struct TranscriptProjection {
@@ -555,8 +556,6 @@ pub(crate) struct TranscriptSearchLayout {
 
 #[derive(Clone, Debug)]
 pub(crate) struct TranscriptSearchLayoutEntry {
-    pub(crate) id: RenderNodeId,
-    pub(crate) key: NodeLayoutKey,
     pub(crate) block_ids: Vec<BlockId>,
     pub(crate) first_row: RowIndex,
     pub(crate) rows: RowIndex,
@@ -1504,8 +1503,6 @@ impl TranscriptProjection {
             };
             if !block_ids.is_empty() {
                 entries.push(TranscriptSearchLayoutEntry {
-                    id: measured_node.id,
-                    key: measured_node.key,
                     block_ids,
                     first_row,
                     rows,
@@ -2328,6 +2325,45 @@ impl TranscriptProjection {
         self.prepare_row_index_with_env(env, history, width);
         let generation = self.measurements.active.search_layout_hash();
         self.search_layout(generation, history)
+    }
+
+    pub(crate) fn materialize_search_layout_for_blocks(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        block_indices: &[u64],
+    ) -> TranscriptSearchLayout {
+        if block_indices.is_empty() {
+            return TranscriptSearchLayout {
+                generation: self.measurements.active.search_layout_hash(),
+                entries: Vec::new(),
+            };
+        }
+        let wanted = block_indices
+            .iter()
+            .copied()
+            .map(BlockId::new)
+            .collect::<HashSet<_>>();
+        let mut layout = self.materialize_search_layout(lua, history, width);
+        layout
+            .entries
+            .retain(|entry| entry.block_ids.iter().any(|id| wanted.contains(id)));
+        layout
+    }
+
+    pub(crate) fn block_id_at_or_before_row(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        row: RowIndex,
+    ) -> Option<BlockId> {
+        let node = self.node_at_row(lua, history, width, row)?;
+        match self.render_plan.node(node.index)? {
+            RenderNode::Block { id, .. } => Some(*id),
+            RenderNode::Group { child_ids, .. } => child_ids.first().copied(),
+        }
     }
 
     /// Render the full transcript history into a regular buffer. This is for

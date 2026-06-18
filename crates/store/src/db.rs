@@ -341,6 +341,22 @@ impl SessionDb {
         history::search_transcript_candidates(&self.conn, query)
     }
 
+    pub fn search_transcript_candidate_page(
+        &self,
+        query: &str,
+        origin_block_idx: Option<u64>,
+        direction: crate::TranscriptSearchDirection,
+        limit: usize,
+    ) -> Result<Vec<TranscriptSearchCandidate>> {
+        history::search_transcript_candidate_page(
+            &self.conn,
+            query,
+            origin_block_idx,
+            direction,
+            limit,
+        )
+    }
+
     pub fn history_text_bytes(&self) -> Result<u64> {
         session_snapshot::history_text_bytes(&self.conn)
     }
@@ -459,6 +475,65 @@ mod tests {
         assert_eq!(
             db.search_transcript_candidates("updated two").unwrap(),
             vec![]
+        );
+    }
+
+    #[test]
+    fn transcript_search_uses_indexed_short_utf8_and_paged_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = vec![
+            transcript_record(0, "zero", "alpha café"),
+            transcript_record(1, "one", "beta needle"),
+            transcript_record(2, "two", "gamma café needle"),
+            transcript_record(3, "three", "delta"),
+        ];
+        db.replace_transcript_descriptor_records(&records).unwrap();
+
+        assert_eq!(
+            db.search_transcript_candidates("é").unwrap(),
+            vec![
+                TranscriptSearchCandidate {
+                    block_idx: 0,
+                    history_idx: None,
+                },
+                TranscriptSearchCandidate {
+                    block_idx: 2,
+                    history_idx: None,
+                },
+            ]
+        );
+        assert_eq!(
+            db.search_transcript_candidate_page(
+                "needle",
+                Some(2),
+                crate::TranscriptSearchDirection::Forward,
+                8,
+            )
+            .unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 2,
+                history_idx: None,
+            }]
+        );
+        assert_eq!(
+            db.search_transcript_candidate_page(
+                "needle",
+                Some(2),
+                crate::TranscriptSearchDirection::Backward,
+                8,
+            )
+            .unwrap(),
+            vec![
+                TranscriptSearchCandidate {
+                    block_idx: 1,
+                    history_idx: None,
+                },
+                TranscriptSearchCandidate {
+                    block_idx: 2,
+                    history_idx: None,
+                },
+            ]
         );
     }
 

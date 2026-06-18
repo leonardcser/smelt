@@ -157,7 +157,9 @@ impl TuiApp {
         };
         let origin = self.search_origin(target).unwrap_or_default();
         if self.transcript_document_is_attached_to(target) {
-            let Some(mut transcript_session) = self.new_transcript_search_session(&query) else {
+            let Some(mut transcript_session) =
+                self.new_transcript_search_session(&query, origin, direction)
+            else {
                 self.clear_search();
                 return;
             };
@@ -223,13 +225,6 @@ impl TuiApp {
             let query = session.query.clone();
             let range = match &mut session.backend {
                 SearchBackend::Transcript(transcript) => {
-                    if !self.sync_transcript_search_session(transcript, &query) {
-                        let Some(new_session) = self.new_transcript_search_session(&query) else {
-                            self.search.session = Some(session);
-                            return false;
-                        };
-                        *transcript = new_session;
-                    }
                     let origin = match (
                         transcript
                             .current
@@ -250,6 +245,15 @@ impl TuiApp {
                         }
                         (None, _) => self.search_origin(target).unwrap_or_default(),
                     };
+                    if !self.sync_transcript_search_session(transcript, &query) {
+                        let Some(new_session) =
+                            self.new_transcript_search_session(&query, origin, direction)
+                        else {
+                            self.search.session = Some(session);
+                            return false;
+                        };
+                        *transcript = new_session;
+                    }
                     self.advance_transcript_search(transcript, &query, origin, direction)
                 }
                 SearchBackend::Full { .. } => None,
@@ -373,6 +377,15 @@ impl TuiApp {
             .document_snapshot_for_win(win)
             .map(|snapshot| snapshot.total_rows)
             .unwrap_or(0);
+        let Some(window) = self.ui.win(win) else {
+            return Vec::new();
+        };
+        let row_document = window.row_cursor().is_some() || window.materialized_rows().is_some();
+        let origin = self.search_origin(win).unwrap_or_default();
+        if row_document {
+            return self.scan_document_search_window(win, query, total_rows, origin.row);
+        }
+
         let mut matches = Vec::new();
         let mut start = 0;
         while start < total_rows {
@@ -380,11 +393,35 @@ impl TuiApp {
             let display = self
                 .materialize_document_rows(win, start, count)
                 .unwrap_or_default();
-            for (offset, row) in display.rows.iter().enumerate() {
-                let row_index = start.saturating_add(offset as RowIndex);
-                matches.extend(display_row_matches(row, row_index, query).map(TextRange::Rows));
-            }
+            collect_display_matches(&display.rows, start, query, &mut matches);
             start = start.saturating_add(count);
+        }
+        matches
+    }
+
+    fn scan_document_search_window(
+        &mut self,
+        win: WinId,
+        query: &str,
+        total_rows: RowIndex,
+        origin_row: RowIndex,
+    ) -> Vec<TextRange> {
+        if total_rows == 0 {
+            return Vec::new();
+        }
+        let mut matches = Vec::new();
+        let start = origin_row.min(total_rows.saturating_sub(1));
+        let count = SEARCH_SCAN_ROWS.min(total_rows - start);
+        let display = self
+            .materialize_document_rows(win, start, count)
+            .unwrap_or_default();
+        collect_display_matches(&display.rows, start, query, &mut matches);
+        if matches.is_empty() && start > 0 {
+            let count = SEARCH_SCAN_ROWS.min(start);
+            let display = self
+                .materialize_document_rows(win, 0, count)
+                .unwrap_or_default();
+            collect_display_matches(&display.rows, 0, query, &mut matches);
         }
         matches
     }
@@ -436,6 +473,18 @@ fn initial_match(
             .iter()
             .rposition(starts_at_or_before)
             .or_else(|| (!matches.is_empty()).then_some(matches.len() - 1)),
+    }
+}
+
+fn collect_display_matches(
+    rows: &[DisplayRow],
+    start: RowIndex,
+    query: &str,
+    matches: &mut Vec<TextRange>,
+) {
+    for (offset, row) in rows.iter().enumerate() {
+        let row_index = start.saturating_add(offset as RowIndex);
+        matches.extend(display_row_matches(row, row_index, query).map(TextRange::Rows));
     }
 }
 

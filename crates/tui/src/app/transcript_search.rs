@@ -1,10 +1,8 @@
 use crate::app::search::{doc_range_for_match, row_match_is_selectable, SearchDirection};
 use crate::app::TuiApp;
-use crate::content::render_plan::RenderNodeId;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::content::transcript_search_text::descriptor_search_text;
 use crate::smelt_edit::{DisplayRow, DocPosition, DocRange, RowIndex};
-use smelt_core::transcript_model::{BlockId, LayoutKey};
 use std::collections::HashMap;
 
 const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
@@ -12,7 +10,6 @@ const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
 
 #[derive(Clone, Debug)]
 pub(crate) struct TranscriptSearchSession {
-    pub(super) key: TranscriptSearchKey,
     pub(super) total_rows: RowIndex,
     pub(super) candidates: Vec<usize>,
     pub(super) scanned: Vec<bool>,
@@ -23,7 +20,6 @@ pub(crate) struct TranscriptSearchSession {
 #[derive(Clone, Debug)]
 pub(super) struct TranscriptSearchIndex {
     key: TranscriptSearchKey,
-    extends: Option<TranscriptSearchKey>,
     entries: Vec<TranscriptSearchEntry>,
     block_entries: HashMap<u64, Vec<usize>>,
     trigrams: HashMap<u32, Vec<usize>>,
@@ -31,9 +27,6 @@ pub(super) struct TranscriptSearchIndex {
 
 #[derive(Clone, Debug)]
 struct TranscriptSearchEntry {
-    id: RenderNodeId,
-    layout_key: LayoutKey,
-    block_ids: Vec<BlockId>,
     first_row: RowIndex,
     rows: RowIndex,
     search_text: String,
@@ -43,6 +36,7 @@ struct TranscriptSearchEntry {
 pub(super) struct TranscriptSearchKey {
     layout_generation: u64,
     width: u16,
+    candidates_hash: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -52,58 +46,6 @@ struct SqliteTranscriptCandidateBlocks {
 }
 
 impl TranscriptSearchIndex {
-    fn append_from_layout(
-        mut self,
-        key: TranscriptSearchKey,
-        layout: &TranscriptSearchLayout,
-        mut search_text_for_entry: impl FnMut(&TranscriptSearchLayoutEntry) -> String,
-    ) -> Option<Self> {
-        if self.key.width != key.width {
-            return None;
-        }
-        let old_len = self.entries.len();
-        let old_key = self.key;
-        if old_len >= layout.entries.len() {
-            return None;
-        }
-        for (entry, layout_entry) in self.entries.iter().zip(layout.entries.iter()) {
-            if entry.id != layout_entry.id
-                || entry.layout_key != layout_entry.key
-                || entry.block_ids != layout_entry.block_ids
-                || entry.first_row != layout_entry.first_row
-                || entry.rows != layout_entry.rows
-            {
-                return None;
-            }
-        }
-
-        let _perf = smelt_perf::perf::begin("search:transcript:index_extend");
-        for layout_entry in &layout.entries[old_len..] {
-            let search_text = search_text_for_entry(layout_entry);
-            push_search_entry(
-                &mut self.entries,
-                &mut self.block_entries,
-                &mut self.trigrams,
-                layout_entry,
-                search_text,
-            );
-        }
-        self.key = key;
-        self.extends = Some(old_key);
-        smelt_perf::perf::record_value(
-            "search:transcript:index_appended_entries",
-            (layout.entries.len() - old_len) as u64,
-        );
-        Some(self)
-    }
-
-    fn total_rows(&self) -> RowIndex {
-        self.entries
-            .last()
-            .map(|entry| entry.first_row.saturating_add(entry.rows))
-            .unwrap_or(0)
-    }
-
     fn candidate_entries(&self, query: &str, preferred_blocks: Option<&[u64]>) -> Vec<usize> {
         let mut out = Vec::new();
         let mut seen = vec![false; self.entries.len()];
@@ -172,7 +114,6 @@ fn build_transcript_search_index(
     }
     TranscriptSearchIndex {
         key,
-        extends: None,
         entries,
         block_entries,
         trigrams,
@@ -188,9 +129,6 @@ fn push_search_entry(
 ) {
     let entry_index = entries.len();
     entries.push(TranscriptSearchEntry {
-        id: layout_entry.id,
-        layout_key: layout_entry.key,
-        block_ids: layout_entry.block_ids.clone(),
         first_row: layout_entry.first_row,
         rows: layout_entry.rows,
         search_text: search_text.clone(),
@@ -218,10 +156,15 @@ fn record_index_size(index: &TranscriptSearchIndex) {
 }
 
 impl TuiApp {
-    fn transcript_search_key(&mut self, layout_generation: u64) -> TranscriptSearchKey {
+    fn transcript_search_key(
+        &mut self,
+        layout_generation: u64,
+        candidate_blocks: &[u64],
+    ) -> TranscriptSearchKey {
         TranscriptSearchKey {
             layout_generation,
             width: self.transcript_width() as u16,
+            candidates_hash: smelt_core::utils::hash_serializable(&candidate_blocks),
         }
     }
 
@@ -244,14 +187,58 @@ impl TuiApp {
         text
     }
 
-    fn sqlite_transcript_candidate_blocks(&self, query: &str) -> SqliteTranscriptCandidateBlocks {
+    fn sqlite_transcript_candidate_blocks(
+        &mut self,
+        query: &str,
+        origin: DocPosition,
+        direction: SearchDirection,
+    ) -> SqliteTranscriptCandidateBlocks {
+        let width = self.transcript_width() as u16;
+        let origin_block = self
+            .transcript
+            .block_id_at_or_before_row(&self.lua, width, origin.row)
+            .map(|id| id.get());
         let db_path = smelt_core::session::dir_for(&self.core.session).join("session.db");
+        let store_direction = match direction {
+            SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
+            SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
+        };
+        let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
         let Some(candidates) = smelt_store::SessionDb::open_read_only(db_path)
             .ok()
-            .and_then(|db| db.search_transcript_candidates(query).ok())
+            .and_then(|db| {
+                let mut page = db
+                    .search_transcript_candidate_page(query, origin_block, store_direction, limit)
+                    .ok()?;
+                if origin_block.is_some() && page.len() < limit {
+                    let wrapped = db
+                        .search_transcript_candidate_page(
+                            query,
+                            None,
+                            store_direction,
+                            limit - page.len(),
+                        )
+                        .ok()?;
+                    for candidate in wrapped {
+                        if !page
+                            .iter()
+                            .any(|seen| seen.block_idx == candidate.block_idx)
+                        {
+                            page.push(candidate);
+                        }
+                    }
+                }
+                if page.is_empty() && db.transcript_descriptor_count().ok() == Some(0) {
+                    return None;
+                }
+                Some(page)
+            })
         else {
             return SqliteTranscriptCandidateBlocks::default();
         };
+        if candidates.is_empty() {
+            return SqliteTranscriptCandidateBlocks::default();
+        }
         SqliteTranscriptCandidateBlocks {
             block_indices: candidates
                 .into_iter()
@@ -261,14 +248,25 @@ impl TuiApp {
         }
     }
 
-    fn ensure_transcript_search_index(&mut self) -> Option<&TranscriptSearchIndex> {
+    fn ensure_transcript_candidate_index(
+        &mut self,
+        candidate_blocks: Option<&[u64]>,
+    ) -> Option<&TranscriptSearchIndex> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
         let layout = {
-            let _perf = smelt_perf::perf::begin("search:transcript:index_layout");
-            self.transcript.materialize_search_layout(&self.lua, width)
+            let _perf = smelt_perf::perf::begin("search:transcript:candidate_layout");
+            match candidate_blocks {
+                Some(candidate_blocks) => self.transcript.materialize_search_layout_for_blocks(
+                    &self.lua,
+                    width,
+                    candidate_blocks,
+                ),
+                None => self.transcript.materialize_search_layout(&self.lua, width),
+            }
         };
-        let key = self.transcript_search_key(layout.generation);
+        let candidate_key = candidate_blocks.unwrap_or(&[]);
+        let key = self.transcript_search_key(layout.generation, candidate_key);
         if self
             .search
             .transcript_index
@@ -276,16 +274,6 @@ impl TuiApp {
             .is_some_and(|index| index.key == key)
         {
             return self.search.transcript_index.as_ref();
-        }
-
-        if let Some(index) = self.search.transcript_index.take() {
-            if let Some(index) = index.append_from_layout(key, &layout, |layout_entry| {
-                self.transcript_search_text_for_entry(layout_entry)
-            }) {
-                self.search.transcript_index = Some(index);
-                record_index_size(self.search.transcript_index.as_ref()?);
-                return self.search.transcript_index.as_ref();
-            }
         }
 
         let _perf = smelt_perf::perf::begin("search:transcript:index_build");
@@ -301,20 +289,30 @@ impl TuiApp {
     pub(super) fn new_transcript_search_session(
         &mut self,
         query: &str,
+        origin: DocPosition,
+        direction: SearchDirection,
     ) -> Option<TranscriptSearchSession> {
-        let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query);
-        let index = self.ensure_transcript_search_index()?;
-        let preferred = sqlite_candidates
-            .available
-            .then_some(sqlite_candidates.block_indices.as_slice());
-        let candidates = index.candidate_entries(query, preferred);
+        let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
+        let (candidates, scanned_len) = {
+            let candidate_blocks = sqlite_candidates
+                .available
+                .then_some(sqlite_candidates.block_indices.as_slice());
+            let index = self.ensure_transcript_candidate_index(candidate_blocks)?;
+            let preferred = sqlite_candidates
+                .available
+                .then_some(sqlite_candidates.block_indices.as_slice());
+            (
+                index.candidate_entries(query, preferred),
+                index.entries.len(),
+            )
+        };
         smelt_perf::perf::record_value("search:transcript:candidates", candidates.len() as u64);
-        let total_rows = index.total_rows();
+        let width = self.transcript_width() as u16;
+        let total_rows = self.transcript.estimated_total_rows(&self.lua, width);
         Some(TranscriptSearchSession {
-            key: index.key,
             total_rows,
             candidates,
-            scanned: vec![false; index.entries.len()],
+            scanned: vec![false; scanned_len],
             matches: Vec::new(),
             current: None,
         })
@@ -322,32 +320,10 @@ impl TuiApp {
 
     pub(super) fn sync_transcript_search_session(
         &mut self,
-        session: &mut TranscriptSearchSession,
-        query: &str,
+        _session: &mut TranscriptSearchSession,
+        _query: &str,
     ) -> bool {
-        let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query);
-        let Some(index) = self.ensure_transcript_search_index() else {
-            return false;
-        };
-        if index.key == session.key {
-            return true;
-        }
-        if index.extends != Some(session.key) || session.scanned.len() > index.entries.len() {
-            return false;
-        }
-
-        session.key = index.key;
-        session.total_rows = index.total_rows();
-        session.scanned.resize(index.entries.len(), false);
-        let preferred = sqlite_candidates
-            .available
-            .then_some(sqlite_candidates.block_indices.as_slice());
-        session.candidates = index.candidate_entries(query, preferred);
-        smelt_perf::perf::record_value(
-            "search:transcript:candidates",
-            session.candidates.len() as u64,
-        );
-        true
+        self.search.transcript_index.is_some()
     }
 
     pub(super) fn advance_transcript_search(
@@ -610,7 +586,7 @@ fn unique_trigrams(text: &str) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smelt_core::transcript_model::ViewState;
+    use smelt_core::transcript_model::BlockId;
 
     fn test_index(texts: &[&str]) -> TranscriptSearchIndex {
         let mut entries = Vec::new();
@@ -619,13 +595,6 @@ mod tests {
         for (i, search_text) in texts.iter().enumerate() {
             let id = BlockId::new(i as u64);
             let layout_entry = TranscriptSearchLayoutEntry {
-                id: RenderNodeId::Block(id),
-                key: LayoutKey {
-                    width: 80,
-                    view_state: ViewState::Expanded,
-                    content_hash: i as u64,
-                    sidecar_hash: 0,
-                },
                 block_ids: vec![id],
                 first_row: i as RowIndex,
                 rows: 1,
@@ -642,8 +611,8 @@ mod tests {
             key: TranscriptSearchKey {
                 layout_generation: 1,
                 width: 80,
+                candidates_hash: 0,
             },
-            extends: None,
             entries,
             block_entries,
             trigrams,
@@ -680,13 +649,6 @@ mod tests {
         let mut block_entries = HashMap::new();
         let mut trigrams = HashMap::new();
         let layout_entry = TranscriptSearchLayoutEntry {
-            id: RenderNodeId::Group(1),
-            key: LayoutKey {
-                width: 80,
-                view_state: ViewState::Expanded,
-                content_hash: 1,
-                sidecar_hash: 0,
-            },
             block_ids: vec![BlockId::new(7), BlockId::new(8)],
             first_row: 0,
             rows: 2,
@@ -702,8 +664,8 @@ mod tests {
             key: TranscriptSearchKey {
                 layout_generation: 1,
                 width: 80,
+                candidates_hash: 0,
             },
-            extends: None,
             entries,
             block_entries,
             trigrams,

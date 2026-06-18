@@ -1,8 +1,9 @@
 use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
+use crate::history;
 
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -66,6 +67,12 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     if current < 5 {
         conn.execute_batch(MIGRATION_5)?;
         set_user_version(conn, 5)?;
+        current = 5;
+    }
+    if current < 6 {
+        conn.execute_batch(MIGRATION_6)?;
+        history::rebuild_transcript_search_terms(conn)?;
+        set_user_version(conn, 6)?;
     }
     conn.execute(
         "INSERT INTO store_meta (key, value, updated_at)
@@ -260,4 +267,13 @@ ALTER TABLE session_state ADD COLUMN context_tokens INTEGER;
 ALTER TABLE session_state ADD COLUMN context_tokens_history_len INTEGER;
 ALTER TABLE session_state ADD COLUMN display_context_tokens INTEGER;
 ALTER TABLE session_state ADD COLUMN session_cost_usd REAL NOT NULL DEFAULT 0;
+"#;
+
+const MIGRATION_6: &str = r#"
+CREATE TABLE IF NOT EXISTS transcript_search_terms (
+    term TEXT NOT NULL,
+    block_idx INTEGER NOT NULL REFERENCES transcript_search(block_idx) ON DELETE CASCADE,
+    PRIMARY KEY (term, block_idx)
+);
+CREATE INDEX IF NOT EXISTS transcript_search_terms_block_idx ON transcript_search_terms(block_idx);
 "#;
