@@ -8,7 +8,7 @@ use super::text::{
     char_class, line_end, line_start, next_char_boundary, prev_char_boundary, word_backward_pos,
     word_forward_pos, CharClass,
 };
-use super::text_objects::text_object;
+use super::text_objects::{surrounding_delimiters, text_object};
 use super::window::{ViewerCommand, ViewerKeyResult};
 use super::{Clipboard, UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -191,6 +191,15 @@ impl Op {
     }
 }
 
+fn find_kind_char(kind: FindKind) -> char {
+    match kind {
+        FindKind::Forward => 'f',
+        FindKind::ForwardTill => 't',
+        FindKind::Backward => 'F',
+        FindKind::BackwardTill => 'T',
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) enum SubState {
     #[default]
@@ -208,6 +217,18 @@ pub(crate) enum SubState {
     WaitingTextObj(Op, bool),
     /// Visual mode `i`/`a` pressed, waiting for object type char.
     WaitingVisualTextObj(bool),
+    /// `ys` pressed, waiting for a motion or text-object prefix.
+    WaitingSurroundMotion,
+    /// `ysi`/`ysa` pressed, waiting for object type char.
+    WaitingSurroundTextObj(bool),
+    /// A surround target range was resolved, waiting for the delimiter to add.
+    WaitingSurroundChar(usize, usize),
+    /// `ds` pressed, waiting for delimiter kind to remove.
+    WaitingDeleteSurround,
+    /// `cs` pressed, waiting for delimiter kind to replace.
+    WaitingChangeSurroundTarget,
+    /// `cs{target}` pressed, waiting for replacement delimiter.
+    WaitingChangeSurroundReplacement(char),
 }
 
 // ── Vim state ───────────────────────────────────────────────────────────────
@@ -296,7 +317,61 @@ impl VimWindowState {
     /// True when no multi-key sequence and no count accumulator are pending,
     /// i.e. Esc in Normal mode would be a no-op.
     pub fn is_idle(&self) -> bool {
-        matches!(self.sub, SubState::Ready) && self.count1.is_none() && self.count2.is_none()
+        self.pending_input().is_none()
+    }
+
+    /// User-facing key sequence currently waiting for more vim input.
+    ///
+    /// Counts are included because they are part of the pending command: after
+    /// `3d2` the next key is still a motion for that exact sequence.
+    pub fn pending_input(&self) -> Option<String> {
+        let mut out = String::new();
+        if let Some(count) = self.count1 {
+            out.push_str(&count.to_string());
+        }
+
+        let push_op = |out: &mut String, op: Op| {
+            out.push(op.char());
+            if let Some(count) = self.count2 {
+                out.push_str(&count.to_string());
+            }
+        };
+
+        match self.sub {
+            SubState::Ready => {}
+            SubState::WaitingOp(op) => push_op(&mut out, op),
+            SubState::WaitingG => out.push('g'),
+            SubState::WaitingZ => out.push('z'),
+            SubState::WaitingOpG(op) => {
+                push_op(&mut out, op);
+                out.push('g');
+            }
+            SubState::WaitingR => out.push('r'),
+            SubState::WaitingFind(kind) => out.push(find_kind_char(kind)),
+            SubState::WaitingOpFind(op, kind) => {
+                push_op(&mut out, op);
+                out.push(find_kind_char(kind));
+            }
+            SubState::WaitingTextObj(op, inner) => {
+                push_op(&mut out, op);
+                out.push(if inner { 'i' } else { 'a' });
+            }
+            SubState::WaitingVisualTextObj(inner) => out.push(if inner { 'i' } else { 'a' }),
+            SubState::WaitingSurroundMotion => out.push_str("ys"),
+            SubState::WaitingSurroundTextObj(inner) => {
+                out.push_str("ys");
+                out.push(if inner { 'i' } else { 'a' });
+            }
+            SubState::WaitingSurroundChar(_, _) => out.push_str("ys"),
+            SubState::WaitingDeleteSurround => out.push_str("ds"),
+            SubState::WaitingChangeSurroundTarget => out.push_str("cs"),
+            SubState::WaitingChangeSurroundReplacement(target) => {
+                out.push_str("cs");
+                out.push(target);
+            }
+        }
+
+        (!out.is_empty()).then_some(out)
     }
 
     /// Set mode and clear the pending sequence.
@@ -620,6 +695,20 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
         SubState::WaitingG => return handle_waiting_g(key, ctx),
         SubState::WaitingOpG(op) => return handle_waiting_op_g(key, op, ctx),
         SubState::WaitingTextObj(op, inner) => return handle_waiting_textobj(key, op, inner, ctx),
+        SubState::WaitingSurroundMotion => return handle_waiting_surround_motion(key, ctx),
+        SubState::WaitingSurroundTextObj(inner) => {
+            return handle_waiting_surround_textobj(key, inner, ctx)
+        }
+        SubState::WaitingSurroundChar(start, end) => {
+            return handle_waiting_surround_char(key, start, end, ctx)
+        }
+        SubState::WaitingDeleteSurround => return handle_waiting_delete_surround(key, ctx),
+        SubState::WaitingChangeSurroundTarget => {
+            return handle_waiting_change_surround_target(key, ctx)
+        }
+        SubState::WaitingChangeSurroundReplacement(target) => {
+            return handle_waiting_change_surround_replacement(key, target, ctx)
+        }
         SubState::WaitingOp(op) => {
             if let KeyCode::Char(c) = key.code {
                 if c.is_ascii_digit() && (c != '0' || ctx.vim_state.count2.is_some()) {
@@ -630,6 +719,14 @@ fn handle_normal(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
                 }
                 if c == op.char() {
                     return execute_linewise_op(op, ctx);
+                }
+                if c == 's' {
+                    ctx.vim_state.sub = match op {
+                        Op::Yank => SubState::WaitingSurroundMotion,
+                        Op::Delete => SubState::WaitingDeleteSurround,
+                        Op::Change => SubState::WaitingChangeSurroundTarget,
+                    };
+                    return Action::Consumed;
                 }
                 if c == 'i' || c == 'a' {
                     ctx.vim_state.sub = SubState::WaitingTextObj(op, c == 'i');
@@ -1765,45 +1862,205 @@ fn handle_waiting_textobj(key: KeyEvent, op: Op, inner: bool, ctx: &mut VimConte
     Action::Consumed
 }
 
-/// Operator-pending motion dispatch.
-fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action {
+fn handle_waiting_surround_motion(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
+    if let KeyCode::Char(c) = key.code {
+        if c == 'i' || c == 'a' {
+            ctx.vim_state.sub = SubState::WaitingSurroundTextObj(c == 'i');
+            return Action::Consumed;
+        }
+        if c == 's' {
+            let (start, end) = current_line_content_range(ctx.buf.as_str(), *ctx.cpos);
+            ctx.vim_state.sub = SubState::WaitingSurroundChar(start, end);
+            ctx.vim_state.reset_counts();
+            return Action::Consumed;
+        }
+    }
+
+    match resolve_motion_range(key, ctx, None) {
+        MotionRange::Charwise(start, end) | MotionRange::Linewise(start, end) => {
+            ctx.vim_state.sub = SubState::WaitingSurroundChar(start, end);
+            Action::Consumed
+        }
+        MotionRange::Pending(_) | MotionRange::None => {
+            ctx.vim_state.reset_pending();
+            Action::Consumed
+        }
+    }
+}
+
+fn handle_waiting_surround_textobj(key: KeyEvent, inner: bool, ctx: &mut VimContext<'_>) -> Action {
+    if let KeyCode::Char(c) = key.code {
+        if let Some((start, end)) = text_object(ctx.buf.as_str(), *ctx.cpos, inner, c) {
+            ctx.vim_state.sub = SubState::WaitingSurroundChar(start, end);
+            ctx.vim_state.reset_counts();
+            return Action::Consumed;
+        }
+    }
+    ctx.vim_state.reset_pending();
+    Action::Consumed
+}
+
+fn handle_waiting_surround_char(
+    key: KeyEvent,
+    start: usize,
+    end: usize,
+    ctx: &mut VimContext<'_>,
+) -> Action {
+    ctx.vim_state.sub = SubState::Ready;
+    if let KeyCode::Char(c) = key.code {
+        if let Some((open, close)) = surround_pair(c) {
+            add_surround(ctx, start, end, open, close);
+        }
+    }
+    ctx.vim_state.reset_pending();
+    Action::Consumed
+}
+
+fn handle_waiting_delete_surround(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
+    ctx.vim_state.sub = SubState::Ready;
+    if let KeyCode::Char(c) = key.code {
+        delete_surround(ctx, c);
+    }
+    ctx.vim_state.reset_pending();
+    Action::Consumed
+}
+
+fn handle_waiting_change_surround_target(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
+    if let KeyCode::Char(c) = key.code {
+        if surrounding_delimiters(ctx.buf.as_str(), *ctx.cpos, c).is_some() {
+            ctx.vim_state.sub = SubState::WaitingChangeSurroundReplacement(c);
+            return Action::Consumed;
+        }
+    }
+    ctx.vim_state.reset_pending();
+    Action::Consumed
+}
+
+fn handle_waiting_change_surround_replacement(
+    key: KeyEvent,
+    target: char,
+    ctx: &mut VimContext<'_>,
+) -> Action {
+    ctx.vim_state.sub = SubState::Ready;
+    if let KeyCode::Char(replacement) = key.code {
+        change_surround(ctx, target, replacement);
+    }
+    ctx.vim_state.reset_pending();
+    Action::Consumed
+}
+
+fn surround_pair(c: char) -> Option<(&'static str, &'static str)> {
+    match c {
+        '"' => Some(("\"", "\"")),
+        '\'' => Some(("'", "'")),
+        '`' => Some(("`", "`")),
+        '(' => Some(("( ", " )")),
+        ')' | 'b' => Some(("(", ")")),
+        '[' => Some(("[ ", " ]")),
+        ']' | 'r' => Some(("[", "]")),
+        '{' => Some(("{ ", " }")),
+        '}' | 'B' => Some(("{", "}")),
+        '<' => Some(("< ", " >")),
+        '>' | 'a' => Some(("<", ">")),
+        'q' => Some(("\"", "\"")),
+        _ => None,
+    }
+}
+
+fn add_surround(ctx: &mut VimContext<'_>, start: usize, end: usize, open: &str, close: &str) {
+    let start = smelt_buffer::text::snap(ctx.buf.as_str(), start.min(ctx.buf.len()));
+    let end = smelt_buffer::text::snap(ctx.buf.as_str(), end.min(ctx.buf.len()));
+    if start > end {
+        return;
+    }
+    ctx.save_undo();
+    ctx.insert_str(end, close);
+    ctx.insert_str(start, open);
+    *ctx.cpos = start + open.len();
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+}
+
+fn delete_surround(ctx: &mut VimContext<'_>, kind: char) {
+    let Some(delims) = surrounding_delimiters(ctx.buf.as_str(), *ctx.cpos, kind) else {
+        return;
+    };
+    ctx.save_undo();
+    ctx.delete_range(delims.close_start, delims.close_end);
+    ctx.delete_range(delims.open_start, delims.open_end);
+    *ctx.cpos = delims.open_start.min(ctx.buf.len());
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+}
+
+fn change_surround(ctx: &mut VimContext<'_>, target: char, replacement: char) {
+    let Some((open, close)) = surround_pair(replacement) else {
+        return;
+    };
+    let Some(delims) = surrounding_delimiters(ctx.buf.as_str(), *ctx.cpos, target) else {
+        return;
+    };
+    ctx.save_undo();
+    ctx.replace_range(delims.close_start, delims.close_end, close);
+    ctx.replace_range(delims.open_start, delims.open_end, open);
+    *ctx.cpos = delims.open_start + open.len();
+    clamp_normal(ctx.buf.as_str(), ctx.cpos);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MotionRange {
+    Charwise(usize, usize),
+    Linewise(usize, usize),
+    Pending(SubState),
+    None,
+}
+
+fn ordered_range(a: usize, b: usize) -> Option<(usize, usize)> {
+    let (start, end) = if b < a { (b, a) } else { (a, b) };
+    (start < end).then_some((start, end))
+}
+
+fn resolve_motion_range(key: KeyEvent, ctx: &mut VimContext<'_>, op: Option<Op>) -> MotionRange {
     let n = ctx.vim_state.effective_count();
     let origin = *ctx.cpos;
-
-    // Resolve motion target and whether the motion is linewise.
-    let (target, linewise) = match key.code {
+    let target = match key.code {
         KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => {
             let mut p = origin;
             for _ in 0..n {
                 p = move_left(ctx.buf.as_str(), p);
             }
-            (Some(p), false)
+            p
         }
         KeyCode::Char('l') | KeyCode::Right => {
             let mut p = origin;
             for _ in 0..n {
                 p = move_right_inclusive(ctx.buf.as_str(), p);
             }
-            (Some(p), false)
+            p
         }
         KeyCode::Char('j') => {
             let mut p = origin;
             for _ in 0..n {
                 p = move_down(ctx.buf.as_str(), p);
             }
-            (Some(p), true)
+            let (start, end) = if p < origin { (p, origin) } else { (origin, p) };
+            return MotionRange::Linewise(
+                line_start(ctx.buf.as_str(), start),
+                line_end(ctx.buf.as_str(), end),
+            );
         }
         KeyCode::Char('k') => {
             let mut p = origin;
             for _ in 0..n {
                 p = move_up(ctx.buf.as_str(), p);
             }
-            (Some(p), true)
+            let (start, end) = if p < origin { (p, origin) } else { (origin, p) };
+            return MotionRange::Linewise(
+                line_start(ctx.buf.as_str(), start),
+                line_end(ctx.buf.as_str(), end),
+            );
         }
         KeyCode::Char('w') => {
             let mut p = origin;
-            // vim special case: cw behaves like ce when cursor is on a word char.
-            let use_end = op == Op::Change
+            let use_end = op == Some(Op::Change)
                 && p < ctx.buf.len()
                 && char_class(
                     ctx.buf.as_str()[p..].chars().next().unwrap(),
@@ -1812,16 +2069,16 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
             for _ in 0..n {
                 if use_end {
                     p = word_end_pos(ctx.buf.as_str(), p, CharClass::Word);
-                    p = advance_chars(ctx.buf.as_str(), p, 1); // inclusive end
+                    p = advance_chars(ctx.buf.as_str(), p, 1);
                 } else {
                     p = word_forward_pos(ctx.buf.as_str(), p, CharClass::Word);
                 }
             }
-            (Some(p), false)
+            p
         }
         KeyCode::Char('W') => {
             let mut p = origin;
-            let use_end = op == Op::Change
+            let use_end = op == Some(Op::Change)
                 && p < ctx.buf.len()
                 && char_class(
                     ctx.buf.as_str()[p..].chars().next().unwrap(),
@@ -1835,99 +2092,104 @@ fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action 
                     p = word_forward_pos(ctx.buf.as_str(), p, CharClass::WORD);
                 }
             }
-            (Some(p), false)
+            p
         }
         KeyCode::Char('b') => {
             let mut p = origin;
             for _ in 0..n {
                 p = word_backward_pos(ctx.buf.as_str(), p, CharClass::Word);
             }
-            (Some(p), false)
+            p
         }
         KeyCode::Char('B') => {
             let mut p = origin;
             for _ in 0..n {
                 p = word_backward_pos(ctx.buf.as_str(), p, CharClass::WORD);
             }
-            (Some(p), false)
+            p
         }
         KeyCode::Char('e') => {
             let mut p = origin;
             for _ in 0..n {
                 p = word_end_pos(ctx.buf.as_str(), p, CharClass::Word);
             }
-            (Some(advance_chars(ctx.buf.as_str(), p, 1)), false)
+            advance_chars(ctx.buf.as_str(), p, 1)
         }
         KeyCode::Char('E') => {
             let mut p = origin;
             for _ in 0..n {
                 p = word_end_pos(ctx.buf.as_str(), p, CharClass::WORD);
             }
-            (Some(advance_chars(ctx.buf.as_str(), p, 1)), false)
+            advance_chars(ctx.buf.as_str(), p, 1)
         }
-        KeyCode::Char('0') => (Some(line_start(ctx.buf.as_str(), origin)), false),
-        KeyCode::Char('^' | '_') => (Some(first_non_blank(ctx.buf.as_str(), origin)), false),
-        KeyCode::Char('$') => (Some(line_end(ctx.buf.as_str(), origin)), false),
+        KeyCode::Char('0') | KeyCode::Home => line_start(ctx.buf.as_str(), origin),
+        KeyCode::Char('^' | '_') => first_non_blank(ctx.buf.as_str(), origin),
+        KeyCode::Char('$') | KeyCode::End => line_end(ctx.buf.as_str(), origin),
         KeyCode::Char('%') => {
-            if let Some(t) = find_matching_bracket(ctx.buf.as_str(), origin) {
-                let lo = origin.min(t);
-                let hi = advance_chars(ctx.buf.as_str(), origin.max(t), 1);
-                return apply_charwise_op(op, ctx, lo, hi);
-            }
-            (None, false)
+            let Some(t) = find_matching_bracket(ctx.buf.as_str(), origin) else {
+                return MotionRange::None;
+            };
+            let lo = origin.min(t);
+            let hi = advance_chars(ctx.buf.as_str(), origin.max(t), 1);
+            return ordered_range(lo, hi)
+                .map(|(start, end)| MotionRange::Charwise(start, end))
+                .unwrap_or(MotionRange::None);
         }
-        KeyCode::Char('G') => (Some(ctx.buf.len()), true), // linewise
+        KeyCode::Char('G') => {
+            let (start, end) = if ctx.buf.len() < origin {
+                (ctx.buf.len(), origin)
+            } else {
+                (origin, ctx.buf.len())
+            };
+            return MotionRange::Linewise(
+                line_start(ctx.buf.as_str(), start),
+                line_end(ctx.buf.as_str(), end),
+            );
+        }
         KeyCode::Char('g') => {
-            ctx.vim_state.sub = SubState::WaitingOpG(op);
-            return Action::Consumed;
+            return op
+                .map(|op| MotionRange::Pending(SubState::WaitingOpG(op)))
+                .unwrap_or(MotionRange::None);
         }
         KeyCode::Char('f') => {
-            ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::Forward);
-            return Action::Consumed;
+            return op
+                .map(|op| MotionRange::Pending(SubState::WaitingOpFind(op, FindKind::Forward)))
+                .unwrap_or(MotionRange::None);
         }
         KeyCode::Char('F') => {
-            ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::Backward);
-            return Action::Consumed;
+            return op
+                .map(|op| MotionRange::Pending(SubState::WaitingOpFind(op, FindKind::Backward)))
+                .unwrap_or(MotionRange::None);
         }
         KeyCode::Char('t') => {
-            ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::ForwardTill);
-            return Action::Consumed;
+            return op
+                .map(|op| MotionRange::Pending(SubState::WaitingOpFind(op, FindKind::ForwardTill)))
+                .unwrap_or(MotionRange::None);
         }
         KeyCode::Char('T') => {
-            ctx.vim_state.sub = SubState::WaitingOpFind(op, FindKind::BackwardTill);
-            return Action::Consumed;
+            return op
+                .map(|op| MotionRange::Pending(SubState::WaitingOpFind(op, FindKind::BackwardTill)))
+                .unwrap_or(MotionRange::None);
         }
-        KeyCode::Home => (Some(line_start(ctx.buf.as_str(), origin)), false),
-        KeyCode::End => (Some(line_end(ctx.buf.as_str(), origin)), false),
-        _ => (None, false),
+        _ => return MotionRange::None,
     };
 
-    let Some(target) = target else {
-        return Action::Consumed;
-    };
+    ordered_range(origin, target)
+        .map(|(start, end)| MotionRange::Charwise(start, end))
+        .unwrap_or(MotionRange::None)
+}
 
-    if linewise {
-        let (start, end) = if target < origin {
-            (target, origin)
-        } else {
-            (origin, target)
-        };
-        let ls = line_start(ctx.buf.as_str(), start);
-        let le = line_end(ctx.buf.as_str(), end);
-        return apply_linewise_op(op, ctx, ls, le);
+/// Operator-pending motion dispatch.
+fn execute_op_motion(key: KeyEvent, op: Op, ctx: &mut VimContext<'_>) -> Action {
+    match resolve_motion_range(key, ctx, Some(op)) {
+        MotionRange::Charwise(start, end) => apply_charwise_op(op, ctx, start, end),
+        MotionRange::Linewise(start, end) => apply_linewise_op(op, ctx, start, end),
+        MotionRange::Pending(sub) => {
+            ctx.vim_state.sub = sub;
+            Action::Consumed
+        }
+        MotionRange::None => Action::Consumed,
     }
-
-    let (start, end) = if target < origin {
-        (target, origin)
-    } else {
-        (origin, target)
-    };
-
-    if start == end {
-        return Action::Consumed;
-    }
-
-    apply_charwise_op(op, ctx, start, end)
 }
 
 fn execute_linewise_op(op: Op, ctx: &mut VimContext<'_>) -> Action {
@@ -2073,6 +2335,44 @@ mod tests {
             modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),
+        }
+    }
+
+    #[test]
+    fn pending_input_renders_counts_and_substates() {
+        let mut state = VimWindowState::default();
+        assert_eq!(state.pending_input(), None);
+
+        state.count1 = Some(3);
+        assert_eq!(state.pending_input().as_deref(), Some("3"));
+
+        state.sub = SubState::WaitingOp(Op::Delete);
+        assert_eq!(state.pending_input().as_deref(), Some("3d"));
+
+        state.count2 = Some(2);
+        assert_eq!(state.pending_input().as_deref(), Some("3d2"));
+
+        state.sub = SubState::WaitingOpFind(Op::Delete, FindKind::ForwardTill);
+        assert_eq!(state.pending_input().as_deref(), Some("3d2t"));
+    }
+
+    #[test]
+    fn pending_input_renders_motion_prefixes() {
+        let cases = [
+            (SubState::WaitingG, "g"),
+            (SubState::WaitingZ, "z"),
+            (SubState::WaitingR, "r"),
+            (SubState::WaitingFind(FindKind::Backward), "F"),
+            (SubState::WaitingTextObj(Op::Change, true), "ci"),
+            (SubState::WaitingVisualTextObj(false), "a"),
+        ];
+
+        for (sub, expected) in cases {
+            let state = VimWindowState {
+                sub,
+                ..Default::default()
+            };
+            assert_eq!(state.pending_input().as_deref(), Some(expected));
         }
     }
 
@@ -2325,6 +2625,102 @@ mod tests {
         h.handle(key('i'));
         h.handle(key('('));
         assert_eq!(h.buf, "foo()baz");
+    }
+
+    #[test]
+    fn ysiw_adds_quotes_around_inner_word() {
+        let mut h = TestHarness::new("hello world");
+        h.cpos = 6;
+        h.handle(key('y'));
+        h.handle(key('s'));
+        h.handle(key('i'));
+        h.handle(key('w'));
+        h.handle(key('"'));
+        assert_eq!(h.buf, "hello \"world\"");
+        assert_eq!(h.mode, VimMode::Normal);
+    }
+
+    #[test]
+    fn ys_motion_adds_quotes_around_motion_range() {
+        let mut h = TestHarness::new("make strings");
+        h.handle(key('y'));
+        h.handle(key('s'));
+        h.handle(key('$'));
+        h.handle(key('"'));
+        assert_eq!(h.buf, "\"make strings\"");
+    }
+
+    #[test]
+    fn ds_quote_deletes_surrounding_string_quotes() {
+        let mut h = TestHarness::new("say \"hello\" now");
+        h.cpos = 6;
+        h.handle(key('d'));
+        h.handle(key('s'));
+        h.handle(key('"'));
+        assert_eq!(h.buf, "say hello now");
+        assert_eq!(h.cpos, 4);
+    }
+
+    #[test]
+    fn cs_quote_changes_surrounding_string_quotes() {
+        let mut h = TestHarness::new("say 'hello' now");
+        h.cpos = 6;
+        h.handle(key('c'));
+        h.handle(key('s'));
+        h.handle(key('\''));
+        h.handle(key('"'));
+        assert_eq!(h.buf, "say \"hello\" now");
+    }
+
+    #[test]
+    fn q_alias_deletes_nearest_quote_surrounding() {
+        let mut h = TestHarness::new(r#"say `hello` and 'bye'"#);
+        h.cpos = 5;
+        h.handle(key('d'));
+        h.handle(key('s'));
+        h.handle(key('q'));
+        assert_eq!(h.buf, "say hello and 'bye'");
+    }
+
+    #[test]
+    fn dis_deletes_inner_string_alias() {
+        let mut h = TestHarness::new("say \"hello\" now");
+        h.cpos = 6;
+        h.handle(key('d'));
+        h.handle(key('i'));
+        h.handle(key('s'));
+        assert_eq!(h.buf, "say \"\" now");
+    }
+
+    #[test]
+    fn tag_text_object_works_with_operators() {
+        let mut h = TestHarness::new("x <b>bold</b> y");
+        h.cpos = 5;
+        h.handle(key('d'));
+        h.handle(key('i'));
+        h.handle(key('t'));
+        assert_eq!(h.buf, "x <b></b> y");
+    }
+
+    #[test]
+    fn dst_deletes_surrounding_tags() {
+        let mut h = TestHarness::new("x <b>bold</b> y");
+        h.cpos = 5;
+        h.handle(key('d'));
+        h.handle(key('s'));
+        h.handle(key('t'));
+        assert_eq!(h.buf, "x bold y");
+    }
+
+    #[test]
+    fn cst_changes_tags_to_quotes() {
+        let mut h = TestHarness::new("x <b>bold</b> y");
+        h.cpos = 5;
+        h.handle(key('c'));
+        h.handle(key('s'));
+        h.handle(key('t'));
+        h.handle(key('"'));
+        assert_eq!(h.buf, "x \"bold\" y");
     }
 
     #[test]

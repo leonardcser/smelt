@@ -410,6 +410,7 @@ pub const SEEDED_CELL_NAMES: &[&str] = &[
     "turn_error",
     "turn_start",
     "vim_mode",
+    "vim_pending_input",
     "work_busy",
     "work_elapsed_ms",
     "work_label",
@@ -715,6 +716,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("stream_phase", EventStub);
     cells.declare("input_submit", String::new());
     cells.declare("keymap_pending", String::new());
+    cells.declare("vim_pending_input", String::new());
 
     cells
 }

@@ -2,20 +2,50 @@
 
 use super::text::{char_class, line_end, line_start, next_char_boundary, CharClass};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SurroundDelimiters {
+    pub open_start: usize,
+    pub open_end: usize,
+    pub close_start: usize,
+    pub close_end: usize,
+}
+
+impl SurroundDelimiters {
+    pub fn inner_range(self) -> (usize, usize) {
+        (self.open_end, self.close_start)
+    }
+
+    pub fn outer_range(self) -> (usize, usize) {
+        (self.open_start, self.close_end)
+    }
+}
+
 pub(crate) fn text_object(
     buf: &str,
     cpos: usize,
     inner: bool,
     kind: char,
 ) -> Option<(usize, usize)> {
+    if kind == 'q' || kind == 's' {
+        return text_object_any_quote(buf, cpos, inner);
+    }
+    if kind == 't' {
+        return surrounding_delimiters(buf, cpos, kind).map(|d| {
+            if inner {
+                d.inner_range()
+            } else {
+                d.outer_range()
+            }
+        });
+    }
     match kind {
         'w' => text_object_word(buf, cpos, inner, CharClass::Word),
         'W' => text_object_word(buf, cpos, inner, CharClass::WORD),
         '"' | '\'' | '`' => text_object_quote(buf, cpos, inner, kind),
         '(' | ')' | 'b' => text_object_pair(buf, cpos, inner, '(', ')'),
-        '[' | ']' => text_object_pair(buf, cpos, inner, '[', ']'),
+        '[' | ']' | 'r' => text_object_pair(buf, cpos, inner, '[', ']'),
         '{' | '}' | 'B' => text_object_pair(buf, cpos, inner, '{', '}'),
-        '<' | '>' => text_object_pair(buf, cpos, inner, '<', '>'),
+        '<' | '>' | 'a' => text_object_pair(buf, cpos, inner, '<', '>'),
         'p' => text_object_paragraph(buf, cpos, inner),
         _ => None,
     }
@@ -88,39 +118,26 @@ fn text_object_quote(buf: &str, cpos: usize, inner: bool, quote: char) -> Option
     // Mirrors vim's `current_quote` (textobject.c): scan backward for an
     // opening quote, then forward for a closing one. `\` escapes the next
     // char (vim's default `'quoteescape'`).
+    let delims = quote_delimiters(buf, cpos, quote)?;
+    if inner {
+        return Some(delims.inner_range());
+    }
+
     let line_s = line_start(buf, cpos);
     let line_e = line_end(buf, cpos);
-    let line = &buf[line_s..line_e];
-    let rel = cpos - line_s;
-    let qlen = quote.len_utf8();
-
-    let mut open = find_prev_quote(line, rel, quote, true);
-    if open.is_none() {
-        open = find_next_quote(line, rel, quote, false);
-    }
-    let open = open?;
-    let close = find_next_quote(line, open + qlen, quote, true)?;
-
-    let abs_open = line_s + open;
-    let abs_close = line_s + close;
-
-    if inner {
-        return Some((abs_open + qlen, abs_close));
-    }
     let bytes = buf.as_bytes();
-    let after = abs_close + qlen;
-    let mut a_end = after;
+    let mut a_end = delims.close_end;
     while a_end < line_e && matches!(bytes[a_end], b' ' | b'\t') {
         a_end += 1;
     }
-    if a_end > after {
-        return Some((abs_open, a_end));
+    if a_end > delims.close_end {
+        return Some((delims.open_start, a_end));
     }
-    let mut a_start = abs_open;
+    let mut a_start = delims.open_start;
     while a_start > line_s && matches!(bytes[a_start - 1], b' ' | b'\t') {
         a_start -= 1;
     }
-    Some((a_start, after))
+    Some((a_start, delims.close_end))
 }
 
 fn find_next_quote(line: &str, from: usize, quote: char, respect_escape: bool) -> Option<usize> {
@@ -169,6 +186,188 @@ fn find_prev_quote(line: &str, from: usize, quote: char, respect_escape: bool) -
         }
     }
     None
+}
+
+fn text_object_any_quote(buf: &str, cpos: usize, inner: bool) -> Option<(usize, usize)> {
+    nearest_quote_delimiters(buf, cpos).map(|d| {
+        if inner {
+            d.inner_range()
+        } else {
+            d.outer_range()
+        }
+    })
+}
+
+fn nearest_quote_delimiters(buf: &str, cpos: usize) -> Option<SurroundDelimiters> {
+    let cursor = smelt_buffer::text::snap(buf, cpos.min(buf.len()));
+    ['"', '\'', '`']
+        .into_iter()
+        .filter_map(|quote| quote_delimiters(buf, cursor, quote))
+        .filter(|d| cursor >= d.open_start && cursor <= d.close_end)
+        .min_by_key(|d| d.close_end.saturating_sub(d.open_start))
+}
+
+pub(crate) fn surrounding_delimiters(
+    buf: &str,
+    cpos: usize,
+    kind: char,
+) -> Option<SurroundDelimiters> {
+    match kind {
+        'q' | 's' => nearest_quote_delimiters(buf, cpos),
+        '"' | '\'' | '`' => quote_delimiters(buf, cpos, kind),
+        '(' | ')' | 'b' => pair_delimiters(buf, cpos, '(', ')'),
+        '[' | ']' | 'r' => pair_delimiters(buf, cpos, '[', ']'),
+        '{' | '}' | 'B' => pair_delimiters(buf, cpos, '{', '}'),
+        '<' | '>' | 'a' => pair_delimiters(buf, cpos, '<', '>'),
+        't' => tag_delimiters(buf, cpos),
+        _ => None,
+    }
+}
+
+fn quote_delimiters(buf: &str, cpos: usize, quote: char) -> Option<SurroundDelimiters> {
+    let line_s = line_start(buf, cpos);
+    let line_e = line_end(buf, cpos);
+    let line = &buf[line_s..line_e];
+    let rel = cpos.saturating_sub(line_s);
+    let qlen = quote.len_utf8();
+
+    let mut open = find_prev_quote(line, rel, quote, true);
+    if open.is_none() {
+        open = find_next_quote(line, rel, quote, false);
+    }
+    let open = open?;
+    let close = find_next_quote(line, open + qlen, quote, true)?;
+    Some(SurroundDelimiters {
+        open_start: line_s + open,
+        open_end: line_s + open + qlen,
+        close_start: line_s + close,
+        close_end: line_s + close + qlen,
+    })
+}
+
+fn pair_delimiters(buf: &str, cpos: usize, open: char, close: char) -> Option<SurroundDelimiters> {
+    let (outer_start, outer_end) = text_object_pair(buf, cpos, false, open, close)?;
+    Some(SurroundDelimiters {
+        open_start: outer_start,
+        open_end: outer_start + open.len_utf8(),
+        close_start: outer_end - close.len_utf8(),
+        close_end: outer_end,
+    })
+}
+
+#[derive(Clone, Debug)]
+struct HtmlTag<'a> {
+    start: usize,
+    end: usize,
+    name: &'a str,
+    closing: bool,
+    self_closing: bool,
+}
+
+// Lightweight HTML/XML tag matching for Vim `it`/`at` and surround `t`.
+// It is deliberately syntax-only: quoted attributes are skipped while looking
+// for `>`, self-closing tags are ignored, and malformed tags do not match.
+fn tag_delimiters(buf: &str, cpos: usize) -> Option<SurroundDelimiters> {
+    let cursor = smelt_buffer::text::snap(buf, cpos.min(buf.len()));
+    let mut stack: Vec<HtmlTag<'_>> = Vec::new();
+    let mut best: Option<SurroundDelimiters> = None;
+    let mut i = 0usize;
+
+    while i < buf.len() {
+        let Some(rel) = buf[i..].find('<') else { break };
+        let start = i + rel;
+        let Some(tag) = parse_html_tag(buf, start) else {
+            i = start + 1;
+            continue;
+        };
+        i = tag.end;
+
+        if tag.closing {
+            if let Some(open_idx) = stack
+                .iter()
+                .rposition(|open| open.name.eq_ignore_ascii_case(tag.name))
+            {
+                let open = stack.remove(open_idx);
+                if cursor >= open.start && cursor <= tag.end {
+                    let candidate = SurroundDelimiters {
+                        open_start: open.start,
+                        open_end: open.end,
+                        close_start: tag.start,
+                        close_end: tag.end,
+                    };
+                    let replace = best
+                        .map(|current| {
+                            candidate.close_end - candidate.open_start
+                                < current.close_end - current.open_start
+                        })
+                        .unwrap_or(true);
+                    if replace {
+                        best = Some(candidate);
+                    }
+                }
+            }
+        } else if !tag.self_closing {
+            stack.push(tag);
+        }
+    }
+
+    best
+}
+
+fn parse_html_tag<'a>(buf: &'a str, start: usize) -> Option<HtmlTag<'a>> {
+    let bytes = buf.as_bytes();
+    if bytes.get(start) != Some(&b'<') {
+        return None;
+    }
+
+    let mut i = start + 1;
+    let mut closing = false;
+    if bytes.get(i) == Some(&b'/') {
+        closing = true;
+        i += 1;
+    }
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+
+    let name_start = i;
+    while i < bytes.len() && is_tag_name_byte(bytes[i]) {
+        i += 1;
+    }
+    if i == name_start {
+        return None;
+    }
+    let name = &buf[name_start..i];
+
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
+        } else if b == b'>' {
+            let mut j = i;
+            while j > start && matches!(bytes[j - 1], b' ' | b'\t' | b'\n' | b'\r') {
+                j -= 1;
+            }
+            return Some(HtmlTag {
+                start,
+                end: i + 1,
+                name,
+                closing,
+                self_closing: !closing && j > start && bytes[j - 1] == b'/',
+            });
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_tag_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-')
 }
 
 fn text_object_paragraph(buf: &str, cpos: usize, inner: bool) -> Option<(usize, usize)> {
@@ -416,6 +615,40 @@ mod tests {
         let s = "\"a\nb\"";
         // cursor on `a` - only the open quote is on this line.
         assert_eq!(text_object(s, 1, true, '"'), None);
+    }
+
+    #[test]
+    fn q_alias_selects_the_nearest_quoted_string() {
+        let s = r#""a" `b` 'c'"#;
+        let r = text_object(s, 5, true, 'q').unwrap();
+        assert_eq!(slice(s, r), "b");
+    }
+
+    #[test]
+    fn s_alias_selects_the_nearest_quoted_string() {
+        let s = r#"call("hello")"#;
+        let r = text_object(s, 7, true, 's').unwrap();
+        assert_eq!(slice(s, r), "hello");
+        let r = text_object(s, 7, false, 's').unwrap();
+        assert_eq!(slice(s, r), "\"hello\"");
+    }
+
+    #[test]
+    fn tag_text_objects_select_inner_and_outer_html_tags() {
+        let s = r#"x <div class="a"><span>hello</span></div> y"#;
+        let inner = text_object(s, 25, true, 't').unwrap();
+        assert_eq!(slice(s, inner), "hello");
+        let outer = text_object(s, 25, false, 't').unwrap();
+        assert_eq!(slice(s, outer), "<span>hello</span>");
+    }
+
+    #[test]
+    fn tag_text_object_handles_nested_same_name_tags() {
+        let s = "<div>outer <div>inner</div> tail</div>";
+        let inner = text_object(s, 17, false, 't').unwrap();
+        assert_eq!(slice(s, inner), "<div>inner</div>");
+        let outer = text_object(s, 30, false, 't').unwrap();
+        assert_eq!(slice(s, outer), s);
     }
 
     // ── pair: i( / a( / i{ / a{ / i[ / i< ───────────────────────────────

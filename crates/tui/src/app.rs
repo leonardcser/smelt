@@ -1220,13 +1220,17 @@ impl TuiApp {
         Some(expires_at.saturating_duration_since(self.core.clock.instant_now()))
     }
 
-    /// Publish `vim_mode`, `keymap_pending`, `confirms_pending`, `now`,
-    /// `notification_visible`, `spinner_frame`, and the `work_*` family of cells whenever their values change.
+    /// Publish `vim_mode`, `vim_pending_input`, `keymap_pending`,
+    /// `confirms_pending`, `now`, `notification_visible`, `spinner_frame`,
+    /// and the `work_*` family of cells whenever their values change.
     pub(crate) fn publish_diff_cells(&mut self) {
         let keymap_pending = self.keymap_pending_cell_value();
         self.core
             .cells
             .publish_if_changed("vim_mode", self.vim_mode_cell_value());
+        self.core
+            .cells
+            .publish_if_changed("vim_pending_input", self.vim_pending_input_cell_value());
         self.core
             .cells
             .publish_if_changed("keymap_pending", keymap_pending);
@@ -1305,6 +1309,13 @@ impl TuiApp {
             crate::smelt_edit::VimMode::Normal => "NORMAL",
         }
         .into()
+    }
+
+    fn vim_pending_input_cell_value(&self) -> String {
+        self.ui
+            .focused_window()
+            .and_then(|w| w.vim_pending_input())
+            .unwrap_or_default()
     }
 
     /// Cursor position of the focused window, published as `cursor_pos`.

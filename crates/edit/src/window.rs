@@ -673,14 +673,21 @@ impl Window {
         &self.surface.text().vim_state
     }
 
-    pub fn vim_has_pending_input(&self) -> bool {
+    pub fn vim_pending_input(&self) -> Option<String> {
         let text = self.surface.text();
-        text.vim_enabled
-            && !text.vim_state.is_idle()
-            && matches!(
+        if !text.vim_enabled
+            || !matches!(
                 text.vim_mode,
                 VimMode::Normal | VimMode::Visual | VimMode::VisualLine
             )
+        {
+            return None;
+        }
+        text.vim_state.pending_input()
+    }
+
+    pub fn vim_has_pending_input(&self) -> bool {
+        self.vim_pending_input().is_some()
     }
 
     pub fn shift_vim_visual_anchor(&mut self, delta: usize) {
