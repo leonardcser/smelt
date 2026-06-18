@@ -320,9 +320,45 @@ impl DisplayDocument for BufferDocument<'_> {
     fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
         match range {
             TextRange::Bytes(range) => Some(self.buf.copy_range(range)),
-            TextRange::Rows(_) => None,
+            TextRange::Rows(range) => copy_buffer_doc_range(self.buf, range),
         }
     }
+}
+
+pub(crate) fn copy_buffer_doc_range(buf: &Buffer, range: DocRange) -> Option<CopyOutput> {
+    let lines = buf.lines();
+    if lines.is_empty()
+        || (range.start.row, range.start.byte_col) >= (range.end.row, range.end.byte_col)
+    {
+        return None;
+    }
+    let start_row = range.start.row.min(range.end.row);
+    let end_row = range.start.row.max(range.end.row);
+    let mut out = String::new();
+    for row_idx in start_row..=end_row {
+        if row_idx == end_row && range.end.byte_col == 0 && end_row > start_row {
+            break;
+        }
+        let row = lines.get(row_to_usize(row_idx))?;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        if start_row == end_row {
+            let start = range.start.byte_col.min(range.end.byte_col);
+            let end = range.start.byte_col.max(range.end.byte_col);
+            out.push_str(smelt_buffer::text::slice(row, start..end));
+        } else if row_idx == range.start.row {
+            out.push_str(smelt_buffer::text::slice(
+                row,
+                range.start.byte_col..row.len(),
+            ));
+        } else if row_idx == range.end.row {
+            out.push_str(smelt_buffer::text::slice(row, 0..range.end.byte_col));
+        } else {
+            out.push_str(row);
+        }
+    }
+    Some(CopyOutput::same(out))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -459,6 +495,27 @@ mod tests {
             }))
             .expect("copy range");
         assert_eq!(copied.kill_ring, "lpha\nbe");
+    }
+
+    #[test]
+    fn buffer_document_copies_row_ranges() {
+        let mut buf = Buffer::new(BufId(1), crate::BufCreateOpts::default());
+        buf.set_all_lines(vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        let mut doc = BufferDocument::new(&buf);
+
+        let copied = doc
+            .copy_range(TextRange::Rows(DocRange {
+                start: DocPosition {
+                    row: 0,
+                    byte_col: 1,
+                },
+                end: DocPosition {
+                    row: 2,
+                    byte_col: 2,
+                },
+            }))
+            .expect("copy range");
+        assert_eq!(copied.kill_ring, "lpha\nbeta\nga");
     }
 
     #[test]

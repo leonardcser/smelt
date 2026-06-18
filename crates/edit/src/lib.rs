@@ -2674,9 +2674,27 @@ impl DisplayDocument for BufferDisplayDocument<'_> {
     }
 
     fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
-        match range {
-            TextRange::Rows(_) | TextRange::Bytes(_) => None,
-        }
+        let range = match range {
+            TextRange::Rows(range) => range,
+            TextRange::Bytes(_) => return None,
+        };
+        let win = self.ui.win(self.win)?;
+        let buf = self.ui.buf(win.buf)?;
+        let range = if let Some(materialized) = win.materialized_rows() {
+            DocRange {
+                start: DocPosition {
+                    row: materialized.local_row(range.start.row),
+                    byte_col: range.start.byte_col,
+                },
+                end: DocPosition {
+                    row: materialized.local_row(range.end.row),
+                    byte_col: range.end.byte_col,
+                },
+            }
+        } else {
+            range
+        };
+        crate::row::copy_buffer_doc_range(buf, range)
     }
 
     fn search_matches(
