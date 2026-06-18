@@ -7,7 +7,7 @@
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BreakPolicy {
@@ -328,7 +328,8 @@ fn text_width(text: &str) -> usize {
 }
 
 fn char_width(ch: char) -> usize {
-    UnicodeWidthChar::width(ch).unwrap_or(0)
+    let mut buf = [0; 4];
+    UnicodeWidthStr::width(ch.encode_utf8(&mut buf))
 }
 
 #[cfg(test)]
@@ -347,6 +348,15 @@ mod tests {
         assert_eq!(
             texts(line.wrap_ranges(7)),
             vec![vec![String::from("hello ")], vec![String::from("world")]]
+        );
+    }
+
+    #[test]
+    fn oversized_control_word_counts_controls_as_cells() {
+        let line = InlineLine::plain("\0\0\0\0x", ());
+        assert_eq!(
+            texts(line.wrap_ranges(3)),
+            vec![vec![String::from("\0\0\0")], vec![String::from("\0x")]]
         );
     }
 

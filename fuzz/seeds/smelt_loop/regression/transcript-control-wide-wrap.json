@@ -1,0 +1,18 @@
+{
+  "_about": "Transcript text wrapping regression: streamed model text with control bytes and a wide glyph must wrap using the same display width model as window layout.",
+  "_fix": "Count control characters consistently in plain text wrap ranges so preformatted transcript rows stay within the pinned viewport.",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": {
+        "chunks": 150,
+        "error": false,
+        "text": "\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000䖖",
+        "thinking": "",
+        "turn_id": 0
+      },
+      "kind": "macro_stream_turn"
+    }
+  ],
+  "vim": true
+}

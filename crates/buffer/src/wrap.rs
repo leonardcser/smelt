@@ -40,7 +40,7 @@ pub fn wrap_line_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
 }
 
 fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Vec<(usize, usize)>) {
-    use unicode_width::UnicodeWidthChar;
+    use unicode_width::UnicodeWidthStr;
     if start == end {
         out.push((start, end));
         return;
@@ -60,10 +60,7 @@ fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Ve
         }
         // Process the word `line[word_start..i]`.
         let word_end = i;
-        let word_w: usize = line[word_start..word_end]
-            .chars()
-            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-            .sum();
+        let word_w: usize = UnicodeWidthStr::width(&line[word_start..word_end]);
         let trailing = if at_space { 1 } else { 0 };
         let total_w = word_w + trailing;
         // If word+space doesn't fit on current line and chunk has content, emit.
@@ -79,15 +76,16 @@ fn wrap_logical(line: &str, start: usize, end: usize, width: usize, out: &mut Ve
             // Char-break the word.
             let mut idx = word_start;
             for ch in line[word_start..word_end].chars() {
-                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                let end_idx = idx + ch.len_utf8();
+                let cw = UnicodeWidthStr::width(&line[idx..end_idx]);
                 if col + cw > width && col > 0 {
                     out.push((chunk_start, chunk_end));
                     chunk_start = idx;
                     col = 0;
                 }
-                chunk_end = idx + ch.len_utf8();
+                chunk_end = end_idx;
                 col += cw;
-                idx += ch.len_utf8();
+                idx = end_idx;
             }
         } else {
             chunk_end = word_end;
@@ -182,6 +180,14 @@ mod wrap_tests {
         let r = wrap_line_ranges(s, 10);
         let chunks: Vec<&str> = r.iter().map(|(a, b)| &s[*a..*b]).collect();
         assert_eq!(chunks, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn control_chars_count_as_visible_cells() {
+        let s = "\0\0\0\0x";
+        let r = wrap_line_ranges(s, 3);
+        let chunks: Vec<&str> = r.iter().map(|(a, b)| &s[*a..*b]).collect();
+        assert_eq!(chunks, vec!["\0\0\0", "\0x"]);
     }
 
     #[test]
