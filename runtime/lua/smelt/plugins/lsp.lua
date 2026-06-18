@@ -21,6 +21,69 @@ local function clear_regs()
   state.regs = {}
 end
 
+local JSON_PREVIEW_LIMIT = 200
+local JSON_OBJECT_KEY_LIMIT = 200
+local JSON_DEPTH_LIMIT = 8
+
+local function is_array(t)
+  if type(t) ~= "table" then return false end
+  local n = #t
+  if n == 0 then return next(t) == nil end
+  for k, _ in pairs(t) do
+    if type(k) ~= "number" or k < 1 or k > n or k % 1 ~= 0 then return false end
+  end
+  return true
+end
+
+local function limited_json_value(value, depth)
+  if type(value) ~= "table" then return value end
+  if depth >= JSON_DEPTH_LIMIT then return "<truncated: maximum preview depth reached>" end
+
+  if is_array(value) then
+    local total = #value
+    local keep = math.min(total, JSON_PREVIEW_LIMIT)
+    local items = {}
+    for i = 1, keep do
+      items[i] = limited_json_value(value[i], depth + 1)
+    end
+    if keep < total then
+      return {
+        truncated = true,
+        total = total,
+        shown = keep,
+        omitted = total - keep,
+        items = items,
+      }
+    end
+    return items
+  end
+
+  local out = {}
+  local shown = 0
+  local omitted = 0
+  for k, v in pairs(value) do
+    if shown < JSON_OBJECT_KEY_LIMIT then
+      out[k] = limited_json_value(v, depth + 1)
+      shown = shown + 1
+    else
+      omitted = omitted + 1
+    end
+  end
+  if omitted > 0 then
+    out._truncated = true
+    out._omitted_keys = omitted
+  end
+  return out
+end
+
+local function format_json_result(result)
+  local preview = limited_json_value(result or {}, 0)
+  return {
+    content = smelt.json.encode(preview, { pretty = true }),
+    metadata = { syntax = "json" },
+  }
+end
+
 local function backend_name(tool_name)
   return ({
     lsp_status = "__status",
@@ -45,7 +108,7 @@ local function call_backend(name, args)
   if payload.err then return { content = payload.err, is_error = true } end
   local result = payload.result
   if type(result) == "string" then return { content = result } end
-  return { content = smelt.json.encode(result or {}, { pretty = true }) }
+  return format_json_result(result)
 end
 
 local function path_param(desc)

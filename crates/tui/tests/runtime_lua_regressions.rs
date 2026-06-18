@@ -554,6 +554,55 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
 }
 
 #[test]
+fn structured_tool_output_uses_inline_syntax_runs() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        smelt = {
+          transcript = { defaults = {} },
+          text = { truncate_cells = function(text) return text end },
+          layout = {
+            text = function(content, opts)
+              return { kind = "text", content = content, opts = opts or {} }
+            end,
+            cap = function(child, opts)
+              return { kind = "cap", child = child, opts = opts or {} }
+            end,
+            runs = function(lines, opts)
+              return { kind = "runs", lines = lines, opts = opts or {} }
+            end,
+            code = function(content, opts)
+              return { kind = "code", content = content, opts = opts or {} }
+            end,
+          },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+    lua.load(TRANSCRIPT_DEFAULTS_LUA)
+        .exec()
+        .expect("load transcript defaults");
+
+    let (node_kind, child_kind, syntax): (String, String, String) = lua
+        .load(
+            r#"
+            local node = smelt.transcript.defaults.render_tool_output_tail({
+              content = "{\n  \"state\": \"ready\"\n}",
+              metadata = { syntax = "json" },
+            }, { limits = { tool_output_rows = 20 } })
+            return node.kind, node.child.kind, node.child.lines[1][1].syntax
+            "#,
+        )
+        .eval()
+        .expect("render structured tool output");
+
+    assert_eq!(node_kind, "cap");
+    assert_eq!(child_kind, "runs");
+    assert_eq!(syntax, "json");
+}
+
+#[test]
 fn ps_details_dialog_uses_list_dialog_height() {
     assert!(PS_LUA.contains("local DIALOG_HEIGHT = \"60%\""));
     assert!(PS_LUA.contains("height = DIALOG_HEIGHT"));

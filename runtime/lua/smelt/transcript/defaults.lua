@@ -340,7 +340,67 @@ local function output_total_rows(output)
   return tonumber(display_count.value)
 end
 
---- Render raw tool output without gutter using generic layout primitives: text and
+local MAX_RENDER_CONTENT_BYTES = 120000
+
+local function output_syntax(output)
+  local metadata = output and output.metadata
+  if type(metadata) ~= "table" then return nil end
+  local syntax = metadata.syntax or metadata.lang or metadata.language
+  if type(syntax) ~= "string" or syntax == "" then return nil end
+  return syntax
+end
+
+local function preview_line(line)
+  if #line <= MAX_RENDER_CONTENT_BYTES then return line end
+  if smelt.text and smelt.text.truncate_cells then
+    return smelt.text.truncate_cells(line, 4000, { suffix = "…" })
+  end
+  return "<truncated long line>"
+end
+
+local function preview_render_content(content, keep)
+  if #content <= MAX_RENDER_CONTENT_BYTES then return content, nil end
+
+  local lines = {}
+  local first = 1
+  local total = 0
+  local bytes = 0
+  keep = keep or "tail"
+  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+    total = total + 1
+    local line_bytes = #line + 1
+    if keep == "head" then
+      if bytes + line_bytes <= MAX_RENDER_CONTENT_BYTES or #lines == 0 then
+        line = preview_line(line)
+        lines[#lines + 1] = line
+        bytes = bytes + #line + 1
+      end
+    else
+      line = preview_line(line)
+      lines[#lines + 1] = line
+      bytes = bytes + #line + 1
+      while bytes > MAX_RENDER_CONTENT_BYTES and first < #lines do
+        bytes = bytes - (#lines[first] + 1)
+        first = first + 1
+      end
+    end
+  end
+
+  local preview = {}
+  for i = first, #lines do preview[#preview + 1] = lines[i] end
+  return table.concat(preview, "\n"), total
+end
+
+local function syntax_lines(content, syntax)
+  local lines = {}
+  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+    lines[#lines + 1] = { { text = line, syntax = syntax } }
+  end
+  if #lines == 0 then lines[1] = { { text = "", syntax = syntax } } end
+  return lines
+end
+
+--- Render raw tool output without gutter using generic layout primitives: text/runs and
 --- a rendered-row cap. Body renderers use this for expanded/tail previews.
 ---@type fun(output: smelt.transcript.ToolOutput?, ctx: smelt.transcript.Context?, opts: table?): smelt.layout.Node
 function smelt.transcript.defaults.render_tool_output_tail(output, ctx, opts)
@@ -348,21 +408,31 @@ function smelt.transcript.defaults.render_tool_output_tail(output, ctx, opts)
   ctx = ctx or {}
   local limits = ctx.limits or {}
   local content = output and output.content or ""
+  local preview_total_rows
+  content, preview_total_rows = preview_render_content(content, opts.keep or "tail")
   local is_error = output and output.is_error == true
   local rows = opts.rows or limits.tool_output_rows or 20
   local hl = opts.hl or opts.hl_group
   if not hl and is_error then hl = "ErrorMsg" end
 
-  return layout.cap(
-    layout.text(content, {
+  local syntax = output_syntax(output)
+  local body
+  if syntax and not hl then
+    body = layout.runs(syntax_lines(content, syntax))
+  else
+    body = layout.text(content, {
       hl_group = hl,
       ansi = true,
-    }),
+    })
+  end
+
+  return layout.cap(
+    body,
     {
       rows = rows,
       keep = opts.keep or "tail",
       marker = opts.marker or "above",
-      total_rows = opts.total_rows or output_total_rows(output),
+      total_rows = opts.total_rows or output_total_rows(output) or preview_total_rows,
     }
   )
 end

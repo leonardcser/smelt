@@ -493,3 +493,137 @@ app_story!(mcp_tool_json_args_wrap_in_header, |ctx| {
     );
     ctx.assert_snapshot();
 });
+
+app_story!(lsp_tool_states, |ctx| {
+    ctx.set_viewport(96, 86);
+    ctx.run_lua("require('smelt.plugins.lsp').setup({ servers = {} })");
+    ctx.tool_call_with_metadata(
+        "lsp_status",
+        &[("file_path", json!("crates/core/src/lsp.rs"))],
+        r#"{
+  "servers": [
+    {
+      "name": "rust",
+      "state": "ready",
+      "root": "/repo/smelt"
+    }
+  ]
+}"#,
+        json!({ "syntax": "json" }),
+        Some(2),
+    );
+    ctx.tool_call_with_metadata(
+        "lsp_document_symbols",
+        &[("file_path", json!("crates/core/src/lsp.rs"))],
+        r#"[
+  {
+    "name": "LspManager",
+    "kind": 5,
+    "range": {
+      "start": { "line": 70, "character": 0 },
+      "end": { "line": 260, "character": 1 }
+    }
+  }
+]"#,
+        json!({ "syntax": "json" }),
+        Some(18),
+    );
+    ctx.tool_call_with_metadata(
+        "lsp_definition",
+        &[
+            ("file_path", json!("crates/core/src/lsp.rs")),
+            ("line", json!(111)),
+            ("column", json!(12)),
+        ],
+        r#"[
+  {
+    "uri": "file:///repo/smelt/crates/core/src/lsp.rs",
+    "range": {
+      "start": { "line": 70, "character": 11 },
+      "end": { "line": 70, "character": 21 }
+    }
+  }
+]"#,
+        json!({ "syntax": "json" }),
+        Some(9),
+    );
+    ctx.tool_call_with_metadata(
+        "lsp_references",
+        &[
+            ("file_path", json!("crates/core/src/lsp.rs")),
+            ("line", json!(111)),
+            ("column", json!(12)),
+            ("include_declaration", json!(false)),
+        ],
+        r#"[
+  {
+    "uri": "file:///repo/smelt/crates/core/src/lua/api/lsp.rs",
+    "range": {
+      "start": { "line": 43, "character": 22 },
+      "end": { "line": 43, "character": 32 }
+    }
+  }
+]"#,
+        json!({ "syntax": "json" }),
+        Some(27),
+    );
+    ctx.tool_call_with_metadata(
+        "lsp_diagnostics",
+        &[("file_path", json!("crates/core/src/lsp.rs"))],
+        r#"[
+  {
+    "range": {
+      "start": { "line": 210, "character": 8 },
+      "end": { "line": 210, "character": 17 }
+    },
+    "severity": 2,
+    "message": "unused variable: settings"
+  }
+]"#,
+        json!({ "syntax": "json" }),
+        Some(6),
+    );
+    ctx.tool_call_with_metadata(
+        "lsp_rename_preview",
+        &[
+            ("file_path", json!("crates/core/src/lsp.rs")),
+            ("line", json!(111)),
+            ("column", json!(12)),
+            ("new_name", json!("manager")),
+        ],
+        r#"{
+  "changes": {
+    "file:///repo/smelt/crates/core/src/lsp.rs": [
+      {
+        "range": {
+          "start": { "line": 111, "character": 11 },
+          "end": { "line": 111, "character": 21 }
+        },
+        "newText": "manager"
+      }
+    ]
+  }
+}"#,
+        json!({ "syntax": "json" }),
+        Some(15),
+    );
+    ctx.tool_call_with_metadata(
+        "lsp_rename",
+        &[
+            ("file_path", json!("crates/core/src/lsp.rs")),
+            ("line", json!(111)),
+            ("column", json!(12)),
+            ("new_name", json!("manager")),
+        ],
+        r#"{
+  "applied": true,
+  "files": ["/repo/smelt/crates/core/src/lsp.rs"],
+  "edits": 1
+}"#,
+        json!({ "syntax": "json" }),
+        Some(21),
+    );
+    ctx.assert_snapshot_named("expanded");
+    ctx.run_lua("smelt.transcript.fold_all('close')");
+    ctx.assert_snapshot_named("collapsed");
+});

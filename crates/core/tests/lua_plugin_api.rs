@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 const BOOTSTRAP_LUA: &str = include_str!("../../../runtime/lua/smelt/_bootstrap.lua");
 const READ_PROCESS_OUTPUT_LUA: &str =
     include_str!("../../../runtime/lua/smelt/tools/read_process_output.lua");
+const LSP_PLUGIN_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/lsp.lua");
 
 /// Build a runtime with bootstrap evaluated. Tests that don't need
 /// host I/O can drive coroutines through this directly.
@@ -376,6 +377,204 @@ fn parallel_tool_execute_steps_the_new_task_not_an_older_ready_task() {
     );
 }
 
+#[test]
+fn tool_execute_preserves_result_metadata() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "metadata_tool",
+                execute = function()
+                    return {
+                        content = "{\"ok\":true}",
+                        metadata = { syntax = "json" },
+                    }
+                end,
+            })
+            "#,
+        )
+        .exec()
+        .expect("register metadata_tool");
+
+    let result = rt.execute_tool(
+        "metadata_tool",
+        &HashMap::new(),
+        3,
+        "call-metadata",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        Instant::now(),
+    );
+
+    match result {
+        ToolExecResult::Immediate {
+            content,
+            is_error,
+            metadata,
+        } => {
+            assert_eq!(content, "{\"ok\":true}");
+            assert!(!is_error);
+            assert_eq!(metadata, Some(serde_json::json!({ "syntax": "json" })));
+        }
+        ToolExecResult::Pending => panic!("metadata_tool should complete immediately"),
+    }
+}
+
+#[test]
+fn lsp_plugin_marks_structured_results_as_json() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.lsp = {
+                configure = function(_) end,
+                __status = function(id, _)
+                    smelt.task.resume(id, { result = { state = "ready" } })
+                end,
+            }
+            for _, name in ipairs({ "glob", "grep", "edit_file" }) do
+                smelt.tools.register({ name = name, execute = function() return "" end })
+            end
+            "#,
+        )
+        .exec()
+        .expect("stub lsp backend");
+    rt.lua
+        .load(LSP_PLUGIN_LUA)
+        .set_name("smelt/plugins/lsp.lua")
+        .exec()
+        .expect("load lsp plugin");
+
+    let result = rt.execute_tool(
+        "lsp_status",
+        &HashMap::new(),
+        4,
+        "call-lsp-status",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        Instant::now(),
+    );
+
+    let (content, is_error, metadata) = match result {
+        ToolExecResult::Immediate {
+            content,
+            is_error,
+            metadata,
+        } => (content, is_error, metadata),
+        ToolExecResult::Pending => {
+            rt.pump_task_events();
+            rt.drive_tasks(Instant::now())
+                .into_iter()
+                .find_map(|out| match out {
+                    TaskDriveOutput::ToolComplete {
+                        request_id: 4,
+                        call_id,
+                        content,
+                        is_error,
+                        metadata,
+                    } if call_id == "call-lsp-status" => Some((content, is_error, metadata)),
+                    _ => None,
+                })
+                .expect("lsp_status completion")
+        }
+    };
+
+    assert!(!is_error);
+    assert!(content.contains("\"state\": \"ready\""));
+    assert!(!content.contains("```"));
+    assert_eq!(metadata, Some(serde_json::json!({ "syntax": "json" })));
+}
+
+#[test]
+fn lsp_plugin_truncates_large_structured_results() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.lsp = {
+                configure = function(_) end,
+                __references = function(id, _)
+                    local refs = {}
+                    for i = 1, 205 do
+                        refs[i] = {
+                            uri = "file:///tmp/example" .. i .. ".rs",
+                            range = {
+                                start = { line = i, character = 1 },
+                                ["end"] = { line = i, character = 2 },
+                            },
+                        }
+                    end
+                    smelt.task.resume(id, { result = refs })
+                end,
+            }
+            for _, name in ipairs({ "glob", "grep", "edit_file" }) do
+                smelt.tools.register({ name = name, execute = function() return "" end })
+            end
+            "#,
+        )
+        .exec()
+        .expect("stub lsp backend");
+    rt.lua
+        .load(LSP_PLUGIN_LUA)
+        .set_name("smelt/plugins/lsp.lua")
+        .exec()
+        .expect("load lsp plugin");
+
+    let mut args = HashMap::new();
+    args.insert("file_path".into(), serde_json::json!("/tmp/example.rs"));
+    args.insert("line".into(), serde_json::json!(1));
+    args.insert("column".into(), serde_json::json!(1));
+    let result = rt.execute_tool(
+        "lsp_references",
+        &args,
+        5,
+        "call-lsp-references",
+        ToolEnv {
+            mode: protocol::AgentMode::normal(),
+            session_id: "sess",
+            session_dir: Path::new("/tmp"),
+        },
+        Instant::now(),
+    );
+
+    let (content, is_error, metadata) = match result {
+        ToolExecResult::Immediate {
+            content,
+            is_error,
+            metadata,
+        } => (content, is_error, metadata),
+        ToolExecResult::Pending => {
+            rt.pump_task_events();
+            rt.drive_tasks(Instant::now())
+                .into_iter()
+                .find_map(|out| match out {
+                    TaskDriveOutput::ToolComplete {
+                        request_id: 5,
+                        call_id,
+                        content,
+                        is_error,
+                        metadata,
+                    } if call_id == "call-lsp-references" => Some((content, is_error, metadata)),
+                    _ => None,
+                })
+                .expect("lsp_references completion")
+        }
+    };
+
+    assert!(!is_error);
+    assert!(content.contains("\"truncated\": true"));
+    assert!(content.contains("\"total\": 205"));
+    assert!(content.contains("\"shown\": 200"));
+    assert!(!content.contains("example205.rs"));
+    assert_eq!(metadata, Some(serde_json::json!({ "syntax": "json" })));
+}
 #[test]
 fn tool_timeout_completes_a_parked_tool_with_error() {
     let rt = fresh();
