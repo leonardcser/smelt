@@ -1697,6 +1697,7 @@ impl Ui {
     {
         let win = self.wins.get(&win_id)?;
         let buf_id = win.buf;
+        let document_handle = win.document_handle();
         let gutter_width = self
             .bufs
             .get(&buf_id)
@@ -1712,6 +1713,7 @@ impl Ui {
         let request = MaterializeRequest {
             win: win_id,
             buf: buf_id,
+            document_handle,
             rect,
             gutter_width,
             content_width,
@@ -1722,6 +1724,7 @@ impl Ui {
 
         let win = self.wins.get(&win_id)?;
         let buf_id = win.buf;
+        let document_handle = win.document_handle();
         let gutter_width = self
             .bufs
             .get(&buf_id)
@@ -1770,6 +1773,7 @@ impl Ui {
         Some(PreparedWindowRequest {
             win: win_id,
             buf: buf_id,
+            document_handle,
             rect,
             gutter_width,
             content_width,

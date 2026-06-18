@@ -577,10 +577,11 @@ impl TuiApp {
                 win.expect("transcript window")
                     .viewer_doc_pos_at_mouse(buf?, me, viewport)
             }?;
-            let action = {
-                let mut doc = crate::smelt_edit::HostDisplayDocument::new(self, win_id);
-                crate::smelt_edit::DisplayDocument::action_at(&mut doc, pos)
-            };
+            let action = self
+                .with_display_document_for_win(win_id, |doc| {
+                    crate::smelt_edit::DisplayDocument::action_at(doc, pos)
+                })
+                .flatten();
             if let Some(action) = action {
                 self.dispatch_span_action(action);
                 return None;
@@ -602,7 +603,12 @@ impl TuiApp {
                     .handle_row_mouse(buf?, me, mouse_ctx, now);
                 range?
             };
-            let out = crate::smelt_edit::UiHost::copy_document_range(self, win_id, range)?;
+            let out = self.with_display_document_for_win(win_id, |doc| {
+                crate::smelt_edit::DisplayDocument::copy_range(
+                    doc,
+                    crate::smelt_edit::TextRange::Rows(range),
+                )
+            })??;
             return if out.clipboard.is_empty() && out.kill_ring.is_empty() {
                 None
             } else {

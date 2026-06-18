@@ -327,6 +327,7 @@ impl MaterializedRows {
 pub struct MaterializeRequest {
     pub win: WinId,
     pub buf: BufId,
+    pub document_handle: Option<DocumentHandle>,
     pub rect: Rect,
     pub gutter_width: u16,
     pub content_width: u16,
@@ -338,6 +339,7 @@ pub struct MaterializeRequest {
 pub struct PreparedWindowRequest {
     pub win: WinId,
     pub buf: BufId,
+    pub document_handle: Option<DocumentHandle>,
     pub rect: Rect,
     pub gutter_width: u16,
     pub content_width: u16,

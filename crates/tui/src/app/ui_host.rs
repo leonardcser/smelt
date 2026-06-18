@@ -1,17 +1,7 @@
-//! `UiHost` impl for `TuiApp`. Delegates to `crate::smelt_edit::Ui`; overrides
-//! row-range access for prompt and transcript windows, with explicitly named
-//! full-document fallbacks for export/debug-style callers.
+//! `UiHost` impl for `TuiApp`. Delegates window resource operations to
+//! `crate::smelt_edit::Ui`; document operations use the app document resolver.
 
 use crate::app::TuiApp;
-
-impl TuiApp {
-    fn document_handle_for_win(
-        &self,
-        win: crate::smelt_edit::WinId,
-    ) -> Option<crate::smelt_edit::DocumentHandle> {
-        self.ui.win(win).and_then(|win| win.document_handle())
-    }
-}
 
 impl crate::smelt_edit::UiHost for TuiApp {
     fn ui(&mut self) -> &mut crate::smelt_edit::Ui {
@@ -57,22 +47,16 @@ impl crate::smelt_edit::UiHost for TuiApp {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> Option<crate::smelt_edit::DisplayRows> {
-        match self.document_handle_for_win(win) {
-            Some(crate::app::TRANSCRIPT_DOCUMENT) => {
-                Some(self.transcript_rows_and_breaks_range(start, count))
-            }
-            _ => crate::smelt_edit::UiHost::display_rows_for_range(&mut self.ui, win, start, count),
-        }
+        self.with_display_document_for_win(win, |document| {
+            document.materialize(start..start.saturating_add(count))
+        })
     }
 
     fn document_total_rows(
         &mut self,
         win: crate::smelt_edit::WinId,
     ) -> Option<crate::smelt_edit::RowIndex> {
-        match self.document_handle_for_win(win) {
-            Some(crate::app::TRANSCRIPT_DOCUMENT) => Some(self.transcript_total_rows()),
-            _ => crate::smelt_edit::UiHost::document_total_rows(&mut self.ui, win),
-        }
+        self.with_display_document_for_win(win, |document| document.snapshot().total_rows)
     }
 
     fn copy_document_range(
@@ -80,9 +64,9 @@ impl crate::smelt_edit::UiHost for TuiApp {
         win: crate::smelt_edit::WinId,
         range: crate::smelt_edit::DocRange,
     ) -> Option<crate::smelt_edit::CopyOutput> {
-        match self.document_handle_for_win(win) {
-            Some(crate::app::TRANSCRIPT_DOCUMENT) => self.transcript_copy_range(range),
-            _ => crate::smelt_edit::UiHost::copy_document_range(&mut self.ui, win, range),
-        }
+        self.with_display_document_for_win(win, |document| {
+            document.copy_range(crate::smelt_edit::TextRange::Rows(range))
+        })
+        .flatten()
     }
 }
