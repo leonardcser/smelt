@@ -720,7 +720,7 @@ Acceptance:
 
 Goal: finish the store rewrite side that is still worth doing because save and request-start durability remain major scaling risks.
 
-Status: in progress in the current worktree. Display-only deferred request append, normal request append, and the general `save_session` persistence path now use typed `SessionHistorySuffix` writes paired transactionally with transcript descriptor suffix replacement, so request-start and dirty-suffix saves no longer construct a `SessionSnapshot`. The typed suffix can also carry requested metadata/turn/accounting table suffixes, covering request-start metadata, assistant/tool history suffixes, checkpoint state, turn metadata, and accounting snapshots through suffix table writes. Empty-history rewinds now persist typed history and descriptor deletion instead of returning before writing. Remaining Phase 4 work is to replace any remaining full-session fingerprint or snapshot comparison hot paths and then validate the phase acceptance criteria.
+Status: implemented in the current worktree. TUI hot persistence now uses typed `SessionHistorySuffix` writes paired transactionally with transcript descriptor suffix replacement for display-only deferred request append, normal request append, assistant/tool dirty suffix saves, checkpoint state, title/metadata/accounting table suffixes, and empty-history rewinds. These paths no longer construct `SessionSnapshot` or run snapshot-table/full-history comparison; remaining `SessionSnapshot` usage is limited to explicit import/export/legacy core save boundaries and tests.
 
 Deliverables:
 

@@ -1483,10 +1483,9 @@ impl TuiApp {
         let history_len = history_index.saturating_add(1);
         let descriptor_count = descriptor_records.len();
         let had_descriptor_total = self.transcript.descriptor_total_count().is_some();
-        let snapshot_table_start = if self.session_dirty { 0 } else { history_index };
         let snapshot_tables = match session::store_snapshot_table_suffixes_from_session(
             &self.core.session,
-            snapshot_table_start,
+            history_index,
         ) {
             Ok(tables) => tables,
             Err(err) => {
