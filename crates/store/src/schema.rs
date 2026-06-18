@@ -1,9 +1,8 @@
 use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
-use crate::history;
 
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 1;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -37,42 +36,16 @@ pub(crate) fn user_version(conn: &Connection) -> Result<i32> {
 }
 
 fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
-    let mut current = user_version(conn)?;
+    let current = user_version(conn)?;
     if current > SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchema {
             found: current,
             expected: SCHEMA_VERSION,
         });
     }
-    if current < 1 {
-        conn.execute_batch(MIGRATION_1)?;
-        set_user_version(conn, 1)?;
-        current = 1;
-    }
-    if current < 2 {
-        conn.execute_batch(MIGRATION_2)?;
-        set_user_version(conn, 2)?;
-        current = 2;
-    }
-    if current < 3 {
-        conn.execute_batch(MIGRATION_3)?;
-        set_user_version(conn, 3)?;
-        current = 3;
-    }
-    if current < 4 {
-        conn.execute_batch(MIGRATION_4)?;
-        set_user_version(conn, 4)?;
-        current = 4;
-    }
-    if current < 5 {
-        conn.execute_batch(MIGRATION_5)?;
-        set_user_version(conn, 5)?;
-        current = 5;
-    }
-    if current < 6 {
-        conn.execute_batch(MIGRATION_6)?;
-        history::rebuild_transcript_search_terms(conn)?;
-        set_user_version(conn, 6)?;
+    if current < SCHEMA_VERSION {
+        conn.execute_batch(SCHEMA)?;
+        set_user_version(conn, SCHEMA_VERSION)?;
     }
     conn.execute(
         "INSERT INTO store_meta (key, value, updated_at)
@@ -88,7 +61,7 @@ fn set_user_version(conn: &Connection, version: i32) -> Result<()> {
     Ok(())
 }
 
-const MIGRATION_1: &str = r#"
+const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS store_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -100,11 +73,18 @@ CREATE TABLE IF NOT EXISTS session_state (
     id TEXT NOT NULL UNIQUE,
     title TEXT,
     slug TEXT,
+    first_user_message TEXT,
     cwd TEXT,
     mode TEXT,
+    reasoning_effort TEXT,
     model TEXT,
+    parent_id TEXT,
     accounting_json TEXT,
     checkpoint_json TEXT,
+    context_tokens INTEGER,
+    context_tokens_history_len INTEGER,
+    display_context_tokens INTEGER,
+    session_cost_usd REAL NOT NULL DEFAULT 0,
     revision INTEGER NOT NULL DEFAULT 0,
     history_len INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -134,7 +114,10 @@ CREATE TABLE IF NOT EXISTS transcript_blocks (
     estimated_text_bytes INTEGER NOT NULL DEFAULT 0,
     estimated_rows INTEGER,
     preview_text TEXT,
-    search_text TEXT
+    search_text TEXT,
+    descriptor_json TEXT,
+    origin_json TEXT,
+    tool_state_json TEXT
 );
 CREATE INDEX IF NOT EXISTS transcript_blocks_history_idx ON transcript_blocks(history_idx, block_idx);
 CREATE INDEX IF NOT EXISTS transcript_blocks_kind_idx ON transcript_blocks(kind, block_idx);
@@ -173,7 +156,15 @@ CREATE TABLE IF NOT EXISTS request_attempts (
     error_hash TEXT REFERENCES objects(hash) ON DELETE RESTRICT,
     error_summary TEXT,
     background INTEGER NOT NULL DEFAULT 0,
-    raw_body_size INTEGER NOT NULL DEFAULT 0
+    raw_body_size INTEGER NOT NULL DEFAULT 0,
+    kind TEXT,
+    api_base TEXT,
+    url TEXT,
+    http_status INTEGER,
+    prompt_cache_key TEXT,
+    stream INTEGER NOT NULL DEFAULT 0,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    response_summary TEXT
 );
 CREATE INDEX IF NOT EXISTS request_attempts_started_at_idx ON request_attempts(started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS request_attempts_request_id_idx ON request_attempts(request_id);
@@ -182,6 +173,7 @@ CREATE INDEX IF NOT EXISTS request_attempts_provider_model_idx ON request_attemp
 CREATE INDEX IF NOT EXISTS request_attempts_error_idx ON request_attempts(error_summary, started_at DESC);
 CREATE INDEX IF NOT EXISTS request_attempts_background_idx ON request_attempts(background, started_at DESC);
 CREATE INDEX IF NOT EXISTS request_attempts_body_size_idx ON request_attempts(raw_body_size DESC);
+CREATE INDEX IF NOT EXISTS request_attempts_url_idx ON request_attempts(url);
 
 CREATE TABLE IF NOT EXISTS request_object_refs (
     request_attempt_id INTEGER NOT NULL REFERENCES request_attempts(id) ON DELETE CASCADE,
@@ -197,8 +189,14 @@ CREATE TABLE IF NOT EXISTS request_stats (
     cached_input_tokens INTEGER,
     reasoning_tokens INTEGER,
     total_cost_micros INTEGER,
-    stats_json TEXT
+    stats_json TEXT,
+    context_tokens INTEGER,
+    cache_write_tokens INTEGER,
+    tokens_per_sec REAL
 );
+CREATE INDEX IF NOT EXISTS request_stats_input_tokens_idx ON request_stats(input_tokens DESC);
+CREATE INDEX IF NOT EXISTS request_stats_output_tokens_idx ON request_stats(output_tokens DESC);
+CREATE INDEX IF NOT EXISTS request_stats_total_cost_idx ON request_stats(total_cost_micros DESC);
 
 CREATE TABLE IF NOT EXISTS turn_metas (
     turn_idx INTEGER PRIMARY KEY,
@@ -230,46 +228,7 @@ CREATE TABLE IF NOT EXISTS transcript_search (
     text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS transcript_search_history_idx ON transcript_search(history_idx, block_idx);
-"#;
 
-const MIGRATION_2: &str = r#"
-ALTER TABLE request_attempts ADD COLUMN kind TEXT;
-"#;
-
-const MIGRATION_3: &str = r#"
-ALTER TABLE request_attempts ADD COLUMN api_base TEXT;
-ALTER TABLE request_attempts ADD COLUMN url TEXT;
-ALTER TABLE request_attempts ADD COLUMN http_status INTEGER;
-ALTER TABLE request_attempts ADD COLUMN prompt_cache_key TEXT;
-ALTER TABLE request_attempts ADD COLUMN stream INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE request_attempts ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE request_attempts ADD COLUMN response_summary TEXT;
-ALTER TABLE request_stats ADD COLUMN context_tokens INTEGER;
-ALTER TABLE request_stats ADD COLUMN cache_write_tokens INTEGER;
-ALTER TABLE request_stats ADD COLUMN tokens_per_sec REAL;
-CREATE INDEX IF NOT EXISTS request_attempts_url_idx ON request_attempts(url);
-CREATE INDEX IF NOT EXISTS request_stats_input_tokens_idx ON request_stats(input_tokens DESC);
-CREATE INDEX IF NOT EXISTS request_stats_output_tokens_idx ON request_stats(output_tokens DESC);
-CREATE INDEX IF NOT EXISTS request_stats_total_cost_idx ON request_stats(total_cost_micros DESC);
-"#;
-
-const MIGRATION_4: &str = r#"
-ALTER TABLE transcript_blocks ADD COLUMN descriptor_json TEXT;
-ALTER TABLE transcript_blocks ADD COLUMN origin_json TEXT;
-ALTER TABLE transcript_blocks ADD COLUMN tool_state_json TEXT;
-"#;
-
-const MIGRATION_5: &str = r#"
-ALTER TABLE session_state ADD COLUMN first_user_message TEXT;
-ALTER TABLE session_state ADD COLUMN reasoning_effort TEXT;
-ALTER TABLE session_state ADD COLUMN parent_id TEXT;
-ALTER TABLE session_state ADD COLUMN context_tokens INTEGER;
-ALTER TABLE session_state ADD COLUMN context_tokens_history_len INTEGER;
-ALTER TABLE session_state ADD COLUMN display_context_tokens INTEGER;
-ALTER TABLE session_state ADD COLUMN session_cost_usd REAL NOT NULL DEFAULT 0;
-"#;
-
-const MIGRATION_6: &str = r#"
 CREATE TABLE IF NOT EXISTS transcript_search_terms (
     term TEXT NOT NULL,
     block_idx INTEGER NOT NULL REFERENCES transcript_search(block_idx) ON DELETE CASCADE,

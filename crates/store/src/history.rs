@@ -645,19 +645,6 @@ fn insert_transcript_search_terms(conn: &Connection, block_idx: i64, text: &str)
     Ok(())
 }
 
-pub(crate) fn rebuild_transcript_search_terms(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM transcript_search_terms", [])?;
-    let mut stmt = conn.prepare("SELECT block_idx, text FROM transcript_search")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })?;
-    for row in rows {
-        let (block_idx, text) = row?;
-        insert_transcript_search_terms(conn, block_idx, &text)?;
-    }
-    Ok(())
-}
-
 fn search_terms(text: &str) -> Vec<String> {
     let chars = text.chars().collect::<Vec<_>>();
     if chars.is_empty() {

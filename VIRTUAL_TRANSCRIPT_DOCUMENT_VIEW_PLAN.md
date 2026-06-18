@@ -61,6 +61,12 @@ These follow the same principles as the session store rewrite plan.
    - Keep performance instrumentation, but remove duplicated runtime paths once measurements show the replacement covers the operation.
    - Prefer simple typed transactions and indexed SQL over in-memory mirrors of database state.
 
+9. **No intra-plan compatibility debt**
+   - This rewrite lands as one unreleased change. No agent is running against intermediate Phase 1, Phase 2, Phase 3, or Phase 4 database shapes.
+   - Do not add legacy readers, schema migrations, format-version bumps, cache-version bumps, or compatibility shims for formats introduced earlier in this plan.
+   - When schema, cache, index, or wire shapes introduced by this plan need to change, rewrite the original definition in place and keep its version at the plan baseline.
+   - The only compatibility code allowed here is for data formats that existed before this plan started, and it must stay isolated at the storage boundary.
+
 ## Non-Negotiable Performance and Memory Invariants
 
 These are design constraints, not optimization goals.
