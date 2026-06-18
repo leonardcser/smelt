@@ -1101,6 +1101,12 @@ impl TranscriptProjection {
         self.visible.total_rows = 0;
     }
 
+    fn invalidate_presentation_projection(&mut self) {
+        self.clear_visible_state();
+        self.visible.full_rows = None;
+        self.projection_generation = self.projection_generation.wrapping_add(1);
+    }
+
     fn clear_width_dependent_state(&mut self) {
         self.measurements.remember_active();
         self.measurements.clear_active();
@@ -1664,8 +1670,7 @@ impl TranscriptProjection {
             ),
         };
         if changed {
-            self.clear_visible_state();
-            self.visible.full_rows = None;
+            self.invalidate_presentation_projection();
         }
         changed
     }
@@ -1684,8 +1689,7 @@ impl TranscriptProjection {
             view_state,
         );
         if changed {
-            self.clear_visible_state();
-            self.visible.full_rows = None;
+            self.invalidate_presentation_projection();
         }
         changed
     }
@@ -1746,8 +1750,7 @@ impl TranscriptProjection {
             );
         }
         if changed {
-            self.clear_visible_state();
-            self.visible.full_rows = None;
+            self.invalidate_presentation_projection();
         }
         changed
     }
@@ -2929,6 +2932,44 @@ mod tests {
     }
 
     #[test]
+    fn copy_range_materializes_only_selected_nodes() {
+        let lua = test_lua();
+        let theme = Theme::default();
+        let mut transcript = Transcript::new();
+        for i in 0..200 {
+            transcript.push(Block::Text {
+                content: format!("assistant response {i}\n{}", "detail line\n".repeat(8)),
+            });
+        }
+        let mut projection = TranscriptProjection::new();
+        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
+        assert!(total > 10);
+        projection.reset_counters();
+
+        let out = projection.copy_range(
+            &lua,
+            &mut transcript.history,
+            80,
+            &theme,
+            DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: 0,
+                    byte_col: 0,
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: 0,
+                    byte_col: usize::MAX,
+                },
+            },
+        );
+
+        let counters = projection.counters();
+        assert!(!out.clipboard.is_empty());
+        assert_eq!(counters.full_row_builds, 0);
+        assert!(counters.range_materialized_blocks <= 2);
+    }
+
+    #[test]
     fn read_file_summary_shows_default_limit_only_when_reached() {
         let lua = test_lua();
         install_read_file_renderer(&lua);
@@ -3023,6 +3064,7 @@ mod tests {
             80,
         );
         assert!(buf.lines().iter().any(|line| line == "three"));
+        let generation_before_fold = projection.projection_generation();
 
         assert!(projection.fold_node_at_row(
             &lua,
@@ -3034,6 +3076,7 @@ mod tests {
                 activation: FoldActivation::AnyNodeRow,
             },
         ));
+        assert!(projection.projection_generation() > generation_before_fold);
         let history_key = transcript.history.resolve_key(id, base_layout_key(80));
         assert_eq!(history_key.view_state, ViewState::Expanded);
 
