@@ -1169,7 +1169,8 @@ struct Snapshot {
     streaming: tui::app::test_harness::StreamingState,
     session_messages: usize,
     queued_messages: usize,
-    queued_next_history_append: bool,
+    queued_next_starts: bool,
+    queued_next_context_append: bool,
     working: tui::app::test_harness::WorkingSnapshot,
     session_cost_usd: f64,
     context_tokens: Option<u32>,
@@ -1201,7 +1202,8 @@ impl Snapshot {
             streaming: app.streaming_state(),
             session_messages: app.session_message_count(),
             queued_messages: app.queued_message_count(),
-            queued_next_history_append: app.next_queued_input_writes_history(),
+            queued_next_starts: app.next_queued_input_starts_turn(),
+            queued_next_context_append: app.next_queued_input_appends_context_note(),
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
@@ -1227,7 +1229,7 @@ fn expected_model_history_len(pre: &Snapshot, msg_count: usize) -> usize {
 }
 
 fn completed_turn_starts_queued_followup(pre: &Snapshot, targeted_active: bool) -> bool {
-    targeted_active && pre.queued_next_history_append && !pre.working.busy
+    targeted_active && pre.queued_next_starts && !pre.working.busy
 }
 
 fn expected_completed_history_len(
@@ -1240,12 +1242,14 @@ fn expected_completed_history_len(
     } else {
         0
     };
-    let queued_followup = if completed_turn_starts_queued_followup(pre, targeted_active) {
+    let queued_context_append = if completed_turn_starts_queued_followup(pre, targeted_active)
+        && pre.queued_next_context_append
+    {
         1
     } else {
         0
     };
-    expected_model_history_len(pre, msg_count) + pending_appends + queued_followup
+    expected_model_history_len(pre, msg_count) + pending_appends + queued_context_append
 }
 
 fn scheduled_reload_mode_change(
@@ -1467,7 +1471,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                     let max_expected = expected + usize::from(expected > 0);
                     assert!(
                         post.session_messages == expected || post.session_messages == max_expected,
-                        "TurnComplete did not merge session.messages with scheduled reload mode change: post {} (expected {expected}..={max_expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, busy {})",
+                        "TurnComplete did not merge session.messages with scheduled reload mode change: post {} (expected {expected}..={max_expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, queued context append {}, busy {})",
                         post.session_messages,
                         pre.checkpoint_first_live_index,
                         if targeted_active {
@@ -1475,13 +1479,14 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                         } else {
                             0
                         },
-                        pre.queued_next_history_append,
+                        pre.queued_next_starts,
+                        pre.queued_next_context_append,
                         pre.working.busy,
                     );
                 } else {
                     assert_eq!(
                         post.session_messages, expected,
-                        "TurnComplete did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, busy {})",
+                        "TurnComplete did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, queued context append {}, busy {})",
                         post.session_messages,
                         pre.checkpoint_first_live_index,
                         if targeted_active {
@@ -1489,7 +1494,8 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                         } else {
                             0
                         },
-                        pre.queued_next_history_append,
+                        pre.queued_next_starts,
+                        pre.queued_next_context_append,
                         pre.working.busy,
                     );
                 }

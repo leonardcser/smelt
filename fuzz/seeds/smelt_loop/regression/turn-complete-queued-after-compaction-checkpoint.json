@@ -1,0 +1,42 @@
+{
+  "_about": "Regression for a smelt_loop oracle crash where TurnComplete expected a queued follow-up to append a new context note even when a compaction checkpoint already preserved the current context note.",
+  "_fix": "Track queued follow-up start separately from queued context-note append when computing the expected post-completion session history length.",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": {
+        "movement": 0,
+        "repetitions": 183,
+        "submit": true,
+        "text": "e"
+      },
+      "kind": "macro_prompt_edit"
+    },
+    {
+      "data": {
+        "variant": 27
+      },
+      "kind": "probe_compaction_prepare_request"
+    },
+    {
+      "data": {
+        "movement": 255,
+        "repetitions": 254,
+        "submit": true,
+        "text": "񂝷"
+      },
+      "kind": "macro_prompt_edit"
+    },
+    {
+      "data": {
+        "chunks": 0,
+        "error": false,
+        "text": "",
+        "thinking": "",
+        "turn_id": 0
+      },
+      "kind": "macro_stream_turn"
+    }
+  ],
+  "vim": false
+}

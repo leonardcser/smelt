@@ -87,13 +87,23 @@ impl TestApp {
     }
 
     /// Whether completing the active turn would immediately start a queued
-    /// input that appends one user-visible history item.
-    pub fn next_queued_input_writes_history(&self) -> bool {
+    /// input with non-empty display text.
+    pub fn next_queued_input_starts_turn(&self) -> bool {
         self.app
             .queued_inputs
             .display_texts()
             .first()
             .is_some_and(|text| !text.is_empty())
+    }
+
+    /// Whether starting the next queued input would append a fresh context
+    /// note to session history before the next request is dispatched.
+    pub fn next_queued_input_appends_context_note(&self) -> bool {
+        if !self.next_queued_input_starts_turn() {
+            return false;
+        }
+        let context = self.app.current_context_note_text();
+        self.app.latest_context_note_text() != Some(context.as_str())
     }
 
     /// Side-channel: push a synthetic queued message. In production
