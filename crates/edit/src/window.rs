@@ -675,6 +675,14 @@ impl Window {
         *self.document_view_state_mut() = state;
     }
 
+    pub fn document_view_state(&self) -> DocumentViewState {
+        *self.row_text_state()
+    }
+
+    pub fn set_document_view_state(&mut self, state: DocumentViewState) {
+        *self.row_text_state_mut() = state;
+    }
+
     pub fn cpos(&self) -> usize {
         self.surface.text().cpos
     }
