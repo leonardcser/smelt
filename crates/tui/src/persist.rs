@@ -169,14 +169,6 @@ fn write(req: &PersistRequest) -> Result<(), String> {
     );
     db.write_meta_sidecar(req.session_dir.join("meta.json"))
         .map_err(|err| format!("write session metadata: {err}"))?;
-    let blob = db
-        .search_blob()
-        .map_err(|err| format!("read search sidecar: {err}"))?;
-    smelt_core::session::atomic_write(
-        &req.session_dir.join("content.txt"),
-        blob.as_bytes(),
-        smelt_core::session::now_ms(),
-    );
     Ok(())
 }
 

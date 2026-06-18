@@ -681,7 +681,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "text",
-        "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads the `content.txt` sidecar; falls back to rebuilding from `session.json` and caching the sidecar for legacy sessions.",
+        "Return the searchable plain-text blob for session `id` (user + assistant text only; reasoning, tool output, and system messages excluded). Returns `nil` when the session is missing. Reads canonical SQLite search text when available, refreshing the `content.txt` sidecar for compatibility; falls back to legacy sidecars/importers for old sessions.",
         &["id"],
         |_, id: String| -> LuaResult<Option<String>> {
             Ok(smelt_core::session::load_search_blob(&id))

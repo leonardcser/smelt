@@ -2191,14 +2191,14 @@ fn build_search_blob(history: &[HistoryItem]) -> String {
 pub fn load_search_blob(id: &str) -> Option<String> {
     let _perf = smelt_perf::perf::begin("session:load_search_blob");
     let session_dir = sessions_dir().join(id);
-    if let Ok(contents) = fs::read_to_string(session_dir.join("content.txt")) {
-        return Some(contents);
-    }
     if let Ok(db) = smelt_store::SessionDb::open(session_dir.join("session.db")) {
         if let Ok(blob) = db.search_blob() {
             atomic_write(&session_dir.join("content.txt"), blob.as_bytes(), now_ms());
             return Some(blob);
         }
+    }
+    if let Ok(contents) = fs::read_to_string(session_dir.join("content.txt")) {
+        return Some(contents);
     }
     if let Err(err) = crate::session_migration::ensure_session_db(&session_dir) {
         log_session_migration_error(&session_dir, &err);

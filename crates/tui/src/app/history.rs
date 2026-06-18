@@ -1571,6 +1571,7 @@ mod checkpoint_tests {
             "store:history:read_all_rows",
             "store:session:load_full_snapshot",
             "store:session:full_snapshot_rows_read",
+            "store:transcript:search_blob_full",
             "store:transcript:read_descriptors_full",
             "store:transcript:descriptors_full_loaded",
             "transcript:build_from_session:history_items",
