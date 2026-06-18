@@ -553,9 +553,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Return the model-visible message list for the next request. If the session has a context checkpoint, this is the checkpoint summary plus retained live tail; otherwise it is the persisted transcript. Read-only.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
-            let messages =
-                crate::lua::try_with_app(|app| protocol::history_to_messages(&app.model_history()))
-                    .unwrap_or_default();
+            let messages = crate::lua::try_with_app(|app| app.model_history_messages())
+                .unwrap_or_default();
             messages_to_lua(lua, &messages)
         },
     )?;

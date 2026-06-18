@@ -1266,6 +1266,53 @@ impl TuiApp {
         self.core.session.model_history(engine::SUMMARY_PREFIX)
     }
 
+    pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
+        if let Some(history) = self.read_model_history_from_store() {
+            smelt_perf::perf::record_value("tui:model_history:messages_store", 1);
+            return protocol::history_to_messages(&history);
+        }
+        smelt_perf::perf::record_value("tui:model_history:messages_fallback", 1);
+        protocol::history_to_messages(&self.model_history())
+    }
+
+    fn read_model_history_from_store(&self) -> Option<Vec<HistoryItem>> {
+        if self.session_dirty || self.dirty_history_from.is_some() || !self.persisted_store_ready {
+            return None;
+        }
+        let protocol::ModelHistorySource::Store {
+            summary_prefix,
+            summary,
+            first_live_index,
+            end_index,
+        } = self.model_history_source()
+        else {
+            return None;
+        };
+        let mut history = Vec::new();
+        if let Some(summary) = summary {
+            history.push(HistoryItem::user(protocol::Content::text(format!(
+                "{}\n{}",
+                summary_prefix.trim_end(),
+                summary
+            ))));
+        }
+        if end_index > first_live_index {
+            let db = smelt_store::SessionDb::open_read_only(
+                session::dir_for(&self.core.session).join("session.db"),
+            )
+            .ok()?;
+            let mut rows = db
+                .read_history_items_range(first_live_index..end_index)
+                .ok()?;
+            smelt_perf::perf::record_value(
+                "tui:model_history:messages_store_rows",
+                rows.len() as u64,
+            );
+            history.append(&mut rows);
+        }
+        Some(history)
+    }
+
     pub(crate) fn rewind_to(
         &mut self,
         block_idx: usize,

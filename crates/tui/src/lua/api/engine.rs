@@ -568,7 +568,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 crate::lua::with_app(|app| {
                     let system = app.assemble_system_prompt();
                     if messages.is_empty() {
-                        messages = protocol::history_to_messages(&app.model_history());
+                        messages = app.model_history_messages();
                     }
                     if let Some(q) = question {
                         messages.push(protocol::Message::user(protocol::Content::text(&q)));

@@ -23,10 +23,8 @@ fn restore_working_phase() {
 }
 
 fn current_model_history_decision() -> HostRequestDecision {
-    crate::lua::try_with_app(|app| {
-        HostRequestDecision::Replace(protocol::history_to_messages(&app.model_history()))
-    })
-    .unwrap_or(HostRequestDecision::Continue)
+    crate::lua::try_with_app(|app| HostRequestDecision::Replace(app.model_history_messages()))
+        .unwrap_or(HostRequestDecision::Continue)
 }
 
 fn request_decision_from_lua(
