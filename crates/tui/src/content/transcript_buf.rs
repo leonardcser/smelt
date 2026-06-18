@@ -6169,6 +6169,98 @@ mod tests {
         elapsed.as_secs_f64() * 1_000.0
     }
 
+    fn counters_json(counters: TranscriptProjectionCounters) -> String {
+        format!(
+            "{{\"full_row_builds\":{},\"display_layouts\":{},\"exact_height_measured_blocks\":{},\"range_materialized_blocks\":{},\"max_range_materialized_blocks\":{},\"range_materialized_rows\":{},\"max_range_materialized_rows\":{}}}",
+            counters.full_row_builds,
+            counters.display_layouts,
+            counters.exact_height_measured_blocks,
+            counters.range_materialized_blocks,
+            counters.max_range_materialized_blocks,
+            counters.range_materialized_rows,
+            counters.max_range_materialized_rows,
+        )
+    }
+
+    fn selectable_copy_range_from_rows(
+        start_row: RowIndex,
+        rows: &DisplayRows,
+        total_rows: RowIndex,
+    ) -> Option<DocRange> {
+        rows.rows.iter().enumerate().find_map(|(offset, row)| {
+            let selectable = row
+                .selectable_ranges
+                .iter()
+                .find(|range| range.start < range.end)?;
+            let row_idx = start_row.saturating_add(offset as RowIndex);
+            Some(DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: row_idx,
+                    byte_col: selectable.start,
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: row_idx.saturating_add(79).min(total_rows.saturating_sub(1)),
+                    byte_col: usize::MAX,
+                },
+            })
+        })
+    }
+
+    fn find_selectable_copy_range(
+        projection: &mut TranscriptProjection,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        theme: &Theme,
+        preferred_row: RowIndex,
+        total_rows: RowIndex,
+    ) -> Option<DocRange> {
+        if total_rows == 0 {
+            return None;
+        }
+        let chunk = 80;
+        let start = preferred_row.min(total_rows.saturating_sub(1));
+        for row in (start..total_rows).step_by(chunk as usize) {
+            let rows = projection.display_rows_for_range(
+                lua,
+                history,
+                width,
+                theme,
+                row..row.saturating_add(chunk).min(total_rows),
+            );
+            if let Some(range) = selectable_copy_range_from_rows(row, &rows, total_rows) {
+                if !projection
+                    .copy_range(lua, history, width, theme, range)
+                    .kill_ring
+                    .is_empty()
+                {
+                    return Some(range);
+                }
+            }
+        }
+        let mut row = start;
+        while row > 0 {
+            row = row.saturating_sub(chunk).min(row);
+            let rows = projection.display_rows_for_range(
+                lua,
+                history,
+                width,
+                theme,
+                row..row.saturating_add(chunk).min(total_rows),
+            );
+            if let Some(range) = selectable_copy_range_from_rows(row, &rows, total_rows) {
+                if !projection
+                    .copy_range(lua, history, width, theme, range)
+                    .kill_ring
+                    .is_empty()
+                {
+                    return Some(range);
+                }
+            }
+        }
+        None
+    }
+
     fn perf_value_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
         snapshot
             .values
@@ -6414,6 +6506,21 @@ mod tests {
             rebuild_ms,
             render_ms,
         );
+        eprintln!(
+            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"target_bytes\":{},\"history_items\":{},\"rows\":{},\"build_ms\":{:.3},\"first_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3},\"descriptor_load_ms\":{:.3},\"descriptor_render_ms\":{:.3},\"legacy_load_ms\":{:.3},\"legacy_rebuild_ms\":{:.3},\"legacy_render_ms\":{:.3}}}",
+            target_bytes,
+            history_items,
+            first.total_rows,
+            build_ms,
+            first_ms,
+            tail_load_ms,
+            tail_render_ms,
+            descriptor_load_ms,
+            descriptor_render_ms,
+            load_ms,
+            rebuild_ms,
+            render_ms,
+        );
     }
     fn assert_projection_bench_gates(counters: TranscriptProjectionCounters, label: &str) {
         const MAX_MATERIALIZED_ROWS_PER_OPERATION: usize = 80;
@@ -6521,29 +6628,26 @@ mod tests {
         let visible_ms = elapsed_ms(visible_start.elapsed());
         let visible_counters = cold.counters();
 
-        let copy_end_row = mid
-            .saturating_add(79)
-            .min(resized.total_rows.saturating_sub(1));
-        cold.reset_counters();
-        let copy_start = std::time::Instant::now();
-        let copied = cold.copy_range(
+        let mut copy_probe = TranscriptProjection::new();
+        copy_probe.set_inline_options(cold.inline_options().clone());
+        let copy_range = find_selectable_copy_range(
+            &mut copy_probe,
             &lua,
             &mut transcript.history,
             72,
             &theme,
-            DocRange {
-                start: crate::smelt_edit::DocPosition {
-                    row: mid,
-                    byte_col: 0,
-                },
-                end: crate::smelt_edit::DocPosition {
-                    row: copy_end_row,
-                    byte_col: usize::MAX,
-                },
-            },
-        );
+            mid,
+            resized.total_rows,
+        )
+        .expect("benchmark transcript should contain selectable display text");
+        let mut copy_projection = TranscriptProjection::new();
+        copy_projection.set_inline_options(cold.inline_options().clone());
+        copy_projection.reset_counters();
+        let copy_start = std::time::Instant::now();
+        let copied =
+            copy_projection.copy_range(&lua, &mut transcript.history, 72, &theme, copy_range);
         let copy_ms = elapsed_ms(copy_start.elapsed());
-        let copy_counters = cold.counters();
+        let copy_counters = copy_projection.counters();
 
         let mut no_cache = TranscriptProjection::new();
         let mut no_cache_buf = Buffer::new(crate::smelt_edit::BufId(80), Default::default());
@@ -6592,11 +6696,16 @@ mod tests {
         );
         assert!(
             !copied.kill_ring.is_empty(),
-            "copy range was empty at mid={mid} end={copy_end_row} total_rows={} counters={copy_counters:?}",
+            "copy range was empty at start={:?} end={:?} total_rows={} counters={copy_counters:?}",
+            copy_range.start,
+            copy_range.end,
             resized.total_rows
         );
         assert_eq!(no_cache_projection.total_rows, first.total_rows);
-        assert!(appended.total_rows > resized.total_rows);
+        assert!(
+            appended.materialized_rows > 0,
+            "live append repaint produced no materialized rows: {appended:?}"
+        );
         assert!(first_counters.display_layouts > 0);
         assert!(first_counters.display_layouts <= blocks);
         assert!(resize_counters.display_layouts <= blocks);
@@ -6649,7 +6758,11 @@ mod tests {
             allocs: first_alloc.allocs,
             bytes_allocated: first_alloc.bytes_allocated,
             visible_rows: visible.rows.len(),
-            copied_rows: copy_end_row.saturating_sub(mid).saturating_add(1),
+            copied_rows: copy_range
+                .end
+                .row
+                .saturating_sub(copy_range.start.row)
+                .saturating_add(1),
             appended_rows,
             scroll_materialized_rows,
             first_counters,
@@ -6763,6 +6876,51 @@ mod tests {
             sample.scroll_materialized_rows,
             first.min,
             first.max,
+        );
+        eprintln!(
+            "TRANSCRIPT_LAYOUT_BENCH_JSON {{\"type\":\"layout_summary\",\"workload\":\"{}\",\"runs\":{},\"input_bytes\":{},\"generated_bytes\":{},\"blocks\":{},\"rows\":{},\"first_mean_ms\":{:.3},\"first_stddev_ms\":{:.3},\"resize_mean_ms\":{:.3},\"resize_stddev_ms\":{:.3},\"theme_mean_ms\":{:.3},\"theme_stddev_ms\":{:.3},\"scroll12_mean_ms\":{:.3},\"scroll12_stddev_ms\":{:.3},\"visible_mean_ms\":{:.3},\"visible_stddev_ms\":{:.3},\"copy_mean_ms\":{:.3},\"copy_stddev_ms\":{:.3},\"append_mean_ms\":{:.3},\"append_stddev_ms\":{:.3},\"no_cache_mean_ms\":{:.3},\"no_cache_stddev_ms\":{:.3},\"allocs\":{},\"bytes_allocated\":{},\"visible_rows\":{},\"copied_rows\":{},\"appended_rows\":{},\"scroll_materialized_rows\":{},\"first_min_ms\":{:.3},\"first_max_ms\":{:.3}}}",
+            workload.name,
+            samples.len(),
+            sample.input_bytes,
+            sample.generated_bytes,
+            sample.blocks,
+            sample.total_rows,
+            first.mean,
+            first.stddev,
+            resize.mean,
+            resize.stddev,
+            theme.mean,
+            theme.stddev,
+            scroll.mean,
+            scroll.stddev,
+            visible.mean,
+            visible.stddev,
+            copy.mean,
+            copy.stddev,
+            append.mean,
+            append.stddev,
+            no_cache.mean,
+            no_cache.stddev,
+            sample.allocs,
+            sample.bytes_allocated,
+            sample.visible_rows,
+            sample.copied_rows,
+            sample.appended_rows,
+            sample.scroll_materialized_rows,
+            first.min,
+            first.max,
+        );
+        eprintln!(
+            "TRANSCRIPT_LAYOUT_COUNTERS_JSON {{\"type\":\"layout_counters\",\"workload\":\"{}\",\"first\":{},\"resize\":{},\"theme\":{},\"scroll12\":{},\"visible\":{},\"copy\":{},\"append\":{},\"no_cache\":{}}}",
+            workload.name,
+            counters_json(sample.first_counters),
+            counters_json(sample.resize_counters),
+            counters_json(sample.theme_counters),
+            counters_json(sample.scroll_counters),
+            counters_json(sample.visible_counters),
+            counters_json(sample.copy_counters),
+            counters_json(sample.append_counters),
+            counters_json(sample.no_cache_counters),
         );
         eprintln!(
             "TRANSCRIPT_LAYOUT_BENCH_COUNTERS workload={} first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} copy={:?} append={:?} no_cache={:?}",

@@ -933,3 +933,104 @@ This rewrite is complete when:
 9. No semantic operation uses estimated rows except for scrollbar extent and coarse scrollbar landing before exact local refinement.
 10. Provider request start no longer clones full history as the normal path.
 11. Legacy session compatibility remains isolated at the storage boundary and documented with `COMPAT` ids.
+
+## Post-Completion Performance Follow-Up Plan
+
+The document rewrite is complete, but the final benchmark pass exposed follow-up work that is worth doing before treating large-session performance as fully hardened. These items are intentionally tracked after the completion definition because they refine and stabilize the finished architecture rather than block it.
+
+### Follow-up 1: Harden the benchmark harness
+
+Status: complete. The layout benchmark now chooses a copy range by probing for selectable rows that actually copy, live append validation no longer depends on total row growth, and the broad mixed 10 MiB/50 MiB layout/search/resume command completes on the current worktree. Layout, navigation, search, resume, and layout-counter summaries now emit JSON lines in addition to the existing human and key-value output.
+
+Goal: make the broad transcript benchmark command continuously runnable and easy to compare over time.
+
+Deliverables:
+
+- Fix benchmark fixtures so `mixed_10mib,mixed_50mib` and multi-workload runs do not fail because a synthetic copy range lands on non-selectable content or because a live append assertion depends on row-count growth that may not occur after wrapping/folding changes.
+- Choose benchmark copy ranges from known selectable materialized rows.
+- Assert live append repaint through document generation, tail materialization, and bounded counters rather than only `total_rows` growth.
+- Emit machine-readable JSON or CSV summaries in addition to the current human table.
+- Keep the existing counter gates for full row builds, exactified rows, descriptor reads, store full reads, and dirty suffix writes.
+
+Acceptance:
+
+- `cargo xtask bench-transcript-layout --runs 1 --workloads mixed_10mib,mixed_50mib --search --search-bytes 10485760 --resume --resume-bytes 10485760` completes successfully on the current worktree.
+- The benchmark output includes stable machine-readable rows for layout, search, resume, and key counter summaries. Save/request benchmark rows are added in Follow-up 6.
+
+### Follow-up 2: Explain and reduce tail-load wall-time scaling
+
+Goal: tail resume should stay bounded in rows/descriptors and should not have unexplained wall-time growth with total database size.
+
+Deliverables:
+
+- Add focused timing labels around read-only SQLite open, metadata reads, descriptor count reads, tail descriptor queries, descriptor decoding, and document construction.
+- Compare 10 MiB and 50 MiB tail-load timing using the true resume benchmark.
+- Optimize only the measured bottleneck, such as avoiding unnecessary count queries, using a better tail index/query shape, reusing metadata already loaded by resume, or reducing row decoding allocations.
+
+Acceptance:
+
+- Tail-load benchmark output shows where the time is spent.
+- Any remaining scaling is explained by a named SQLite operation or reduced to noise relative to render time.
+
+### Follow-up 3: Reduce first-paint allocation churn
+
+Goal: first paint should allocate in proportion to the visible/rendered work, not to pathological block count.
+
+Deliverables:
+
+- Add allocation counter breakdowns for row materialization, render-node collection, Lua display-model construction, render-cache insertion, and display-row cloning.
+- Profile the `tiny_blocks_1mib` workload, which currently allocates far more than the input size on first paint.
+- Remove avoidable clones and temporary vectors on the bounded materialization path.
+- Prefer reusing render buffers or borrowing existing row text where that keeps ownership simple.
+
+Acceptance:
+
+- First-paint allocation for `tiny_blocks_1mib` is materially lower without regressing the bounded row counters.
+- The benchmark reports enough allocation labels to catch future allocation regressions.
+
+### Follow-up 4: Make search indexing durable or truly incremental
+
+Goal: cold and after-append transcript search should avoid rebuilding the same large in-memory index when SQLite descriptor/search records are current.
+
+Deliverables:
+
+- Measure whether current search time is dominated by index build, candidate lookup, or exact display refinement.
+- Choose the simplest durable or incremental index that fits the existing store model. Prefer SQLite-backed indexed terms/FTS/trigram rows if they avoid duplicating another cache invalidation system.
+- Update append and rewrite suffix transactions to maintain the chosen search index incrementally.
+- Keep exact display refinement in `TranscriptDocument`; the index may only produce candidates.
+
+Acceptance:
+
+- Rare search and after-append search do not rebuild a full in-memory transcript search index on the normal path.
+- Search benchmarks still prove bounded exactified/display-scanned rows.
+
+### Follow-up 5: Remove the compact transcript render bridge
+
+Goal: make `TranscriptDocument` render directly from sparse descriptor windows instead of rebuilding a compact `Transcript` for the active window.
+
+Deliverables:
+
+- Replace `rebuild_legacy_compact_transcript_from_active_descriptors` with a direct sparse descriptor-to-projection path.
+- Keep `BlockId`, descriptor index, and history index identity stable across window activation, folds, anchors, and action hit testing.
+- Remove compatibility naming once the bridge is gone.
+- Preserve all Phase 6 exactness tests for search, copy, folds, actions, UTF-8 offsets, and drag autoscroll.
+
+Acceptance:
+
+- Activating a descriptor window no longer rebuilds an intermediate compact transcript.
+- Render/copy/search counters remain bounded and first-paint allocations decrease or stay flat.
+
+### Follow-up 6: Add wall-time hot-path save/request benchmarks
+
+Goal: keep the row-count hot-path guarantees while also catching fixed-cost latency regressions.
+
+Deliverables:
+
+- Add benchmark samples for no-op save, one-row request append, engine `HistoryUpdated`, rewind/delete suffix, and provider request dispatch history read.
+- Report wall time plus the existing row-count/store-read counters.
+- Gate only on robust asymptotic counters by default; make wall-time thresholds advisory unless calibrated for CI hardware.
+
+Acceptance:
+
+- Benchmark output includes save/request latency and dirty suffix row counts.
+- No benchmarked hot save/request path performs full session history reads, clones, serialization, fingerprinting, or sidecar rewrites.

@@ -440,6 +440,20 @@ fn transcript_layout_search_benchmark_suite() {
         after_append.mean,
         after_append.stddev,
     );
+    eprintln!(
+        "TRANSCRIPT_SEARCH_BENCH_JSON {{\"type\":\"search_summary\",\"runs\":{},\"bytes\":{},\"rows\":{},\"rare_mean_ms\":{:.3},\"rare_stddev_ms\":{:.3},\"common_submit_mean_ms\":{:.3},\"common_submit_stddev_ms\":{:.3},\"next100_mean_ms\":{:.3},\"next100_stddev_ms\":{:.3},\"after_append_mean_ms\":{:.3},\"after_append_stddev_ms\":{:.3}}}",
+        samples.len(),
+        samples[0].bytes,
+        samples[0].rows,
+        rare.mean,
+        rare.stddev,
+        common.mean,
+        common.stddev,
+        next.mean,
+        next.stddev,
+        after_append.mean,
+        after_append.stddev,
+    );
 }
 
 #[test]
@@ -498,6 +512,21 @@ fn transcript_layout_navigation_benchmark_suite() {
     let g = NavStats::from(&samples.iter().map(|sample| sample.g_ms).collect::<Vec<_>>());
     eprintln!(
         "TRANSCRIPT_LAYOUT_NAV_SUMMARY runs={} rows={} search_mean_ms={:.3} search_stddev_ms={:.3} ctrl_d20_mean_ms={:.3} ctrl_d20_stddev_ms={:.3} ctrl_u20_mean_ms={:.3} ctrl_u20_stddev_ms={:.3} gg_mean_ms={:.3} gg_stddev_ms={:.3} G_mean_ms={:.3} G_stddev_ms={:.3}",
+        samples.len(),
+        samples[0].rows,
+        search.mean,
+        search.stddev,
+        ctrl_d.mean,
+        ctrl_d.stddev,
+        ctrl_u.mean,
+        ctrl_u.stddev,
+        gg.mean,
+        gg.stddev,
+        g.mean,
+        g.stddev,
+    );
+    eprintln!(
+        "TRANSCRIPT_LAYOUT_NAV_JSON {{\"type\":\"navigation_summary\",\"runs\":{},\"rows\":{},\"search_mean_ms\":{:.3},\"search_stddev_ms\":{:.3},\"ctrl_d20_mean_ms\":{:.3},\"ctrl_d20_stddev_ms\":{:.3},\"ctrl_u20_mean_ms\":{:.3},\"ctrl_u20_stddev_ms\":{:.3},\"gg_mean_ms\":{:.3},\"gg_stddev_ms\":{:.3},\"G_mean_ms\":{:.3},\"G_stddev_ms\":{:.3}}}",
         samples.len(),
         samples[0].rows,
         search.mean,
