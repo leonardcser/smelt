@@ -19,6 +19,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+const DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS: u16 = 3;
+const DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS: u16 = 80;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LoadedTranscriptDescriptorSlice {
     pub(crate) start: smelt_store::TranscriptDescriptorIndex,
@@ -40,6 +43,30 @@ impl LoadedTranscript {
             descriptor_slice: None,
             session_dir: None,
         }
+    }
+
+    pub(crate) fn from_sqlite_dir(session_dir: PathBuf) -> Option<Self> {
+        let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
+        let rows = store.read_descriptor_records().ok()?;
+        Self::from_full_descriptor_rows(rows, session_dir)
+    }
+
+    pub(crate) fn tail_from_sqlite_dir(
+        session_dir: PathBuf,
+        width: u16,
+        viewport_rows: u16,
+    ) -> Option<Self> {
+        let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
+        let target_rows = descriptor_tail_target_rows(viewport_rows);
+        let slice = store
+            .read_tail_descriptor_slice_for_rows(width, target_rows)
+            .ok()?;
+        smelt_perf::perf::record_value(
+            "transcript:sqlite:descriptor_total",
+            slice.total_count as u64,
+        );
+        smelt_perf::perf::record_value("transcript:sqlite:descriptor_loaded", slice.len() as u64);
+        Self::from_descriptor_slice(slice, session_dir)
     }
 
     pub(crate) fn from_descriptor_rows(
@@ -94,6 +121,69 @@ impl LoadedTranscript {
             session_dir: Some(session_dir),
         })
     }
+}
+
+struct SqliteTranscriptStore {
+    db: smelt_store::SessionDb,
+}
+
+impl SqliteTranscriptStore {
+    fn open_read_only(session_dir: impl AsRef<std::path::Path>) -> smelt_store::Result<Self> {
+        let db = smelt_store::SessionDb::open_read_only(session_dir.as_ref().join("session.db"))?;
+        Ok(Self { db })
+    }
+
+    fn read_descriptor_records(
+        &self,
+    ) -> smelt_store::Result<Vec<smelt_store::TranscriptDescriptorRecord>> {
+        self.db.read_transcript_descriptor_records()
+    }
+
+    fn read_tail_descriptor_slice_for_rows(
+        &self,
+        width: u16,
+        target_rows: u16,
+    ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
+        let total = self.db.transcript_descriptor_count()?;
+        if total == 0 {
+            return self.db.read_transcript_descriptor_tail_slice(0);
+        }
+
+        let target_rows = u64::from(target_rows.max(1));
+        let mut count = target_rows
+            .saturating_add(1)
+            .saturating_div(2)
+            .min(total as u64) as usize;
+        while count < total {
+            let slice = self.db.read_transcript_descriptor_tail_slice(count)?;
+            if estimate_descriptor_rows(&slice.records, width) >= target_rows {
+                return Ok(slice);
+            }
+            count = count.saturating_mul(2).min(total);
+        }
+        self.db.read_transcript_descriptor_tail_slice(total)
+    }
+}
+
+fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
+    viewport_rows
+        .max(1)
+        .saturating_mul(DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS.saturating_add(1))
+        .max(DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS)
+}
+
+fn estimate_descriptor_rows(
+    records: &[smelt_store::TranscriptDescriptorRecord],
+    width: u16,
+) -> u64 {
+    let width = u64::from(width.max(1));
+    records
+        .iter()
+        .map(|record| {
+            let text_rows = record.estimated_text_bytes.saturating_add(width - 1) / width;
+            text_rows.max(1).saturating_add(1)
+        })
+        .sum()
 }
 
 pub(crate) struct TranscriptDocument {

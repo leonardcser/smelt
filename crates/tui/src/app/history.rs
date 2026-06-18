@@ -6,11 +6,8 @@ use smelt_core::{Block, ToolOutput, ToolState, ToolStatus, TranscriptBlockDescri
 
 use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
-
-const DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS: u16 = 3;
-const DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS: u16 = 80;
 
 pub(crate) struct ToolSummaryResolver<'a> {
     lua: &'a crate::lua::LuaRuntime,
@@ -124,54 +121,10 @@ pub(crate) fn load_transcript_from_sqlite_id(
     load_transcript_tail_from_sqlite_dir(session::dir_for_id(id), width, viewport_rows)
 }
 
-struct SqliteTranscriptStore {
-    db: smelt_store::SessionDb,
-}
-
-impl SqliteTranscriptStore {
-    fn open_read_only(session_dir: impl AsRef<Path>) -> smelt_store::Result<Self> {
-        let db = smelt_store::SessionDb::open_read_only(session_dir.as_ref().join("session.db"))?;
-        Ok(Self { db })
-    }
-
-    fn read_descriptor_records(
-        &self,
-    ) -> smelt_store::Result<Vec<smelt_store::TranscriptDescriptorRecord>> {
-        self.db.read_transcript_descriptor_records()
-    }
-
-    fn read_tail_descriptor_slice_for_rows(
-        &self,
-        width: u16,
-        target_rows: u16,
-    ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
-        let total = self.db.transcript_descriptor_count()?;
-        if total == 0 {
-            return self.db.read_transcript_descriptor_tail_slice(0);
-        }
-
-        let target_rows = u64::from(target_rows.max(1));
-        let mut count = target_rows
-            .saturating_add(1)
-            .saturating_div(2)
-            .min(total as u64) as usize;
-        while count < total {
-            let slice = self.db.read_transcript_descriptor_tail_slice(count)?;
-            if estimate_descriptor_rows(&slice.records, width) >= target_rows {
-                return Ok(slice);
-            }
-            count = count.saturating_mul(2).min(total);
-        }
-        self.db.read_transcript_descriptor_tail_slice(total)
-    }
-}
-
 fn load_transcript_from_sqlite_dir(
     session_dir: PathBuf,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
-    let rows = store.read_descriptor_records().ok()?;
-    crate::app::transcript::LoadedTranscript::from_full_descriptor_rows(rows, session_dir)
+    crate::app::transcript::LoadedTranscript::from_sqlite_dir(session_dir)
 }
 
 fn load_transcript_tail_from_sqlite_dir(
@@ -179,38 +132,11 @@ fn load_transcript_tail_from_sqlite_dir(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
-    let target_rows = descriptor_tail_target_rows(viewport_rows);
-    let slice = store
-        .read_tail_descriptor_slice_for_rows(width, target_rows)
-        .ok()?;
-    smelt_perf::perf::record_value(
-        "transcript:sqlite:descriptor_total",
-        slice.total_count as u64,
-    );
-    smelt_perf::perf::record_value("transcript:sqlite:descriptor_loaded", slice.len() as u64);
-    crate::app::transcript::LoadedTranscript::from_descriptor_slice(slice, session_dir)
-}
-
-fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
-    viewport_rows
-        .max(1)
-        .saturating_mul(DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS.saturating_add(1))
-        .max(DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS)
-}
-
-fn estimate_descriptor_rows(
-    records: &[smelt_store::TranscriptDescriptorRecord],
-    width: u16,
-) -> u64 {
-    let width = u64::from(width.max(1));
-    records
-        .iter()
-        .map(|record| {
-            let text_rows = record.estimated_text_bytes.saturating_add(width - 1) / width;
-            text_rows.max(1).saturating_add(1)
-        })
-        .sum()
+    crate::app::transcript::LoadedTranscript::tail_from_sqlite_dir(
+        session_dir,
+        width,
+        viewport_rows,
+    )
 }
 
 fn transcript_covers_history(transcript: &Transcript, session: &session::Session) -> bool {
