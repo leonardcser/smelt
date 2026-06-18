@@ -209,6 +209,44 @@ fn estimate_text_rows_for_width(text: &str, width: usize) -> RowIndex {
         .max(1)
 }
 
+fn descriptor_window_payload_bytes(records: &[TranscriptBlockRecord]) -> u64 {
+    records
+        .iter()
+        .filter_map(|record| record.descriptor.raw_text())
+        .map(|text| text.len() as u64)
+        .sum()
+}
+
+fn record_descriptor_window_metrics(window: &LoadedDescriptorWindow) {
+    smelt_perf::perf::record_value(
+        "transcript:descriptor_window:start",
+        window.start.get() as u64,
+    );
+    smelt_perf::perf::record_value(
+        "transcript:descriptor_window:end",
+        window.end().get() as u64,
+    );
+    smelt_perf::perf::record_value(
+        "transcript:descriptor_window:total",
+        window.total_count as u64,
+    );
+    smelt_perf::perf::record_value(
+        "transcript:descriptor_window:loaded",
+        window.records.len() as u64,
+    );
+    smelt_perf::perf::record_value(
+        "transcript:descriptor_window:payload_bytes",
+        descriptor_window_payload_bytes(&window.records),
+    );
+    smelt_perf::perf::record_value(
+        "transcript:descriptor_window:object_backed",
+        u64::from(matches!(
+            window.hydration,
+            smelt_store::TranscriptDescriptorHydration::ObjectBacked
+        )),
+    );
+}
+
 #[derive(Default)]
 struct SparseTranscriptDescriptors {
     total_count: Option<usize>,
@@ -425,25 +463,7 @@ impl TranscriptDocument {
 
     pub(crate) fn from_loaded_transcript(loaded: LoadedTranscript) -> Self {
         if let Some(window) = loaded.descriptor_window.as_ref() {
-            smelt_perf::perf::record_value(
-                "transcript:descriptor_window:start",
-                window.start.get() as u64,
-            );
-            smelt_perf::perf::record_value(
-                "transcript:descriptor_window:end",
-                window.end().get() as u64,
-            );
-            smelt_perf::perf::record_value(
-                "transcript:descriptor_window:total",
-                window.total_count as u64,
-            );
-            smelt_perf::perf::record_value(
-                "transcript:descriptor_window:object_backed",
-                u64::from(matches!(
-                    window.hydration,
-                    smelt_store::TranscriptDescriptorHydration::ObjectBacked
-                )),
-            );
+            record_descriptor_window_metrics(window);
         }
         let active_descriptor_range = loaded
             .descriptor_window
@@ -499,6 +519,7 @@ impl TranscriptDocument {
             return false;
         }
         self.active_descriptor_range = Some(active_range);
+        record_descriptor_window_metrics(&window);
         self.rebuild_legacy_compact_transcript_from_active_descriptors();
         true
     }

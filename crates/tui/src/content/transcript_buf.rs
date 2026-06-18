@@ -66,6 +66,8 @@ pub(crate) struct TranscriptProjectionCounters {
     pub exact_height_measured_blocks: usize,
     pub range_materialized_blocks: usize,
     pub max_range_materialized_blocks: usize,
+    pub range_materialized_rows: usize,
+    pub max_range_materialized_rows: usize,
 }
 
 struct CachedRows {
@@ -2222,6 +2224,13 @@ impl TranscriptProjection {
         }
 
         smelt_perf::perf::record_value("transcript:collect_nodes_range:rows", texts.len() as u64);
+        #[cfg(test)]
+        {
+            let count = texts.len();
+            self.counters.range_materialized_rows += count;
+            self.counters.max_range_materialized_rows =
+                self.counters.max_range_materialized_rows.max(count);
+        }
         self.measurements.active.refresh_prefix_rows();
         MaterializedTranscriptRange {
             row_base,
