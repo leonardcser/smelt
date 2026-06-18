@@ -1543,6 +1543,65 @@ mod checkpoint_tests {
     use protocol::Content;
     use smelt_core::ContextCheckpoint;
 
+    fn perf_value_max(label: &str) -> u64 {
+        smelt_perf::perf::snapshot()
+            .values
+            .into_iter()
+            .find(|row| row.label == label)
+            .map(|row| row.max)
+            .unwrap_or(0)
+    }
+
+    fn assert_perf_value_absent(label: &str) {
+        let value = perf_value_max(label);
+        assert_eq!(value, 0, "{label} recorded {value}, expected no samples");
+    }
+
+    fn assert_perf_value_at_most(label: &str, max: u64) {
+        let value = perf_value_max(label);
+        assert!(
+            value <= max,
+            "{label} recorded max {value}, expected <= {max}"
+        );
+    }
+
+    fn assert_no_full_store_reads() {
+        for label in [
+            "store:history:read_all",
+            "store:history:read_all_rows",
+            "store:session:load_full_snapshot",
+            "store:session:full_snapshot_rows_read",
+            "store:transcript:read_descriptors_full",
+            "store:transcript:descriptors_full_loaded",
+            "transcript:build_from_session:history_items",
+        ] {
+            assert_perf_value_absent(label);
+        }
+    }
+
+    fn large_saved_session_app(id: &str, history_len: usize) -> crate::app::test_harness::TestApp {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        session.id = id.to_string();
+        session.first_user_message = Some("old user 0".into());
+        session.history = (0..history_len)
+            .map(|idx| {
+                if idx.is_multiple_of(2) {
+                    user(&format!("old user {idx}"))
+                } else {
+                    assistant(&format!("old assistant {idx}"))
+                }
+            })
+            .collect();
+
+        app.app.load_session(session);
+        app.app.restore_screen();
+        app.app.persisted_store_ready = false;
+        app.app.save_session();
+        app.app.flush_persist();
+        app
+    }
+
     fn user(text: &str) -> HistoryItem {
         HistoryItem::user(Content::text(text))
     }
@@ -1704,6 +1763,70 @@ mod checkpoint_tests {
         assert!(descriptors
             .iter()
             .any(|record| record.history_idx == Some(2)));
+    }
+
+    #[test]
+    fn normal_request_append_persists_only_dirty_suffix_rows() {
+        const OLD_HISTORY_LEN: usize = 256;
+        let mut app = large_saved_session_app("normal-request-dirty-suffix-gate", OLD_HISTORY_LEN);
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        let source = app.app.commit_request_history_item(
+            user("new user"),
+            Some(Block::User {
+                text: "new user".into(),
+                image_labels: vec![],
+            }),
+        );
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+
+        assert!(matches!(
+            source,
+            protocol::ModelHistorySource::Store {
+                first_live_index: 0,
+                end_index: OLD_HISTORY_LEN,
+                ..
+            }
+        ));
+        assert_eq!(app.app.core.session.history.len(), OLD_HISTORY_LEN + 1);
+        assert!(snapshot
+            .values
+            .iter()
+            .any(|row| row.label == "persist:write:history_items"));
+        assert_perf_value_at_most("persist:write:history_items", 1);
+        assert_perf_value_at_most("store:session:dirty_suffix_history_rows", 1);
+        assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
+        assert_perf_value_at_most("store:session:history_rows_inserted", 1);
+        assert_perf_value_at_most("store:session:history_rows_deleted", 0);
+        assert_perf_value_at_most("persist:write:descriptor_records", 1);
+        assert_perf_value_at_most("store:transcript:dirty_descriptor_suffix_rows", 1);
+        assert_perf_value_at_most("store:transcript:descriptor_db_rows_inserted", 1);
+        assert_no_full_store_reads();
+    }
+
+    #[test]
+    fn no_op_save_does_not_enqueue_history_or_descriptor_work() {
+        let mut app = large_saved_session_app("normal-save-noop-gate", 256);
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        app.app.save_session();
+        app.app.flush_persist();
+        smelt_perf::perf::set_enabled(false);
+
+        let skipped = perf_value_max("session:save:skipped_unchanged");
+        assert_eq!(
+            skipped, 1,
+            "no-op save did not take the unchanged fast path"
+        );
+        assert_perf_value_absent("persist:write:history_items");
+        assert_perf_value_absent("persist:write:descriptor_records");
+        assert_perf_value_absent("store:session:dirty_suffix_history_rows");
+        assert_perf_value_absent("store:history:dirty_suffix_rows");
+        assert_perf_value_absent("store:transcript:dirty_descriptor_suffix_rows");
+        assert_no_full_store_reads();
     }
 
     #[test]

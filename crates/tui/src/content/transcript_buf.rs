@@ -6166,6 +6166,43 @@ mod tests {
         elapsed.as_secs_f64() * 1_000.0
     }
 
+    fn perf_value_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
+        snapshot
+            .values
+            .iter()
+            .find(|row| row.label == label)
+            .map(|row| row.max)
+            .unwrap_or(0)
+    }
+
+    fn assert_resume_tail_perf_gates(snapshot: &smelt_perf::perf::Snapshot, history_items: usize) {
+        for label in [
+            "store:history:read_all",
+            "store:history:read_all_rows",
+            "store:session:load_full_snapshot",
+            "store:session:full_snapshot_rows_read",
+            "store:transcript:read_descriptors_full",
+            "store:transcript:descriptors_full_loaded",
+            "transcript:build_from_session:history_items",
+        ] {
+            let value = perf_value_max(snapshot, label);
+            assert_eq!(
+                value, 0,
+                "display-only resume recorded {label}={value}, expected no full-session work"
+            );
+        }
+        let loaded = perf_value_max(snapshot, "store:transcript:descriptors_loaded");
+        assert!(
+            loaded <= 256,
+            "display-only resume loaded {loaded} descriptors from {history_items} history items"
+        );
+        let descriptor_total = perf_value_max(snapshot, "transcript:sqlite:descriptor_total");
+        assert!(
+            descriptor_total >= history_items as u64 / 2,
+            "display-only resume did not observe total descriptor count: {descriptor_total} for {history_items} history items"
+        );
+    }
+
     fn transcript_bench_runs() -> usize {
         std::env::var("SMELT_TRANSCRIPT_BENCH_RUNS")
             .ok()
@@ -6292,6 +6329,30 @@ mod tests {
         )
         .expect("write benchmark transcript descriptors");
 
+        smelt_perf::perf::clear();
+        let tail_load_start = std::time::Instant::now();
+        let mut tail_resumed =
+            crate::app::history::load_transcript_from_sqlite_id(&session.id, 100, 40)
+                .expect("tail-load benchmark transcript descriptors");
+        let tail_load_ms = elapsed_ms(tail_load_start.elapsed());
+        let mut tail_projection = TranscriptProjection::new();
+        let mut tail_buf = Buffer::new(crate::smelt_edit::BufId(94), Default::default());
+        let tail_render_start = std::time::Instant::now();
+        let tail_rows = project_with_lua(
+            &mut tail_projection,
+            &lua,
+            &mut tail_buf,
+            &mut tail_resumed.transcript.history,
+            100,
+            &theme,
+            ScrollTarget::visible_tail(),
+            40,
+        );
+        let tail_render_ms = elapsed_ms(tail_render_start.elapsed());
+        assert!(tail_rows.total_rows > 0);
+        let tail_snapshot = smelt_perf::perf::snapshot();
+        assert_resume_tail_perf_gates(&tail_snapshot, history_items);
+
         let descriptor_load_start = std::time::Instant::now();
         let mut descriptor_resumed = crate::app::history::load_transcript_from_sqlite(&session)
             .expect("load benchmark transcript descriptors");
@@ -6336,12 +6397,14 @@ mod tests {
         smelt_core::session::delete(&session.id);
         smelt_perf::perf::set_enabled(false);
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_SAMPLE target_bytes={} history_items={} rows={} build_ms={:.3} first_ms={:.3} descriptor_load_ms={:.3} descriptor_render_ms={:.3} legacy_load_ms={:.3} legacy_rebuild_ms={:.3} legacy_render_ms={:.3}",
+            "TRANSCRIPT_TRUE_RESUME_SAMPLE target_bytes={} history_items={} rows={} build_ms={:.3} first_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3} descriptor_load_ms={:.3} descriptor_render_ms={:.3} legacy_load_ms={:.3} legacy_rebuild_ms={:.3} legacy_render_ms={:.3}",
             target_bytes,
             history_items,
             first.total_rows,
             build_ms,
             first_ms,
+            tail_load_ms,
+            tail_render_ms,
             descriptor_load_ms,
             descriptor_render_ms,
             load_ms,
