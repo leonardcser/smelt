@@ -1142,6 +1142,72 @@ mod tests {
             .collect()
     }
 
+    fn perf_value_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
+        snapshot
+            .values
+            .iter()
+            .find(|row| row.label == label)
+            .map(|row| row.max)
+            .unwrap_or(0)
+    }
+
+    fn assert_perf_value_absent(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
+        let value = perf_value_max(snapshot, label);
+        assert_eq!(value, 0, "{label} recorded {value}, expected no samples");
+    }
+
+    fn assert_perf_value_at_most(snapshot: &smelt_perf::perf::Snapshot, label: &str, max: u64) {
+        let value = perf_value_max(snapshot, label);
+        assert!(
+            value <= max,
+            "{label} recorded max {value}, expected <= {max}"
+        );
+    }
+
+    fn assert_no_full_request_start_reads(snapshot: &smelt_perf::perf::Snapshot) {
+        for label in [
+            "store:history:read_all",
+            "store:history:read_all_rows",
+            "store:session:load_full_snapshot",
+            "store:session:full_snapshot_rows_read",
+            "store:transcript:search_blob_full",
+            "store:transcript:read_descriptors_full",
+            "store:transcript:descriptors_full_loaded",
+            "transcript:build_from_session:history_items",
+        ] {
+            assert_perf_value_absent(snapshot, label);
+        }
+    }
+
+    fn large_saved_session_app(id: &str, history_len: usize) -> crate::app::test_harness::TestApp {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut session =
+            smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        session.id = id.to_string();
+        session.first_user_message = Some("old user 0".into());
+        session.history = (0..history_len)
+            .map(|idx| {
+                if idx.is_multiple_of(2) {
+                    HistoryItem::user(Content::text(format!("old user {idx}")))
+                } else {
+                    HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                        Some(Content::text(format!("old assistant {idx}"))),
+                        None,
+                        Vec::new(),
+                    ))
+                }
+            })
+            .collect();
+        app.app.load_session(session);
+        app.app.restore_screen();
+        app.app.ensure_current_context_note();
+        app.app.apply_pending_history_appends_for_request();
+        app.app.persisted_store_ready = false;
+        app.app.save_session();
+        app.app.flush_persist();
+        app
+    }
+
     #[test]
     fn starting_user_turn_dismisses_visible_notification() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
@@ -1210,6 +1276,62 @@ mod tests {
             loaded.history.last(),
             Some(HistoryItem::User { content, .. }) if content.text_content() == "first request"
         ));
+    }
+
+    #[test]
+    fn request_start_dispatches_store_history_without_full_reads() {
+        const BASE_HISTORY_LEN: usize = 128;
+        let mut app = large_saved_session_app("request-store-history", BASE_HISTORY_LEN);
+        let old_history_len = app.app.core.session.history.len();
+        assert!(old_history_len >= BASE_HISTORY_LEN);
+
+        smelt_perf::perf::set_enabled(true);
+        smelt_perf::perf::clear();
+        let turn = app
+            .app
+            .begin_agent_turn("new request", Content::text("new request"));
+        let snapshot = smelt_perf::perf::snapshot();
+        smelt_perf::perf::set_enabled(false);
+        app.app.agent = Some(turn);
+
+        assert_no_full_request_start_reads(&snapshot);
+        assert_perf_value_at_most(&snapshot, "persist:write:history_items", 1);
+        assert_perf_value_at_most(&snapshot, "persist:write:descriptor_records", 1);
+        assert_perf_value_at_most(&snapshot, "store:session:dirty_suffix_history_rows", 1);
+        assert_perf_value_at_most(&snapshot, "store:history:dirty_suffix_rows", 1);
+        assert_perf_value_at_most(&snapshot, "store:session:history_rows_inserted", 1);
+        assert_perf_value_at_most(
+            &snapshot,
+            "store:transcript:dirty_descriptor_suffix_rows",
+            1,
+        );
+        assert_perf_value_at_most(&snapshot, "store:transcript:descriptor_db_rows_inserted", 1);
+
+        let payload = app
+            .drain_engine_sends()
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                protocol::UiCommand::StartTurn(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("turn dispatched");
+        match payload.history {
+            protocol::ModelHistorySource::Store {
+                ref prefix,
+                first_live_index,
+                end_index,
+            } => {
+                assert!(prefix.is_empty());
+                assert_eq!(first_live_index, 0);
+                assert_eq!(end_index, old_history_len);
+            }
+            protocol::ModelHistorySource::Items(_) => panic!("request start cloned full history"),
+        }
+        assert_eq!(
+            payload.input.provider_content().text_content(),
+            "new request"
+        );
+        assert_eq!(app.app.core.session.history.len(), old_history_len + 1);
     }
 
     #[test]

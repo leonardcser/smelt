@@ -46,6 +46,14 @@ with `COMPAT(<id>)`.
 - Code:
   - `crates/core/src/session.rs`: session listing/search blob fallbacks
 
+## legacy-session-full-load-fallbacks
+
+- Remove after: SQLite session metadata, history, and transcript descriptors are required for all supported saved sessions
+- Why: explicit open/preview paths still need to display old or partially migrated sessions that lack sparse transcript records or history length metadata
+- Code:
+  - `crates/tui/src/app/lua_handlers.rs`: fallback in `load_session_by_id`
+  - `crates/tui/src/lua/api/session.rs`: fallback in `smelt.session.render_preview_into`
+
 ## transcript-deferred-full-descriptor-bridge
 
 - Remove after: normal session resume opens metadata and sparse transcript windows without `session::load` / `load_session_snapshot`
