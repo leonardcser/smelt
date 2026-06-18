@@ -103,10 +103,7 @@ fn publish_turn_end(app: &mut TestApp) {
     let _g = crate::lua::install_app_ptr(&mut app.app);
     app.app.core.signals.emit_dyn(
         "turn_end",
-        std::rc::Rc::new(smelt_core::signals::TurnEnd {
-            cancelled: false,
-            continuation_token: None,
-        }),
+        std::rc::Rc::new(smelt_core::signals::TurnEnd { cancelled: false }),
     );
     app.app.pump_lua();
 }

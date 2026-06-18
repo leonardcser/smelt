@@ -547,13 +547,10 @@ pub(crate) fn transcript_descriptor_estimated_rows(
                  END
              )
          ), 0)
-         FROM (
-             SELECT kind, estimated_rows, estimated_text_bytes, preview_text
-             FROM transcript_blocks
-             WHERE descriptor_idx >= ?3
-               AND descriptor_idx < ?3 + ?2
-             ORDER BY descriptor_idx
-         )",
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL
+           AND descriptor_idx >= ?3
+           AND descriptor_idx < ?3 + ?2",
         params![
             checked_i64(width, "descriptor_estimated_rows_width")?,
             limit,

@@ -167,6 +167,26 @@ impl TuiApp {
     }
 }
 
+pub(crate) fn target_screen_row_for_reveal(
+    scroll_top: RowIndex,
+    viewport_rows: u16,
+    row: RowIndex,
+    opts: RevealOptions,
+) -> RowIndex {
+    let last_screen_row = viewport_rows.saturating_sub(1) as RowIndex;
+    let min_screen_row = opts.top_padding.min(last_screen_row);
+    let max_screen_row = last_screen_row
+        .saturating_sub(opts.bottom_padding)
+        .max(min_screen_row);
+    if row < scroll_top.saturating_add(min_screen_row) {
+        min_screen_row
+    } else if row > scroll_top.saturating_add(max_screen_row) {
+        max_screen_row
+    } else {
+        row.saturating_sub(scroll_top)
+    }
+}
+
 fn apply_reveal_padding(
     win: &mut crate::smelt_edit::Window,
     total_rows: RowIndex,
@@ -179,22 +199,20 @@ fn apply_reveal_padding(
         return;
     }
 
-    let last_screen_row = viewport_rows.saturating_sub(1) as RowIndex;
-    let min_screen_row = top_padding.min(last_screen_row);
-    let max_screen_row = last_screen_row
-        .saturating_sub(bottom_padding)
-        .max(min_screen_row);
-    let screen_row = row.saturating_sub(win.scroll_top());
-
-    let target_scroll = if screen_row < min_screen_row {
-        row.saturating_sub(min_screen_row)
-    } else if screen_row > max_screen_row {
-        row.saturating_sub(max_screen_row)
-    } else {
-        return;
-    };
-
-    win.pin_scroll(target_scroll.min(max_scroll(total_rows, viewport_rows)));
+    let target_screen_row = target_screen_row_for_reveal(
+        win.scroll_top(),
+        viewport_rows,
+        row,
+        RevealOptions {
+            top_padding,
+            bottom_padding,
+            ..RevealOptions::default()
+        },
+    );
+    let target_scroll = row.saturating_sub(target_screen_row);
+    if target_scroll != win.scroll_top() {
+        win.pin_scroll(target_scroll.min(max_scroll(total_rows, viewport_rows)));
+    }
 }
 
 fn max_scroll(total_rows: RowIndex, viewport_rows: u16) -> RowIndex {

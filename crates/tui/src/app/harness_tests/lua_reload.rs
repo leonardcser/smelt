@@ -141,11 +141,11 @@ fn lua_goal_module_persists_and_updates_session_goal() {
             assert(goal.update_status({ summary = "Context notes", progress = "Phase 1/2" }))
             assert(goal.current().summary == "Context notes")
             assert(goal.current().progress.label == "Phase 1/2")
-            assert(goal.describe():find("auto%-continue: off"))
-            assert(goal.describe():find("state: active", 1, true))
-            assert(goal.describe():find("summary: Context notes", 1, true))
-            assert(goal.describe():find("progress: Phase 1/2", 1, true))
-            assert(goal.describe():find("id:"))
+            assert(goal.describe():find("Auto%-continue: off"))
+            assert(goal.describe():find("State: active", 1, true))
+            assert(goal.describe():find("Summary: Context notes", 1, true))
+            assert(goal.describe():find("Progress: Phase 1/2", 1, true))
+            assert(goal.describe():find("ID:"))
             assert(goal.pause())
             assert(goal.current().state == "paused")
             assert(goal.status_text():find("goal paused", 1, true))
@@ -218,13 +218,12 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
         r#"
             local goal = require("smelt.goal")
             smelt.engine.is_running = function() return _G.__goal_running == true end
-            smelt.engine.submit_command_continuation = function(name, body, _overrides, display, continuation_token)
-                _G.__goal_submit = { name = name, body = body, display = display, continuation_token = continuation_token }
-                return continuation_token == 42
+            smelt.engine.submit_command = function(name, body, _overrides, display)
+                _G.__goal_submit = { name = name, body = body, display = display }
             end
             _G.__goal_running = true
             assert(goal.create("finish <the> & goal", { auto_continue = true }))
-            goal.schedule_auto_continue(42)
+            goal.schedule_auto_continue()
             _G.__goal_running = false
         "#,
     ));
@@ -235,13 +234,12 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
         r##"
             assert(_G.__goal_submit.name == "goal")
             assert(_G.__goal_submit.display == "goal continue")
-            assert(_G.__goal_submit.continuation_token == 42)
             assert(_G.__goal_submit.body:find("# Continue goal", 1, true))
             assert(_G.__goal_submit.body:find("finish &lt;the&gt; &amp; goal", 1, true))
-            assert(_G.__goal_submit.body:find("Call update_goal_progress when starting a meaningful phase", 1, true))
-            assert(_G.__goal_submit.body:find("skip routine substeps and live activity", 1, true))
-            assert(_G.__goal_submit.body:find("Preserve the original scope", 1, true))
-            assert(_G.__goal_submit.body:find("Treat incomplete, indirect, weak, or missing evidence as not done", 1, true))
+            assert(_G.__goal_submit.body:find("Update goal progress only when entering", 1, true))
+            assert(_G.__goal_submit.body:find("Progress labels may include a brief stage description", 1, true))
+            assert(_G.__goal_submit.body:find("moment-to-moment activity", 1, true))
+            assert(_G.__goal_submit.body:find("routine substeps", 1, true))
             assert(_G.__goal_submit.body:find("state=\"done\"", 1, true))
             assert(_G.__goal_submit.body:find("state=\"blocked\"", 1, true))
         "##,
@@ -326,7 +324,7 @@ fn loading_session_restores_persisted_cwd() {
         app.app.core.signals.get::<String>("cwd").as_deref(),
         Some(expected.as_str())
     );
-    assert!(app.app.display_only_session.is_none());
+    assert!(app.app.deferred_session_load.is_none());
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
         cmd,
         protocol::UiCommand::SetCwd { cwd } if cwd == expected
@@ -344,9 +342,10 @@ fn loading_session_restores_persisted_cwd() {
     app.app.load_session_display_only(
         display_session,
         crate::app::transcript::LoadedTranscript::full(transcript),
-        crate::app::DisplayOnlySessionState {
-            full_session_id: "full-display-only-cwd-session".into(),
-            persisted_history_len: 0,
+        crate::app::DeferredSessionLoad {
+            id: "full-display-only-cwd-session".into(),
+            history_len: 0,
+            checkpoint: None,
         },
     );
 
@@ -358,9 +357,9 @@ fn loading_session_restores_persisted_cwd() {
     assert_eq!(app.app.core.env.cwd(), display_target);
     assert_eq!(
         app.app
-            .display_only_session
+            .deferred_session_load
             .as_ref()
-            .map(|display_only| display_only.full_session_id.as_str()),
+            .map(|deferred| deferred.id.as_str()),
         Some("full-display-only-cwd-session")
     );
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
