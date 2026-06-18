@@ -5629,10 +5629,7 @@ mod tests {
     fn visible_projection_preserves_rendered_row_anchor_across_width_change() {
         let mut transcript = Transcript::new();
         transcript.push(Block::Text {
-            content: format!(
-                "{}\nANCHOR stay at viewport top\nafter",
-                "before wrapping content ".repeat(6)
-            ),
+            content: format!("ANCHOR\n{}\nafter", "before wrapping content ".repeat(6)),
         });
         for i in 0..20 {
             transcript.push(Block::Text {
