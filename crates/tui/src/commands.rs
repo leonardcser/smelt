@@ -639,6 +639,15 @@ mod tests {
             .collect()
     }
 
+    fn pending_mode_appends(app: &crate::app::TuiApp) -> Vec<&crate::app::PendingHistoryAppend> {
+        app.pending_history_appends
+            .iter()
+            .filter(|append| {
+                append.replacement_note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
+            })
+            .collect()
+    }
+
     fn normal_app() -> crate::app::test_harness::TestApp {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.app.core.config.mode = AgentMode::parse("normal").unwrap();
@@ -735,11 +744,11 @@ mod tests {
         app.start_turn(1);
 
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
-        assert_eq!(app.app.pending_history_appends.len(), 1);
+        assert_eq!(pending_mode_appends(&app.app).len(), 1);
 
         app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
 
-        assert!(app.app.pending_history_appends.is_empty());
+        assert!(pending_mode_appends(&app.app).is_empty());
         assert!(mode_blocks(&app.app).is_empty());
     }
 

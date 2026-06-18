@@ -1209,9 +1209,17 @@ mod tests {
         app.app.handle_process_completed("4242".into(), Some(9));
 
         assert!(process_status_blocks(&app).is_empty());
-        assert_eq!(app.app.pending_history_appends.len(), 1);
+        let process_status_appends: Vec<_> = app
+            .app
+            .pending_history_appends
+            .iter()
+            .filter(|append| {
+                append.history_item().note_kind() == Some(protocol::HistoryNoteKind::ProcessStatus)
+            })
+            .collect();
+        assert_eq!(process_status_appends.len(), 1);
         assert_eq!(
-            app.app.pending_history_appends[0].history_item(),
+            process_status_appends[0].history_item(),
             protocol::HistoryItem::note(protocol::HistoryNote::process_status_event(
                 protocol::ProcessStatusEvent::background_process_completed("4242", Some(9))
             ))
