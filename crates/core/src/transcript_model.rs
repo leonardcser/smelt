@@ -638,6 +638,12 @@ pub struct TranscriptBlockRecord {
     pub tool_state: Option<(String, ToolState)>,
 }
 
+#[derive(Clone)]
+pub struct TranscriptBlockRecordWithId {
+    pub block_id: BlockId,
+    pub record: TranscriptBlockRecord,
+}
+
 impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecord {
     type Error = serde_json::Error;
 
@@ -664,6 +670,16 @@ impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecord 
             origin,
             tool_state,
         })
+    }
+}
+
+impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecordWithId {
+    type Error = serde_json::Error;
+
+    fn try_from(row: smelt_store::TranscriptDescriptorRecord) -> Result<Self, Self::Error> {
+        let block_id = BlockId::new(row.block_idx);
+        let record = TranscriptBlockRecord::try_from(row)?;
+        Ok(Self { block_id, record })
     }
 }
 
@@ -967,15 +983,34 @@ impl BlockHistory {
     }
 
     pub fn from_descriptor_records(records: Vec<TranscriptBlockRecord>) -> Self {
+        let records = records
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| TranscriptBlockRecordWithId {
+                block_id: BlockId::new(index as u64),
+                record,
+            })
+            .collect();
+        Self::from_descriptor_records_with_ids(records)
+    }
+
+    pub fn from_descriptor_records_with_ids(records: Vec<TranscriptBlockRecordWithId>) -> Self {
         let mut history = Self::new();
         for record in records {
-            if let Some((call_id, state)) = record.tool_state {
+            if let Some((call_id, state)) = record.record.tool_state {
                 let hash = state.display_hash();
                 history.tool_states.insert(call_id.clone(), state);
                 history.tool_display_hashes.insert(call_id, hash);
             }
-            let content_hash = (record.content_hash != 0).then_some(record.content_hash);
-            history.add_descriptor(None, record.descriptor, record.origin, content_hash);
+            let content_hash =
+                (record.record.content_hash != 0).then_some(record.record.content_hash);
+            history.add_descriptor_with_id(
+                record.block_id,
+                None,
+                record.record.descriptor,
+                record.record.origin,
+                content_hash,
+            );
         }
         history.clear_descriptor_dirty();
         history
@@ -1062,14 +1097,26 @@ impl BlockHistory {
         origin: Option<BlockOrigin>,
         content_hash: Option<u64>,
     ) -> BlockId {
+        let id = BlockId(self.next_id);
+        self.next_id += 1;
+        self.add_descriptor_with_id(id, idx, descriptor, origin, content_hash)
+    }
+
+    fn add_descriptor_with_id(
+        &mut self,
+        id: BlockId,
+        idx: Option<usize>,
+        descriptor: TranscriptBlockDescriptor,
+        origin: Option<BlockOrigin>,
+        content_hash: Option<u64>,
+    ) -> BlockId {
         let normalized = descriptor.normalize_content();
         let normalized_hash = normalized.content_hash();
         let hash = content_hash
             .filter(|hash| *hash == normalized_hash)
             .unwrap_or(normalized_hash);
         let descriptor = normalized;
-        let id = BlockId(self.next_id);
-        self.next_id += 1;
+        self.next_id = self.next_id.max(id.0.saturating_add(1));
         let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
         self.order.insert(order_index, id);
         self.entries

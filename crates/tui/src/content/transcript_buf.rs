@@ -6559,23 +6559,22 @@ mod tests {
 
         smelt_perf::perf::clear();
         let tail_load_start = std::time::Instant::now();
-        let mut tail_resumed =
+        let tail_resumed =
             crate::app::history::load_transcript_from_sqlite_id(&session.id, 100, 40)
                 .expect("tail-load benchmark transcript descriptors");
+        let mut tail_document =
+            crate::app::transcript::TranscriptDocument::from_loaded_transcript(tail_resumed);
         let tail_load_ms = elapsed_ms(tail_load_start.elapsed());
-        let mut tail_projection = TranscriptProjection::new();
         let mut tail_buf = Buffer::new(crate::smelt_edit::BufId(94), Default::default());
         let tail_render_start = std::time::Instant::now();
-        let tail_rows = project_with_lua(
-            &mut tail_projection,
+        let tail_plan = tail_document.plan_projection_measured(
             &lua,
-            &mut tail_buf,
-            &mut tail_resumed.transcript.history,
             100,
             &theme,
             ScrollTarget::visible_tail(),
             40,
         );
+        let tail_rows = tail_document.project_planned(&lua, &mut tail_buf, &theme, tail_plan);
         let tail_render_ms = elapsed_ms(tail_render_start.elapsed());
         assert!(tail_rows.total_rows > 0);
         let tail_snapshot = smelt_perf::perf::snapshot();
@@ -6583,22 +6582,22 @@ mod tests {
         assert_resume_tail_perf_gates(&tail_snapshot, history_items);
 
         let descriptor_load_start = std::time::Instant::now();
-        let mut descriptor_resumed = crate::app::history::load_transcript_from_sqlite(&session)
+        let descriptor_resumed = crate::app::history::load_transcript_from_sqlite(&session)
             .expect("load benchmark transcript descriptors");
+        let mut descriptor_document =
+            crate::app::transcript::TranscriptDocument::from_loaded_transcript(descriptor_resumed);
         let descriptor_load_ms = elapsed_ms(descriptor_load_start.elapsed());
-        let mut descriptor_projection = TranscriptProjection::new();
         let mut descriptor_buf = Buffer::new(crate::smelt_edit::BufId(93), Default::default());
         let descriptor_render_start = std::time::Instant::now();
-        let descriptor_rows = project_with_lua(
-            &mut descriptor_projection,
+        let descriptor_plan = descriptor_document.plan_projection_measured(
             &lua,
-            &mut descriptor_buf,
-            &mut descriptor_resumed.transcript.history,
             100,
             &theme,
             ScrollTarget::visible_tail(),
             40,
         );
+        let descriptor_rows =
+            descriptor_document.project_planned(&lua, &mut descriptor_buf, &theme, descriptor_plan);
         let descriptor_render_ms = elapsed_ms(descriptor_render_start.elapsed());
         assert_eq!(descriptor_rows.total_rows, first.total_rows);
 

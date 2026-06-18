@@ -33,6 +33,14 @@ impl Transcript {
         }
     }
 
+    pub fn from_descriptor_records_with_ids(
+        records: Vec<crate::transcript_model::TranscriptBlockRecordWithId>,
+    ) -> Self {
+        Self {
+            history: BlockHistory::from_descriptor_records_with_ids(records),
+        }
+    }
+
     // ── Accessors ─────────────────────────────────────────────────────
 
     pub fn block(&self, id: BlockId) -> Option<&Block> {

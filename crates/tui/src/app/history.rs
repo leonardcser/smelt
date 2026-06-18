@@ -110,7 +110,7 @@ pub(crate) fn load_transcript_from_sqlite(
     session: &session::Session,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
     let loaded = load_transcript_from_sqlite_dir(session::dir_for(session))?;
-    transcript_covers_history(&loaded.transcript, session).then_some(loaded)
+    loaded_transcript_covers_history(&loaded, session).then_some(loaded)
 }
 
 pub(crate) fn load_transcript_from_sqlite_id(
@@ -139,15 +139,32 @@ fn load_transcript_tail_from_sqlite_dir(
     )
 }
 
+fn loaded_transcript_covers_history(
+    loaded: &crate::app::transcript::LoadedTranscript,
+    session: &session::Session,
+) -> bool {
+    if let Some(window) = loaded.descriptor_window.as_ref() {
+        return descriptor_records_cover_history(
+            window.records.iter().map(|record| &record.record),
+            session,
+        );
+    }
+    transcript_covers_history(&loaded.transcript, session)
+}
+
 fn transcript_covers_history(transcript: &Transcript, session: &session::Session) -> bool {
     block_history_covers_history(&transcript.history, session)
 }
 
 fn block_history_covers_history(history: &BlockHistory, session: &session::Session) -> bool {
-    if session.history.is_empty() {
-        return true;
-    }
-    let records = history.descriptor_records();
+    descriptor_records_cover_history(history.descriptor_records().iter(), session)
+}
+
+fn descriptor_records_cover_history<'a>(
+    records: impl IntoIterator<Item = &'a smelt_core::TranscriptBlockRecord>,
+    session: &session::Session,
+) -> bool {
+    let records = records.into_iter().collect::<Vec<_>>();
     session.history.iter().enumerate().all(|(idx, item)| {
         if fallback_history_item_block_count(item) == 0 {
             return true;

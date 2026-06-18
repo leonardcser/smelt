@@ -1012,6 +1012,8 @@ Acceptance:
 
 ### Follow-up 5: Remove the compact transcript render bridge
 
+Status: complete. Descriptor window loads now keep `LoadedTranscript.transcript` empty until the document activates a sparse window, so the old `transcript:descriptor_window:build_compact` bridge and its compatibility naming are gone. Loaded descriptor rows carry `TranscriptBlockRecordWithId`, allowing active projections to preserve durable SQLite `block_idx` values as `BlockId`s across window activation and hit-testing state instead of renumbering each active window from zero. Tail activation reuses the already loaded tail window. The true resume benchmark for 10 MiB shows `transcript:resume_tail:build_loaded` at 58 us, `transcript:descriptor_window:active_records` at 80, no compact-build metric, and tail-load at 0.826 ms; `tiny_blocks_1mib` first paint stayed flat at 36,137 allocations / 101,409,850 bytes with bounded materialization counters.
+
 Goal: make `TranscriptDocument` render directly from sparse descriptor windows instead of rebuilding a compact `Transcript` for the active window.
 
 Deliverables:

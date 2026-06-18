@@ -14,7 +14,7 @@ use smelt_core::content::highlight::InlineOptions;
 use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::transcript_model::{
-    Block, BlockHistory, BlockId, ToolOutputRef, ToolStatus, TranscriptBlockRecord,
+    Block, BlockHistory, BlockId, ToolOutputRef, ToolStatus, TranscriptBlockRecordWithId,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Range;
@@ -29,7 +29,7 @@ pub(crate) struct LoadedDescriptorWindow {
     pub(crate) start: smelt_store::TranscriptDescriptorIndex,
     pub(crate) total_count: usize,
     pub(crate) hydration: smelt_store::TranscriptDescriptorHydration,
-    pub(crate) records: Vec<TranscriptBlockRecord>,
+    pub(crate) records: Vec<TranscriptBlockRecordWithId>,
 }
 
 impl LoadedDescriptorWindow {
@@ -104,12 +104,8 @@ impl LoadedTranscript {
     ) -> Option<Self> {
         let total_count = rows.len();
         let records = descriptor_records_from_rows(rows)?;
-        let transcript = {
-            let _perf = smelt_perf::perf::begin("transcript:descriptor_window:build_compact");
-            Transcript::from_descriptor_records(records.clone())
-        };
         Some(Self {
-            transcript,
+            transcript: Transcript::new(),
             descriptor_window: Some(LoadedDescriptorWindow {
                 start: smelt_store::TranscriptDescriptorIndex::new(0),
                 total_count,
@@ -125,12 +121,8 @@ impl LoadedTranscript {
         session_dir: PathBuf,
     ) -> Option<Self> {
         let descriptor_window = LoadedDescriptorWindow::from_slice(slice)?;
-        let transcript = {
-            let _perf = smelt_perf::perf::begin("transcript:descriptor_window:build_compact");
-            Transcript::from_descriptor_records(descriptor_window.records.clone())
-        };
         Some(Self {
-            transcript,
+            transcript: Transcript::new(),
             descriptor_window: Some(descriptor_window),
             session_dir: Some(session_dir),
         })
@@ -139,7 +131,7 @@ impl LoadedTranscript {
 
 fn descriptor_records_from_rows(
     rows: Vec<smelt_store::TranscriptDescriptorRecord>,
-) -> Option<Vec<TranscriptBlockRecord>> {
+) -> Option<Vec<TranscriptBlockRecordWithId>> {
     if rows.is_empty() {
         return None;
     }
@@ -244,10 +236,10 @@ fn estimate_text_rows_for_width(text: &str, width: usize) -> RowIndex {
         .max(1)
 }
 
-fn descriptor_window_payload_bytes(records: &[TranscriptBlockRecord]) -> u64 {
+fn descriptor_window_payload_bytes(records: &[TranscriptBlockRecordWithId]) -> u64 {
     records
         .iter()
-        .filter_map(|record| record.descriptor.raw_text())
+        .filter_map(|record| record.record.descriptor.raw_text())
         .map(|text| text.len() as u64)
         .sum()
 }
@@ -286,7 +278,7 @@ fn record_descriptor_window_metrics(window: &LoadedDescriptorWindow) {
 struct SparseTranscriptDescriptors {
     total_count: Option<usize>,
     loaded_ranges: Vec<Range<smelt_store::TranscriptDescriptorIndex>>,
-    records: BTreeMap<smelt_store::TranscriptDescriptorIndex, TranscriptBlockRecord>,
+    records: BTreeMap<smelt_store::TranscriptDescriptorIndex, TranscriptBlockRecordWithId>,
 }
 
 impl SparseTranscriptDescriptors {
@@ -338,10 +330,10 @@ impl SparseTranscriptDescriptors {
         self.loaded_ranges = merged;
     }
 
-    fn legacy_compact_records_for_range(
+    fn records_for_range(
         &self,
         range: Option<&Range<smelt_store::TranscriptDescriptorIndex>>,
-    ) -> Vec<TranscriptBlockRecord> {
+    ) -> Vec<TranscriptBlockRecordWithId> {
         match range {
             Some(range) => self
                 .records
@@ -506,7 +498,7 @@ impl TranscriptDocument {
             .map(|window| window.start..window.end());
         let sparse_descriptors =
             SparseTranscriptDescriptors::from_loaded(loaded.descriptor_window.as_ref());
-        Self {
+        let mut document = Self {
             transcript: loaded.transcript,
             projection: crate::content::transcript_buf::TranscriptProjection::new(),
             render_cache: TranscriptRenderCache::new(),
@@ -514,7 +506,11 @@ impl TranscriptDocument {
             sparse_descriptors,
             active_descriptor_range,
             session_dir: loaded.session_dir,
+        };
+        if document.active_descriptor_range.is_some() {
+            document.install_active_descriptor_projection();
         }
+        document
     }
 
     pub(crate) fn replace_transcript(&mut self, transcript: Transcript) {
@@ -555,16 +551,23 @@ impl TranscriptDocument {
         }
         self.active_descriptor_range = Some(active_range);
         record_descriptor_window_metrics(&window);
-        self.rebuild_legacy_compact_transcript_from_active_descriptors();
+        self.install_active_descriptor_projection();
         true
     }
 
-    fn rebuild_legacy_compact_transcript_from_active_descriptors(&mut self) {
-        let inline_options = self.projection.inline_options().clone();
-        self.transcript = Transcript::from_descriptor_records(
-            self.sparse_descriptors
-                .legacy_compact_records_for_range(self.active_descriptor_range.as_ref()),
+    fn install_active_descriptor_projection(&mut self) {
+        let records = self
+            .sparse_descriptors
+            .records_for_range(self.active_descriptor_range.as_ref());
+        smelt_perf::perf::record_value(
+            "transcript:descriptor_window:active_records",
+            records.len() as u64,
         );
+        if records.is_empty() {
+            return;
+        }
+        let inline_options = self.projection.inline_options().clone();
+        self.transcript = Transcript::from_descriptor_records_with_ids(records);
         self.projection = crate::content::transcript_buf::TranscriptProjection::new();
         self.projection.set_inline_options(inline_options);
         self.render_cache.clear();
@@ -583,6 +586,7 @@ impl TranscriptDocument {
             })
             .map(|(_, record)| {
                 record
+                    .record
                     .descriptor
                     .raw_text()
                     .map(|text| estimate_text_rows_for_width(&text, width))
@@ -806,6 +810,11 @@ impl TranscriptDocument {
         viewport_rows: u16,
     ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
         let total = self.sparse_descriptors.total_count()?;
+        if let Some(active) = self.active_descriptor_range.as_ref() {
+            if active.end.get() == total {
+                return Some(active.clone());
+            }
+        }
         self.descriptor_window_range_around_center(
             width,
             total.saturating_sub(1),
@@ -823,7 +832,7 @@ impl TranscriptDocument {
         }
         if self.sparse_descriptors.range_is_loaded(&range) {
             self.active_descriptor_range = Some(range);
-            self.rebuild_legacy_compact_transcript_from_active_descriptors();
+            self.install_active_descriptor_projection();
             return true;
         }
         let Some(window) = self.load_descriptor_window((range.start.get()..range.end.get()).into())
@@ -1299,6 +1308,7 @@ impl Default for TranscriptDocument {
 #[cfg(test)]
 mod document_tests {
     use super::*;
+    use smelt_core::transcript_model::TranscriptBlockRecord;
 
     #[test]
     fn sparse_tail_document_reports_virtual_prefix_rows() {
@@ -1311,13 +1321,14 @@ mod document_tests {
             content: "tail two".into(),
         });
         let records = source.history.descriptor_records();
+        let window_records = descriptor_records_with_ids(&records, 8);
         let loaded = LoadedTranscript {
-            transcript: Transcript::from_descriptor_records(records.clone()),
+            transcript: Transcript::new(),
             descriptor_window: Some(LoadedDescriptorWindow {
                 start: smelt_store::TranscriptDescriptorIndex::new(8),
                 total_count: 10,
                 hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-                records,
+                records: window_records,
             }),
             session_dir: None,
         };
@@ -1345,13 +1356,14 @@ mod document_tests {
             content: "tail two".into(),
         });
         let records = source.history.descriptor_records();
+        let window_records = descriptor_records_with_ids(&records, 8);
         let loaded = LoadedTranscript {
-            transcript: Transcript::from_descriptor_records(records.clone()),
+            transcript: Transcript::new(),
             descriptor_window: Some(LoadedDescriptorWindow {
                 start: smelt_store::TranscriptDescriptorIndex::new(8),
                 total_count: 10,
                 hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-                records,
+                records: window_records,
             }),
             session_dir: None,
         };
@@ -1445,14 +1457,29 @@ mod document_tests {
         source.history.descriptor_records()
     }
 
+    fn descriptor_records_with_ids(
+        records: &[TranscriptBlockRecord],
+        block_id_start: usize,
+    ) -> Vec<TranscriptBlockRecordWithId> {
+        records
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(offset, record)| TranscriptBlockRecordWithId {
+                block_id: BlockId::new(block_id_start.saturating_add(offset) as u64),
+                record,
+            })
+            .collect()
+    }
+
     fn sparse_loaded_transcript(
         records: &[TranscriptBlockRecord],
         range: Range<usize>,
         session_dir: Option<PathBuf>,
     ) -> LoadedTranscript {
-        let window_records = records[range.clone()].to_vec();
+        let window_records = descriptor_records_with_ids(&records[range.clone()], range.start);
         LoadedTranscript {
-            transcript: Transcript::from_descriptor_records(window_records.clone()),
+            transcript: Transcript::new(),
             descriptor_window: Some(LoadedDescriptorWindow {
                 start: smelt_store::TranscriptDescriptorIndex::new(range.start),
                 total_count: records.len(),
@@ -1463,7 +1490,7 @@ mod document_tests {
         }
     }
 
-    fn compact_transcript_contains(document: &TranscriptDocument, needle: &str) -> bool {
+    fn active_history_contains(document: &TranscriptDocument, needle: &str) -> bool {
         document
             .transcript
             .history
@@ -1490,7 +1517,7 @@ mod document_tests {
             start: smelt_store::TranscriptDescriptorIndex::new(40),
             total_count: records.len(),
             hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: records[40..48].to_vec(),
+            records: descriptor_records_with_ids(&records[40..48], 40),
         }));
 
         assert_eq!(document.sparse_descriptors.loaded_ranges().len(), 2);
@@ -1502,8 +1529,8 @@ mod document_tests {
             )
         );
         assert_eq!(document.transcript.history.descriptor_records().len(), 8);
-        assert!(compact_transcript_contains(&document, "block 40"));
-        assert!(!compact_transcript_contains(&document, "block 90"));
+        assert!(active_history_contains(&document, "block 40"));
+        assert!(!active_history_contains(&document, "block 90"));
     }
 
     #[test]
@@ -1533,8 +1560,8 @@ mod document_tests {
         assert!(active.start.get() > 0);
         assert!(active.end.get() < records.len());
         assert_eq!(document.sparse_descriptors.loaded_ranges().len(), 2);
-        assert!(compact_transcript_contains(&document, "block 40"));
-        assert!(!compact_transcript_contains(&document, "block 90"));
+        assert!(active_history_contains(&document, "block 40"));
+        assert!(!active_history_contains(&document, "block 90"));
     }
 
     #[test]
@@ -1559,7 +1586,7 @@ mod document_tests {
 
         assert_eq!(document.active_descriptor_range, active_before);
         assert_eq!(document.sparse_descriptors.loaded_ranges().len(), 1);
-        assert!(compact_transcript_contains(&document, "block 40"));
+        assert!(active_history_contains(&document, "block 40"));
     }
 
     #[test]
@@ -1576,7 +1603,7 @@ mod document_tests {
             start: smelt_store::TranscriptDescriptorIndex::new(40),
             total_count: records.len(),
             hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-            records: records[40..48].to_vec(),
+            records: descriptor_records_with_ids(&records[40..48], 40),
         }));
 
         let _plan = document.plan_projection_measured(
@@ -1594,8 +1621,8 @@ mod document_tests {
                     ..smelt_store::TranscriptDescriptorIndex::new(100)
             )
         );
-        assert!(compact_transcript_contains(&document, "block 90"));
-        assert!(!compact_transcript_contains(&document, "block 40"));
+        assert!(active_history_contains(&document, "block 90"));
+        assert!(!active_history_contains(&document, "block 40"));
     }
 }
 
@@ -2803,6 +2830,13 @@ mod tests {
             super::DescriptorRangeState::Missing
         );
         assert_eq!(document.history().order.len(), 2);
+        assert_eq!(
+            document.history().order,
+            vec![
+                smelt_core::transcript_model::BlockId::new(1),
+                smelt_core::transcript_model::BlockId::new(2),
+            ]
+        );
         let origins = document
             .history()
             .descriptor_records()
