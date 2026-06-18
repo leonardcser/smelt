@@ -65,8 +65,8 @@ pub struct ShutdownContext {
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
-    pub(crate) transcript: crate::app::transcript::TranscriptView,
-    pub(crate) document_render_cache: crate::app::document::RenderCache,
+    pub(crate) transcript: crate::app::transcript::TranscriptDocument,
+    pub(crate) buffer_render_cache: crate::app::document::RenderCache,
     pub(crate) parser: smelt_core::content::stream_parser::StreamParser,
     pub(crate) draft_tools: crate::app::drafts::ToolDraftController,
     pub(crate) resume_preview_cache: crate::app::transcript::ResumePreviewCache,
@@ -1239,7 +1239,7 @@ impl TuiApp {
                 Some(std::path::PathBuf::from(&cwd)),
             ),
         };
-        let mut transcript = crate::app::transcript::TranscriptView::new();
+        let mut transcript = crate::app::transcript::TranscriptDocument::new();
         transcript.set_inline_options(inline_options.clone());
         let mut resume_preview_cache = crate::app::transcript::ResumePreviewCache::new(6);
         resume_preview_cache.set_inline_options(inline_options);
@@ -1262,7 +1262,7 @@ impl TuiApp {
             core,
             lua,
             transcript,
-            document_render_cache: crate::app::document::RenderCache::new(),
+            buffer_render_cache: crate::app::document::RenderCache::new(),
             parser: smelt_core::content::stream_parser::StreamParser::new(),
             draft_tools: crate::app::drafts::ToolDraftController::default(),
             resume_preview_cache,

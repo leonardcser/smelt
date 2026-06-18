@@ -4,7 +4,9 @@ use crate::app::TuiApp;
 use crate::content::prompt_parser::{
     build_prompt_display_lines, prompt_display_uses_cursor_padding,
 };
-use crate::smelt_edit::{Buffer, DisplayDocument, DisplaySnapshot, TextRange, Theme};
+use crate::smelt_edit::{
+    Buffer, DisplayDocument, DisplayRows, DisplaySnapshot, RowIndex, TextRange, Theme,
+};
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_core::content::file_icons::FileIconOptions;
 use smelt_core::content::highlight::InlineOptions;
@@ -38,14 +40,72 @@ impl LoadedTranscript {
     }
 }
 
-pub(crate) struct TranscriptView {
+pub(crate) struct TranscriptDocument {
     transcript: Transcript,
     projection: crate::content::transcript_buf::TranscriptProjection,
+    render_cache: TranscriptRenderCache,
     compaction_preview_id: Option<BlockId>,
     descriptor_slice: Option<LoadedTranscriptDescriptorSlice>,
 }
 
-impl TranscriptView {
+pub(crate) struct TranscriptRenderContext {
+    pub(crate) width: u16,
+    pub(crate) theme_key: u64,
+    pub(crate) renderer_generation: u64,
+    pub(crate) renderer_cache_key: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct TranscriptRenderCacheKey {
+    generation: u64,
+    width: u16,
+    theme: u64,
+    renderer_generation: u64,
+    renderer_cache_key: Option<u64>,
+    start: RowIndex,
+    count: RowIndex,
+}
+
+struct TranscriptRenderCache {
+    rows: HashMap<TranscriptRenderCacheKey, DisplayRows>,
+    order: VecDeque<TranscriptRenderCacheKey>,
+    limit: usize,
+}
+
+impl TranscriptRenderCache {
+    const DEFAULT_LIMIT: usize = 16;
+
+    fn new() -> Self {
+        Self {
+            rows: HashMap::new(),
+            order: VecDeque::new(),
+            limit: Self::DEFAULT_LIMIT,
+        }
+    }
+
+    fn get(&mut self, key: TranscriptRenderCacheKey) -> Option<DisplayRows> {
+        let rows = self.rows.get(&key)?.clone();
+        self.order.retain(|existing| *existing != key);
+        self.order.push_back(key);
+        Some(rows)
+    }
+
+    fn insert(&mut self, key: TranscriptRenderCacheKey, rows: DisplayRows) {
+        self.order.retain(|existing| *existing != key);
+        self.order.push_back(key);
+        self.rows.insert(key, rows);
+        while self.order.len() > self.limit {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if !self.order.contains(&oldest) {
+                self.rows.remove(&oldest);
+            }
+        }
+    }
+}
+
+impl TranscriptDocument {
     pub(crate) fn new() -> Self {
         Self::from_transcript(Transcript::new())
     }
@@ -79,6 +139,7 @@ impl TranscriptView {
         Self {
             transcript: loaded.transcript,
             projection: crate::content::transcript_buf::TranscriptProjection::new(),
+            render_cache: TranscriptRenderCache::new(),
             compaction_preview_id: None,
             descriptor_slice: loaded.descriptor_slice,
         }
@@ -229,6 +290,31 @@ impl TranscriptView {
             theme,
             start..start.saturating_add(count),
         )
+    }
+
+    pub(crate) fn cached_display_rows_for_range(
+        &mut self,
+        lua: &LuaRuntime,
+        theme: &Theme,
+        render: TranscriptRenderContext,
+        start: RowIndex,
+        count: RowIndex,
+    ) -> DisplayRows {
+        let key = TranscriptRenderCacheKey {
+            generation: self.projection_generation(),
+            width: render.width,
+            theme: render.theme_key,
+            renderer_generation: render.renderer_generation,
+            renderer_cache_key: render.renderer_cache_key,
+            start,
+            count,
+        };
+        if let Some(rows) = self.render_cache.get(key) {
+            return rows;
+        }
+        let rows = self.display_rows_for_range(lua, render.width, theme, start, count);
+        self.render_cache.insert(key, rows.clone());
+        rows
     }
 
     pub(crate) fn node_metadata_at_row(
@@ -418,28 +504,28 @@ impl TranscriptView {
     }
 }
 
-impl Default for TranscriptView {
+impl Default for TranscriptDocument {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub(crate) struct TranscriptDocument<'a> {
-    view: &'a mut TranscriptView,
+pub(crate) struct TranscriptDisplayDocument<'a> {
+    document: &'a mut TranscriptDocument,
     lua: &'a LuaRuntime,
     width: u16,
     theme: &'a Theme,
 }
 
-impl<'a> TranscriptDocument<'a> {
+impl<'a> TranscriptDisplayDocument<'a> {
     pub(crate) fn new(
-        view: &'a mut TranscriptView,
+        document: &'a mut TranscriptDocument,
         lua: &'a LuaRuntime,
         width: u16,
         theme: &'a Theme,
     ) -> Self {
         Self {
-            view,
+            document,
             lua,
             width,
             theme,
@@ -447,11 +533,11 @@ impl<'a> TranscriptDocument<'a> {
     }
 }
 
-impl DisplayDocument for TranscriptDocument<'_> {
+impl DisplayDocument for TranscriptDisplayDocument<'_> {
     fn snapshot(&mut self) -> DisplaySnapshot {
         DisplaySnapshot {
-            generation: self.view.projection_generation(),
-            total_rows: self.view.estimated_total_rows(self.lua, self.width),
+            generation: self.document.projection_generation(),
+            total_rows: self.document.estimated_total_rows(self.lua, self.width),
         }
     }
 
@@ -459,7 +545,7 @@ impl DisplayDocument for TranscriptDocument<'_> {
         &mut self,
         range: std::ops::Range<crate::smelt_edit::RowIndex>,
     ) -> crate::smelt_edit::DisplayRows {
-        self.view.display_rows_for_range(
+        self.document.display_rows_for_range(
             self.lua,
             self.width,
             self.theme,
@@ -470,14 +556,14 @@ impl DisplayDocument for TranscriptDocument<'_> {
 
     fn copy_range(&mut self, range: TextRange) -> Option<crate::smelt_edit::CopyOutput> {
         range.rows().map(|range| {
-            self.view
+            self.document
                 .copy_range(self.lua, self.width, self.theme, range)
         })
     }
 }
 
 pub(crate) struct ResumePreviewCache {
-    views: HashMap<String, TranscriptView>,
+    views: HashMap<String, TranscriptDocument>,
     order: VecDeque<String>,
     limit: usize,
 }
@@ -496,11 +582,11 @@ impl ResumePreviewCache {
         self.order.clear();
     }
 
-    pub(crate) fn take(&mut self, key: &str) -> Option<TranscriptView> {
+    pub(crate) fn take(&mut self, key: &str) -> Option<TranscriptDocument> {
         self.views.remove(key)
     }
 
-    pub(crate) fn store(&mut self, key: String, view: TranscriptView) {
+    pub(crate) fn store(&mut self, key: String, view: TranscriptDocument) {
         self.order.retain(|existing| existing != &key);
         self.order.push_back(key.clone());
         self.views.insert(key.clone(), view);

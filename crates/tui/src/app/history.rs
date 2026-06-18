@@ -1674,7 +1674,8 @@ mod checkpoint_tests {
             },
             smelt_core::BlockOrigin::History(1),
         );
-        app.app.transcript = crate::app::transcript::TranscriptView::from_transcript(transcript);
+        app.app.transcript =
+            crate::app::transcript::TranscriptDocument::from_transcript(transcript);
 
         let index = app.app.suppress_duplicate_carried_tail_before(2);
 

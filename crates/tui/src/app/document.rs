@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
-use crate::app::transcript::TranscriptDocument;
+use crate::app::transcript::{TranscriptDisplayDocument, TranscriptRenderContext};
 use crate::app::TuiApp;
 use crate::smelt_edit::{
     BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DisplaySnapshot, DocPosition,
@@ -30,7 +30,6 @@ impl DocumentRegistry {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum RenderCacheDocument {
-    Handle(DocumentHandle),
     Buffer(crate::smelt_edit::BufId),
 }
 
@@ -122,7 +121,7 @@ impl TuiApp {
                 let width = self.transcript_width() as u16;
                 let theme = self.ui.theme().clone();
                 let mut document =
-                    TranscriptDocument::new(&mut self.transcript, &self.lua, width, &theme);
+                    TranscriptDisplayDocument::new(&mut self.transcript, &self.lua, width, &theme);
                 Some(f(&mut document))
             }
             None if handle.is_some() => None,
@@ -147,24 +146,7 @@ impl TuiApp {
         let handle = self.document_handle_for_win(win);
         let theme = theme_cache_key(self.ui.theme());
         match DocumentRegistry::resolve_optional(handle) {
-            Some(RegisteredDocument::Transcript) => {
-                self.sync_transcript_renderer_generation();
-                let inline_options = self.inline_options();
-                Some(RenderCacheKey {
-                    document: RenderCacheDocument::Handle(crate::app::TRANSCRIPT_DOCUMENT),
-                    generation: self.transcript.projection_generation(),
-                    width: self.transcript_width() as u16,
-                    theme,
-                    renderer_generation: self.lua.transcript_renderer_generation(),
-                    renderer_cache_key:
-                        crate::content::display_layout::transcript_renderer_cache_key(
-                            &self.lua,
-                            &inline_options,
-                        ),
-                    start,
-                    count,
-                })
-            }
+            Some(RegisteredDocument::Transcript) => None,
             None if handle.is_some() => None,
             None => {
                 let win = self.ui.win(win)?;
@@ -192,9 +174,34 @@ impl TuiApp {
         start: RowIndex,
         count: RowIndex,
     ) -> Option<DisplayRows> {
+        if self.registered_document_for_win(win) == Some(RegisteredDocument::Transcript) {
+            self.sync_transcript_renderer_generation();
+            let width = self.transcript_width() as u16;
+            let theme = self.ui.theme().clone();
+            let theme_key = theme_cache_key(&theme);
+            let inline_options = self.inline_options();
+            let renderer_generation = self.lua.transcript_renderer_generation();
+            let renderer_cache_key = crate::content::display_layout::transcript_renderer_cache_key(
+                &self.lua,
+                &inline_options,
+            );
+            return Some(self.transcript.cached_display_rows_for_range(
+                &self.lua,
+                &theme,
+                TranscriptRenderContext {
+                    width,
+                    theme_key,
+                    renderer_generation,
+                    renderer_cache_key,
+                },
+                start,
+                count,
+            ));
+        }
+
         let key = self.render_cache_key_for_win(win, start, count);
         if let Some(key) = key {
-            if let Some(rows) = self.document_render_cache.get(key) {
+            if let Some(rows) = self.buffer_render_cache.get(key) {
                 return Some(rows);
             }
         }
@@ -202,7 +209,7 @@ impl TuiApp {
             document.materialize(start..start.saturating_add(count))
         })?;
         if let Some(key) = key {
-            self.document_render_cache.insert(key, rows.clone());
+            self.buffer_render_cache.insert(key, rows.clone());
         }
         Some(rows)
     }
