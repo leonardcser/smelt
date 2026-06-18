@@ -149,7 +149,7 @@ wizard does this normally, but you may be invoked when neither has happened yet.
 
 Lua config edits are hot-reloaded automatically by default. The reload re-runs
 `init.lua`, all autoloaded plugins/commands/tools, and the user's `plugins/`.
-Persistent state (`smelt.state`, `smelt.cell`) survives across the cycle;
+Persistent state (`smelt.state`, `smelt.signal`) survives across the cycle;
 module-local state in plugins is reset.
 
 **You (the agent) trigger the reload by calling the `smelt_reload` tool.** Do
@@ -515,7 +515,7 @@ index below labels every namespace with its tier.
 - **Unknown setting/chord/mode keys raise.** Better to fail loud than silently
   no-op. Check the recipes above for valid values.
 - **Hot reload wipes the Lua context.** Don't rely on module-local state
-  surviving a `/reload`. Use `smelt.state` / `smelt.cell` for state that needs
+  surviving a `/reload`. Use `smelt.state` / `smelt.signal` for state that needs
   to persist.
 - **`.smelt/` requires trust.** After creating or editing project config, the
   user must run `/trust`. The next reload after an edit fails until they do.
@@ -568,15 +568,6 @@ Opt out of bundled `smelt.<dotted>` modules.
 - `smelt.builtins.list` :: `fun(): table`
   Return the sorted dotted module names that are currently disabled.
 
-#### `smelt.cell`
-
-Typed reactive cell registry.
-
-- `smelt.cell.glob` :: `fun(pattern: string, handler: fun(arg1: string, arg2: any)): smelt.Reg`
-  Register `handler(name, value)` for every cell whose name matches `pattern` (glob syntax).
-- `smelt.cell.new` :: `fun(name: smelt.cell.Name, initial: any): nil`
-  Declare a cell named `name` with `initial` as its starting value.
-
 #### `smelt.cli`
 
 Declare and read CLI flags from Lua.
@@ -603,6 +594,17 @@ Wall-clock time primitives.
 
 - `smelt.clock.unix_ms` :: `fun(): integer`
   Return the current Unix timestamp in milliseconds.
+
+#### `smelt.events`
+
+Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `confirm_requested`.
+
+- `smelt.events.emit` :: `fun(event: smelt.events.Name, payload: any): nil`
+  Publish `payload` for the event named `event`.
+- `smelt.events.new` :: `fun(event: smelt.events.Name): nil`
+  Declare an event named `event`.
+- `smelt.events.on` :: `fun(event: smelt.events.Name, handler: fun(value: any)): smelt.Reg`
+  Register `handler(payload)` for the event named `event`.
 
 #### `smelt.files`
 
@@ -1007,6 +1009,15 @@ Shell command splitting and interactive/background-operator validators.
   Split `command` into the sequence of subcommands separated by shell operators (`;`, `&&`, `||`, `|`).
 - `smelt.shell.split_with_ops` :: `fun(command: string): table`
   Split `command` into subcommands and pair each with the operator that followed it.
+
+#### `smelt.signal`
+
+Named reactive values.
+
+- `smelt.signal.glob` :: `fun(pattern: string, handler: fun(arg1: string, arg2: any, arg3: any)): smelt.Reg`
+  Register `handler(name, value, previous)` for every signal whose name matches `pattern` (glob syntax).
+- `smelt.signal.new` :: `fun(name: smelt.signal.Name, initial: any): nil`
+  Declare a signal named `name` with `initial` as its starting value.
 
 #### `smelt.skills`
 

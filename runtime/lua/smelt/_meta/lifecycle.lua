@@ -8,7 +8,7 @@
 local lifecycle = {}
 
 --- Create a guard whose `:alive()` flips false when any scoped epoch changes.
---- Scopes are `"session"`, `"history"`, `"input"`, or a concrete cell name.
+--- Scopes are `"session"`, `"history"`, `"input"`, or a concrete signal name.
 --- Use `:latest(key)` when only the newest request in a family may complete.
 ---@type fun(scopes: string|string[]|table?): smelt.lifecycle.Guard
 lifecycle.guard = nil

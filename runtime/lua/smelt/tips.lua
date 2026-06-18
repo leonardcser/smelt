@@ -114,8 +114,8 @@ function M.prompt_tip()
       have_source = true
     end
   end
-  if not have_source and smelt.cell then
-    local ok, value = pcall(function() return smelt.cell("now"):get() end)
+  if not have_source and smelt.signal then
+    local ok, value = pcall(function() return smelt.signal("now"):get() end)
     if ok and type(value) == "number" then
       now = value
       have_source = true

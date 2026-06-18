@@ -88,8 +88,8 @@ local function should_show_tip(queued)
   if #queued > 0 or smelt.prompt.has_stash() then return false end
   if (smelt.prompt.text() or "") ~= "" then return false end
   if smelt.prompt.is_modal and smelt.prompt.is_modal() then return false end
-  if smelt.cell("notification_visible"):get() then return false end
-  local work_state = smelt.cell("work_state"):get()
+  if smelt.signal("notification_visible"):get() then return false end
+  local work_state = smelt.signal("work_state"):get()
   return not work_state or work_state == "idle"
 end
 
@@ -136,7 +136,7 @@ end
 
 -- ── working indicator (top bar left spans) ───────────────────────────
 --
--- Reads work_* cells published by the engine. Returns a list of bar
+-- Reads work_* signals published by the engine. Returns a list of bar
 -- spans suitable for `_bar.compose`. Each character of the indicator's
 -- "glyph + label" gets its own span so the traveling wave can paint a
 -- per-cell gradient.
@@ -144,13 +144,13 @@ end
 local function indicator_spans(opts)
   opts = opts or {}
   local bar_style = opts.bar_style or { fg = "SmeltBar" }
-  local state = smelt.cell("work_state"):get()
+  local state = smelt.signal("work_state"):get()
   if not state or state == "idle" then return nil end
 
-  local label = smelt.cell("work_label"):get() or ""
-  local elapsed_ms = smelt.cell("work_elapsed_ms"):get() or 0
-  local retry_attempt = smelt.cell("work_retry_attempt"):get() or 0
-  local retry_remaining_ms = smelt.cell("work_retry_remaining_ms"):get() or 0
+  local label = smelt.signal("work_label"):get() or ""
+  local elapsed_ms = smelt.signal("work_elapsed_ms"):get() or 0
+  local retry_attempt = smelt.signal("work_retry_attempt"):get() or 0
+  local retry_remaining_ms = smelt.signal("work_retry_remaining_ms"):get() or 0
 
   if label == "" then
     if state == "done" then label = "done"
@@ -326,8 +326,8 @@ local function right_spans(opts)
 end
 
 local function resize_bar_opts(position)
-  if not smelt.cell("prompt_resize_active"):get() then return nil end
-  local chrome = smelt.cell("prompt_resize_chrome"):get() or ""
+  if not smelt.signal("prompt_resize_active"):get() then return nil end
+  local chrome = smelt.signal("prompt_resize_chrome"):get() or ""
   if chrome == position or chrome == "both" then
     return { bar_style = { hl_group = "SmeltResizeHandle" } }
   end

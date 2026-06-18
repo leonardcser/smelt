@@ -267,7 +267,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
 `{ on_response = fn }`:\n\n\
 - `on_response(message)` - runs after the assistant message is fully assembled but before it's appended to history. `message` is the same `{ role = \"assistant\", content?, tool_calls? }` shape used everywhere else. Return a replacement table to mutate it; any other return leaves it as-is.\n\n\
 Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns a `Reg` whose `:remove()` drops this middleware.\n\n\
-For streaming observation use `smelt.cell(\"stream_delta\"):subscribe( ...)` - synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.",
+For streaming observation use `smelt.events.on(\"stream_delta\", ...)` - synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.",
             &["mw"],
             move |lua, mw: mlua::Table| -> LuaResult<LuaReg> {
                 let on_response: mlua::Function = mw.get("on_response").map_err(|_| {

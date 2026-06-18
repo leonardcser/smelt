@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn signal_api_reads_sets_and_subscribes_to_values() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+        _G.initial_work_state = smelt.signal("work_state"):get()
+        smelt.signal("work_state"):subscribe(function(value, previous)
+            _G.signal_transition = previous .. "->" .. value
+        end)
+        smelt.signal("work_state"):set("testing")
+        "#
+    ));
+    app.app.drain_cells_pending();
+
+    let globals = app.app.lua.lua.globals();
+    assert_eq!(
+        globals.get::<String>("initial_work_state").ok().as_deref(),
+        Some("idle")
+    );
+    assert_eq!(
+        globals.get::<String>("signal_transition").ok().as_deref(),
+        Some("idle->testing")
+    );
+}
+
+#[test]
+fn events_on_subscribes_to_event_shaped_signals() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+        smelt.events.on("turn_start", function(payload)
+            _G.turn_start_seen = payload.kind
+        end)
+        smelt.events.emit("turn_start", { kind = "manual" })
+        "#
+    ));
+    app.app.drain_cells_pending();
+
+    let globals = app.app.lua.lua.globals();
+    assert_eq!(
+        globals.get::<String>("turn_start_seen").ok().as_deref(),
+        Some("manual")
+    );
+}
+
+#[test]
+fn custom_events_declare_and_emit_through_events_api() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+        smelt.events.on("plugin:ready", function(payload)
+            _G.custom_event_seen = payload.answer
+        end)
+        smelt.events.emit("plugin:ready", { answer = 42 })
+        "#
+    ));
+    app.app.drain_cells_pending();
+
+    let globals = app.app.lua.lua.globals();
+    assert_eq!(globals.get::<i64>("custom_event_seen").ok(), Some(42));
+}
+
+#[test]
 fn display_only_resume_sets_resume_hint_state() {
     let mut app = TestApp::builder().build();
     let mut session =

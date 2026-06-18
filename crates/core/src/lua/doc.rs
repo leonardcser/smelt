@@ -23,7 +23,7 @@ use super::lua_type::{LuaAliasDecl, LuaClassDecl, LuaType, LuaTypeTuple};
 
 /// Which Lua-runtime tier a binding belongs to.
 ///
-/// `Host` bindings (`smelt.fs`, `smelt.http`, `smelt.cell`, …) live in
+/// `Host` bindings (`smelt.fs`, `smelt.http`, `smelt.signal`, …) live in
 /// `smelt-core` and work without a terminal UI - headless plugins can
 /// call them. `UiHost` bindings (`smelt.win`, `smelt.theme`,
 /// `smelt.confirm`, …) live in the TUI crate and crash if invoked

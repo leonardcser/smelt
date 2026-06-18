@@ -382,8 +382,8 @@ local function transcript_fits_banner()
 end
 
 local function turn_active()
-	local cell = smelt.cell("work_state")
-	local work_state = cell and cell.get and cell:get() or nil
+	local signal = smelt.signal("work_state")
+	local work_state = signal and signal.get and signal:get() or nil
 	return work_state == "working" or work_state == "retrying" or work_state == "paused"
 end
 
@@ -403,10 +403,10 @@ end
 -- covers programmatic agent dispatches (CLI startup message, replay);
 -- history covers rewind / compaction / load. on_ready ensures the host
 -- pointer is live before the first paint.
-smelt.cell("session_started"):subscribe(refresh)
-smelt.cell("input_submit"):subscribe(teardown)
-smelt.cell("turn_start"):subscribe(teardown)
-smelt.cell("history"):subscribe(refresh)
+smelt.events.on("session_started", refresh)
+smelt.events.on("input_submit", teardown)
+smelt.events.on("turn_start", teardown)
+smelt.events.on("history", refresh)
 smelt.lifecycle.on_ready(function()
 	-- The decoration is transcript-owned, so any transcript resize can make it fit
 	-- or stop fitting without needing screen-position bookkeeping.

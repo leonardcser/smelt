@@ -4,7 +4,7 @@
 
 **Tier:** `UiHost` - Requires a terminal UI; calling these from headless mode raises.
 
-Push background work-state tokens. Tokens drive the prompt top-bar indicator and the reactive `work_*` cells; plugins observe state by subscribing to those cells. UiHost-only.
+Push background work-state tokens. Tokens drive the prompt top-bar indicator and the reactive `work_*` signals; plugins observe state by subscribing to those signals. UiHost-only.
 
 ## `smelt.work.busy`
 
@@ -38,5 +38,5 @@ Return whether a guard from `work.guard()` still matches the current turn and ca
 fun(): boolean
 ```
 
-Return `true` while at least one `smelt.work.busy` token is live. Plugins that need richer state (top label, full stack, retry countdown, archived outcome) subscribe to the reactive `work_*` cells instead.
+Return `true` while at least one `smelt.work.busy` token is live. Plugins that need richer state (top label, full stack, retry countdown, archived outcome) subscribe to the reactive `work_*` signals instead.
 

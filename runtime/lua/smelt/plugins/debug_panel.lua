@@ -90,10 +90,10 @@ local function compose_lines(win)
 	local session_id = smelt.session.id()
 	local session_title = smelt.session.title()
 	local cwd = smelt.session.cwd()
-	local worktree_managed = smelt.cell("cwd_managed_worktree"):get()
-	local worktree_path = smelt.cell("cwd_worktree_path"):get()
-	local worktree_name = smelt.cell("cwd_worktree"):get()
-	local work_state = smelt.cell("work_state"):get() or "idle"
+	local worktree_managed = smelt.signal("cwd_managed_worktree"):get()
+	local worktree_path = smelt.signal("cwd_worktree_path"):get()
+	local worktree_name = smelt.signal("cwd_worktree"):get()
+	local work_state = smelt.signal("work_state"):get() or "idle"
 	local compact = smelt.state("compact")
 
 	local pricing = smelt.model.pricing()

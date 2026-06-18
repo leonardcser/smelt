@@ -254,7 +254,7 @@ impl<T: LuaType> LuaTypeTuple for mlua::Variadic<T> {
 /// Typed wrapper around `mlua::Function` whose `LuaType` renders as a
 /// full `fun(args): ret` signature instead of the bare `function`.
 ///
-/// Use as a parameter type for handler callbacks (`smelt.cell(name):subscribe`,
+/// Use as a parameter type for handler callbacks (`smelt.signal(name):subscribe`,
 /// `smelt.cmd.register`, …) so plugin authors see the callback shape in
 /// IDE completion and reference docs.
 ///

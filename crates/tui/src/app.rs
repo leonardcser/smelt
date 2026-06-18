@@ -2208,7 +2208,7 @@ impl TuiApp {
         // Cold-start the Lua context through the same pipeline `/reload`
         // uses. `main` already ran a pre-TUI plugin pass to extract
         // engine config - that pass couldn't touch `smelt.win`,
-        // `smelt.overlay`, `smelt.paint`, `smelt.cell:subscribe`, etc.
+        // `smelt.overlay`, `smelt.paint`, `smelt.signal(...):subscribe`, etc.
         // because the host pointer wasn't installed yet. Re-running
         // here inside `install_app_ptr` makes the host live for module
         // bodies on every Lua-context init (cold start AND `/reload`),

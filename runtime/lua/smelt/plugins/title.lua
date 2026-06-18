@@ -64,8 +64,8 @@ local function reset_sent_messages()
   sent_messages = {}
 end
 
-smelt.cell("session_epoch"):subscribe(reset_sent_messages)
-smelt.cell("history_epoch"):subscribe(reset_sent_messages)
+smelt.signal("session_epoch"):subscribe(reset_sent_messages)
+smelt.signal("history_epoch"):subscribe(reset_sent_messages)
 
 local function update_title(new_text)
 
@@ -152,6 +152,6 @@ local function update_title(new_text)
   })
 end
 
-smelt.cell("input_submit"):subscribe(function(text)
+smelt.events.on("input_submit", function(text)
   update_title(text)
 end)

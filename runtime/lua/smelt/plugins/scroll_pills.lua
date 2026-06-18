@@ -228,17 +228,17 @@ end)
 -- The session reset path can clear transcript content without changing the
 -- previous scroll tuple enough to emit `scrolled`; lifecycle/history cells are
 -- the semantic source of truth for stale overlay cleanup.
-smelt.cell("history"):subscribe(function(payload)
+smelt.events.on("history", function(payload)
   if payload and payload.kind == "cleared" then close_all() end
 end)
-smelt.cell("session_started"):subscribe(close_all)
+smelt.events.on("session_started", close_all)
 
-smelt.cell("cursor_pos"):subscribe(function()
+smelt.signal("cursor_pos"):subscribe(function()
   if smelt.focus() == "transcript" then refresh() end
 end)
 
 -- Jump to bottom when the user submits a message so the new turn is visible.
-smelt.cell("input_submit"):subscribe(function()
+smelt.events.on("input_submit", function()
   if state.transcript_win then
     state.transcript_win:scroll("tail")
   end

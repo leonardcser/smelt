@@ -108,16 +108,16 @@ local function render_header(buf, req, width)
 end
 
 -- Drive the bundled tool-permission confirm dialog for `handle_id`.
--- Reads the matching request out of the `confirm_requested` cell, builds
+-- Reads the matching request out of the `confirm_requested` signal, builds
 -- the header + preview + option leaves, dispatches the user's choice
 -- through `smelt.confirm.__resolve`. Bails when no matching request is
 -- active (e.g. a newer prompt has superseded it). Called by the host;
 -- plugins should not invoke directly.
 ---@type fun(handle_id: string): nil
 function smelt.confirm.open(handle_id)
-  -- Bail if the cell doesn't match this handle; a newer request may have
+  -- Bail if the signal doesn't match this handle; a newer request may have
   -- replaced it before this dialog opened.
-  local req = smelt.cell("confirm_requested"):get()
+  local req = smelt.signal("confirm_requested"):get()
   if not req or req.handle_id ~= handle_id then return end
 
   local header_buf  = smelt.buf.new()

@@ -254,7 +254,7 @@ fn prompt_bar_lua_fixture() -> mlua::Lua {
           settings = { show_tokens = true, show_cost = true },
           model = function() return "model" end,
           reasoning = function() return "off" end,
-          cell = function(name)
+          signal = function(name)
             return {
               get = function()
                 if name == "prompt_resize_active" then return smelt.__resize end
@@ -541,7 +541,8 @@ fn banner_press_resumes_existing_animation_instead_of_reseeding() {
           overlay = { new = function() return { close = function() end } end },
           ns = function(name) return name end,
           transcript = { is_empty = function() return true end },
-          cell = function() return { subscribe = function() end } end,
+          events = { on = function() end },
+          signal = function() return { subscribe = function() end } end,
           lifecycle = {
             on_ready = function(fn) fn() end,
             on_shutdown = function() end,
@@ -666,7 +667,10 @@ fn scroll_pills_hide_when_transcript_cursor_is_under_them() {
               return nil
             end,
           },
-          cell = function(name)
+          events = {
+            on = function(name, fn) cells[name] = fn end,
+          },
+          signal = function(name)
             return {
               subscribe = function(_, fn) cells[name] = fn end,
             }

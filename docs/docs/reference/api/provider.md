@@ -52,7 +52,7 @@ Register provider middleware. `mw` is a table of `{ on_response = fn }`:
 
 Hooks fire in registration order. Each hook sees the previous hook's replacement. Returns a `Reg` whose `:remove()` drops this middleware.
 
-For streaming observation use `smelt.cell("stream_delta"):subscribe( ...)` - synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
+For streaming observation use `smelt.events.on("stream_delta", ...)` - synchronous mutation of mid-stream tokens isn't safe because the parser owns the partial state.
 
 ## `smelt.provider.normalize`
 

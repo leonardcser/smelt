@@ -8,7 +8,7 @@
 local confirm = {}
 
 --- Drive the bundled tool-permission confirm dialog for `handle_id`.
---- Reads the matching request out of the `confirm_requested` cell, builds
+--- Reads the matching request out of the `confirm_requested` signal, builds
 --- the header + preview + option leaves, dispatches the user's choice
 --- through `smelt.confirm.__resolve`. Bails when no matching request is
 --- active (e.g. a newer prompt has superseded it). Called by the host;

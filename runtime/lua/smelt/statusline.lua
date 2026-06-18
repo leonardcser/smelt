@@ -7,7 +7,7 @@
 --     returned segments, composes via `_bar.compose_status`, and
 --     writes to the window's buffer.
 --
--- The built-in `core` source reads engine state directly from cells
+-- The built-in `core` source reads engine state directly from signals
 -- (`vim_mode`, `agent_mode`, `tps`, `task_label`, `running_procs`,
 -- `permission_pending`, `keymap_pending`, `vim_pending_input`, `cursor_pos`). Plugins extend the line by
 -- registering additional sources via `M.add(name, fn)`.
@@ -46,7 +46,7 @@ local function vim_group(label)
   end
 end
 
-local function cell(name) return smelt.cell(name):get() end
+local function signal(name) return smelt.signal(name):get() end
 
 local function core_compose()
   local items = {}
@@ -55,7 +55,7 @@ local function core_compose()
   -- fg as the pill bg when no explicit bg has been set (default), so
   -- `/color` (which writes SmeltSlug.bg) and theme swaps both
   -- propagate naturally.
-  local task_label = cell("task_label")
+  local task_label = signal("task_label")
   if smelt.settings.show_slug and task_label and task_label ~= "" then
     local slug = smelt.theme.get("SmeltSlug") or {}
     local style = { hl_group = "SmeltSlug" }
@@ -74,7 +74,7 @@ local function core_compose()
   end
 
   -- Vim mode pill.
-  local vim_label = cell("vim_mode")
+  local vim_label = signal("vim_mode")
   if vim_label and vim_label ~= "" then
     items[#items + 1] = {
       text = " " .. vim_label .. " ",
@@ -84,7 +84,7 @@ local function core_compose()
   end
 
   -- Agent mode pill.
-  local mode_name = cell("agent_mode")
+  local mode_name = signal("agent_mode")
   if mode_name and mode_name ~= "" then
     local icon = smelt.mode.icon and smelt.mode.icon(mode_name) or ""
     items[#items + 1] = {
@@ -95,7 +95,7 @@ local function core_compose()
   end
 
   -- tok/s.
-  local tps = cell("tps") or 0
+  local tps = signal("tps") or 0
   if smelt.settings.show_tps and tps > 0 then
     items[#items + 1] = {
       text = string.format("%.1f tok/s", tps),
@@ -106,7 +106,7 @@ local function core_compose()
   end
 
   -- Right-strip indicators.
-  if cell("permission_pending") then
+  if signal("permission_pending") then
     items[#items + 1] = {
       text = "permission pending",
       style = { fg = "SmeltAccent", bold = true },
@@ -115,7 +115,7 @@ local function core_compose()
     }
   end
 
-  local keymap_pending = cell("keymap_pending")
+  local keymap_pending = signal("keymap_pending")
   if keymap_pending and keymap_pending ~= "" then
     items[#items + 1] = {
       text = "key " .. keymap_pending,
@@ -125,7 +125,7 @@ local function core_compose()
     }
   end
 
-  local procs = cell("running_procs") or 0
+  local procs = signal("running_procs") or 0
   if procs > 0 then
     items[#items + 1] = {
       text = procs == 1 and "1 proc" or (procs .. " procs"),
@@ -135,8 +135,8 @@ local function core_compose()
     }
   end
 
-  local cwd_worktree_path = cell("cwd_worktree_path")
-  if cell("cwd_managed_worktree") and cwd_worktree_path and cwd_worktree_path ~= "" then
+  local cwd_worktree_path = signal("cwd_worktree_path")
+  if signal("cwd_managed_worktree") and cwd_worktree_path and cwd_worktree_path ~= "" then
     items[#items + 1] = {
       text = cwd_worktree_path,
       style = { fg = "Comment" },
@@ -147,7 +147,7 @@ local function core_compose()
     }
   end
 
-  local vim_pending = cell("vim_pending_input")
+  local vim_pending = signal("vim_pending_input")
   if vim_pending and vim_pending ~= "" then
     items[#items + 1] = {
       text = vim_pending,
@@ -156,7 +156,7 @@ local function core_compose()
     }
   end
 
-  local pos = cell("cursor_pos")
+  local pos = signal("cursor_pos")
   if pos and pos.line and pos.line > 0 then
     items[#items + 1] = {
       text = string.format("%d:%d %d%%", pos.line, pos.col or 1, pos.scroll_pct or 0),

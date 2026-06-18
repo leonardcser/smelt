@@ -479,7 +479,7 @@ impl TestApp {
 
         // BusyStack `since` field tracks the timestamp of the *first*
         // pushed token; it MUST be Some iff entries is non-empty. The
-        // reactive `work_*` cells and `WorkState::elapsed` consult it,
+        // reactive `work_*` signals and `WorkState::elapsed` consult it,
         // and a stale `Some` after the last release would leave the
         // prompt indicator animating past 0 entries.
         assert_eq!(

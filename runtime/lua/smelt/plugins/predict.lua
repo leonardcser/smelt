@@ -23,19 +23,19 @@ end
 -- so only the messages array is compared between calls.
 local sent_messages = {}
 
-smelt.cell("input_epoch"):subscribe(clear_prediction)
+smelt.signal("input_epoch"):subscribe(clear_prediction)
 
-smelt.cell("session_epoch"):subscribe(function()
+smelt.signal("session_epoch"):subscribe(function()
   clear_prediction()
   sent_messages = {}
 end)
 
-smelt.cell("history_epoch"):subscribe(function()
+smelt.signal("history_epoch"):subscribe(function()
   clear_prediction()
   sent_messages = {}
 end)
 
-smelt.cell("turn_end"):subscribe(function(payload)
+smelt.events.on("turn_end", function(payload)
   if payload.cancelled then
     return
   end

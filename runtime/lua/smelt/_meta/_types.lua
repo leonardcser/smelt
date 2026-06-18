@@ -58,13 +58,6 @@
 ---@field dialogs? string[] Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`).
 ---@field modules? string[] Fully-qualified `smelt.<dotted>` module names, passed through verbatim.
 
---- Sticky handle returned by `smelt.cell(name)`. Setters return the handle for chaining; `:subscribe` returns a `Reg`.
----@class smelt.cell.Cell
----@field get fun(): any Return the current cell value, or `nil` when the cell isn't declared.
----@field set fun(value: any): smelt.cell.Cell Publish a new value. Returns the handle for chaining.
----@field subscribe fun(handler: fun(value: any)): smelt.Reg Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect.
----@field name fun(): string Return the cell name.
-
 --- Flag specification accepted by `smelt.cli.register_flag`.
 ---@class smelt.cli.RegisterFlagOpts
 ---@field name string Flag name without `--`. Used as the key for `smelt.cli.get`.
@@ -553,6 +546,13 @@
 ---@field hl_group? string Highlight group applied to the whole block. When omitted, text renders dim.
 ---@field width? integer Wrapping width in terminal cells. Defaults to the current terminal width.
 
+--- Sticky handle returned by `smelt.signal(name)`. Setters return the handle for chaining; `:subscribe` returns a `Reg`.
+---@class smelt.signal.Signal
+---@field get fun(): any Return the current signal value, or `nil` when the signal isn't declared.
+---@field set fun(value: any): smelt.signal.Signal Publish a new value. Returns the handle for chaining.
+---@field subscribe fun(handler: fun(arg1: any, arg2: any)): smelt.Reg Register `handler(value, previous)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect.
+---@field name fun(): string Return the signal name.
+
 --- Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
 ---@class smelt.theme.ColorDecl
 ---@field ansi? integer ANSI 256-color palette index for the default (non-branched) case.
@@ -742,11 +742,11 @@
 --- Where a virtual-text chunk is rendered relative to the line.
 ---@alias smelt.buf.VirtTextPos "inline"|"overlay"|"right_align"|"eol"
 
---- Name of a reactive cell. Open alias - plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
----@alias smelt.cell.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_title"|"shutdown"|"spinner_frame"|"stream_delta"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
-
 --- Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 ---@alias smelt.cli.FlagKind "boolean"|"string"|"integer"
+
+--- Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
+---@alias smelt.events.Name string|"block_done"|"confirm_requested"|"confirm_resolved"|"history"|"input_submit"|"session_ended"|"session_started"|"shutdown"|"stream_delta"|"stream_phase"|"tool_end"|"tool_start"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"
 
 ---@alias smelt.input.Event "change"|"submit"|"cancel"
 
@@ -755,6 +755,9 @@
 
 --- Reasoning effort level string literal.
 ---@alias smelt.reasoning.Effort "off"|"low"|"medium"|"high"|"max"
+
+--- Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
+---@alias smelt.signal.Name string|"agent_mode"|"block_done"|"branch"|"cmd_post"|"cmd_pre"|"confirm_requested"|"confirm_resolved"|"confirms_pending"|"cursor_pos"|"cwd"|"cwd_branch"|"cwd_managed_worktree"|"cwd_project"|"cwd_worktree"|"cwd_worktree_path"|"errors"|"history"|"history_epoch"|"input_epoch"|"input_submit"|"keymap_pending"|"model"|"now"|"notification_visible"|"permission_pending"|"prompt_resize_active"|"prompt_resize_chrome"|"reasoning"|"running_procs"|"session_ended"|"session_epoch"|"session_started"|"session_title"|"shutdown"|"spinner_frame"|"stream_delta"|"stream_phase"|"task_label"|"tokens_used"|"tool_end"|"tool_start"|"tps"|"turn_complete"|"turn_end"|"turn_error"|"turn_start"|"vim_mode"|"vim_pending_input"|"work_busy"|"work_elapsed_ms"|"work_label"|"work_outcome"|"work_retry_attempt"|"work_retry_remaining_ms"|"work_state"
 
 --- Decision string accepted by `decide` callbacks and `permission_defaults`. Matches `protocol::Decision::{Allow, Ask, Deny}` - the engine's `Error(_)` variant is not exposed.
 ---@alias smelt.tools.Decision "allow"|"ask"|"deny"

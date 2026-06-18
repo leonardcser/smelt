@@ -6,8 +6,8 @@
 //! preview buffers itself via `buf:styled`,
 //! `smelt.render.syntax`, and friends. The request payload (tool name /
 //! desc / args / options / approval patterns / outside dir / cwd label)
-//! flows through the `confirm_requested` cell, so the dialog reads it
-//! once via `smelt.cell("confirm_requested"):get()` instead of polling
+//! flows through the `confirm_requested` signal, so the dialog reads it
+//! once via `smelt.signal("confirm_requested"):get()` instead of polling
 //! Rust by handle. Rust exposes:
 //!
 //! - `__back_tab` - toggles app mode + resolves when the new mode

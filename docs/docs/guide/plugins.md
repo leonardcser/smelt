@@ -152,8 +152,8 @@ Bindings are tagged with one of two tiers. The
 per-namespace page calls it out in the header.
 
 - **Host**: works everywhere, including headless mode (`smelt --headless`).
-  Examples: `smelt.fs`, `smelt.http`, `smelt.process`, `smelt.cell`,
-  `smelt.tools`.
+  Examples: `smelt.fs`, `smelt.http`, `smelt.process`, `smelt.signal`,
+  `smelt.events`, `smelt.tools`.
 - **UiHost**: requires a live terminal UI. Calling a UiHost function from
   headless mode raises. Examples: `smelt.win`, `smelt.buf`, `smelt.theme`,
   `smelt.notify`, `smelt.statusline`, `smelt.keymap`.
@@ -187,38 +187,42 @@ path.
 
 ## Lifecycle events
 
-`smelt.cell(name):subscribe(handler)` subscribes to runtime cells: agent turns,
-session load, mode changes, tool start/end, and so on. Some carry a payload,
-some are bare signals. `:subscribe` returns a `Reg` whose `:remove()` drops the
-subscription. The full list is the `smelt.cell.Name` alias in
+`smelt.events.on(name, handler)` subscribes to runtime events: agent turns,
+session load, tool start/end, and so on. Events carry only future occurrences,
+so handlers receive the payload without a previous value. `smelt.signal(name)`
+subscribes to durable runtime state such as mode changes. Both return a `Reg`
+whose `:remove()` drops the subscription. The full lists are the
+`smelt.events.Name` and `smelt.signal.Name` aliases in
 [`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
 common ones:
 
-| Event             | Payload                          | When                           |
-| ----------------- | -------------------------------- | ------------------------------ | ------- | ------- | ------------------ |
+| Name              | Payload                          | When                           |
+| ----------------- | -------------------------------- | ------------------------------ |
 | `session_started` | none                             | A session has been loaded      |
 | `turn_start`      | none                             | The agent dispatched a turn    |
-| `turn_end`        | `{ cancelled }`                  | Turn complete (or interrupted) |
+| `turn_end`        | `{ cancelled }`                  | Turn complete or interrupted   |
 | `tool_start`      | `{ tool, args }`                 | A tool call began              |
 | `tool_end`        | `{ tool, is_error, elapsed_ms }` | A tool call finished           |
-| `agent_mode`      | `"normal"                        | "plan"                         | "apply" | "yolo"` | Agent mode changed |
-| `input_submit`    | `{ text }`                       | User submitted a message       |
+| `agent_mode`      | `"normal"`, `"plan"`, `"apply"`, `"yolo"` | Agent mode changed |
+| `input_submit`    | submitted text                   | User submitted a message       |
 | `shutdown`        | none                             | App is about to quit           |
 
 ```lua
-smelt.cell("turn_end"):subscribe(function(payload)
+smelt.events.on("turn_end", function(payload)
   if payload.cancelled then return end
   -- ... e.g. kick off a prediction call
 end)
 
-smelt.cell("agent_mode"):subscribe(function(mode)
+smelt.signal("agent_mode"):subscribe(function(mode)
   if mode == "plan" then activate() else deactivate() end
 end)
 ```
 
-You can also declare your own cells with
-`smelt.cell.new("my_plugin:state", initial)` and broadcast updates with
-`smelt.cell("my_plugin:state"):set(value)`.
+You can declare your own durable signals with
+`smelt.signal.new("my_plugin:state", initial)` and broadcast updates with
+`smelt.signal("my_plugin:state"):set(value)`. For occurrence-shaped plugin
+hooks, use `smelt.events.on("my_plugin:event", handler)` and
+`smelt.events.emit("my_plugin:event", payload)`.
 
 ## Provider middleware
 
@@ -235,7 +239,7 @@ smelt.provider.middleware({
 
 Hooks fire in registration order; each hook sees the previous hook's
 replacement. To observe streaming tokens without mutating the response,
-subscribe to runtime cells such as `stream_delta`. See the
+subscribe to runtime events such as `stream_delta`. See the
 [`smelt.provider` reference](../reference/api/provider.md) for exact payload
 shapes.
 
@@ -653,5 +657,5 @@ labels. The IDE shows them in autocomplete and rejects typos. Closed aliases
 require canonical names only: `smelt.vim.set_mode("normal")` works,
 `smelt.vim.set_mode("n")` does not (short forms `"n"`, `"i"`, `"v"`, `"V"`, and
 PascalCase variants like `"Insert"` are not accepted). Open aliases (e.g.
-[`smelt.cell.Name`](../reference/api/types.md#smeltcellname)) keep accepting any
+[`smelt.signal.Name`](../reference/api/types.md#smeltsignalname)) keep accepting any
 string and just expose well-known names as completion hints.

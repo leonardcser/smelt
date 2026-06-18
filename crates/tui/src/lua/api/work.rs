@@ -1,7 +1,7 @@
 //! `smelt.work` - push background work-state tokens. Distinct from
 //! `smelt.spinner`, which is just the shared animation primitive: this
 //! module is the engine/state-machine surface. Tokens here drive the
-//! reactive `work_*` cells and the prompt top-bar indicator. UiHost-only.
+//! reactive `work_*` signals and the prompt top-bar indicator. UiHost-only.
 
 use mlua::prelude::*;
 use smelt_core::lua::doc::Tier;
@@ -14,8 +14,8 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         smelt,
         "work",
         "Push background work-state tokens. Tokens drive the prompt \
-top-bar indicator and the reactive `work_*` cells; plugins observe \
-state by subscribing to those cells. UiHost-only.",
+top-bar indicator and the reactive `work_*` signals; plugins observe \
+state by subscribing to those signals. UiHost-only.",
         Tier::UiHost,
     )?;
     m.fn_(
@@ -67,7 +67,7 @@ concurrently; the most recently pushed label wins for display.",
         "is_busy",
         "Return `true` while at least one `smelt.work.busy` token is \
 live. Plugins that need richer state (top label, full stack, retry \
-countdown, archived outcome) subscribe to the reactive `work_*` cells \
+countdown, archived outcome) subscribe to the reactive `work_*` signals \
 instead.",
         &[],
         |_, ()| Ok(crate::lua::try_with_app(|app| app.busy_stack.is_busy()).unwrap_or(false)),

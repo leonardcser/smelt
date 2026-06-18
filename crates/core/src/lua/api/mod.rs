@@ -11,12 +11,12 @@ macro_rules! host_read {
 
 mod auth;
 mod builtins;
-pub(crate) mod cell;
 mod cli;
 mod clipboard;
 mod clock;
 mod cmd;
 mod defaults;
+mod events;
 mod files;
 mod frontend;
 mod fs;
@@ -43,6 +43,7 @@ pub mod reasoning;
 mod reg;
 mod remember;
 mod shell;
+mod signal;
 mod skills;
 mod spawn;
 mod state;
@@ -135,12 +136,12 @@ pub fn register_host_api(
     crate::lua::reg::register_class_doc();
     auth::register(lua, smelt, shared)?;
     builtins::register(lua, smelt, shared)?;
-    cell::register(lua, smelt, shared)?;
     clock::register(lua, smelt)?;
     cli::register(lua, smelt, shared)?;
     clipboard::register(lua, smelt)?;
     cmd::register(lua, smelt, shared)?;
     defaults::register(lua, smelt, shared)?;
+    events::register(lua, smelt, shared)?;
     files::register(lua, smelt)?;
     frontend::register(lua, smelt)?;
     fs::register(lua, smelt, shared)?;
@@ -167,6 +168,7 @@ pub fn register_host_api(
     process::register(lua, smelt, shared)?;
     provider::register(lua, smelt, shared)?;
     shell::register(lua, smelt)?;
+    signal::register(lua, smelt, shared)?;
     skills::register(lua, smelt)?;
     spawn::register(lua, smelt, shared)?;
     state::register(lua, smelt)?;

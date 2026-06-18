@@ -127,7 +127,7 @@ impl Cells {
         }
     }
 
-    /// Declare a cell. Idempotent - re-declaration resets the value and drops all subscribers.
+    /// Declare or reset a cell. Re-declaration resets the value and drops all subscribers.
     pub(crate) fn declare<T: Any + 'static>(&mut self, name: impl Into<String>, initial: T) {
         self.slots.insert(
             name.into(),
@@ -136,6 +136,18 @@ impl Cells {
                 subscribers: Vec::new(),
             },
         );
+    }
+
+    /// Declare a cell only when it does not already exist.
+    pub(crate) fn declare_if_missing<T: Any + 'static>(
+        &mut self,
+        name: impl Into<String>,
+        initial: T,
+    ) {
+        self.slots.entry(name.into()).or_insert_with(|| Slot {
+            value: Rc::new(initial),
+            subscribers: Vec::new(),
+        });
     }
 
     /// Overwrite a cell and queue subscribers. Returns `false` when `name` is undeclared.
@@ -360,67 +372,105 @@ pub struct StreamDelta {
     pub tool_name: Option<String>,
 }
 
-/// Built-in cell names declared by [`build_with_builtins`]. Surfaces in
-/// the `smelt.cell.Name` LuaCATS alias as IDE autocomplete hints.
-/// Keep in lockstep with the `cells.declare(...)` calls below - both
-/// the assertion in `builtin_seeds_declare_every_cell` and
-/// `crates/core/src/lua/api/cell.rs` read from this list.
-pub const SEEDED_CELL_NAMES: &[&str] = &[
-    "agent_mode",
-    "block_done",
-    "branch",
-    "cmd_post",
-    "cmd_pre",
-    "confirm_requested",
-    "confirm_resolved",
-    "confirms_pending",
-    "cursor_pos",
-    "cwd",
-    "cwd_branch",
-    "cwd_managed_worktree",
-    "cwd_project",
-    "cwd_worktree",
-    "cwd_worktree_path",
-    "errors",
-    "history",
-    "history_epoch",
-    "input_epoch",
-    "input_submit",
-    "keymap_pending",
-    "model",
-    "now",
-    "notification_visible",
-    "permission_pending",
-    "prompt_resize_active",
-    "prompt_resize_chrome",
-    "reasoning",
-    "running_procs",
-    "session_ended",
-    "session_epoch",
-    "session_started",
-    "session_title",
-    "shutdown",
-    "spinner_frame",
-    "stream_delta",
-    "task_label",
-    "tokens_used",
-    "tool_end",
-    "tool_start",
-    "tps",
-    "turn_complete",
-    "turn_end",
-    "turn_error",
-    "turn_start",
-    "vim_mode",
-    "vim_pending_input",
-    "work_busy",
-    "work_elapsed_ms",
-    "work_label",
-    "work_outcome",
-    "work_retry_attempt",
-    "work_retry_remaining_ms",
-    "work_state",
+/// How a built-in signal should be presented to Lua users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinSignalKind {
+    /// Durable state where the current value is meaningful.
+    State,
+    /// Occurrence-shaped signal where subscribers usually care only about future payloads.
+    Event,
+}
+
+/// Built-in signals declared by [`build_with_builtins`]. This is the source of
+/// truth for generated `smelt.signal.Name` and `smelt.events.Name` autocomplete.
+pub struct BuiltinSignal {
+    pub name: &'static str,
+    pub kind: BuiltinSignalKind,
+}
+
+const fn state(name: &'static str) -> BuiltinSignal {
+    BuiltinSignal {
+        name,
+        kind: BuiltinSignalKind::State,
+    }
+}
+
+const fn event(name: &'static str) -> BuiltinSignal {
+    BuiltinSignal {
+        name,
+        kind: BuiltinSignalKind::Event,
+    }
+}
+
+pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
+    state("agent_mode"),
+    event("block_done"),
+    state("branch"),
+    state("cmd_post"),
+    state("cmd_pre"),
+    event("confirm_requested"),
+    event("confirm_resolved"),
+    state("confirms_pending"),
+    state("cursor_pos"),
+    state("cwd"),
+    state("cwd_branch"),
+    state("cwd_managed_worktree"),
+    state("cwd_project"),
+    state("cwd_worktree"),
+    state("cwd_worktree_path"),
+    state("errors"),
+    event("history"),
+    state("history_epoch"),
+    state("input_epoch"),
+    event("input_submit"),
+    state("keymap_pending"),
+    state("model"),
+    state("now"),
+    state("notification_visible"),
+    state("permission_pending"),
+    state("prompt_resize_active"),
+    state("prompt_resize_chrome"),
+    state("reasoning"),
+    state("running_procs"),
+    event("session_ended"),
+    state("session_epoch"),
+    event("session_started"),
+    state("session_title"),
+    event("shutdown"),
+    state("spinner_frame"),
+    event("stream_delta"),
+    event("stream_phase"),
+    state("task_label"),
+    state("tokens_used"),
+    event("tool_end"),
+    event("tool_start"),
+    state("tps"),
+    event("turn_complete"),
+    event("turn_end"),
+    event("turn_error"),
+    event("turn_start"),
+    state("vim_mode"),
+    state("vim_pending_input"),
+    state("work_busy"),
+    state("work_elapsed_ms"),
+    state("work_label"),
+    state("work_outcome"),
+    state("work_retry_attempt"),
+    state("work_retry_remaining_ms"),
+    state("work_state"),
 ];
+
+pub fn builtin_signal_names() -> Vec<&'static str> {
+    BUILTIN_SIGNALS.iter().map(|signal| signal.name).collect()
+}
+
+pub fn builtin_event_names() -> Vec<&'static str> {
+    BUILTIN_SIGNALS
+        .iter()
+        .filter(|signal| signal.kind == BuiltinSignalKind::Event)
+        .map(|signal| signal.name)
+        .collect()
+}
 
 /// Project a `StyledLines` payload into the same shape Lua sees from
 /// `buf:styled` - a sequence of lines, each a sequence
@@ -700,7 +750,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
     cells.declare("work_retry_attempt", 0u32);
     cells.declare("work_retry_remaining_ms", 0u64);
 
-    // Event-shaped cells: declared with an `EventStub` placeholder so `smelt.cell(name):subscribe` works.
+    // Event-shaped signals: declared with an `EventStub` placeholder so `smelt.events.on(name, handler)` works.
     cells.declare("history", EventStub);
     cells.declare("turn_complete", EventStub);
     cells.declare("turn_error", EventStub);
@@ -1070,36 +1120,17 @@ mod tests {
             other => panic!("expected Table, got {other:?}"),
         }
 
-        // Every name in `SEEDED_CELL_NAMES` must round-trip through
+        // Every name in `BUILTIN_SIGNALS` must round-trip through
         // `Cells::get_lua` (i.e. actually be declared above). Adding a
-        // new builtin without updating the list trips this test.
-        for name in SEEDED_CELL_NAMES {
+        // new builtin without updating the metadata trips this test.
+        for signal in BUILTIN_SIGNALS {
+            let name = signal.name;
             let v = cells.get_lua(name, &lua);
             assert!(
-                !matches!(v, mlua::Value::Nil) || is_event_cell(name),
-                "SEEDED_CELL_NAMES lists `{name}` but Cells::get_lua returned Nil for a non-event cell"
+                !matches!(v, mlua::Value::Nil) || signal.kind == BuiltinSignalKind::Event,
+                "BUILTIN_SIGNALS lists `{name}` but Cells::get_lua returned Nil for a non-event signal"
             );
         }
-    }
-
-    fn is_event_cell(name: &str) -> bool {
-        matches!(
-            name,
-            "history"
-                | "turn_complete"
-                | "turn_error"
-                | "confirm_requested"
-                | "confirm_resolved"
-                | "session_started"
-                | "session_ended"
-                | "block_done"
-                | "shutdown"
-                | "turn_start"
-                | "turn_end"
-                | "tool_start"
-                | "tool_end"
-                | "stream_delta"
-        )
     }
 
     #[test]

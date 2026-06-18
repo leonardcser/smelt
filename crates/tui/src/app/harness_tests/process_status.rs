@@ -15,7 +15,7 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
         .app
         .lua
         .lua
-        .load(r#"return smelt.cell("work_state"):get()"#)
+        .load(r#"return smelt.signal("work_state"):get()"#)
         .eval()
         .expect("work_state");
     assert_eq!(state, "busy");
@@ -23,7 +23,7 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
         .app
         .lua
         .lua
-        .load(r#"return smelt.cell("work_label"):get()"#)
+        .load(r#"return smelt.signal("work_label"):get()"#)
         .eval()
         .expect("work_label");
     assert_eq!(label, "syncing");
@@ -33,7 +33,7 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
         .lua
         .load(
             r#"
-                local s = smelt.cell("work_busy"):get()
+                local s = smelt.signal("work_busy"):get()
                 return #s, s[1].label
                 "#,
         )
@@ -51,7 +51,7 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
         .app
         .lua
         .lua
-        .load(r#"return smelt.cell("work_state"):get()"#)
+        .load(r#"return smelt.signal("work_state"):get()"#)
         .eval()
         .expect("work_state post-release");
     assert_eq!(state_after, "idle");

@@ -141,8 +141,8 @@ function M.setup(user_opts)
 	if state.subscription then
 		state.subscription:remove()
 	end
-	state.subscription = smelt.cell("keymap_pending"):subscribe(update)
-	update(smelt.cell("keymap_pending"):get())
+	state.subscription = smelt.signal("keymap_pending"):subscribe(update)
+	update(smelt.signal("keymap_pending"):get())
 	return M
 end
 

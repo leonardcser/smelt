@@ -678,8 +678,8 @@ function M.setup()
   register_headerline()
   sync_context_note()
 
-  smelt.cell("session_epoch"):subscribe(sync_context_note)
-  smelt.cell("turn_end"):subscribe(function(ev)
+  smelt.signal("session_epoch"):subscribe(sync_context_note)
+  smelt.events.on("turn_end", function(ev)
     if ev and ev.cancelled then return end
     M.schedule_auto_continue()
   end)

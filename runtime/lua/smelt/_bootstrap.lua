@@ -299,7 +299,7 @@ end
 
 -- Lifecycle guards capture stable app epochs and let async callbacks cheaply
 -- ignore stale completions after a session/history/input boundary changes.
-if smelt.lifecycle and smelt.cell then
+if smelt.lifecycle and smelt.signal then
   local epoch_cells = {
     session = "session_epoch",
     history = "history_epoch",
@@ -341,13 +341,13 @@ if smelt.lifecycle and smelt.cell then
   ---@field latest fun(self:smelt.lifecycle.Guard,key:string):smelt.lifecycle.Guard Mark this guard as the latest request for `key`; older guards with the same key become stale.
   ---@field wrap fun(self:smelt.lifecycle.Guard,fn:function):function Return a wrapper that calls `fn` only while the guard is alive.
   ---Create a guard whose `:alive()` flips false when any scoped epoch changes.
-  ---Scopes are `"session"`, `"history"`, `"input"`, or a concrete cell name.
+  ---Scopes are `"session"`, `"history"`, `"input"`, or a concrete signal name.
   ---Use `:latest(key)` when only the newest request in a family may complete.
   ---@type fun(scopes: string|string[]|table?): smelt.lifecycle.Guard
   function smelt.lifecycle.guard(scopes)
     local snapshot = {}
-    for _, cell_name in ipairs(normalize_guard_scopes(scopes)) do
-      snapshot[cell_name] = smelt.cell(cell_name):get()
+    for _, signal_name in ipairs(normalize_guard_scopes(scopes)) do
+      snapshot[signal_name] = smelt.signal(signal_name):get()
     end
 
     local active = true
@@ -358,8 +358,8 @@ if smelt.lifecycle and smelt.cell then
     function guard:alive()
       if not active then return false end
       if latest_key and __smelt_lifecycle_latest__[latest_key] ~= latest_token then return false end
-      for cell_name, value in pairs(snapshot) do
-        if smelt.cell(cell_name):get() ~= value then return false end
+      for signal_name, value in pairs(snapshot) do
+        if smelt.signal(signal_name):get() ~= value then return false end
       end
       return true
     end
@@ -658,7 +658,7 @@ function smelt.tick.every(secs, fn)
     error("smelt.tick.every: fn must be a function", 2)
   end
   local last = 0
-  return smelt.cell("now"):subscribe(function(now)
+  return smelt.signal("now"):subscribe(function(now)
     if (now or 0) - last >= secs then
       last = now or 0
       smelt.spawn(function() fn() end)
@@ -892,11 +892,11 @@ end
 -- Idempotent within a single module body run: counters reset on every
 -- promotion so declaration order is what matters.
 --
--- The handle deliberately doesn't wrap `smelt.cell` / `smelt.cmd` /
+-- The handle deliberately doesn't wrap `smelt.signal` / `smelt.cmd` /
 -- `smelt.keymap` / `smelt.lifecycle.*` - those calls would not be
--- scope-aware (cell/cmd names are global), so a method facade would
+-- scope-aware (signal/cmd names are global), so a method facade would
 -- imply encapsulation it can't deliver. Call them directly through
--- `smelt.*` and namespace your cell/cmd names explicitly.
+-- `smelt.*` and namespace your signal/cmd names explicitly.
 --
 -- Must be called from a module body (or init.lua). Outside a loader
 -- frame (e.g. from an event callback) it raises immediately.

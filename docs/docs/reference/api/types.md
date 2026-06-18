@@ -81,17 +81,6 @@ Selector accepted by `smelt.builtins.disable` / `enable`. Each list is a set of 
 | `dialogs` | `string[]` |  | Short dialog names under `smelt.dialogs.*` (e.g. `"resume"`). |
 | `modules` | `string[]` |  | Fully-qualified `smelt.<dotted>` module names, passed through verbatim. |
 
-### `smelt.cell.Cell`
-
-Sticky handle returned by `smelt.cell(name)`. Setters return the handle for chaining; `:subscribe` returns a `Reg`.
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `get` | `fun(): any` | yes | Return the current cell value, or `nil` when the cell isn't declared. |
-| `set` | `fun(value: any): smelt.cell.Cell` | yes | Publish a new value. Returns the handle for chaining. |
-| `subscribe` | `fun(handler: fun(value: any)): smelt.Reg` | yes | Register `handler(value)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect. |
-| `name` | `fun(): string` | yes | Return the cell name. |
-
 ### `smelt.cli.RegisterFlagOpts`
 
 Flag specification accepted by `smelt.cli.register_flag`.
@@ -803,6 +792,17 @@ Options for `smelt.render.text`.
 | `hl_group` | `string` |  | Highlight group applied to the whole block. When omitted, text renders dim. |
 | `width` | `integer` |  | Wrapping width in terminal cells. Defaults to the current terminal width. |
 
+### `smelt.signal.Signal`
+
+Sticky handle returned by `smelt.signal(name)`. Setters return the handle for chaining; `:subscribe` returns a `Reg`.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `get` | `fun(): any` | yes | Return the current signal value, or `nil` when the signal isn't declared. |
+| `set` | `fun(value: any): smelt.signal.Signal` | yes | Publish a new value. Returns the handle for chaining. |
+| `subscribe` | `fun(handler: fun(arg1: any, arg2: any)): smelt.Reg` | yes | Register `handler(value, previous)` to fire on every `set`. Returns a `Reg` whose `:remove()` drops the subscription. No-op when called before the host pointer is live (e.g. the pre-TUI plugin pass). The module body re-runs inside `bring_up_lua` where the bind takes effect. |
+| `name` | `fun(): string` | yes | Return the signal name. |
+
 ### `smelt.theme.ColorDecl`
 
 Color value. Set `ansi` (256-color palette index) or `rgb` (`{R, G, B}` triple) for a direct color, or `dark` / `light` (themselves `ColorDecl`s) for a branch that resolves against the terminal background. A matching-side branch wins over the direct fields.
@@ -1067,17 +1067,17 @@ Where a virtual-text chunk is rendered relative to the line.
 
 Variants: `"inline"` \| `"overlay"` \| `"right_align"` \| `"eol"`
 
-### `smelt.cell.Name`
-
-Name of a reactive cell. Open alias - plugin-defined cells declared via `smelt.cell.new` are accepted alongside the well-known runtime cells listed here.
-
-Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"history"` \| `"history_epoch"` \| `"input_epoch"` \| `"input_submit"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_resize_active"` \| `"prompt_resize_chrome"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_epoch"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
-
 ### `smelt.cli.FlagKind`
 
 Type of CLI flag declared via `smelt.cli.register_flag`. Matches the subset of clap that we expose to Lua.
 
 Variants: `"boolean"` \| `"string"` \| `"integer"`
+
+### `smelt.events.Name`
+
+Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
+
+Open alias - accepts any `string`. Well-known names: `"block_done"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"history"` \| `"input_submit"` \| `"session_ended"` \| `"session_started"` \| `"shutdown"` \| `"stream_delta"` \| `"stream_phase"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"`.
 
 ### `smelt.input.Event`
 
@@ -1094,6 +1094,12 @@ Variants: `"press"` \| `"release"` \| `"drag"`
 Reasoning effort level string literal.
 
 Variants: `"off"` \| `"low"` \| `"medium"` \| `"high"` \| `"max"`
+
+### `smelt.signal.Name`
+
+Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.
+
+Open alias - accepts any `string`. Well-known names: `"agent_mode"` \| `"block_done"` \| `"branch"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"confirms_pending"` \| `"cursor_pos"` \| `"cwd"` \| `"cwd_branch"` \| `"cwd_managed_worktree"` \| `"cwd_project"` \| `"cwd_worktree"` \| `"cwd_worktree_path"` \| `"errors"` \| `"history"` \| `"history_epoch"` \| `"input_epoch"` \| `"input_submit"` \| `"keymap_pending"` \| `"model"` \| `"now"` \| `"notification_visible"` \| `"permission_pending"` \| `"prompt_resize_active"` \| `"prompt_resize_chrome"` \| `"reasoning"` \| `"running_procs"` \| `"session_ended"` \| `"session_epoch"` \| `"session_started"` \| `"session_title"` \| `"shutdown"` \| `"spinner_frame"` \| `"stream_delta"` \| `"stream_phase"` \| `"task_label"` \| `"tokens_used"` \| `"tool_end"` \| `"tool_start"` \| `"tps"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"` \| `"vim_mode"` \| `"vim_pending_input"` \| `"work_busy"` \| `"work_elapsed_ms"` \| `"work_label"` \| `"work_outcome"` \| `"work_retry_attempt"` \| `"work_retry_remaining_ms"` \| `"work_state"`.
 
 ### `smelt.tools.Decision`
 

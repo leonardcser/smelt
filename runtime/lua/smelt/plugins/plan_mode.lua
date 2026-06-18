@@ -385,7 +385,7 @@ end
 
 register_present_plan()
 
-smelt.cell("session_started"):subscribe(function()
+smelt.events.on("session_started", function()
   rehydrate_plan_grants()
 end)
 
