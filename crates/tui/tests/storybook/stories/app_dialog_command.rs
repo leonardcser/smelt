@@ -283,6 +283,8 @@ app_story!(resume_dialog, |ctx| {
             cwd: Some(cwd.clone()),
             parent_id: parent_id.map(str::to_string),
             context_tokens: None,
+            history_len: None,
+            checkpoint: None,
             text_bytes: Some(bytes),
             migration: None,
         };

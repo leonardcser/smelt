@@ -1,4 +1,4 @@
-use crate::app::TuiApp;
+use crate::app::{DeferredSessionLoad, TuiApp};
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
 use smelt_core::transcript_model::BlockHistory;
@@ -568,7 +568,12 @@ impl TuiApp {
         if matches!(kind, "cleared" | "rewound" | "loaded" | "forked") {
             self.bump_epoch("history_epoch");
         }
-        let count = self.core.session.history.len();
+        let count = self
+            .deferred_session_load
+            .as_ref()
+            .map_or(self.core.session.history.len(), |deferred| {
+                deferred.history_len
+            });
         self.core.signals.emit_dyn(
             "history",
             std::rc::Rc::new(smelt_core::signals::HistoryDelta {
@@ -863,7 +868,7 @@ impl TuiApp {
         &mut self,
         loaded: session::Session,
         transcript: crate::app::transcript::LoadedTranscript,
-        full_session_id: String,
+        deferred: DeferredSessionLoad,
     ) {
         if self.agent.is_some() {
             self.cancel_agent();
@@ -894,7 +899,7 @@ impl TuiApp {
         }
 
         self.install_loaded_session(loaded);
-        self.deferred_session_load = Some(full_session_id);
+        self.deferred_session_load = Some(deferred);
         self.persisted_store_ready = false;
         self.transcript_descriptors_persisted = true;
         self.session_dirty = false;
@@ -921,10 +926,10 @@ impl TuiApp {
     }
 
     pub(crate) fn ensure_deferred_session_loaded(&mut self) {
-        let Some(id) = self.deferred_session_load.take() else {
+        let Some(deferred) = self.deferred_session_load.take() else {
             return;
         };
-        if let Some(loaded) = session::load(&id) {
+        if let Some(loaded) = session::load(&deferred.id) {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
             if !block_history_covers_history(self.transcript.history(), &self.core.session) {
@@ -942,6 +947,8 @@ impl TuiApp {
                 }
             }
             self.sync_session_snapshot();
+        } else {
+            self.deferred_session_load = Some(deferred);
         }
     }
 
@@ -1158,6 +1165,21 @@ impl TuiApp {
     }
 
     pub(crate) fn model_history_source(&self) -> protocol::ModelHistorySource {
+        if let Some(deferred) = &self.deferred_session_load {
+            let Some(checkpoint) = deferred.checkpoint.as_ref() else {
+                return protocol::ModelHistorySource::store(Vec::new(), 0, deferred.history_len);
+            };
+            let prefix = vec![HistoryItem::user(protocol::Content::text(format!(
+                "{}\n{}",
+                engine::SUMMARY_PREFIX.trim_end(),
+                checkpoint.summary
+            )))];
+            return protocol::ModelHistorySource::store(
+                prefix,
+                checkpoint.first_live_index,
+                deferred.history_len,
+            );
+        }
         let (prefix, first_live_index, end_index) = self
             .core
             .session
@@ -1302,11 +1324,108 @@ impl TuiApp {
         self.publish_history_delta("rewound");
     }
 
+    fn persist_deferred_history_suffix(
+        &mut self,
+        history_start_idx: usize,
+        history_len: usize,
+        history: Vec<HistoryItem>,
+        descriptor_start_idx: usize,
+        descriptor_records: Vec<smelt_core::TranscriptBlockRecord>,
+    ) -> bool {
+        self.update_session_persist_metadata();
+        let session = &self.core.session;
+        let state = match session::store_state_from_session(session, history_len) {
+            Ok(state) => state,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                return false;
+            }
+        };
+        let snapshot = smelt_store::SessionSnapshot {
+            state,
+            meta_json: None,
+            history_start_idx,
+            history_len,
+            history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+        let session_id = session.id.clone();
+        let session_dir = session::dir_for(session);
+        self.persister.save(crate::persist::PersistRequest {
+            session_id,
+            session_dir,
+            snapshot,
+            blobs: self.pending_image_blobs(),
+            descriptor_start_idx,
+            descriptor_records,
+        });
+        self.persisted_store_ready = true;
+        self.transcript_descriptors_persisted = true;
+        self.transcript.history_mut().clear_descriptor_dirty();
+        self.session_dirty = false;
+        self.dirty_history_from = None;
+        true
+    }
+
+    fn commit_deferred_request_history_item(
+        &mut self,
+        item: HistoryItem,
+        block: Option<Block>,
+    ) -> protocol::ModelHistorySource {
+        let history = self.model_history_source();
+        let history_index = self
+            .deferred_session_load
+            .as_ref()
+            .map_or(self.core.session.history.len(), |deferred| {
+                deferred.history_len
+            });
+        let descriptor_order_start = self.transcript.history().len();
+        let descriptor_start_idx = self.transcript.descriptor_total_count().unwrap_or_else(|| {
+            self.transcript
+                .history()
+                .descriptor_record_index_for_order_index(descriptor_order_start)
+        });
+        if let Some(block) = block {
+            self.transcript
+                .push_with_origin(block, smelt_core::BlockOrigin::History(history_index));
+        }
+        let descriptor_records = self
+            .transcript
+            .history()
+            .descriptor_records_from(descriptor_order_start);
+        self.core.session.history.push(item.clone());
+        let history_len = history_index.saturating_add(1);
+        let descriptor_count = descriptor_records.len();
+        if self.persist_deferred_history_suffix(
+            history_index,
+            history_len,
+            vec![item],
+            descriptor_start_idx,
+            descriptor_records,
+        ) {
+            self.transcript
+                .note_persisted_descriptor_append(descriptor_count);
+            let checkpoint = self.core.session.checkpoint.clone();
+            if let Some(deferred) = self.deferred_session_load.as_mut() {
+                deferred.history_len = history_len;
+                deferred.checkpoint = checkpoint;
+            }
+        }
+        self.publish_history_delta("request");
+        self.flush_persist();
+        history
+    }
+
     pub(crate) fn commit_request_history_item(
         &mut self,
         item: HistoryItem,
         block: Option<Block>,
     ) -> protocol::ModelHistorySource {
+        if self.deferred_session_load.is_some() {
+            return self.commit_deferred_request_history_item(item, block);
+        }
         let history = self.model_history_source();
         let history_index = self.core.session.history.len();
         if let Some(block) = block {
@@ -1369,6 +1488,84 @@ mod checkpoint_tests {
             .processes
             .spawn(id.clone(), "sleep 30", child, std::time::Instant::now());
         id
+    }
+
+    #[test]
+    fn display_only_request_append_preserves_persisted_history_prefix() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        session.id = "display-only-request-append".into();
+        session.first_user_message = Some("old user".into());
+        session.history = vec![user("old user"), assistant("old assistant")];
+
+        app.app.load_session(session);
+        app.app.restore_screen();
+        app.app.persisted_store_ready = false;
+        app.app.save_session();
+        app.app.flush_persist();
+
+        let id = app.app.core.session.id.clone();
+        let loaded_transcript = load_transcript_from_sqlite_id(&id, 80, 24)
+            .expect("display-only transcript tail should load");
+        let mut display_session =
+            session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        display_session.id = id.clone();
+        display_session.first_user_message = Some("old user".into());
+
+        app.app.load_session_display_only(
+            display_session,
+            loaded_transcript,
+            crate::app::DeferredSessionLoad {
+                id: id.clone(),
+                history_len: 2,
+                checkpoint: None,
+            },
+        );
+
+        let source = app.app.commit_request_history_item(
+            user("new user"),
+            Some(Block::User {
+                text: "new user".into(),
+                image_labels: vec![],
+            }),
+        );
+
+        assert!(matches!(
+            source,
+            protocol::ModelHistorySource::Store {
+                first_live_index: 0,
+                end_index: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            app.app
+                .deferred_session_load
+                .as_ref()
+                .map(|deferred| deferred.history_len),
+            Some(3)
+        );
+
+        let db =
+            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+                .expect("open session db");
+        let rows = db
+            .read_history_items_range(0..3)
+            .expect("read persisted history");
+        assert_eq!(
+            rows,
+            vec![
+                user("old user"),
+                assistant("old assistant"),
+                user("new user")
+            ]
+        );
+        let descriptors = db
+            .read_transcript_descriptor_records()
+            .expect("read transcript descriptors");
+        assert!(descriptors
+            .iter()
+            .any(|record| record.history_idx == Some(2)));
     }
 
     #[test]

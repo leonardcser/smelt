@@ -317,6 +317,15 @@ impl TuiApp {
                 self.last_height,
             ),
         ) {
+            let Some(history_len) = meta.history_len else {
+                if let Some(loaded) = smelt_core::session::load(id) {
+                    self.load_session(loaded);
+                    self.restore_screen();
+                    self.finish_transcript_turn();
+                    self.transcript_win_mut().follow_tail();
+                }
+                return;
+            };
             let mut session =
                 smelt_core::session::Session::new(self.core.env.pid(), self.core.env.cwd());
             session.id = meta.id.clone();
@@ -326,11 +335,21 @@ impl TuiApp {
             session.created_at_ms = meta.created_at_ms;
             session.updated_at_ms = meta.updated_at_ms;
             session.mode = meta.mode;
+            session.reasoning_effort = meta.reasoning_effort;
             session.model = meta.model;
             session.cwd = meta.cwd;
             session.parent_id = meta.parent_id;
+            session.checkpoint = meta.checkpoint.clone();
             session.display_context_tokens = meta.context_tokens;
-            self.load_session_display_only(session, transcript, meta.id);
+            self.load_session_display_only(
+                session,
+                transcript,
+                crate::app::DeferredSessionLoad {
+                    id: meta.id,
+                    history_len,
+                    checkpoint: meta.checkpoint,
+                },
+            );
             self.finish_transcript_turn();
             self.transcript_win_mut().follow_tail();
             return;

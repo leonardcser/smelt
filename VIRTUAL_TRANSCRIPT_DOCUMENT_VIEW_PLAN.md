@@ -669,6 +669,8 @@ Acceptance:
 
 ### Phase 2: Normal resume without full semantic session load
 
+Status: implemented for normal display resume and request start in the current worktree. Display-only resume now keeps metadata-backed deferred session state with persisted history length and checkpoint cursor, `prepare_user_visible_turn` no longer forces `session::load`, request start uses the deferred store-backed model-history bounds, and the request row plus transcript descriptor are appended to SQLite without rewriting or deleting the persisted prefix. Explicit operations that need semantic history, such as rewind and fork, still call the deferred full-load bridge until later phases replace those semantics.
+
 Goal: make normal resume follow the same bounded document path as display-only preview, while still providing provider history on demand.
 
 Deliverables:

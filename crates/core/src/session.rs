@@ -683,6 +683,10 @@ pub struct SessionMeta {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub context_tokens: Option<u32>,
+    #[serde(default)]
+    pub history_len: Option<usize>,
+    #[serde(default)]
+    pub checkpoint: Option<ContextCheckpoint>,
     /// Approximate text byte size (message bodies, reasoning, tool-call args).
     /// Populated in `meta.json` so the resume dialog avoids loading session history.
     #[serde(default)]
@@ -850,6 +854,8 @@ impl Session {
             cwd: self.cwd.clone(),
             parent_id: self.parent_id.clone(),
             context_tokens: self.display_context_tokens(),
+            history_len: Some(self.history.len()),
+            checkpoint: self.checkpoint.clone(),
             text_bytes: Some(compute_text_bytes(&self.history)),
             migration: None,
         }
@@ -1379,33 +1385,7 @@ pub fn store_snapshot_from_session(
 ) -> Result<smelt_store::SessionSnapshot, smelt_store::StoreError> {
     let history_start_idx = history_start_idx.min(session.history.len());
     Ok(smelt_store::SessionSnapshot {
-        state: smelt_store::SessionState {
-            id: session.id.clone(),
-            title: session.title.clone(),
-            slug: session.slug.clone(),
-            first_user_message: session.first_user_message.clone(),
-            cwd: session.cwd.clone(),
-            mode: session.mode.clone(),
-            reasoning_effort: session
-                .reasoning_effort
-                .map(|effort| effort.label().to_string()),
-            model: session.model.clone(),
-            parent_id: session.parent_id.clone(),
-            accounting_json: Some(serde_json::to_value(&session.session_usage)?),
-            checkpoint_json: session
-                .checkpoint
-                .as_ref()
-                .map(serde_json::to_value)
-                .transpose()?,
-            context_tokens: session.context_tokens.map(u64::from),
-            context_tokens_history_len: session.context_tokens_history_len.map(|len| len as u64),
-            display_context_tokens: session.display_context_tokens.map(u64::from),
-            session_cost_usd: session.session_cost_usd,
-            revision: 0,
-            history_len: session.history.len() as u64,
-            created_at: session.created_at_ms as i64,
-            updated_at: session.updated_at_ms as i64,
-        },
+        state: store_state_from_session(session, session.history.len())?,
         meta_json: None,
         history_start_idx,
         history_len: session.history.len(),
@@ -1413,6 +1393,39 @@ pub fn store_snapshot_from_session(
         turn_metas: snapshot_values_from(&session.turn_metas, history_start_idx)?,
         metadata_snapshots: snapshot_values_from(&session.metadata_snapshots, history_start_idx)?,
         accounting_snapshots: snapshot_values_from(&session.context_snapshots, history_start_idx)?,
+    })
+}
+
+pub fn store_state_from_session(
+    session: &Session,
+    history_len: usize,
+) -> Result<smelt_store::SessionState, smelt_store::StoreError> {
+    Ok(smelt_store::SessionState {
+        id: session.id.clone(),
+        title: session.title.clone(),
+        slug: session.slug.clone(),
+        first_user_message: session.first_user_message.clone(),
+        cwd: session.cwd.clone(),
+        mode: session.mode.clone(),
+        reasoning_effort: session
+            .reasoning_effort
+            .map(|effort| effort.label().to_string()),
+        model: session.model.clone(),
+        parent_id: session.parent_id.clone(),
+        accounting_json: Some(serde_json::to_value(&session.session_usage)?),
+        checkpoint_json: session
+            .checkpoint
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?,
+        context_tokens: session.context_tokens.map(u64::from),
+        context_tokens_history_len: session.context_tokens_history_len.map(|len| len as u64),
+        display_context_tokens: session.display_context_tokens.map(u64::from),
+        session_cost_usd: session.session_cost_usd,
+        revision: 0,
+        history_len: history_len as u64,
+        created_at: session.created_at_ms as i64,
+        updated_at: session.updated_at_ms as i64,
     })
 }
 
@@ -1967,7 +1980,8 @@ fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
     } else {
         None
     };
-    let meta = if let Some(meta) = meta {
+    let meta = if let Some(mut meta) = meta {
+        enrich_meta_from_db(&path, &mut meta);
         meta
     } else if let Some(meta) = load_meta_from_db(&path) {
         write_meta(&path, &meta);
@@ -1976,6 +1990,27 @@ fn load_meta_for_dir(path: PathBuf) -> Option<SessionMeta> {
         return migration_meta_for_dir(&path);
     };
     Some(with_migration_status(&path, meta))
+}
+
+fn enrich_meta_from_db(path: &Path, meta: &mut SessionMeta) {
+    if meta.history_len.is_some() && meta.checkpoint.is_some() {
+        return;
+    }
+    let db_path = path.join("session.db");
+    let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) else {
+        return;
+    };
+    let Ok(Some(state)) = db.session_state() else {
+        return;
+    };
+    if meta.history_len.is_none() {
+        meta.history_len = Some(state.history_len as usize);
+    }
+    if meta.checkpoint.is_none() {
+        meta.checkpoint = state
+            .checkpoint_json
+            .and_then(|value| serde_json::from_value(value).ok());
+    }
 }
 
 fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
@@ -1994,6 +2029,8 @@ fn migration_meta_for_dir(path: &Path) -> Option<SessionMeta> {
         cwd: None,
         parent_id: None,
         context_tokens: None,
+        history_len: None,
+        checkpoint: None,
         text_bytes: None,
         migration: Some(migration),
     })
@@ -2021,10 +2058,15 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
     if !db_path.is_file() {
         return None;
     }
-    let db = smelt_store::SessionDb::open(&db_path).ok()?;
-    let snapshot = db.load_session_snapshot().ok()??;
-    if let Some(meta_json) = snapshot.meta_json {
-        if let Ok(meta) = serde_json::from_value::<SessionJsonlMeta>(meta_json) {
+    let db = smelt_store::SessionDb::open_read_only(&db_path).ok()?;
+    let state = db.session_state().ok()??;
+    let text_bytes = Some(db.history_text_bytes().ok()?);
+    let checkpoint = state
+        .checkpoint_json
+        .clone()
+        .and_then(|value| serde_json::from_value(value).ok());
+    if let Some(meta_json) = db.meta("session_meta_json").ok().flatten() {
+        if let Ok(meta) = serde_json::from_str::<SessionJsonlMeta>(&meta_json) {
             return Some(SessionMeta {
                 id: meta.id,
                 title: meta.title,
@@ -2038,26 +2080,35 @@ fn load_meta_from_db(path: &Path) -> Option<SessionMeta> {
                 cwd: meta.cwd,
                 parent_id: meta.parent_id,
                 context_tokens: meta.display_context_tokens.or(meta.context_tokens),
-                text_bytes: Some(db.history_text_bytes().ok()?),
+                history_len: Some(state.history_len as usize),
+                checkpoint,
+                text_bytes,
                 migration: None,
             });
         }
     }
-    let state = snapshot.state;
     Some(SessionMeta {
         id: state.id,
         title: state.title,
         slug: state.slug,
-        first_user_message: None,
+        first_user_message: state.first_user_message,
         created_at_ms: state.created_at as u64,
         updated_at_ms: state.updated_at as u64,
         mode: state.mode,
-        reasoning_effort: None,
+        reasoning_effort: state
+            .reasoning_effort
+            .as_deref()
+            .and_then(ReasoningEffort::parse),
         model: state.model,
         cwd: state.cwd,
-        parent_id: None,
-        context_tokens: None,
-        text_bytes: Some(db.history_text_bytes().ok()?),
+        parent_id: state.parent_id,
+        context_tokens: state
+            .display_context_tokens
+            .or(state.context_tokens)
+            .and_then(|tokens| u32::try_from(tokens).ok()),
+        history_len: Some(state.history_len as usize),
+        checkpoint,
+        text_bytes,
         migration: None,
     })
 }
@@ -3257,6 +3308,8 @@ mod tests {
             cwd: None,
             parent_id: None,
             context_tokens: None,
+            history_len: None,
+            checkpoint: None,
             text_bytes: None,
             migration: None,
         };

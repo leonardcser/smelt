@@ -62,6 +62,13 @@ pub struct ShutdownContext {
     pub has_messages: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct DeferredSessionLoad {
+    pub(crate) id: String,
+    pub(crate) history_len: usize,
+    pub(crate) checkpoint: Option<smelt_core::ContextCheckpoint>,
+}
+
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
@@ -117,7 +124,7 @@ pub struct TuiApp {
     pub(crate) dirty_history_from: Option<usize>,
     /// Set by transient UI updates that can disappear before the next normal frame.
     transient_render_requested: bool,
-    pub(crate) deferred_session_load: Option<String>,
+    pub(crate) deferred_session_load: Option<DeferredSessionLoad>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
     pub(crate) next_turn_id: u64,

@@ -731,9 +731,19 @@ impl TranscriptDocument {
                 .is_none_or(|total_count| total_count == 0)
     }
 
-    #[cfg(test)]
-    fn descriptor_total_count(&self) -> Option<usize> {
+    pub(crate) fn descriptor_total_count(&self) -> Option<usize> {
         self.sparse_descriptors.total_count()
+    }
+
+    pub(crate) fn note_persisted_descriptor_append(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let total = self
+            .sparse_descriptors
+            .total_count
+            .unwrap_or_else(|| self.transcript.history.descriptor_records().len());
+        self.sparse_descriptors.total_count = Some(total.saturating_add(count));
     }
 
     #[cfg(test)]
