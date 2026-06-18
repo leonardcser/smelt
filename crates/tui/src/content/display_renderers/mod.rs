@@ -5,6 +5,7 @@ mod markdown;
 
 pub(crate) use layout_ir::{
     measure_layout_ir_with_options, render_layout_ir_into, render_layout_ir_into_with_history,
+    render_layout_ir_range_into, render_layout_ir_range_into_with_history,
 };
 pub(crate) use markdown::render_markdown_inner;
 

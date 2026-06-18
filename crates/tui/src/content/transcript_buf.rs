@@ -1,6 +1,6 @@
 use super::display_layout::{
-    measure_block, render_block_into, CompileJob, DisplayModel, MeasureCtx, RenderCtx,
-    TranscriptRenderEnv,
+    measure_block, render_block_into, render_block_range_into, CompileJob, DisplayModel,
+    MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
 use crate::content::render_plan::{
     NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptDefaultViewPolicy,
@@ -537,6 +537,14 @@ impl ProjectionAnchor {
             display_offset: Some(display_offset),
         }
     }
+
+    fn rendered_block_without_display_offset(id: BlockId, row_offset: RowIndex) -> Self {
+        Self::RenderedBlock {
+            id,
+            row_offset,
+            display_offset: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -594,6 +602,7 @@ pub(crate) struct ProjectionPlan {
     target: ResolvedProjectionTarget,
     scroll_top: RowIndex,
     viewport_rows: u16,
+    row_window: std::ops::Range<RowIndex>,
     node_range: std::ops::Range<usize>,
 }
 
@@ -671,6 +680,10 @@ impl ProjectionPlan {
     pub(crate) fn node_range(&self) -> std::ops::Range<usize> {
         self.node_range.clone()
     }
+
+    fn row_window(&self) -> std::ops::Range<RowIndex> {
+        self.row_window.clone()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -740,7 +753,6 @@ struct PendingRow {
 }
 
 struct ProjectRows<'a> {
-    row_base: RowIndex,
     texts: &'a mut Vec<String>,
     pending: &'a mut Vec<PendingRow>,
     layout: &'a mut Vec<LayoutEntry>,
@@ -929,6 +941,58 @@ fn render_cached_layout_to_buffer(
             inline_options: inline_options.clone(),
         },
     );
+    Some((buf, outcome.line_count))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_cached_layout_range_to_buffer(
+    display_model: &DisplayModel,
+    id: RenderNodeId,
+    key: NodeLayoutKey,
+    renderer_generation: u64,
+    renderer_cache_key: Option<u64>,
+    theme: &Theme,
+    history: &BlockHistory,
+    inline_options: &InlineOptions,
+    row_start: RowIndex,
+    row_count: RowIndex,
+) -> Option<(Buffer, usize)> {
+    let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
+    let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+    let outcome = render_block_range_into(
+        &mut buf,
+        layout,
+        RenderCtx {
+            width: key.width,
+            view_state: layout_view_state(id, key.view_state, history),
+            theme,
+            history: Some(history),
+            inline_options: inline_options.clone(),
+        },
+        row_to_usize(row_start),
+        row_to_usize(row_count),
+    );
+    if outcome.line_count == 0 && row_count > 0 {
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let outcome = render_block_into(
+            &mut buf,
+            layout,
+            RenderCtx {
+                width: key.width,
+                view_state: layout_view_state(id, key.view_state, history),
+                theme,
+                history: Some(history),
+                inline_options: inline_options.clone(),
+            },
+        );
+        let start = row_to_usize(row_start).min(outcome.line_count);
+        let end = start
+            .saturating_add(row_to_usize(row_count))
+            .min(outcome.line_count);
+        buf.set_lines(end, outcome.line_count, vec![]);
+        buf.set_lines(0, start, vec![]);
+        return Some((buf, end.saturating_sub(start)));
+    }
     Some((buf, outcome.line_count))
 }
 
@@ -2034,12 +2098,16 @@ impl TranscriptProjection {
                 start..total_rows
             }
         };
-        let node_range = self.measurements.active.node_range_for_rows(row_window);
+        let node_range = self
+            .measurements
+            .active
+            .node_range_for_rows(row_window.clone());
         ProjectionPlan {
             key: request.key,
             target: request.target,
             scroll_top,
             viewport_rows: request.viewport_rows,
+            row_window,
             node_range,
         }
     }
@@ -2187,6 +2255,7 @@ impl TranscriptProjection {
             history,
             theme,
             plan.node_range(),
+            Some(plan.row_window()),
         );
         let row_base = materialized.row_base;
         let total_rows = materialized.total_rows;
@@ -2220,6 +2289,7 @@ impl TranscriptProjection {
         history: &BlockHistory,
         theme: &Theme,
         node_range: std::ops::Range<usize>,
+        row_clip: Option<std::ops::Range<RowIndex>>,
     ) -> MaterializedTranscriptRange {
         let _perf = smelt_perf::perf::begin("transcript:collect_nodes_range");
         let start = node_range.start.min(self.measurements.active.nodes.len());
@@ -2235,13 +2305,15 @@ impl TranscriptProjection {
             self.counters.max_range_materialized_blocks =
                 self.counters.max_range_materialized_blocks.max(count);
         }
-        let row_base = self.measurements.active.prefix_row(start);
+        let row_base = row_clip
+            .as_ref()
+            .map(|range| range.start)
+            .unwrap_or_else(|| self.measurements.active.prefix_row(start));
         let mut texts = Vec::new();
         let mut pending = Vec::new();
         let mut layout = Vec::with_capacity(end.saturating_sub(start));
         let mut row_anchors = Vec::new();
         let mut rows = ProjectRows {
-            row_base,
             texts: &mut texts,
             pending: &mut pending,
             layout: &mut layout,
@@ -2253,7 +2325,15 @@ impl TranscriptProjection {
         for block_index in block_indices {
             let id = self.measurements.active.nodes[block_index].id;
             let key = self.measurements.active.nodes[block_index].key;
-            self.append_projected_node(history, theme, block_index, id, key, &mut rows);
+            self.append_projected_node(
+                history,
+                theme,
+                block_index,
+                id,
+                key,
+                row_clip.as_ref(),
+                &mut rows,
+            );
         }
 
         smelt_perf::perf::record_value("transcript:collect_nodes_range:rows", texts.len() as u64);
@@ -2275,6 +2355,7 @@ impl TranscriptProjection {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_projected_node(
         &mut self,
         history: &BlockHistory,
@@ -2282,58 +2363,119 @@ impl TranscriptProjection {
         block_index: usize,
         id: RenderNodeId,
         key: NodeLayoutKey,
+        row_clip: Option<&std::ops::Range<RowIndex>>,
         rows: &mut ProjectRows<'_>,
     ) {
         let renderer_generation = self.measurements.active.renderer_generation;
         let renderer_cache_key = self.measurements.active.renderer_cache_key;
-        let Some((node_buf, node_rows)) = render_cached_layout_to_buffer(
-            &self.display_layouts,
-            id,
-            key,
-            renderer_generation,
-            renderer_cache_key,
-            theme,
-            history,
-            &self.inline_options,
-        ) else {
-            return;
+        let node_start = self.measurements.active.prefix_row(block_index);
+        let exact_rows = self
+            .measurements
+            .active
+            .nodes
+            .get(block_index)
+            .and_then(|node| node.exact_height);
+        let full_rows = match exact_rows {
+            Some(rows) => rows,
+            None => {
+                let Some((_, node_rows)) = render_cached_layout_to_buffer(
+                    &self.display_layouts,
+                    id,
+                    key,
+                    renderer_generation,
+                    renderer_cache_key,
+                    theme,
+                    history,
+                    &self.inline_options,
+                ) else {
+                    return;
+                };
+                let gap = self
+                    .render_plan
+                    .rendered_node_gap(history, block_index, node_rows);
+                (gap as usize).saturating_add(node_rows) as RowIndex
+            }
         };
         let gap = self
             .render_plan
-            .rendered_node_gap(history, block_index, node_rows);
-        self.set_exact_height(
-            block_index,
-            (gap as usize).saturating_add(node_rows) as RowIndex,
-        );
-        for _ in 0..gap {
+            .rendered_node_gap(history, block_index, full_rows as usize)
+            as RowIndex;
+        self.set_exact_height(block_index, full_rows);
+
+        let node_end = node_start.saturating_add(full_rows);
+        let clip_start = row_clip
+            .map_or(node_start, |range| range.start)
+            .max(node_start);
+        let clip_end = row_clip.map_or(node_end, |range| range.end).min(node_end);
+        if clip_start >= clip_end {
+            return;
+        }
+
+        let gap_end = node_start.saturating_add(gap).min(node_end);
+        let gap_start = clip_start.max(node_start);
+        let gap_clip_end = clip_end.min(gap_end);
+        for _ in gap_start..gap_clip_end {
             rows.texts.push(String::new());
             rows.row_anchors.push(None);
         }
 
         let block_id = id.as_block_id();
-        let block_anchors = block_id.map(|id| rendered_row_anchors(&node_buf, id, node_rows));
-        let local_start = rows.texts.len() as RowIndex;
-        for r in 0..node_rows {
-            let row_idx = rows.texts.len();
-            rows.texts
-                .push(node_buf.get_line(r).unwrap_or("").to_string());
-            let h = node_buf.highlights_at(r);
-            let dec = node_buf.decoration_at(r).clone();
-            if !h.is_empty() || dec != LineDecoration::default() {
-                rows.pending.push(PendingRow {
-                    row: row_idx,
-                    highlights: h,
-                    decoration: dec,
-                });
+        let block_start = gap_end;
+        let block_rows = full_rows.saturating_sub(gap);
+        let block_end = block_start.saturating_add(block_rows);
+        let visible_start = clip_start.max(block_start);
+        let visible_end = clip_end.min(block_end);
+        if visible_start < visible_end {
+            let local_row_start = visible_start.saturating_sub(block_start);
+            let local_row_count = visible_end.saturating_sub(visible_start);
+            let Some((node_buf, rendered_rows)) = render_cached_layout_range_to_buffer(
+                &self.display_layouts,
+                id,
+                key,
+                renderer_generation,
+                renderer_cache_key,
+                theme,
+                history,
+                &self.inline_options,
+                local_row_start,
+                local_row_count,
+            ) else {
+                return;
+            };
+            let block_anchors = block_id.and_then(|id| {
+                (local_row_start == 0).then(|| rendered_row_anchors(&node_buf, id, rendered_rows))
+            });
+            for r in 0..rendered_rows {
+                let row_idx = rows.texts.len();
+                rows.texts
+                    .push(node_buf.get_line(r).unwrap_or("").to_string());
+                let h = node_buf.highlights_at(r);
+                let dec = node_buf.decoration_at(r).clone();
+                if !h.is_empty() || dec != LineDecoration::default() {
+                    rows.pending.push(PendingRow {
+                        row: row_idx,
+                        highlights: h,
+                        decoration: dec,
+                    });
+                }
+                rows.row_anchors.push(block_id.map(|id| {
+                    block_anchors
+                        .as_ref()
+                        .map(|anchors| anchors[r])
+                        .unwrap_or_else(|| {
+                            ProjectionAnchor::rendered_block_without_display_offset(
+                                id,
+                                local_row_start.saturating_add(r as RowIndex),
+                            )
+                        })
+                }));
             }
-            rows.row_anchors
-                .push(block_anchors.as_ref().map(|anchors| anchors[r]));
         }
         if let Some(block_id) = block_id {
             rows.layout.push(LayoutEntry {
                 id: block_id,
-                start: rows.row_base.saturating_add(local_start),
-                rows: node_rows as RowIndex,
+                start: block_start,
+                rows: block_rows,
             });
         }
     }
@@ -2451,6 +2593,7 @@ impl TranscriptProjection {
             history,
             theme,
             0..self.measurements.active.nodes.len(),
+            None,
         );
         buf.set_all_lines(materialized.texts);
         for p in materialized.pending {
@@ -2575,8 +2718,8 @@ impl TranscriptProjection {
         rows: std::ops::Range<RowIndex>,
     ) -> DisplayRows {
         let _perf = smelt_perf::perf::begin("transcript:display_rows_for_range");
-        let start = rows.start;
-        let end = rows.end;
+        let mut start = rows.start;
+        let mut end = rows.end;
         let count = end.saturating_sub(start);
         smelt_perf::perf::record_value("transcript:display_rows_for_range:rows", count);
         smelt_perf::perf::record_value("transcript:exactified_rows", count);
@@ -2588,10 +2731,15 @@ impl TranscriptProjection {
         self.prepare_row_index_with_env(env.clone(), history, width);
         let _ = self.exactify_row_range(env.clone(), history, start..end);
         let total_rows = self.measurements.active.total_rows();
-        if total_rows == 0 || start >= total_rows {
+        if total_rows == 0 {
             return DisplayRows::empty();
         }
-        let end = end.min(total_rows);
+        if start >= total_rows {
+            start = total_rows.saturating_sub(count);
+            end = total_rows;
+        } else {
+            end = end.min(total_rows);
+        }
         let node_range = self.measurements.active.node_range_for_rows(start..end);
         if node_range.start >= node_range.end {
             return DisplayRows::empty();
@@ -2606,6 +2754,7 @@ impl TranscriptProjection {
             history,
             theme,
             node_range,
+            Some(start..end),
         );
         let local_start = row_to_usize(start.saturating_sub(materialized.row_base));
         let local_end =
@@ -2704,8 +2853,23 @@ impl TranscriptProjection {
         let mut start = node_range.start;
         while start < node_range.end {
             let end = start.saturating_add(COPY_CHUNK_NODES).min(node_range.end);
-            let materialized =
-                self.collect_nodes_range(renderer_env.clone(), history, theme, start..end);
+            let chunk_start_row = self
+                .measurements
+                .active
+                .prefix_row(start)
+                .max(range.start.row);
+            let chunk_end_row = self
+                .measurements
+                .active
+                .prefix_row(end)
+                .min(end_row.saturating_add(1));
+            let materialized = self.collect_nodes_range(
+                renderer_env.clone(),
+                history,
+                theme,
+                start..end,
+                Some(chunk_start_row..chunk_end_row),
+            );
             append_copy_chunk(
                 &mut kill_ring,
                 &mut clipboard,
@@ -6185,6 +6349,20 @@ mod tests {
             render_ms,
         );
     }
+    fn assert_projection_bench_gates(counters: TranscriptProjectionCounters, label: &str) {
+        const MAX_MATERIALIZED_ROWS_PER_OPERATION: usize = 80;
+        assert!(
+            counters.max_range_materialized_rows <= MAX_MATERIALIZED_ROWS_PER_OPERATION,
+            "{label} materialized {} rows, expected <= {MAX_MATERIALIZED_ROWS_PER_OPERATION}",
+            counters.max_range_materialized_rows,
+        );
+        assert!(
+            counters.max_range_materialized_blocks <= MAX_MATERIALIZED_ROWS_PER_OPERATION,
+            "{label} materialized {} blocks, expected <= {MAX_MATERIALIZED_ROWS_PER_OPERATION}",
+            counters.max_range_materialized_blocks,
+        );
+    }
+
     fn run_transcript_bench_sample(workload: TranscriptBenchWorkload) -> TranscriptBenchSample {
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
@@ -6298,7 +6476,11 @@ mod tests {
         assert!(first.total_rows > 0);
         assert!(resized.total_rows > 0);
         assert_eq!(themed.total_rows, resized.total_rows);
-        assert!(!visible.rows.is_empty());
+        assert!(
+            !visible.rows.is_empty(),
+            "visible range was empty at mid={mid} total_rows={} counters={visible_counters:?}",
+            resized.total_rows
+        );
         assert_eq!(no_cache_projection.total_rows, first.total_rows);
         assert!(first_counters.display_layouts > 0);
         assert!(first_counters.display_layouts <= blocks);
@@ -6313,6 +6495,17 @@ mod tests {
         assert_eq!(
             no_cache_counters.display_layouts,
             first_counters.display_layouts
+        );
+        assert_projection_bench_gates(first_counters, "first paint");
+        assert_projection_bench_gates(resize_counters, "resize");
+        assert_projection_bench_gates(theme_counters, "theme refresh");
+        assert_projection_bench_gates(visible_counters, "visible range");
+        assert_projection_bench_gates(no_cache_counters, "no-cache first paint");
+        assert_projection_bench_gates(scroll_counters, "scroll jump");
+        assert!(
+            scroll_counters.range_materialized_rows <= 12 * 80,
+            "scroll benchmark materialized {} rows over 12 jumps, expected <= 960",
+            scroll_counters.range_materialized_rows,
         );
 
         smelt_perf::alloc::set_enabled(false);

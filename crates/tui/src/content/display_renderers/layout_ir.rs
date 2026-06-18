@@ -48,6 +48,47 @@ pub(crate) fn render_layout_ir_into_with_history(
     )
 }
 
+pub(crate) fn render_layout_ir_range_into(
+    out: &mut LineBuilder,
+    layout: &LayoutIr,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    inline_options: &InlineOptions,
+) -> u16 {
+    render_layout_ir_range(
+        out,
+        layout,
+        width,
+        row_start,
+        row_count,
+        None,
+        None,
+        inline_options,
+    )
+}
+
+pub(crate) fn render_layout_ir_range_into_with_history(
+    out: &mut LineBuilder,
+    layout: &LayoutIr,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    history: &BlockHistory,
+    inline_options: &InlineOptions,
+) -> u16 {
+    render_layout_ir_range(
+        out,
+        layout,
+        width,
+        row_start,
+        row_count,
+        None,
+        Some(history),
+        inline_options,
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn measure_layout_ir(layout: &LayoutIr, width: u16) -> u16 {
     measure_layout_ir_with_options(layout, width, &InlineOptions::default())

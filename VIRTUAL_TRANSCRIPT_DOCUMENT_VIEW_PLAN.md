@@ -800,7 +800,7 @@ Acceptance:
 
 ### Phase 7: Cleanup, compatibility isolation, and hard performance gates
 
-Status: in progress. Store-level performance counters now cover full and ranged history reads, descriptor full/slice/tail loads, object payload hydration and storage, search candidate paging, snapshot/full-session loads, dirty suffix size, and DB row write/delete counts. The transcript search benchmark prints `store:*`, `session:*`, and `transcript:*` perf rows in addition to `search:transcript*` rows so benchmark output exposes the storage hot-path counters added in this phase.
+Status: in progress. Store-level performance counters now cover full and ranged history reads, descriptor full/slice/tail loads, object payload hydration and storage, search candidate paging, snapshot/full-session loads, dirty suffix size, and DB row write/delete counts. The transcript search benchmark prints `store:*`, `session:*`, and `transcript:*` perf rows in addition to `search:transcript*` rows so benchmark output exposes the storage hot-path counters added in this phase. Transcript projection now renders clipped row windows for visible, resize, jump, and copy materialization, and the layout benchmark fails if these operations materialize more than the bounded requested row window.
 
 Goal: delete old paths after the correct abstractions cover hot operations, and prove the application scales to very large sessions.
 

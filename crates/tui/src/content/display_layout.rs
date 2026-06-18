@@ -803,6 +803,42 @@ pub(crate) fn render_block_into(
     apply_view_state(buf, ctx.theme, ctx.width, ctx.view_state, outcome)
 }
 
+pub(crate) fn render_block_range_into(
+    buf: &mut Buffer,
+    layout: &LayoutIr,
+    ctx: RenderCtx<'_>,
+    row_start: usize,
+    row_count: usize,
+) -> Outcome {
+    if row_count == 0 {
+        return Outcome::default();
+    }
+    if ctx.view_state != ViewState::Expanded || row_start > u16::MAX as usize {
+        let outcome = render_block_into(buf, layout, ctx);
+        let start = row_start.min(outcome.line_count);
+        let end = start.saturating_add(row_count).min(outcome.line_count);
+        buf.set_lines(end, outcome.line_count, vec![]);
+        buf.set_lines(0, start, vec![]);
+        return Outcome {
+            line_count: end.saturating_sub(start),
+            ..outcome
+        };
+    }
+    let row_start = row_start.min(u16::MAX as usize) as u16;
+    let row_count = row_count.min(u16::MAX as usize) as u16;
+    let mut out = LineBuilder::new(buf, ctx.theme, ctx.width);
+    render_expanded_block_range(
+        &mut out,
+        layout,
+        ctx.width,
+        row_start,
+        row_count,
+        ctx.history,
+        &ctx.inline_options,
+    );
+    out.finish()
+}
+
 fn render_expanded_block(
     out: &mut LineBuilder,
     layout: &LayoutIr,
@@ -821,6 +857,38 @@ fn render_expanded_block(
         )
     } else {
         crate::content::display_renderers::render_layout_ir_into(out, layout, width as u16)
+    }
+}
+
+fn render_expanded_block_range(
+    out: &mut LineBuilder,
+    layout: &LayoutIr,
+    width: u16,
+    row_start: u16,
+    row_count: u16,
+    history: Option<&BlockHistory>,
+    inline_options: &InlineOptions,
+) -> u16 {
+    let _perf = smelt_perf::perf::begin("render:layout:range");
+    if let Some(history) = history {
+        crate::content::display_renderers::render_layout_ir_range_into_with_history(
+            out,
+            layout,
+            width,
+            row_start,
+            row_count,
+            history,
+            inline_options,
+        )
+    } else {
+        crate::content::display_renderers::render_layout_ir_range_into(
+            out,
+            layout,
+            width,
+            row_start,
+            row_count,
+            inline_options,
+        )
     }
 }
 
