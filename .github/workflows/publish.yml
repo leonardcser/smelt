@@ -62,8 +62,36 @@ jobs:
           echo "Publishing crate=$CRATE version=$VERSION"
 
       - name: Bump version
+        env:
+          CRATE: ${{ steps.parse.outputs.crate }}
+          VERSION: ${{ steps.parse.outputs.version }}
         run: |
-          cargo set-version -p "${{ steps.parse.outputs.crate }}" "${{ steps.parse.outputs.version }}"
+          cargo set-version -p "$CRATE" "$VERSION"
+          python3 <<'PY'
+          import os
+          from pathlib import Path
+
+          crate = os.environ["CRATE"]
+          version = os.environ["VERSION"]
+          paths = {
+              "smelt-perf": "crates/perf",
+              "smelt-style": "crates/style",
+              "smelt-ansi": "crates/ansi",
+              "smelt-term": "crates/term",
+          }
+          crate_path = paths[crate]
+          root = Path("Cargo.toml")
+          lines = root.read_text().splitlines()
+          prefix = f'{crate} = {{ path = "{crate_path}", version = "'
+          replacement = f'{crate} = {{ path = "{crate_path}", version = "{version}" }}'
+          for i, line in enumerate(lines):
+              if line.startswith(prefix):
+                  lines[i] = replacement
+                  break
+          else:
+              raise SystemExit(f"workspace dependency for {crate} not found")
+          root.write_text("\n".join(lines) + "\n")
+          PY
 
       - name: Check formatting
         run: cargo fmt -- --check

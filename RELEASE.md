@@ -6,15 +6,17 @@ publishes, and pushes the bump back to `main`. Do not pre-edit
 
 ## Library crates (crates.io)
 
-`smelt-perf`, `smelt-style`, `smelt-term`. Tag from `main`:
+`smelt-perf`, `smelt-style`, `smelt-ansi`, `smelt-term`. Tag from `main`:
 
 ```bash
 git tag smelt-<crate>-v<X.Y.Z>
 git push origin smelt-<crate>-v<X.Y.Z>
 ```
 
-If bumping multiple, tag `smelt-style` before `smelt-term` (term depends
-on style) and wait for the first run to finish before pushing the next.
+If bumping multiple, tag dependencies before dependents. Currently that means
+`smelt-style` before `smelt-ansi`, and both `smelt-style` and `smelt-ansi`
+before `smelt-term`. Wait for each publish run to finish before pushing the
+next tag.
 
 ## Agent (binary release)
 
