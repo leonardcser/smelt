@@ -6017,7 +6017,7 @@ mod tests {
             &mut descriptor_projection,
             &lua,
             &mut descriptor_buf,
-            &mut descriptor_resumed.history,
+            &mut descriptor_resumed.transcript.history,
             100,
             &theme,
             ScrollTarget::visible_tail(),

@@ -109,9 +109,11 @@ pub(crate) fn build_transcript_from_session(
     transcript
 }
 
-pub(crate) fn load_transcript_from_sqlite(session: &session::Session) -> Option<Transcript> {
-    let transcript = load_transcript_from_sqlite_dir(session::dir_for(session))?;
-    transcript_covers_history(&transcript, session).then_some(transcript)
+pub(crate) fn load_transcript_from_sqlite(
+    session: &session::Session,
+) -> Option<crate::app::transcript::LoadedTranscript> {
+    let loaded = load_transcript_from_sqlite_dir(session::dir_for(session))?;
+    transcript_covers_history(&loaded.transcript, session).then_some(loaded)
 }
 
 pub(crate) fn load_transcript_from_sqlite_id(
@@ -164,10 +166,12 @@ impl SqliteTranscriptStore {
     }
 }
 
-fn load_transcript_from_sqlite_dir(session_dir: PathBuf) -> Option<Transcript> {
+fn load_transcript_from_sqlite_dir(
+    session_dir: PathBuf,
+) -> Option<crate::app::transcript::LoadedTranscript> {
     let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
     let rows = store.read_descriptor_records().ok()?;
-    crate::app::transcript::LoadedTranscript::from_descriptor_rows(rows)
+    crate::app::transcript::LoadedTranscript::from_full_descriptor_rows(rows, session_dir)
 }
 
 fn load_transcript_tail_from_sqlite_dir(
@@ -1031,15 +1035,18 @@ impl TuiApp {
         self.clear_transcript();
         self.prune_rewindable_session_state(self.core.session.history.len());
         self.persisted_store_ready = true;
-        let (transcript, descriptors_persisted) =
+        let (loaded_transcript, descriptors_persisted) =
             match load_transcript_from_sqlite(&self.core.session) {
-                Some(transcript) => (transcript, true),
+                Some(loaded_transcript) => (loaded_transcript, true),
                 None => (
-                    build_transcript_from_session(&self.lua, &self.core.session),
+                    crate::app::transcript::LoadedTranscript::full(build_transcript_from_session(
+                        &self.lua,
+                        &self.core.session,
+                    )),
                     false,
                 ),
             };
-        self.transcript.replace_transcript(transcript);
+        self.transcript.replace_loaded_transcript(loaded_transcript);
         self.transcript_descriptors_persisted = descriptors_persisted;
         self.session_dirty = false;
         self.dirty_history_from = None;
