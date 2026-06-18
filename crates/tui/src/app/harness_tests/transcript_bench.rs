@@ -198,8 +198,7 @@ fn transcript_perf_metric(label: &str) -> bool {
         .any(|prefix| label.starts_with(prefix))
 }
 
-fn search_perf_snapshot(label: &str) {
-    let snapshot = smelt_perf::perf::snapshot();
+fn search_perf_snapshot(label: &str, snapshot: &smelt_perf::perf::Snapshot) {
     for row in snapshot
         .durations
         .iter()
@@ -218,6 +217,67 @@ fn search_perf_snapshot(label: &str) {
         eprintln!(
             "TRANSCRIPT_SEARCH_PERF_VALUE label={} metric={} count={} last={} total={} p95={} max={}",
             label, row.label, row.count, row.last, row.total, row.p95, row.max
+        );
+    }
+}
+
+fn perf_value_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
+    snapshot
+        .values
+        .iter()
+        .find(|row| row.label == label)
+        .map(|row| row.max)
+        .unwrap_or(0)
+}
+
+fn perf_value_total(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
+    snapshot
+        .values
+        .iter()
+        .find(|row| row.label == label)
+        .map(|row| row.total)
+        .unwrap_or(0)
+}
+
+fn assert_no_full_search_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
+    for metric in [
+        "store:history:read_all",
+        "store:history:read_all_rows",
+        "store:session:load_full_snapshot",
+        "store:session:full_snapshot_rows_read",
+        "store:transcript:read_descriptors_full",
+        "store:transcript:descriptors_full_loaded",
+        "transcript:build_from_session:history_items",
+    ] {
+        let value = perf_value_max(snapshot, metric);
+        assert_eq!(
+            value, 0,
+            "{label} recorded {metric}={value}, expected no full-session search work"
+        );
+    }
+}
+
+fn assert_search_refinement_gates(
+    snapshot: &smelt_perf::perf::Snapshot,
+    label: &str,
+    max_rows_per_refinement: u64,
+    max_total_rows: u64,
+) {
+    assert_no_full_search_hot_path_reads(snapshot, label);
+    for metric in [
+        "search:transcript:scanned_rows",
+        "transcript:display_rows_for_range:rows",
+        "transcript:exactified_rows",
+    ] {
+        let max = perf_value_max(snapshot, metric);
+        let total = perf_value_total(snapshot, metric);
+        assert!(
+            max <= max_rows_per_refinement,
+            "{label} recorded {metric} max {max}, expected <= {max_rows_per_refinement}"
+        );
+        assert!(
+            total <= max_total_rows,
+            "{label} recorded {metric} total {total}, expected <= {max_total_rows}"
         );
     }
 }
@@ -255,8 +315,10 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     app.render_silent();
     let rare_ms = elapsed_ms(rare_start.elapsed());
     assert!(transcript_row_cursor_row(&app) > rows / 2);
+    let rare_snapshot = smelt_perf::perf::snapshot();
+    assert_search_refinement_gates(&rare_snapshot, "rare_cold", 80, 160);
     if report_perf {
-        search_perf_snapshot("rare_cold");
+        search_perf_snapshot("rare_cold", &rare_snapshot);
     }
 
     smelt_perf::perf::clear();
@@ -275,8 +337,10 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         app.render_silent();
     }
     let next100_ms = elapsed_ms(next_start.elapsed());
+    let common_snapshot = smelt_perf::perf::snapshot();
+    assert_search_refinement_gates(&common_snapshot, "common_hot_next100", 512, 32_000);
     if report_perf {
-        search_perf_snapshot("common_hot_next100");
+        search_perf_snapshot("common_hot_next100", &common_snapshot);
     }
 
     smelt_perf::perf::clear();
@@ -292,8 +356,10 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     );
     app.render_silent();
     let after_append_ms = elapsed_ms(after_append_start.elapsed());
+    let after_append_snapshot = smelt_perf::perf::snapshot();
+    assert_search_refinement_gates(&after_append_snapshot, "after_append", 80, 160);
     if report_perf {
-        search_perf_snapshot("after_append");
+        search_perf_snapshot("after_append", &after_append_snapshot);
     }
     smelt_perf::perf::set_enabled(false);
 
