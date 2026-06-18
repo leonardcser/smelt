@@ -18,17 +18,43 @@ local function trim_trailing(s)
   return (s:gsub("[%s\n]+$", ""))
 end
 
+local function xml_escape_attr(s)
+  return tostring(s or "")
+      :gsub("&", "&amp;")
+      :gsub('"', "&quot;")
+      :gsub("<", "&lt;")
+      :gsub(">", "&gt;")
+end
+
+local function render_cmd_output(script, result)
+  local out = ""
+  if result then
+    out = result.stdout or ""
+    if result.stderr and result.stderr ~= "" then
+      if out ~= "" then out = out .. "\n" end
+      out = out .. result.stderr
+    end
+  end
+  out = trim_trailing(out)
+
+  local attrs = {
+    'command="' .. xml_escape_attr(script) .. '"',
+    'cwd="' .. xml_escape_attr(smelt.os.cwd() or "") .. '"',
+    'executed_by="smelt"',
+    'source="custom_command"',
+  }
+  if result and result.exit_code ~= nil then
+    attrs[#attrs + 1] = 'exit_code="' .. xml_escape_attr(result.exit_code) .. '"'
+  end
+  if result and result.timed_out then
+    attrs[#attrs + 1] = 'timed_out="true"'
+  end
+  return "<command_output " .. table.concat(attrs, " ") .. ">\n" .. out .. "\n</command_output>"
+end
+
 local function exec_cmd(script)
   local r = smelt.process.run("sh", { "-c", script }, {})
-  if not r then
-    return ""
-  end
-  local out = r.stdout or ""
-  if r.stderr and r.stderr ~= "" then
-    if out ~= "" then out = out .. "\n" end
-    out = out .. r.stderr
-  end
-  return trim_trailing(out)
+  return render_cmd_output(script, r)
 end
 
 -- Leading whitespace is allowed; `!` must immediately follow the three backticks.
@@ -92,7 +118,7 @@ local function evaluate(body)
         script_lines[#script_lines + 1] = inner
         i = i + 1
       end
-      out[#out + 1] = "```\n" .. exec_cmd(table.concat(script_lines, "\n")) .. "\n```"
+      out[#out + 1] = exec_cmd(table.concat(script_lines, "\n"))
       i = i + 1
     else
       out[#out + 1] = eval_inline_exec(line)

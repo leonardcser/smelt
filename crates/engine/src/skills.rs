@@ -256,6 +256,13 @@ fn scan_command_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
     }
 }
 
+fn xml_escape_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 fn parse_command_skill(path: &Path) -> Option<SkillEntry> {
     let text = std::fs::read_to_string(path).ok()?;
     let (fm, body) = split_frontmatter(&text)?;
@@ -271,8 +278,9 @@ fn parse_command_skill(path: &Path) -> Option<SkillEntry> {
         .unwrap_or_default();
     let location = path.display().to_string();
     let body = body.trim_start();
+    let name_attr = xml_escape_attr(&name);
     let formatted = format!(
-        "<skill name=\"{name}\">\n{body}\n\n## Slash command\n\nThis skill is also available to users as `/{name}`. When loaded as a skill, it is static, receives no slash-command arguments, and does not evaluate shell output markers.\n</skill>"
+        "<skill name=\"{name_attr}\" included_by=\"smelt\" source=\"custom_command\">\n{body}\n\n## Slash command\n\nThis skill is also available to users as `/{name}`. When loaded as a skill, it is static, receives no slash-command arguments, and does not evaluate shell output markers.\n</skill>"
     );
     Some(SkillEntry {
         name,
@@ -302,7 +310,11 @@ fn parse_skill_text(
     let (fm, body) = split_frontmatter(text)?;
     let meta = parse_frontmatter(fm)?;
 
-    let mut formatted = format!("<skill name=\"{}\">\n{}", meta.name, body);
+    let name_attr = xml_escape_attr(&meta.name);
+    let source_attr = source.as_str();
+    let mut formatted = format!(
+        "<skill name=\"{name_attr}\" included_by=\"smelt\" source=\"{source_attr}\">\n{body}"
+    );
 
     if let Some(dir) = dir {
         let files = list_bundled_files(dir);
@@ -673,6 +685,9 @@ mod tests {
         scan_command_dir(dir.path(), &mut map);
         let entry = map.get("review").unwrap();
         assert_eq!(entry.description, "Review the current diff");
+        assert!(entry
+            .formatted
+            .contains("<skill name=\"review\" included_by=\"smelt\" source=\"custom_command\">"));
         assert!(entry.formatted.contains("Review changed files."));
         assert!(entry
             .formatted
@@ -723,7 +738,9 @@ mod tests {
             entry.location,
             skill_dir.join("SKILL.md").display().to_string()
         );
-        assert!(entry.formatted.contains("<skill name=\"my\">"));
+        assert!(entry
+            .formatted
+            .contains("<skill name=\"my\" included_by=\"smelt\" source=\"skill\">"));
         assert!(entry.formatted.contains("use me wisely"));
         assert!(entry.formatted.ends_with("</skill>"));
     }

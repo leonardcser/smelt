@@ -354,6 +354,9 @@ mod tests {
 
         assert!(with_tools.contains("# Tools"));
         assert!(with_tools.contains("read_file"));
+        assert!(with_tools.contains("<attached_file ... tool=\"read_file\" already_read=\"true\">"));
+        assert!(with_tools.contains("<command_output ... executed_by=\"smelt\">"));
+        assert!(with_tools.contains("<skill ... included_by=\"smelt\">"));
         assert!(!without_tools.contains("# Tools"));
         assert!(!without_tools.contains("read_file"));
         assert!(without_tools.contains("# Code"));

@@ -125,18 +125,27 @@ pub fn expand_at_file_refs(text: &str, cwd: &str, files: &FileStateCache) -> Str
 fn render_attached_file(path: &Path, raw: &str) -> Result<String, String> {
     let display = path.display().to_string();
     let path_attr = xml_escape(&display);
+    let call = render_synthetic_read_call(&display);
     if crate::notebook::is_notebook_path(&display) {
         let body = crate::notebook::render_notebook_text_from_raw(raw, 1, usize::MAX)?;
         Ok(format!(
-            "\n\n<attached_file path=\"{path_attr}\">\n{body}\n</attached_file>"
+            "\n\n{call}\n\n<attached_file path=\"{path_attr}\" tool=\"read_file\" already_read=\"true\" source=\"user_attachment\">\n{body}\n</attached_file>"
         ))
     } else {
         let body = crate::fs::render_text_window(raw, 1, usize::MAX)
             .unwrap_or_else(|| "offset beyond end of file".into());
         Ok(format!(
-            "\n\n<attached_file path=\"{path_attr}\">\n{body}\n</attached_file>"
+            "\n\n{call}\n\n<attached_file path=\"{path_attr}\" tool=\"read_file\" already_read=\"true\" source=\"user_attachment\">\n{body}\n</attached_file>"
         ))
     }
+}
+
+fn render_synthetic_read_call(path: &str) -> String {
+    let args = serde_json::json!({
+        "file_path": path,
+        "offset": 1,
+    });
+    format!("Called the read_file tool with the following input: {args}")
 }
 
 fn render_attached_file_error(path: &str, err: &str) -> String {
@@ -182,5 +191,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["資料/メモ.txt"]
         );
+    }
+
+    #[test]
+    fn expansion_marks_attachment_as_read_file_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("note.txt");
+        std::fs::write(&file, "hello\nworld").unwrap();
+        let cache = FileStateCache::new();
+
+        let expanded =
+            expand_at_file_refs("summarize @note.txt", &tmp.path().to_string_lossy(), &cache);
+        let path = file.to_string_lossy();
+
+        assert!(expanded.contains("Called the read_file tool with the following input:"));
+        assert!(expanded.contains(&format!(r#""file_path":"{path}""#)));
+        assert!(expanded.contains(&format!(
+            "<attached_file path=\"{path}\" tool=\"read_file\" already_read=\"true\" source=\"user_attachment\">"
+        )));
+        assert!(expanded.contains("   1\thello"));
+        assert!(cache.has(&path));
+    }
+
+    #[test]
+    fn expanded_attachment_satisfies_edit_staleness_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("note.txt");
+        std::fs::write(&file, "hello\nworld").unwrap();
+        let cache = FileStateCache::new();
+
+        let _ = expand_at_file_refs("edit @note.txt", &tmp.path().to_string_lossy(), &cache);
+        let path = file.to_string_lossy();
+
+        crate::fs::checked_edit_file(&path, "hello", "hi", false, &cache).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hi\nworld");
     }
 }

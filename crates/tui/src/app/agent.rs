@@ -1137,7 +1137,10 @@ mod tests {
         let expanded = app.app.expand_at_file_refs_in_text("summarize @note.txt");
 
         let path = file.to_string_lossy();
-        assert!(expanded.contains(&format!("<attached_file path=\"{path}\">")));
+        assert!(expanded.contains(&format!(
+            "<attached_file path=\"{path}\" tool=\"read_file\" already_read=\"true\" source=\"user_attachment\">"
+        )));
+        assert!(expanded.contains("Called the read_file tool with the following input:"));
         assert!(expanded.contains("   1\thello"));
         assert!(app.app.core.files.has(&path));
     }
@@ -1157,7 +1160,10 @@ mod tests {
         let expanded = app.app.expand_at_file_refs_in_text("summarize @nb.ipynb");
 
         let path = file.to_string_lossy();
-        assert!(expanded.contains(&format!("<attached_file path=\"{path}\">")));
+        assert!(expanded.contains(&format!(
+            "<attached_file path=\"{path}\" tool=\"read_file\" already_read=\"true\" source=\"user_attachment\">"
+        )));
+        assert!(expanded.contains("Called the read_file tool with the following input:"));
         assert!(expanded.contains("--- Cell 0 [markdown] id=intro ---"));
         assert!(app.app.core.files.has(&path));
     }

@@ -70,7 +70,59 @@ fn skill_backed_commands_submit_skill_body_and_focus() {
     let text = content.text_content();
     assert!(text.contains("# Reflect"));
     assert!(text.contains("## Additional Focus\n\nfocus area"));
-    assert!(!text.contains("<skill name="));
+    assert!(text.contains("<skill name=\"reflect\" included_by=\"smelt\""));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn custom_command_shell_output_is_marked_as_smelt_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let command_path = dir.path().join("probe.md");
+    std::fs::write(
+        &command_path,
+        "---\ndescription: probe\n---\n\nBefore\n\n```!\nprintf smelt-provenance\n```\n\nAfter",
+    )
+    .unwrap();
+
+    let mut app = TestApp::builder().with_vim(false).build();
+    let dir_lua = format!("{:?}", dir.path().display().to_string());
+    assert!(app.run_lua(
+        "smelt.process.run = function() return { stdout = 'smelt-provenance', stderr = '', exit_code = 0 } end"
+    ));
+    assert!(app.run_lua(&format!(
+        "require('smelt.commands.custom_commands').register_dir({dir_lua})"
+    )));
+    app.type_text("/probe");
+    app.press(KeyCode::Enter);
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+        app.feed_one(SourceEvent::LuaWakeup);
+        if app
+            .actions()
+            .iter()
+            .any(|action| matches!(action, Action::EngineSend(cmd) if matches!(cmd.as_ref(), protocol::UiCommand::StartTurn(_))))
+        {
+            break;
+        }
+    }
+
+    let payload = app
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::EngineSend(cmd) => match cmd.as_ref() {
+                protocol::UiCommand::StartTurn(payload) => Some((**payload).clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("/probe should start a turn");
+    let content = payload.input.provider_content();
+    let text = content.text_content();
+    assert!(text.contains("<command_output "));
+    assert!(text.contains("executed_by=\"smelt\""));
+    assert!(text.contains("source=\"custom_command\""));
+    assert!(text.contains("command=\"printf smelt-provenance\""));
+    assert!(text.contains("smelt-provenance\n</command_output>"));
 }
 
 #[test]
