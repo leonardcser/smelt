@@ -124,6 +124,8 @@ pub enum HistoryNote {
     ModeChange {
         #[serde(skip_serializing_if = "Option::is_none", default)]
         mode: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        base_mode: Option<String>,
         text: String,
     },
     Context {
@@ -207,6 +209,7 @@ impl HistoryNote {
     pub fn mode_change(text: impl Into<String>) -> Self {
         Self::ModeChange {
             mode: None,
+            base_mode: None,
             text: text.into(),
         }
     }
@@ -214,6 +217,19 @@ impl HistoryNote {
     pub fn mode_change_for_mode(mode: impl Into<String>, text: impl Into<String>) -> Self {
         Self::ModeChange {
             mode: Some(mode.into()),
+            base_mode: None,
+            text: text.into(),
+        }
+    }
+
+    pub fn mode_change_for_transition(
+        base_mode: impl Into<String>,
+        mode: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self::ModeChange {
+            mode: Some(mode.into()),
+            base_mode: Some(base_mode.into()),
             text: text.into(),
         }
     }
@@ -262,6 +278,13 @@ impl HistoryNote {
     pub fn mode(&self) -> Option<&str> {
         match self {
             HistoryNote::ModeChange { mode, .. } => mode.as_deref(),
+            HistoryNote::Context { .. } | HistoryNote::ProcessStatus { .. } => None,
+        }
+    }
+
+    pub fn base_mode(&self) -> Option<&str> {
+        match self {
+            HistoryNote::ModeChange { base_mode, .. } => base_mode.as_deref(),
             HistoryNote::Context { .. } | HistoryNote::ProcessStatus { .. } => None,
         }
     }
@@ -493,7 +516,10 @@ fn append_mode_change(
         return HistoryAppendResult::Pushed;
     };
 
-    let fallback = mode_base.as_str();
+    let fallback = item
+        .as_note()
+        .and_then(HistoryNote::base_mode)
+        .unwrap_or(mode_base.as_str());
     let last_mode = items
         .last()
         .is_some_and(|last| last.note_kind() == Some(HistoryNoteKind::ModeChange));
@@ -504,7 +530,7 @@ fn append_mode_change(
             .and_then(HistoryItem::as_note)
             .and_then(HistoryNote::mode)
             .is_some();
-        if last_has_mode && new_mode == effective_mode_before(items, items.len() - 1, fallback) {
+        if last_has_mode && new_mode == effective_mode_at(items, items.len() - 1, fallback) {
             items.pop();
             return HistoryAppendResult::RemovedLast;
         }
@@ -512,7 +538,7 @@ fn append_mode_change(
         return HistoryAppendResult::ReplacedLast;
     }
 
-    if new_mode == effective_mode_before(items, items.len(), fallback) {
+    if new_mode == effective_mode_at(items, items.len(), fallback) {
         return HistoryAppendResult::Unchanged;
     }
 
@@ -520,12 +546,23 @@ fn append_mode_change(
     HistoryAppendResult::Pushed
 }
 
-fn effective_mode_before<'a>(items: &'a [HistoryItem], end: usize, fallback: &'a str) -> &'a str {
+pub fn effective_mode_at<'a>(
+    items: &'a [HistoryItem],
+    hist_idx: usize,
+    fallback: &'a str,
+) -> &'a str {
+    let end = hist_idx.min(items.len());
     items[..end]
         .iter()
         .rev()
         .filter_map(HistoryItem::as_note)
         .find_map(HistoryNote::mode)
+        .or_else(|| {
+            items[end..]
+                .iter()
+                .filter_map(HistoryItem::as_note)
+                .find_map(HistoryNote::base_mode)
+        })
         .unwrap_or(fallback)
 }
 
@@ -789,6 +826,26 @@ mod tests {
             mode,
             format!("now in {mode} mode"),
         ))
+    }
+
+    fn transition_item(base: &str, mode: &str) -> HistoryItem {
+        HistoryItem::note(HistoryNote::mode_change_for_transition(
+            base,
+            mode,
+            format!("now in {mode} mode"),
+        ))
+    }
+
+    #[test]
+    fn effective_mode_at_uses_transition_base_after_rewind_boundary() {
+        let history = vec![
+            HistoryItem::user(Content::text("before")),
+            transition_item("normal", "apply"),
+            HistoryItem::user(Content::text("after")),
+        ];
+
+        assert_eq!(effective_mode_at(&history, 1, "apply"), "normal");
+        assert_eq!(effective_mode_at(&history, 2, "normal"), "apply");
     }
 
     #[test]

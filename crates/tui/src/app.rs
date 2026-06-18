@@ -501,6 +501,12 @@ pub(crate) struct PendingHistoryAppend {
     replace_note_kind: Option<protocol::HistoryNoteKind>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingHistoryLifecycle {
+    TurnScoped,
+    SessionScoped,
+}
+
 impl PendingHistoryAppend {
     pub(crate) fn mode_change(mode: String, text: String) -> Self {
         Self {
@@ -547,15 +553,35 @@ impl PendingHistoryAppend {
         self.item.as_note().and_then(protocol::HistoryNote::mode)
     }
 
+    pub(crate) fn lifecycle(&self) -> PendingHistoryLifecycle {
+        if self.replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
+            PendingHistoryLifecycle::SessionScoped
+        } else {
+            PendingHistoryLifecycle::TurnScoped
+        }
+    }
+
     pub(crate) fn history_append(
         &self,
         mode_base: Option<protocol::AgentMode>,
     ) -> protocol::HistoryAppend {
         match self.replace_note_kind {
-            Some(protocol::HistoryNoteKind::ModeChange) => protocol::HistoryAppend::mode_change(
-                self.item.clone(),
-                mode_base.expect("mode history appends require a base mode"),
-            ),
+            Some(protocol::HistoryNoteKind::ModeChange) => {
+                let note = self.item.as_note().expect("mode history appends are notes");
+                let mode = note.mode().expect("mode history appends require a mode");
+                let base = note
+                    .base_mode()
+                    .and_then(protocol::AgentMode::parse)
+                    .or(mode_base)
+                    .expect("mode history appends require a base mode");
+                let item =
+                    protocol::HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
+                        base.as_str(),
+                        mode,
+                        note.text(),
+                    ));
+                protocol::HistoryAppend::mode_change(item, base)
+            }
             Some(kind) => protocol::HistoryAppend::replace_note_kind(self.item.clone(), kind),
             None => protocol::HistoryAppend::append(self.item.clone()),
         }
@@ -707,7 +733,6 @@ impl TuiApp {
     }
 
     pub(crate) fn mode_history_base(&self) -> protocol::AgentMode {
-        let fallback = self.core.session.mode.as_deref().unwrap_or("normal");
         let history = &self.core.session.history;
         let end = if history.last().is_some_and(|item| {
             item.note_kind() == Some(protocol::HistoryNoteKind::ModeChange)
@@ -720,12 +745,20 @@ impl TuiApp {
         } else {
             history.len()
         };
-        let mode = history[..end]
-            .iter()
-            .rev()
-            .filter_map(protocol::HistoryItem::as_note)
-            .find_map(protocol::HistoryNote::mode)
-            .unwrap_or(fallback);
+        let mode = protocol::effective_mode_at(
+            history,
+            end,
+            self.core.session.mode.as_deref().unwrap_or("normal"),
+        );
+        protocol::AgentMode::parse(mode).unwrap_or_else(protocol::AgentMode::normal)
+    }
+
+    pub(crate) fn mode_at_history_boundary(&self, hist_idx: usize) -> protocol::AgentMode {
+        let mode = protocol::effective_mode_at(
+            &self.core.session.history,
+            hist_idx,
+            self.core.session.mode.as_deref().unwrap_or("normal"),
+        );
         protocol::AgentMode::parse(mode).unwrap_or_else(protocol::AgentMode::normal)
     }
 
@@ -859,8 +892,17 @@ impl TuiApp {
         let replace_note_kind = history_append.replacement_note_kind();
 
         if self.agent_is_running() {
+            let pending_append = if replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange)
+            {
+                PendingHistoryAppend {
+                    item: history_append.item.clone(),
+                    replace_note_kind: append.replace_note_kind,
+                }
+            } else {
+                append.clone()
+            };
             self.queue_pending_history_append(
-                append.clone(),
+                pending_append,
                 match &history_append.policy {
                     protocol::HistoryAppendPolicy::ModeChange { base } => Some(base),
                     _ => None,

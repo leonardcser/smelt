@@ -172,6 +172,11 @@ enum CloseTarget {
     Overlay(crate::smelt_edit::OverlayId),
 }
 
+enum ModeNotePolicy {
+    Append,
+    Suppress,
+}
+
 impl TuiApp {
     fn focused_close_target(&self) -> Option<CloseTarget> {
         if self.cmdline_is_focused() {
@@ -546,6 +551,14 @@ impl TuiApp {
     /// `record=false` skips the `recent.json` write so session
     /// resume doesn't overwrite the user's last explicit pick.
     pub(crate) fn set_mode(&mut self, mode: AgentMode, record: bool) {
+        self.apply_mode(mode, record, ModeNotePolicy::Append);
+    }
+
+    pub(crate) fn restore_mode_after_rewind(&mut self, mode: AgentMode) {
+        self.apply_mode(mode, false, ModeNotePolicy::Suppress);
+    }
+
+    fn apply_mode(&mut self, mode: AgentMode, record: bool, note_policy: ModeNotePolicy) {
         let old = self.core.config.mode.clone();
         self.core.config.mode = mode.clone();
         if record && self.core.config.remember.mode {
@@ -561,16 +574,18 @@ impl TuiApp {
             self.core
                 .engine
                 .send(UiCommand::SetMode { mode: mode.clone() });
-            // Queue an internal mode-change note so the next LLM request learns about
-            // the new mode without regenerating the cached prompt prefix. If a
-            // turn is active, the engine applies the same note when it reaches
-            // its next request boundary; otherwise we apply it locally before
-            // the next turn starts.
-            let note_text = self.lua.mode_note(self.core.config.mode.as_str());
-            self.queue_history_append(crate::app::PendingHistoryAppend::mode_change(
-                self.core.config.mode.as_str().to_string(),
-                note_text,
-            ));
+            if matches!(note_policy, ModeNotePolicy::Append) {
+                // Queue an internal mode-change note so the next LLM request learns about
+                // the new mode without regenerating the cached prompt prefix. If a
+                // turn is active, the engine applies the same note when it reaches
+                // its next request boundary; otherwise we apply it locally before
+                // the next turn starts.
+                let note_text = self.lua.mode_note(self.core.config.mode.as_str());
+                self.queue_history_append(crate::app::PendingHistoryAppend::mode_change(
+                    self.core.config.mode.as_str().to_string(),
+                    note_text,
+                ));
+            }
         }
     }
 
@@ -624,6 +639,33 @@ mod tests {
             .collect()
     }
 
+    fn normal_app() -> crate::app::test_harness::TestApp {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.config.mode = AgentMode::parse("normal").unwrap();
+        app.app.core.session.mode = Some("normal".into());
+        app
+    }
+
+    fn user(text: &str) -> protocol::HistoryItem {
+        protocol::HistoryItem::user(Content::text(text))
+    }
+
+    fn assistant(text: &str) -> protocol::HistoryItem {
+        protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+            Some(Content::text(text)),
+            None,
+            Vec::new(),
+        ))
+    }
+
+    fn set_history(
+        app: &mut crate::app::test_harness::TestApp,
+        history: Vec<protocol::HistoryItem>,
+    ) {
+        app.app.core.session.history = history;
+        app.app.restore_screen();
+    }
+
     #[test]
     fn mode_change_during_turn_commits_when_history_reaches_next_request() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
@@ -668,9 +710,8 @@ mod tests {
 
     #[test]
     fn returning_to_history_mode_removes_mode_change_note() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.session.mode = Some("normal".into());
-        app.app.core.session.history = vec![protocol::HistoryItem::user(Content::text("hello"))];
+        let mut app = normal_app();
+        app.app.core.session.history = vec![user("hello")];
 
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
         assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
@@ -689,9 +730,8 @@ mod tests {
 
     #[test]
     fn returning_to_history_mode_clears_pending_mode_change_during_turn() {
-        let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.session.mode = Some("normal".into());
-        app.app.core.session.history = vec![protocol::HistoryItem::user(Content::text("hello"))];
+        let mut app = normal_app();
+        app.app.core.session.history = vec![user("hello")];
         app.start_turn(1);
 
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
@@ -715,6 +755,45 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_turn_preserves_deferred_mode_change_for_replacement_turn() {
+        let mut app = normal_app();
+        set_history(&mut app, vec![user("hello")]);
+        app.start_turn(1);
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        assert_eq!(app.app.pending_history_appends.len(), 1);
+
+        app.app.discard_turn(crate::app::TurnEnd::Cancelled);
+        assert_eq!(app.app.pending_history_appends.len(), 1);
+        assert_eq!(app.app.pending_history_appends[0].mode(), Some("apply"));
+
+        app.app.apply_pending_history_appends_for_request();
+        assert_eq!(
+            app.app
+                .core
+                .session
+                .history
+                .last()
+                .and_then(protocol::HistoryItem::as_note)
+                .and_then(protocol::HistoryNote::mode),
+            Some("apply")
+        );
+        app.app.restore_screen();
+
+        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+        assert_eq!(
+            app.app
+                .core
+                .session
+                .history
+                .last()
+                .and_then(protocol::HistoryItem::as_note)
+                .and_then(protocol::HistoryNote::mode),
+            Some("apply")
+        );
+    }
+
+    #[test]
     fn mode_change_before_first_user_message_does_not_push_mode_block() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
 
@@ -727,18 +806,16 @@ mod tests {
     #[test]
     fn mode_change_after_rewinding_to_first_turn_does_not_push_mode_block() {
         let mut app = crate::app::test_harness::TestApp::builder().build();
-        app.app.core.session.history = vec![
-            protocol::HistoryItem::note(protocol::HistoryNote::context(
-                "Current working directory: /tmp.",
-            )),
-            protocol::HistoryItem::user(Content::text("first")),
-            protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
-                Some(Content::text("reply")),
-                None,
-                Vec::new(),
-            )),
-        ];
-        app.app.restore_screen();
+        set_history(
+            &mut app,
+            vec![
+                protocol::HistoryItem::note(protocol::HistoryNote::context(
+                    "Current working directory: /tmp.",
+                )),
+                user("first"),
+                assistant("reply"),
+            ],
+        );
         let first_turn_block = app.app.user_turns()[0].0;
 
         app.app.rewind_to(first_turn_block);
@@ -751,6 +828,59 @@ mod tests {
                 "Current working directory: /tmp.",
             ))]
         );
+    }
+
+    #[test]
+    fn rewind_to_message_before_mode_change_restores_boundary_mode() {
+        let mut app = normal_app();
+        set_history(
+            &mut app,
+            vec![
+                user("first"),
+                assistant("first reply"),
+                user("second"),
+                assistant("second reply"),
+            ],
+        );
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.app.core.session.history.push(user("third"));
+        app.app.core.session.history.push(assistant("third reply"));
+        app.app.sync_session_snapshot();
+        app.app.restore_screen();
+        let second_turn_block = app.app.user_turns()[1].0;
+
+        let restored = app.app.rewind_to(second_turn_block).expect("second turn");
+
+        assert_eq!(restored.0, "second");
+        assert_eq!(app.app.core.config.mode.as_str(), "normal");
+
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+
+        assert_eq!(mode_blocks(&app.app), vec!["now in apply mode"]);
+    }
+
+    #[test]
+    fn returning_to_mode_note_base_after_rewind_removes_mode_block() {
+        let mut app = normal_app();
+        set_history(&mut app, vec![user("first"), assistant("first reply")]);
+        app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        app.app.core.session.history.push(user("second"));
+        app.app.core.session.history.push(assistant("second reply"));
+        app.app.sync_session_snapshot();
+        app.app.restore_screen();
+        let second_turn_block = app.app.user_turns()[1].0;
+
+        app.app.rewind_to(second_turn_block);
+        app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
+
+        assert!(mode_blocks(&app.app).is_empty());
+        assert!(app
+            .app
+            .core
+            .session
+            .history
+            .iter()
+            .all(|item| item.note_kind() != Some(protocol::HistoryNoteKind::ModeChange)));
     }
 
     #[tokio::test]

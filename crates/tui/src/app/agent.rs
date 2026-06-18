@@ -1,5 +1,6 @@
 use crate::app::{
-    DeferredDialog, PendingTool, SessionControl, TuiApp, TurnState, CONFIRM_DEFER_MS,
+    DeferredDialog, PendingHistoryLifecycle, PendingTool, SessionControl, TuiApp, TurnState,
+    CONFIRM_DEFER_MS,
 };
 use protocol::{Content, ContentPart, Decision, HistoryItem, UiCommand};
 use smelt_core::working::{TurnOutcome, TurnPhase};
@@ -497,14 +498,18 @@ impl TuiApp {
                 (meta, start_queued)
             }
             TurnEnd::Cancelled => {
-                self.pending_history_appends.clear();
+                self.pending_history_appends.retain(|pending| {
+                    pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
+                });
                 let meta = self.working.finish(TurnOutcome::Interrupted);
                 self.drain_queued_inputs_into_prompt();
                 self.restore_session_metadata_after_rewind(self.core.session.history.len());
                 (meta, false)
             }
             TurnEnd::Errored => {
-                self.pending_history_appends.clear();
+                self.pending_history_appends.retain(|pending| {
+                    pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
+                });
                 let meta = self.working.finish(TurnOutcome::Interrupted);
                 // On error the queue is preserved so the user can resubmit.
                 (meta, false)

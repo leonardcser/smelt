@@ -1059,6 +1059,11 @@ impl TuiApp {
             _ => Vec::new(),
         };
 
+        let mode_after_rewind = self.core.session.history[..hist_idx]
+            .iter()
+            .any(HistoryItem::is_transcript_visible)
+            .then(|| self.mode_at_history_boundary(hist_idx));
+
         self.core.session.history.truncate(hist_idx);
         self.mark_history_dirty_from(hist_idx);
         let keep_checkpoint_at_boundary = turn_text.is_some()
@@ -1070,6 +1075,9 @@ impl TuiApp {
                 .is_some_and(|cp| cp.first_live_index == hist_idx);
         self.restore_rewindable_session_state_after_rewind(hist_idx, keep_checkpoint_at_boundary);
         self.truncate_to(block_idx);
+        if let Some(mode) = mode_after_rewind {
+            self.restore_mode_after_rewind(mode);
+        }
         self.reset_session_permissions();
         self.sync_session_snapshot();
         self.publish_history_delta("rewound");
