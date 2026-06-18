@@ -5,8 +5,8 @@ use crate::app::transcript::{TranscriptDisplayDocument, TranscriptRenderContext}
 use crate::app::TuiApp;
 use crate::smelt_edit::{
     BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DisplaySnapshot, DocPosition,
-    DocRange, DocumentCommand, DocumentHandle, DocumentViewExecutor, RowIndex, SpanAction,
-    TextRange, WinId,
+    DocRange, DocumentCommand, DocumentHandle, DocumentViewExecutor, MaterializedRows, RowIndex,
+    SpanAction, TextRange, WinId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,13 +246,16 @@ impl TuiApp {
             mut scroll_left,
             following_tail,
             viewport_cols,
+            cursor,
         ) = {
             let win = self.ui.win(win)?;
-            if !win.has_materialized_rows() {
-                return None;
-            }
+            let buf = win.buf;
+            let cursor = self
+                .ui
+                .buf(buf)
+                .and_then(|buf| win.viewer_doc_cursor(buf))?;
             (
-                win.buf,
+                buf,
                 win.document_view_state(),
                 win.vim_mode(),
                 win.scroll_top(),
@@ -261,9 +264,24 @@ impl TuiApp {
                 win.viewport
                     .map(|viewport| viewport.content_width)
                     .unwrap_or(0),
+                cursor,
             )
         };
         let copy = self.with_display_document_for_win(win, |document| {
+            let total_rows = document.snapshot().total_rows;
+            if !state.active {
+                state.active = true;
+                state.materialized = MaterializedRows {
+                    clamped_scroll: scroll_top,
+                    row_base: 0,
+                    total_rows,
+                    materialized_rows: total_rows,
+                };
+                state.cursor = crate::smelt_edit::DocPosition {
+                    row: cursor.row.min(total_rows.saturating_sub(1)),
+                    byte_col: cursor.byte_col,
+                };
+            }
             DocumentViewExecutor::execute(
                 &mut state,
                 document,
@@ -298,6 +316,7 @@ impl TuiApp {
                 win_ref.pin_current_scroll();
             }
         }
+        win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
         copy
     }
 }

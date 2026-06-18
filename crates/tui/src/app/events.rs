@@ -1413,11 +1413,11 @@ impl TuiApp {
         }
 
         let now = self.core.clock.instant_now();
-        let copied = if self
+        let use_document_view = self
             .ui
             .win(win_id)
-            .is_some_and(|win| win.has_materialized_rows())
-        {
+            .is_some_and(|win| win.surface().is_readonly_text() || win.has_materialized_rows());
+        let copied = if use_document_view {
             self.execute_document_view_command_for_win(win_id, command, viewport_rows, now)
                 .map(crate::smelt_edit::DocumentCopy::Rows)
         } else {
@@ -1519,12 +1519,13 @@ impl TuiApp {
         use crate::keymap::{lookup, KeyAction, KeyContext};
         use crate::smelt_edit::{Status, VimMode};
 
-        let (vim_enabled, vim_mode, readonly, buf_empty) =
+        let (vim_enabled, vim_mode, readonly, readonly_text, buf_empty) =
             match (self.ui.win(win_id), self.ui.buf(buf_id)) {
                 (Some(w), Some(b)) => (
                     w.vim_enabled(),
                     w.vim_mode(),
                     b.readonly,
+                    w.surface().is_readonly_text(),
                     b.text().is_empty(),
                 ),
                 _ => return Status::Ignored,
@@ -1543,10 +1544,11 @@ impl TuiApp {
             return Status::Ignored;
         };
 
-        if self
-            .ui
-            .win(win_id)
-            .is_some_and(|win| win.has_materialized_rows())
+        if readonly_text
+            || self
+                .ui
+                .win(win_id)
+                .is_some_and(|win| win.has_materialized_rows())
         {
             let extending = matches!(
                 action,
