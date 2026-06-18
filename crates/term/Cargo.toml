@@ -1,6 +1,6 @@
 [package]
 name = "smelt-term"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Terminal rendering library: Grid, Compositor, LayoutTree, diff-flush renderer."
 license = "MIT"
