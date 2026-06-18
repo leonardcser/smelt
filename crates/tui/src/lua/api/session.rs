@@ -229,7 +229,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     "smelt.session.context_note: name must be non-empty".into(),
                 ));
             }
-            crate::lua::with_app(|app| app.set_context_note(name, text));
+            crate::lua::try_with_app(|app| app.set_context_note(name, text));
             Ok(())
         },
     )?;

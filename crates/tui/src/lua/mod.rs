@@ -1270,6 +1270,18 @@ mod tests {
     }
 
     #[test]
+    fn session_context_note_noops_before_app_ptr() {
+        let mut rt = LuaRuntime::new();
+        rt.load_autoload();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+
+        rt.lua
+            .load("smelt.session.context_note('goal', 'hello')")
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
     fn autoload_registers_process_detach_keymap() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
