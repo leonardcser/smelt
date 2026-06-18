@@ -110,6 +110,21 @@ impl SessionDb {
         &self.conn
     }
 
+    fn immediate_transaction<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = f(&self.conn);
+        match result {
+            Ok(value) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
     pub fn user_version(&self) -> Result<i32> {
         schema::user_version(&self.conn)
     }
@@ -299,33 +314,22 @@ impl SessionDb {
             .session_state()?
             .as_ref()
             .map_or(0, |state| state.revision);
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let result = (|| {
+        self.immediate_transaction(|conn| {
             let report = session_snapshot::save_session_snapshot_in_transaction(
-                &self.conn,
+                conn,
                 snapshot,
                 Some(expected_revision),
                 Some(&lease),
                 self.object_compression,
             )?;
             history::replace_transcript_descriptor_suffix_in_transaction(
-                &self.conn,
+                conn,
                 start_descriptor_idx,
                 records,
                 self.object_compression,
             )?;
             Ok(report)
-        })();
-        match result {
-            Ok(report) => {
-                self.conn.execute_batch("COMMIT")?;
-                Ok(report)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK");
-                Err(err)
-            }
-        }
+        })
     }
 
     pub fn load_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {

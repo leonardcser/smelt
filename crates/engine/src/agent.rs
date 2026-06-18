@@ -188,8 +188,7 @@ fn load_model_history(
             Ok(items)
         }
         protocol::ModelHistorySource::Store {
-            summary_prefix,
-            summary,
+            prefix,
             first_live_index,
             end_index,
         } => {
@@ -199,14 +198,7 @@ fn load_model_history(
                 first_live_index as u64,
             );
             smelt_perf::perf::record_value("engine:model_history:end_index", end_index as u64);
-            let mut history = Vec::new();
-            if let Some(summary) = summary {
-                history.push(HistoryItem::user(protocol::Content::text(format!(
-                    "{}\n{}",
-                    summary_prefix.trim_end(),
-                    summary
-                ))));
-            }
+            let mut history = prefix;
             if end_index > first_live_index {
                 let db_path = session_dir.join("session.db");
                 let db = smelt_store::SessionDb::open(&db_path)
@@ -2590,7 +2582,13 @@ mod tests {
         db.save_session_snapshot(&snapshot, None).unwrap();
 
         let history = load_model_history(
-            protocol::ModelHistorySource::store("SUMMARY:", Some("compact".into()), 1, 3),
+            protocol::ModelHistorySource::store(
+                vec![HistoryItem::user(protocol::Content::text(
+                    "SUMMARY:\ncompact",
+                ))],
+                1,
+                3,
+            ),
             dir.path(),
         )
         .unwrap();

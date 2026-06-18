@@ -1112,18 +1112,25 @@ impl Session {
         })
     }
 
-    pub fn model_history(&self, summary_prefix: &str) -> Vec<HistoryItem> {
+    pub fn model_history_range(&self, summary_prefix: &str) -> (Vec<HistoryItem>, usize, usize) {
+        let end_index = self.history.len();
         let Some(cp) = &self.checkpoint else {
-            return self.history.clone();
+            return (Vec::new(), 0, end_index);
         };
-        let mut out =
-            Vec::with_capacity(self.history.len().saturating_sub(cp.first_live_index) + 1);
-        out.push(HistoryItem::user(protocol::Content::text(format!(
-            "{}\n{}",
-            summary_prefix.trim_end(),
-            cp.summary
-        ))));
-        out.extend(self.history.iter().skip(cp.first_live_index).cloned());
+        (
+            vec![HistoryItem::user(protocol::Content::text(format!(
+                "{}\n{}",
+                summary_prefix.trim_end(),
+                cp.summary
+            )))],
+            cp.first_live_index,
+            end_index,
+        )
+    }
+
+    pub fn model_history(&self, summary_prefix: &str) -> Vec<HistoryItem> {
+        let (mut out, first_live_index, _) = self.model_history_range(summary_prefix);
+        out.extend(self.history.iter().skip(first_live_index).cloned());
         out
     }
 

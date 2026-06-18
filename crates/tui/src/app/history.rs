@@ -1250,16 +1250,11 @@ impl TuiApp {
     }
 
     pub(crate) fn model_history_source(&self) -> protocol::ModelHistorySource {
-        let end_index = self.core.session.history.len();
-        match &self.core.session.checkpoint {
-            Some(checkpoint) => protocol::ModelHistorySource::store(
-                engine::SUMMARY_PREFIX,
-                Some(checkpoint.summary.clone()),
-                checkpoint.first_live_index,
-                end_index,
-            ),
-            None => protocol::ModelHistorySource::store(engine::SUMMARY_PREFIX, None, 0, end_index),
-        }
+        let (prefix, first_live_index, end_index) = self
+            .core
+            .session
+            .model_history_range(engine::SUMMARY_PREFIX);
+        protocol::ModelHistorySource::store(prefix, first_live_index, end_index)
     }
 
     pub(crate) fn model_history(&self) -> Vec<HistoryItem> {
@@ -1267,50 +1262,53 @@ impl TuiApp {
     }
 
     pub(crate) fn model_history_messages(&self) -> Vec<protocol::Message> {
-        if let Some(history) = self.read_model_history_from_store() {
-            smelt_perf::perf::record_value("tui:model_history:messages_store", 1);
-            return protocol::history_to_messages(&history);
+        match self.read_model_history_from_store() {
+            Ok(Some(history)) => {
+                smelt_perf::perf::record_value("tui:model_history:messages_store", 1);
+                protocol::history_to_messages(&history)
+            }
+            Ok(None) => {
+                smelt_perf::perf::record_value("tui:model_history:messages_fallback_expected", 1);
+                protocol::history_to_messages(&self.model_history())
+            }
+            Err(err) => {
+                smelt_perf::perf::record_value("tui:model_history:messages_fallback_error", 1);
+                smelt_perf::perf::record_value(
+                    "tui:model_history:messages_fallback_error_bytes",
+                    err.len() as u64,
+                );
+                protocol::history_to_messages(&self.model_history())
+            }
         }
-        smelt_perf::perf::record_value("tui:model_history:messages_fallback", 1);
-        protocol::history_to_messages(&self.model_history())
     }
 
-    fn read_model_history_from_store(&self) -> Option<Vec<HistoryItem>> {
+    fn read_model_history_from_store(&self) -> Result<Option<Vec<HistoryItem>>, String> {
         if self.session_dirty || self.dirty_history_from.is_some() || !self.persisted_store_ready {
-            return None;
+            return Ok(None);
         }
         let protocol::ModelHistorySource::Store {
-            summary_prefix,
-            summary,
+            prefix,
             first_live_index,
             end_index,
         } = self.model_history_source()
         else {
-            return None;
+            return Ok(None);
         };
-        let mut history = Vec::new();
-        if let Some(summary) = summary {
-            history.push(HistoryItem::user(protocol::Content::text(format!(
-                "{}\n{}",
-                summary_prefix.trim_end(),
-                summary
-            ))));
-        }
+        let mut history = prefix;
         if end_index > first_live_index {
-            let db = smelt_store::SessionDb::open_read_only(
-                session::dir_for(&self.core.session).join("session.db"),
-            )
-            .ok()?;
+            let db_path = session::dir_for(&self.core.session).join("session.db");
+            let db = smelt_store::SessionDb::open_read_only(&db_path)
+                .map_err(|err| format!("open model history database {db_path:?}: {err}"))?;
             let mut rows = db
                 .read_history_items_range(first_live_index..end_index)
-                .ok()?;
+                .map_err(|err| format!("read model history rows: {err}"))?;
             smelt_perf::perf::record_value(
                 "tui:model_history:messages_store_rows",
                 rows.len() as u64,
             );
             history.append(&mut rows);
         }
-        Some(history)
+        Ok(Some(history))
     }
 
     pub(crate) fn rewind_to(

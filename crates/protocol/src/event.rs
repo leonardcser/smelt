@@ -417,8 +417,7 @@ impl StartTurnInput {
 pub enum ModelHistorySource {
     Items(Vec<crate::history::HistoryItem>),
     Store {
-        summary_prefix: String,
-        summary: Option<String>,
+        prefix: Vec<crate::history::HistoryItem>,
         first_live_index: usize,
         end_index: usize,
     },
@@ -430,14 +429,12 @@ impl ModelHistorySource {
     }
 
     pub fn store(
-        summary_prefix: impl Into<String>,
-        summary: Option<String>,
+        prefix: Vec<crate::history::HistoryItem>,
         first_live_index: usize,
         end_index: usize,
     ) -> Self {
         Self::Store {
-            summary_prefix: summary_prefix.into(),
-            summary,
+            prefix,
             first_live_index,
             end_index,
         }
@@ -447,13 +444,12 @@ impl ModelHistorySource {
         match self {
             Self::Items(items) => items.len(),
             Self::Store {
-                summary,
+                prefix,
                 first_live_index,
                 end_index,
-                ..
             } => end_index
                 .saturating_sub(*first_live_index)
-                .saturating_add(usize::from(summary.is_some())),
+                .saturating_add(prefix.len()),
         }
     }
 }
