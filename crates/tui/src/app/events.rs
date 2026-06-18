@@ -1389,17 +1389,6 @@ impl TuiApp {
     ) -> crate::smelt_edit::Status {
         use crate::smelt_edit::{DocumentCommand, Status};
 
-        let command = if self
-            .ui
-            .win(win_id)
-            .is_some_and(|win| win.has_materialized_rows())
-        {
-            self.resolve_row_viewer_command(win_id, command)
-                .unwrap_or(command)
-        } else {
-            command
-        };
-
         if matches!(command, DocumentCommand::OpenAction) {
             let pos = {
                 let Some(win) = self.ui.win(win_id) else {
@@ -1424,7 +1413,14 @@ impl TuiApp {
         }
 
         let now = self.core.clock.instant_now();
-        let copied = {
+        let copied = if self
+            .ui
+            .win(win_id)
+            .is_some_and(|win| win.has_materialized_rows())
+        {
+            self.execute_document_view_command_for_win(win_id, command, viewport_rows, now)
+                .map(crate::smelt_edit::DocumentCopy::Rows)
+        } else {
             let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
             let win = win.expect("window");
             let buf = buf.expect("buffer");
@@ -1504,18 +1500,6 @@ impl TuiApp {
             Err(err) => format!("{reason}: could not copy ({err}); open {text} manually"),
         };
         self.record_notice(MessageKind::Warning, "actions".into(), body);
-    }
-
-    fn resolve_row_viewer_command(
-        &mut self,
-        win_id: crate::smelt_edit::WinId,
-        command: crate::smelt_edit::DocumentCommand,
-    ) -> Option<crate::smelt_edit::DocumentCommand> {
-        let (cursor, vim_mode) = {
-            let win = self.ui.win(win_id)?;
-            (win.row_cursor()?, win.vim_mode())
-        };
-        self.resolve_document_command_for_win(win_id, command, cursor, vim_mode)
     }
 
     /// Keymap-driven dispatcher: looks up the binding under the window's
@@ -1612,33 +1596,30 @@ impl TuiApp {
                 _ => None,
             };
             if let Some(command) = command {
-                let command = self
-                    .resolve_row_viewer_command(win_id, command)
-                    .unwrap_or(command);
                 let now = self.core.clock.instant_now();
-                let copied = {
-                    let (win, buf) = self.ui.win_and_buf_mut(win_id, buf_id);
-                    let win = win.expect("window");
-                    let buf = buf.expect("buffer");
-                    if extending && !win.row_selection_anchor_active() {
-                        win.execute_row_viewer_command(
-                            buf,
-                            crate::smelt_edit::DocumentCommand::StartVisual,
-                            viewport_rows,
-                            now,
-                        );
-                    } else if !extending
-                        && !matches!(command, crate::smelt_edit::DocumentCommand::YankSelection)
-                    {
-                        win.execute_row_viewer_command(
-                            buf,
-                            crate::smelt_edit::DocumentCommand::ClearSelection,
-                            viewport_rows,
-                            now,
-                        );
-                    }
-                    win.execute_row_viewer_command(buf, command, viewport_rows, now)
-                };
+                let anchor_active = self
+                    .ui
+                    .win(win_id)
+                    .is_some_and(|win| win.row_selection_anchor_active());
+                if extending && !anchor_active {
+                    self.execute_document_view_command_for_win(
+                        win_id,
+                        crate::smelt_edit::DocumentCommand::StartVisual,
+                        viewport_rows,
+                        now,
+                    );
+                } else if !extending
+                    && !matches!(command, crate::smelt_edit::DocumentCommand::YankSelection)
+                {
+                    self.execute_document_view_command_for_win(
+                        win_id,
+                        crate::smelt_edit::DocumentCommand::ClearSelection,
+                        viewport_rows,
+                        now,
+                    );
+                }
+                let copied =
+                    self.execute_document_view_command_for_win(win_id, command, viewport_rows, now);
                 if let Some(range) = copied {
                     if let Some(out) = self.copy_document_rows(win_id, range) {
                         self.yank_to_clipboard(out);

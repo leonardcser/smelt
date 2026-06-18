@@ -5,7 +5,8 @@ use crate::app::transcript::{TranscriptDisplayDocument, TranscriptRenderContext}
 use crate::app::TuiApp;
 use crate::smelt_edit::{
     BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DisplaySnapshot, DocPosition,
-    DocRange, DocumentCommand, DocumentHandle, RowIndex, SpanAction, TextRange, VimMode, WinId,
+    DocRange, DocumentCommand, DocumentHandle, DocumentViewExecutor, RowIndex, SpanAction,
+    TextRange, WinId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,16 +231,73 @@ impl TuiApp {
             .flatten()
     }
 
-    pub(crate) fn resolve_document_command_for_win(
+    pub(crate) fn execute_document_view_command_for_win(
         &mut self,
         win: WinId,
         command: DocumentCommand,
-        cursor: DocPosition,
-        vim_mode: VimMode,
-    ) -> Option<DocumentCommand> {
-        self.with_display_document_for_win(win, |document| {
-            crate::smelt_edit::resolve_document_command(document, command, cursor, vim_mode)
-        })
-        .flatten()
+        viewport_rows: u16,
+        now: std::time::Instant,
+    ) -> Option<DocRange> {
+        let (
+            buf,
+            mut state,
+            mut vim_mode,
+            mut scroll_top,
+            mut scroll_left,
+            following_tail,
+            viewport_cols,
+        ) = {
+            let win = self.ui.win(win)?;
+            if !win.has_materialized_rows() {
+                return None;
+            }
+            (
+                win.buf,
+                win.document_view_state(),
+                win.vim_mode(),
+                win.scroll_top(),
+                win.scroll_left,
+                win.is_following_tail(),
+                win.viewport
+                    .map(|viewport| viewport.content_width)
+                    .unwrap_or(0),
+            )
+        };
+        let copy = self.with_display_document_for_win(win, |document| {
+            DocumentViewExecutor::execute(
+                &mut state,
+                document,
+                command,
+                &mut vim_mode,
+                &mut scroll_top,
+                &mut scroll_left,
+                viewport_rows,
+                viewport_cols,
+                following_tail,
+                now,
+            )
+        })?;
+
+        let (win_ref, buf_ref) = self.ui.win_and_buf_mut(win, buf);
+        let win_ref = win_ref?;
+        let buf_ref = buf_ref?;
+        win_ref.set_document_view_state(state);
+        if win_ref.vim_mode() != vim_mode {
+            win_ref.set_vim_mode(vim_mode);
+        }
+        win_ref.scroll_left = scroll_left;
+        match command {
+            DocumentCommand::ScrollRows(_) => {
+                win_ref.set_scroll(scroll_top, buf_ref);
+                win_ref.update_tail_state(buf_ref, viewport_rows);
+            }
+            DocumentCommand::CenterScroll => win_ref.pin_scroll(scroll_top),
+            DocumentCommand::PanColumns(_) => {}
+            _ => {
+                win_ref.set_resolved_scroll(scroll_top);
+                win_ref.pin_current_scroll();
+            }
+        }
+        copy
     }
 }
