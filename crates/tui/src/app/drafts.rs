@@ -1,6 +1,6 @@
 use crate::app::TuiApp;
 use smelt_core::content::stream_parser::{ToolDraftUpdate, ToolStart};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 const MAX_DRAFT_STRING_BYTES: usize = 200_000;
@@ -18,26 +18,61 @@ struct ToolDraft {
     tool_name: Option<String>,
     preview: DraftJsonPreview,
     finished: bool,
-    last_render: Option<Instant>,
-    rendered_args: bool,
+    render_state: DraftRenderState,
 }
 
-impl ToolDraft {
-    fn should_render(&mut self, now: Instant, force: bool) -> bool {
-        if force
+#[derive(Default)]
+struct DraftRenderState {
+    last_render: Option<Instant>,
+    rendered_raw_args: bool,
+    rendered_arg_keys: HashSet<String>,
+    pending_throttled_render: bool,
+}
+
+impl DraftRenderState {
+    fn can_render(&self, now: Instant, force: bool) -> bool {
+        force
             || self
                 .last_render
                 .is_none_or(|last| now.saturating_duration_since(last) >= DRAFT_RENDER_INTERVAL)
-        {
-            self.last_render = Some(now);
-            true
-        } else {
-            false
-        }
     }
 
+    fn mark_rendered(&mut self, now: Instant) {
+        self.last_render = Some(now);
+        self.pending_throttled_render = false;
+    }
+
+    fn mark_throttled(&mut self) {
+        self.pending_throttled_render = true;
+    }
+
+    fn pending_deadline(&self) -> Option<Instant> {
+        if self.pending_throttled_render {
+            self.last_render.map(|last| last + DRAFT_RENDER_INTERVAL)
+        } else {
+            None
+        }
+    }
+}
+
+impl ToolDraft {
     fn has_args(&self) -> bool {
         !self.preview.raw_arguments.is_empty() || !self.preview.args.is_empty()
+    }
+
+    fn has_new_arg_keys(&self) -> bool {
+        self.preview
+            .args
+            .keys()
+            .any(|key| !self.render_state.rendered_arg_keys.contains(key))
+    }
+
+    fn mark_rendered(&mut self, now: Instant) {
+        self.render_state.mark_rendered(now);
+        self.render_state.rendered_raw_args |= self.has_args();
+        self.render_state
+            .rendered_arg_keys
+            .extend(self.preview.args.keys().cloned());
     }
 
     fn snapshot(&self, stream_id: String) -> ToolDraftSnapshot {
@@ -91,16 +126,51 @@ impl ToolDraftController {
         }
         draft.finished |= finished;
         let has_args = draft.has_args();
-        let should_render = draft.should_render(
-            now,
-            force_render || finished || (has_args && !draft.rendered_args),
-        );
+        let force = force_render
+            || finished
+            || (has_args && !draft.render_state.rendered_raw_args)
+            || draft.has_new_arg_keys();
+        let should_render = draft.render_state.can_render(now, force);
         if should_render {
-            draft.rendered_args |= has_args;
+            draft.mark_rendered(now);
             Some(draft.snapshot(stream_id))
         } else {
+            if has_args {
+                draft.render_state.mark_throttled();
+            }
             None
         }
+    }
+
+    fn drain_due_renders(&mut self, now: Instant) -> Vec<ToolDraftSnapshot> {
+        let stream_ids: Vec<String> = self
+            .drafts
+            .iter()
+            .filter(|(_, draft)| {
+                draft
+                    .render_state
+                    .pending_deadline()
+                    .is_some_and(|deadline| deadline <= now)
+            })
+            .map(|(stream_id, _)| stream_id.clone())
+            .collect();
+
+        let mut snapshots = Vec::with_capacity(stream_ids.len());
+        for stream_id in stream_ids {
+            if let Some(draft) = self.drafts.get_mut(&stream_id) {
+                draft.mark_rendered(now);
+                snapshots.push(draft.snapshot(stream_id));
+            }
+        }
+        snapshots
+    }
+
+    fn next_render_delay(&self, now: Instant) -> Option<Duration> {
+        self.drafts
+            .values()
+            .filter_map(|draft| draft.render_state.pending_deadline())
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min()
     }
 
     fn remove_by_stream_id(&mut self, stream_id: &str) {
@@ -236,6 +306,22 @@ impl TuiApp {
     pub(crate) fn clear_tool_drafts(&mut self) {
         self.draft_tools.clear();
         self.parser.clear_tool_drafts(self.transcript.history_mut());
+    }
+
+    pub(crate) fn flush_due_tool_drafts(&mut self) -> bool {
+        let snapshots = self
+            .draft_tools
+            .drain_due_renders(self.core.clock.instant_now());
+        let did_work = !snapshots.is_empty();
+        for snapshot in snapshots {
+            self.render_tool_draft(snapshot);
+        }
+        did_work
+    }
+
+    pub(crate) fn next_tool_draft_render_delay(&self) -> Option<Duration> {
+        self.draft_tools
+            .next_render_delay(self.core.clock.instant_now())
     }
 
     fn render_tool_draft(&mut self, snapshot: ToolDraftSnapshot) {
@@ -618,6 +704,135 @@ mod tests {
             Some("/tmp/a")
         );
         assert_eq!(args.get("content").and_then(|v| v.as_str()), Some("hello"));
+    }
+
+    #[test]
+    fn new_argument_delta_renders_inside_throttle() {
+        let mut controller = ToolDraftController::default();
+        let now = Instant::now();
+
+        controller.update(
+            ToolDraftEvent {
+                stream_id: "s".into(),
+                call_id: Some("c".into()),
+                tool_name: Some("write_file".into()),
+                delta: None,
+                arguments: None,
+                finished: false,
+            },
+            now,
+            true,
+        );
+
+        let path_update = controller.update(
+            ToolDraftEvent {
+                stream_id: "s".into(),
+                call_id: Some("c".into()),
+                tool_name: Some("write_file".into()),
+                delta: Some(r#"{"file_path":"src/live.rs","#.into()),
+                arguments: None,
+                finished: false,
+            },
+            now,
+            false,
+        );
+        assert!(path_update.is_some());
+
+        let content_update = controller
+            .update(
+                ToolDraftEvent {
+                    stream_id: "s".into(),
+                    call_id: Some("c".into()),
+                    tool_name: Some("write_file".into()),
+                    delta: Some(r#""content":"pub fn live() -> i32 { 1 }"#.into()),
+                    arguments: None,
+                    finished: false,
+                },
+                now,
+                false,
+            )
+            .expect("new argument should render inside throttle window");
+
+        assert_eq!(
+            content_update
+                .args
+                .get("content")
+                .and_then(|value| value.as_str()),
+            Some("pub fn live() -> i32 { 1 }")
+        );
+    }
+
+    #[test]
+    fn delayed_flush_renders_throttled_argument_updates() {
+        let mut controller = ToolDraftController::default();
+        let now = Instant::now();
+
+        controller.update(
+            ToolDraftEvent {
+                stream_id: "s".into(),
+                call_id: Some("c".into()),
+                tool_name: Some("write_file".into()),
+                delta: None,
+                arguments: None,
+                finished: false,
+            },
+            now,
+            true,
+        );
+
+        let first_update = controller
+            .update(
+                ToolDraftEvent {
+                    stream_id: "s".into(),
+                    call_id: Some("c".into()),
+                    tool_name: Some("write_file".into()),
+                    delta: Some(r#"{"content":"a"#.into()),
+                    arguments: None,
+                    finished: false,
+                },
+                now,
+                false,
+            )
+            .expect("first argument content should render immediately");
+        assert_eq!(
+            first_update
+                .args
+                .get("content")
+                .and_then(|value| value.as_str()),
+            Some("a")
+        );
+
+        let throttled = controller.update(
+            ToolDraftEvent {
+                stream_id: "s".into(),
+                call_id: Some("c".into()),
+                tool_name: Some("write_file".into()),
+                delta: Some("b".into()),
+                arguments: None,
+                finished: false,
+            },
+            now,
+            false,
+        );
+        assert!(throttled.is_none());
+        assert_eq!(
+            controller.next_render_delay(now),
+            Some(DRAFT_RENDER_INTERVAL)
+        );
+
+        assert!(controller
+            .drain_due_renders(now + DRAFT_RENDER_INTERVAL - Duration::from_millis(1))
+            .is_empty());
+
+        let due = controller.drain_due_renders(now + DRAFT_RENDER_INTERVAL);
+        assert_eq!(due.len(), 1);
+        assert_eq!(
+            due[0].args.get("content").and_then(|value| value.as_str()),
+            Some("ab")
+        );
+        assert!(controller
+            .drain_due_renders(now + DRAFT_RENDER_INTERVAL)
+            .is_empty());
     }
 
     #[test]

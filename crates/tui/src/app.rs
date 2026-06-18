@@ -2377,10 +2377,16 @@ impl TuiApp {
                 .map(|deadline| deadline.saturating_duration_since(now));
             let next_notification_delay = self.notification_expiry_delay();
             let next_keymap_delay = self.pending_keymap_chord_expiry_delay();
-            let next_idle_delay = [next_timer_delay, next_notification_delay, next_keymap_delay]
-                .into_iter()
-                .flatten()
-                .min();
+            let next_draft_render_delay = self.next_tool_draft_render_delay();
+            let next_idle_delay = [
+                next_timer_delay,
+                next_notification_delay,
+                next_keymap_delay,
+                next_draft_render_delay,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
 
             tokio::select! {
                 biased;
@@ -2561,6 +2567,7 @@ impl TuiApp {
                     self.drive_lua_tasks();
                     self.dismiss_expired_notification();
                     self.expire_pending_keymap_chord();
+                    self.flush_due_tool_drafts();
                     self.publish_diff_cells();
                     self.render_normal();
                 }

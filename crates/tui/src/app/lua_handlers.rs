@@ -92,6 +92,7 @@ impl TuiApp {
     pub(crate) fn drain_idle_work(&mut self) -> bool {
         let mut did_work = self.dismiss_expired_notification();
         did_work |= self.expire_pending_keymap_chord();
+        did_work |= self.flush_due_tool_drafts();
         did_work |= self.try_perform_scheduled_lua_reload();
         did_work
     }
