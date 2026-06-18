@@ -1,0 +1,21 @@
+{
+  "_about": "TurnComplete oracle accepts final model snapshots that do not include a pending context append sent while the turn was active.",
+  "_fix": "The smelt_loop oracle treats pending history appends as optionally reflected in the synthetic TurnComplete history.",
+  "mode": "plan",
+  "ops": [
+    {
+      "kind": "schedule_reload"
+    },
+    {
+      "kind": "start_turn",
+      "data": 35
+    },
+    {
+      "kind": "engine_turn_complete",
+      "data": {
+        "msg_count": 40
+      }
+    }
+  ],
+  "vim": true
+}

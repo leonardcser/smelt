@@ -771,6 +771,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2451,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "smelt-perf"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "smelt-protocol"
@@ -2465,6 +2476,7 @@ dependencies = [
 name = "smelt-store"
 version = "0.5.0-alpha.5"
 dependencies = [
+ "hostname",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2479,7 +2491,7 @@ version = "0.2.0"
 
 [[package]]
 name = "smelt-term"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossterm",
  "smelt-ansi",

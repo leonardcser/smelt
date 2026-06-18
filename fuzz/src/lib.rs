@@ -1237,11 +1237,6 @@ fn expected_completed_history_len(
     msg_count: usize,
     targeted_active: bool,
 ) -> usize {
-    let pending_appends = if targeted_active {
-        pre.pending_history_appends
-    } else {
-        0
-    };
     let queued_followup = completed_turn_starts_queued_followup(pre, targeted_active);
     let queued_context_append = if queued_followup
         && (pre.checkpoint_first_live_index.is_none() || pre.queued_next_context_append)
@@ -1251,10 +1246,7 @@ fn expected_completed_history_len(
         0
     };
     let queued_request_append = usize::from(queued_followup);
-    expected_model_history_len(pre, msg_count)
-        + pending_appends
-        + queued_context_append
-        + queued_request_append
+    expected_model_history_len(pre, msg_count) + queued_context_append + queued_request_append
 }
 
 fn scheduled_reload_mode_change(
@@ -1466,6 +1458,11 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
             let history_path = targeted_active || msg_count > 0;
             if history_path {
                 let expected = expected_completed_history_len(pre, msg_count, targeted_active);
+                let pending_appends = if targeted_active {
+                    pre.pending_history_appends
+                } else {
+                    0
+                };
                 if scheduled_reload_mode_change(pre, targeted_active, new_actions) {
                     // A reload deferred until turn end can invalidate the
                     // active mode and switch back to normal mode. That queues
@@ -1473,32 +1470,25 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                     // snapshot has been merged; depending on whether the
                     // merged tail is already a mode note, it either appends or
                     // replaces in place.
-                    let max_expected = expected + usize::from(expected > 0);
+                    let max_expected = expected + pending_appends + usize::from(expected > 0);
                     assert!(
-                        post.session_messages == expected || post.session_messages == max_expected,
+                        (expected..=max_expected).contains(&post.session_messages),
                         "TurnComplete did not merge session.messages with scheduled reload mode change: post {} (expected {expected}..={max_expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, queued context append {}, busy {})",
                         post.session_messages,
                         pre.checkpoint_first_live_index,
-                        if targeted_active {
-                            pre.pending_history_appends
-                        } else {
-                            0
-                        },
+                        pending_appends,
                         pre.queued_next_starts,
                         pre.queued_next_context_append,
                         pre.working.busy,
                     );
                 } else {
-                    assert_eq!(
-                        post.session_messages, expected,
-                        "TurnComplete did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, queued context append {}, busy {})",
+                    let max_expected = expected + pending_appends;
+                    assert!(
+                        (expected..=max_expected).contains(&post.session_messages),
+                        "TurnComplete did not merge session.messages: post {} (expected {expected}..={max_expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, queued context append {}, busy {})",
                         post.session_messages,
                         pre.checkpoint_first_live_index,
-                        if targeted_active {
-                            pre.pending_history_appends
-                        } else {
-                            0
-                        },
+                        pending_appends,
                         pre.queued_next_starts,
                         pre.queued_next_context_append,
                         pre.working.busy,
