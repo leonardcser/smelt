@@ -174,6 +174,14 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
         protocol::AgentMode::normal(),
         smelt_core::lua::ToolVisibility::Interactive,
     );
+    let create = tools
+        .iter()
+        .find(|tool| tool.name == "create_goal")
+        .expect("create_goal should be registered");
+    assert!(create
+        .description
+        .contains("system/developer instructions; do not infer goals from ordinary tasks"));
+
     let update = tools
         .iter()
         .find(|tool| tool.name == "update_goal")

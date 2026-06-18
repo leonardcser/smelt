@@ -574,7 +574,7 @@ local function register_tools()
 
   smelt.tools.register({
     name = "create_goal",
-    description = "Create a session goal only when explicitly requested by the user or instructions. Fails if an unfinished goal already exists; use update_goal only to report done or blocked.",
+    description = "Create a session goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks. Fails if an unfinished goal already exists; use update_goal only to report done or blocked.",
     parameters = {
       type = "object",
       properties = {
