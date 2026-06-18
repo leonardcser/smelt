@@ -97,7 +97,7 @@ local function normalize_goal(goal)
   local now = now_ms()
   goal.objective = trim(goal.objective)
   goal.summary = present(goal.summary)
-  goal.activity = present(goal.activity)
+  goal.activity = nil
   goal.progress = normalize_progress(goal.progress)
   if goal.state ~= STATE.ACTIVE
       and goal.state ~= STATE.PAUSED
@@ -162,8 +162,9 @@ local function context_text(goal)
     "Goal instructions:",
     "- Keep future work aligned with this objective unless the user says otherwise.",
     "- Use get_goal to inspect the current goal state.",
-    "- At the start of a goal continuation pass, call update_goal_status only if the visible pass-level activity or progress should change.",
-    "- Do not call update_goal_status during routine substeps or individual tool calls.",
+    "- Call update_goal_progress only for durable, user-facing progress, such as a plan phase or milestone.",
+    "- Do not use progress for current activity; if no meaningful long-term progress label applies, leave it unset.",
+    "- Do not call update_goal_progress for routine substeps or individual tool calls.",
     "- At the end, call update_goal only if the goal is done or genuinely blocked.",
     "- Do not mark the goal done until current evidence proves the requested outcome is complete.",
   }, "\n")
@@ -198,8 +199,9 @@ local function continuation_prompt(goal)
     "",
     "## Instructions",
     "- Pick the next concrete step and execute it.",
-    "- At the start of this goal continuation pass, call update_goal_status only if the visible pass-level activity or progress should change.",
-    "- Do not call update_goal_status during routine substeps or individual tool calls.",
+    "- Call update_goal_progress only for durable, user-facing progress, such as a plan phase or milestone.",
+    "- Do not use progress for current activity; if no meaningful long-term progress label applies, leave it unset.",
+    "- Do not call update_goal_progress for routine substeps or individual tool calls.",
     "- Preserve the original scope; do not redefine success around the work already done.",
     "- Before marking the goal done, verify the current state against every explicit requirement, artifact, command, test, and deliverable in the objective.",
     "- Treat incomplete, indirect, weak, or missing evidence as not done; gather stronger evidence or keep working.",
@@ -294,7 +296,6 @@ local function apply(action, opts)
     if goal.state == STATE.ACTIVE then goal.reason = nil end
   elseif action == "update_status" then
     if opts.summary ~= nil then goal.summary = present(opts.summary) end
-    if opts.activity ~= nil then goal.activity = present(opts.activity) end
     if opts.progress ~= nil then goal.progress = normalize_progress(opts.progress) end
   else
     return nil, "unknown goal action: " .. tostring(action)
@@ -315,19 +316,21 @@ local function banner_label(goal)
 end
 
 local function banner_mode(goal)
-  if goal.state == STATE.ACTIVE and goal.auto_continue ~= false then return "auto" end
-  return nil
+  if goal.state ~= STATE.ACTIVE then return nil end
+  return goal.auto_continue ~= false and "auto" or "manual"
 end
 
 local function banner_text(goal)
+  local goal_text = present(goal.summary) or goal.objective
   local progress = progress_label(goal.progress)
-  local activity = present(goal.activity)
-  local summary = present(goal.summary)
-  if progress and activity then return progress .. " · " .. activity end
-  if activity then return activity end
-  if progress then return progress end
-  if goal.state == STATE.BLOCKED and goal.reason then return goal.reason end
-  return summary or goal.objective
+  if goal.state == STATE.BLOCKED and goal.reason then
+    local parts = { goal.reason, goal_text }
+    if progress then parts[#parts + 1] = progress end
+    return table.concat(parts, " · ")
+  end
+  local parts = { goal_text }
+  if progress then parts[#parts + 1] = progress end
+  return table.concat(parts, " · ")
 end
 
 local function banner_row(goal, width)
@@ -486,7 +489,6 @@ function M.describe(goal)
   if goal.summary then table.insert(lines, "Summary: " .. tostring(goal.summary)) end
   local progress = progress_label(goal.progress)
   if progress then table.insert(lines, "Progress: " .. progress) end
-  if goal.activity then table.insert(lines, "Activity: " .. tostring(goal.activity)) end
   if goal.id then table.insert(lines, "ID: " .. tostring(goal.id)) end
   if goal.created_at_ms then table.insert(lines, "Created: " .. tostring(goal.created_at_ms)) end
   if goal.updated_at_ms then table.insert(lines, "Updated: " .. tostring(goal.updated_at_ms)) end
@@ -531,11 +533,6 @@ function M.command(arg)
     M.schedule_auto_continue()
     return
   end
-  if sub == "activity" then
-    local goal, err = M.update_status({ activity = rest })
-    if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal activity updated.", "goal") end
-    return
-  end
   if sub == "progress" then
     local goal, err = M.update_status({ progress = rest })
     if not goal then smelt.notify.warn(err, "goal") else smelt.notify("Goal progress updated.", "goal") end
@@ -564,7 +561,7 @@ end
 local function register_tools()
   smelt.tools.register({
     name = "get_goal",
-    description = "Return the current session goal, including lifecycle state, live activity, progress, auto-continue, id, and timestamps.",
+    description = "Return the current session goal, including lifecycle state, progress, auto-continue, id, and timestamps.",
     parameters = { type = "object", properties = {}, required = {} },
     summary = function() return "get goal" end,
     execute = function()
@@ -600,18 +597,16 @@ local function register_tools()
   })
 
   smelt.tools.register({
-    name = "update_goal_status",
-    description = "Update the pass-level goal summary, activity, or progress shown in the top goal bar. Use at most once near the start of a goal continuation pass, and only when the visible pass label should change. Do not use for routine substeps, individual tool calls, done, or blocked.",
+    name = "update_goal_progress",
+    description = "Update the durable goal progress shown in the top goal bar. Use only for user-facing phases or milestones, not the current activity. Prefer leaving progress unset when no meaningful long-term progress label applies. Do not use for routine substeps, individual tool calls, done, or blocked.",
     parameters = {
       type = "object",
       properties = {
-        summary = { type = "string", description = "Short stable label for the goal, used when no activity or progress is available." },
-        activity = { type = "string", description = "Short present-tense description of the pass-level work." },
         progress = {
           type = "object",
-          description = "User-facing progress. Use label for unbounded work; use current/total or percent only when grounded in the goal or an explicit plan.",
+          description = "Durable user-facing progress. Use label for plan phases or milestones; use current/total or percent only when grounded in the goal or an explicit plan. Do not report current activity.",
           properties = {
-            label = { type = "string", description = "Progress label, such as 'Phase 3/7', '4/12', or 'Exploratory cleanup'." },
+            label = { type = "string", description = "Durable progress label, such as 'Phase 3/7', '4/12', 'Design review', or 'Validation'. Not the current activity." },
             current = { type = "number", description = "Optional numeric current progress." },
             total = { type = "number", description = "Optional numeric total progress." },
             percent = { type = "number", description = "Optional percent complete. Do not invent percentages." },
@@ -619,21 +614,16 @@ local function register_tools()
           required = {},
         },
       },
-      required = {},
+      required = { "progress" },
     },
     summary = function(args)
       args = args or {}
-      local progress = progress_label(args.progress)
-      return args.activity or progress or args.summary or "update goal status"
+      return progress_label(args.progress) or "update goal progress"
     end,
     execute = function(args)
       args = args or {}
-      local update = {
-        summary = args.summary,
-        activity = args.activity,
-      }
-      if args.progress ~= nil then update.progress = args.progress end
-      local goal, err = M.update_status(update)
+      if args.progress == nil then return { content = "progress is required", is_error = true } end
+      local goal, err = M.update_status({ progress = args.progress })
       if not goal then return { content = err, is_error = true } end
       return { content = "Updated goal status.\n" .. M.describe(goal) }
     end,

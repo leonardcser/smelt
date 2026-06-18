@@ -138,15 +138,13 @@ fn lua_goal_module_persists_and_updates_session_goal() {
             assert(type(created.created_at_ms) == "number")
             assert(goal.current().objective == "finish named context notes")
             assert(goal.current().state == "active")
-            assert(goal.update_status({ summary = "Context notes", progress = "Phase 1/2", activity = "Checking persistence" }))
+            assert(goal.update_status({ summary = "Context notes", progress = "Phase 1/2" }))
             assert(goal.current().summary == "Context notes")
             assert(goal.current().progress.label == "Phase 1/2")
-            assert(goal.current().activity == "Checking persistence")
             assert(goal.describe():find("Auto%-continue: off"))
             assert(goal.describe():find("State: active", 1, true))
             assert(goal.describe():find("Summary: Context notes", 1, true))
             assert(goal.describe():find("Progress: Phase 1/2", 1, true))
-            assert(goal.describe():find("Activity: Checking persistence", 1, true))
             assert(goal.describe():find("ID:"))
             assert(goal.pause())
             assert(goal.current().state == "paused")
@@ -197,13 +195,18 @@ fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
 
     let status = tools
         .iter()
-        .find(|tool| tool.name == "update_goal_status")
-        .expect("update_goal_status should be registered");
-    assert!(status.description.contains("at most once"));
-    assert!(status.parameters["properties"].get("activity").is_some());
+        .find(|tool| tool.name == "update_goal_progress")
+        .expect("update_goal_progress should be registered");
+    assert!(status.description.contains("durable goal progress"));
+    assert!(status.parameters["properties"].get("activity").is_none());
+    assert!(status.parameters["properties"].get("summary").is_none());
     assert!(status.parameters["properties"]["progress"]
         .get("properties")
         .is_some());
+    assert_eq!(
+        status.parameters["required"],
+        serde_json::json!(["progress"])
+    );
 }
 
 #[test]
@@ -233,7 +236,8 @@ fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
             assert(_G.__goal_submit.display == "goal continue")
             assert(_G.__goal_submit.body:find("# Continue goal", 1, true))
             assert(_G.__goal_submit.body:find("finish &lt;the&gt; &amp; goal", 1, true))
-            assert(_G.__goal_submit.body:find("At the start of this goal continuation pass", 1, true))
+            assert(_G.__goal_submit.body:find("Call update_goal_progress only for durable"))
+            assert(_G.__goal_submit.body:find("Do not use progress for current activity", 1, true))
             assert(_G.__goal_submit.body:find("routine substeps", 1, true))
             assert(_G.__goal_submit.body:find("state=\"done\"", 1, true))
             assert(_G.__goal_submit.body:find("state=\"blocked\"", 1, true))

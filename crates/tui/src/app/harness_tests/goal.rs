@@ -19,8 +19,8 @@ fn lua_goal_renders_top_banner_not_statusline() {
         frame.text()
     );
     assert!(
-        !frame.rows[0].trim_end().ends_with("manual"),
-        "manual goals should not show right-side mode:\n{}",
+        frame.rows[0].trim_end().ends_with("manual"),
+        "manual active goals should show right-side mode:\n{}",
         frame.text()
     );
     assert!(
@@ -35,7 +35,7 @@ fn lua_goal_renders_top_banner_not_statusline() {
 }
 
 #[test]
-fn lua_goal_banner_prefers_live_progress_and_activity() {
+fn lua_goal_banner_prefers_live_progress() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(72, 16);
 
@@ -43,13 +43,13 @@ fn lua_goal_banner_prefers_live_progress_and_activity() {
         r#"
             local goal = require("smelt.goal")
             assert(goal.create("continue implementing the full goal progress plan", { auto_continue = true, summary = "Goal progress UI" }))
-            assert(goal.update_status({ progress = "Phase 3/7", activity = "Updating headerline rendering" }))
+            assert(goal.update_status({ progress = "Phase 3/7" }))
         "#,
     ));
 
     let frame = app.render_to_frame();
     assert!(
-        frame.rows[0].contains(" GOAL Phase 3/7 · Updating headerline rendering"),
+        frame.rows[0].contains(" GOAL Goal progress UI · Phase 3/7"),
         "frame:\n{}",
         frame.text()
     );
@@ -144,7 +144,7 @@ fn lua_goal_banner_uses_status_labels_and_unicode_ellipsis() {
     let frame = app.render_to_frame();
     assert!(
         frame.rows[0].contains("waiting"),
-        "blocked banner should show the blocker reason when live status is empty:\n{}",
+        "blocked banner should show the blocker reason:\n{}",
         frame.text()
     );
     assert!(
