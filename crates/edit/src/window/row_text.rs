@@ -5,6 +5,23 @@ use std::ops::Range;
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewerTextObject {
+    spec: crate::text_objects::TextObjectSpec,
+}
+
+impl ViewerTextObject {
+    pub fn new(inner: bool, kind: char) -> Option<Self> {
+        Some(Self {
+            spec: crate::text_objects::TextObjectSpec::new(inner, kind)?,
+        })
+    }
+
+    pub(crate) fn spec(self) -> crate::text_objects::TextObjectSpec {
+        self.spec
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewerCommand {
     MoveRows(isize),
     PageRows(isize),
@@ -24,6 +41,7 @@ pub enum ViewerCommand {
     YankSelection,
     YankSelectionLinewise,
     YankLines(RowIndex),
+    TextObject(ViewerTextObject),
     CenterScroll,
     PanColumns(isize),
     MoveCursorCol(isize),
@@ -190,6 +208,14 @@ impl DisplayDocument for MaterializedBufferDocument<'_> {
     fn copy_range(&mut self, _range: TextRange) -> Option<crate::CopyOutput> {
         None
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowTextObjectSelection {
+    start: DocPosition,
+    cursor: DocPosition,
+    include_cursor_cell: bool,
+    linewise: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -755,6 +781,40 @@ impl Window {
         buf.get_line(row_to_usize(local)).map(str::len).unwrap_or(0)
     }
 
+    fn row_text_object_range(
+        &self,
+        state: &RowTextState,
+        buf: &Buffer,
+        cursor: DocPosition,
+        spec: crate::text_objects::TextObjectSpec,
+    ) -> Option<RowTextObjectSelection> {
+        if spec.kind == crate::text_objects::TextObjectKind::Paragraph {
+            return row_paragraph_text_object(state, buf, cursor, spec.inner);
+        }
+
+        let row_count = buf.line_count() as RowIndex;
+        if row_count == 0 {
+            return None;
+        }
+        let local = state
+            .materialized
+            .local_row(cursor.row)
+            .min(row_count.saturating_sub(1));
+        let line = buf.get_line(row_to_usize(local))?;
+        let col = text::snap(line, cursor.byte_col.min(line.len()));
+        let (start, end) = crate::text_objects::text_object_for_spec(line, col, spec)?;
+        let row = state.materialized.absolute_row(local);
+        Some(RowTextObjectSelection {
+            start: DocPosition {
+                row,
+                byte_col: start,
+            },
+            cursor: DocPosition { row, byte_col: end },
+            include_cursor_cell: false,
+            linewise: false,
+        })
+    }
+
     fn row_doc_pos_at_mouse(
         &mut self,
         buf: &Buffer,
@@ -924,6 +984,29 @@ impl Window {
             }
             ViewerCommand::YankLines(count) => {
                 copy = self.viewer_line_range(buf, count.max(1));
+            }
+            ViewerCommand::TextObject(object) => {
+                let source = buf.text();
+                let spec = object.spec();
+                if let Some((start, end)) =
+                    crate::text_objects::text_object_for_spec(&source, self.cpos(), spec)
+                {
+                    self.text_state_mut().vim_state.visual_anchor = start;
+                    let cursor = if spec.kind == crate::text_objects::TextObjectKind::Paragraph {
+                        self.set_vim_mode(VimMode::VisualLine);
+                        if end > start {
+                            text::line_start(&source, text::prev_char_boundary(&source, end))
+                        } else {
+                            start
+                        }
+                    } else if end > 0 {
+                        text::prev_char_boundary(&source, end)
+                    } else {
+                        end
+                    };
+                    self.set_cpos(cursor);
+                    self.resync(buf, viewport_rows);
+                }
             }
             ViewerCommand::CenterScroll => {
                 let total_rows = self.scroll_row_total(buf);
@@ -1133,6 +1216,21 @@ impl Window {
                     until: now + YANK_FLASH_DURATION,
                 });
             }
+            ViewerCommand::TextObject(object) => {
+                if let Some(selection) =
+                    self.row_text_object_range(&state, buf, current, object.spec())
+                {
+                    state.selection_anchor = Some(selection.start);
+                    state.cursor = selection.cursor;
+                    next = selection.cursor;
+                    state.selection_includes_cursor_cell = selection.include_cursor_cell;
+                    if selection.linewise {
+                        self.set_vim_mode(VimMode::VisualLine);
+                    }
+                    state.yank_flash = None;
+                    state.preferred_cell_col = None;
+                }
+            }
             ViewerCommand::CenterScroll => {
                 let half = viewport_rows as RowIndex / 2;
                 let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
@@ -1182,6 +1280,49 @@ impl Window {
         }
         copy
     }
+}
+
+fn row_paragraph_text_object(
+    state: &RowTextState,
+    buf: &Buffer,
+    cursor: DocPosition,
+    inner: bool,
+) -> Option<RowTextObjectSelection> {
+    let row_count = buf.line_count() as RowIndex;
+    if row_count == 0 {
+        return None;
+    }
+    let li = state
+        .materialized
+        .local_row(cursor.row)
+        .min(row_count.saturating_sub(1));
+    let lines: Vec<crate::text_objects::ParagraphLine> = (0..row_count)
+        .map(|row| crate::text_objects::ParagraphLine {
+            is_blank: row_is_blank(buf, row),
+        })
+        .collect();
+    let range = crate::text_objects::paragraph_line_range(&lines, row_to_usize(li), inner)?;
+    let last = range.end.saturating_sub(1) as RowIndex;
+    let start = DocPosition {
+        row: state.materialized.absolute_row(range.start as RowIndex),
+        byte_col: 0,
+    };
+    let cursor = DocPosition {
+        row: state.materialized.absolute_row(last),
+        byte_col: 0,
+    };
+    Some(RowTextObjectSelection {
+        start,
+        cursor,
+        include_cursor_cell: false,
+        linewise: true,
+    })
+}
+
+fn row_is_blank(buf: &Buffer, row: RowIndex) -> bool {
+    buf.get_line(row_to_usize(row))
+        .map(|line| line.bytes().all(|b| matches!(b, b' ' | b'\t')))
+        .unwrap_or(true)
 }
 
 fn order_doc_range_including_cursor_cell(

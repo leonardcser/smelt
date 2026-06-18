@@ -1,6 +1,7 @@
 //! Vim text-object selection (iw/aw, i"/a", i(/a(, ip/ap, etc.) over `&str` buffers.
 
 use super::text::{char_class, line_end, line_start, next_char_boundary, CharClass};
+use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SurroundDelimiters {
@@ -20,34 +21,93 @@ impl SurroundDelimiters {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TextObjectSpec {
+    pub inner: bool,
+    pub kind: TextObjectKind,
+}
+
+impl TextObjectSpec {
+    pub fn new(inner: bool, kind: char) -> Option<Self> {
+        Some(Self {
+            inner,
+            kind: TextObjectKind::from_char(kind)?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextObjectKind {
+    Word,
+    BigWord,
+    Quote(char),
+    AnyQuote,
+    Pair { open: char, close: char },
+    Tag,
+    Paragraph,
+}
+
+impl TextObjectKind {
+    fn from_char(kind: char) -> Option<Self> {
+        match kind {
+            'w' => Some(Self::Word),
+            'W' => Some(Self::BigWord),
+            '"' | '\'' | '`' => Some(Self::Quote(kind)),
+            'q' | 's' => Some(Self::AnyQuote),
+            '(' | ')' | 'b' => Some(Self::Pair {
+                open: '(',
+                close: ')',
+            }),
+            '[' | ']' | 'r' => Some(Self::Pair {
+                open: '[',
+                close: ']',
+            }),
+            '{' | '}' | 'B' => Some(Self::Pair {
+                open: '{',
+                close: '}',
+            }),
+            '<' | '>' | 'a' => Some(Self::Pair {
+                open: '<',
+                close: '>',
+            }),
+            't' => Some(Self::Tag),
+            'p' | 'P' => Some(Self::Paragraph),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn text_object(
     buf: &str,
     cpos: usize,
     inner: bool,
     kind: char,
 ) -> Option<(usize, usize)> {
-    if kind == 'q' || kind == 's' {
-        return text_object_any_quote(buf, cpos, inner);
-    }
-    if kind == 't' {
-        return surrounding_delimiters(buf, cpos, kind).map(|d| {
-            if inner {
+    let spec = TextObjectSpec::new(inner, kind)?;
+    text_object_for_spec(buf, cpos, spec)
+}
+
+pub(crate) fn text_object_for_spec(
+    buf: &str,
+    cpos: usize,
+    spec: TextObjectSpec,
+) -> Option<(usize, usize)> {
+    match spec.kind {
+        TextObjectKind::Word => text_object_word(buf, cpos, spec.inner, CharClass::Word),
+        TextObjectKind::BigWord => text_object_word(buf, cpos, spec.inner, CharClass::WORD),
+        TextObjectKind::Quote(quote) => text_object_quote(buf, cpos, spec.inner, quote),
+        TextObjectKind::AnyQuote => text_object_any_quote(buf, cpos, spec.inner),
+        TextObjectKind::Pair { open, close } => {
+            text_object_pair(buf, cpos, spec.inner, open, close)
+        }
+        TextObjectKind::Tag => surrounding_delimiters(buf, cpos, 't').map(|d| {
+            if spec.inner {
                 d.inner_range()
             } else {
                 d.outer_range()
             }
-        });
-    }
-    match kind {
-        'w' => text_object_word(buf, cpos, inner, CharClass::Word),
-        'W' => text_object_word(buf, cpos, inner, CharClass::WORD),
-        '"' | '\'' | '`' => text_object_quote(buf, cpos, inner, kind),
-        '(' | ')' | 'b' => text_object_pair(buf, cpos, inner, '(', ')'),
-        '[' | ']' | 'r' => text_object_pair(buf, cpos, inner, '[', ']'),
-        '{' | '}' | 'B' => text_object_pair(buf, cpos, inner, '{', '}'),
-        '<' | '>' | 'a' => text_object_pair(buf, cpos, inner, '<', '>'),
-        'p' => text_object_paragraph(buf, cpos, inner),
-        _ => None,
+        }),
+        TextObjectKind::Paragraph => text_object_paragraph(buf, cpos, spec.inner),
     }
 }
 
@@ -370,53 +430,33 @@ fn is_tag_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'-')
 }
 
-fn text_object_paragraph(buf: &str, cpos: usize, inner: bool) -> Option<(usize, usize)> {
-    if buf.is_empty() {
-        return None;
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParagraphLine {
+    pub is_blank: bool,
+}
 
-    // Build line table: (start_byte, end_byte_exclusive_including_newline, is_blank).
-    let mut lines: Vec<(usize, usize, bool)> = Vec::new();
-    let bytes = buf.as_bytes();
-    let mut start = 0usize;
-    for i in 0..bytes.len() {
-        if bytes[i] == b'\n' {
-            let line = &buf[start..i];
-            let is_blank = line.bytes().all(|b| b == b' ' || b == b'\t');
-            lines.push((start, i + 1, is_blank));
-            start = i + 1;
-        }
-    }
-    if start < bytes.len() {
-        let line = &buf[start..];
-        let is_blank = line.bytes().all(|b| b == b' ' || b == b'\t');
-        lines.push((start, bytes.len(), is_blank));
-    }
-
+pub(crate) fn paragraph_line_range(
+    lines: &[ParagraphLine],
+    cursor_line: usize,
+    inner: bool,
+) -> Option<Range<usize>> {
     if lines.is_empty() {
         return None;
     }
+    let li = cursor_line.min(lines.len().saturating_sub(1));
+    let blank = lines[li].is_blank;
 
-    let clamped = cpos.min(buf.len());
-    let li = lines
-        .iter()
-        .position(|(s, e, _)| clamped >= *s && clamped < *e)
-        .unwrap_or(lines.len() - 1);
-
-    let blank = lines[li].2;
-
-    // Expand to the run of same-blank-status lines containing `li`.
     let mut lo = li;
-    while lo > 0 && lines[lo - 1].2 == blank {
+    while lo > 0 && lines[lo - 1].is_blank == blank {
         lo -= 1;
     }
     let mut hi = li;
-    while hi + 1 < lines.len() && lines[hi + 1].2 == blank {
+    while hi + 1 < lines.len() && lines[hi + 1].is_blank == blank {
         hi += 1;
     }
 
     if inner {
-        return Some((lines[lo].0, lines[hi].1));
+        return Some(lo..hi + 1);
     }
 
     // Mirrors vim's `current_par`:
@@ -425,23 +465,56 @@ fn text_object_paragraph(buf: &str, cpos: usize, inner: bool) -> Option<(usize, 
     //   to leading blank lines (the "no white in front, none in back" branch).
     // - With cursor in a trailing blank run at EOF, `ap` fails - return None.
     if hi + 1 < lines.len() {
-        let other = lines[hi + 1].2;
+        let other = lines[hi + 1].is_blank;
         let mut hi2 = hi + 1;
-        while hi2 + 1 < lines.len() && lines[hi2 + 1].2 == other {
+        while hi2 + 1 < lines.len() && lines[hi2 + 1].is_blank == other {
             hi2 += 1;
         }
-        Some((lines[lo].0, lines[hi2].1))
-    } else if !blank && lo > 0 && lines[lo - 1].2 {
+        Some(lo..hi2 + 1)
+    } else if !blank && lo > 0 && lines[lo - 1].is_blank {
         let mut lo2 = lo - 1;
-        while lo2 > 0 && lines[lo2 - 1].2 {
+        while lo2 > 0 && lines[lo2 - 1].is_blank {
             lo2 -= 1;
         }
-        Some((lines[lo2].0, lines[hi].1))
+        Some(lo2..hi + 1)
     } else if !blank {
-        Some((lines[lo].0, lines[hi].1))
+        Some(lo..hi + 1)
     } else {
         None
     }
+}
+
+fn text_object_paragraph(buf: &str, cpos: usize, inner: bool) -> Option<(usize, usize)> {
+    if buf.is_empty() {
+        return None;
+    }
+
+    // Build line table: (start_byte, end_byte_exclusive_including_newline, is_blank).
+    let mut lines: Vec<(usize, usize, ParagraphLine)> = Vec::new();
+    let bytes = buf.as_bytes();
+    let mut start = 0usize;
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\n' {
+            let line = &buf[start..i];
+            let is_blank = line.bytes().all(|b| b == b' ' || b == b'\t');
+            lines.push((start, i + 1, ParagraphLine { is_blank }));
+            start = i + 1;
+        }
+    }
+    if start < bytes.len() {
+        let line = &buf[start..];
+        let is_blank = line.bytes().all(|b| b == b' ' || b == b'\t');
+        lines.push((start, bytes.len(), ParagraphLine { is_blank }));
+    }
+
+    let clamped = cpos.min(buf.len());
+    let li = lines
+        .iter()
+        .position(|(s, e, _)| clamped >= *s && clamped < *e)
+        .unwrap_or(lines.len().saturating_sub(1));
+    let paragraph_lines: Vec<ParagraphLine> = lines.iter().map(|(_, _, line)| *line).collect();
+    let range = paragraph_line_range(&paragraph_lines, li, inner)?;
+    Some((lines[range.start].0, lines[range.end - 1].1))
 }
 
 fn text_object_pair(
@@ -494,6 +567,13 @@ mod tests {
 
     fn slice(buf: &str, range: (usize, usize)) -> &str {
         &buf[range.0..range.1]
+    }
+
+    #[test]
+    fn capital_p_alias_selects_paragraph() {
+        let s = "before\n\npara a\npara b\n\nafter";
+        let r = text_object(s, s.find("para a").unwrap(), true, 'P').unwrap();
+        assert_eq!(slice(s, r), "para a\npara b\n");
     }
 
     // ── dispatcher ───────────────────────────────────────────────────────

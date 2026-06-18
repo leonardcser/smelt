@@ -1225,6 +1225,50 @@ mod tests {
     }
 
     #[test]
+    fn transcript_pinned_scroll_does_not_tail_follow_after_growth() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+        for i in 0..100 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        app.transcript_win_mut().follow_tail();
+        app.render_normal_to(&mut std::io::sink());
+        let tail_top = app.transcript_win().scroll_top();
+        let vp = app
+            .transcript_win()
+            .viewport
+            .expect("render populated transcript viewport");
+
+        for _ in 0..12 {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                row: vp.rect.top,
+                column: vp.rect.left,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+        }
+        app.render_normal_to(&mut std::io::sink());
+        let pinned_top = app.transcript_win().scroll_top();
+        assert!(pinned_top < tail_top, "wheel up should move off tail");
+        assert!(!app.transcript_win().is_following_tail());
+
+        app.push_block(smelt_core::Block::Text {
+            content: "line 100".into(),
+        });
+        app.render_normal_to(&mut std::io::sink());
+
+        let win = app.transcript_win();
+        let rendered_rows = app.ui.buf(win.buf).unwrap().lines();
+        assert_eq!(win.scroll_top(), pinned_top);
+        assert!(!win.is_following_tail());
+        assert!(
+            !rendered_rows.iter().any(|line| line == "line 100"),
+            "pinned projection should not rematerialize the tail after growth"
+        );
+    }
+
+    #[test]
     fn transcript_drag_after_tail_render_starts_from_clicked_row() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         for i in 0..100 {

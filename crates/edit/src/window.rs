@@ -17,7 +17,7 @@ use std::sync::Arc;
 mod row_text;
 pub use row_text::{
     resolve_row_document_viewer_command, RowTextState, RowYankFlash, ViewerCommand, ViewerCopy,
-    ViewerKeyResult,
+    ViewerKeyResult, ViewerTextObject,
 };
 
 /// Per-frame paint context for `Window::render`.
@@ -3968,6 +3968,178 @@ mod tests {
         assert!(w
             .row_selection_range(&buf, now + Duration::from_millis(250))
             .is_none());
+    }
+
+    #[test]
+    fn row_text_visual_inner_paragraph_selects_current_paragraph() {
+        let mut w = make_win();
+        let buf = make_buf(vec![
+            "before".into(),
+            String::new(),
+            "para a".into(),
+            "para b".into(),
+            String::new(),
+            "after".into(),
+        ]);
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 20,
+            materialized_rows: 6,
+        });
+        w.set_vim_mode(VimMode::Visual);
+        let now = Instant::now();
+        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(12), 10, now);
+        w.execute_row_viewer_command(
+            &buf,
+            ViewerCommand::TextObject(ViewerTextObject::new(true, 'p').unwrap()),
+            10,
+            now,
+        );
+
+        assert_eq!(
+            w.row_selection_anchor_range(&buf).unwrap(),
+            DocRange {
+                start: DocPosition {
+                    row: 12,
+                    byte_col: 0,
+                },
+                end: DocPosition {
+                    row: 14,
+                    byte_col: 0,
+                },
+            }
+        );
+        assert_eq!(w.vim_mode(), VimMode::VisualLine);
+        assert_eq!(
+            w.row_text_state().cursor,
+            DocPosition {
+                row: 13,
+                byte_col: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn row_text_visual_outer_paragraph_includes_separator() {
+        let mut w = make_win();
+        let buf = make_buf(vec![
+            "before".into(),
+            String::new(),
+            "para a".into(),
+            "para b".into(),
+            String::new(),
+            "after".into(),
+        ]);
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 20,
+            materialized_rows: 6,
+        });
+        w.set_vim_mode(VimMode::Visual);
+        let now = Instant::now();
+        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(12), 10, now);
+        w.execute_row_viewer_command(
+            &buf,
+            ViewerCommand::TextObject(ViewerTextObject::new(false, 'p').unwrap()),
+            10,
+            now,
+        );
+
+        assert_eq!(
+            w.row_selection_anchor_range(&buf).unwrap(),
+            DocRange {
+                start: DocPosition {
+                    row: 12,
+                    byte_col: 0,
+                },
+                end: DocPosition {
+                    row: 15,
+                    byte_col: 0,
+                },
+            }
+        );
+        assert_eq!(w.vim_mode(), VimMode::VisualLine);
+        assert_eq!(
+            w.row_text_state().cursor,
+            DocPosition {
+                row: 14,
+                byte_col: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn row_text_visual_line_paragraph_keeps_char_motions_linewise() {
+        let mut w = make_win();
+        let buf = make_buf(vec![
+            "before".into(),
+            String::new(),
+            "para a".into(),
+            "para b".into(),
+            String::new(),
+            "after".into(),
+        ]);
+        w.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 20,
+            materialized_rows: 6,
+        });
+        w.set_vim_mode(VimMode::Visual);
+        let now = Instant::now();
+        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(12), 10, now);
+        w.execute_row_viewer_command(
+            &buf,
+            ViewerCommand::TextObject(ViewerTextObject::new(true, 'p').unwrap()),
+            10,
+            now,
+        );
+        w.execute_row_viewer_command(&buf, ViewerCommand::MoveCursorCol(1), 10, now);
+        assert_eq!(w.vim_mode(), VimMode::VisualLine);
+        assert_eq!(
+            w.row_text_state().cursor,
+            DocPosition {
+                row: 13,
+                byte_col: 1,
+            }
+        );
+        assert_eq!(
+            w.row_selection_anchor_range(&buf).unwrap(),
+            DocRange {
+                start: DocPosition {
+                    row: 12,
+                    byte_col: 0,
+                },
+                end: DocPosition {
+                    row: 14,
+                    byte_col: 0,
+                },
+            }
+        );
+
+        w.execute_row_viewer_command(&buf, ViewerCommand::WordForward(1), 10, now);
+        assert_eq!(
+            w.row_text_state().cursor,
+            DocPosition {
+                row: 13,
+                byte_col: 5,
+            }
+        );
+        assert_eq!(
+            w.row_selection_anchor_range(&buf).unwrap(),
+            DocRange {
+                start: DocPosition {
+                    row: 12,
+                    byte_col: 0,
+                },
+                end: DocPosition {
+                    row: 14,
+                    byte_col: 0,
+                },
+            }
+        );
     }
 
     #[test]

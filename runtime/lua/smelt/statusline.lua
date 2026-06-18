@@ -41,7 +41,7 @@ end
 
 local function vim_group(label)
   if label == "INSERT" then return "SmeltVimInsert"
-  elseif label == "VISUAL" or label == "VISUAL LINE" then return "SmeltVimVisual"
+  elseif label == "VISUAL" or label == "V-LINE" then return "SmeltVimVisual"
   else return "SmeltVimNormal"
   end
 end

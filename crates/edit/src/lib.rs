@@ -76,8 +76,8 @@ pub use vim::VimMode;
 pub use window::{
     clamp_scroll, materialized_row_range, resolve_row_document_viewer_command, scroll_to_show,
     CursorShape, DrawContext, EventCtx, MouseCtx, RowTextState, RowYankFlash, ScrollbarState,
-    SplitConfig, VerticalScroll, ViewerCommand, ViewerCopy, ViewerKeyResult, Window, WindowSurface,
-    WindowViewport,
+    SplitConfig, VerticalScroll, ViewerCommand, ViewerCopy, ViewerKeyResult, ViewerTextObject,
+    Window, WindowSurface, WindowViewport,
 };
 
 /// Byte offsets of hard `\n` line breaks in `text`.
@@ -1708,6 +1708,7 @@ impl Ui {
             .gutters
             .content_width(rect.width)
             .min(rect.width.saturating_sub(gutter_width));
+        let follow_tail = self.should_follow_tail(win_id);
         let request = MaterializeRequest {
             win: win_id,
             buf: buf_id,
@@ -1715,7 +1716,7 @@ impl Ui {
             gutter_width,
             content_width,
             scroll_top: win.scroll_top(),
-            follow_tail: win.is_following_tail(),
+            follow_tail,
         };
         prepare(self, request);
 
@@ -2447,7 +2448,7 @@ impl Ui {
     }
 
     /// Whether `win`'s tail-follow should fire this frame: tail mode is active,
-    /// there is no active selection, and the same window is not under a mouse drag.
+    /// there is no active selection, and no pointer gesture owns the same window.
     pub fn should_follow_tail(&self, win: WinId) -> bool {
         let Some(w) = self.wins.get(&win) else {
             return false;
@@ -2455,7 +2456,10 @@ impl Ui {
         if !w.is_following_tail() || w.selection_active() {
             return false;
         }
-        !matches!(self.capture, Some(HitTarget::Window(d)) if d == win)
+        !matches!(
+            self.capture,
+            Some(HitTarget::Window(d) | HitTarget::Scrollbar { owner: d }) if d == win
+        )
     }
 
     /// Resolve tail-follow windows against their current row count. This is a
@@ -5825,6 +5829,7 @@ mod tests {
     #[test]
     fn resolve_tail_scrolls_respects_frozen() {
         let mut ui = make_ui();
+        ui.set_terminal_size(20, 10);
         let buf = ui.buf_create(BufCreateOpts::default());
         if let Some(b) = ui.buf_mut(buf) {
             b.set_all_lines((0..50).map(|i| format!("line {i}")).collect());
@@ -5881,6 +5886,93 @@ mod tests {
         ui.win_mut(win).unwrap().follow_tail();
         ui.resolve_tail_scrolls();
         assert_eq!(ui.win(win).unwrap().scroll_top(), 40);
+    }
+
+    #[test]
+    fn resolve_tail_scrolls_skips_scrollbar_capture() {
+        let mut ui = make_ui();
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines((0..50).map(|i| format!("line {i}")).collect());
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        let rect = layout::Rect::new(0, 0, 20, 10);
+        let bar = window::ScrollbarState::new(19, 50, 10).unwrap();
+        ui.win_mut(win).unwrap().viewport =
+            Some(window::WindowViewport::new(rect, 19, 50, 0, Some(bar)));
+        ui.win_mut(win).unwrap().pin_scroll(0);
+        ui.win_mut(win).unwrap().follow_tail();
+        ui.set_capture(HitTarget::Scrollbar { owner: win });
+
+        ui.resolve_tail_scrolls();
+
+        assert_eq!(ui.win(win).unwrap().scroll_top(), 0);
+        ui.clear_capture();
+    }
+
+    #[test]
+    fn render_prepare_uses_effective_follow_tail() {
+        let mut ui = make_ui();
+        ui.set_terminal_size(20, 10);
+        let buf = ui.buf_create(BufCreateOpts::default());
+        if let Some(b) = ui.buf_mut(buf) {
+            b.set_all_lines((0..50).map(|i| format!("line {i}")).collect());
+        }
+        let win = ui
+            .win_open_split(
+                buf,
+                SplitConfig {
+                    region: "p".into(),
+                    gutters: Gutters::default(),
+                },
+            )
+            .unwrap();
+        ui.set_layout(LayoutTree::vbox(vec![(
+            Constraint::Fill,
+            LayoutTree::leaf(win),
+        )]));
+
+        ui.win_mut(win).unwrap().pin_scroll(0);
+        ui.win_mut(win).unwrap().follow_tail();
+        let mut request_follow_tail = None;
+        let mut out = Vec::new();
+        ui.render_with_paints_prepared(
+            &mut out,
+            |_, request| {
+                if request.win == win {
+                    request_follow_tail = Some(request.follow_tail);
+                }
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(request_follow_tail, Some(true));
+
+        ui.win_mut(win).unwrap().pin_scroll(0);
+        ui.win_mut(win).unwrap().follow_tail();
+        ui.set_capture(HitTarget::Scrollbar { owner: win });
+        let mut request_follow_tail = None;
+        let mut out = Vec::new();
+        ui.render_with_paints_prepared(
+            &mut out,
+            |_, request| {
+                if request.win == win {
+                    request_follow_tail = Some(request.follow_tail);
+                }
+            },
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(request_follow_tail, Some(false));
+        ui.clear_capture();
     }
 
     #[test]

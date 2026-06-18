@@ -1392,7 +1392,7 @@ impl TuiApp {
         match mode {
             crate::smelt_edit::VimMode::Insert => "INSERT",
             crate::smelt_edit::VimMode::Visual => "VISUAL",
-            crate::smelt_edit::VimMode::VisualLine => "VISUAL LINE",
+            crate::smelt_edit::VimMode::VisualLine => "V-LINE",
             crate::smelt_edit::VimMode::Normal => "NORMAL",
         }
         .into()

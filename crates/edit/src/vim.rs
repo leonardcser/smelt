@@ -8,8 +8,10 @@ use super::text::{
     char_class, line_end, line_start, next_char_boundary, prev_char_boundary, word_backward_pos,
     word_forward_pos, CharClass,
 };
-use super::text_objects::{surrounding_delimiters, text_object};
-use super::window::{ViewerCommand, ViewerKeyResult};
+use super::text_objects::{
+    surrounding_delimiters, text_object, text_object_for_spec, TextObjectKind, TextObjectSpec,
+};
+use super::window::{ViewerCommand, ViewerKeyResult, ViewerTextObject};
 use super::{Clipboard, UndoEntry, UndoHistory};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use smelt_buffer::attached::AttachedTextMut;
@@ -473,6 +475,18 @@ pub fn handle_viewer_key(
             state.count2 = None;
             return cmd.map_or(ViewerKeyResult::Consumed, ViewerKeyResult::Command);
         }
+        SubState::WaitingVisualTextObj(inner) => {
+            state.sub = SubState::Ready;
+            let cmd = match key.code {
+                KeyCode::Char(kind) => {
+                    ViewerTextObject::new(inner, kind).map(ViewerCommand::TextObject)
+                }
+                _ => None,
+            };
+            state.count1 = None;
+            state.count2 = None;
+            return cmd.map_or(ViewerKeyResult::Consumed, ViewerKeyResult::Command);
+        }
         SubState::WaitingG => {
             state.sub = SubState::Ready;
             let cmd = match key.code {
@@ -577,6 +591,14 @@ pub fn handle_viewer_key(
         KeyCode::Char('V') => {
             state.set_mode(mode, VimMode::VisualLine);
             ViewerKeyResult::Command(ViewerCommand::StartVisualLine)
+        }
+        KeyCode::Char('i') if matches!(*mode, VimMode::Visual | VimMode::VisualLine) => {
+            state.sub = SubState::WaitingVisualTextObj(true);
+            ViewerKeyResult::Consumed
+        }
+        KeyCode::Char('a') if matches!(*mode, VimMode::Visual | VimMode::VisualLine) => {
+            state.sub = SubState::WaitingVisualTextObj(false);
+            ViewerKeyResult::Consumed
         }
         KeyCode::Char('y') => {
             if matches!(*mode, VimMode::Visual | VimMode::VisualLine) {
@@ -1260,13 +1282,23 @@ fn handle_visual(key: KeyEvent, ctx: &mut VimContext<'_>) -> Action {
     if let SubState::WaitingVisualTextObj(inner) = ctx.vim_state.sub {
         ctx.vim_state.sub = SubState::Ready;
         if let KeyCode::Char(c) = key.code {
-            if let Some((start, end)) = text_object(ctx.buf.as_str(), *ctx.cpos, inner, c) {
-                ctx.vim_state.visual_anchor = start;
-                *ctx.cpos = if end > 0 {
-                    prev_char_boundary(ctx.buf.as_str(), end)
-                } else {
-                    end
-                };
+            if let Some(spec) = TextObjectSpec::new(inner, c) {
+                if let Some((start, end)) = text_object_for_spec(ctx.buf.as_str(), *ctx.cpos, spec)
+                {
+                    ctx.vim_state.visual_anchor = start;
+                    *ctx.cpos = if spec.kind == TextObjectKind::Paragraph {
+                        *ctx.mode = VimMode::VisualLine;
+                        if end > start {
+                            line_start(ctx.buf.as_str(), prev_char_boundary(ctx.buf.as_str(), end))
+                        } else {
+                            start
+                        }
+                    } else if end > 0 {
+                        prev_char_boundary(ctx.buf.as_str(), end)
+                    } else {
+                        end
+                    };
+                }
             }
         }
         return Action::Consumed;
@@ -2467,6 +2499,29 @@ mod tests {
     }
 
     #[test]
+    fn row_viewer_visual_text_object_prefix_returns_command() {
+        let mut mode = VimMode::Normal;
+        let mut state = VimWindowState::default();
+
+        assert_eq!(
+            handle_viewer_key(key('v'), &mut mode, &mut state),
+            ViewerKeyResult::Command(ViewerCommand::StartVisual)
+        );
+        assert_eq!(mode, VimMode::Visual);
+        assert_eq!(
+            handle_viewer_key(key('i'), &mut mode, &mut state),
+            ViewerKeyResult::Consumed
+        );
+        assert_eq!(state.pending_input().as_deref(), Some("i"));
+        assert_eq!(
+            handle_viewer_key(key('p'), &mut mode, &mut state),
+            ViewerKeyResult::Command(ViewerCommand::TextObject(
+                ViewerTextObject::new(true, 'p').unwrap()
+            ))
+        );
+    }
+
+    #[test]
     fn test_word_forward() {
         let mut h = TestHarness::new("hello world foo");
         h.handle(key('w'));
@@ -2751,6 +2806,32 @@ mod tests {
         h.handle(key('a'));
         h.handle(key('p'));
         assert_eq!(h.buf, "c\n");
+    }
+
+    #[test]
+    fn vip_deletes_the_inner_paragraph() {
+        let mut h = TestHarness::new("a\nb\n\nc\nd\n\ne\n");
+        h.cpos = 5;
+        h.handle(key('v'));
+        h.handle(key('i'));
+        h.handle(key('p'));
+        assert_eq!(h.mode, VimMode::VisualLine);
+        assert_eq!(h.cpos, h.buf.find('d').unwrap());
+        h.handle(key('d'));
+        assert_eq!(h.buf, "a\nb\n\n\ne\n");
+    }
+
+    #[test]
+    fn vap_deletes_the_paragraph_and_trailing_blank() {
+        let mut h = TestHarness::new("a\nb\n\nc\nd\n\ne\n");
+        h.cpos = 5;
+        h.handle(key('v'));
+        h.handle(key('a'));
+        h.handle(key('p'));
+        assert_eq!(h.mode, VimMode::VisualLine);
+        assert_eq!(h.cpos, h.buf.find("\ne").unwrap());
+        h.handle(key('d'));
+        assert_eq!(h.buf, "a\nb\n\ne\n");
     }
 
     #[test]
