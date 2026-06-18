@@ -2484,7 +2484,7 @@ mod tests {
     }
 
     #[test]
-    fn row_viewer_gf_opens_action() {
+    fn document_view_gf_opens_action() {
         let mut mode = VimMode::Normal;
         let mut state = VimWindowState::default();
 
@@ -2499,7 +2499,7 @@ mod tests {
     }
 
     #[test]
-    fn row_viewer_visual_text_object_prefix_returns_command() {
+    fn document_view_visual_text_object_prefix_returns_command() {
         let mut mode = VimMode::Normal;
         let mut state = VimWindowState::default();
 

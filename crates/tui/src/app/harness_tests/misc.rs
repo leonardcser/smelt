@@ -528,7 +528,7 @@ fn transcript_h_and_l_move_row_cursor_horizontally() {
 }
 
 #[test]
-fn transcript_line_end_uses_absolute_row_text() {
+fn transcript_line_end_uses_absolute_document_row() {
     let mut app = row_document_transcript_app(100, true);
     let materialized_head = transcript_buffer_lines(&app, 1).pop().unwrap_or_default();
 

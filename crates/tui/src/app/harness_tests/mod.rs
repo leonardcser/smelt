@@ -313,7 +313,7 @@ fn execute_transcript_viewer_command(
         .win_and_buf_mut(crate::app::TRANSCRIPT_WIN, buf_id);
     let win = win.expect("transcript window");
     let buf = buf.expect("transcript buffer");
-    win.execute_row_viewer_command(buf, command, viewport_rows, now);
+    win.execute_document_view_command(buf, command, viewport_rows, now);
 }
 
 fn pin_transcript_top_to_line_containing(

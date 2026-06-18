@@ -59,7 +59,7 @@ impl TuiApp {
 
         if opts.cursor {
             if is_row_backed {
-                win.execute_row_viewer_command(
+                win.execute_document_view_command(
                     buf,
                     crate::smelt_edit::DocumentCommand::GotoPosition(position),
                     viewport_rows,

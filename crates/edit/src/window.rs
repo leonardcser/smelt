@@ -645,20 +645,20 @@ impl Window {
         self.surface.text_mut()
     }
 
-    pub(crate) fn row_text_state(&self) -> &DocumentViewState {
+    pub(crate) fn document_view_state_ref(&self) -> &DocumentViewState {
         &self.surface.text().document_view
     }
 
-    pub(crate) fn row_text_state_mut(&mut self) -> &mut DocumentViewState {
+    pub(crate) fn document_view_state_mut(&mut self) -> &mut DocumentViewState {
         &mut self.surface.text_mut().document_view
     }
 
     pub fn document_view_state(&self) -> DocumentViewState {
-        *self.row_text_state()
+        *self.document_view_state_ref()
     }
 
     pub fn set_document_view_state(&mut self, state: DocumentViewState) {
-        *self.row_text_state_mut() = state;
+        *self.document_view_state_mut() = state;
     }
 
     pub fn cpos(&self) -> usize {
@@ -957,8 +957,8 @@ impl Window {
             .scroll_top
             .saturating_add(screen_row as RowIndex)
             .min(self.scroll_row_total(buf).saturating_sub(1));
-        if self.row_text_state().active {
-            let mut state = *self.row_text_state();
+        if self.document_view_state_ref().active {
+            let mut state = *self.document_view_state_ref();
             let mut cursor = state.cursor;
             self.move_row_cursor_to_row_preserving_cell(
                 &mut state,
@@ -968,7 +968,7 @@ impl Window {
             );
             state.cursor = cursor;
             self.project_row_cursor_to_local(state, buf);
-            *self.row_text_state_mut() = state;
+            *self.document_view_state_mut() = state;
             return;
         }
         let target_vrow = self.local_row(target_abs_row).min(total.saturating_sub(1));
@@ -1050,16 +1050,20 @@ impl Window {
     }
 
     fn local_row(&self, absolute_row: RowIndex) -> RowIndex {
-        if self.row_text_state().active {
-            self.row_text_state().materialized.local_row(absolute_row)
+        if self.document_view_state_ref().active {
+            self.document_view_state_ref()
+                .materialized
+                .local_row(absolute_row)
         } else {
             absolute_row
         }
     }
 
     fn absolute_row(&self, local_row: RowIndex) -> RowIndex {
-        if self.row_text_state().active {
-            self.row_text_state().materialized.absolute_row(local_row)
+        if self.document_view_state_ref().active {
+            self.document_view_state_ref()
+                .materialized
+                .absolute_row(local_row)
         } else {
             local_row
         }
@@ -1070,8 +1074,8 @@ impl Window {
     }
 
     fn absolute_cursor_row(&self) -> RowIndex {
-        if self.row_text_state().active {
-            self.row_text_state().cursor.row
+        if self.document_view_state_ref().active {
+            self.document_view_state_ref().cursor.row
         } else {
             self.absolute_row(self.cursor_row())
         }
@@ -1093,8 +1097,8 @@ impl Window {
     }
 
     fn backed_display_row(&self, buf: &Buffer, absolute_row: RowIndex) -> Option<RowIndex> {
-        if self.row_text_state().active {
-            self.backed_local_row(*self.row_text_state(), buf, absolute_row)
+        if self.document_view_state_ref().active {
+            self.backed_local_row(*self.document_view_state_ref(), buf, absolute_row)
         } else {
             (absolute_row < self.visual_row_total(buf)).then_some(absolute_row)
         }
@@ -2011,11 +2015,11 @@ impl Window {
     /// For row-backed documents this is the document row; for byte-backed text it is
     /// the local row from `effective_cursor_row`, which is already absolute.
     pub fn drag_endpoint_absolute_row(&self, buf: &Buffer) -> RowIndex {
-        if self.row_text_state().active {
-            self.row_text_state()
+        if self.document_view_state_ref().active {
+            self.document_view_state_ref()
                 .drag_endpoint
                 .map(|ep| ep.row)
-                .unwrap_or(self.row_text_state().cursor.row)
+                .unwrap_or(self.document_view_state_ref().cursor.row)
         } else {
             self.effective_cursor_row(buf)
         }
@@ -2601,8 +2605,8 @@ impl Window {
         }
 
         // Row-document path: update the document cursor and drag endpoint.
-        if self.row_text_state().active {
-            let mut state = *self.row_text_state();
+        if self.document_view_state_ref().active {
+            let mut state = *self.document_view_state_ref();
             let col = state.preferred_cell_col.unwrap_or_else(|| {
                 self.row_position_cell(state, buf, state.drag_endpoint.unwrap_or(state.cursor))
                     .unwrap_or(0)
@@ -2626,7 +2630,7 @@ impl Window {
                     de.byte_col = byte_col;
                 }
             }
-            *self.row_text_state_mut() = state;
+            *self.document_view_state_mut() = state;
             self.project_row_cursor_to_local(state, buf);
             return true;
         }
@@ -2683,8 +2687,8 @@ impl Window {
         let screen_row =
             Self::screen_row_or_edge(self.absolute_cursor_row(), cur_scroll, viewport_rows);
 
-        if self.row_text_state().active {
-            let mut state = *self.row_text_state();
+        if self.document_view_state_ref().active {
+            let mut state = *self.document_view_state_ref();
             let mut cursor = state.cursor;
             let target_row = new_scroll
                 .saturating_add(screen_row as RowIndex)
@@ -2692,7 +2696,7 @@ impl Window {
             self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut cursor, target_row);
             state.cursor = cursor;
             self.project_row_cursor_to_local(state, buf);
-            *self.row_text_state_mut() = state;
+            *self.document_view_state_mut() = state;
         } else {
             let target_vrow = self
                 .local_row(new_scroll.saturating_add(screen_row as RowIndex))
@@ -3549,7 +3553,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_tail_checks_use_logical_total_rows() {
+    fn document_view_tail_checks_use_logical_total_rows() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         w.set_materialized_rows(80, 20, 100);
@@ -3935,7 +3939,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_goto_keeps_absolute_cursor_across_materialized_slice() {
+    fn document_view_goto_keeps_absolute_cursor_across_materialized_slice() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         w.apply_materialized_rows(MaterializedRows {
@@ -3946,7 +3950,7 @@ mod tests {
         });
         w.set_resolved_scroll(100);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(150), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(150), 10, now);
 
         assert_eq!(w.row_cursor().unwrap().row, 150);
         assert_eq!(w.scroll_top(), 141);
@@ -3964,7 +3968,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_yank_selection_returns_doc_range() {
+    fn document_view_yank_selection_returns_doc_range() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         w.apply_materialized_rows(MaterializedRows {
@@ -3974,11 +3978,11 @@ mod tests {
             materialized_rows: 20,
         });
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(45), 10, now);
-        w.execute_row_viewer_command(&buf, DocumentCommand::StartVisual, 10, now);
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(55), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(45), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::StartVisual, 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(55), 10, now);
         let range = w
-            .execute_row_viewer_command(&buf, DocumentCommand::YankSelection, 10, now)
+            .execute_document_view_command(&buf, DocumentCommand::YankSelection, 10, now)
             .unwrap();
 
         assert_eq!(range.start.row, 45);
@@ -3991,7 +3995,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_visual_inner_paragraph_selects_current_paragraph() {
+    fn document_view_visual_inner_paragraph_selects_current_paragraph() {
         let mut w = make_win();
         let buf = make_buf(vec![
             "before".into(),
@@ -4009,8 +4013,8 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(12), 10, now);
-        w.execute_row_viewer_command(
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(12), 10, now);
+        w.execute_document_view_command(
             &buf,
             DocumentCommand::TextObject(DocumentTextObject::new(true, 'p').unwrap()),
             10,
@@ -4032,7 +4036,7 @@ mod tests {
         );
         assert_eq!(w.vim_mode(), VimMode::VisualLine);
         assert_eq!(
-            w.row_text_state().cursor,
+            w.document_view_state_ref().cursor,
             DocPosition {
                 row: 13,
                 byte_col: 0,
@@ -4041,7 +4045,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_visual_outer_paragraph_includes_separator() {
+    fn document_view_visual_outer_paragraph_includes_separator() {
         let mut w = make_win();
         let buf = make_buf(vec![
             "before".into(),
@@ -4059,8 +4063,8 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(12), 10, now);
-        w.execute_row_viewer_command(
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(12), 10, now);
+        w.execute_document_view_command(
             &buf,
             DocumentCommand::TextObject(DocumentTextObject::new(false, 'p').unwrap()),
             10,
@@ -4082,7 +4086,7 @@ mod tests {
         );
         assert_eq!(w.vim_mode(), VimMode::VisualLine);
         assert_eq!(
-            w.row_text_state().cursor,
+            w.document_view_state_ref().cursor,
             DocPosition {
                 row: 14,
                 byte_col: 0,
@@ -4091,7 +4095,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_visual_line_paragraph_keeps_char_motions_linewise() {
+    fn document_view_visual_line_paragraph_keeps_char_motions_linewise() {
         let mut w = make_win();
         let buf = make_buf(vec![
             "before".into(),
@@ -4109,17 +4113,17 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(12), 10, now);
-        w.execute_row_viewer_command(
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(12), 10, now);
+        w.execute_document_view_command(
             &buf,
             DocumentCommand::TextObject(DocumentTextObject::new(true, 'p').unwrap()),
             10,
             now,
         );
-        w.execute_row_viewer_command(&buf, DocumentCommand::MoveCursorCol(1), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::MoveCursorCol(1), 10, now);
         assert_eq!(w.vim_mode(), VimMode::VisualLine);
         assert_eq!(
-            w.row_text_state().cursor,
+            w.document_view_state_ref().cursor,
             DocPosition {
                 row: 13,
                 byte_col: 1,
@@ -4139,9 +4143,9 @@ mod tests {
             }
         );
 
-        w.execute_row_viewer_command(&buf, DocumentCommand::WordForward(1), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::WordForward(1), 10, now);
         assert_eq!(
-            w.row_text_state().cursor,
+            w.document_view_state_ref().cursor,
             DocPosition {
                 row: 13,
                 byte_col: 5,
@@ -4163,7 +4167,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_visual_line_yank_returns_linewise_doc_range() {
+    fn document_view_visual_line_yank_returns_linewise_doc_range() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         w.apply_materialized_rows(MaterializedRows {
@@ -4174,11 +4178,11 @@ mod tests {
         });
         w.set_vim_mode(VimMode::VisualLine);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(45), 10, now);
-        w.execute_row_viewer_command(&buf, DocumentCommand::StartVisualLine, 10, now);
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(47), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(45), 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::StartVisualLine, 10, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(47), 10, now);
         let range = w
-            .execute_row_viewer_command(&buf, DocumentCommand::YankSelectionLinewise, 10, now)
+            .execute_document_view_command(&buf, DocumentCommand::YankSelectionLinewise, 10, now)
             .unwrap();
 
         assert_eq!(
@@ -4197,7 +4201,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_line_end_lands_on_last_character() {
+    fn document_view_line_end_lands_on_last_character() {
         let mut w = make_win();
         let buf = make_buf(vec!["abc".into()]);
         w.apply_materialized_rows(MaterializedRows {
@@ -4208,14 +4212,14 @@ mod tests {
         });
         let now = Instant::now();
 
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(10), 5, now);
-        w.execute_row_viewer_command(&buf, DocumentCommand::LineEnd, 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(10), 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::LineEnd, 5, now);
 
         assert_eq!(w.row_cursor().unwrap().byte_col, 2);
     }
 
     #[test]
-    fn row_text_word_motion_updates_doc_column() {
+    fn document_view_word_motion_updates_doc_column() {
         let mut w = make_win();
         let buf = make_buf(vec!["alpha beta gamma".into()]);
         w.apply_materialized_rows(MaterializedRows {
@@ -4225,17 +4229,17 @@ mod tests {
             materialized_rows: 1,
         });
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(10), 5, now);
-        w.execute_row_viewer_command(&buf, DocumentCommand::WordForward(2), 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(10), 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::WordForward(2), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha beta ".len());
-        w.execute_row_viewer_command(&buf, DocumentCommand::WordBackward(1), 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::WordBackward(1), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha ".len());
-        w.execute_row_viewer_command(&buf, DocumentCommand::WordEnd(1), 5, now);
+        w.execute_document_view_command(&buf, DocumentCommand::WordEnd(1), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha beta".len() - 1);
     }
 
     #[test]
-    fn row_text_mouse_drag_returns_doc_range() {
+    fn document_view_mouse_drag_returns_doc_range() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         w.apply_materialized_rows(MaterializedRows {
@@ -4292,7 +4296,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_mouse_click_sets_preferred_cell_for_vertical_motion() {
+    fn document_view_mouse_click_sets_preferred_cell_for_vertical_motion() {
         let mut w = make_win();
         let buf = make_buf(vec!["abcdef".into(), "uvwxyz".into()]);
         w.apply_materialized_rows(MaterializedRows {
@@ -4316,9 +4320,9 @@ mod tests {
             ctx,
             now,
         );
-        assert_eq!(w.row_text_state().preferred_cell_col, Some(4));
+        assert_eq!(w.document_view_state_ref().preferred_cell_col, Some(4));
 
-        w.execute_row_viewer_command(&buf, DocumentCommand::MoveRows(1), 2, now);
+        w.execute_document_view_command(&buf, DocumentCommand::MoveRows(1), 2, now);
         w.sync_row_cursor_to_local(&buf, 2);
         assert_eq!(w.row_cursor().unwrap().row, 11);
         assert_eq!(w.cursor_col(), 4);
@@ -4558,7 +4562,7 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_row_text_from_absolute_scroll_top() {
+    fn render_paints_document_view_from_absolute_scroll_top() {
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         buf.set_all_lines(vec!["row 20".into(), "row 21".into(), "row 22".into()]);
         let mut w = make_win();
@@ -4575,7 +4579,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_pan_preserves_cursor_screen_row_in_absolute_space() {
+    fn document_view_pan_preserves_cursor_screen_row_in_absolute_space() {
         let mut w = make_win();
         let rows = sample_rows(20);
         let buf = make_buf(rows.clone());
@@ -4596,7 +4600,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_pan_preserves_screen_row_beyond_materialized_slice() {
+    fn document_view_pan_preserves_screen_row_beyond_materialized_slice() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         let viewport = 5;
@@ -4608,7 +4612,7 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 94);
         assert_eq!(w.cursor_screen_row(viewport), Some(4));
 
@@ -4620,7 +4624,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_pan_preserves_screen_row_before_materialized_slice() {
+    fn document_view_pan_preserves_screen_row_before_materialized_slice() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         let viewport = 5;
@@ -4632,7 +4636,7 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 94);
         assert_eq!(w.cursor_screen_row(viewport), Some(4));
 
@@ -4644,7 +4648,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_scroll_command_preserves_screen_row_beyond_materialized_slice() {
+    fn document_view_scroll_command_preserves_screen_row_beyond_materialized_slice() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         let viewport = 5;
@@ -4656,9 +4660,9 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
 
-        w.execute_row_viewer_command(&buf, DocumentCommand::ScrollRows(20), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::ScrollRows(20), viewport, now);
 
         assert_eq!(w.scroll_top, 110);
         assert_eq!(w.row_cursor().unwrap().row, 114);
@@ -4666,7 +4670,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_half_page_rows_moves_by_half_viewport() {
+    fn document_view_half_page_rows_moves_by_half_viewport() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(100));
         let viewport = 10;
@@ -4678,7 +4682,7 @@ mod tests {
         });
         w.set_resolved_scroll(0);
         let now = Instant::now();
-        w.execute_row_viewer_command(
+        w.execute_document_view_command(
             &buf,
             DocumentCommand::GotoPosition(DocPosition {
                 row: 5,
@@ -4688,15 +4692,15 @@ mod tests {
             now,
         );
 
-        w.execute_row_viewer_command(&buf, DocumentCommand::HalfPageRows(1), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::HalfPageRows(1), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 10);
 
-        w.execute_row_viewer_command(&buf, DocumentCommand::HalfPageRows(-1), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::HalfPageRows(-1), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 5);
     }
 
     #[test]
-    fn row_text_ctrl_u_and_ctrl_d_use_half_page_in_vim_handler() {
+    fn document_view_ctrl_u_and_ctrl_d_use_half_page_in_vim_handler() {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         let mut mode = VimMode::Normal;
         let mut state = VimWindowState::default();
@@ -4776,7 +4780,7 @@ mod tests {
         });
         w.set_resolved_scroll(42);
         let now = Instant::now();
-        w.execute_row_viewer_command(
+        w.execute_document_view_command(
             &buf,
             DocumentCommand::GotoPosition(DocPosition {
                 row: 42,
@@ -4807,24 +4811,24 @@ mod tests {
         });
         w.set_resolved_scroll(10);
         {
-            w.row_text_state_mut().cursor = DocPosition {
+            w.document_view_state_mut().cursor = DocPosition {
                 row: 11,
                 byte_col: 4,
             };
-            w.row_text_state_mut().preferred_cell_col = Some(4);
+            w.document_view_state_mut().preferred_cell_col = Some(4);
         }
 
         w.sync_row_cursor_to_local(&buf, 3);
 
         assert_eq!(w.cursor_col(), 0);
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         assert_eq!(state.cursor.row, 11);
         assert_eq!(state.cursor.byte_col, 4);
         assert_eq!(state.preferred_cell_col, Some(4));
     }
 
     #[test]
-    fn row_text_vertical_motion_preserves_preferred_cell_across_short_rows() {
+    fn document_view_vertical_motion_preserves_preferred_cell_across_short_rows() {
         let mut w = make_win();
         let buf = make_buf(vec!["abcdef".into(), String::new(), "uvwxyz".into()]);
         let viewport = 3;
@@ -4836,7 +4840,7 @@ mod tests {
             materialized_rows: 3,
         });
         w.set_resolved_scroll(10);
-        w.execute_row_viewer_command(
+        w.execute_document_view_command(
             &buf,
             DocumentCommand::GotoPosition(DocPosition {
                 row: 10,
@@ -4849,13 +4853,13 @@ mod tests {
         assert_eq!(w.cursor_col(), 4);
         w.text_state_mut().curswant = Some(0);
 
-        w.execute_row_viewer_command(&buf, DocumentCommand::MoveRows(1), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::MoveRows(1), viewport, now);
         w.sync_row_cursor_to_local(&buf, viewport);
         assert_eq!(w.row_cursor().unwrap().row, 11);
         assert_eq!(w.cursor_col(), 0);
-        assert_eq!(w.row_text_state().preferred_cell_col, Some(4));
+        assert_eq!(w.document_view_state_ref().preferred_cell_col, Some(4));
 
-        w.execute_row_viewer_command(&buf, DocumentCommand::MoveRows(1), viewport, now);
+        w.execute_document_view_command(&buf, DocumentCommand::MoveRows(1), viewport, now);
         w.sync_row_cursor_to_local(&buf, viewport);
         assert_eq!(w.row_cursor().unwrap().row, 12);
         assert_eq!(w.cursor_col(), 4);
@@ -4863,7 +4867,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_pan_preserves_preferred_cell_across_short_rows() {
+    fn document_view_pan_preserves_preferred_cell_across_short_rows() {
         let mut w = make_win();
         let buf = make_buf(vec!["abcdef".into(), String::new(), "uvwxyz".into()]);
         let viewport = 1;
@@ -4875,7 +4879,7 @@ mod tests {
             materialized_rows: 3,
         });
         w.set_resolved_scroll(10);
-        w.execute_row_viewer_command(
+        w.execute_document_view_command(
             &buf,
             DocumentCommand::GotoPosition(DocPosition {
                 row: 10,
@@ -4890,7 +4894,7 @@ mod tests {
         w.pan_by_lines(&buf, 1, viewport);
         assert_eq!(w.row_cursor().unwrap().row, 11);
         assert_eq!(w.cursor_col(), 0);
-        assert_eq!(w.row_text_state().preferred_cell_col, Some(4));
+        assert_eq!(w.document_view_state_ref().preferred_cell_col, Some(4));
 
         w.pan_by_lines(&buf, 1, viewport);
         assert_eq!(w.row_cursor().unwrap().row, 12);
@@ -4899,7 +4903,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_mouse_hit_testing_subtracts_row_base() {
+    fn document_view_mouse_hit_testing_subtracts_row_base() {
         let w = {
             let mut w = make_win();
             w.set_materialized_rows(80, 20, 100);
@@ -4922,7 +4926,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_scroll_row_total_uses_logical_extent() {
+    fn document_view_scroll_row_total_uses_logical_extent() {
         let mut w = make_win();
         let buf = make_buf(sample_rows(20));
         assert_eq!(w.scroll_row_total(&buf), 20);
@@ -4938,7 +4942,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_mouse_double_click_selects_word() {
+    fn document_view_mouse_double_click_selects_word() {
         let mut w = make_win();
         let rows = sample_rows(20);
         let buf = make_buf(rows.clone());
@@ -4971,7 +4975,7 @@ mod tests {
         assert!(range.is_none());
 
         // selection_anchor should be set to the word range
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         assert_eq!(
             state.selection_anchor,
             Some(DocPosition {
@@ -4989,7 +4993,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_mouse_triple_click_selects_line() {
+    fn document_view_mouse_triple_click_selects_line() {
         let mut w = make_win();
         let rows = sample_rows(20);
         let buf = make_buf(rows.clone());
@@ -5021,7 +5025,7 @@ mod tests {
         assert_eq!(status, Status::Capture);
         assert!(range.is_none());
 
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         assert_eq!(
             state.selection_anchor,
             Some(DocPosition {
@@ -5039,7 +5043,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_mouse_triple_click_selects_soft_wrapped_group() {
+    fn document_view_mouse_triple_click_selects_soft_wrapped_group() {
         let mut w = make_win();
         let mut buf = make_buf(vec![
             "wrapped paragraph start".into(),
@@ -5081,7 +5085,7 @@ mod tests {
         assert_eq!(status, Status::Capture);
         assert!(range.is_none());
 
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         assert_eq!(
             state.selection_anchor,
             Some(DocPosition {
@@ -5103,7 +5107,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_drag_autoscroll_steps_scroll_and_updates_row_cursor() {
+    fn document_view_drag_autoscroll_steps_scroll_and_updates_row_cursor() {
         let mut w = make_win();
         let rows = sample_rows(20);
         let buf = make_buf(rows.clone());
@@ -5133,13 +5137,13 @@ mod tests {
             click_count: 1,
         };
         w.handle_row_mouse(&buf, event, mouse_ctx, now);
-        assert_eq!(w.row_text_state().cursor.row, 9);
+        assert_eq!(w.document_view_state_ref().cursor.row, 9);
 
         // Auto-scroll down by one row.
         let stepped = w.drag_autoscroll_step(&buf, 10, 1);
         assert!(stepped, "autoscroll should have stepped");
         assert_eq!(w.scroll_top, 1);
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         assert_eq!(
             state.cursor.row, 10,
             "row-text cursor should follow scroll to row 10"
@@ -5156,7 +5160,7 @@ mod tests {
         let stepped = w.drag_autoscroll_step(&buf, 10, -1);
         assert!(stepped, "autoscroll should have stepped back");
         assert_eq!(w.scroll_top, 0);
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         assert_eq!(
             state.cursor.row, 0,
             "row-text cursor should follow scroll to row 0"
@@ -5164,7 +5168,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_drag_autoscroll_refreshes_endpoint_after_rematerialize() {
+    fn document_view_drag_autoscroll_refreshes_endpoint_after_rematerialize() {
         let mut w = make_win();
         let mut buf = make_buf((0..10).map(|i| format!("short {i}")).collect());
         w.set_materialized_rows(0, 10, 30);
@@ -5198,8 +5202,8 @@ mod tests {
         );
 
         assert!(w.drag_autoscroll_step(&buf, 10, 1));
-        assert_eq!(w.row_text_state().cursor.row, 10);
-        assert_eq!(w.row_text_state().drag_endpoint.unwrap().row, 10);
+        assert_eq!(w.document_view_state_ref().cursor.row, 10);
+        assert_eq!(w.document_view_state_ref().drag_endpoint.unwrap().row, 10);
 
         let rows = (1..=10)
             .map(|i| {
@@ -5214,7 +5218,7 @@ mod tests {
         w.set_materialized_rows(1, 10, 30);
         w.sync_row_render_state(&mut buf, 10, now);
 
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         assert_eq!(state.cursor.row, 10);
         assert_eq!(state.drag_endpoint.unwrap().row, 10);
         assert_eq!(state.cursor.byte_col, "ééézzz".len());
@@ -5222,7 +5226,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_drag_autoscroll_top_edge_keeps_cursor_parked() {
+    fn document_view_drag_autoscroll_top_edge_keeps_cursor_parked() {
         let mut w = make_win();
         let rows = sample_rows(100);
         let buf = make_buf(rows.clone());
@@ -5253,7 +5257,7 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
         w.handle_row_mouse(&buf, down, mouse_ctx(viewport), now);
-        assert_eq!(w.row_text_state().cursor.row, 55);
+        assert_eq!(w.document_view_state_ref().cursor.row, 55);
 
         // Drag up to the top edge (terminal row 0 => abs 50).
         let drag_top = MouseEvent {
@@ -5263,7 +5267,7 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::empty(),
         };
         w.handle_row_mouse(&buf, drag_top, mouse_ctx(viewport), now);
-        assert_eq!(w.row_text_state().cursor.row, 50);
+        assert_eq!(w.document_view_state_ref().cursor.row, 50);
 
         // Simulate a few autoscroll ticks upward.
         for expected_scroll in [49, 48, 47, 46, 45] {
@@ -5274,7 +5278,7 @@ mod tests {
                 w.scroll_top
             );
             assert_eq!(w.scroll_top, expected_scroll);
-            let state = w.row_text_state();
+            let state = w.document_view_state_ref();
             assert_eq!(
                 state.cursor.row, expected_scroll,
                 "cursor should park at the new top edge after autoscroll to {}",
@@ -5290,7 +5294,7 @@ mod tests {
             // new absolute top row, not drift downward.
             viewport.scroll_top = w.scroll_top;
             w.handle_row_mouse(&buf, drag_top, mouse_ctx(viewport), now);
-            let state = w.row_text_state();
+            let state = w.document_view_state_ref();
             assert_eq!(
                 state.cursor.row, expected_scroll,
                 "cursor should stay at top edge after drag at scroll_top={}",
@@ -5300,7 +5304,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_mouse_click_preserves_scroll_top() {
+    fn document_view_mouse_click_preserves_scroll_top() {
         let mut w = make_win();
         let rows = sample_rows(20);
         let buf = make_buf(rows.clone());
@@ -5332,12 +5336,12 @@ mod tests {
         w.handle_row_mouse(&buf, event, mouse_ctx, now);
         // scroll_top must NOT be clobbered by the mouse handler.
         assert_eq!(w.scroll_top, 5, "scroll_top should remain 5 after click");
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         assert_eq!(state.cursor.row, 7, "cursor should be at absolute row 7");
     }
 
     #[test]
-    fn row_text_mouse_drag_outside_viewport_does_not_desync_scroll() {
+    fn document_view_mouse_drag_outside_viewport_does_not_desync_scroll() {
         let mut w = make_win();
         let rows = sample_rows(20);
         let buf = make_buf(rows.clone());
@@ -5375,7 +5379,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_mouse_double_click_yank_flash_covers_full_word() {
+    fn document_view_mouse_double_click_yank_flash_covers_full_word() {
         let mut w = make_win();
         let rows = sample_rows(20);
         let buf = make_buf(rows.clone());
@@ -5421,13 +5425,13 @@ mod tests {
         assert_eq!(range.end.byte_col, 4);
 
         // The yank flash must cover the same full range.
-        let state = w.row_text_state();
+        let state = w.document_view_state_ref();
         let flash = state.yank_flash.expect("yank flash should be set");
         assert_eq!(flash.range, range);
     }
 
     #[test]
-    fn row_text_visual_mode_h_and_l_move_cursor_and_preserve_column() {
+    fn document_view_visual_mode_h_and_l_move_cursor_and_preserve_column() {
         let mut w = make_win();
         let rows = vec![
             "short".into(),
@@ -5442,7 +5446,7 @@ mod tests {
         w.set_vim_mode(VimMode::Normal);
 
         // Place cursor at row 1, byte_col 5 on the long line.
-        w.row_text_state_mut().cursor = DocPosition {
+        w.document_view_state_mut().cursor = DocPosition {
             row: 1,
             byte_col: 5,
         };
@@ -5463,7 +5467,7 @@ mod tests {
             cmd,
             crate::DocumentKeyResult::Command(crate::DocumentCommand::StartVisual)
         );
-        w.execute_row_viewer_command(&buf, command(cmd), 10, now);
+        w.execute_document_view_command(&buf, command(cmd), 10, now);
 
         // Move down to the short row 2; byte_col should clamp to line width.
         let cmd = w.handle_viewer_key(crossterm::event::KeyEvent {
@@ -5476,10 +5480,10 @@ mod tests {
             cmd,
             crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveRows(1))
         );
-        w.execute_row_viewer_command(&buf, command(cmd), 10, now);
-        assert_eq!(w.row_text_state().cursor.row, 2);
+        w.execute_document_view_command(&buf, command(cmd), 10, now);
+        assert_eq!(w.document_view_state_ref().cursor.row, 2);
         assert_eq!(
-            w.row_text_state().cursor.byte_col,
+            w.document_view_state_ref().cursor.byte_col,
             4,
             "cursor should clamp to end of short line"
         );
@@ -5496,10 +5500,10 @@ mod tests {
             cmd,
             crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveRows(1))
         );
-        w.execute_row_viewer_command(&buf, command(cmd), 10, now);
-        assert_eq!(w.row_text_state().cursor.row, 3);
+        w.execute_document_view_command(&buf, command(cmd), 10, now);
+        assert_eq!(w.document_view_state_ref().cursor.row, 3);
         assert_eq!(
-            w.row_text_state().cursor.byte_col,
+            w.document_view_state_ref().cursor.byte_col,
             5,
             "cursor should recover to original byte column after short line"
         );
@@ -5517,10 +5521,10 @@ mod tests {
                 cmd,
                 crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveCursorCol(1))
             );
-            w.execute_row_viewer_command(&buf, command(cmd), 10, now);
+            w.execute_document_view_command(&buf, command(cmd), 10, now);
         }
         assert_eq!(
-            w.row_text_state().cursor.byte_col,
+            w.document_view_state_ref().cursor.byte_col,
             line3_len,
             "cursor should park past last char"
         );
@@ -5536,9 +5540,9 @@ mod tests {
             cmd,
             crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveCursorCol(1))
         );
-        w.execute_row_viewer_command(&buf, command(cmd), 10, now);
+        w.execute_document_view_command(&buf, command(cmd), 10, now);
         assert_eq!(
-            w.row_text_state().cursor.byte_col,
+            w.document_view_state_ref().cursor.byte_col,
             line3_len,
             "l at end of line should stay put"
         );
@@ -5561,7 +5565,7 @@ mod tests {
     }
 
     #[test]
-    fn row_text_doc_range_to_row_ranges_skips_chrome_on_empty_line() {
+    fn document_view_doc_range_to_row_ranges_skips_chrome_on_empty_line() {
         let mut w = make_win();
         let mut buf = Buffer::new(BufId(1), BufCreateOpts::default());
         // Thinking-block style: chrome "│ " is non-selectable.

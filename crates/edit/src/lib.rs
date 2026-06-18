@@ -5820,7 +5820,7 @@ mod tests {
         ui.set_capture(HitTarget::Window(win));
         // Park row-document drag endpoint at bottom edge (row 9).
         {
-            let state = ui.wins.get_mut(&win).unwrap().row_text_state_mut();
+            let state = ui.wins.get_mut(&win).unwrap().document_view_state_mut();
             state.cursor = DocPosition {
                 row: 9,
                 byte_col: 0,
@@ -5836,7 +5836,7 @@ mod tests {
         assert!(ui.drag_autoscroll_interval().is_some());
         assert!(ui.tick_drag_autoscroll());
         assert_eq!(ui.win(win).unwrap().scroll_top(), 1);
-        let state = *ui.win(win).unwrap().row_text_state();
+        let state = *ui.win(win).unwrap().document_view_state_ref();
         assert_eq!(state.cursor.row, 10);
         assert_eq!(
             state.drag_endpoint,

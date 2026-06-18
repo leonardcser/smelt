@@ -83,7 +83,7 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
     pos.row = pos.row.min(total_rows.saturating_sub(1));
 
     if let DocumentCommand::MoveCursorCol(delta) = command {
-        let line = document_row_text(doc, pos.row)?;
+        let line = document_row_string(doc, pos.row)?;
         pos.byte_col = text::snap(&line, pos.byte_col.min(line.len()));
         if delta < 0 {
             for _ in 0..delta.unsigned_abs() {
@@ -104,7 +104,7 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
     }
 
     if let DocumentCommand::LineEnd = command {
-        let line = document_row_text(doc, pos.row)?;
+        let line = document_row_string(doc, pos.row)?;
         pos.byte_col = if matches!(vim_mode, VimMode::Normal) && !line.is_empty() {
             text::prev_char_boundary(&line, line.len())
         } else {
@@ -123,7 +123,7 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
     for _ in 0..count {
         match kind {
             WordKind::Forward => {
-                let line = document_row_text(doc, pos.row)?;
+                let line = document_row_string(doc, pos.row)?;
                 let col = text::word_forward_pos(&line, pos.byte_col, text::CharClass::Word);
                 if col < line.len() || pos.row.saturating_add(1) >= total_rows {
                     pos.byte_col = col;
@@ -133,17 +133,17 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
                 }
             }
             WordKind::Backward => {
-                let line = document_row_text(doc, pos.row)?;
+                let line = document_row_string(doc, pos.row)?;
                 let col = text::word_backward_pos(&line, pos.byte_col, text::CharClass::Word);
                 if col > 0 || pos.row == 0 {
                     pos.byte_col = col;
                 } else {
                     pos.row = pos.row.saturating_sub(1);
-                    pos.byte_col = document_row_text(doc, pos.row)?.len();
+                    pos.byte_col = document_row_string(doc, pos.row)?.len();
                 }
             }
             WordKind::End => {
-                let line = document_row_text(doc, pos.row)?;
+                let line = document_row_string(doc, pos.row)?;
                 let col = text::word_end_pos(&line, pos.byte_col, text::CharClass::Word);
                 if col > pos.byte_col || pos.row.saturating_add(1) >= total_rows {
                     pos.byte_col = col;
@@ -158,7 +158,7 @@ pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
     Some(DocumentCommand::GotoPosition(pos))
 }
 
-fn document_row_text<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<String> {
+fn document_row_string<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<String> {
     doc.materialize(row..row.saturating_add(1))
         .rows
         .into_iter()
@@ -259,15 +259,15 @@ impl Window {
     }
 
     fn set_row_materialization(&mut self, rows: MaterializedRows) {
-        let cursor = if self.row_text_state().active {
-            self.row_text_state().cursor
+        let cursor = if self.document_view_state_ref().active {
+            self.document_view_state_ref().cursor
         } else {
             DocPosition {
                 row: rows.absolute_row(self.cursor_row()),
                 byte_col: self.cursor_col() as usize,
             }
         };
-        let state = self.row_text_state_mut();
+        let state = self.document_view_state_mut();
         state.active = true;
         state.materialized = rows;
         state.cursor = DocPosition {
@@ -277,11 +277,11 @@ impl Window {
     }
 
     pub fn clear_materialized_rows(&mut self) {
-        *self.row_text_state_mut() = DocumentViewState::default();
+        *self.document_view_state_mut() = DocumentViewState::default();
     }
 
     pub fn scroll_row_total(&self, buf: &Buffer) -> RowIndex {
-        let state = self.row_text_state();
+        let state = self.document_view_state_ref();
         if state.active {
             state.materialized.total_rows
         } else {
@@ -290,19 +290,19 @@ impl Window {
     }
 
     pub fn has_materialized_rows(&self) -> bool {
-        self.row_text_state().active
+        self.document_view_state_ref().active
     }
 
     pub fn materialized_rows(&self) -> Option<MaterializedRows> {
-        self.row_text_state()
+        self.document_view_state_ref()
             .active
-            .then_some(self.row_text_state().materialized)
+            .then_some(self.document_view_state_ref().materialized)
     }
 
     pub fn row_cursor(&self) -> Option<DocPosition> {
-        self.row_text_state()
+        self.document_view_state_ref()
             .active
-            .then_some(self.row_text_state().cursor)
+            .then_some(self.document_view_state_ref().cursor)
     }
 
     pub fn viewer_doc_cursor(&self, buf: &Buffer) -> Option<DocPosition> {
@@ -326,15 +326,15 @@ impl Window {
             Some(ViewportHit::Content { row, .. }) => row,
             _ => return None,
         };
-        let total_rows = if self.row_text_state().active {
-            self.row_text_state().materialized.total_rows
+        let total_rows = if self.document_view_state_ref().active {
+            self.document_view_state_ref().materialized.total_rows
         } else {
             self.visual_row_total(buf)
         };
         if total_rows == 0 || self.scroll_top.saturating_add(rel_row as RowIndex) >= total_rows {
             return None;
         }
-        if self.row_text_state().active {
+        if self.document_view_state_ref().active {
             return Some(self.row_doc_pos_at_mouse(buf, event, viewport));
         }
         let hit = self.text_hit_at_mouse(buf, event, viewport);
@@ -350,11 +350,13 @@ impl Window {
 
     pub fn drag_active(&self) -> bool {
         self.text_state().drag_endpoint.is_some()
-            || (self.row_text_state().active && self.row_text_state().drag_endpoint.is_some())
+            || (self.document_view_state_ref().active
+                && self.document_view_state_ref().drag_endpoint.is_some())
     }
 
     pub fn row_selection_anchor_active(&self) -> bool {
-        self.row_text_state().active && self.row_text_state().selection_anchor.is_some()
+        self.document_view_state_ref().active
+            && self.document_view_state_ref().selection_anchor.is_some()
     }
 
     pub fn row_selection_range(&self, buf: &Buffer, now: Instant) -> Option<DocRange> {
@@ -363,10 +365,10 @@ impl Window {
     }
 
     pub fn row_selection_anchor_range(&self, buf: &Buffer) -> Option<DocRange> {
-        if !self.row_text_state().active {
+        if !self.document_view_state_ref().active {
             return None;
         }
-        let state = *self.row_text_state();
+        let state = *self.document_view_state_ref();
         state.selection_anchor.map(|anchor| {
             if matches!(self.vim_mode(), VimMode::VisualLine) {
                 let start = anchor.row.min(state.cursor.row);
@@ -394,10 +396,10 @@ impl Window {
     }
 
     pub fn row_yank_flash_range(&self, now: Instant) -> Option<DocRange> {
-        if !self.row_text_state().active {
+        if !self.document_view_state_ref().active {
             return None;
         }
-        self.row_text_state()
+        self.document_view_state_ref()
             .yank_flash
             .filter(|flash| now < flash.until)
             .map(|flash| flash.range)
@@ -439,7 +441,7 @@ impl Window {
         {
             return Vec::new();
         }
-        let state = self.row_text_state();
+        let state = self.document_view_state_ref();
         let total_rows = if state.active {
             state.materialized.total_rows
         } else {
@@ -531,10 +533,10 @@ impl Window {
     }
 
     fn refresh_row_cursor_columns(&mut self, buf: &Buffer) {
-        if !self.row_text_state().active {
+        if !self.document_view_state_ref().active {
             return;
         }
-        let mut state = *self.row_text_state();
+        let mut state = *self.document_view_state_ref();
         let cell = state
             .preferred_cell_col
             .or_else(|| {
@@ -559,22 +561,24 @@ impl Window {
                 state.drag_endpoint = Some(endpoint);
             }
         }
-        *self.row_text_state_mut() = state;
+        *self.document_view_state_mut() = state;
     }
 
     pub fn row_yank_flash_until(&self) -> Option<Instant> {
-        self.row_text_state().active.then_some(())?;
-        self.row_text_state().yank_flash.map(|flash| flash.until)
+        self.document_view_state_ref().active.then_some(())?;
+        self.document_view_state_ref()
+            .yank_flash
+            .map(|flash| flash.until)
     }
 
     pub fn clear_expired_row_yank_flash(&mut self, now: Instant) {
-        if self.row_text_state().active
+        if self.document_view_state_ref().active
             && self
-                .row_text_state()
+                .document_view_state_ref()
                 .yank_flash
                 .is_some_and(|flash| now >= flash.until)
         {
-            self.row_text_state_mut().yank_flash = None;
+            self.document_view_state_mut().yank_flash = None;
         }
     }
 
@@ -583,10 +587,10 @@ impl Window {
     }
 
     pub fn resync_row_display_coords(&mut self, buf: &Buffer) -> bool {
-        if !self.row_text_state().active {
+        if !self.document_view_state_ref().active {
             return false;
         }
-        let state = *self.row_text_state();
+        let state = *self.document_view_state_ref();
         if buf.lines().is_empty() {
             self.reset_cursor();
             return false;
@@ -595,14 +599,14 @@ impl Window {
     }
 
     pub fn reveal_row_cursor(&mut self, buf: &Buffer, viewport_rows: u16) {
-        if !self.row_text_state().active {
+        if !self.document_view_state_ref().active {
             return;
         }
         if buf.lines().is_empty() {
             self.reset_cursor();
             return;
         }
-        let state = *self.row_text_state();
+        let state = *self.document_view_state_ref();
         let local_cursor_synced = self.resync_row_display_coords(buf);
         if viewport_rows > 0 {
             let viewport_cols = if local_cursor_synced {
@@ -631,10 +635,10 @@ impl Window {
         ctx: MouseCtx,
         now: Instant,
     ) -> (Status, Option<DocRange>) {
-        if !self.row_text_state().active {
+        if !self.document_view_state_ref().active {
             return (Status::Ignored, None);
         }
-        let mut state = *self.row_text_state();
+        let mut state = *self.document_view_state_ref();
         if ctx.viewport.rect.height == 0
             || state.materialized.total_rows == 0
             || buf.lines().is_empty()
@@ -692,7 +696,7 @@ impl Window {
                 if let Some(cell) = self.row_position_cell(state, buf, state.cursor) {
                     state.preferred_cell_col = Some(cell);
                 }
-                *self.row_text_state_mut() = state;
+                *self.document_view_state_mut() = state;
                 // A new mouse gesture starts fresh: exit any existing visual
                 // mode so the old anchor doesn't pollute the new selection.
                 if self.vim_enabled()
@@ -710,7 +714,7 @@ impl Window {
                 state.cursor = pos;
                 state.drag_endpoint = Some(pos);
                 state.yank_flash = None;
-                *self.row_text_state_mut() = state;
+                *self.document_view_state_mut() = state;
                 (Status::Consumed, None)
             }
             MouseEventKind::Up(MouseButton::Left) => {
@@ -741,7 +745,7 @@ impl Window {
                     range,
                     until: now + YANK_FLASH_DURATION,
                 });
-                *self.row_text_state_mut() = state;
+                *self.document_view_state_mut() = state;
                 // Mouse-up concludes the gesture: exit visual mode so the
                 // selection is not left dangling.
                 if self.vim_enabled()
@@ -809,10 +813,10 @@ impl Window {
         event: MouseEvent,
         viewport: WindowViewport,
     ) -> DocPosition {
-        if !self.row_text_state().active {
+        if !self.document_view_state_ref().active {
             return DocPosition::default();
         }
-        let state = *self.row_text_state();
+        let state = *self.document_view_state_ref();
         let height = viewport.rect.height.max(1);
         // Use the authoritative scroll_top on self, not the stale viewport copy
         // (viewport is set during render prep; autoscroll may have changed
@@ -851,9 +855,9 @@ impl Window {
         viewport_rows: u16,
         now: Instant,
     ) -> Option<DocumentCopy> {
-        if self.row_text_state().active {
+        if self.document_view_state_ref().active {
             return self
-                .execute_row_viewer_command(buf, command, viewport_rows, now)
+                .execute_document_view_command(buf, command, viewport_rows, now)
                 .map(DocumentCopy::Rows);
         }
         self.execute_buffer_viewer_command(buf, command, viewport_rows)
@@ -1056,14 +1060,14 @@ impl Window {
         (start < end).then_some(start..end)
     }
 
-    pub fn execute_row_viewer_command(
+    pub fn execute_document_view_command(
         &mut self,
         buf: &Buffer,
         command: DocumentCommand,
         viewport_rows: u16,
         now: Instant,
     ) -> Option<DocRange> {
-        if !self.row_text_state().active {
+        if !self.document_view_state_ref().active {
             return None;
         }
         if let DocumentCommand::PanColumns(delta) = command {
@@ -1071,7 +1075,7 @@ impl Window {
             self.pan_by_columns(delta, viewport_cols);
             return None;
         }
-        let mut state = *self.row_text_state();
+        let mut state = *self.document_view_state_ref();
         let materialized = state.materialized;
         let mut document = MaterializedBufferDocument { buf, materialized };
         let mut vim_mode = self.vim_mode();
@@ -1091,7 +1095,7 @@ impl Window {
             following_tail,
             now,
         );
-        *self.row_text_state_mut() = state;
+        *self.document_view_state_mut() = state;
         if self.vim_mode() != vim_mode {
             self.set_vim_mode(vim_mode);
         }
@@ -1397,7 +1401,7 @@ impl DocumentViewExecutor {
                 state.selection_includes_cursor_cell = false;
                 match click_count {
                     2 => {
-                        if let Some(row) = document_row_text(document, pos.row) {
+                        if let Some(row) = document_row_string(document, pos.row) {
                             let snap_col = text::snap(&row, pos.byte_col.min(row.len()));
                             if let Some((start, end)) =
                                 text::big_word_range_at_transparent(&row, snap_col, &[])
@@ -1423,7 +1427,7 @@ impl DocumentViewExecutor {
                             });
                             state.cursor = DocPosition {
                                 row: end,
-                                byte_col: document_row_text(document, end)
+                                byte_col: document_row_string(document, end)
                                     .map(|row| row.len())
                                     .unwrap_or(0),
                             };

@@ -826,7 +826,7 @@ fn subtract_byte_range(ranges: &mut Vec<std::ops::Range<usize>>, remove: std::op
     *ranges = out;
 }
 
-fn selectable_row_text(buf: &Buffer, row: usize) -> String {
+fn selectable_row_string(buf: &Buffer, row: usize) -> String {
     let Some(line) = buf.get_line(row) else {
         return String::new();
     };
@@ -855,7 +855,7 @@ fn rendered_row_anchors(buf: &Buffer, id: BlockId, rows: usize) -> Vec<Projectio
             row as RowIndex,
             display_offset,
         ));
-        display_offset = display_offset.saturating_add(selectable_row_text(buf, row).len());
+        display_offset = display_offset.saturating_add(selectable_row_string(buf, row).len());
     }
     anchors
 }
@@ -872,7 +872,7 @@ fn row_offset_for_display_offset(
     let offsets: Vec<usize> = (0..rows)
         .scan(0usize, |offset, row| {
             let current = *offset;
-            *offset = offset.saturating_add(selectable_row_text(buf, row).len());
+            *offset = offset.saturating_add(selectable_row_string(buf, row).len());
             Some(current)
         })
         .collect();
