@@ -1134,14 +1134,14 @@ mod tests {
     fn process_status_typed_fields_match_selectors_and_buckets() {
         let mut transcript = smelt_core::content::transcript::Transcript::new();
         transcript.push(Block::ProcessStatus {
-            text: "background process 1 finished successfully".into(),
+            text: "Background process 1 finished successfully.".into(),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "1",
                 Some(0),
             )),
         });
         transcript.push(Block::ProcessStatus {
-            text: "background process 2 finished successfully".into(),
+            text: "Background process 2 finished successfully.".into(),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "2",
                 Some(0),
