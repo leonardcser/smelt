@@ -103,8 +103,11 @@ fn display_only_resume_sets_resume_hint_state() {
         content: "restored transcript".into(),
     });
 
-    app.app
-        .load_session_display_only(session, transcript, "full-session".into());
+    app.app.load_session_display_only(
+        session,
+        crate::app::transcript::LoadedTranscript::full(transcript),
+        "full-session".into(),
+    );
 
     assert!(app.app.core.session.history.is_empty());
     assert_eq!(

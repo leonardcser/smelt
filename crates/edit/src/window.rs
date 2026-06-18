@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 mod row_text;
 pub use row_text::{
-    resolve_row_document_viewer_command, RowTextState, RowYankFlash, ViewerCommand, ViewerCopy,
-    ViewerKeyResult, ViewerTextObject,
+    resolve_document_command, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject,
+    DocumentViewState, RowYankFlash,
 };
 
 /// Per-frame paint context for `Window::render`.
@@ -316,7 +316,7 @@ pub struct WindowTextState {
     /// Virtual row/document state for readonly viewers whose backing buffer is a
     /// materialized slice of a larger row space. `None` means the backing buffer
     /// is the full scrollable extent.
-    pub(crate) row_text: RowTextState,
+    pub(crate) row_text: DocumentViewState,
     /// Cell-column of the cursor within its visual row. Derived from `cpos`
     /// via `sync_from_cpos`.
     pub(crate) cursor_col: u16,
@@ -633,11 +633,11 @@ impl Window {
         self.surface.text_mut()
     }
 
-    pub(crate) fn row_text_state(&self) -> &RowTextState {
+    pub(crate) fn row_text_state(&self) -> &DocumentViewState {
         &self.surface.text().row_text
     }
 
-    pub(crate) fn row_text_state_mut(&mut self) -> &mut RowTextState {
+    pub(crate) fn row_text_state_mut(&mut self) -> &mut DocumentViewState {
         &mut self.surface.text_mut().row_text
     }
 
@@ -1059,7 +1059,7 @@ impl Window {
 
     fn backed_local_row(
         &self,
-        state: RowTextState,
+        state: DocumentViewState,
         buf: &Buffer,
         absolute_row: RowIndex,
     ) -> Option<RowIndex> {
@@ -1080,7 +1080,7 @@ impl Window {
         }
     }
 
-    fn project_row_cursor_to_local(&mut self, state: RowTextState, buf: &Buffer) -> bool {
+    fn project_row_cursor_to_local(&mut self, state: DocumentViewState, buf: &Buffer) -> bool {
         let Some(local) = self.backed_local_row(state, buf, state.cursor.row) else {
             return false;
         };
@@ -1101,7 +1101,7 @@ impl Window {
 
     fn move_row_cursor_to_row_preserving_cell(
         &self,
-        state: &mut RowTextState,
+        state: &mut DocumentViewState,
         buf: &Buffer,
         cursor: &mut DocPosition,
         row: RowIndex,
@@ -1120,7 +1120,7 @@ impl Window {
 
     fn row_position_cell(
         &self,
-        state: RowTextState,
+        state: DocumentViewState,
         buf: &Buffer,
         position: DocPosition,
     ) -> Option<usize> {
@@ -1130,7 +1130,7 @@ impl Window {
 
     fn row_byte_col_at_cell(
         &self,
-        state: RowTextState,
+        state: DocumentViewState,
         buf: &Buffer,
         row: RowIndex,
         cell: usize,
@@ -3926,7 +3926,7 @@ mod tests {
         });
         w.set_resolved_scroll(100);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(150), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(150), 10, now);
 
         assert_eq!(w.row_cursor().unwrap().row, 150);
         assert_eq!(w.scroll_top(), 141);
@@ -3954,11 +3954,11 @@ mod tests {
             materialized_rows: 20,
         });
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(45), 10, now);
-        w.execute_row_viewer_command(&buf, ViewerCommand::StartVisual, 10, now);
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(55), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(45), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::StartVisual, 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(55), 10, now);
         let range = w
-            .execute_row_viewer_command(&buf, ViewerCommand::YankSelection, 10, now)
+            .execute_row_viewer_command(&buf, DocumentCommand::YankSelection, 10, now)
             .unwrap();
 
         assert_eq!(range.start.row, 45);
@@ -3989,10 +3989,10 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(12), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(12), 10, now);
         w.execute_row_viewer_command(
             &buf,
-            ViewerCommand::TextObject(ViewerTextObject::new(true, 'p').unwrap()),
+            DocumentCommand::TextObject(DocumentTextObject::new(true, 'p').unwrap()),
             10,
             now,
         );
@@ -4039,10 +4039,10 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(12), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(12), 10, now);
         w.execute_row_viewer_command(
             &buf,
-            ViewerCommand::TextObject(ViewerTextObject::new(false, 'p').unwrap()),
+            DocumentCommand::TextObject(DocumentTextObject::new(false, 'p').unwrap()),
             10,
             now,
         );
@@ -4089,14 +4089,14 @@ mod tests {
         });
         w.set_vim_mode(VimMode::Visual);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(12), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(12), 10, now);
         w.execute_row_viewer_command(
             &buf,
-            ViewerCommand::TextObject(ViewerTextObject::new(true, 'p').unwrap()),
+            DocumentCommand::TextObject(DocumentTextObject::new(true, 'p').unwrap()),
             10,
             now,
         );
-        w.execute_row_viewer_command(&buf, ViewerCommand::MoveCursorCol(1), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::MoveCursorCol(1), 10, now);
         assert_eq!(w.vim_mode(), VimMode::VisualLine);
         assert_eq!(
             w.row_text_state().cursor,
@@ -4119,7 +4119,7 @@ mod tests {
             }
         );
 
-        w.execute_row_viewer_command(&buf, ViewerCommand::WordForward(1), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::WordForward(1), 10, now);
         assert_eq!(
             w.row_text_state().cursor,
             DocPosition {
@@ -4154,11 +4154,11 @@ mod tests {
         });
         w.set_vim_mode(VimMode::VisualLine);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(45), 10, now);
-        w.execute_row_viewer_command(&buf, ViewerCommand::StartVisualLine, 10, now);
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(47), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(45), 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::StartVisualLine, 10, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(47), 10, now);
         let range = w
-            .execute_row_viewer_command(&buf, ViewerCommand::YankSelectionLinewise, 10, now)
+            .execute_row_viewer_command(&buf, DocumentCommand::YankSelectionLinewise, 10, now)
             .unwrap();
 
         assert_eq!(
@@ -4188,8 +4188,8 @@ mod tests {
         });
         let now = Instant::now();
 
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(10), 5, now);
-        w.execute_row_viewer_command(&buf, ViewerCommand::LineEnd, 5, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(10), 5, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::LineEnd, 5, now);
 
         assert_eq!(w.row_cursor().unwrap().byte_col, 2);
     }
@@ -4205,12 +4205,12 @@ mod tests {
             materialized_rows: 1,
         });
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(10), 5, now);
-        w.execute_row_viewer_command(&buf, ViewerCommand::WordForward(2), 5, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(10), 5, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::WordForward(2), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha beta ".len());
-        w.execute_row_viewer_command(&buf, ViewerCommand::WordBackward(1), 5, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::WordBackward(1), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha ".len());
-        w.execute_row_viewer_command(&buf, ViewerCommand::WordEnd(1), 5, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::WordEnd(1), 5, now);
         assert_eq!(w.row_cursor().unwrap().byte_col, "alpha beta".len() - 1);
     }
 
@@ -4298,7 +4298,7 @@ mod tests {
         );
         assert_eq!(w.row_text_state().preferred_cell_col, Some(4));
 
-        w.execute_row_viewer_command(&buf, ViewerCommand::MoveRows(1), 2, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::MoveRows(1), 2, now);
         w.sync_row_cursor_to_local(&buf, 2);
         assert_eq!(w.row_cursor().unwrap().row, 11);
         assert_eq!(w.cursor_col(), 4);
@@ -4588,7 +4588,7 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(94), viewport, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 94);
         assert_eq!(w.cursor_screen_row(viewport), Some(4));
 
@@ -4612,7 +4612,7 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(94), viewport, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 94);
         assert_eq!(w.cursor_screen_row(viewport), Some(4));
 
@@ -4636,9 +4636,9 @@ mod tests {
         });
         w.set_resolved_scroll(90);
         let now = Instant::now();
-        w.execute_row_viewer_command(&buf, ViewerCommand::GotoRow(94), viewport, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::GotoRow(94), viewport, now);
 
-        w.execute_row_viewer_command(&buf, ViewerCommand::ScrollRows(20), viewport, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::ScrollRows(20), viewport, now);
 
         assert_eq!(w.scroll_top, 110);
         assert_eq!(w.row_cursor().unwrap().row, 114);
@@ -4660,7 +4660,7 @@ mod tests {
         let now = Instant::now();
         w.execute_row_viewer_command(
             &buf,
-            ViewerCommand::GotoPosition(DocPosition {
+            DocumentCommand::GotoPosition(DocPosition {
                 row: 5,
                 byte_col: 0,
             }),
@@ -4668,10 +4668,10 @@ mod tests {
             now,
         );
 
-        w.execute_row_viewer_command(&buf, ViewerCommand::HalfPageRows(1), viewport, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::HalfPageRows(1), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 10);
 
-        w.execute_row_viewer_command(&buf, ViewerCommand::HalfPageRows(-1), viewport, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::HalfPageRows(-1), viewport, now);
         assert_eq!(w.row_cursor().unwrap().row, 5);
     }
 
@@ -4693,7 +4693,7 @@ mod tests {
         );
         assert_eq!(
             up,
-            ViewerKeyResult::Command(ViewerCommand::HalfPageRows(-1))
+            DocumentKeyResult::Command(DocumentCommand::HalfPageRows(-1))
         );
 
         let down = vim::handle_viewer_key(
@@ -4708,7 +4708,7 @@ mod tests {
         );
         assert_eq!(
             down,
-            ViewerKeyResult::Command(ViewerCommand::HalfPageRows(1))
+            DocumentKeyResult::Command(DocumentCommand::HalfPageRows(1))
         );
 
         let back = vim::handle_viewer_key(
@@ -4721,7 +4721,10 @@ mod tests {
             &mut mode,
             &mut state,
         );
-        assert_eq!(back, ViewerKeyResult::Command(ViewerCommand::PageRows(-1)));
+        assert_eq!(
+            back,
+            DocumentKeyResult::Command(DocumentCommand::PageRows(-1))
+        );
 
         let forward = vim::handle_viewer_key(
             KeyEvent {
@@ -4735,7 +4738,7 @@ mod tests {
         );
         assert_eq!(
             forward,
-            ViewerKeyResult::Command(ViewerCommand::PageRows(1))
+            DocumentKeyResult::Command(DocumentCommand::PageRows(1))
         );
     }
 
@@ -4755,7 +4758,7 @@ mod tests {
         let now = Instant::now();
         w.execute_row_viewer_command(
             &buf,
-            ViewerCommand::GotoPosition(DocPosition {
+            DocumentCommand::GotoPosition(DocPosition {
                 row: 42,
                 byte_col: "│ he".len(),
             }),
@@ -4815,7 +4818,7 @@ mod tests {
         w.set_resolved_scroll(10);
         w.execute_row_viewer_command(
             &buf,
-            ViewerCommand::GotoPosition(DocPosition {
+            DocumentCommand::GotoPosition(DocPosition {
                 row: 10,
                 byte_col: 4,
             }),
@@ -4826,13 +4829,13 @@ mod tests {
         assert_eq!(w.cursor_col(), 4);
         w.text_state_mut().curswant = Some(0);
 
-        w.execute_row_viewer_command(&buf, ViewerCommand::MoveRows(1), viewport, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::MoveRows(1), viewport, now);
         w.sync_row_cursor_to_local(&buf, viewport);
         assert_eq!(w.row_cursor().unwrap().row, 11);
         assert_eq!(w.cursor_col(), 0);
         assert_eq!(w.row_text_state().preferred_cell_col, Some(4));
 
-        w.execute_row_viewer_command(&buf, ViewerCommand::MoveRows(1), viewport, now);
+        w.execute_row_viewer_command(&buf, DocumentCommand::MoveRows(1), viewport, now);
         w.sync_row_cursor_to_local(&buf, viewport);
         assert_eq!(w.row_cursor().unwrap().row, 12);
         assert_eq!(w.cursor_col(), 4);
@@ -4854,7 +4857,7 @@ mod tests {
         w.set_resolved_scroll(10);
         w.execute_row_viewer_command(
             &buf,
-            ViewerCommand::GotoPosition(DocPosition {
+            DocumentCommand::GotoPosition(DocPosition {
                 row: 10,
                 byte_col: 4,
             }),
@@ -5369,7 +5372,7 @@ mod tests {
         // Enter visual mode.
         let now = std::time::Instant::now();
         let command = |result| match result {
-            crate::ViewerKeyResult::Command(cmd) => cmd,
+            crate::DocumentKeyResult::Command(cmd) => cmd,
             other => panic!("expected viewer command, got {other:?}"),
         };
         let cmd = w.handle_viewer_key(crossterm::event::KeyEvent {
@@ -5380,7 +5383,7 @@ mod tests {
         });
         assert_eq!(
             cmd,
-            crate::ViewerKeyResult::Command(crate::ViewerCommand::StartVisual)
+            crate::DocumentKeyResult::Command(crate::DocumentCommand::StartVisual)
         );
         w.execute_row_viewer_command(&buf, command(cmd), 10, now);
 
@@ -5393,7 +5396,7 @@ mod tests {
         });
         assert_eq!(
             cmd,
-            crate::ViewerKeyResult::Command(crate::ViewerCommand::MoveRows(1))
+            crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveRows(1))
         );
         w.execute_row_viewer_command(&buf, command(cmd), 10, now);
         assert_eq!(w.row_text_state().cursor.row, 2);
@@ -5413,7 +5416,7 @@ mod tests {
         });
         assert_eq!(
             cmd,
-            crate::ViewerKeyResult::Command(crate::ViewerCommand::MoveRows(1))
+            crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveRows(1))
         );
         w.execute_row_viewer_command(&buf, command(cmd), 10, now);
         assert_eq!(w.row_text_state().cursor.row, 3);
@@ -5434,7 +5437,7 @@ mod tests {
             });
             assert_eq!(
                 cmd,
-                crate::ViewerKeyResult::Command(crate::ViewerCommand::MoveCursorCol(1))
+                crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveCursorCol(1))
             );
             w.execute_row_viewer_command(&buf, command(cmd), 10, now);
         }
@@ -5453,7 +5456,7 @@ mod tests {
         });
         assert_eq!(
             cmd,
-            crate::ViewerKeyResult::Command(crate::ViewerCommand::MoveCursorCol(1))
+            crate::DocumentKeyResult::Command(crate::DocumentCommand::MoveCursorCol(1))
         );
         w.execute_row_viewer_command(&buf, command(cmd), 10, now);
         assert_eq!(

@@ -296,7 +296,10 @@ fn transcript_total_rows(app: &TestApp) -> crate::smelt_edit::RowIndex {
     win.scroll_row_total(buf)
 }
 
-fn execute_transcript_viewer_command(app: &mut TestApp, command: crate::smelt_edit::ViewerCommand) {
+fn execute_transcript_viewer_command(
+    app: &mut TestApp,
+    command: crate::smelt_edit::DocumentCommand,
+) {
     let win = app.app.transcript_win();
     let buf_id = win.buf;
     let viewport_rows = win
@@ -318,7 +321,7 @@ fn pin_transcript_top_to_line_containing(
     needle: &str,
 ) -> crate::smelt_edit::RowIndex {
     for row in 0..transcript_total_rows(app) {
-        execute_transcript_viewer_command(app, crate::smelt_edit::ViewerCommand::GotoRow(row));
+        execute_transcript_viewer_command(app, crate::smelt_edit::DocumentCommand::GotoRow(row));
         app.app.transcript_win_mut().pin_scroll(row);
         app.render_silent();
         if transcript_viewport_top_line(app).contains(needle) {
@@ -333,7 +336,7 @@ fn pin_transcript_top_to_line_containing(
 
 fn pin_transcript_viewport_to_line_containing(app: &mut TestApp, needle: &str) {
     for row in 0..transcript_total_rows(app) {
-        execute_transcript_viewer_command(app, crate::smelt_edit::ViewerCommand::GotoRow(row));
+        execute_transcript_viewer_command(app, crate::smelt_edit::DocumentCommand::GotoRow(row));
         app.app.transcript_win_mut().pin_scroll(row);
         app.render_silent();
         if transcript_viewport_lines(app)
@@ -350,7 +353,7 @@ fn pin_transcript_viewport_to_line_containing(app: &mut TestApp, needle: &str) {
 }
 
 fn move_transcript_cursor_to_row(app: &mut TestApp, row: crate::smelt_edit::RowIndex) {
-    execute_transcript_viewer_command(app, crate::smelt_edit::ViewerCommand::GotoRow(row));
+    execute_transcript_viewer_command(app, crate::smelt_edit::DocumentCommand::GotoRow(row));
     app.render_silent();
 }
 

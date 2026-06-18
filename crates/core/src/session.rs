@@ -1356,7 +1356,7 @@ pub fn save_with_blobs_result_with_history_start(
     };
 
     let db = smelt_store::SessionDb::open(session_dir.join("session.db"))?;
-    let snapshot = session_store_snapshot(&session_out, history_start_idx)?;
+    let snapshot = store_snapshot_from_session(session_out.as_ref(), history_start_idx)?;
     let report = db.save_session_snapshot_as_writer(&snapshot)?;
     write_meta(&session_dir, &session_out.meta());
     let blob = db
@@ -1366,46 +1366,56 @@ pub fn save_with_blobs_result_with_history_start(
     Ok(report)
 }
 
-fn session_store_snapshot(
+pub fn store_snapshot_from_session(
     session: &Session,
     history_start_idx: usize,
 ) -> Result<smelt_store::SessionSnapshot, smelt_store::StoreError> {
-    let meta_json = serde_json::to_value(SessionJsonlMeta::from(session))?;
     let history_start_idx = history_start_idx.min(session.history.len());
     Ok(smelt_store::SessionSnapshot {
         state: smelt_store::SessionState {
             id: session.id.clone(),
             title: session.title.clone(),
             slug: session.slug.clone(),
+            first_user_message: session.first_user_message.clone(),
             cwd: session.cwd.clone(),
             mode: session.mode.clone(),
+            reasoning_effort: session
+                .reasoning_effort
+                .map(|effort| effort.label().to_string()),
             model: session.model.clone(),
+            parent_id: session.parent_id.clone(),
             accounting_json: Some(serde_json::to_value(&session.session_usage)?),
             checkpoint_json: session
                 .checkpoint
                 .as_ref()
                 .map(serde_json::to_value)
                 .transpose()?,
+            context_tokens: session.context_tokens.map(u64::from),
+            context_tokens_history_len: session.context_tokens_history_len.map(|len| len as u64),
+            display_context_tokens: session.display_context_tokens.map(u64::from),
+            session_cost_usd: session.session_cost_usd,
             revision: 0,
             history_len: session.history.len() as u64,
             created_at: session.created_at_ms as i64,
             updated_at: session.updated_at_ms as i64,
         },
-        meta_json: Some(meta_json),
+        meta_json: None,
         history_start_idx,
         history_len: session.history.len(),
         history: session.history[history_start_idx..].to_vec(),
-        turn_metas: snapshot_values(&session.turn_metas)?,
-        metadata_snapshots: snapshot_values(&session.metadata_snapshots)?,
-        accounting_snapshots: snapshot_values(&session.context_snapshots)?,
+        turn_metas: snapshot_values_from(&session.turn_metas, history_start_idx)?,
+        metadata_snapshots: snapshot_values_from(&session.metadata_snapshots, history_start_idx)?,
+        accounting_snapshots: snapshot_values_from(&session.context_snapshots, history_start_idx)?,
     })
 }
 
-fn snapshot_values<T: Serialize>(
+fn snapshot_values_from<T: Serialize>(
     snapshots: &HistorySnapshots<T>,
+    history_start_idx: usize,
 ) -> Result<Vec<(u64, Value)>, smelt_store::StoreError> {
     snapshots
         .iter()
+        .filter(|(idx, _)| *idx >= history_start_idx)
         .map(|(idx, value)| Ok((*idx as u64, serde_json::to_value(value)?)))
         .collect()
 }
@@ -1503,11 +1513,6 @@ fn load_db_session(dir_path: &std::path::Path) -> Option<Session> {
     let db = smelt_store::SessionDb::open(&db_path).ok()?;
     let mut snapshot = db.load_session_snapshot().ok()??;
     let history = std::mem::take(&mut snapshot.history);
-    if let Some(meta_json) = snapshot.meta_json.take() {
-        if let Ok(meta) = serde_json::from_value::<SessionJsonlMeta>(meta_json) {
-            return Some(meta.into_session(history));
-        }
-    }
     Some(session_from_store_snapshot(snapshot, history))
 }
 
@@ -1529,29 +1534,40 @@ fn session_from_store_snapshot(
         .checkpoint_json
         .clone()
         .and_then(|value| serde_json::from_value(value).ok());
+    let context_tokens = state
+        .context_tokens
+        .and_then(|tokens| u32::try_from(tokens).ok());
     Session {
         id: state.id,
         title: state.title,
         slug: state.slug,
-        first_user_message: None,
+        first_user_message: state.first_user_message,
         metadata_snapshots,
         created_at_ms: state.created_at as u64,
         updated_at_ms: state.updated_at as u64,
         mode: state.mode,
-        reasoning_effort: None,
+        reasoning_effort: state
+            .reasoning_effort
+            .as_deref()
+            .and_then(ReasoningEffort::parse),
         model: state.model,
         cwd: state.cwd,
-        parent_id: None,
+        parent_id: state.parent_id,
         history,
         checkpoint,
-        context_tokens: None,
-        context_tokens_history_len: None,
+        context_tokens,
+        context_tokens_history_len: state
+            .context_tokens_history_len
+            .and_then(|len| usize::try_from(len).ok()),
         context_token_identity: None,
-        display_context_tokens: None,
+        display_context_tokens: state
+            .display_context_tokens
+            .and_then(|tokens| u32::try_from(tokens).ok())
+            .or(context_tokens),
         display_context_token_identity: None,
         turn_metas,
         context_snapshots,
-        session_cost_usd: 0.0,
+        session_cost_usd: state.session_cost_usd,
         session_usage,
     }
 }
@@ -1624,7 +1640,7 @@ pub(crate) fn import_legacy_session_to_db(
 
     let db = smelt_store::SessionDb::open(&temp_path)?;
     let result = (|| {
-        let snapshot = session_store_snapshot(session, 0)?;
+        let snapshot = store_snapshot_from_session(session, 0)?;
         db.save_session_snapshot_for_import(&snapshot)?;
         db.import_legacy_requests_jsonl(dir_path)?;
         db.connection()
@@ -2166,7 +2182,7 @@ fn rewrite_history_image_urls<F: Fn(&mut String)>(history: &mut [HistoryItem], s
     }
 }
 
-fn externalize_blobs(
+pub fn externalize_blobs(
     history: &mut [HistoryItem],
     url_to_blob: &std::collections::HashMap<String, String>,
 ) {
@@ -2526,7 +2542,7 @@ mod tests {
         s.id = "existing".into();
         s.history.push(user_item("already migrated"));
         let db = smelt_store::SessionDb::open(session_dir.join("session.db")).unwrap();
-        db.save_session_snapshot(&session_store_snapshot(&s, 0).unwrap(), None)
+        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
             .unwrap();
         drop(db);
         for name in [
@@ -2615,7 +2631,7 @@ mod tests {
         let mut s = fixture_session();
         s.id = "existing".into();
         let db = smelt_store::SessionDb::open(existing.join("session.db")).unwrap();
-        db.save_session_snapshot(&session_store_snapshot(&s, 0).unwrap(), None)
+        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
             .unwrap();
 
         let good = root.path().join("good");
@@ -2660,16 +2676,25 @@ mod tests {
         let mut s = fixture_session();
         s.id = "db-session".into();
         s.title = Some("DB".into());
+        s.first_user_message = Some("hello sqlite".into());
+        s.reasoning_effort = Some(ReasoningEffort::High);
+        s.parent_id = Some("parent-session".into());
+        s.session_cost_usd = 1.5;
         s.history.push(user_item("hello sqlite"));
         s.record_context_tokens(42, test_context_identity());
         let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
-        db.save_session_snapshot(&session_store_snapshot(&s, 0).unwrap(), None)
+        db.save_session_snapshot(&store_snapshot_from_session(&s, 0).unwrap(), None)
             .unwrap();
 
         let loaded = load_session_files(dir.path()).expect("load db session");
         assert_eq!(loaded.id, "db-session");
         assert_eq!(loaded.title.as_deref(), Some("DB"));
+        assert_eq!(loaded.first_user_message.as_deref(), Some("hello sqlite"));
+        assert_eq!(loaded.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(loaded.parent_id.as_deref(), Some("parent-session"));
         assert_eq!(loaded.context_tokens, Some(42));
+        assert_eq!(loaded.display_context_tokens, Some(42));
+        assert_eq!(loaded.session_cost_usd, 1.5);
         assert_eq!(loaded.history.len(), 1);
         assert!(!dir.path().join("history.jsonl").exists());
     }

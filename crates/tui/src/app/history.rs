@@ -2,13 +2,15 @@ use crate::app::TuiApp;
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
 use smelt_core::transcript_model::BlockHistory;
-use smelt_core::{
-    Block, ToolOutput, ToolState, ToolStatus, TranscriptBlockDescriptor, TranscriptBlockRecord,
-};
+use smelt_core::{Block, ToolOutput, ToolState, ToolStatus, TranscriptBlockDescriptor};
 
 use protocol::{AgentMode, AssistantStep, Content, HistoryItem, UiCommand};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+const DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS: u16 = 3;
+const DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS: u16 = 80;
 
 pub(crate) struct ToolSummaryResolver<'a> {
     lua: &'a crate::lua::LuaRuntime,
@@ -112,68 +114,132 @@ pub(crate) fn load_transcript_from_sqlite(session: &session::Session) -> Option<
     transcript_covers_history(&transcript, session).then_some(transcript)
 }
 
-pub(crate) fn load_transcript_from_sqlite_id(id: &str) -> Option<Transcript> {
-    let transcript = load_transcript_from_sqlite_dir(session::dir_for_id(id))?;
-    transcript_has_contiguous_history_origins(&transcript).then_some(transcript)
+pub(crate) fn load_transcript_from_sqlite_id(
+    id: &str,
+    width: u16,
+    viewport_rows: u16,
+) -> Option<crate::app::transcript::LoadedTranscript> {
+    load_transcript_tail_from_sqlite_dir(session::dir_for_id(id), width, viewport_rows)
 }
 
-fn load_transcript_from_sqlite_dir(session_dir: std::path::PathBuf) -> Option<Transcript> {
-    let db_path = session_dir.join("session.db");
-    let db = smelt_store::SessionDb::open_read_only(db_path).ok()?;
-    let rows = db.read_transcript_descriptor_records().ok()?;
+struct SqliteTranscriptStore {
+    db: smelt_store::SessionDb,
+}
+
+impl SqliteTranscriptStore {
+    fn open_read_only(session_dir: impl AsRef<Path>) -> smelt_store::Result<Self> {
+        let db = smelt_store::SessionDb::open_read_only(session_dir.as_ref().join("session.db"))?;
+        Ok(Self { db })
+    }
+
+    fn read_descriptor_records(
+        &self,
+    ) -> smelt_store::Result<Vec<smelt_store::TranscriptDescriptorRecord>> {
+        self.db.read_transcript_descriptor_records()
+    }
+
+    fn read_tail_descriptor_slice_for_rows(
+        &self,
+        width: u16,
+        target_rows: u16,
+    ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
+        let total = self.db.transcript_descriptor_count()?;
+        if total == 0 {
+            return self.db.read_transcript_descriptor_tail_slice(0);
+        }
+
+        let target_rows = u64::from(target_rows.max(1));
+        let mut count = target_rows
+            .saturating_add(1)
+            .saturating_div(2)
+            .min(total as u64) as usize;
+        while count < total {
+            let slice = self.db.read_transcript_descriptor_tail_slice(count)?;
+            if estimate_descriptor_rows(&slice.records, width) >= target_rows {
+                return Ok(slice);
+            }
+            count = count.saturating_mul(2).min(total);
+        }
+        self.db.read_transcript_descriptor_tail_slice(total)
+    }
+}
+
+fn load_transcript_from_sqlite_dir(session_dir: PathBuf) -> Option<Transcript> {
+    let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
+    let rows = store.read_descriptor_records().ok()?;
+    transcript_from_descriptor_rows(rows)
+}
+
+fn load_transcript_tail_from_sqlite_dir(
+    session_dir: PathBuf,
+    width: u16,
+    viewport_rows: u16,
+) -> Option<crate::app::transcript::LoadedTranscript> {
+    let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
+    let target_rows = descriptor_tail_target_rows(viewport_rows);
+    let slice = store
+        .read_tail_descriptor_slice_for_rows(width, target_rows)
+        .ok()?;
+    smelt_perf::perf::record_value(
+        "transcript:sqlite:descriptor_total",
+        slice.total_count as u64,
+    );
+    smelt_perf::perf::record_value("transcript:sqlite:descriptor_loaded", slice.len() as u64);
+    transcript_from_descriptor_slice(slice)
+}
+
+fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
+    viewport_rows
+        .max(1)
+        .saturating_mul(DISPLAY_ONLY_TRANSCRIPT_OVERSCAN_VIEWPORTS.saturating_add(1))
+        .max(DISPLAY_ONLY_TRANSCRIPT_MIN_TARGET_ROWS)
+}
+
+fn estimate_descriptor_rows(
+    records: &[smelt_store::TranscriptDescriptorRecord],
+    width: u16,
+) -> u64 {
+    let width = u64::from(width.max(1));
+    records
+        .iter()
+        .map(|record| {
+            let text_rows = record.estimated_text_bytes.saturating_add(width - 1) / width;
+            text_rows.max(1).saturating_add(1)
+        })
+        .sum()
+}
+
+fn transcript_from_descriptor_slice(
+    slice: smelt_store::TranscriptDescriptorSlice,
+) -> Option<crate::app::transcript::LoadedTranscript> {
+    if slice.is_empty() {
+        return None;
+    }
+    let descriptor_slice = crate::app::transcript::LoadedTranscriptDescriptorSlice {
+        start: slice.start,
+        end: slice.end(),
+        total_count: slice.total_count,
+        hydration: slice.hydration,
+    };
+    let transcript = transcript_from_descriptor_rows(slice.into_records())?;
+    Some(crate::app::transcript::LoadedTranscript {
+        transcript,
+        descriptor_slice: Some(descriptor_slice),
+    })
+}
+
+fn transcript_from_descriptor_rows(
+    rows: Vec<smelt_store::TranscriptDescriptorRecord>,
+) -> Option<Transcript> {
     if rows.is_empty() {
         return None;
     }
     let records = rows
         .into_iter()
-        .map(|row| {
-            let descriptor: TranscriptBlockDescriptor = serde_json::from_str(&row.descriptor_json)?;
-            let origin = row
-                .origin_json
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()?
-                .or_else(|| {
-                    row.history_idx
-                        .map(|idx| smelt_core::BlockOrigin::History(idx as usize))
-                });
-            let tool_state = row
-                .tool_state_json
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()?;
-            let content_hash = row.content_hash.parse::<u64>().unwrap_or_default();
-            Ok(TranscriptBlockRecord {
-                descriptor,
-                content_hash,
-                origin,
-                tool_state,
-            })
-        })
+        .map(TryInto::try_into)
         .collect::<Result<Vec<_>, serde_json::Error>>()
         .ok()?;
     Some(Transcript::from_descriptor_records(records))
-}
-
-fn transcript_has_contiguous_history_origins(transcript: &Transcript) -> bool {
-    let mut origins = transcript
-        .history
-        .descriptor_records()
-        .into_iter()
-        .filter_map(|record| match record.origin {
-            Some(smelt_core::BlockOrigin::History(idx)) => Some(idx),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if origins.is_empty() {
-        return true;
-    }
-    origins.sort_unstable();
-    origins.dedup();
-    origins
-        .iter()
-        .enumerate()
-        .all(|(expected, actual)| expected == *actual)
 }
 
 fn transcript_covers_history(transcript: &Transcript, session: &session::Session) -> bool {
@@ -477,6 +543,63 @@ mod tests {
     }
 
     #[test]
+    fn display_only_sqlite_load_reads_bounded_tail_descriptors() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = (0..200)
+            .map(|idx| test_descriptor_record(idx, &format!("block {idx}")))
+            .collect::<Vec<_>>();
+        db.replace_transcript_descriptor_records(&records).unwrap();
+        drop(db);
+
+        let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 10, 1)
+            .expect("tail transcript");
+        let descriptor_slice = loaded.descriptor_slice.expect("descriptor slice");
+        assert_eq!(descriptor_slice.start.get(), 160);
+        assert_eq!(descriptor_slice.end.get(), 200);
+        assert_eq!(descriptor_slice.total_count, 200);
+        assert_eq!(
+            descriptor_slice.hydration,
+            smelt_store::TranscriptDescriptorHydration::ObjectBacked
+        );
+        assert_eq!(loaded.transcript.history.order.len(), 40);
+        assert_eq!(
+            loaded.transcript.history.descriptor_records()[0].origin,
+            Some(smelt_core::BlockOrigin::History(160))
+        );
+        assert_eq!(
+            loaded.transcript.history.descriptor_records()[39].origin,
+            Some(smelt_core::BlockOrigin::History(199))
+        );
+    }
+
+    fn test_descriptor_record(
+        block_idx: u64,
+        content: &str,
+    ) -> smelt_store::TranscriptDescriptorRecord {
+        smelt_store::TranscriptDescriptorRecord {
+            block_idx,
+            history_idx: None,
+            kind: "text".to_string(),
+            tool_call_id: None,
+            tool_name: None,
+            content_hash: "0".to_string(),
+            estimated_text_bytes: content.len() as u64,
+            preview_text: content.to_string(),
+            search_text: content.to_string(),
+            descriptor_json: serde_json::to_string(&TranscriptBlockDescriptor::Text {
+                content: content.to_string(),
+            })
+            .unwrap(),
+            origin_json: Some(
+                serde_json::to_string(&smelt_core::BlockOrigin::History(block_idx as usize))
+                    .unwrap(),
+            ),
+            tool_state_json: None,
+        }
+    }
+
+    #[test]
     fn registered_lua_tool_can_intentionally_use_empty_summary() {
         let lua = crate::lua::LuaRuntime::new();
         lua.lua
@@ -691,7 +814,7 @@ impl TuiApp {
         let original_id = self.core.session.id.clone();
         let forked = self.core.session.fork(self.core.env.pid());
         self.core.session = forked;
-        self.persisted_fingerprint = None;
+        self.persisted_store_ready = false;
         self.bump_epoch("session_epoch");
         self.save_session();
         self.flush_persist();
@@ -741,7 +864,7 @@ impl TuiApp {
         self.input.store.lock().unwrap().clear();
         self.stop_background_processes();
         self.core.session = session::Session::new(self.core.env.pid(), self.core.env.cwd());
-        self.persisted_fingerprint = None;
+        self.persisted_store_ready = false;
         self.transcript_descriptors_persisted = false;
         self.bump_epoch("session_epoch");
         if let Ok(mut guard) = self.shared_session.lock() {
@@ -813,7 +936,7 @@ impl TuiApp {
         }
 
         self.install_loaded_session(loaded);
-        self.persisted_fingerprint = None;
+        self.persisted_store_ready = false;
         self.transcript_descriptors_persisted = false;
         self.bump_epoch("session_epoch");
         // Drop snapshots beyond the restored history length.
@@ -842,7 +965,7 @@ impl TuiApp {
     pub(crate) fn load_session_display_only(
         &mut self,
         loaded: session::Session,
-        transcript: Transcript,
+        transcript: crate::app::transcript::LoadedTranscript,
         full_session_id: String,
     ) {
         if self.agent.is_some() {
@@ -875,7 +998,7 @@ impl TuiApp {
 
         self.install_loaded_session(loaded);
         self.deferred_session_load = Some(full_session_id);
-        self.persisted_fingerprint = None;
+        self.persisted_store_ready = false;
         self.transcript_descriptors_persisted = true;
         self.session_dirty = false;
         self.dirty_history_from = None;
@@ -887,7 +1010,7 @@ impl TuiApp {
         self.input.store.lock().unwrap().clear();
         self.stop_background_processes();
         self.clear_transcript();
-        self.transcript.replace_transcript(transcript);
+        self.transcript.replace_loaded_transcript(transcript);
         self.publish_shared_session_state();
         self.core
             .signals
@@ -926,7 +1049,7 @@ impl TuiApp {
     fn rebuild_screen_from_history(&mut self) {
         self.clear_transcript();
         self.prune_rewindable_session_state(self.core.session.history.len());
-        let persisted_fingerprint = persist_fingerprint(&self.core.session);
+        self.persisted_store_ready = true;
         let (transcript, descriptors_persisted) =
             match load_transcript_from_sqlite(&self.core.session) {
                 Some(transcript) => (transcript, true),
@@ -936,7 +1059,6 @@ impl TuiApp {
                 ),
             };
         self.transcript.replace_transcript(transcript);
-        self.persisted_fingerprint = persisted_fingerprint;
         self.transcript_descriptors_persisted = descriptors_persisted;
         self.session_dirty = false;
         self.dirty_history_from = None;
@@ -965,7 +1087,7 @@ impl TuiApp {
         self.session_save_pending = false;
         let blobs = self.pending_image_blobs();
         if !self.session_dirty
-            && self.persisted_fingerprint.is_some()
+            && self.persisted_store_ready
             && self.transcript_descriptors_persisted
             && self.transcript.history().descriptor_dirty_from().is_none()
             && blobs.is_empty()
@@ -974,8 +1096,7 @@ impl TuiApp {
             return;
         }
         self.update_session_persist_metadata();
-        let fingerprint = persist_fingerprint(&self.core.session);
-        let history_start_idx = if self.persisted_fingerprint.is_some() {
+        let history_start_idx = if self.persisted_store_ready {
             self.dirty_history_from
                 .unwrap_or(self.core.session.history.len())
         } else {
@@ -1000,31 +1121,35 @@ impl TuiApp {
         };
         let descriptor_records = transcript_history.descriptor_records_from(descriptor_order_start);
         let descriptor_work = descriptor_order_dirty.is_some();
-        if fingerprint.is_some()
-            && self.persisted_fingerprint.as_ref() == fingerprint.as_ref()
-            && !descriptor_work
-            && blobs.is_empty()
-        {
-            self.session_dirty = false;
-            self.dirty_history_from = None;
+        if !descriptor_work && blobs.is_empty() && !self.session_dirty {
             smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             return;
         }
-        let session = self.core.session.clone();
+        let session = &self.core.session;
+        let snapshot = match session::store_snapshot_from_session(session, history_start_idx) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                return;
+            }
+        };
+        let session_id = session.id.clone();
+        let session_dir = session::dir_for(session);
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = Some(crate::app::SharedSessionState {
-                id: session.id.clone(),
+                id: session_id.clone(),
                 has_messages: !session.history.is_empty(),
             });
         }
         self.persister.save(crate::persist::PersistRequest {
-            session,
-            history_start_idx,
+            session_id,
+            session_dir,
+            snapshot,
             blobs,
             descriptor_start_idx,
             descriptor_records,
         });
-        self.persisted_fingerprint = fingerprint;
+        self.persisted_store_ready = true;
         self.transcript_descriptors_persisted = true;
         self.transcript.history_mut().clear_descriptor_dirty();
         self.session_dirty = false;
@@ -1233,6 +1358,7 @@ impl TuiApp {
         self.sync_session_snapshot();
         self.publish_history_delta("request");
         self.save_session();
+        self.flush_persist();
     }
 
     pub(crate) fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {
@@ -1241,58 +1367,6 @@ impl TuiApp {
             image_labels,
         });
     }
-}
-
-fn persist_fingerprint(session: &session::Session) -> Option<Vec<u8>> {
-    #[derive(serde::Serialize)]
-    struct Fingerprint<'a> {
-        id: &'a str,
-        title: &'a Option<String>,
-        slug: &'a Option<String>,
-        first_user_message: &'a Option<String>,
-        metadata_snapshots: &'a session::HistorySnapshots<session::SessionMetadataSnapshot>,
-        created_at_ms: u64,
-        updated_at_ms: u64,
-        mode: &'a Option<String>,
-        reasoning_effort: &'a Option<protocol::ReasoningEffort>,
-        model: &'a Option<String>,
-        cwd: &'a Option<String>,
-        parent_id: &'a Option<String>,
-        history: &'a [HistoryItem],
-        checkpoint: &'a Option<session::ContextCheckpoint>,
-        context_tokens: &'a Option<u32>,
-        context_tokens_history_len: &'a Option<usize>,
-        display_context_tokens: &'a Option<u32>,
-        turn_metas: &'a session::HistorySnapshots<protocol::TurnMeta>,
-        context_snapshots: &'a session::HistorySnapshots<session::ContextSnapshot>,
-        session_cost_usd: f64,
-        session_usage: &'a protocol::TokenUsage,
-    }
-
-    bincode::serialize(&Fingerprint {
-        id: &session.id,
-        title: &session.title,
-        slug: &session.slug,
-        first_user_message: &session.first_user_message,
-        metadata_snapshots: &session.metadata_snapshots,
-        created_at_ms: session.created_at_ms,
-        updated_at_ms: 0,
-        mode: &session.mode,
-        reasoning_effort: &session.reasoning_effort,
-        model: &session.model,
-        cwd: &session.cwd,
-        parent_id: &session.parent_id,
-        history: &session.history,
-        checkpoint: &session.checkpoint,
-        context_tokens: &session.context_tokens,
-        context_tokens_history_len: &session.context_tokens_history_len,
-        display_context_tokens: &session.display_context_tokens,
-        turn_metas: &session.turn_metas,
-        context_snapshots: &session.context_snapshots,
-        session_cost_usd: session.session_cost_usd,
-        session_usage: &session.session_usage,
-    })
-    .ok()
 }
 
 #[cfg(test)]

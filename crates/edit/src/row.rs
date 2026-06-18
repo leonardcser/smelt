@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::{text, BufId, WinId};
+use crate::{text, BufId, Buffer, WinId};
 use smelt_buffer::buffer::{CopyOutput, SpanAction};
 use smelt_term::Rect;
 
@@ -116,6 +116,119 @@ pub trait DisplayDocument {
     }
 }
 
+pub struct StaticRowsDocument {
+    rows: Vec<DisplayRow>,
+    generation: u64,
+}
+
+impl StaticRowsDocument {
+    pub fn new(rows: Vec<DisplayRow>) -> Self {
+        Self {
+            rows,
+            generation: 0,
+        }
+    }
+
+    pub fn from_text_rows(rows: Vec<String>) -> Self {
+        Self::new(
+            rows.into_iter()
+                .map(|text| {
+                    let range = 0..text.len();
+                    DisplayRow::new(text, vec![range])
+                })
+                .collect(),
+        )
+    }
+
+    pub fn set_rows(&mut self, rows: Vec<DisplayRow>) {
+        self.rows = rows;
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+impl DisplayDocument for StaticRowsDocument {
+    fn snapshot(&mut self) -> DisplaySnapshot {
+        DisplaySnapshot {
+            generation: self.generation,
+            total_rows: self.rows.len() as RowIndex,
+        }
+    }
+
+    fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+        let start = row_to_usize(range.start).min(self.rows.len());
+        let end = row_to_usize(range.end).min(self.rows.len());
+        DisplayRows {
+            rows: self.rows[start..end].to_vec(),
+        }
+    }
+
+    fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
+        let range = range.rows()?;
+        let start_row = range.start.row.min(range.end.row);
+        let end_row = range.start.row.max(range.end.row);
+        let mut out = String::new();
+        for row_idx in start_row..=end_row {
+            let row = self.rows.get(row_to_usize(row_idx))?;
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            if start_row == end_row {
+                let start = range.start.byte_col.min(range.end.byte_col);
+                let end = range.start.byte_col.max(range.end.byte_col);
+                out.push_str(smelt_buffer::text::slice(&row.text, start..end));
+            } else if row_idx == range.start.row {
+                out.push_str(smelt_buffer::text::slice(
+                    &row.text,
+                    range.start.byte_col..row.text.len(),
+                ));
+            } else if row_idx == range.end.row {
+                out.push_str(smelt_buffer::text::slice(&row.text, 0..range.end.byte_col));
+            } else {
+                out.push_str(&row.text);
+            }
+        }
+        Some(CopyOutput::same(out))
+    }
+}
+
+pub struct BufferDocument<'a> {
+    buf: &'a Buffer,
+}
+
+impl<'a> BufferDocument<'a> {
+    pub fn new(buf: &'a Buffer) -> Self {
+        Self { buf }
+    }
+}
+
+impl DisplayDocument for BufferDocument<'_> {
+    fn snapshot(&mut self) -> DisplaySnapshot {
+        DisplaySnapshot {
+            generation: self.buf.changedtick(),
+            total_rows: self.buf.line_count() as RowIndex,
+        }
+    }
+
+    fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+        let start = row_to_usize(range.start).min(self.buf.line_count());
+        let end = row_to_usize(range.end).min(self.buf.line_count());
+        let rows = self
+            .buf
+            .get_lines(start, end)
+            .iter()
+            .map(|line| DisplayRow::new(line.clone(), std::iter::once(0..line.len()).collect()))
+            .collect();
+        DisplayRows { rows }
+    }
+
+    fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput> {
+        match range {
+            TextRange::Bytes(range) => Some(self.buf.copy_range(range)),
+            TextRange::Rows(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayRows {
     pub rows: Vec<DisplayRow>,
@@ -228,6 +341,27 @@ pub fn row_to_usize(row: RowIndex) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_rows_document_materializes_and_copies_ranges() {
+        let mut doc = StaticRowsDocument::from_text_rows(vec!["alpha".into(), "beta".into()]);
+        assert_eq!(doc.snapshot().total_rows, 2);
+        assert_eq!(doc.materialize(1..2).text_rows(), vec!["beta"]);
+
+        let copied = doc
+            .copy_range(TextRange::Rows(DocRange {
+                start: DocPosition {
+                    row: 0,
+                    byte_col: 1,
+                },
+                end: DocPosition {
+                    row: 1,
+                    byte_col: 2,
+                },
+            }))
+            .expect("copy range");
+        assert_eq!(copied.kill_ring, "lpha\nbe");
+    }
 
     #[test]
     fn materialized_rows_translate_between_absolute_and_local_rows() {

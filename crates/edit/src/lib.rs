@@ -68,15 +68,15 @@ pub use overlay::{
     ResizeConfig, ResizeEdges,
 };
 pub use row::{
-    row_to_usize, DisplayAction, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot,
-    DocPosition, DocRange, MaterializeRequest, MaterializedRows, PreparedWindowRequest, RowBreak,
-    RowIndex, TextRange,
+    row_to_usize, BufferDocument, DisplayAction, DisplayDocument, DisplayRow, DisplayRows,
+    DisplaySnapshot, DocPosition, DocRange, MaterializeRequest, MaterializedRows,
+    PreparedWindowRequest, RowBreak, RowIndex, StaticRowsDocument, TextRange,
 };
 pub use vim::VimMode;
 pub use window::{
-    clamp_scroll, materialized_row_range, resolve_row_document_viewer_command, scroll_to_show,
-    CursorShape, DrawContext, EventCtx, MouseCtx, RowTextState, RowYankFlash, ScrollbarState,
-    SplitConfig, VerticalScroll, ViewerCommand, ViewerCopy, ViewerKeyResult, ViewerTextObject,
+    clamp_scroll, materialized_row_range, resolve_document_command, scroll_to_show, CursorShape,
+    DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject, DocumentViewState,
+    DrawContext, EventCtx, MouseCtx, RowYankFlash, ScrollbarState, SplitConfig, VerticalScroll,
     Window, WindowSurface, WindowViewport,
 };
 

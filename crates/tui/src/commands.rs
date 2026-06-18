@@ -864,11 +864,39 @@ mod tests {
         app.app.core.session.history = vec![user("hello")];
         app.start_turn(1);
 
+        let before = app
+            .app
+            .pending_history_appends
+            .iter()
+            .map(|append| append.history_item())
+            .collect::<Vec<_>>();
+
         app.app.set_mode(AgentMode::parse("apply").unwrap(), false);
+        let after_apply = app
+            .app
+            .pending_history_appends
+            .iter()
+            .map(|append| append.history_item())
+            .collect::<Vec<_>>();
+        let expected_apply =
+            protocol::HistoryItem::note(protocol::HistoryNote::mode_change_for_transition(
+                "normal",
+                "apply",
+                app.app.lua.mode_note("apply"),
+            ));
+        assert_eq!(&after_apply[..before.len()], before.as_slice());
+        assert_eq!(&after_apply[before.len()..], [expected_apply]);
         assert_eq!(pending_mode_appends(&app.app).len(), 1);
 
         app.app.set_mode(AgentMode::parse("normal").unwrap(), false);
 
+        let after_normal = app
+            .app
+            .pending_history_appends
+            .iter()
+            .map(|append| append.history_item())
+            .collect::<Vec<_>>();
+        assert_eq!(after_normal, before);
         assert!(pending_mode_appends(&app.app).is_empty());
         assert!(mode_blocks(&app.app).is_empty());
     }

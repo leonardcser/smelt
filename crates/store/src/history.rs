@@ -1,6 +1,7 @@
 use protocol::HistoryItem;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Statement};
 use serde_json::{json, Value};
+use std::ops::Range;
 
 use crate::compression::ObjectCompression;
 use crate::error::Result;
@@ -13,6 +14,51 @@ pub(crate) const OBJECT_REF_KEY: &str = "$smelt_object_ref";
 pub(crate) struct HistoryRowInfo {
     pub idx: u64,
     pub hash: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TranscriptDescriptorIndex(usize);
+
+impl TranscriptDescriptorIndex {
+    pub fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl From<usize> for TranscriptDescriptorIndex {
+    fn from(value: usize) -> Self {
+        Self::new(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TranscriptDescriptorRange {
+    start: TranscriptDescriptorIndex,
+    end: TranscriptDescriptorIndex,
+}
+
+impl TranscriptDescriptorRange {
+    pub fn new(start: TranscriptDescriptorIndex, end: TranscriptDescriptorIndex) -> Self {
+        Self { start, end }
+    }
+
+    pub fn start(self) -> TranscriptDescriptorIndex {
+        self.start
+    }
+
+    pub fn end(self) -> TranscriptDescriptorIndex {
+        self.end
+    }
+}
+
+impl From<Range<usize>> for TranscriptDescriptorRange {
+    fn from(value: Range<usize>) -> Self {
+        Self::new(value.start.into(), value.end.into())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,15 +77,72 @@ pub struct TranscriptDescriptorRecord {
     pub tool_state_json: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriptDescriptorHydration {
+    Hydrated,
+    ObjectBacked,
+}
+
+impl TranscriptDescriptorHydration {
+    fn hydrates_objects(self) -> bool {
+        matches!(self, Self::Hydrated)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TranscriptDescriptorSlice {
+    pub start: TranscriptDescriptorIndex,
+    pub total_count: usize,
+    pub hydration: TranscriptDescriptorHydration,
+    pub records: Vec<TranscriptDescriptorRecord>,
+}
+
+impl TranscriptDescriptorSlice {
+    pub fn new(
+        start: TranscriptDescriptorIndex,
+        total_count: usize,
+        hydration: TranscriptDescriptorHydration,
+        records: Vec<TranscriptDescriptorRecord>,
+    ) -> Self {
+        Self {
+            start,
+            total_count,
+            hydration,
+            records,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn end(&self) -> TranscriptDescriptorIndex {
+        TranscriptDescriptorIndex::new(self.start.get().saturating_add(self.records.len()))
+    }
+
+    pub fn into_records(self) -> Vec<TranscriptDescriptorRecord> {
+        self.records
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptSearchCandidate {
     pub block_idx: u64,
     pub history_idx: Option<u64>,
 }
 
-pub(crate) fn history_hashes(conn: &Connection) -> Result<Vec<HistoryRowInfo>> {
-    let mut stmt = conn.prepare("SELECT idx, hash FROM history_items ORDER BY idx")?;
-    let rows = stmt.query_map([], |row| {
+pub(crate) fn history_hashes_from(
+    conn: &Connection,
+    start_idx: usize,
+) -> Result<Vec<HistoryRowInfo>> {
+    let start_idx = checked_i64(start_idx as u64, "start_idx")?;
+    let mut stmt =
+        conn.prepare("SELECT idx, hash FROM history_items WHERE idx >= ?1 ORDER BY idx")?;
+    let rows = stmt.query_map([start_idx], |row| {
         Ok(HistoryRowInfo {
             idx: row.get::<_, i64>(0)? as u64,
             hash: row.get(1)?,
@@ -275,6 +378,15 @@ fn insert_transcript_descriptor_record(
     Ok(())
 }
 
+pub(crate) fn transcript_descriptor_count(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count as usize)
+}
+
 pub(crate) fn read_transcript_descriptor_records(
     conn: &Connection,
 ) -> Result<Vec<TranscriptDescriptorRecord>> {
@@ -286,7 +398,79 @@ pub(crate) fn read_transcript_descriptor_records(
          WHERE descriptor_json IS NOT NULL
          ORDER BY block_idx",
     )?;
-    let rows = stmt.query_map([], |row| {
+    read_transcript_descriptor_records_from_stmt(
+        conn,
+        &mut stmt,
+        [],
+        TranscriptDescriptorHydration::Hydrated,
+    )
+}
+
+pub(crate) fn read_transcript_descriptor_slice(
+    conn: &Connection,
+    range: TranscriptDescriptorRange,
+) -> Result<TranscriptDescriptorSlice> {
+    let total_count = transcript_descriptor_count(conn)?;
+    let start = range.start().get().min(total_count);
+    let end = range.end().get().min(total_count);
+    if start >= end {
+        return Ok(TranscriptDescriptorSlice::new(
+            TranscriptDescriptorIndex::new(start),
+            total_count,
+            TranscriptDescriptorHydration::ObjectBacked,
+            Vec::new(),
+        ));
+    }
+    let limit = checked_i64((end - start) as u64, "descriptor_range_len")?;
+    let offset = checked_i64(start as u64, "descriptor_range_start")?;
+    let mut stmt = conn.prepare(
+        "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
+                estimated_text_bytes, preview_text, search_text, descriptor_json,
+                origin_json, tool_state_json
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL
+         ORDER BY block_idx
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let records = read_transcript_descriptor_records_from_stmt(
+        conn,
+        &mut stmt,
+        params![limit, offset],
+        TranscriptDescriptorHydration::ObjectBacked,
+    )?;
+    Ok(TranscriptDescriptorSlice::new(
+        TranscriptDescriptorIndex::new(start),
+        total_count,
+        TranscriptDescriptorHydration::ObjectBacked,
+        records,
+    ))
+}
+
+pub(crate) fn read_transcript_descriptor_tail_slice(
+    conn: &Connection,
+    count: usize,
+) -> Result<TranscriptDescriptorSlice> {
+    let total_count = transcript_descriptor_count(conn)?;
+    let start = total_count.saturating_sub(count);
+    read_transcript_descriptor_slice(
+        conn,
+        TranscriptDescriptorRange::new(
+            TranscriptDescriptorIndex::new(start),
+            TranscriptDescriptorIndex::new(total_count),
+        ),
+    )
+}
+
+fn read_transcript_descriptor_records_from_stmt<P>(
+    conn: &Connection,
+    stmt: &mut Statement<'_>,
+    params: P,
+    hydration: TranscriptDescriptorHydration,
+) -> Result<Vec<TranscriptDescriptorRecord>>
+where
+    P: rusqlite::Params,
+{
+    let rows = stmt.query_map(params, |row| {
         Ok(TranscriptDescriptorRecord {
             block_idx: row.get::<_, i64>(0)? as u64,
             history_idx: row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
@@ -305,13 +489,15 @@ pub(crate) fn read_transcript_descriptor_records(
     let mut records = Vec::new();
     for row in rows {
         let mut record = row?;
-        let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
-        rehydrate_object_refs(conn, &mut descriptor)?;
-        record.descriptor_json = serde_json::to_string(&descriptor)?;
-        if let Some(json) = &record.tool_state_json {
-            let mut value: Value = serde_json::from_str(json)?;
-            rehydrate_object_refs(conn, &mut value)?;
-            record.tool_state_json = Some(serde_json::to_string(&value)?);
+        if hydration.hydrates_objects() {
+            let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
+            rehydrate_object_refs(conn, &mut descriptor)?;
+            record.descriptor_json = serde_json::to_string(&descriptor)?;
+            if let Some(json) = &record.tool_state_json {
+                let mut value: Value = serde_json::from_str(json)?;
+                rehydrate_object_refs(conn, &mut value)?;
+                record.tool_state_json = Some(serde_json::to_string(&value)?);
+            }
         }
         records.push(record);
     }

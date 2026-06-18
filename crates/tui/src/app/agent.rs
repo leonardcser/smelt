@@ -1308,9 +1308,28 @@ mod tests {
         let mut app = crate::app::test_harness::TestApp::builder().build();
         app.start_turn(7);
 
+        let before = app
+            .app
+            .pending_history_appends
+            .iter()
+            .map(|append| append.history_item())
+            .collect::<Vec<_>>();
+
         app.app.handle_process_completed("4242".into(), Some(9));
 
         assert!(process_status_blocks(&app).is_empty());
+        let expected = protocol::HistoryItem::note(protocol::HistoryNote::process_status_event(
+            protocol::ProcessStatusEvent::background_process_completed("4242", Some(9)),
+        ));
+        let after = app
+            .app
+            .pending_history_appends
+            .iter()
+            .map(|append| append.history_item())
+            .collect::<Vec<_>>();
+        assert_eq!(&after[..before.len()], before.as_slice());
+        assert_eq!(&after[before.len()..], std::slice::from_ref(&expected));
+
         let process_status_appends: Vec<_> = app
             .app
             .pending_history_appends
@@ -1320,12 +1339,7 @@ mod tests {
             })
             .collect();
         assert_eq!(process_status_appends.len(), 1);
-        assert_eq!(
-            process_status_appends[0].history_item(),
-            protocol::HistoryItem::note(protocol::HistoryNote::process_status_event(
-                protocol::ProcessStatusEvent::background_process_completed("4242", Some(9))
-            ))
-        );
+        assert_eq!(process_status_appends[0].history_item(), expected);
     }
 
     #[test]

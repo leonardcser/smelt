@@ -638,6 +638,35 @@ pub struct TranscriptBlockRecord {
     pub tool_state: Option<(String, ToolState)>,
 }
 
+impl TryFrom<smelt_store::TranscriptDescriptorRecord> for TranscriptBlockRecord {
+    type Error = serde_json::Error;
+
+    fn try_from(row: smelt_store::TranscriptDescriptorRecord) -> Result<Self, Self::Error> {
+        let descriptor: TranscriptBlockDescriptor = serde_json::from_str(&row.descriptor_json)?;
+        let origin = row
+            .origin_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .or_else(|| {
+                row.history_idx
+                    .map(|idx| BlockOrigin::History(idx as usize))
+            });
+        let tool_state = row
+            .tool_state_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
+        let content_hash = row.content_hash.parse::<u64>().unwrap_or_default();
+        Ok(Self {
+            descriptor,
+            content_hash,
+            origin,
+            tool_state,
+        })
+    }
+}
+
 struct LazyBlock {
     descriptor: TranscriptBlockDescriptor,
     block: OnceLock<Block>,

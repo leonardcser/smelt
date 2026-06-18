@@ -7,7 +7,10 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::compression::ObjectCompression;
 use crate::error::{Result, StoreError};
-use crate::history::{self, TranscriptDescriptorRecord, TranscriptSearchCandidate};
+use crate::history::{
+    self, TranscriptDescriptorRange, TranscriptDescriptorRecord, TranscriptDescriptorSlice,
+    TranscriptSearchCandidate,
+};
 use crate::legacy::{self, LegacyImportReport, RequestAttemptSummary};
 use crate::meta::{self, SessionMeta, SessionState, WriterLease};
 use crate::object::{self, ObjectMeta, StoredObject};
@@ -309,8 +312,26 @@ impl SessionDb {
         )
     }
 
+    pub fn transcript_descriptor_count(&self) -> Result<usize> {
+        history::transcript_descriptor_count(&self.conn)
+    }
+
     pub fn read_transcript_descriptor_records(&self) -> Result<Vec<TranscriptDescriptorRecord>> {
         history::read_transcript_descriptor_records(&self.conn)
+    }
+
+    pub fn read_transcript_descriptor_slice(
+        &self,
+        range: TranscriptDescriptorRange,
+    ) -> Result<TranscriptDescriptorSlice> {
+        history::read_transcript_descriptor_slice(&self.conn, range)
+    }
+
+    pub fn read_transcript_descriptor_tail_slice(
+        &self,
+        count: usize,
+    ) -> Result<TranscriptDescriptorSlice> {
+        history::read_transcript_descriptor_tail_slice(&self.conn, count)
     }
 
     pub fn search_transcript_candidates(
@@ -439,6 +460,77 @@ mod tests {
             db.search_transcript_candidates("updated two").unwrap(),
             vec![]
         );
+    }
+
+    #[test]
+    fn transcript_descriptor_range_and_tail_read_bounded_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = (0..6)
+            .map(|idx| transcript_record(idx * 10, &format!("block-{idx}"), &format!("text {idx}")))
+            .collect::<Vec<_>>();
+        db.replace_transcript_descriptor_records(&records).unwrap();
+
+        let slice = db.read_transcript_descriptor_slice((2..5).into()).unwrap();
+        assert_eq!(slice.start.get(), 2);
+        assert_eq!(slice.end().get(), 5);
+        assert_eq!(slice.total_count, 6);
+        assert_eq!(slice.records, records[2..5].to_vec());
+        assert_eq!(
+            slice.hydration,
+            crate::TranscriptDescriptorHydration::ObjectBacked
+        );
+
+        let empty = db.read_transcript_descriptor_slice((4..4).into()).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.start.get(), 4);
+        assert_eq!(empty.total_count, 6);
+
+        let tail = db.read_transcript_descriptor_tail_slice(2).unwrap();
+        assert_eq!(tail.start.get(), 4);
+        assert_eq!(tail.end().get(), 6);
+        assert_eq!(tail.records, records[4..6].to_vec());
+        assert!(db
+            .read_transcript_descriptor_tail_slice(0)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.read_transcript_descriptor_tail_slice(99)
+                .unwrap()
+                .records,
+            records
+        );
+    }
+
+    #[test]
+    fn sparse_transcript_descriptor_reads_keep_metadata_object_backed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut record = transcript_record(0, "tool", "tool text");
+        let metadata_payload = "x".repeat(crate::history::METADATA_OBJECT_MIN_BYTES + 128);
+        record.descriptor_json = serde_json::json!({
+            "kind": "tool",
+            "metadata": { "payload": metadata_payload },
+        })
+        .to_string();
+        db.replace_transcript_descriptor_records(&[record]).unwrap();
+
+        let full: serde_json::Value = serde_json::from_str(
+            &db.read_transcript_descriptor_records().unwrap()[0].descriptor_json,
+        )
+        .unwrap();
+        assert_eq!(
+            full["metadata"]["payload"].as_str(),
+            Some(metadata_payload.as_str())
+        );
+
+        let tail: serde_json::Value = serde_json::from_str(
+            &db.read_transcript_descriptor_tail_slice(1).unwrap().records[0].descriptor_json,
+        )
+        .unwrap();
+        assert!(tail["metadata"]
+            .get(crate::history::OBJECT_REF_KEY)
+            .is_some());
     }
 
     #[test]
@@ -622,11 +714,18 @@ mod tests {
                 id: "s1".into(),
                 title: Some("title".into()),
                 slug: Some("title".into()),
+                first_user_message: None,
                 cwd: Some("/tmp/project".into()),
                 mode: Some("normal".into()),
+                reasoning_effort: None,
                 model: Some("model-a".into()),
+                parent_id: None,
                 accounting_json: Some(serde_json::json!({"prompt_tokens": 1})),
                 checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
                 revision: 0,
                 history_len: 1,
                 created_at: 10,
@@ -697,11 +796,18 @@ mod tests {
                 id: "s1".into(),
                 title: Some("title".into()),
                 slug: Some("title".into()),
+                first_user_message: None,
                 cwd: Some("/tmp/project".into()),
                 mode: Some("normal".into()),
+                reasoning_effort: None,
                 model: Some("model-a".into()),
+                parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
                 revision: 0,
                 history_len: 1,
                 created_at: 10,
@@ -786,11 +892,18 @@ mod tests {
                 id: "s1".into(),
                 title: Some("title".into()),
                 slug: Some("title".into()),
+                first_user_message: None,
                 cwd: Some("/tmp/project".into()),
                 mode: Some("normal".into()),
+                reasoning_effort: None,
                 model: Some("model-a".into()),
+                parent_id: None,
                 accounting_json: None,
                 checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
                 revision: 0,
                 history_len: 3,
                 created_at: 10,
@@ -1274,11 +1387,18 @@ mod tests {
             id: "s1".into(),
             title: Some("title".into()),
             slug: Some("slug".into()),
+            first_user_message: Some("hello".into()),
             cwd: Some("/tmp".into()),
             mode: Some("ask".into()),
+            reasoning_effort: Some("low".into()),
             model: Some("model".into()),
+            parent_id: Some("parent".into()),
             accounting_json: Some(serde_json::json!({"cost": 1})),
             checkpoint_json: None,
+            context_tokens: Some(42),
+            context_tokens_history_len: Some(3),
+            display_context_tokens: Some(40),
+            session_cost_usd: 1.25,
             revision: 7,
             history_len: 3,
             created_at: 10,
@@ -1307,11 +1427,18 @@ mod tests {
             id: "s1".into(),
             title: None,
             slug: None,
+            first_user_message: None,
             cwd: None,
             mode: None,
+            reasoning_effort: None,
             model: None,
+            parent_id: None,
             accounting_json: None,
             checkpoint_json: None,
+            context_tokens: None,
+            context_tokens_history_len: None,
+            display_context_tokens: None,
+            session_cost_usd: 0.0,
             revision: 0,
             history_len: 0,
             created_at: 10,

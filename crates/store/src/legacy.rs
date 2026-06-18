@@ -363,11 +363,18 @@ fn session_state_from_json(value: &Value, history_len: u64) -> Result<SessionSta
         id,
         title: optional_string(value, "title"),
         slug: optional_string(value, "slug"),
+        first_user_message: optional_string(value, "first_user_message"),
         cwd: optional_string(value, "cwd"),
         mode: optional_string(value, "mode"),
+        reasoning_effort: optional_string(value, "reasoning_effort"),
         model: optional_string(value, "model"),
+        parent_id: optional_string(value, "parent_id"),
         accounting_json: value.get("session_usage").cloned(),
         checkpoint_json: value.get("checkpoint").cloned(),
+        context_tokens: optional_u64(value, "context_tokens"),
+        context_tokens_history_len: optional_u64(value, "context_tokens_history_len"),
+        display_context_tokens: optional_u64(value, "display_context_tokens"),
+        session_cost_usd: optional_f64(value, "session_cost_usd").unwrap_or_default(),
         revision: history_len,
         history_len,
         created_at: optional_u64(value, "created_at_ms").unwrap_or_default() as i64,
@@ -384,6 +391,10 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
 
 fn optional_u64(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(Value::as_u64)
+}
+
+fn optional_f64(value: &Value, key: &str) -> Option<f64> {
+    value.get(key).and_then(Value::as_f64)
 }
 
 pub(crate) fn import_requests_jsonl(

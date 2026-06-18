@@ -5,11 +5,11 @@ use std::ops::Range;
 use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ViewerTextObject {
+pub struct DocumentTextObject {
     spec: crate::text_objects::TextObjectSpec,
 }
 
-impl ViewerTextObject {
+impl DocumentTextObject {
     pub fn new(inner: bool, kind: char) -> Option<Self> {
         Some(Self {
             spec: crate::text_objects::TextObjectSpec::new(inner, kind)?,
@@ -22,7 +22,7 @@ impl ViewerTextObject {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ViewerCommand {
+pub enum DocumentCommand {
     MoveRows(isize),
     PageRows(isize),
     HalfPageRows(isize),
@@ -41,7 +41,7 @@ pub enum ViewerCommand {
     YankSelection,
     YankSelectionLinewise,
     YankLines(RowIndex),
-    TextObject(ViewerTextObject),
+    TextObject(DocumentTextObject),
     CenterScroll,
     PanColumns(isize),
     MoveCursorCol(isize),
@@ -50,24 +50,24 @@ pub enum ViewerCommand {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ViewerKeyResult {
-    Command(ViewerCommand),
+pub enum DocumentKeyResult {
+    Command(DocumentCommand),
     Consumed,
     Passthrough,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ViewerCopy {
+pub enum DocumentCopy {
     Bytes(Range<usize>),
     Rows(DocRange),
 }
 
-pub fn resolve_row_document_viewer_command<D: DisplayDocument + ?Sized>(
+pub fn resolve_document_command<D: DisplayDocument + ?Sized>(
     doc: &mut D,
-    command: ViewerCommand,
+    command: DocumentCommand,
     cursor: DocPosition,
     vim_mode: VimMode,
-) -> Option<ViewerCommand> {
+) -> Option<DocumentCommand> {
     #[derive(Clone, Copy)]
     enum WordKind {
         Forward,
@@ -82,7 +82,7 @@ pub fn resolve_row_document_viewer_command<D: DisplayDocument + ?Sized>(
     let mut pos = cursor;
     pos.row = pos.row.min(total_rows.saturating_sub(1));
 
-    if let ViewerCommand::MoveCursorCol(delta) = command {
+    if let DocumentCommand::MoveCursorCol(delta) = command {
         let line = document_row_text(doc, pos.row)?;
         pos.byte_col = text::snap(&line, pos.byte_col.min(line.len()));
         if delta < 0 {
@@ -100,23 +100,23 @@ pub fn resolve_row_document_viewer_command<D: DisplayDocument + ?Sized>(
                 pos.byte_col = text::prev_char_boundary(&line, line.len());
             }
         }
-        return Some(ViewerCommand::GotoPosition(pos));
+        return Some(DocumentCommand::GotoPosition(pos));
     }
 
-    if let ViewerCommand::LineEnd = command {
+    if let DocumentCommand::LineEnd = command {
         let line = document_row_text(doc, pos.row)?;
         pos.byte_col = if matches!(vim_mode, VimMode::Normal) && !line.is_empty() {
             text::prev_char_boundary(&line, line.len())
         } else {
             line.len()
         };
-        return Some(ViewerCommand::GotoPosition(pos));
+        return Some(DocumentCommand::GotoPosition(pos));
     }
 
     let (kind, count) = match command {
-        ViewerCommand::WordForward(count) => (WordKind::Forward, count.max(1)),
-        ViewerCommand::WordBackward(count) => (WordKind::Backward, count.max(1)),
-        ViewerCommand::WordEnd(count) => (WordKind::End, count.max(1)),
+        DocumentCommand::WordForward(count) => (WordKind::Forward, count.max(1)),
+        DocumentCommand::WordBackward(count) => (WordKind::Backward, count.max(1)),
+        DocumentCommand::WordEnd(count) => (WordKind::End, count.max(1)),
         _ => return Some(command),
     };
 
@@ -155,7 +155,7 @@ pub fn resolve_row_document_viewer_command<D: DisplayDocument + ?Sized>(
         }
     }
 
-    Some(ViewerCommand::GotoPosition(pos))
+    Some(DocumentCommand::GotoPosition(pos))
 }
 
 fn document_row_text<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) -> Option<String> {
@@ -169,12 +169,12 @@ fn document_row_text<D: DisplayDocument + ?Sized>(doc: &mut D, row: RowIndex) ->
 fn resolve_materialized_row_viewer_command(
     buf: &Buffer,
     materialized: MaterializedRows,
-    command: ViewerCommand,
+    command: DocumentCommand,
     cursor: DocPosition,
     vim_mode: VimMode,
-) -> Option<ViewerCommand> {
+) -> Option<DocumentCommand> {
     let mut doc = MaterializedBufferDocument { buf, materialized };
-    resolve_row_document_viewer_command(&mut doc, command, cursor, vim_mode)
+    resolve_document_command(&mut doc, command, cursor, vim_mode)
 }
 
 struct MaterializedBufferDocument<'a> {
@@ -225,7 +225,7 @@ pub struct RowYankFlash {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RowTextState {
+pub struct DocumentViewState {
     pub active: bool,
     pub materialized: MaterializedRows,
     /// Authoritative row-document cursor position. `byte_col` is a byte column in
@@ -288,7 +288,7 @@ impl Window {
     }
 
     pub fn clear_materialized_rows(&mut self) {
-        *self.row_text_state_mut() = RowTextState::default();
+        *self.row_text_state_mut() = DocumentViewState::default();
     }
 
     pub fn scroll_row_total(&self, buf: &Buffer) -> RowIndex {
@@ -597,7 +597,7 @@ impl Window {
         }
     }
 
-    pub fn handle_viewer_key(&mut self, key: KeyEvent) -> ViewerKeyResult {
+    pub fn handle_viewer_key(&mut self, key: KeyEvent) -> DocumentKeyResult {
         let text = self.text_state_mut();
         vim::handle_viewer_key(key, &mut text.vim_mode, &mut text.vim_state)
     }
@@ -735,7 +735,7 @@ impl Window {
 
     fn row_copy_group_range(
         &self,
-        state: &RowTextState,
+        state: &DocumentViewState,
         buf: &Buffer,
         row: RowIndex,
     ) -> Option<(RowIndex, RowIndex)> {
@@ -769,7 +769,7 @@ impl Window {
         ))
     }
 
-    fn row_line_len(&self, state: &RowTextState, buf: &Buffer, row: RowIndex) -> usize {
+    fn row_line_len(&self, state: &DocumentViewState, buf: &Buffer, row: RowIndex) -> usize {
         let row_count = buf.line_count() as RowIndex;
         if row_count == 0 {
             return 0;
@@ -783,7 +783,7 @@ impl Window {
 
     fn row_text_object_range(
         &self,
-        state: &RowTextState,
+        state: &DocumentViewState,
         buf: &Buffer,
         cursor: DocPosition,
         spec: crate::text_objects::TextObjectSpec,
@@ -859,68 +859,68 @@ impl Window {
     pub fn execute_viewer_command(
         &mut self,
         buf: &Buffer,
-        command: ViewerCommand,
+        command: DocumentCommand,
         viewport_rows: u16,
         now: Instant,
-    ) -> Option<ViewerCopy> {
+    ) -> Option<DocumentCopy> {
         if self.row_text_state().active {
             return self
                 .execute_row_viewer_command(buf, command, viewport_rows, now)
-                .map(ViewerCopy::Rows);
+                .map(DocumentCopy::Rows);
         }
         self.execute_buffer_viewer_command(buf, command, viewport_rows)
-            .map(ViewerCopy::Bytes)
+            .map(DocumentCopy::Bytes)
     }
 
     fn execute_buffer_viewer_command(
         &mut self,
         buf: &Buffer,
-        command: ViewerCommand,
+        command: DocumentCommand,
         viewport_rows: u16,
     ) -> Option<Range<usize>> {
         let mut copy = None;
         match command {
-            ViewerCommand::MoveRows(delta) => {
+            DocumentCommand::MoveRows(delta) => {
                 self.move_cursor_by_lines(buf, delta, viewport_rows);
             }
-            ViewerCommand::PageRows(delta) => {
+            DocumentCommand::PageRows(delta) => {
                 let rows = (viewport_rows as isize).saturating_mul(delta);
                 self.move_cursor_by_lines(buf, rows, viewport_rows);
             }
-            ViewerCommand::HalfPageRows(delta) => {
+            DocumentCommand::HalfPageRows(delta) => {
                 let rows = (viewport_rows as isize / 2).max(1).saturating_mul(delta);
                 self.move_cursor_by_lines(buf, rows, viewport_rows);
             }
-            ViewerCommand::ScrollRows(delta) => {
+            DocumentCommand::ScrollRows(delta) => {
                 self.pan_by_lines(buf, delta, viewport_rows);
             }
-            ViewerCommand::BufferStart => {
+            DocumentCommand::BufferStart => {
                 self.set_cpos(0);
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::BufferEnd => {
+            DocumentCommand::BufferEnd => {
                 self.set_cpos(buf.text().len());
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::GotoRow(row) => {
+            DocumentCommand::GotoRow(row) => {
                 self.set_cpos(self.cpos_at_visual(buf, row_to_usize(row), 0));
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::GotoPosition(pos) => {
+            DocumentCommand::GotoPosition(pos) => {
                 self.set_cpos(buf.byte_at_display_byte_pos(row_to_usize(pos.row), pos.byte_col));
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::LineStart => {
+            DocumentCommand::LineStart => {
                 let text = buf.text();
                 self.set_cpos(text::line_start(&text, self.cpos()));
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::LineEnd => {
+            DocumentCommand::LineEnd => {
                 let text = buf.text();
                 let cpos = if matches!(self.vim_mode(), VimMode::Normal) {
                     crate::motions::line_end_normal(&text, self.cpos())
@@ -931,7 +931,7 @@ impl Window {
                 self.set_curswant(None);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::WordForward(count) => {
+            DocumentCommand::WordForward(count) => {
                 let text = buf.text();
                 let mut cpos = self.cpos();
                 for _ in 0..count.max(1) {
@@ -940,7 +940,7 @@ impl Window {
                 self.set_cpos(cpos);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::WordBackward(count) => {
+            DocumentCommand::WordBackward(count) => {
                 let text = buf.text();
                 let mut cpos = self.cpos();
                 for _ in 0..count.max(1) {
@@ -949,7 +949,7 @@ impl Window {
                 self.set_cpos(cpos);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::WordEnd(count) => {
+            DocumentCommand::WordEnd(count) => {
                 let text = buf.text();
                 let mut cpos = self.cpos();
                 for _ in 0..count.max(1) {
@@ -958,20 +958,20 @@ impl Window {
                 self.set_cpos(cpos);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::StartVisual => {
+            DocumentCommand::StartVisual => {
                 self.begin_visual(VimMode::Visual, self.cpos());
             }
-            ViewerCommand::StartVisualLine => {
+            DocumentCommand::StartVisualLine => {
                 self.begin_visual(VimMode::VisualLine, self.cpos());
             }
-            ViewerCommand::YankSelection => {
+            DocumentCommand::YankSelection => {
                 copy =
                     vim::visual_range(self.vim_state(), &buf.text(), self.cpos(), VimMode::Visual)
                         .filter(|(s, e)| s < e)
                         .map(|(s, e)| s..e);
                 self.set_vim_mode(VimMode::Normal);
             }
-            ViewerCommand::YankSelectionLinewise => {
+            DocumentCommand::YankSelectionLinewise => {
                 copy = vim::visual_range(
                     self.vim_state(),
                     &buf.text(),
@@ -982,10 +982,10 @@ impl Window {
                 .map(|(s, e)| s..e);
                 self.set_vim_mode(VimMode::Normal);
             }
-            ViewerCommand::YankLines(count) => {
+            DocumentCommand::YankLines(count) => {
                 copy = self.viewer_line_range(buf, count.max(1));
             }
-            ViewerCommand::TextObject(object) => {
+            DocumentCommand::TextObject(object) => {
                 let source = buf.text();
                 let spec = object.spec();
                 if let Some((start, end)) =
@@ -1008,15 +1008,15 @@ impl Window {
                     self.resync(buf, viewport_rows);
                 }
             }
-            ViewerCommand::CenterScroll => {
+            DocumentCommand::CenterScroll => {
                 let total_rows = self.scroll_row_total(buf);
                 self.recenter_on_cursor(buf, total_rows, viewport_rows);
             }
-            ViewerCommand::PanColumns(delta) => {
+            DocumentCommand::PanColumns(delta) => {
                 let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
                 self.pan_by_columns(delta, viewport_cols);
             }
-            ViewerCommand::MoveCursorCol(delta) => {
+            DocumentCommand::MoveCursorCol(delta) => {
                 let text = buf.text();
                 let mut cpos = self.cpos();
                 if delta < 0 {
@@ -1037,8 +1037,8 @@ impl Window {
                 self.set_cpos(cpos);
                 self.resync(buf, viewport_rows);
             }
-            ViewerCommand::OpenAction => {}
-            ViewerCommand::ClearSelection => {
+            DocumentCommand::OpenAction => {}
+            DocumentCommand::ClearSelection => {
                 self.clear_selection_anchor();
                 self.text_state_mut().drag_endpoint = None;
                 if matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine) {
@@ -1071,14 +1071,34 @@ impl Window {
     pub fn execute_row_viewer_command(
         &mut self,
         buf: &Buffer,
-        command: ViewerCommand,
+        command: DocumentCommand,
         viewport_rows: u16,
         now: Instant,
     ) -> Option<DocRange> {
-        if !self.row_text_state().active {
+        DocumentViewExecutor::new(self).execute(buf, command, viewport_rows, now)
+    }
+}
+
+pub struct DocumentViewExecutor<'a> {
+    window: &'a mut Window,
+}
+
+impl<'a> DocumentViewExecutor<'a> {
+    pub fn new(window: &'a mut Window) -> Self {
+        Self { window }
+    }
+
+    pub fn execute(
+        &mut self,
+        buf: &Buffer,
+        command: DocumentCommand,
+        viewport_rows: u16,
+        now: Instant,
+    ) -> Option<DocRange> {
+        if !self.window.row_text_state().active {
             return None;
         }
-        let mut state = *self.row_text_state();
+        let mut state = *self.window.row_text_state();
         let total_rows = state.materialized.total_rows;
         if total_rows == 0 || viewport_rows == 0 {
             return None;
@@ -1089,75 +1109,81 @@ impl Window {
             state.materialized,
             command,
             current,
-            self.vim_mode(),
+            self.window.vim_mode(),
         )
         .unwrap_or(command);
         let mut next = current;
         let mut copy = None;
         match command {
-            ViewerCommand::MoveRows(delta) => {
+            DocumentCommand::MoveRows(delta) => {
                 let row = add_signed_row(current.row, delta).min(total_rows.saturating_sub(1));
-                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.window
+                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
-            ViewerCommand::PageRows(delta) => {
+            DocumentCommand::PageRows(delta) => {
                 let rows = (viewport_rows as isize).saturating_mul(delta);
                 let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
-                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.window
+                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
-            ViewerCommand::HalfPageRows(delta) => {
+            DocumentCommand::HalfPageRows(delta) => {
                 let rows = (viewport_rows as isize / 2).max(1).saturating_mul(delta);
                 let row = add_signed_row(current.row, rows).min(total_rows.saturating_sub(1));
-                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.window
+                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
-            ViewerCommand::ScrollRows(delta) => {
+            DocumentCommand::ScrollRows(delta) => {
                 let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
-                let cur_scroll = if self.is_following_tail() && self.scroll_top != max_scroll {
-                    max_scroll
-                } else {
-                    self.scroll_top
-                };
+                let cur_scroll =
+                    if self.window.is_following_tail() && self.window.scroll_top != max_scroll {
+                        max_scroll
+                    } else {
+                        self.window.scroll_top
+                    };
                 let screen_row =
-                    Self::screen_row_or_edge(current.row, cur_scroll, viewport_rows) as RowIndex;
+                    Window::screen_row_or_edge(current.row, cur_scroll, viewport_rows) as RowIndex;
                 let new_scroll = add_signed_row(cur_scroll, delta).min(max_scroll);
-                self.set_scroll(new_scroll, buf);
-                self.update_tail_state(buf, viewport_rows);
+                self.window.set_scroll(new_scroll, buf);
+                self.window.update_tail_state(buf, viewport_rows);
                 let row = new_scroll
                     .saturating_add(screen_row)
                     .min(total_rows.saturating_sub(1));
-                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+                self.window
+                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
-            ViewerCommand::BufferStart => {
+            DocumentCommand::BufferStart => {
                 next.row = 0;
                 next.byte_col = 0;
                 state.preferred_cell_col = None;
             }
-            ViewerCommand::BufferEnd => {
+            DocumentCommand::BufferEnd => {
                 next.row = total_rows.saturating_sub(1);
             }
-            ViewerCommand::GotoRow(row) => {
-                self.move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
+            DocumentCommand::GotoRow(row) => {
+                self.window
+                    .move_row_cursor_to_row_preserving_cell(&mut state, buf, &mut next, row);
             }
-            ViewerCommand::GotoPosition(pos) => {
+            DocumentCommand::GotoPosition(pos) => {
                 next.row = pos.row.min(total_rows.saturating_sub(1));
                 next.byte_col = pos.byte_col;
                 state.preferred_cell_col = None;
             }
-            ViewerCommand::LineStart => {
+            DocumentCommand::LineStart => {
                 next.byte_col = 0;
                 state.preferred_cell_col = None;
             }
-            ViewerCommand::StartVisual => {
+            DocumentCommand::StartVisual => {
                 state.selection_anchor = Some(current);
                 state.selection_includes_cursor_cell = true;
             }
-            ViewerCommand::StartVisualLine => {
+            DocumentCommand::StartVisualLine => {
                 state.selection_anchor = Some(DocPosition {
                     row: current.row,
                     byte_col: 0,
                 });
                 state.selection_includes_cursor_cell = false;
             }
-            ViewerCommand::YankSelection => {
+            DocumentCommand::YankSelection => {
                 if let Some(anchor) = state.selection_anchor {
                     let range = order_doc_range_including_cursor_cell(
                         buf,
@@ -1174,7 +1200,7 @@ impl Window {
                     state.selection_anchor = None;
                 }
             }
-            ViewerCommand::YankSelectionLinewise => {
+            DocumentCommand::YankSelectionLinewise => {
                 if let Some(anchor) = state.selection_anchor {
                     let start = anchor.row.min(current.row);
                     let end = anchor
@@ -1199,7 +1225,7 @@ impl Window {
                     state.selection_anchor = None;
                 }
             }
-            ViewerCommand::YankLines(count) => {
+            DocumentCommand::YankLines(count) => {
                 let end_row = current.row.saturating_add(count.max(1)).min(total_rows);
                 copy = Some(DocRange {
                     start: DocPosition {
@@ -1216,37 +1242,39 @@ impl Window {
                     until: now + YANK_FLASH_DURATION,
                 });
             }
-            ViewerCommand::TextObject(object) => {
+            DocumentCommand::TextObject(object) => {
                 if let Some(selection) =
-                    self.row_text_object_range(&state, buf, current, object.spec())
+                    self.window
+                        .row_text_object_range(&state, buf, current, object.spec())
                 {
                     state.selection_anchor = Some(selection.start);
                     state.cursor = selection.cursor;
                     next = selection.cursor;
                     state.selection_includes_cursor_cell = selection.include_cursor_cell;
                     if selection.linewise {
-                        self.set_vim_mode(VimMode::VisualLine);
+                        self.window.set_vim_mode(VimMode::VisualLine);
                     }
                     state.yank_flash = None;
                     state.preferred_cell_col = None;
                 }
             }
-            ViewerCommand::CenterScroll => {
+            DocumentCommand::CenterScroll => {
                 let half = viewport_rows as RowIndex / 2;
                 let max_scroll = total_rows.saturating_sub(viewport_rows as RowIndex);
-                self.pin_scroll(current.row.saturating_sub(half).min(max_scroll));
+                self.window
+                    .pin_scroll(current.row.saturating_sub(half).min(max_scroll));
             }
-            ViewerCommand::PanColumns(delta) => {
-                let viewport_cols = self.viewport.map(|v| v.content_width).unwrap_or(0);
-                self.pan_by_columns(delta, viewport_cols);
+            DocumentCommand::PanColumns(delta) => {
+                let viewport_cols = self.window.viewport.map(|v| v.content_width).unwrap_or(0);
+                self.window.pan_by_columns(delta, viewport_cols);
             }
-            ViewerCommand::LineEnd
-            | ViewerCommand::MoveCursorCol(_)
-            | ViewerCommand::WordForward(_)
-            | ViewerCommand::WordEnd(_)
-            | ViewerCommand::WordBackward(_) => {}
-            ViewerCommand::OpenAction => {}
-            ViewerCommand::ClearSelection => {
+            DocumentCommand::LineEnd
+            | DocumentCommand::MoveCursorCol(_)
+            | DocumentCommand::WordForward(_)
+            | DocumentCommand::WordEnd(_)
+            | DocumentCommand::WordBackward(_) => {}
+            DocumentCommand::OpenAction => {}
+            DocumentCommand::ClearSelection => {
                 state.selection_anchor = None;
                 state.drag_endpoint = None;
                 state.yank_flash = None;
@@ -1254,36 +1282,37 @@ impl Window {
         }
         if matches!(
             command,
-            ViewerCommand::BufferStart
-                | ViewerCommand::BufferEnd
-                | ViewerCommand::GotoPosition(_)
-                | ViewerCommand::LineStart
-                | ViewerCommand::LineEnd
-                | ViewerCommand::WordForward(_)
-                | ViewerCommand::WordBackward(_)
-                | ViewerCommand::WordEnd(_)
+            DocumentCommand::BufferStart
+                | DocumentCommand::BufferEnd
+                | DocumentCommand::GotoPosition(_)
+                | DocumentCommand::LineStart
+                | DocumentCommand::LineEnd
+                | DocumentCommand::WordForward(_)
+                | DocumentCommand::WordBackward(_)
+                | DocumentCommand::WordEnd(_)
         ) {
-            if let Some(cell) = self.row_position_cell(state, buf, next) {
+            if let Some(cell) = self.window.row_position_cell(state, buf, next) {
                 state.preferred_cell_col = Some(cell);
             }
         }
         state.cursor = next;
-        *self.row_text_state_mut() = state;
+        *self.window.row_text_state_mut() = state;
         if !matches!(
             command,
-            ViewerCommand::ScrollRows(_)
-                | ViewerCommand::CenterScroll
-                | ViewerCommand::PanColumns(_)
+            DocumentCommand::ScrollRows(_)
+                | DocumentCommand::CenterScroll
+                | DocumentCommand::PanColumns(_)
         ) {
-            self.scroll_top = scroll_to_show(self.scroll_top, next.row, viewport_rows);
-            self.pin_current_scroll();
+            self.window.scroll_top =
+                scroll_to_show(self.window.scroll_top, next.row, viewport_rows);
+            self.window.pin_current_scroll();
         }
         copy
     }
 }
 
 fn row_paragraph_text_object(
-    state: &RowTextState,
+    state: &DocumentViewState,
     buf: &Buffer,
     cursor: DocPosition,
     inner: bool,

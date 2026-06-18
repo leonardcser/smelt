@@ -311,7 +311,11 @@ impl TuiApp {
     pub(crate) fn load_session_by_id(&mut self, id: &str) {
         if let (Some(meta), Some(transcript)) = (
             smelt_core::session::load_meta(id),
-            crate::app::history::load_transcript_from_sqlite_id(id),
+            crate::app::history::load_transcript_from_sqlite_id(
+                id,
+                self.last_width,
+                self.last_height,
+            ),
         ) {
             let mut session =
                 smelt_core::session::Session::new(self.core.env.pid(), self.core.env.cwd());

@@ -15,7 +15,10 @@ pub use compression::{
 };
 pub use db::{OpenMode, OpenOptions, SessionDb};
 pub use error::{Result, StoreError};
-pub use history::{TranscriptDescriptorRecord, TranscriptSearchCandidate};
+pub use history::{
+    TranscriptDescriptorHydration, TranscriptDescriptorIndex, TranscriptDescriptorRange,
+    TranscriptDescriptorRecord, TranscriptDescriptorSlice, TranscriptSearchCandidate,
+};
 pub use legacy::{LegacyImportReport, RequestAttemptSummary};
 pub use meta::{SessionMeta, SessionState, WriterLease};
 pub use object::{ObjectCodec, ObjectMeta, StoredObject};

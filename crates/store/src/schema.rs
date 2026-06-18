@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -61,6 +61,11 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
     if current < 4 {
         conn.execute_batch(MIGRATION_4)?;
         set_user_version(conn, 4)?;
+        current = 4;
+    }
+    if current < 5 {
+        conn.execute_batch(MIGRATION_5)?;
+        set_user_version(conn, 5)?;
     }
     conn.execute(
         "INSERT INTO store_meta (key, value, updated_at)
@@ -245,4 +250,14 @@ const MIGRATION_4: &str = r#"
 ALTER TABLE transcript_blocks ADD COLUMN descriptor_json TEXT;
 ALTER TABLE transcript_blocks ADD COLUMN origin_json TEXT;
 ALTER TABLE transcript_blocks ADD COLUMN tool_state_json TEXT;
+"#;
+
+const MIGRATION_5: &str = r#"
+ALTER TABLE session_state ADD COLUMN first_user_message TEXT;
+ALTER TABLE session_state ADD COLUMN reasoning_effort TEXT;
+ALTER TABLE session_state ADD COLUMN parent_id TEXT;
+ALTER TABLE session_state ADD COLUMN context_tokens INTEGER;
+ALTER TABLE session_state ADD COLUMN context_tokens_history_len INTEGER;
+ALTER TABLE session_state ADD COLUMN display_context_tokens INTEGER;
+ALTER TABLE session_state ADD COLUMN session_cost_usd REAL NOT NULL DEFAULT 0;
 "#;

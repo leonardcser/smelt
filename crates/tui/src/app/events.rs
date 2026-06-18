@@ -1369,11 +1369,11 @@ impl TuiApp {
                 win.handle_viewer_key(k)
             };
             match result {
-                crate::smelt_edit::ViewerKeyResult::Command(command) => {
+                crate::smelt_edit::DocumentKeyResult::Command(command) => {
                     return self.execute_viewer_command(win_id, buf_id, command, viewport_rows);
                 }
-                crate::smelt_edit::ViewerKeyResult::Consumed => return Status::Consumed,
-                crate::smelt_edit::ViewerKeyResult::Passthrough => {}
+                crate::smelt_edit::DocumentKeyResult::Consumed => return Status::Consumed,
+                crate::smelt_edit::DocumentKeyResult::Passthrough => {}
             }
         }
 
@@ -1384,10 +1384,10 @@ impl TuiApp {
         &mut self,
         win_id: crate::smelt_edit::WinId,
         buf_id: crate::smelt_edit::BufId,
-        command: crate::smelt_edit::ViewerCommand,
+        command: crate::smelt_edit::DocumentCommand,
         viewport_rows: u16,
     ) -> crate::smelt_edit::Status {
-        use crate::smelt_edit::{Status, ViewerCommand};
+        use crate::smelt_edit::{DocumentCommand, Status};
 
         let command = if self
             .ui
@@ -1400,7 +1400,7 @@ impl TuiApp {
             command
         };
 
-        if matches!(command, ViewerCommand::OpenAction) {
+        if matches!(command, DocumentCommand::OpenAction) {
             let pos = {
                 let Some(win) = self.ui.win(win_id) else {
                     return Status::Ignored;
@@ -1441,17 +1441,17 @@ impl TuiApp {
         &mut self,
         win_id: crate::smelt_edit::WinId,
         buf_id: crate::smelt_edit::BufId,
-        copied: Option<crate::smelt_edit::ViewerCopy>,
+        copied: Option<crate::smelt_edit::DocumentCopy>,
     ) {
         match copied {
-            Some(crate::smelt_edit::ViewerCopy::Rows(range)) => {
+            Some(crate::smelt_edit::DocumentCopy::Rows(range)) => {
                 if let Some(out) =
                     crate::smelt_edit::UiHost::copy_document_range(self, win_id, range)
                 {
                     self.yank_to_clipboard(out);
                 }
             }
-            Some(crate::smelt_edit::ViewerCopy::Bytes(range)) => {
+            Some(crate::smelt_edit::DocumentCopy::Bytes(range)) => {
                 if let Some(buf) = self.ui.buf(buf_id) {
                     self.yank_to_clipboard(buf.copy_range(range));
                 }
@@ -1514,14 +1514,14 @@ impl TuiApp {
     fn resolve_row_viewer_command(
         &mut self,
         win_id: crate::smelt_edit::WinId,
-        command: crate::smelt_edit::ViewerCommand,
-    ) -> Option<crate::smelt_edit::ViewerCommand> {
+        command: crate::smelt_edit::DocumentCommand,
+    ) -> Option<crate::smelt_edit::DocumentCommand> {
         let (cursor, vim_mode) = {
             let win = self.ui.win(win_id)?;
             (win.row_cursor()?, win.vim_mode())
         };
         let mut doc = crate::smelt_edit::HostDisplayDocument::new(self, win_id);
-        crate::smelt_edit::resolve_row_document_viewer_command(&mut doc, command, cursor, vim_mode)
+        crate::smelt_edit::resolve_document_command(&mut doc, command, cursor, vim_mode)
     }
 
     /// Keymap-driven dispatcher: looks up the binding under the window's
@@ -1581,36 +1581,40 @@ impl TuiApp {
             );
             let command = match action {
                 KeyAction::MoveUp | KeyAction::SelectUp => {
-                    Some(crate::smelt_edit::ViewerCommand::MoveRows(-1))
+                    Some(crate::smelt_edit::DocumentCommand::MoveRows(-1))
                 }
                 KeyAction::MoveDown | KeyAction::SelectDown => {
-                    Some(crate::smelt_edit::ViewerCommand::MoveRows(1))
+                    Some(crate::smelt_edit::DocumentCommand::MoveRows(1))
                 }
                 KeyAction::MoveWordForward | KeyAction::SelectWordForward => {
-                    Some(crate::smelt_edit::ViewerCommand::WordForward(1))
+                    Some(crate::smelt_edit::DocumentCommand::WordForward(1))
                 }
                 KeyAction::MoveWordBackward | KeyAction::SelectWordBackward => {
-                    Some(crate::smelt_edit::ViewerCommand::WordBackward(1))
+                    Some(crate::smelt_edit::DocumentCommand::WordBackward(1))
                 }
-                KeyAction::PageUp => Some(crate::smelt_edit::ViewerCommand::PageRows(-1)),
-                KeyAction::PageDown => Some(crate::smelt_edit::ViewerCommand::PageRows(1)),
-                KeyAction::HalfPageUp => Some(crate::smelt_edit::ViewerCommand::MoveRows(
+                KeyAction::PageUp => Some(crate::smelt_edit::DocumentCommand::PageRows(-1)),
+                KeyAction::PageDown => Some(crate::smelt_edit::DocumentCommand::PageRows(1)),
+                KeyAction::HalfPageUp => Some(crate::smelt_edit::DocumentCommand::MoveRows(
                     -((viewport_rows as isize) / 2).max(1),
                 )),
-                KeyAction::HalfPageDown => Some(crate::smelt_edit::ViewerCommand::MoveRows(
+                KeyAction::HalfPageDown => Some(crate::smelt_edit::DocumentCommand::MoveRows(
                     ((viewport_rows as isize) / 2).max(1),
                 )),
-                KeyAction::ScrollLineUp => Some(crate::smelt_edit::ViewerCommand::ScrollRows(-1)),
-                KeyAction::ScrollLineDown => Some(crate::smelt_edit::ViewerCommand::ScrollRows(1)),
-                KeyAction::MoveStartOfBuffer => Some(crate::smelt_edit::ViewerCommand::BufferStart),
-                KeyAction::MoveEndOfBuffer => Some(crate::smelt_edit::ViewerCommand::BufferEnd),
+                KeyAction::ScrollLineUp => Some(crate::smelt_edit::DocumentCommand::ScrollRows(-1)),
+                KeyAction::ScrollLineDown => {
+                    Some(crate::smelt_edit::DocumentCommand::ScrollRows(1))
+                }
+                KeyAction::MoveStartOfBuffer => {
+                    Some(crate::smelt_edit::DocumentCommand::BufferStart)
+                }
+                KeyAction::MoveEndOfBuffer => Some(crate::smelt_edit::DocumentCommand::BufferEnd),
                 KeyAction::MoveStartOfLine | KeyAction::SelectStartOfLine => {
-                    Some(crate::smelt_edit::ViewerCommand::LineStart)
+                    Some(crate::smelt_edit::DocumentCommand::LineStart)
                 }
                 KeyAction::MoveEndOfLine | KeyAction::SelectEndOfLine => {
-                    Some(crate::smelt_edit::ViewerCommand::LineEnd)
+                    Some(crate::smelt_edit::DocumentCommand::LineEnd)
                 }
-                KeyAction::CopySelection => Some(crate::smelt_edit::ViewerCommand::YankSelection),
+                KeyAction::CopySelection => Some(crate::smelt_edit::DocumentCommand::YankSelection),
                 _ => None,
             };
             if let Some(command) = command {
@@ -1625,16 +1629,16 @@ impl TuiApp {
                     if extending && !win.row_selection_anchor_active() {
                         win.execute_row_viewer_command(
                             buf,
-                            crate::smelt_edit::ViewerCommand::StartVisual,
+                            crate::smelt_edit::DocumentCommand::StartVisual,
                             viewport_rows,
                             now,
                         );
                     } else if !extending
-                        && !matches!(command, crate::smelt_edit::ViewerCommand::YankSelection)
+                        && !matches!(command, crate::smelt_edit::DocumentCommand::YankSelection)
                     {
                         win.execute_row_viewer_command(
                             buf,
-                            crate::smelt_edit::ViewerCommand::ClearSelection,
+                            crate::smelt_edit::DocumentCommand::ClearSelection,
                             viewport_rows,
                             now,
                         );

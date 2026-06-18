@@ -16,10 +16,33 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LoadedTranscriptDescriptorSlice {
+    pub(crate) start: smelt_store::TranscriptDescriptorIndex,
+    pub(crate) end: smelt_store::TranscriptDescriptorIndex,
+    pub(crate) total_count: usize,
+    pub(crate) hydration: smelt_store::TranscriptDescriptorHydration,
+}
+
+pub(crate) struct LoadedTranscript {
+    pub(crate) transcript: Transcript,
+    pub(crate) descriptor_slice: Option<LoadedTranscriptDescriptorSlice>,
+}
+
+impl LoadedTranscript {
+    pub(crate) fn full(transcript: Transcript) -> Self {
+        Self {
+            transcript,
+            descriptor_slice: None,
+        }
+    }
+}
+
 pub(crate) struct TranscriptView {
     transcript: Transcript,
     projection: crate::content::transcript_buf::TranscriptProjection,
     compaction_preview_id: Option<BlockId>,
+    descriptor_slice: Option<LoadedTranscriptDescriptorSlice>,
 }
 
 impl TranscriptView {
@@ -28,16 +51,46 @@ impl TranscriptView {
     }
 
     pub(crate) fn from_transcript(transcript: Transcript) -> Self {
+        Self::from_loaded_transcript(LoadedTranscript::full(transcript))
+    }
+
+    pub(crate) fn from_loaded_transcript(loaded: LoadedTranscript) -> Self {
+        if let Some(slice) = loaded.descriptor_slice {
+            smelt_perf::perf::record_value(
+                "transcript:descriptor_slice:start",
+                slice.start.get() as u64,
+            );
+            smelt_perf::perf::record_value(
+                "transcript:descriptor_slice:end",
+                slice.end.get() as u64,
+            );
+            smelt_perf::perf::record_value(
+                "transcript:descriptor_slice:total",
+                slice.total_count as u64,
+            );
+            smelt_perf::perf::record_value(
+                "transcript:descriptor_slice:object_backed",
+                u64::from(matches!(
+                    slice.hydration,
+                    smelt_store::TranscriptDescriptorHydration::ObjectBacked
+                )),
+            );
+        }
         Self {
-            transcript,
+            transcript: loaded.transcript,
             projection: crate::content::transcript_buf::TranscriptProjection::new(),
             compaction_preview_id: None,
+            descriptor_slice: loaded.descriptor_slice,
         }
     }
 
     pub(crate) fn replace_transcript(&mut self, transcript: Transcript) {
+        self.replace_loaded_transcript(LoadedTranscript::full(transcript));
+    }
+
+    pub(crate) fn replace_loaded_transcript(&mut self, loaded: LoadedTranscript) {
         let inline_options = self.projection.inline_options().clone();
-        *self = Self::from_transcript(transcript);
+        *self = Self::from_loaded_transcript(loaded);
         self.set_inline_options(inline_options);
     }
 
@@ -265,6 +318,9 @@ impl TranscriptView {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.transcript.history.is_empty()
+            && self
+                .descriptor_slice
+                .is_none_or(|slice| slice.total_count == 0)
     }
 
     pub(crate) fn push(&mut self, block: Block) {

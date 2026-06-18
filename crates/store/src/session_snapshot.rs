@@ -76,7 +76,9 @@ fn save_session_snapshot_inner(
         }
     }
 
-    let current_hashes = history::history_hashes(conn)?;
+    let current_len = current_state
+        .as_ref()
+        .map_or(0, |state| state.history_len as usize);
     let history_start = snapshot.history_start_idx.min(snapshot.history_len);
     if snapshot.history_len != history_start + snapshot.history.len() {
         return Err(StoreError::Integrity(format!(
@@ -85,25 +87,25 @@ fn save_session_snapshot_inner(
             snapshot.history_len
         )));
     }
-    if history_start > current_hashes.len() {
+    if history_start > current_len {
         return Err(StoreError::Integrity(format!(
-            "history unchanged prefix exceeds stored rows: prefix {history_start}, stored {}",
-            current_hashes.len()
+            "history unchanged prefix exceeds stored rows: prefix {history_start}, stored {current_len}",
         )));
     }
 
+    let current_suffix_hashes = history::history_hashes_from(conn, history_start)?;
     let new_hashes = snapshot
         .history
         .iter()
         .map(history::item_hash)
         .collect::<Result<Vec<_>>>()?;
-    let suffix_common = current_hashes[history_start..]
+    let suffix_common = current_suffix_hashes
         .iter()
         .zip(new_hashes.iter())
         .take_while(|(current, new)| current.hash == **new)
         .count();
     let common_len = history_start + suffix_common;
-    let history_deleted = current_hashes.len().saturating_sub(common_len) as u64;
+    let history_deleted = current_len.saturating_sub(common_len) as u64;
     let history_inserted = snapshot.history_len.saturating_sub(common_len) as u64;
 
     if history_deleted > 0 || history_inserted > 0 {
@@ -166,11 +168,18 @@ fn session_state_changed(current: Option<&SessionState>, next: &SessionState) ->
     current.id != next.id
         || current.title != next.title
         || current.slug != next.slug
+        || current.first_user_message != next.first_user_message
         || current.cwd != next.cwd
         || current.mode != next.mode
+        || current.reasoning_effort != next.reasoning_effort
         || current.model != next.model
+        || current.parent_id != next.parent_id
         || current.accounting_json != next.accounting_json
         || current.checkpoint_json != next.checkpoint_json
+        || current.context_tokens != next.context_tokens
+        || current.context_tokens_history_len != next.context_tokens_history_len
+        || current.display_context_tokens != next.display_context_tokens
+        || current.session_cost_usd != next.session_cost_usd
         || current.history_len != next.history_len
         || current.created_at != next.created_at
         || current.updated_at != next.updated_at
@@ -180,97 +189,148 @@ fn replace_snapshot_tables_if_changed(
     conn: &Connection,
     snapshot: &SessionSnapshot,
 ) -> Result<bool> {
-    let next_turn_metas = snapshot_rows_json(&snapshot.turn_metas)?;
-    let next_metadata = snapshot_rows_json(&snapshot.metadata_snapshots)?;
-    let next_accounting = snapshot_rows_json(&snapshot.accounting_snapshots)?;
-    let changed = table_rows_json(conn, "turn_metas", "turn_idx", "meta_json")? != next_turn_metas
-        || table_rows_json(conn, "metadata_snapshots", "history_idx", "metadata_json")?
-            != next_metadata
-        || table_rows_json(
-            conn,
-            "accounting_snapshots",
-            "history_idx",
-            "accounting_json",
-        )? != next_accounting;
-    if !changed {
+    let snapshot_start = snapshot.history_start_idx.min(snapshot.history_len) as u64;
+    let turn_metas = snapshot_rows_json_from(&snapshot.turn_metas, snapshot_start)?;
+    let metadata = snapshot_rows_json_from(&snapshot.metadata_snapshots, snapshot_start)?;
+    let accounting = snapshot_rows_json_from(&snapshot.accounting_snapshots, snapshot_start)?;
+
+    let mut changed =
+        sync_snapshot_table_suffix(conn, SnapshotTable::TurnMetas, snapshot_start, &turn_metas)?;
+    changed |= sync_snapshot_table_suffix(
+        conn,
+        SnapshotTable::MetadataSnapshots,
+        snapshot_start,
+        &metadata,
+    )?;
+    changed |= sync_snapshot_table_suffix(
+        conn,
+        SnapshotTable::AccountingSnapshots,
+        snapshot_start,
+        &accounting,
+    )?;
+    Ok(changed)
+}
+
+#[derive(Clone, Copy)]
+enum SnapshotTable {
+    TurnMetas,
+    MetadataSnapshots,
+    AccountingSnapshots,
+}
+
+impl SnapshotTable {
+    fn idx_col(self) -> &'static str {
+        match self {
+            Self::TurnMetas => "turn_idx",
+            Self::MetadataSnapshots | Self::AccountingSnapshots => "history_idx",
+        }
+    }
+
+    fn select_from_sql(self) -> &'static str {
+        match self {
+            Self::TurnMetas => {
+                "SELECT turn_idx, meta_json FROM turn_metas WHERE turn_idx >= ?1 ORDER BY turn_idx"
+            }
+            Self::MetadataSnapshots => {
+                "SELECT history_idx, metadata_json FROM metadata_snapshots WHERE history_idx >= ?1 ORDER BY history_idx"
+            }
+            Self::AccountingSnapshots => {
+                "SELECT history_idx, accounting_json FROM accounting_snapshots WHERE history_idx >= ?1 ORDER BY history_idx"
+            }
+        }
+    }
+
+    fn select_all_sql(self) -> &'static str {
+        match self {
+            Self::TurnMetas => "SELECT turn_idx, meta_json FROM turn_metas ORDER BY turn_idx",
+            Self::MetadataSnapshots => {
+                "SELECT history_idx, metadata_json FROM metadata_snapshots ORDER BY history_idx"
+            }
+            Self::AccountingSnapshots => {
+                "SELECT history_idx, accounting_json FROM accounting_snapshots ORDER BY history_idx"
+            }
+        }
+    }
+
+    fn delete_from_sql(self) -> &'static str {
+        match self {
+            Self::TurnMetas => "DELETE FROM turn_metas WHERE turn_idx >= ?1",
+            Self::MetadataSnapshots => "DELETE FROM metadata_snapshots WHERE history_idx >= ?1",
+            Self::AccountingSnapshots => "DELETE FROM accounting_snapshots WHERE history_idx >= ?1",
+        }
+    }
+
+    fn insert_sql(self) -> &'static str {
+        match self {
+            Self::TurnMetas => {
+                "INSERT INTO turn_metas (turn_idx, meta_json) VALUES (?1, ?2)
+                 ON CONFLICT(turn_idx) DO UPDATE SET meta_json = excluded.meta_json"
+            }
+            Self::MetadataSnapshots => {
+                "INSERT INTO metadata_snapshots (history_idx, metadata_json) VALUES (?1, ?2)
+                 ON CONFLICT(history_idx) DO UPDATE SET metadata_json = excluded.metadata_json"
+            }
+            Self::AccountingSnapshots => {
+                "INSERT INTO accounting_snapshots (history_idx, accounting_json) VALUES (?1, ?2)
+                 ON CONFLICT(history_idx) DO UPDATE SET accounting_json = excluded.accounting_json"
+            }
+        }
+    }
+}
+
+fn sync_snapshot_table_suffix(
+    conn: &Connection,
+    table: SnapshotTable,
+    start_idx: u64,
+    rows: &[(u64, String)],
+) -> Result<bool> {
+    let existing = read_snapshot_rows_json_from(conn, table, start_idx)?;
+    let common = existing
+        .iter()
+        .zip(rows.iter())
+        .take_while(|(current, next)| current == next)
+        .count();
+    if common == existing.len() && common == rows.len() {
         return Ok(false);
     }
 
-    sync_snapshot_table(
-        conn,
-        "turn_metas",
-        "turn_idx",
-        "meta_json",
-        &next_turn_metas,
-    )?;
-    sync_snapshot_table(
-        conn,
-        "metadata_snapshots",
-        "history_idx",
-        "metadata_json",
-        &next_metadata,
-    )?;
-    sync_snapshot_table(
-        conn,
-        "accounting_snapshots",
-        "history_idx",
-        "accounting_json",
-        &next_accounting,
-    )?;
+    let delete_from = match (existing.get(common), rows.get(common)) {
+        (Some((current_idx, _)), Some((next_idx, _))) => (*current_idx).min(*next_idx),
+        (Some((current_idx, _)), None) => *current_idx,
+        (None, Some((next_idx, _))) => *next_idx,
+        (None, None) => return Ok(false),
+    };
+    let delete_from = checked_i64(delete_from, table.idx_col())?;
+    conn.execute(table.delete_from_sql(), [delete_from])?;
+
+    for (idx, value) in &rows[common..] {
+        conn.execute(
+            table.insert_sql(),
+            params![checked_i64(*idx, table.idx_col())?, value],
+        )?;
+    }
     Ok(true)
 }
 
-fn sync_snapshot_table(
+fn read_snapshot_rows_json_from(
     conn: &Connection,
-    table: &'static str,
-    idx_col: &'static str,
-    json_col: &'static str,
-    rows: &[(u64, String)],
-) -> Result<()> {
-    let keep = rows
-        .iter()
-        .map(|(idx, _)| checked_i64(*idx, idx_col))
-        .collect::<Result<Vec<_>>>()?;
-    if keep.is_empty() {
-        let sql = format!("DELETE FROM {table}");
-        conn.execute(&sql, [])?;
-    } else {
-        let placeholders = std::iter::repeat_n("?", keep.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!("DELETE FROM {table} WHERE {idx_col} NOT IN ({placeholders})");
-        conn.execute(&sql, rusqlite::params_from_iter(keep.iter()))?;
-    }
-
-    let sql = format!(
-        "INSERT INTO {table} ({idx_col}, {json_col}) VALUES (?1, ?2)
-         ON CONFLICT({idx_col}) DO UPDATE SET {json_col} = excluded.{json_col}"
-    );
-    for (idx, value) in rows {
-        conn.execute(&sql, params![checked_i64(*idx, idx_col)?, value])?;
-    }
-    Ok(())
-}
-
-fn snapshot_rows_json(rows: &[(u64, Value)]) -> Result<Vec<(u64, String)>> {
-    rows.iter()
-        .map(|(idx, value)| Ok((*idx, serde_json::to_string(value)?)))
-        .collect()
-}
-
-fn table_rows_json(
-    conn: &Connection,
-    table: &'static str,
-    idx_col: &'static str,
-    json_col: &'static str,
+    table: SnapshotTable,
+    start_idx: u64,
 ) -> Result<Vec<(u64, String)>> {
-    let sql = format!("SELECT {idx_col}, {json_col} FROM {table} ORDER BY {idx_col}");
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |row| {
+    let start_idx = checked_i64(start_idx, table.idx_col())?;
+    let mut stmt = conn.prepare(table.select_from_sql())?;
+    let rows = stmt.query_map([start_idx], |row| {
         Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
+}
+
+fn snapshot_rows_json_from(rows: &[(u64, Value)], start_idx: u64) -> Result<Vec<(u64, String)>> {
+    rows.iter()
+        .filter(|(idx, _)| *idx >= start_idx)
+        .map(|(idx, value)| Ok((*idx, serde_json::to_string(value)?)))
+        .collect()
 }
 
 pub(crate) fn load_session_snapshot(conn: &Connection) -> Result<Option<SessionSnapshot>> {
@@ -287,30 +347,14 @@ pub(crate) fn load_session_snapshot(conn: &Connection) -> Result<Option<SessionS
         history_start_idx: 0,
         history_len: history.len(),
         history,
-        turn_metas: read_snapshot_rows(conn, "turn_metas", "turn_idx", "meta_json")?,
-        metadata_snapshots: read_snapshot_rows(
-            conn,
-            "metadata_snapshots",
-            "history_idx",
-            "metadata_json",
-        )?,
-        accounting_snapshots: read_snapshot_rows(
-            conn,
-            "accounting_snapshots",
-            "history_idx",
-            "accounting_json",
-        )?,
+        turn_metas: read_snapshot_rows(conn, SnapshotTable::TurnMetas)?,
+        metadata_snapshots: read_snapshot_rows(conn, SnapshotTable::MetadataSnapshots)?,
+        accounting_snapshots: read_snapshot_rows(conn, SnapshotTable::AccountingSnapshots)?,
     }))
 }
 
-fn read_snapshot_rows(
-    conn: &Connection,
-    table: &'static str,
-    idx_col: &'static str,
-    json_col: &'static str,
-) -> Result<Vec<(u64, Value)>> {
-    let sql = format!("SELECT {idx_col}, {json_col} FROM {table} ORDER BY {idx_col}");
-    let mut stmt = conn.prepare(&sql)?;
+fn read_snapshot_rows(conn: &Connection, table: SnapshotTable) -> Result<Vec<(u64, Value)>> {
+    let mut stmt = conn.prepare(table.select_all_sql())?;
     let rows = stmt.query_map([], |row| {
         let json: String = row.get(1)?;
         Ok((

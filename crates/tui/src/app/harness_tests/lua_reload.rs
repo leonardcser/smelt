@@ -343,7 +343,7 @@ fn loading_session_restores_persisted_cwd() {
 
     app.app.load_session_display_only(
         display_session,
-        transcript,
+        crate::app::transcript::LoadedTranscript::full(transcript),
         "full-display-only-cwd-session".into(),
     );
 
