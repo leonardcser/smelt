@@ -283,9 +283,19 @@ local command_tips = {
     text = "try /resume, /session, /compact, /fork, /ps, /color",
   },
   {
-    id = "commands.review",
-    key = "/btw /reflect /simplify",
-    text = "ask side questions or have the agent review its own plan and changes",
+    id = "commands.btw",
+    key = "/btw",
+    text = "ask a side question without steering the main turn",
+  },
+  {
+    id = "commands.reflect",
+    key = "/reflect",
+    text = "have the agent review its own plan and changes",
+  },
+  {
+    id = "commands.simplify",
+    key = "/simplify",
+    text = "ask the agent to find a simpler approach",
   },
   {
     id = "commands.copy",
