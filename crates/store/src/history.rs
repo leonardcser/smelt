@@ -135,8 +135,22 @@ pub(crate) fn replace_transcript_descriptor_records(
     records: &[TranscriptDescriptorRecord],
     compression: ObjectCompression,
 ) -> Result<()> {
+    replace_transcript_descriptor_suffix(conn, 0, records, compression)
+}
+
+pub(crate) fn replace_transcript_descriptor_suffix(
+    conn: &Connection,
+    start_descriptor_idx: usize,
+    records: &[TranscriptDescriptorRecord],
+    compression: ObjectCompression,
+) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = replace_transcript_descriptor_records_inner(conn, records, compression);
+    let result = replace_transcript_descriptor_suffix_inner(
+        conn,
+        start_descriptor_idx,
+        records,
+        compression,
+    );
     match result {
         Ok(()) => {
             conn.execute_batch("COMMIT")?;
@@ -149,13 +163,21 @@ pub(crate) fn replace_transcript_descriptor_records(
     }
 }
 
-fn replace_transcript_descriptor_records_inner(
+fn replace_transcript_descriptor_suffix_inner(
     conn: &Connection,
+    start_descriptor_idx: usize,
     records: &[TranscriptDescriptorRecord],
     compression: ObjectCompression,
 ) -> Result<()> {
-    conn.execute("DELETE FROM transcript_search", [])?;
-    conn.execute("DELETE FROM transcript_blocks", [])?;
+    let start_descriptor_idx = checked_i64(start_descriptor_idx as u64, "start_descriptor_idx")?;
+    conn.execute(
+        "DELETE FROM transcript_search WHERE block_idx >= ?1",
+        [start_descriptor_idx],
+    )?;
+    conn.execute(
+        "DELETE FROM transcript_blocks WHERE block_idx >= ?1",
+        [start_descriptor_idx],
+    )?;
     for record in records {
         let mut descriptor: Value = serde_json::from_str(&record.descriptor_json)?;
         let mut refs = Vec::new();

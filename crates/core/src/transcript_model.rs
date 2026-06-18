@@ -723,7 +723,20 @@ impl BlockEntry {
     }
 
     fn is_tool_draft(&self) -> bool {
-        matches!(self, Self::Materialized(Block::ToolDraft { .. }))
+        match self {
+            Self::Materialized(Block::ToolDraft { .. }) => true,
+            Self::Descriptor(block) => {
+                matches!(
+                    block.descriptor,
+                    TranscriptBlockDescriptor::ToolDraft { .. }
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn has_persisted_descriptor(&self) -> bool {
+        self.kind() != "compaction_preview" && !self.is_tool_draft()
     }
 
     fn raw_text(&self) -> Option<String> {
@@ -758,6 +771,8 @@ pub struct BlockHistory {
     pub finished_blocks: Vec<BlockId>,
     /// Bumped on every mutation; used by `TranscriptSnapshot` to detect staleness.
     generation: u64,
+    /// Earliest transcript order index whose persisted descriptor may be stale.
+    descriptor_dirty_from: Option<usize>,
 }
 
 impl BlockHistory {
@@ -773,6 +788,7 @@ impl BlockHistory {
             origins: HashMap::new(),
             finished_blocks: Vec::new(),
             generation: 0,
+            descriptor_dirty_from: None,
         }
     }
 
@@ -787,6 +803,28 @@ impl BlockHistory {
     /// Marks externally-mutated history as changed so snapshots and projections rebuild.
     pub fn mark_changed(&mut self) {
         self.bump_generation();
+        self.mark_descriptor_dirty_from(0);
+    }
+
+    pub fn descriptor_dirty_from(&self) -> Option<usize> {
+        self.descriptor_dirty_from
+    }
+
+    pub fn clear_descriptor_dirty(&mut self) {
+        self.descriptor_dirty_from = None;
+    }
+
+    fn mark_descriptor_dirty_from(&mut self, idx: usize) {
+        self.descriptor_dirty_from = Some(
+            self.descriptor_dirty_from
+                .map_or(idx, |current| current.min(idx)),
+        );
+    }
+
+    fn mark_descriptor_dirty_for_id(&mut self, id: BlockId) {
+        if let Some(idx) = self.order.iter().position(|candidate| *candidate == id) {
+            self.mark_descriptor_dirty_from(idx);
+        }
     }
 
     pub fn drain_finished_blocks(&mut self) -> Vec<BlockId> {
@@ -857,30 +895,46 @@ impl BlockHistory {
     }
 
     pub fn descriptor_records(&self) -> Vec<TranscriptBlockRecord> {
+        self.descriptor_records_from(0)
+    }
+
+    pub fn descriptor_record_index_for_order_index(&self, start: usize) -> usize {
         self.order
             .iter()
-            .filter_map(|id| {
-                let entry = self.entries.get(id)?;
-                if entry.kind() == "compaction_preview" {
-                    return None;
-                }
-                let descriptor = entry.descriptor();
-                if matches!(descriptor, TranscriptBlockDescriptor::ToolDraft { .. }) {
-                    return None;
-                }
-                let tool_state = descriptor.tool_call_id().and_then(|call_id| {
-                    self.tool_states
-                        .get(call_id)
-                        .map(|state| (call_id.to_string(), state.clone()))
-                });
-                Some(TranscriptBlockRecord {
-                    descriptor,
-                    content_hash: self.content_hash(*id),
-                    origin: self.origins.get(id).copied(),
-                    tool_state,
-                })
+            .take(start.min(self.order.len()))
+            .filter(|id| {
+                self.entries
+                    .get(id)
+                    .is_some_and(BlockEntry::has_persisted_descriptor)
             })
+            .count()
+    }
+
+    pub fn descriptor_records_from(&self, start: usize) -> Vec<TranscriptBlockRecord> {
+        self.order
+            .iter()
+            .skip(start.min(self.order.len()))
+            .filter_map(|id| self.descriptor_record(*id))
             .collect()
+    }
+
+    fn descriptor_record(&self, id: BlockId) -> Option<TranscriptBlockRecord> {
+        let entry = self.entries.get(&id)?;
+        if !entry.has_persisted_descriptor() {
+            return None;
+        }
+        let descriptor = entry.descriptor();
+        let tool_state = descriptor.tool_call_id().and_then(|call_id| {
+            self.tool_states
+                .get(call_id)
+                .map(|state| (call_id.to_string(), state.clone()))
+        });
+        Some(TranscriptBlockRecord {
+            descriptor,
+            content_hash: self.content_hash(id),
+            origin: self.origins.get(&id).copied(),
+            tool_state,
+        })
     }
 
     pub fn from_descriptor_records(records: Vec<TranscriptBlockRecord>) -> Self {
@@ -894,6 +948,7 @@ impl BlockHistory {
             let content_hash = (record.content_hash != 0).then_some(record.content_hash);
             history.add_descriptor(None, record.descriptor, record.origin, content_hash);
         }
+        history.clear_descriptor_dirty();
         history
     }
 
@@ -959,16 +1014,15 @@ impl BlockHistory {
         let hash = block.content_hash();
         let id = BlockId(self.next_id);
         self.next_id += 1;
-        match idx {
-            Some(idx) => self.order.insert(idx.min(self.order.len()), id),
-            None => self.order.push(id),
-        }
+        let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
+        self.order.insert(order_index, id);
         self.entries.insert(id, BlockEntry::Materialized(block));
         self.content_hashes.insert(id, hash);
         if let Some(origin) = origin {
             self.origins.insert(id, origin);
         }
         self.bump_generation();
+        self.mark_descriptor_dirty_from(order_index);
         id
     }
 
@@ -987,10 +1041,8 @@ impl BlockHistory {
         let descriptor = normalized;
         let id = BlockId(self.next_id);
         self.next_id += 1;
-        match idx {
-            Some(idx) => self.order.insert(idx.min(self.order.len()), id),
-            None => self.order.push(id),
-        }
+        let order_index = idx.map_or(self.order.len(), |idx| idx.min(self.order.len()));
+        self.order.insert(order_index, id);
         self.entries
             .insert(id, BlockEntry::Descriptor(LazyBlock::new(descriptor)));
         self.content_hashes.insert(id, hash);
@@ -998,6 +1050,7 @@ impl BlockHistory {
             self.origins.insert(id, origin);
         }
         self.bump_generation();
+        self.mark_descriptor_dirty_from(order_index);
         id
     }
 
@@ -1069,6 +1122,7 @@ impl BlockHistory {
         }
         let block = self.entries.remove(&id).map(BlockEntry::into_materialized);
         self.bump_generation();
+        self.mark_descriptor_dirty_from(idx);
         block
     }
 
@@ -1082,6 +1136,11 @@ impl BlockHistory {
         if removed.is_empty() {
             return;
         }
+        let first_removed = self
+            .order
+            .iter()
+            .position(|id| removed.contains(id))
+            .unwrap_or(self.order.len());
         self.order.retain(|id| !removed.contains(id));
         for id in removed {
             self.entries.remove(&id);
@@ -1090,6 +1149,7 @@ impl BlockHistory {
             self.origins.remove(&id);
         }
         self.bump_generation();
+        self.mark_descriptor_dirty_from(first_removed);
     }
 
     pub(crate) fn push_with_state(
@@ -1135,6 +1195,10 @@ impl BlockHistory {
         call_id: &str,
         mutator: impl FnOnce(&mut ToolState),
     ) -> bool {
+        let dirty_idx = self
+            .order
+            .iter()
+            .position(|id| self.tool_call_id(*id) == Some(call_id));
         let Some(state) = self.tool_states.get_mut(call_id) else {
             return false;
         };
@@ -1142,6 +1206,9 @@ impl BlockHistory {
         self.tool_display_hashes
             .insert(call_id.to_string(), state.display_hash());
         self.bump_generation();
+        if let Some(idx) = dirty_idx {
+            self.mark_descriptor_dirty_from(idx);
+        }
         true
     }
 
@@ -1161,6 +1228,7 @@ impl BlockHistory {
         self.entries.insert(id, BlockEntry::Materialized(block));
         self.content_hashes.insert(id, hash);
         self.bump_generation();
+        self.mark_descriptor_dirty_for_id(id);
     }
 
     pub(crate) fn rewrite_with_tool_state(
@@ -1175,18 +1243,23 @@ impl BlockHistory {
         self.tool_states.insert(call_id.clone(), state);
         self.tool_display_hashes.insert(call_id, hash);
         self.bump_generation();
+        self.mark_descriptor_dirty_for_id(id);
     }
 
     pub(crate) fn remove_block(&mut self, id: BlockId) {
         if !self.entries.contains_key(&id) {
             return;
         }
+        let dirty_idx = self.order.iter().position(|candidate| *candidate == id);
         self.order.retain(|candidate| *candidate != id);
         self.entries.remove(&id);
         self.content_hashes.remove(&id);
         self.statuses.remove(&id);
         self.origins.remove(&id);
         self.bump_generation();
+        if let Some(idx) = dirty_idx {
+            self.mark_descriptor_dirty_from(idx);
+        }
         self.gc_tool_states();
     }
 
@@ -1200,6 +1273,7 @@ impl BlockHistory {
         self.statuses.clear();
         self.origins.clear();
         self.bump_generation();
+        self.mark_descriptor_dirty_from(0);
     }
 
     pub fn block_gap(&self, i: usize) -> u16 {
@@ -1249,6 +1323,7 @@ impl BlockHistory {
             self.origins.remove(&id);
         }
         self.bump_generation();
+        self.mark_descriptor_dirty_from(idx);
         self.gc_tool_states();
     }
 
@@ -1529,6 +1604,76 @@ mod tests {
         )));
         assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("before"));
         assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("after"));
+    }
+
+    #[test]
+    fn descriptor_record_index_counts_only_persisted_prefix() {
+        let mut history = BlockHistory::new();
+        history.push(Block::Text {
+            content: "before".into(),
+        });
+        history.push_descriptor_with_origin(
+            TranscriptBlockDescriptor::ToolDraft {
+                stream_id: "stream-1".into(),
+                call_id: Some("call-1".into()),
+                name: "bash".into(),
+                summary: protocol::StyledLines::from_plain("echo hi"),
+                args: HashMap::from([("command".into(), serde_json::json!("echo hi"))]),
+                raw_arguments: "{\"command\":\"echo hi\"}".into(),
+                finished: false,
+            },
+            BlockOrigin::History(1),
+        );
+        history.push(Block::CompactionPreview {
+            summary: "streaming summary".into(),
+        });
+        history.push(Block::Text {
+            content: "after".into(),
+        });
+        history.push(Block::Text {
+            content: "tail".into(),
+        });
+
+        assert_eq!(history.descriptor_record_index_for_order_index(0), 0);
+        assert_eq!(history.descriptor_record_index_for_order_index(1), 1);
+        assert_eq!(history.descriptor_record_index_for_order_index(2), 1);
+        assert_eq!(history.descriptor_record_index_for_order_index(3), 1);
+        assert_eq!(history.descriptor_record_index_for_order_index(4), 2);
+
+        let records = history.descriptor_records_from(3);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].descriptor.raw_text().as_deref(), Some("after"));
+        assert_eq!(records[1].descriptor.raw_text().as_deref(), Some("tail"));
+    }
+
+    #[test]
+    fn descriptor_dirty_range_is_owned_by_block_history_mutations() {
+        let mut history = BlockHistory::new();
+        assert_eq!(history.descriptor_dirty_from(), None);
+
+        let first = history.push(Block::Text {
+            content: "first".into(),
+        });
+        history.push(Block::Text {
+            content: "second".into(),
+        });
+        assert_eq!(history.descriptor_dirty_from(), Some(0));
+        history.clear_descriptor_dirty();
+
+        history.rewrite(
+            first,
+            Block::Text {
+                content: "changed".into(),
+            },
+        );
+        assert_eq!(history.descriptor_dirty_from(), Some(0));
+        history.clear_descriptor_dirty();
+
+        history.truncate(1);
+        assert_eq!(history.descriptor_dirty_from(), Some(1));
+
+        let restored = BlockHistory::from_descriptor_records(history.descriptor_records());
+        assert_eq!(restored.descriptor_dirty_from(), None);
     }
 
     #[test]

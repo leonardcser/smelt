@@ -427,7 +427,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let shared_session: Arc<Mutex<Option<smelt_core::session::Session>>> =
+    let shared_session: Arc<Mutex<Option<tui::app::SharedSessionState>>> =
         Arc::new(Mutex::new(None));
     let headless_cancel = Arc::new(tokio::sync::Notify::new());
 
@@ -457,16 +457,10 @@ async fn main() {
                 return;
             }
             let session_id = if let Ok(guard) = shared.lock() {
-                if let Some(ref s) = *guard {
-                    smelt_core::session::save(s, &smelt_core::attachment::AttachmentStore::new());
-                    if !s.history.is_empty() {
-                        Some(s.id.clone())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+                guard
+                    .as_ref()
+                    .filter(|session| session.has_messages)
+                    .map(|session| session.id.clone())
             } else {
                 None
             };

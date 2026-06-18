@@ -508,19 +508,6 @@ impl MeasurementIndexStore {
             upsert_row_index_entry(&mut self.entries, entry);
         }
     }
-
-    fn find_entry(
-        &self,
-        width: u16,
-        renderer_generation: u64,
-        renderer_cache_key: Option<u64>,
-    ) -> Option<&DisplayRowIndexEntry> {
-        self.entries.iter().find(|entry| {
-            entry.width == width
-                && entry.renderer_generation == renderer_generation
-                && entry.renderer_cache_key == renderer_cache_key
-        })
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1167,30 +1154,26 @@ impl TranscriptProjection {
     }
 
     fn try_hydrate_row_index(
-        &mut self,
+        active: &mut TranscriptHeightIndex,
+        entries: &[DisplayRowIndexEntry],
         history: &BlockHistory,
         plan: &RenderPlan,
+        policy: &TranscriptDefaultViewPolicy,
+        presentation: &TranscriptPresentationState,
         key: RowIndexKey,
     ) -> bool {
-        if self.measurements.active.is_current(plan, key) {
+        if active.is_current(plan, key) {
             return true;
         }
-        let Some(entry) = self
-            .measurements
-            .find_entry(key.width, key.renderer_generation, key.renderer_cache_key)
-            .cloned()
-        else {
+        let Some(entry) = entries.iter().find(|entry| {
+            entry.width == key.width
+                && entry.renderer_generation == key.renderer_generation
+                && entry.renderer_cache_key == key.renderer_cache_key
+        }) else {
             smelt_perf::perf::record_value("transcript:row_index_cache:miss", 1);
             return false;
         };
-        let hydrated = self.measurements.active.hydrate_from_cache(
-            history,
-            plan,
-            &self.default_view_policy,
-            &self.presentation,
-            &entry,
-            key,
-        );
+        let hydrated = active.hydrate_from_cache(history, plan, policy, presentation, entry, key);
         smelt_perf::perf::record_value(
             if hydrated {
                 "transcript:row_index_cache:hydrated"
@@ -1231,18 +1214,26 @@ impl TranscriptProjection {
         let renderer_cache_key = env.renderer_cache_key;
         self.invalidate_renderer_if_changed(renderer_generation, renderer_cache_key);
         self.gc_if_stale(env.lua, history, width);
-        let plan = self.render_plan.clone();
+        let plan = &self.render_plan;
         let row_key = RowIndexKey::new(
             width,
             renderer_generation,
             renderer_cache_key,
             self.presentation.generation(),
         );
-        let hydrated_index = self.try_hydrate_row_index(history, &plan, row_key);
+        let hydrated_index = Self::try_hydrate_row_index(
+            &mut self.measurements.active,
+            &self.measurements.entries,
+            history,
+            plan,
+            &self.default_view_policy,
+            &self.presentation,
+            row_key,
+        );
         let reused_index = hydrated_index
             || self.measurements.active.sync_stable_order_prefix(
                 history,
-                &plan,
+                plan,
                 &self.default_view_policy,
                 &self.presentation,
                 row_key,
@@ -1255,7 +1246,7 @@ impl TranscriptProjection {
             let _perf = smelt_perf::perf::begin("transcript:prepare_row_index:rebuild_index");
             self.measurements.active.rebuild_if_stale(
                 history,
-                &plan,
+                plan,
                 &self.default_view_policy,
                 &self.presentation,
                 row_key,
@@ -2399,18 +2390,26 @@ impl TranscriptProjection {
             self.counters.full_row_builds += 1;
         }
         smelt_perf::perf::record_value("transcript:build_rows:blocks", history.order.len() as u64);
-        let plan = self.render_plan.clone();
+        let plan = &self.render_plan;
         let row_key = RowIndexKey::new(
             width,
             renderer_generation,
             renderer_cache_key,
             self.presentation.generation(),
         );
-        let hydrated_index = self.try_hydrate_row_index(history, &plan, row_key);
+        let hydrated_index = Self::try_hydrate_row_index(
+            &mut self.measurements.active,
+            &self.measurements.entries,
+            history,
+            plan,
+            &self.default_view_policy,
+            &self.presentation,
+            row_key,
+        );
         let reused_index = hydrated_index
             || self.measurements.active.sync_stable_order_prefix(
                 history,
-                &plan,
+                plan,
                 &self.default_view_policy,
                 &self.presentation,
                 row_key,
@@ -2418,7 +2417,7 @@ impl TranscriptProjection {
         if !reused_index {
             self.measurements.active.rebuild_if_stale(
                 history,
-                &plan,
+                plan,
                 &self.default_view_policy,
                 &self.presentation,
                 row_key,

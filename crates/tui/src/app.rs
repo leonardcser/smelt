@@ -30,7 +30,6 @@ use crate::input::{PromptState, SubmitEdit};
 use engine::EngineHandle;
 use protocol::Content;
 use smelt_core::history::History;
-use smelt_core::session::Session;
 use smelt_core::transcript_model::Block;
 use smelt_core::ConfirmRequest;
 use smelt_core::FrontendKind;
@@ -47,6 +46,12 @@ pub(crate) struct ContextWindowUpdate {
     pub(crate) api_base: String,
     pub(crate) provider_type: String,
     pub(crate) value: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SharedSessionState {
+    pub id: String,
+    pub has_messages: bool,
 }
 
 pub struct TuiApp {
@@ -74,7 +79,7 @@ pub struct TuiApp {
     pub(crate) cwd_worktree: String,
     pub(crate) cwd_worktree_path: String,
     pub(crate) cwd_managed_worktree: bool,
-    pub(crate) shared_session: Arc<Mutex<Option<Session>>>,
+    pub(crate) shared_session: Arc<Mutex<Option<SharedSessionState>>>,
     pub(crate) task_label: Option<String>,
     pub(crate) pending_dialog: bool,
     pub(crate) pending_quit: bool,
@@ -98,6 +103,7 @@ pub struct TuiApp {
     pub(crate) persister: crate::persist::Persister,
     pub(crate) session_save_pending: bool,
     pub(crate) persisted_fingerprint: Option<Vec<u8>>,
+    pub(crate) transcript_descriptors_persisted: bool,
     pub(crate) session_dirty: bool,
     pub(crate) dirty_history_from: Option<usize>,
     pub(crate) deferred_session_load: Option<String>,
@@ -903,7 +909,7 @@ impl TuiApp {
         config: smelt_core::AppConfig,
         mut engine: EngineHandle,
         permissions: Arc<smelt_core::permissions::Permissions>,
-        shared_session: Arc<Mutex<Option<Session>>>,
+        shared_session: Arc<Mutex<Option<SharedSessionState>>>,
         startup_auth_error: Option<String>,
         lua: crate::lua::LuaRuntime,
         project_trust: smelt_core::trust::TrustState,
@@ -1104,6 +1110,7 @@ impl TuiApp {
             persister: crate::persist::Persister::spawn(),
             session_save_pending: false,
             persisted_fingerprint: None,
+            transcript_descriptors_persisted: false,
             session_dirty: false,
             dirty_history_from: None,
             deferred_session_load: None,

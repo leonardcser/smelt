@@ -283,6 +283,19 @@ impl SessionDb {
         history::replace_transcript_descriptor_records(&self.conn, records, self.object_compression)
     }
 
+    pub fn replace_transcript_descriptor_suffix(
+        &self,
+        start_descriptor_idx: usize,
+        records: &[TranscriptDescriptorRecord],
+    ) -> Result<()> {
+        history::replace_transcript_descriptor_suffix(
+            &self.conn,
+            start_descriptor_idx,
+            records,
+            self.object_compression,
+        )
+    }
+
     pub fn read_transcript_descriptor_records(&self) -> Result<Vec<TranscriptDescriptorRecord>> {
         history::read_transcript_descriptor_records(&self.conn)
     }
@@ -364,6 +377,47 @@ mod tests {
         assert_eq!(db.mode(), OpenMode::ReadOnly);
         assert_eq!(db.schema_version().unwrap(), schema::SCHEMA_VERSION);
         db.quick_check().unwrap();
+    }
+
+    #[test]
+    fn transcript_descriptor_suffix_preserves_prefix_and_replaces_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let initial = vec![
+            transcript_record(0, "zero", "old zero"),
+            transcript_record(1, "one", "old one"),
+            transcript_record(2, "two", "old two"),
+        ];
+        db.replace_transcript_descriptor_records(&initial).unwrap();
+
+        let replacement = vec![
+            transcript_record(1, "one-new", "updated one"),
+            transcript_record(2, "two-new", "updated two"),
+        ];
+        db.replace_transcript_descriptor_suffix(1, &replacement)
+            .unwrap();
+
+        let records = db.read_transcript_descriptor_records().unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0], initial[0]);
+        assert_eq!(records[1], replacement[0]);
+        assert_eq!(records[2], replacement[1]);
+        assert_eq!(db.search_transcript_candidates("old two").unwrap(), vec![]);
+        assert_eq!(
+            db.search_transcript_candidates("updated two").unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 2,
+                history_idx: None,
+            }]
+        );
+
+        db.replace_transcript_descriptor_suffix(2, &[]).unwrap();
+        let records = db.read_transcript_descriptor_records().unwrap();
+        assert_eq!(records, vec![initial[0].clone(), replacement[0].clone()]);
+        assert_eq!(
+            db.search_transcript_candidates("updated two").unwrap(),
+            vec![]
+        );
     }
 
     #[test]
@@ -1161,6 +1215,37 @@ mod tests {
 
         let err = SessionDb::open(&path).unwrap_err();
         assert!(matches!(err, StoreError::Sqlite(_)));
+    }
+
+    fn transcript_record(
+        block_idx: u64,
+        label: &str,
+        search_text: &str,
+    ) -> TranscriptDescriptorRecord {
+        TranscriptDescriptorRecord {
+            block_idx,
+            history_idx: None,
+            kind: "assistant".to_string(),
+            tool_call_id: None,
+            tool_name: None,
+            content_hash: format!("hash-{label}"),
+            estimated_text_bytes: search_text.len() as u64,
+            preview_text: search_text.to_string(),
+            search_text: search_text.to_string(),
+            descriptor_json: serde_json::json!({
+                "kind": "assistant",
+                "label": label,
+                "text": search_text,
+            })
+            .to_string(),
+            origin_json: Some(
+                serde_json::json!({
+                    "History": block_idx,
+                })
+                .to_string(),
+            ),
+            tool_state_json: None,
+        }
     }
 
     fn representative_metadata_payload() -> Vec<u8> {

@@ -496,7 +496,10 @@ impl TuiApp {
         self.core.session.reasoning_effort = Some(self.core.config.reasoning_effort);
         self.core.session.model = Some(self.current_model_key());
         if let Ok(mut guard) = self.shared_session.lock() {
-            *guard = Some(self.core.session.clone());
+            *guard = Some(crate::app::SharedSessionState {
+                id: self.core.session.id.clone(),
+                has_messages: !self.core.session.history.is_empty(),
+            });
         }
     }
 
@@ -640,6 +643,7 @@ impl TuiApp {
         self.stop_background_processes();
         self.core.session = session::Session::new(self.core.env.pid(), self.core.env.cwd());
         self.persisted_fingerprint = None;
+        self.transcript_descriptors_persisted = false;
         self.bump_epoch("session_epoch");
         if let Ok(mut guard) = self.shared_session.lock() {
             *guard = None;
@@ -696,6 +700,7 @@ impl TuiApp {
 
         self.core.session = loaded;
         self.persisted_fingerprint = None;
+        self.transcript_descriptors_persisted = false;
         self.bump_epoch("session_epoch");
         // Drop snapshots beyond the restored history length.
         let hist_len = self.core.session.history.len();
@@ -757,6 +762,7 @@ impl TuiApp {
         self.core.session = loaded;
         self.deferred_session_load = Some(full_session_id);
         self.persisted_fingerprint = None;
+        self.transcript_descriptors_persisted = true;
         self.session_dirty = false;
         self.dirty_history_from = None;
         self.bump_epoch("session_epoch");
@@ -800,10 +806,17 @@ impl TuiApp {
         self.clear_transcript();
         self.prune_rewindable_session_state(self.core.session.history.len());
         let persisted_fingerprint = persist_fingerprint(&self.core.session);
-        let transcript = load_transcript_from_sqlite(&self.core.session)
-            .unwrap_or_else(|| build_transcript_from_session(&self.lua, &self.core.session));
+        let (transcript, descriptors_persisted) =
+            match load_transcript_from_sqlite(&self.core.session) {
+                Some(transcript) => (transcript, true),
+                None => (
+                    build_transcript_from_session(&self.lua, &self.core.session),
+                    false,
+                ),
+            };
         self.transcript.replace_transcript(transcript);
         self.persisted_fingerprint = persisted_fingerprint;
+        self.transcript_descriptors_persisted = descriptors_persisted;
         self.session_dirty = false;
         self.dirty_history_from = None;
     }
@@ -830,15 +843,45 @@ impl TuiApp {
         }
         self.session_save_pending = false;
         let blobs = self.pending_image_blobs();
-        if !self.session_dirty && self.persisted_fingerprint.is_some() && blobs.is_empty() {
+        if !self.session_dirty
+            && self.persisted_fingerprint.is_some()
+            && self.transcript_descriptors_persisted
+            && self.transcript.history().descriptor_dirty_from().is_none()
+            && blobs.is_empty()
+        {
             smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             return;
         }
-        let session = self.session_snapshot_for_persist();
-        let descriptor_records = self.transcript.history().descriptor_records();
-        let fingerprint = persist_fingerprint(&session);
+        self.update_session_persist_metadata();
+        let fingerprint = persist_fingerprint(&self.core.session);
+        let history_start_idx = if self.persisted_fingerprint.is_some() {
+            self.dirty_history_from
+                .unwrap_or(self.core.session.history.len())
+        } else {
+            0
+        };
+        let transcript_history = self.transcript.history();
+        let descriptor_order_dirty = if self.transcript_descriptors_persisted {
+            transcript_history.descriptor_dirty_from().or_else(|| {
+                self.dirty_history_from.and_then(|idx| {
+                    transcript_history.first_block_index_for_history_origin_at_or_after(idx)
+                })
+            })
+        } else {
+            Some(0)
+        };
+        let descriptor_order_start =
+            descriptor_order_dirty.unwrap_or_else(|| transcript_history.len());
+        let descriptor_start_idx = if self.transcript_descriptors_persisted {
+            transcript_history.descriptor_record_index_for_order_index(descriptor_order_start)
+        } else {
+            0
+        };
+        let descriptor_records = transcript_history.descriptor_records_from(descriptor_order_start);
+        let descriptor_work = descriptor_order_dirty.is_some();
         if fingerprint.is_some()
             && self.persisted_fingerprint.as_ref() == fingerprint.as_ref()
+            && !descriptor_work
             && blobs.is_empty()
         {
             self.session_dirty = false;
@@ -846,24 +889,25 @@ impl TuiApp {
             smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             return;
         }
-        let history_start_idx = if self.persisted_fingerprint.is_some() {
-            self.dirty_history_from.unwrap_or(session.history.len())
-        } else {
-            0
-        };
-        self.core.session = session.clone();
+        let session = self.core.session.clone();
         if let Ok(mut guard) = self.shared_session.lock() {
-            *guard = Some(session.clone());
+            *guard = Some(crate::app::SharedSessionState {
+                id: session.id.clone(),
+                has_messages: !session.history.is_empty(),
+            });
         }
-        self.persisted_fingerprint = fingerprint;
-        self.session_dirty = false;
-        self.dirty_history_from = None;
         self.persister.save(crate::persist::PersistRequest {
             session,
             history_start_idx,
             blobs,
+            descriptor_start_idx,
             descriptor_records,
         });
+        self.persisted_fingerprint = fingerprint;
+        self.transcript_descriptors_persisted = true;
+        self.transcript.history_mut().clear_descriptor_dirty();
+        self.session_dirty = false;
+        self.dirty_history_from = None;
     }
 
     fn pending_image_blobs(&self) -> Vec<crate::persist::Blob> {
@@ -877,13 +921,11 @@ impl TuiApp {
             .collect()
     }
 
-    fn session_snapshot_for_persist(&self) -> session::Session {
-        let mut session = self.core.session.clone();
-        session.updated_at_ms = session::now_ms();
-        session.mode = Some(self.core.config.mode.as_str().to_string());
-        session.reasoning_effort = Some(self.core.config.reasoning_effort);
-        session.model = Some(self.current_model_key());
-        session
+    fn update_session_persist_metadata(&mut self) {
+        self.core.session.updated_at_ms = session::now_ms();
+        self.core.session.mode = Some(self.core.config.mode.as_str().to_string());
+        self.core.session.reasoning_effort = Some(self.core.config.reasoning_effort);
+        self.core.session.model = Some(self.current_model_key());
     }
 
     /// Block until all queued persist writes complete. Call before reading session files from disk.
@@ -1048,9 +1090,55 @@ impl TuiApp {
 }
 
 fn persist_fingerprint(session: &session::Session) -> Option<Vec<u8>> {
-    let mut normalized = session.clone();
-    normalized.updated_at_ms = 0;
-    bincode::serialize(&normalized).ok()
+    #[derive(serde::Serialize)]
+    struct Fingerprint<'a> {
+        id: &'a str,
+        title: &'a Option<String>,
+        slug: &'a Option<String>,
+        first_user_message: &'a Option<String>,
+        metadata_snapshots: &'a session::HistorySnapshots<session::SessionMetadataSnapshot>,
+        created_at_ms: u64,
+        updated_at_ms: u64,
+        mode: &'a Option<String>,
+        reasoning_effort: &'a Option<protocol::ReasoningEffort>,
+        model: &'a Option<String>,
+        cwd: &'a Option<String>,
+        parent_id: &'a Option<String>,
+        history: &'a [HistoryItem],
+        checkpoint: &'a Option<session::ContextCheckpoint>,
+        context_tokens: &'a Option<u32>,
+        context_tokens_history_len: &'a Option<usize>,
+        display_context_tokens: &'a Option<u32>,
+        turn_metas: &'a session::HistorySnapshots<protocol::TurnMeta>,
+        context_snapshots: &'a session::HistorySnapshots<session::ContextSnapshot>,
+        session_cost_usd: f64,
+        session_usage: &'a protocol::TokenUsage,
+    }
+
+    bincode::serialize(&Fingerprint {
+        id: &session.id,
+        title: &session.title,
+        slug: &session.slug,
+        first_user_message: &session.first_user_message,
+        metadata_snapshots: &session.metadata_snapshots,
+        created_at_ms: session.created_at_ms,
+        updated_at_ms: 0,
+        mode: &session.mode,
+        reasoning_effort: &session.reasoning_effort,
+        model: &session.model,
+        cwd: &session.cwd,
+        parent_id: &session.parent_id,
+        history: &session.history,
+        checkpoint: &session.checkpoint,
+        context_tokens: &session.context_tokens,
+        context_tokens_history_len: &session.context_tokens_history_len,
+        display_context_tokens: &session.display_context_tokens,
+        turn_metas: &session.turn_metas,
+        context_snapshots: &session.context_snapshots,
+        session_cost_usd: session.session_cost_usd,
+        session_usage: &session.session_usage,
+    })
+    .ok()
 }
 
 #[cfg(test)]
