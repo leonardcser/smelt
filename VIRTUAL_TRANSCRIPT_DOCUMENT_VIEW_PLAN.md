@@ -776,7 +776,7 @@ Acceptance:
 
 Goal: make semantic operations exact across unloaded transcript ranges without falling back to full layout or paint-buffer text.
 
-Status: in progress in the current worktree. Transcript search still uses SQLite candidate blocks plus bounded display-row exact refinement, and candidate scanning no longer falls back to descriptor search-text line matches when exact display rows have no match. Remaining work is to add document-level indexed search APIs for large non-transcript documents, verify/finish streamed copy across unloaded ranges, folds, action hit testing, drag autoscroll across unloaded boundaries, and the requested regression coverage.
+Status: in progress in the current worktree. Transcript search still uses SQLite candidate blocks plus bounded display-row exact refinement, and candidate scanning no longer falls back to descriptor search-text line matches when exact display rows have no match. Document search now has a `DisplayDocument::search_next_match` API used by non-transcript search navigation so viewer search can advance through document-owned chunks without building a full match list. Streamed copy across unloaded middle transcript ranges is covered by regression tests that assert selected chunk materialization and no full row build. Remaining work is to finish fold anchor preservation, action hit-testing coverage, drag autoscroll across unloaded boundaries, and the rest of the requested regression coverage.
 
 Deliverables:
 

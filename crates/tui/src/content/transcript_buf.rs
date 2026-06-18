@@ -3068,6 +3068,51 @@ mod tests {
     }
 
     #[test]
+    fn copy_range_streams_large_unloaded_middle_selection() {
+        let lua = test_lua();
+        let theme = Theme::default();
+        let mut transcript = Transcript::new();
+        for i in 0..300 {
+            transcript.push(Block::Text {
+                content: format!("copy-token-{i:03}"),
+            });
+        }
+        let mut projection = TranscriptProjection::new();
+        let estimated_total = projection.estimated_total_rows(&lua, &mut transcript.history, 80);
+        assert!(estimated_total > 220);
+        projection.reset_counters();
+
+        let out = projection.copy_range(
+            &lua,
+            &mut transcript.history,
+            80,
+            &theme,
+            DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: 40,
+                    byte_col: 0,
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: 220,
+                    byte_col: usize::MAX,
+                },
+            },
+        );
+
+        let counters = projection.counters();
+        assert!(out.kill_ring.contains("copy-token-050"));
+        assert!(out.kill_ring.contains("copy-token-100"));
+        assert!(!out.kill_ring.contains("copy-token-001"));
+        assert!(!out.kill_ring.contains("copy-token-250"));
+        assert_eq!(counters.full_row_builds, 0);
+        assert!(counters.range_materialized_blocks > COPY_CHUNK_NODES);
+        assert!(counters.range_materialized_blocks < 300);
+        assert!(counters.max_range_materialized_blocks <= COPY_CHUNK_NODES);
+        assert!(counters.range_materialized_rows < estimated_total as usize);
+        assert!(counters.exact_height_measured_blocks < 300);
+    }
+
+    #[test]
     fn display_rows_for_range_exactifies_only_requested_window() {
         let lua = test_lua();
         let theme = Theme::default();
