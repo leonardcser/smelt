@@ -988,6 +988,29 @@ impl TranscriptDocument {
             .map(|node| self.offset_node_row(width, node))
     }
 
+    pub(crate) fn row_anchor_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: crate::smelt_edit::RowIndex,
+    ) -> Option<crate::content::transcript_buf::TranscriptRowAnchor> {
+        let local_row = self.virtual_row_to_loaded_row(width, row);
+        self.projection
+            .row_anchor_at_row(lua, &mut self.transcript.history, width, local_row)
+    }
+
+    pub(crate) fn row_for_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        anchor: crate::content::transcript_buf::TranscriptRowAnchor,
+    ) -> Option<crate::smelt_edit::RowIndex> {
+        let offset = self.sparse_prefix_row_offset(width);
+        self.projection
+            .row_for_anchor(lua, &mut self.transcript.history, width, anchor)
+            .map(|row| row.saturating_add(offset))
+    }
+
     pub(crate) fn block_node_before_or_at_row(
         &mut self,
         lua: &LuaRuntime,
@@ -1635,6 +1658,27 @@ fn transcript_history_role(history: &BlockHistory, id: BlockId) -> &'static str 
     history.block_kind(id).unwrap_or_default()
 }
 
+#[derive(Clone, Copy)]
+struct TranscriptPositionAnchor {
+    anchor: Option<crate::content::transcript_buf::TranscriptRowAnchor>,
+    position: crate::smelt_edit::DocPosition,
+}
+
+#[derive(Clone, Copy)]
+struct TranscriptRangeAnchor {
+    start: TranscriptPositionAnchor,
+    end: TranscriptPositionAnchor,
+}
+
+struct TranscriptViewAnchors {
+    following_tail: bool,
+    scroll_top: Option<TranscriptPositionAnchor>,
+    cursor: Option<TranscriptPositionAnchor>,
+    selection_anchor: Option<TranscriptPositionAnchor>,
+    drag_endpoint: Option<TranscriptPositionAnchor>,
+    search_current: Option<TranscriptRangeAnchor>,
+}
+
 impl TuiApp {
     pub(crate) fn begin_turn(&mut self) {
         self.context_tokens_updated_this_turn = false;
@@ -1775,6 +1819,147 @@ impl TuiApp {
         self.transcript.build_rows(&self.lua, tw, &theme)
     }
 
+    fn transcript_position_anchor(
+        &mut self,
+        width: u16,
+        position: crate::smelt_edit::DocPosition,
+    ) -> TranscriptPositionAnchor {
+        TranscriptPositionAnchor {
+            anchor: self
+                .transcript
+                .row_anchor_at_row(&self.lua, width, position.row),
+            position,
+        }
+    }
+
+    fn transcript_range_anchor(
+        &mut self,
+        width: u16,
+        range: crate::smelt_edit::DocRange,
+    ) -> TranscriptRangeAnchor {
+        TranscriptRangeAnchor {
+            start: self.transcript_position_anchor(width, range.start),
+            end: self.transcript_position_anchor(width, range.end),
+        }
+    }
+
+    fn resolve_transcript_position_anchor(
+        &mut self,
+        width: u16,
+        anchor: TranscriptPositionAnchor,
+    ) -> crate::smelt_edit::DocPosition {
+        let row = anchor
+            .anchor
+            .and_then(|anchor| self.transcript.row_for_anchor(&self.lua, width, anchor))
+            .unwrap_or(anchor.position.row);
+        crate::smelt_edit::DocPosition {
+            row,
+            byte_col: anchor.position.byte_col,
+        }
+    }
+
+    fn resolve_transcript_range_anchor(
+        &mut self,
+        width: u16,
+        anchor: TranscriptRangeAnchor,
+    ) -> crate::smelt_edit::DocRange {
+        crate::smelt_edit::DocRange {
+            start: self.resolve_transcript_position_anchor(width, anchor.start),
+            end: self.resolve_transcript_position_anchor(width, anchor.end),
+        }
+    }
+
+    fn capture_transcript_view_anchors(&mut self, width: u16) -> TranscriptViewAnchors {
+        let (following_tail, scroll_top, cursor, selection_anchor, drag_endpoint) = {
+            let win = self.transcript_win();
+            let state = win.document_view_state();
+            (
+                win.is_following_tail(),
+                win.scroll_top(),
+                state.cursor,
+                state.selection_anchor,
+                state.drag_endpoint,
+            )
+        };
+        let search_current = self
+            .search
+            .session
+            .as_ref()
+            .filter(|session| session.target == self.well_known.transcript)
+            .and_then(|session| match &session.backend {
+                crate::app::search::SearchBackend::Transcript(transcript) => transcript
+                    .current
+                    .and_then(|index| transcript.matches.get(index).copied()),
+                crate::app::search::SearchBackend::Full { .. } => None,
+            })
+            .map(|range| self.transcript_range_anchor(width, range));
+        TranscriptViewAnchors {
+            following_tail,
+            scroll_top: (!following_tail).then(|| {
+                self.transcript_position_anchor(
+                    width,
+                    crate::smelt_edit::DocPosition {
+                        row: scroll_top,
+                        byte_col: 0,
+                    },
+                )
+            }),
+            cursor: Some(self.transcript_position_anchor(width, cursor)),
+            selection_anchor: selection_anchor
+                .map(|position| self.transcript_position_anchor(width, position)),
+            drag_endpoint: drag_endpoint
+                .map(|position| self.transcript_position_anchor(width, position)),
+            search_current,
+        }
+    }
+
+    fn restore_transcript_view_anchors(&mut self, width: u16, anchors: TranscriptViewAnchors) {
+        let scroll_top = anchors
+            .scroll_top
+            .map(|anchor| self.resolve_transcript_position_anchor(width, anchor).row);
+        let cursor = anchors
+            .cursor
+            .map(|anchor| self.resolve_transcript_position_anchor(width, anchor));
+        let selection_anchor = anchors
+            .selection_anchor
+            .map(|anchor| self.resolve_transcript_position_anchor(width, anchor));
+        let drag_endpoint = anchors
+            .drag_endpoint
+            .map(|anchor| self.resolve_transcript_position_anchor(width, anchor));
+        let search_current = anchors
+            .search_current
+            .map(|anchor| self.resolve_transcript_range_anchor(width, anchor));
+
+        if let Some(win) = self.ui.win_mut(self.well_known.transcript) {
+            if !anchors.following_tail {
+                if let Some(row) = scroll_top {
+                    win.pin_scroll(row);
+                }
+            }
+            let mut state = win.document_view_state();
+            if let Some(cursor) = cursor {
+                state.cursor = cursor;
+            }
+            state.selection_anchor = selection_anchor;
+            state.drag_endpoint = drag_endpoint;
+            win.set_document_view_state(state);
+        }
+
+        if let Some(range) = search_current {
+            if let Some(session) = self.search.session.as_mut() {
+                if let crate::app::search::SearchBackend::Transcript(transcript) =
+                    &mut session.backend
+                {
+                    if let Some(index) = transcript.current {
+                        if let Some(current) = transcript.matches.get_mut(index) {
+                            *current = range;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn transcript_total_rows(&mut self) -> crate::smelt_edit::RowIndex {
         self.document_snapshot_for_win(crate::app::TRANSCRIPT_WIN)
@@ -1818,8 +2003,14 @@ impl TuiApp {
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript
-            .fold_node_at_row(&self.lua, width, row, action, activation)
+        let anchors = self.capture_transcript_view_anchors(width);
+        let changed = self
+            .transcript
+            .fold_node_at_row(&self.lua, width, row, action, activation);
+        if changed {
+            self.restore_transcript_view_anchors(width, anchors);
+        }
+        changed
     }
 
     pub(crate) fn fold_transcript_node(
@@ -1829,7 +2020,12 @@ impl TuiApp {
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript.fold_node(&self.lua, width, id, action)
+        let anchors = self.capture_transcript_view_anchors(width);
+        let changed = self.transcript.fold_node(&self.lua, width, id, action);
+        if changed {
+            self.restore_transcript_view_anchors(width, anchors);
+        }
+        changed
     }
 
     pub(crate) fn fold_all_transcript_nodes(
@@ -1838,7 +2034,12 @@ impl TuiApp {
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript.fold_all(&self.lua, width, action)
+        let anchors = self.capture_transcript_view_anchors(width);
+        let changed = self.transcript.fold_all(&self.lua, width, action);
+        if changed {
+            self.restore_transcript_view_anchors(width, anchors);
+        }
+        changed
     }
 
     pub(crate) fn fold_transcript_block_kind(
@@ -1848,8 +2049,14 @@ impl TuiApp {
     ) -> bool {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        self.transcript
-            .fold_block_kind(&self.lua, width, kind, action)
+        let anchors = self.capture_transcript_view_anchors(width);
+        let changed = self
+            .transcript
+            .fold_block_kind(&self.lua, width, kind, action);
+        if changed {
+            self.restore_transcript_view_anchors(width, anchors);
+        }
+        changed
     }
 
     pub(crate) fn snap_cpos_to_selectable(&mut self, rows: &[String], cpos: usize) -> usize {
@@ -2250,7 +2457,10 @@ impl TuiApp {
 
 #[cfg(test)]
 mod tests {
+    use crate::app::search::SearchDirection;
     use crate::app::test_harness::TestApp;
+    use crate::content::transcript_buf::{FoldAction, FoldActivation};
+    use crate::smelt_edit::{DocPosition, TextRange};
 
     #[test]
     fn selection_highlights_subtract_materialized_row_base() {
@@ -2284,6 +2494,125 @@ mod tests {
             "selection range should be expressed in materialized buffer rows"
         );
         assert!(ranges.iter().all(|(line, _, _)| *line < line_count));
+    }
+
+    #[test]
+    fn fold_preserves_transcript_document_anchors() {
+        let mut app = TestApp::builder().build().app;
+        app.push_block(smelt_core::Block::Thinking {
+            content: (0..20)
+                .map(|i| format!("folded prefix {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        });
+        app.push_block(smelt_core::Block::Text {
+            content: "anchor target\nanchor cursor".into(),
+        });
+        app.push_block(smelt_core::Block::Text {
+            content: "after".into(),
+        });
+        assert!(app.fold_transcript_node_at_row(0, FoldAction::Open, FoldActivation::AnyNodeRow));
+        app.render_normal_to(&mut std::io::sink());
+        let before = app.transcript_block_snapshots();
+        let target_start = before
+            .iter()
+            .find(|(_, _, _, _, first_line)| first_line == "anchor target")
+            .map(|(_, _, row, _, _)| *row)
+            .expect("target block before fold");
+        app.submit_search(
+            app.well_known.transcript,
+            SearchDirection::Forward,
+            "anchor cursor".into(),
+        );
+        let before_match = app
+            .search
+            .session
+            .as_ref()
+            .and_then(|session| session.current_range())
+            .expect("current search match before fold");
+        assert!(matches!(
+            before_match,
+            TextRange::Rows(range) if range.start.row == target_start.saturating_add(1)
+        ));
+        {
+            let win = app.transcript_win_mut();
+            win.pin_scroll(target_start);
+            let mut state = win.document_view_state();
+            state.cursor = DocPosition {
+                row: target_start.saturating_add(1),
+                byte_col: "anchor ".len(),
+            };
+            state.selection_anchor = Some(DocPosition {
+                row: target_start,
+                byte_col: 0,
+            });
+            state.drag_endpoint = Some(DocPosition {
+                row: target_start.saturating_add(1),
+                byte_col: "anchor cursor".len(),
+            });
+            win.set_document_view_state(state);
+        }
+
+        assert!(app.fold_transcript_node_at_row(0, FoldAction::Close, FoldActivation::AnyNodeRow));
+        let after = app.transcript_block_snapshots();
+        let new_target_start = after
+            .iter()
+            .find(|(_, _, _, _, first_line)| first_line == "anchor target")
+            .map(|(_, _, row, _, _)| *row)
+            .expect("target block after fold");
+        let win = app.transcript_win();
+        let state = win.document_view_state();
+
+        assert!(new_target_start < target_start);
+        assert_eq!(win.scroll_top(), new_target_start);
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: new_target_start.saturating_add(1),
+                byte_col: "anchor ".len(),
+            }
+        );
+        assert_eq!(
+            state.selection_anchor,
+            Some(DocPosition {
+                row: new_target_start,
+                byte_col: 0,
+            })
+        );
+        assert_eq!(
+            state.drag_endpoint,
+            Some(DocPosition {
+                row: new_target_start.saturating_add(1),
+                byte_col: "anchor cursor".len(),
+            })
+        );
+        let after_match = app
+            .search
+            .session
+            .as_ref()
+            .and_then(|session| session.current_range())
+            .expect("current search match after fold");
+        assert!(matches!(
+            after_match,
+            TextRange::Rows(range) if range.start.row == new_target_start.saturating_add(1)
+        ));
+    }
+
+    #[test]
+    fn fold_preserves_transcript_tail_follow() {
+        let mut app = TestApp::builder().build().app;
+        for i in 0..40 {
+            app.push_block(smelt_core::Block::Text {
+                content: format!("tail line {i}"),
+            });
+        }
+        app.transcript_win_mut().follow_tail();
+        app.render_normal_to(&mut std::io::sink());
+        assert!(app.transcript_win().is_following_tail());
+
+        assert!(app.fold_all_transcript_nodes(FoldAction::Close));
+
+        assert!(app.transcript_win().is_following_tail());
     }
 
     fn test_descriptor_record(idx: u64) -> smelt_store::TranscriptDescriptorRecord {

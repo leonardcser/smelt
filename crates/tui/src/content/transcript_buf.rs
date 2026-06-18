@@ -635,6 +635,12 @@ pub(crate) struct TranscriptNodeRow {
     pub(crate) explicit_fold_target: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptRowAnchor {
+    pub(crate) id: RenderNodeId,
+    pub(crate) row_offset: RowIndex,
+}
+
 impl TranscriptNodeRow {
     pub(crate) fn can_activate(self, activation: FoldActivation) -> bool {
         match activation {
@@ -1783,6 +1789,33 @@ impl TranscriptProjection {
         row: RowIndex,
     ) -> Option<TranscriptNodeRow> {
         self.node_at_row(lua, history, width, row)
+    }
+
+    pub(crate) fn row_anchor_at_row(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        row: RowIndex,
+    ) -> Option<TranscriptRowAnchor> {
+        self.node_at_row(lua, history, width, row)
+            .map(|node| TranscriptRowAnchor {
+                id: node.id,
+                row_offset: node.row_offset,
+            })
+    }
+
+    pub(crate) fn row_for_anchor(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+        anchor: TranscriptRowAnchor,
+    ) -> Option<RowIndex> {
+        self.prepare_layout(lua, history, width);
+        self.measurements
+            .active
+            .row_for_node_anchor(anchor.id, anchor.row_offset)
     }
 
     fn width_change_anchor_for(
