@@ -43,12 +43,13 @@ fn lua_goal_state_writes_nested_session_updates_immediately() {
         r#"
             local goal = require("smelt.goal")
             assert(goal.create("persist goal state updates", { auto_continue = true }))
-            assert(goal.update_status({ progress = "1/2", activity = "Saving goal state" }))
+            assert(goal.update_status({ progress = "1/2" }))
             assert(goal.block("waiting for persisted blocker"))
         "#,
     ));
 
-    let state_home = std::env::var_os("XDG_STATE_HOME").expect("XDG_STATE_HOME set by test harness");
+    let state_home =
+        std::env::var_os("XDG_STATE_HOME").expect("XDG_STATE_HOME set by test harness");
     let state_path = std::path::PathBuf::from(state_home)
         .join("smelt")
         .join("plugins")
@@ -63,7 +64,6 @@ fn lua_goal_state_writes_nested_session_updates_immediately() {
     assert_eq!(goal["state"], "blocked");
     assert_eq!(goal["reason"], "waiting for persisted blocker");
     assert_eq!(goal["progress"]["label"], "1/2");
-    assert_eq!(goal["activity"], "Saving goal state");
     assert_eq!(goal["auto_continue"], false);
 }
 
@@ -77,7 +77,7 @@ fn lua_goal_state_restores_for_same_resumed_session_id() {
             r#"
                 local goal = require("smelt.goal")
                 assert(goal.create("restore persisted goal on resume", { auto_continue = false }))
-                assert(goal.update_status({ progress = "saved", activity = "Waiting for resume" }))
+                assert(goal.update_status({ progress = "saved" }))
             "#,
         ));
         session_id
@@ -93,7 +93,6 @@ fn lua_goal_state_restores_for_same_resumed_session_id() {
             assert(current.state == "active")
             assert(current.auto_continue == false)
             assert(current.progress.label == "saved")
-            assert(current.activity == "Waiting for resume")
         "#,
     ));
 }
