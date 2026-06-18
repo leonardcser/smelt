@@ -2639,18 +2639,18 @@ fn display_rows_for_ui_range(
     Some(DisplayRows { rows: display_rows })
 }
 
-pub struct HostDisplayDocument<'a> {
+pub struct BufferDisplayDocument<'a> {
     ui: &'a mut Ui,
     win: WinId,
 }
 
-impl<'a> HostDisplayDocument<'a> {
+impl<'a> BufferDisplayDocument<'a> {
     pub fn new(ui: &'a mut Ui, win: WinId) -> Self {
         Self { ui, win }
     }
 }
 
-impl DisplayDocument for HostDisplayDocument<'_> {
+impl DisplayDocument for BufferDisplayDocument<'_> {
     fn snapshot(&mut self) -> DisplaySnapshot {
         let total_rows = self
             .ui
@@ -3214,7 +3214,7 @@ mod tests {
             );
         }
 
-        let mut doc = HostDisplayDocument::new(&mut ui, win);
+        let mut doc = BufferDisplayDocument::new(&mut ui, win);
 
         assert_eq!(
             DisplayDocument::action_at(
@@ -3265,7 +3265,7 @@ mod tests {
                 materialized_rows: 2,
             });
 
-        let mut doc = HostDisplayDocument::new(&mut ui, win);
+        let mut doc = BufferDisplayDocument::new(&mut ui, win);
 
         assert_eq!(doc.snapshot().total_rows, 100);
         assert_eq!(

@@ -4,9 +4,8 @@ use std::hash::{Hash, Hasher};
 use crate::app::transcript::TranscriptDocument;
 use crate::app::TuiApp;
 use crate::smelt_edit::{
-    CopyOutput, DisplayDocument, DisplayRows, DisplaySnapshot, DocPosition, DocRange,
-    DocumentCommand, DocumentHandle, HostDisplayDocument, RowIndex, SpanAction, TextRange, VimMode,
-    WinId,
+    BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DisplaySnapshot, DocPosition,
+    DocRange, DocumentCommand, DocumentHandle, RowIndex, SpanAction, TextRange, VimMode, WinId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -129,7 +128,7 @@ impl TuiApp {
             None if handle.is_some() => None,
             None => {
                 self.ui.win(win)?;
-                let mut document = HostDisplayDocument::new(&mut self.ui, win);
+                let mut document = BufferDisplayDocument::new(&mut self.ui, win);
                 Some(f(&mut document))
             }
         }
