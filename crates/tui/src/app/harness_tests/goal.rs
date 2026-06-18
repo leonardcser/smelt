@@ -35,6 +35,37 @@ fn lua_goal_renders_top_banner_not_statusline() {
 }
 
 #[test]
+fn lua_goal_banner_prefers_live_progress_and_activity() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(72, 16);
+
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            assert(goal.create("continue implementing the full goal progress plan", { auto_continue = true, summary = "Goal progress UI" }))
+            assert(goal.update_status({ progress = "Phase 3/7", activity = "Updating headerline rendering" }))
+        "#,
+    ));
+
+    let frame = app.render_to_frame();
+    assert!(
+        frame.rows[0].contains(" GOAL Phase 3/7 · Updating headerline rendering"),
+        "frame:\n{}",
+        frame.text()
+    );
+    assert!(
+        frame.rows[0].trim_end().ends_with("auto"),
+        "frame:\n{}",
+        frame.text()
+    );
+    assert!(
+        !frame.rows[0].contains("continue implementing the full goal progress plan"),
+        "banner should be glanceable and leave the full objective for /goal status:\n{}",
+        frame.text()
+    );
+}
+
+#[test]
 fn lua_goal_banner_stays_above_transcript_scroll_pill() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(60, 16);
@@ -111,6 +142,11 @@ fn lua_goal_banner_uses_status_labels_and_unicode_ellipsis() {
 
     assert!(app.run_lua(r#"assert(require("smelt.goal").block("waiting"))"#));
     let frame = app.render_to_frame();
+    assert!(
+        frame.rows[0].contains("waiting"),
+        "blocked banner should show the blocker reason when live status is empty:\n{}",
+        frame.text()
+    );
     assert!(
         frame.rows[0].starts_with(" BLOCKED "),
         "frame:\n{}",

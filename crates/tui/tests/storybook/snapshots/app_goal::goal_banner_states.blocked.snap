@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- BLOCKED migrate parser state handling without regressing strea…
+ BLOCKED waiting for parser fixture approval
 
  Please keep working toward the parser migration.
 
