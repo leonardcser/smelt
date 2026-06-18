@@ -222,7 +222,20 @@ impl TuiApp {
                 if is_down && self.ui.active_modal().is_none() {
                     self.ui.set_focus(win);
                 }
-                let yank = self.handle_content_mouse(me, count);
+                if is_down && me.modifiers.contains(KeyModifiers::CONTROL) {
+                    if let Some(pos) = self.document_view_position_at_mouse_for_win(win, me) {
+                        if let Some(action) = self.document_action_at(win, pos) {
+                            self.dispatch_span_action(action);
+                            return EventOutcome::Redraw;
+                        }
+                    }
+                }
+                let yank = if self.transcript_win().has_materialized_rows() {
+                    self.handle_document_view_mouse_for_win(win, me, count, now)
+                        .1
+                } else {
+                    self.handle_content_mouse(me, count)
+                };
                 if is_up {
                     if let Some(out) = yank {
                         self.yank_to_clipboard(out);
@@ -245,7 +258,15 @@ impl TuiApp {
                 // overlays with multiple leaves (e.g. side-by-side panes) need click
                 // to follow keyboard focus, not just the first leaf the overlay opened.
                 // A non-focusable selectable leaf must not steal app_focus.
-                let (status, yank) = self.handle_selectable_leaf_mouse(win, me, count);
+                let use_document_mouse = self
+                    .ui
+                    .win(win)
+                    .is_some_and(|w| w.surface().is_readonly_text() || w.has_materialized_rows());
+                let (status, yank) = if use_document_mouse {
+                    self.handle_document_view_mouse_for_win(win, me, count, now)
+                } else {
+                    self.handle_selectable_leaf_mouse(win, me, count)
+                };
                 if matches!(status, crate::smelt_edit::Status::Ignored) {
                     let is_resize_handle = self.ui.win(win).is_some_and(is_prompt_resize_handle);
                     if is_down && is_resize_handle && self.ui.active_modal().is_none() {
@@ -498,20 +519,11 @@ impl TuiApp {
         let Some(buf_id) = self.ui.win(win).map(|w| w.buf) else {
             return (crate::smelt_edit::Status::Ignored, None);
         };
-        let total_rows = self
-            .document_snapshot_for_win(win)
-            .map(|snapshot| snapshot.total_rows)
-            .unwrap_or_else(|| {
-                self.ui
-                    .buf(buf_id)
-                    .map(|buf| buf.line_count() as crate::smelt_edit::RowIndex)
-                    .unwrap_or(0)
-            });
-        let display_rows = self
-            .materialize_document_rows(win, 0, total_rows)
+        let (soft, hard) = self
+            .ui
+            .buf(buf_id)
+            .map(projected_buf_breaks)
             .unwrap_or_default();
-        let soft = display_rows.soft_breaks();
-        let hard = display_rows.hard_breaks();
         let (status, range) = {
             let mouse_ctx = crate::smelt_edit::MouseCtx {
                 soft_breaks: &soft,

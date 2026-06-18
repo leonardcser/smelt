@@ -1,5 +1,5 @@
 use super::*;
-use crate::row::{DisplayDocument, DisplayRow, DisplayRows, TextRange};
+use crate::row::{DisplayDocument, DisplayRow, DisplayRows, RowBreak, TextRange};
 use smelt_buffer::kill_ring::YANK_FLASH_DURATION;
 use std::ops::Range;
 use std::time::Instant;
@@ -1327,8 +1327,227 @@ impl DocumentViewExecutor {
         }
         copy
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn position_at_mouse<D: DisplayDocument + ?Sized>(
+        document: &mut D,
+        event: MouseEvent,
+        viewport: WindowViewport,
+        gutter_pad_left: u16,
+        scroll_top: RowIndex,
+        scroll_left: u16,
+    ) -> Option<DocPosition> {
+        let total_rows = document.snapshot().total_rows;
+        if viewport.rect.height == 0 || total_rows == 0 {
+            return None;
+        }
+        Some(document_position_at_mouse(
+            document,
+            event,
+            viewport,
+            gutter_pad_left,
+            scroll_top,
+            scroll_left,
+            total_rows,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_mouse<D: DisplayDocument + ?Sized>(
+        state: &mut DocumentViewState,
+        document: &mut D,
+        event: MouseEvent,
+        viewport: WindowViewport,
+        gutter_pad_left: u16,
+        scroll_top: RowIndex,
+        scroll_left: u16,
+        click_count: u8,
+        vim_enabled: bool,
+        vim_mode: &mut VimMode,
+        now: Instant,
+    ) -> (Status, Option<DocRange>) {
+        if !state.active {
+            return (Status::Ignored, None);
+        }
+        let total_rows = document.snapshot().total_rows;
+        state.materialized.total_rows = total_rows;
+        if viewport.rect.height == 0 || total_rows == 0 {
+            return (Status::Consumed, None);
+        }
+
+        let pos = document_position_at_mouse(
+            document,
+            event,
+            viewport,
+            gutter_pad_left,
+            scroll_top,
+            scroll_left,
+            total_rows,
+        );
+        if let Some(cell) = document_position_cell(document, pos) {
+            state.preferred_cell_col = Some(cell);
+        }
+
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                state.cursor = pos;
+                state.drag_endpoint = Some(pos);
+                state.selection_anchor = None;
+                state.yank_flash = None;
+                state.selection_includes_cursor_cell = false;
+                match click_count {
+                    2 => {
+                        if let Some(row) = document_row_text(document, pos.row) {
+                            let snap_col = text::snap(&row, pos.byte_col.min(row.len()));
+                            if let Some((start, end)) =
+                                text::big_word_range_at_transparent(&row, snap_col, &[])
+                            {
+                                state.selection_anchor = Some(DocPosition {
+                                    row: pos.row,
+                                    byte_col: start,
+                                });
+                                state.cursor = DocPosition {
+                                    row: pos.row,
+                                    byte_col: end,
+                                };
+                            }
+                        }
+                    }
+                    3 => {
+                        if let Some((start, end)) =
+                            document_copy_group_range(document, total_rows, pos.row)
+                        {
+                            state.selection_anchor = Some(DocPosition {
+                                row: start,
+                                byte_col: 0,
+                            });
+                            state.cursor = DocPosition {
+                                row: end,
+                                byte_col: document_row_text(document, end)
+                                    .map(|row| row.len())
+                                    .unwrap_or(0),
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(cell) = document_position_cell(document, state.cursor) {
+                    state.preferred_cell_col = Some(cell);
+                }
+                if vim_enabled && matches!(*vim_mode, VimMode::Visual | VimMode::VisualLine) {
+                    *vim_mode = VimMode::Normal;
+                }
+                (Status::Capture, None)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if state.selection_anchor.is_none() {
+                    state.selection_anchor = state.drag_endpoint.or(Some(state.cursor));
+                    state.selection_includes_cursor_cell = true;
+                }
+                state.cursor = pos;
+                state.drag_endpoint = Some(pos);
+                state.yank_flash = None;
+                (Status::Consumed, None)
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let copy = state
+                    .selection_anchor
+                    .map(|anchor| {
+                        order_document_range_including_cursor_cell(
+                            document,
+                            anchor,
+                            state.cursor,
+                            state.selection_includes_cursor_cell,
+                        )
+                    })
+                    .filter(|range| {
+                        (range.start.row, range.start.byte_col)
+                            < (range.end.row, range.end.byte_col)
+                    });
+                state.cursor = pos;
+                state.drag_endpoint = None;
+                state.selection_anchor = None;
+                state.selection_includes_cursor_cell = false;
+                state.yank_flash = copy.map(|range| RowYankFlash {
+                    range,
+                    until: now + YANK_FLASH_DURATION,
+                });
+                if vim_enabled && matches!(*vim_mode, VimMode::Visual | VimMode::VisualLine) {
+                    *vim_mode = VimMode::Normal;
+                }
+                (Status::Consumed, copy)
+            }
+            _ => (Status::Ignored, None),
+        }
+    }
 }
 
+fn document_position_at_mouse<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    event: MouseEvent,
+    viewport: WindowViewport,
+    gutter_pad_left: u16,
+    scroll_top: RowIndex,
+    scroll_left: u16,
+    total_rows: RowIndex,
+) -> DocPosition {
+    let height = viewport.rect.height.max(1);
+    let rel_row = event
+        .row
+        .saturating_sub(viewport.rect.top)
+        .min(height.saturating_sub(1));
+    let rel_col = event
+        .column
+        .saturating_sub(viewport.rect.left)
+        .saturating_sub(viewport.gutter_width)
+        .saturating_sub(gutter_pad_left)
+        .min(viewport.content_width.saturating_sub(1));
+    let row = scroll_top
+        .saturating_add(rel_row as RowIndex)
+        .min(total_rows.saturating_sub(1));
+    let byte_col =
+        document_byte_col_at_cell(document, row, rel_col as usize + scroll_left as usize)
+            .unwrap_or(0);
+    DocPosition { row, byte_col }
+}
+
+fn document_copy_group_range<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    total_rows: RowIndex,
+    row: RowIndex,
+) -> Option<(RowIndex, RowIndex)> {
+    if total_rows == 0 || row >= total_rows {
+        return None;
+    }
+    let mut first = row;
+    while first > 0 && document_row_break_before(document, first) == Some(RowBreak::Soft) {
+        first -= 1;
+    }
+
+    let mut last = row;
+    while last.saturating_add(1) < total_rows
+        && document_row_break_before(document, last.saturating_add(1)) == Some(RowBreak::Soft)
+    {
+        last = last.saturating_add(1);
+    }
+
+    Some((first, last))
+}
+
+fn document_row_break_before<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    row: RowIndex,
+) -> Option<RowBreak> {
+    if row == 0 {
+        return None;
+    }
+    document
+        .materialize(row.saturating_sub(1)..row.saturating_add(1))
+        .rows
+        .into_iter()
+        .nth(1)
+        .and_then(|row| row.break_before)
+}
 fn move_document_cursor_to_row_preserving_cell<D: DisplayDocument + ?Sized>(
     document: &mut D,
     state: &mut DocumentViewState,
@@ -1562,7 +1781,7 @@ fn advance_doc_position_if_on_char(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::row::{DisplayAction, StaticRowsDocument};
+    use crate::row::{DisplayAction, RowBreak, StaticRowsDocument};
     use smelt_buffer::buffer::SpanAction;
 
     fn state_for_rows(total_rows: RowIndex) -> DocumentViewState {
@@ -1599,6 +1818,131 @@ mod tests {
             false,
             Instant::now(),
         )
+    }
+
+    fn mouse_event(kind: MouseEventKind, row: u16, column: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            row,
+            column,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn test_viewport(rows: u16) -> WindowViewport {
+        WindowViewport::new(
+            smelt_term::Rect::new(0, 0, 80, rows),
+            80,
+            rows as RowIndex,
+            0,
+            None,
+        )
+    }
+
+    #[test]
+    fn document_executor_handles_mouse_word_and_row_group_selection() {
+        let mut doc = StaticRowsDocument::new(vec![
+            DisplayRow::new("intro".into(), std::iter::once(0..5).collect()),
+            DisplayRow::new("soft one".into(), std::iter::once(0..8).collect())
+                .with_break_before(RowBreak::Hard),
+            DisplayRow::new("soft two".into(), std::iter::once(0..8).collect())
+                .with_break_before(RowBreak::Soft),
+            DisplayRow::new("next".into(), std::iter::once(0..4).collect())
+                .with_break_before(RowBreak::Hard),
+        ]);
+        let mut state = state_for_rows(4);
+        let mut mode = VimMode::Normal;
+
+        let (status, range) = DocumentViewExecutor::handle_mouse(
+            &mut state,
+            &mut doc,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 2),
+            test_viewport(4),
+            0,
+            0,
+            0,
+            2,
+            true,
+            &mut mode,
+            Instant::now(),
+        );
+        assert_eq!(status, Status::Capture);
+        assert_eq!(range, None);
+        assert_eq!(
+            state.selection_anchor,
+            Some(DocPosition {
+                row: 1,
+                byte_col: 0
+            })
+        );
+        assert_eq!(state.cursor.byte_col, "soft".len());
+        let (_, range) = DocumentViewExecutor::handle_mouse(
+            &mut state,
+            &mut doc,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 2),
+            test_viewport(4),
+            0,
+            0,
+            0,
+            2,
+            true,
+            &mut mode,
+            Instant::now(),
+        );
+        assert_eq!(
+            range,
+            Some(DocRange {
+                start: DocPosition {
+                    row: 1,
+                    byte_col: 0
+                },
+                end: DocPosition {
+                    row: 1,
+                    byte_col: "soft".len()
+                }
+            })
+        );
+
+        let (status, _) = DocumentViewExecutor::handle_mouse(
+            &mut state,
+            &mut doc,
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 2),
+            test_viewport(4),
+            0,
+            0,
+            0,
+            3,
+            true,
+            &mut mode,
+            Instant::now(),
+        );
+        assert_eq!(status, Status::Capture);
+        let (_, range) = DocumentViewExecutor::handle_mouse(
+            &mut state,
+            &mut doc,
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 2),
+            test_viewport(4),
+            0,
+            0,
+            0,
+            3,
+            true,
+            &mut mode,
+            Instant::now(),
+        );
+        assert_eq!(
+            range,
+            Some(DocRange {
+                start: DocPosition {
+                    row: 1,
+                    byte_col: 0
+                },
+                end: DocPosition {
+                    row: 2,
+                    byte_col: "soft two".len()
+                }
+            })
+        );
     }
 
     #[test]

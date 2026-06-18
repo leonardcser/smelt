@@ -4,9 +4,9 @@ use std::hash::{Hash, Hasher};
 use crate::app::transcript::{TranscriptDisplayDocument, TranscriptRenderContext};
 use crate::app::TuiApp;
 use crate::smelt_edit::{
-    BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DisplaySnapshot, DocPosition,
-    DocRange, DocumentCommand, DocumentHandle, DocumentViewExecutor, MaterializedRows, RowIndex,
-    SpanAction, TextRange, WinId,
+    BufferDisplayDocument, CopyOutput, DisplayDocument, DisplayRows, DocPosition, DocRange,
+    DocumentCommand, DocumentHandle, DocumentViewExecutor, MaterializedRows, RowIndex, SpanAction,
+    Status, TextRange, WinId,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,7 +134,11 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn document_snapshot_for_win(&mut self, win: WinId) -> Option<DisplaySnapshot> {
+    #[cfg(test)]
+    pub(crate) fn document_snapshot_for_win(
+        &mut self,
+        win: WinId,
+    ) -> Option<crate::smelt_edit::DisplaySnapshot> {
         self.with_display_document_for_win(win, |document| document.snapshot())
     }
 
@@ -229,6 +233,124 @@ impl TuiApp {
     ) -> Option<SpanAction> {
         self.with_display_document_for_win(win, |document| document.action_at(pos))
             .flatten()
+    }
+
+    pub(crate) fn document_view_position_at_mouse_for_win(
+        &mut self,
+        win: WinId,
+        event: crossterm::event::MouseEvent,
+    ) -> Option<DocPosition> {
+        let (viewport, scroll_top, scroll_left, gutter_pad_left) = {
+            let win_ref = self.ui.win(win)?;
+            (
+                win_ref.viewport?,
+                win_ref.scroll_top(),
+                win_ref.scroll_left,
+                win_ref.config.gutters.pad_left,
+            )
+        };
+        self.with_display_document_for_win(win, |document| {
+            DocumentViewExecutor::position_at_mouse(
+                document,
+                event,
+                viewport,
+                gutter_pad_left,
+                scroll_top,
+                scroll_left,
+            )
+        })
+        .flatten()
+    }
+
+    pub(crate) fn handle_document_view_mouse_for_win(
+        &mut self,
+        win: WinId,
+        event: crossterm::event::MouseEvent,
+        click_count: u8,
+        now: std::time::Instant,
+    ) -> (Status, Option<CopyOutput>) {
+        let (
+            buf,
+            mut state,
+            mut vim_mode,
+            viewport,
+            scroll_top,
+            scroll_left,
+            gutter_pad_left,
+            vim_enabled,
+            cursor,
+        ) = {
+            let Some(win_ref) = self.ui.win(win) else {
+                return (Status::Ignored, None);
+            };
+            let buf = win_ref.buf;
+            let Some(viewport) = win_ref.viewport else {
+                return (Status::Ignored, None);
+            };
+            let Some(cursor) = self
+                .ui
+                .buf(buf)
+                .and_then(|buf| win_ref.viewer_doc_cursor(buf))
+            else {
+                return (Status::Ignored, None);
+            };
+            (
+                buf,
+                win_ref.document_view_state(),
+                win_ref.vim_mode(),
+                viewport,
+                win_ref.scroll_top(),
+                win_ref.scroll_left,
+                win_ref.config.gutters.pad_left,
+                win_ref.vim_enabled(),
+                cursor,
+            )
+        };
+
+        let Some((status, copy)) = self.with_display_document_for_win(win, |document| {
+            let total_rows = document.snapshot().total_rows;
+            if !state.active {
+                state.active = true;
+                state.materialized = MaterializedRows {
+                    clamped_scroll: scroll_top,
+                    row_base: 0,
+                    total_rows,
+                    materialized_rows: total_rows,
+                };
+                state.cursor = crate::smelt_edit::DocPosition {
+                    row: cursor.row.min(total_rows.saturating_sub(1)),
+                    byte_col: cursor.byte_col,
+                };
+            }
+            let (status, range) = DocumentViewExecutor::handle_mouse(
+                &mut state,
+                document,
+                event,
+                viewport,
+                gutter_pad_left,
+                scroll_top,
+                scroll_left,
+                click_count,
+                vim_enabled,
+                &mut vim_mode,
+                now,
+            );
+            let copy = range.and_then(|range| document.copy_range(TextRange::Rows(range)));
+            (status, copy)
+        }) else {
+            return (Status::Ignored, None);
+        };
+
+        let viewport_rows = viewport.rect.height;
+        if let (Some(win_ref), Some(buf_ref)) = self.ui.win_and_buf_mut(win, buf) {
+            win_ref.set_document_view_state(state);
+            if win_ref.vim_mode() != vim_mode {
+                win_ref.set_vim_mode(vim_mode);
+            }
+            win_ref.sync_row_cursor_to_local(buf_ref, viewport_rows);
+        }
+
+        (status, copy)
     }
 
     pub(crate) fn execute_document_view_command_for_win(
