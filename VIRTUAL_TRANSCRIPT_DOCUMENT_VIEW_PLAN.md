@@ -959,6 +959,8 @@ Acceptance:
 
 ### Follow-up 2: Explain and reduce tail-load wall-time scaling
 
+Status: complete. Tail resume now emits JSON/key-value duration and counter rows for read-only store open, descriptor count, tail slice probing, descriptor decode, and compact window construction. The measured bottleneck was repeated descriptor count plus `LIMIT/OFFSET` tail reads; the tail path now computes descriptor extent with `MAX(block_idx)+1`, carries the known total through tail probes, and reads the tail via descending primary-key order without offset scans. True resume tail-load time dropped to about 0.8 ms at 10 MiB and 0.9 ms at 50 MiB while still loading only 80 descriptor rows.
+
 Goal: tail resume should stay bounded in rows/descriptors and should not have unexplained wall-time growth with total database size.
 
 Deliverables:

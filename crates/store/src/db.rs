@@ -65,6 +65,10 @@ impl SessionDb {
     }
 
     pub fn open_with_options(path: impl AsRef<Path>, options: OpenOptions) -> Result<Self> {
+        let _perf = smelt_perf::perf::begin(match options.mode {
+            OpenMode::ReadWrite => "store:db:open_read_write",
+            OpenMode::ReadOnly => "store:db:open_read_only",
+        });
         let path = path.as_ref().to_path_buf();
         if matches!(options.mode, OpenMode::ReadWrite) {
             if let Some(parent) = path.parent() {
@@ -389,6 +393,12 @@ impl SessionDb {
         history::transcript_descriptor_count(&self.conn)
     }
 
+    /// Fast descriptor extent for dense transcript tables written by the current store.
+    /// Use `transcript_descriptor_count` when sparse or synthetic block indices must be counted exactly.
+    pub fn transcript_descriptor_dense_extent(&self) -> Result<usize> {
+        history::transcript_descriptor_dense_extent(&self.conn)
+    }
+
     pub fn read_transcript_descriptor_records(&self) -> Result<Vec<TranscriptDescriptorRecord>> {
         history::read_transcript_descriptor_records(&self.conn)
     }
@@ -400,11 +410,27 @@ impl SessionDb {
         history::read_transcript_descriptor_slice(&self.conn, range)
     }
 
+    pub fn read_transcript_descriptor_slice_with_total(
+        &self,
+        range: TranscriptDescriptorRange,
+        total_count: usize,
+    ) -> Result<TranscriptDescriptorSlice> {
+        history::read_transcript_descriptor_slice_with_total(&self.conn, range, total_count)
+    }
+
     pub fn read_transcript_descriptor_tail_slice(
         &self,
         count: usize,
     ) -> Result<TranscriptDescriptorSlice> {
         history::read_transcript_descriptor_tail_slice(&self.conn, count)
+    }
+
+    pub fn read_transcript_descriptor_tail_slice_with_total(
+        &self,
+        total_count: usize,
+        count: usize,
+    ) -> Result<TranscriptDescriptorSlice> {
+        history::read_transcript_descriptor_tail_slice_with_total(&self.conn, total_count, count)
     }
 
     pub fn search_transcript_candidates(

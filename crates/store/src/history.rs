@@ -451,11 +451,29 @@ fn insert_transcript_descriptor_record(
 }
 
 pub(crate) fn transcript_descriptor_count(conn: &Connection) -> Result<usize> {
+    let _perf = perf::begin("store:transcript:descriptor_count");
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM transcript_blocks WHERE descriptor_json IS NOT NULL",
         [],
         |row| row.get(0),
     )?;
+    perf::record_value("store:transcript:descriptor_count_total", count as u64);
+    Ok(count as usize)
+}
+
+pub(crate) fn transcript_descriptor_dense_extent(conn: &Connection) -> Result<usize> {
+    let _perf = perf::begin("store:transcript:descriptor_dense_extent");
+    let count: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(block_idx) + 1, 0)
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    perf::record_value(
+        "store:transcript:descriptor_dense_extent_total",
+        count as u64,
+    );
     Ok(count as usize)
 }
 
@@ -490,6 +508,14 @@ pub(crate) fn read_transcript_descriptor_slice(
 ) -> Result<TranscriptDescriptorSlice> {
     let _perf = perf::begin("store:transcript:read_descriptor_slice");
     let total_count = transcript_descriptor_count(conn)?;
+    read_transcript_descriptor_slice_with_total(conn, range, total_count)
+}
+
+pub(crate) fn read_transcript_descriptor_slice_with_total(
+    conn: &Connection,
+    range: TranscriptDescriptorRange,
+    total_count: usize,
+) -> Result<TranscriptDescriptorSlice> {
     let start = range.start().get().min(total_count);
     let end = range.end().get().min(total_count);
     if start >= end {
@@ -539,14 +565,51 @@ pub(crate) fn read_transcript_descriptor_tail_slice(
     let _perf = perf::begin("store:transcript:read_descriptor_tail_slice");
     perf::record_value("store:transcript:descriptor_tail_requested", count as u64);
     let total_count = transcript_descriptor_count(conn)?;
+    read_transcript_descriptor_tail_slice_with_total(conn, total_count, count)
+}
+
+pub(crate) fn read_transcript_descriptor_tail_slice_with_total(
+    conn: &Connection,
+    total_count: usize,
+    count: usize,
+) -> Result<TranscriptDescriptorSlice> {
+    let count = count.min(total_count);
     let start = total_count.saturating_sub(count);
-    read_transcript_descriptor_slice(
-        conn,
-        TranscriptDescriptorRange::new(
+    if count == 0 {
+        perf::record_value("store:transcript:descriptor_slice_requested", 0);
+        perf::record_value("store:transcript:descriptors_loaded", 0);
+        perf::record_value("store:transcript:descriptor_json_bytes_loaded", 0);
+        return Ok(TranscriptDescriptorSlice::new(
             TranscriptDescriptorIndex::new(start),
-            TranscriptDescriptorIndex::new(total_count),
-        ),
-    )
+            total_count,
+            TranscriptDescriptorHydration::ObjectBacked,
+            Vec::new(),
+        ));
+    }
+    let limit = checked_i64(count as u64, "descriptor_tail_len")?;
+    let mut stmt = conn.prepare(
+        "SELECT block_idx, history_idx, kind, tool_call_id, tool_name, content_hash,
+                estimated_text_bytes, preview_text, search_text, descriptor_json,
+                origin_json, tool_state_json
+         FROM transcript_blocks
+         WHERE descriptor_json IS NOT NULL
+         ORDER BY block_idx DESC
+         LIMIT ?1",
+    )?;
+    let mut records = read_transcript_descriptor_records_from_stmt(
+        conn,
+        &mut stmt,
+        params![limit],
+        TranscriptDescriptorHydration::ObjectBacked,
+    )?;
+    records.reverse();
+    perf::record_value("store:transcript:descriptor_slice_requested", count as u64);
+    Ok(TranscriptDescriptorSlice::new(
+        TranscriptDescriptorIndex::new(start),
+        total_count,
+        TranscriptDescriptorHydration::ObjectBacked,
+        records,
+    ))
 }
 
 fn read_transcript_descriptor_records_from_stmt<P>(

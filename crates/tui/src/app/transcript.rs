@@ -78,16 +78,23 @@ impl LoadedTranscript {
         width: u16,
         viewport_rows: u16,
     ) -> Option<Self> {
-        let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
+        let store = {
+            let _perf = smelt_perf::perf::begin("transcript:resume_tail:open_store");
+            SqliteTranscriptStore::open_read_only(&session_dir).ok()?
+        };
         let target_rows = descriptor_tail_target_rows(viewport_rows);
-        let slice = store
-            .read_tail_descriptor_slice_for_rows(width, target_rows)
-            .ok()?;
+        let slice = {
+            let _perf = smelt_perf::perf::begin("transcript:resume_tail:read_tail_slice");
+            store
+                .read_tail_descriptor_slice_for_rows(width, target_rows)
+                .ok()?
+        };
         smelt_perf::perf::record_value(
             "transcript:sqlite:descriptor_total",
             slice.total_count as u64,
         );
         smelt_perf::perf::record_value("transcript:sqlite:descriptor_loaded", slice.len() as u64);
+        let _perf = smelt_perf::perf::begin("transcript:resume_tail:build_loaded");
         Self::from_descriptor_slice(slice, session_dir)
     }
 
@@ -97,7 +104,10 @@ impl LoadedTranscript {
     ) -> Option<Self> {
         let total_count = rows.len();
         let records = descriptor_records_from_rows(rows)?;
-        let transcript = Transcript::from_descriptor_records(records.clone());
+        let transcript = {
+            let _perf = smelt_perf::perf::begin("transcript:descriptor_window:build_compact");
+            Transcript::from_descriptor_records(records.clone())
+        };
         Some(Self {
             transcript,
             descriptor_window: Some(LoadedDescriptorWindow {
@@ -115,7 +125,10 @@ impl LoadedTranscript {
         session_dir: PathBuf,
     ) -> Option<Self> {
         let descriptor_window = LoadedDescriptorWindow::from_slice(slice)?;
-        let transcript = Transcript::from_descriptor_records(descriptor_window.records.clone());
+        let transcript = {
+            let _perf = smelt_perf::perf::begin("transcript:descriptor_window:build_compact");
+            Transcript::from_descriptor_records(descriptor_window.records.clone())
+        };
         Some(Self {
             transcript,
             descriptor_window: Some(descriptor_window),
@@ -130,6 +143,11 @@ fn descriptor_records_from_rows(
     if rows.is_empty() {
         return None;
     }
+    let _perf = smelt_perf::perf::begin("transcript:descriptor_window:decode_records");
+    smelt_perf::perf::record_value(
+        "transcript:descriptor_window:decode_rows",
+        rows.len() as u64,
+    );
     rows.into_iter()
         .map(TryInto::try_into)
         .collect::<Result<Vec<_>, serde_json::Error>>()
@@ -157,9 +175,14 @@ impl SqliteTranscriptStore {
         width: u16,
         target_rows: u16,
     ) -> smelt_store::Result<smelt_store::TranscriptDescriptorSlice> {
-        let total = self.db.transcript_descriptor_count()?;
+        let total = {
+            let _perf = smelt_perf::perf::begin("transcript:resume_tail:descriptor_count");
+            self.db.transcript_descriptor_dense_extent()?
+        };
         if total == 0 {
-            return self.db.read_transcript_descriptor_tail_slice(0);
+            return self
+                .db
+                .read_transcript_descriptor_tail_slice_with_total(total, 0);
         }
 
         let target_rows = u64::from(target_rows.max(1));
@@ -167,14 +190,26 @@ impl SqliteTranscriptStore {
             .saturating_add(1)
             .saturating_div(2)
             .min(total as u64) as usize;
+        let mut probes = 0u64;
         while count < total {
-            let slice = self.db.read_transcript_descriptor_tail_slice(count)?;
+            probes = probes.saturating_add(1);
+            smelt_perf::perf::record_value("transcript:resume_tail:tail_probe_count", count as u64);
+            let slice = {
+                let _perf = smelt_perf::perf::begin("transcript:resume_tail:tail_slice_probe");
+                self.db
+                    .read_transcript_descriptor_tail_slice_with_total(total, count)?
+            };
             if estimate_descriptor_rows(&slice.records, width) >= target_rows {
+                smelt_perf::perf::record_value("transcript:resume_tail:tail_probes", probes);
                 return Ok(slice);
             }
             count = count.saturating_mul(2).min(total);
         }
-        self.db.read_transcript_descriptor_tail_slice(total)
+        smelt_perf::perf::record_value("transcript:resume_tail:tail_probes", probes + 1);
+        smelt_perf::perf::record_value("transcript:resume_tail:tail_probe_count", total as u64);
+        let _perf = smelt_perf::perf::begin("transcript:resume_tail:tail_slice_probe");
+        self.db
+            .read_transcript_descriptor_tail_slice_with_total(total, total)
     }
 }
 

@@ -6298,6 +6298,48 @@ mod tests {
         );
     }
 
+    fn resume_perf_metric(label: &str) -> bool {
+        [
+            "transcript:resume_tail",
+            "transcript:descriptor_window",
+            "store:db",
+            "store:transcript",
+        ]
+        .iter()
+        .any(|prefix| label.starts_with(prefix))
+    }
+
+    fn print_resume_perf_snapshot(snapshot: &smelt_perf::perf::Snapshot) {
+        for row in snapshot
+            .durations
+            .iter()
+            .filter(|row| resume_perf_metric(row.label))
+        {
+            eprintln!(
+                "TRANSCRIPT_RESUME_PERF_DURATION metric={} count={} last_us={} total_us={} p95_us={} max_us={}",
+                row.label, row.count, row.last_us, row.total_us, row.p95_us, row.max_us
+            );
+            eprintln!(
+                "TRANSCRIPT_RESUME_PERF_DURATION_JSON {{\"type\":\"resume_perf_duration\",\"metric\":\"{}\",\"count\":{},\"last_us\":{},\"total_us\":{},\"p95_us\":{},\"max_us\":{}}}",
+                row.label, row.count, row.last_us, row.total_us, row.p95_us, row.max_us
+            );
+        }
+        for row in snapshot
+            .values
+            .iter()
+            .filter(|row| resume_perf_metric(row.label))
+        {
+            eprintln!(
+                "TRANSCRIPT_RESUME_PERF_VALUE metric={} count={} last={} total={} p95={} max={}",
+                row.label, row.count, row.last, row.total, row.p95, row.max
+            );
+            eprintln!(
+                "TRANSCRIPT_RESUME_PERF_VALUE_JSON {{\"type\":\"resume_perf_value\",\"metric\":\"{}\",\"count\":{},\"last\":{},\"total\":{},\"p95\":{},\"max\":{}}}",
+                row.label, row.count, row.last, row.total, row.p95, row.max
+            );
+        }
+    }
+
     fn transcript_bench_runs() -> usize {
         std::env::var("SMELT_TRANSCRIPT_BENCH_RUNS")
             .ok()
@@ -6446,6 +6488,7 @@ mod tests {
         let tail_render_ms = elapsed_ms(tail_render_start.elapsed());
         assert!(tail_rows.total_rows > 0);
         let tail_snapshot = smelt_perf::perf::snapshot();
+        print_resume_perf_snapshot(&tail_snapshot);
         assert_resume_tail_perf_gates(&tail_snapshot, history_items);
 
         let descriptor_load_start = std::time::Instant::now();
