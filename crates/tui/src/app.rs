@@ -2125,7 +2125,7 @@ impl TuiApp {
         // RAII guard for the terminal envelope: raw mode + alt screen + mouse +
         // bracketed paste + focus + DECAWM-off + hidden cursor. Lives as long
         // as `run()`; `Drop` restores cooked mode and the normal screen, even
-        // on panic. Shell-outs go through `self.terminal.as_ref().suspended()`.
+        // on panic. Shell-outs go through `self.terminal.as_mut().suspended()`.
         self.terminal = crate::term_setup::TuiTerminal::claim().ok();
 
         if !self.core.session.history.is_empty() {

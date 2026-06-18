@@ -19,16 +19,14 @@
 //!     cargo run -p tui --example stories
 
 use std::collections::HashMap;
-use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{cursor, ExecutableCommand};
 
-use smelt_term::{Color, Compositor, Grid, SnapshotFrame, Style, Theme};
-use unicode_width::UnicodeWidthChar;
+use smelt_term::{
+    Color, Compositor, Grid, GridSlice, Rect, SnapshotFrame, Style, TerminalSession, Theme,
+};
 
 #[derive(Clone, Debug)]
 struct Story {
@@ -203,30 +201,10 @@ const STYLE_DIM: Style = Style {
     reverse: false,
 };
 
-/// Truncate `text` to at most `max_w` visual columns.
-fn fit_width(text: &str, max_w: u16) -> (String, u16) {
-    let mut out = String::new();
-    let mut emitted: u16 = 0;
-    for ch in text.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0).max(1) as u16;
-        if emitted + cw > max_w {
-            break;
-        }
-        out.push(ch);
-        emitted += cw;
-    }
-    (out, emitted)
-}
-
 /// Paint `text` left-aligned at `(x, y)`, truncating to `max_w` and
 /// padding with spaces so a styled background extends to the edge.
-fn write_line(grid: &mut Grid, x: u16, y: u16, max_w: u16, text: &str, style: Style) {
-    let (slice, emitted) = fit_width(text, max_w);
-    grid.put_str(x, y, &slice, style);
-    if emitted < max_w {
-        let pad = " ".repeat((max_w - emitted) as usize);
-        grid.put_str(x + emitted, y, &pad, style);
-    }
+fn write_line(slice: &mut GridSlice<'_>, x: u16, y: u16, max_w: u16, text: &str, style: Style) {
+    slice.put_padded(x, y, max_w, text, style);
 }
 
 fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
@@ -239,78 +217,96 @@ fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
     let content_top: u16 = header_h;
     let content_h = term_h.saturating_sub(header_h + footer_h);
 
-    // Header.
-    let header = format!(
-        "smelt storybook - {} stories across {} groups",
-        app.stories.len(),
-        group_counts(&app.stories).len()
-    );
-    write_line(grid, 0, 0, term_w, &header, STYLE_BOLD);
-
-    // List pane.
-    let mut last_group: Option<&str> = None;
-    for (offset, (i, story)) in app
+    let selected_frame = app
         .stories
-        .iter()
-        .enumerate()
-        .skip(app.list_scroll)
-        .take(content_h as usize)
-        .enumerate()
+        .get(app.selected)
+        .map(|story| (story.full_id.clone(), load_frame(story)));
+
     {
-        let row = content_top + offset as u16;
-        if row >= content_top + content_h {
-            break;
-        }
-        let g_changed = last_group != Some(story.group.as_str());
-        last_group = Some(story.group.as_str());
-        let selected = i == app.selected;
-        let label = if g_changed {
-            format!("▸ {} :: {}", story.group, story.name)
-        } else {
-            format!("    {}", story.name)
-        };
-        let style = if selected {
-            Style {
-                fg: Some(Color::Black),
-                bg: Some(Color::White),
-                ..Style::default()
+        let mut slice = grid.slice_mut(Rect::new(0, 0, term_w, term_h));
+
+        // Header.
+        let header = format!(
+            "smelt storybook - {} stories across {} groups",
+            app.stories.len(),
+            group_counts(&app.stories).len()
+        );
+        write_line(&mut slice, 0, 0, term_w, &header, STYLE_BOLD);
+
+        // List pane.
+        let mut last_group: Option<&str> = None;
+        for (offset, (i, story)) in app
+            .stories
+            .iter()
+            .enumerate()
+            .skip(app.list_scroll)
+            .take(content_h as usize)
+            .enumerate()
+        {
+            let row = content_top + offset as u16;
+            if row >= content_top + content_h {
+                break;
             }
-        } else if g_changed {
-            STYLE_DIM
-        } else {
-            Style::default()
-        };
-        write_line(grid, 0, row, list_w, &label, style);
+            let g_changed = last_group != Some(story.group.as_str());
+            last_group = Some(story.group.as_str());
+            let selected = i == app.selected;
+            let label = if g_changed {
+                format!("▸ {} :: {}", story.group, story.name)
+            } else {
+                format!("    {}", story.name)
+            };
+            let style = if selected {
+                Style {
+                    fg: Some(Color::Black),
+                    bg: Some(Color::White),
+                    ..Style::default()
+                }
+            } else if g_changed {
+                STYLE_DIM
+            } else {
+                Style::default()
+            };
+            write_line(&mut slice, 0, row, list_w, &label, style);
+        }
+
+        slice.rule_v_range(list_w, content_top, content_h, STYLE_DIM);
+
+        if let Some((full_id, frame)) = selected_frame.as_ref() {
+            write_line(
+                &mut slice,
+                preview_left,
+                content_top,
+                preview_w,
+                full_id,
+                STYLE_BOLD,
+            );
+            let info = format!("frame: {} × {}", frame.width, frame.height);
+            write_line(
+                &mut slice,
+                preview_left,
+                content_top + 1,
+                preview_w,
+                &info,
+                STYLE_DIM,
+            );
+
+            let body_top = content_top + 3;
+            let frame_max_w = preview_w.saturating_sub(2);
+            let render_w = frame.width.min(frame_max_w);
+            let inner_x = preview_left + 1;
+            let max_inner_h = (content_h as usize).saturating_sub(5) as u16;
+            let inner_h = frame.height.min(max_inner_h);
+            let top_row = body_top.saturating_sub(1);
+
+            slice.set(preview_left, top_row, '┌', STYLE_DIM);
+            slice.rule_h_range(inner_x, top_row, render_w, STYLE_DIM);
+            slice.set(inner_x + render_w, top_row, '┐', STYLE_DIM);
+            slice.rule_v_range(preview_left, body_top, inner_h, STYLE_DIM);
+            slice.rule_v_range(inner_x + render_w, body_top, inner_h, STYLE_DIM);
+        }
     }
 
-    // Vertical separator.
-    for r in content_top..(content_top + content_h) {
-        grid.put_str(list_w, r, "│", STYLE_DIM);
-    }
-
-    // Preview pane.
-    if let Some(story) = app.stories.get(app.selected) {
-        let frame = load_frame(story);
-
-        write_line(
-            grid,
-            preview_left,
-            content_top,
-            preview_w,
-            &story.full_id,
-            STYLE_BOLD,
-        );
-        let info = format!("frame: {} × {}", frame.width, frame.height);
-        write_line(
-            grid,
-            preview_left,
-            content_top + 1,
-            preview_w,
-            &info,
-            STYLE_DIM,
-        );
-
-        // Frame body, framed by a thin rule above + below.
+    if let Some((_full_id, frame)) = selected_frame.as_ref() {
         let body_top = content_top + 3;
         let frame_max_w = preview_w.saturating_sub(2);
         let render_w = frame.width.min(frame_max_w);
@@ -318,31 +314,27 @@ fn paint_frame(grid: &mut Grid, app: &App, term_w: u16, term_h: u16) {
         let max_inner_h = (content_h as usize).saturating_sub(5) as u16;
         let inner_h = frame.height.min(max_inner_h);
 
-        let top_rule = format!("┌{}┐", "─".repeat(render_w as usize));
-        grid.put_str(
-            preview_left,
-            body_top.saturating_sub(1),
-            &top_rule,
-            STYLE_DIM,
-        );
-
-        for r in 0..inner_h {
-            grid.put_str(preview_left, body_top + r, "│", STYLE_DIM);
-            grid.put_str(inner_x + render_w, body_top + r, "│", STYLE_DIM);
-        }
-
         frame.blit_into(grid, inner_x, body_top);
 
+        let mut slice = grid.slice_mut(Rect::new(0, 0, term_w, term_h));
         let bottom_row = body_top + inner_h;
         if bottom_row < content_top + content_h {
-            let rule = format!("└{}┘", "─".repeat(render_w as usize));
-            grid.put_str(preview_left, bottom_row, &rule, STYLE_DIM);
+            slice.set(preview_left, bottom_row, '└', STYLE_DIM);
+            slice.rule_h_range(inner_x, bottom_row, render_w, STYLE_DIM);
+            slice.set(inner_x + render_w, bottom_row, '┘', STYLE_DIM);
         }
     }
 
-    // Footer.
+    let mut slice = grid.slice_mut(Rect::new(0, 0, term_w, term_h));
     let footer = "j/k or ↓/↑ navigate · g/G top/bottom · q/Esc quit";
-    write_line(grid, 0, term_h.saturating_sub(1), term_w, footer, STYLE_DIM);
+    write_line(
+        &mut slice,
+        0,
+        term_h.saturating_sub(1),
+        term_w,
+        footer,
+        STYLE_DIM,
+    );
 }
 
 // ── Main loop ─────────────────────────────────────────────────────
@@ -357,13 +349,12 @@ fn run() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    terminal::enable_raw_mode()?;
-    let mut out = stdout();
-    out.execute(EnterAlternateScreen)?;
-    out.execute(cursor::Hide)?;
+    let mut term = TerminalSession::builder()
+        .mouse_capture(false)
+        .enter_stdout()?;
 
     let mut app = App::new(stories);
-    let mut size = terminal::size()?;
+    let mut size = term.size()?;
     let theme = Theme::default();
     let mut compositor = Compositor::new(size.0, size.1);
 
@@ -372,7 +363,7 @@ fn run() -> std::io::Result<()> {
         loop {
             let list_height = (size.1 as usize).saturating_sub(4);
             if dirty {
-                compositor.render_with(&theme, &mut out, |grid, _theme| {
+                compositor.render_with(&theme, term.writer(), |grid, _theme| {
                     paint_frame(grid, &app, size.0, size.1);
                 })?;
                 dirty = false;
@@ -422,9 +413,6 @@ fn run() -> std::io::Result<()> {
         Ok(())
     })();
 
-    out.execute(cursor::Show)?;
-    out.execute(LeaveAlternateScreen)?;
-    terminal::disable_raw_mode()?;
     result
 }
 

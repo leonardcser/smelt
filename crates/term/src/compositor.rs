@@ -81,7 +81,8 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
     use crossterm::style::{
         Attribute, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     };
-    use unicode_width::UnicodeWidthChar;
+
+    use crate::grid::char_width;
 
     let mut current_style = Style::default();
     for y in 0..grid.height() {
@@ -97,7 +98,7 @@ fn flush_full<W: Write>(grid: &Grid, w: &mut W) -> std::io::Result<()> {
             } else {
                 cell.symbol
             };
-            let cw = UnicodeWidthChar::width(symbol).unwrap_or(1).max(1) as u16;
+            let cw = char_width(symbol);
 
             // Wide char overflowing the right edge: emit a space to prevent wrapping.
             let (sym, emit_w) = if terminal_col + cw > grid.width() {

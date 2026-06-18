@@ -1003,7 +1003,7 @@ impl TuiApp {
                 .args(&req.args)
                 .status()
         };
-        let status = match self.terminal.as_ref() {
+        let status = match self.terminal.as_mut() {
             Some(t) => t.suspended(spawn),
             None => {
                 self.notify_error("editor: unavailable without an attached terminal".to_string());

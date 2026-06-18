@@ -677,6 +677,12 @@ impl Gutters {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayoutRect {
+    pub id: PaintId,
+    pub rect: Rect,
+}
+
 /// Resolve the tree against `area` and return the rect of every leaf. `Fit`
 /// constraints contribute `0` (no leaf-size hook); use `resolve_layout_with`
 /// to drive content-aware sizing.
@@ -692,8 +698,27 @@ pub fn resolve_layout_with(
     area: Rect,
     sizer: &dyn LeafSizer,
 ) -> HashMap<PaintId, Rect> {
-    let mut result = HashMap::new();
-    resolve_node(tree, area, sizer, &mut result);
+    resolve_layout_ordered_with(tree, area, sizer)
+        .into_iter()
+        .map(|r| (r.id, r.rect))
+        .collect()
+}
+
+/// Resolve the tree against `area` and return every leaf in declaration order.
+/// Unlike [`resolve_layout`], repeated `PaintId`s are preserved.
+pub fn resolve_layout_ordered(tree: &LayoutTree, area: Rect) -> Vec<LayoutRect> {
+    resolve_layout_ordered_with(tree, area, &NoopSizer)
+}
+
+/// Resolve the tree against `area` using `sizer` and preserve every leaf in
+/// declaration order. Repeated `PaintId`s appear once per leaf.
+pub fn resolve_layout_ordered_with(
+    tree: &LayoutTree,
+    area: Rect,
+    sizer: &dyn LeafSizer,
+) -> Vec<LayoutRect> {
+    let mut result = Vec::new();
+    resolve_node_ordered(tree, area, sizer, &mut result);
     result
 }
 
@@ -826,8 +851,7 @@ pub fn paint_chrome(
                     let span_style = merge_title_span_style(top_style, span.style);
                     let mut written = false;
                     for ch in span.text.chars() {
-                        use unicode_width::UnicodeWidthChar;
-                        let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
+                        let cw = crate::grid::char_width(ch);
                         if col + cw > limit {
                             break;
                         }
@@ -861,21 +885,24 @@ fn merge_title_span_style(
     }
 }
 
-fn resolve_node(
+fn resolve_node_ordered(
     node: &LayoutTree,
     area: Rect,
     sizer: &dyn LeafSizer,
-    out: &mut HashMap<PaintId, Rect>,
+    out: &mut Vec<LayoutRect>,
 ) {
     match node {
         LayoutTree::Leaf { id, chrome, .. } => {
-            out.insert(*id, inset_for_chrome(area, chrome));
+            out.push(LayoutRect {
+                id: *id,
+                rect: inset_for_chrome(area, chrome),
+            });
         }
         LayoutTree::Vbox { items, chrome } => {
-            resolve_box(items, chrome, area, true, sizer, out);
+            resolve_box_ordered(items, chrome, area, true, sizer, out);
         }
         LayoutTree::Hbox { items, chrome } => {
-            resolve_box(items, chrome, area, false, sizer, out);
+            resolve_box_ordered(items, chrome, area, false, sizer, out);
         }
     }
 }
@@ -951,17 +978,17 @@ pub fn layout_box_children(
     (inner, rects)
 }
 
-fn resolve_box(
+fn resolve_box_ordered(
     items: &[Item],
     chrome: &Chrome,
     area: Rect,
     vertical: bool,
     sizer: &dyn LeafSizer,
-    out: &mut HashMap<PaintId, Rect>,
+    out: &mut Vec<LayoutRect>,
 ) {
     let (_, rects) = layout_box_children(items, chrome, area, vertical, sizer);
     for ((_, child), &rect) in items.iter().zip(rects.iter()) {
-        resolve_node(child, rect, sizer, out);
+        resolve_node_ordered(child, rect, sizer, out);
     }
 }
 
@@ -1245,6 +1272,38 @@ mod tests {
         assert_eq!(result[&C], Rect::new(20, 0, 80, 4));
         assert_eq!(result[&A], Rect::new(0, 0, 40, 20));
         assert_eq!(result[&B], Rect::new(0, 40, 40, 20));
+    }
+
+    #[test]
+    fn ordered_resolution_preserves_repeated_ids() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(1), LayoutTree::leaf(A)),
+            (Constraint::Length(1), LayoutTree::leaf(A)),
+        ]);
+        let result = resolve_layout_ordered(&tree, Rect::new(0, 0, 10, 2));
+        assert_eq!(
+            result,
+            vec![
+                LayoutRect {
+                    id: A,
+                    rect: Rect::new(0, 0, 10, 1),
+                },
+                LayoutRect {
+                    id: A,
+                    rect: Rect::new(1, 0, 10, 1),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn map_resolution_keeps_last_repeated_id() {
+        let tree = LayoutTree::vbox(vec![
+            (Constraint::Length(1), LayoutTree::leaf(A)),
+            (Constraint::Length(1), LayoutTree::leaf(A)),
+        ]);
+        let result = resolve_layout(&tree, Rect::new(0, 0, 10, 2));
+        assert_eq!(result[&A], Rect::new(1, 0, 10, 1));
     }
 
     #[test]

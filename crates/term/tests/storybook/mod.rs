@@ -116,7 +116,7 @@ impl StoryCtx {
                                         _ts: (u16, u16)| {
                         let mut slice: GridSlice = grid.slice_mut(leaf);
                         if clear_leaf {
-                            let leaf_area = slice.area();
+                            let leaf_area = slice.grid_rect();
                             let local = Rect::new(0, 0, leaf_area.width, leaf_area.height);
                             slice.fill(local, ' ', Style::default());
                         }

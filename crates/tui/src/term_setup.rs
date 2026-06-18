@@ -7,22 +7,15 @@
 //! on panic. [`TuiTerminal::suspended`] is the temporary handoff used for
 //! shell-outs like `$EDITOR`.
 
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Stdout};
 
-use crossterm::{
-    cursor,
-    event::{
-        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
-    QueueableCommand,
-};
+use crossterm::event::KeyboardEnhancementFlags;
+use smelt_term::{TerminalSession, TerminalSessionBuilder};
 
 /// RAII guard for the TUI terminal envelope. Restores cooked mode + the
 /// normal screen on drop, even if the run loop panics.
 pub struct TuiTerminal {
+    session: TerminalSession<BufWriter<Stdout>>,
     // Terminal state is a process-wide resource; the guard must not migrate
     // between threads while it's alive.
     _not_send: std::marker::PhantomData<*const ()>,
@@ -30,8 +23,9 @@ pub struct TuiTerminal {
 
 impl TuiTerminal {
     pub fn claim() -> io::Result<Self> {
-        enter_envelope()?;
+        let session = tui_session_builder().enter_stdout()?;
         Ok(Self {
+            session,
             _not_send: std::marker::PhantomData,
         })
     }
@@ -49,61 +43,21 @@ impl TuiTerminal {
     /// This deliberately does **not** touch any active terminal input reader.
     /// Callers must stop or recreate their reader around suspension so it does
     /// not race the child process for stdin bytes.
-    pub fn suspended<F, R>(&self, f: F) -> R
+    pub fn suspended<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        let _ = release_input_modes();
-        let result = f();
-        // The child's exit may have dropped us to the normal screen; the
-        // full envelope re-enters the alt buffer to be safe.
-        let _ = enter_envelope();
-        result
+        self.session.suspend(f)
     }
 }
 
-impl Drop for TuiTerminal {
-    fn drop(&mut self) {
-        let _ = leave_envelope();
-    }
-}
-
-// ── private ─────────────────────────────────────────────────────────────────
-
-fn enter_envelope() -> io::Result<()> {
-    terminal::enable_raw_mode()?;
-    let mut out = io::stdout();
-    out.queue(EnterAlternateScreen)?
-        .queue(DisableLineWrap)?
-        .queue(cursor::Hide)?
-        .queue(EnableBracketedPaste)?
-        .queue(EnableFocusChange)?
-        .queue(PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-        ))?
-        .queue(EnableMouseCapture)?;
-    out.flush()
-}
-
-fn leave_envelope() -> io::Result<()> {
-    release_input_modes()?;
-    let mut out = io::stdout();
-    out.queue(LeaveAlternateScreen)?;
-    out.flush()?;
-    terminal::disable_raw_mode()
-}
-
-/// Drain the TUI's input-side modes (raw, mouse, bracketed, focus) plus the
-/// display tweaks that aren't tied to the alt-screen swap (cursor visible,
-/// line wrap on). Shared by full teardown and temporary suspend; the
-/// alt-screen swap is the only difference and lives at the call site.
-fn release_input_modes() -> io::Result<()> {
-    let mut out = io::stdout();
-    out.queue(DisableMouseCapture)?
-        .queue(PopKeyboardEnhancementFlags)?
-        .queue(DisableFocusChange)?
-        .queue(DisableBracketedPaste)?
-        .queue(cursor::Show)?
-        .queue(EnableLineWrap)?;
-    out.flush()
+fn tui_session_builder() -> TerminalSessionBuilder {
+    TerminalSession::builder()
+        .alternate_screen(true)
+        .line_wrap(false)
+        .hide_cursor(true)
+        .bracketed_paste(true)
+        .focus_events(true)
+        .keyboard_enhancements(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        .mouse_capture(true)
 }

@@ -29,10 +29,21 @@ impl<P> HitRegistry<P> {
 
     /// Record a hit region. Empty rects are ignored.
     pub fn record(&mut self, rect: Rect, payload: P) {
-        if rect.width == 0 || rect.height == 0 {
+        if rect.is_empty() {
             return;
         }
         self.entries.push((rect, payload));
+    }
+
+    /// Record a rect in local coordinates relative to `origin`.
+    pub fn record_local(&mut self, origin: Rect, rect: Rect, payload: P) {
+        self.record(rect.to_grid(origin), payload);
+    }
+
+    /// Record a rect in local coordinates relative to `origin`, clipped to `origin` before translation.
+    pub fn record_local_clipped(&mut self, origin: Rect, rect: Rect, payload: P) {
+        let bounds = Rect::new(0, 0, origin.width, origin.height);
+        self.record(rect.clip_to(bounds).to_grid(origin), payload);
     }
 
     /// Return the topmost payload whose rect covers `(row, col)`.
@@ -97,5 +108,21 @@ mod tests {
         reg.record(Rect::new(0, 0, 5, 5), 1);
         reg.clear();
         assert_eq!(reg.hit(0, 0), None);
+    }
+
+    #[test]
+    fn record_local_offsets_rect() {
+        let mut reg = HitRegistry::<u32>::new();
+        reg.record_local(Rect::new(10, 20, 5, 5), Rect::new(1, 2, 3, 4), 7);
+        assert_eq!(reg.hit(11, 22), Some(&7));
+        assert_eq!(reg.hit(1, 2), None);
+    }
+
+    #[test]
+    fn record_local_clipped_limits_rect_to_origin() {
+        let mut reg = HitRegistry::<u32>::new();
+        reg.record_local_clipped(Rect::new(10, 20, 5, 5), Rect::new(3, 3, 10, 10), 7);
+        assert_eq!(reg.hit(13, 23), Some(&7));
+        assert_eq!(reg.hit(16, 26), None);
     }
 }

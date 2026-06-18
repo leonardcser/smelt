@@ -2,7 +2,7 @@
 //! `Line` is a sequence of spans for one visual row. Both are data-only;
 //! rendering happens via [`crate::grid::GridSlice::put_line`].
 
-use crate::grid::Style;
+use crate::grid::{display_width, Style};
 use std::borrow::Cow;
 
 /// A styled run of text. `Cow` text keeps borrowed literals zero-copy.
@@ -29,8 +29,7 @@ impl<'a> Span<'a> {
 
     /// Display width of the span's text in terminal cells.
     pub fn width(&self) -> u16 {
-        use unicode_width::UnicodeWidthStr;
-        UnicodeWidthStr::width(self.text.as_ref()) as u16
+        display_width(self.text.as_ref())
     }
 }
 
@@ -76,7 +75,9 @@ impl<'a> Line<'a> {
 
     /// Total display width across all spans.
     pub fn width(&self) -> u16 {
-        self.spans.iter().map(|s| s.width()).sum()
+        self.spans
+            .iter()
+            .fold(0u16, |width, span| width.saturating_add(span.width()))
     }
 }
 

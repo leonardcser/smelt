@@ -29,6 +29,41 @@ pub(crate) fn to_crossterm_color(c: Color) -> crossterm::style::Color {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+pub fn display_width(text: &str) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
+}
+
+pub fn truncate_width(text: &str, max_width: u16) -> String {
+    let mut out = String::new();
+    write_text(0, max_width, text, |_, ch| out.push(ch));
+    out
+}
+
+pub(crate) fn char_width(ch: char) -> u16 {
+    use unicode_width::UnicodeWidthChar;
+    UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16
+}
+
+fn write_text(mut col: u16, limit: u16, text: &str, mut write: impl FnMut(u16, char)) -> u16 {
+    for ch in text.chars() {
+        let width = char_width(ch);
+        if col.saturating_add(width) > limit {
+            break;
+        }
+        write(col, ch);
+        col = col.saturating_add(width);
+    }
+    col.min(limit)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub symbol: char,
     pub style: Style,
@@ -170,23 +205,11 @@ impl Grid {
         }
     }
 
-    pub fn put_str(&mut self, x: u16, y: u16, text: &str, style: Style) {
-        use unicode_width::UnicodeWidthChar;
-
+    pub fn put_str(&mut self, x: u16, y: u16, text: &str, style: Style) -> u16 {
         if y >= self.height {
-            return;
+            return x.min(self.width);
         }
-        let mut col = x;
-        for ch in text.chars() {
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
-            if col + cw > self.width {
-                break;
-            }
-            // Delegate to `set` so wide-char continuation marking stays
-            // consistent across all paths that write into the grid.
-            self.set(col, y, ch, style);
-            col += cw;
-        }
+        write_text(x, self.width, text, |col, ch| self.set(col, y, ch, style))
     }
 
     /// Overwrites `symbol` and `style.fg`; preserves the existing cell's
@@ -202,36 +225,27 @@ impl Grid {
     }
 
     /// String form of [`Grid::put_char`]: overwrites symbol + fg, preserves bg and attrs.
-    pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) {
-        use unicode_width::UnicodeWidthChar;
+    pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) -> u16 {
         if y >= self.height {
-            return;
+            return x.min(self.width);
         }
-        let mut col = x;
-        for ch in text.chars() {
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
-            if col + cw > self.width {
-                break;
-            }
-            self.put_char(col, y, ch, fg);
-            col += cw;
-        }
+        write_text(x, self.width, text, |col, ch| self.put_char(col, y, ch, fg))
     }
 
     /// Paint a [`Line`] of styled spans at `(x, y)`, clipping at the right edge.
-    pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) {
+    pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) -> u16 {
         let mut col = x;
         for span in &line.spans {
             if col >= self.width {
                 break;
             }
             let before = col;
-            self.put_str(col, y, span.text.as_ref(), span.style);
-            col = col.saturating_add(span.width());
+            col = self.put_str(col, y, span.text.as_ref(), span.style);
             if col == before {
                 break;
             }
         }
+        col.min(self.width)
     }
 
     pub fn fill(&mut self, area: Rect, symbol: char, style: Style) {
@@ -312,8 +326,32 @@ impl<'a> GridSlice<'a> {
         self.area.height
     }
 
-    pub fn area(&self) -> Rect {
+    /// Absolute rect this slice covers in the underlying grid.
+    pub fn grid_rect(&self) -> Rect {
         self.area
+    }
+
+    pub fn to_grid_rect(&self, rect: Rect) -> Rect {
+        rect.to_grid(self.area)
+    }
+
+    pub fn to_local_rect(&self, rect: Rect) -> Rect {
+        rect.to_local(self.area)
+    }
+
+    pub fn slice_mut(&mut self, area: Rect) -> GridSlice<'_> {
+        let parent = Rect::new(0, 0, self.area.width, self.area.height);
+        let clipped = area.clip_to(parent);
+        let area = Rect::new(
+            self.area.top.saturating_add(clipped.top),
+            self.area.left.saturating_add(clipped.left),
+            clipped.width,
+            clipped.height,
+        );
+        GridSlice {
+            grid: self.grid,
+            area,
+        }
     }
 
     pub fn set(&mut self, x: u16, y: u16, symbol: char, style: Style) {
@@ -341,25 +379,96 @@ impl<'a> GridSlice<'a> {
         }
     }
 
-    /// Absolute rect this slice covers in the underlying grid.
-    pub fn screen_rect(&self) -> Rect {
-        self.area
+    pub fn put_str(&mut self, x: u16, y: u16, text: &str, style: Style) -> u16 {
+        self.write_str_at(x, y, text, None, style)
     }
 
-    pub fn put_str(&mut self, x: u16, y: u16, text: &str, style: Style) {
-        use unicode_width::UnicodeWidthChar;
+    fn write_str_at(
+        &mut self,
+        x: u16,
+        y: u16,
+        text: &str,
+        max_width: Option<u16>,
+        style: Style,
+    ) -> u16 {
         if y >= self.area.height {
-            return;
+            return x.min(self.area.width);
         }
         let abs_y = self.area.top + y;
-        let mut col = x;
-        for ch in text.chars() {
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
-            if col + cw > self.area.width {
-                break;
-            }
-            self.grid.set(self.area.left + col, abs_y, ch, style);
-            col += cw;
+        let limit = x
+            .saturating_add(max_width.unwrap_or(u16::MAX))
+            .min(self.area.width);
+        write_text(x, limit, text, |col, ch| {
+            self.grid.set(self.area.left + col, abs_y, ch, style)
+        })
+    }
+
+    pub fn put_padded(&mut self, x: u16, y: u16, width: u16, text: &str, style: Style) -> u16 {
+        if y >= self.area.height {
+            return x.min(self.area.width);
+        }
+        let end = x.saturating_add(width).min(self.area.width);
+        let mut col = self
+            .write_str_at(x, y, text, Some(end.saturating_sub(x)), style)
+            .min(end);
+        while col < end {
+            self.set(col, y, ' ', style);
+            col = col.saturating_add(1);
+        }
+        end
+    }
+
+    pub fn put_str_aligned(
+        &mut self,
+        x: u16,
+        y: u16,
+        width: u16,
+        text: &str,
+        align: TextAlign,
+        style: Style,
+    ) -> u16 {
+        if y >= self.area.height {
+            return x.min(self.area.width);
+        }
+        let width = width.min(self.area.width.saturating_sub(x));
+        let text_width = display_width(text).min(width);
+        let col = match align {
+            TextAlign::Left => x,
+            TextAlign::Center => x.saturating_add(width.saturating_sub(text_width) / 2),
+            TextAlign::Right => x.saturating_add(width.saturating_sub(text_width)),
+        };
+        self.put_str(col, y, text, style)
+    }
+
+    pub fn fill_row(&mut self, y: u16, style: Style) {
+        self.fill(Rect::new(y, 0, self.area.width, 1), ' ', style);
+    }
+
+    pub fn rule_h(&mut self, y: u16, style: Style) {
+        self.rule_h_range(0, y, self.area.width, style);
+    }
+
+    pub fn rule_v(&mut self, x: u16, style: Style) {
+        self.rule_v_range(x, 0, self.area.height, style);
+    }
+
+    pub fn rule_h_range(&mut self, x: u16, y: u16, width: u16, style: Style) {
+        if y >= self.area.height || x >= self.area.width {
+            return;
+        }
+        let end = x.saturating_add(width).min(self.area.width);
+        for col in x..end {
+            self.set(col, y, '─', style);
+        }
+    }
+
+    pub fn rule_v_range(&mut self, x: u16, y: u16, height: u16, style: Style) {
+        if x >= self.area.width || y >= self.area.height {
+            return;
+        }
+        let end = y.saturating_add(height).min(self.area.height);
+        for row in y..end {
+            self.set(x, row, '│', style);
         }
     }
 
@@ -372,9 +481,9 @@ impl<'a> GridSlice<'a> {
     }
 
     /// Slice-local [`Grid::put_line`]: paint spans left-to-right, clipping at the slice edge.
-    pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) {
+    pub fn put_line(&mut self, x: u16, y: u16, line: &crate::line::Line<'_>) -> u16 {
         if y >= self.area.height {
-            return;
+            return x.min(self.area.width);
         }
         let mut col = x;
         for span in &line.spans {
@@ -382,30 +491,23 @@ impl<'a> GridSlice<'a> {
                 break;
             }
             let before = col;
-            self.put_str(col, y, span.text.as_ref(), span.style);
-            col = col.saturating_add(span.width());
+            col = self.put_str(col, y, span.text.as_ref(), span.style);
             if col == before {
                 break;
             }
         }
+        col.min(self.area.width)
     }
 
     /// Slice-local [`Grid::put_str_fg`]: overwrites symbol + fg per char, preserves bg and attrs.
-    pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) {
-        use unicode_width::UnicodeWidthChar;
+    pub fn put_str_fg(&mut self, x: u16, y: u16, text: &str, fg: Color) -> u16 {
         if y >= self.area.height {
-            return;
+            return x.min(self.area.width);
         }
         let abs_y = self.area.top + y;
-        let mut col = x;
-        for ch in text.chars() {
-            let cw = UnicodeWidthChar::width(ch).unwrap_or(1).max(1) as u16;
-            if col + cw > self.area.width {
-                break;
-            }
-            self.grid.put_char(self.area.left + col, abs_y, ch, fg);
-            col += cw;
-        }
+        write_text(x, self.area.width, text, |col, ch| {
+            self.grid.put_char(self.area.left + col, abs_y, ch, fg)
+        })
     }
 
     pub fn fill(&mut self, area: Rect, symbol: char, style: Style) {
@@ -516,6 +618,113 @@ mod tests {
         slice.put_str(0, 0, "hello world", Style::default());
         assert_eq!(grid.cell(2, 0).symbol, 'l');
         assert_eq!(grid.cell(3, 0).symbol, ' ');
+    }
+
+    #[test]
+    fn slice_put_str_returns_clipped_end_column() {
+        let mut grid = Grid::new(6, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 6, 1));
+        let end = slice.put_str(4, 0, "abc", Style::default());
+        assert_eq!(end, 6);
+        assert_eq!(grid.cell(4, 0).symbol, 'a');
+        assert_eq!(grid.cell(5, 0).symbol, 'b');
+    }
+
+    #[test]
+    fn slice_put_str_counts_wide_chars() {
+        let mut grid = Grid::new(6, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 6, 1));
+        let end = slice.put_str(1, 0, "a語b", Style::default());
+        assert_eq!(end, 5);
+        assert_eq!(grid.cell(1, 0).symbol, 'a');
+        assert_eq!(grid.cell(2, 0).symbol, '語');
+        assert_eq!(grid.cell(3, 0).symbol, '\0');
+        assert_eq!(grid.cell(4, 0).symbol, 'b');
+    }
+
+    #[test]
+    fn slice_put_padded_fills_remaining_width() {
+        let mut grid = Grid::new(8, 1);
+        let style = Style::new().bg(Color::Blue);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 8, 1));
+        let end = slice.put_padded(1, 0, 4, "hi", style);
+        assert_eq!(end, 5);
+        assert_eq!(grid.cell(1, 0).symbol, 'h');
+        assert_eq!(grid.cell(2, 0).symbol, 'i');
+        assert_eq!(grid.cell(3, 0).symbol, ' ');
+        assert_eq!(grid.cell(4, 0).style.bg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn slice_put_padded_does_not_split_wide_chars() {
+        let mut grid = Grid::new(4, 1);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 4, 1));
+        let end = slice.put_padded(0, 0, 2, "a語", Style::default());
+        assert_eq!(end, 2);
+        assert_eq!(grid.cell(0, 0).symbol, 'a');
+        assert_eq!(grid.cell(1, 0).symbol, ' ');
+        assert_eq!(grid.cell(2, 0).symbol, ' ');
+    }
+
+    #[test]
+    fn slice_put_str_aligned_places_text() {
+        let mut grid = Grid::new(12, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 12, 3));
+        slice.put_str_aligned(2, 0, 8, "ab", TextAlign::Left, Style::default());
+        slice.put_str_aligned(2, 1, 8, "ab", TextAlign::Center, Style::default());
+        slice.put_str_aligned(2, 2, 8, "ab", TextAlign::Right, Style::default());
+        assert_eq!(grid.cell(2, 0).symbol, 'a');
+        assert_eq!(grid.cell(5, 1).symbol, 'a');
+        assert_eq!(grid.cell(8, 2).symbol, 'a');
+    }
+
+    #[test]
+    fn slice_put_str_aligned_ignores_rows_outside_slice() {
+        let mut grid = Grid::new(8, 2);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 8, 2));
+        let end = slice.put_str_aligned(2, 9, 4, "nope", TextAlign::Left, Style::default());
+        assert_eq!(end, 2);
+        assert_eq!(grid.cell(2, 0).symbol, ' ');
+    }
+
+    #[test]
+    fn slice_rules_clip_safely() {
+        let mut grid = Grid::new(4, 3);
+        let mut slice = grid.slice_mut(Rect::new(0, 0, 4, 3));
+        slice.rule_h_range(2, 1, 99, Style::default());
+        slice.rule_v_range(3, 1, 99, Style::default());
+        slice.rule_h(9, Style::default());
+        slice.rule_v(9, Style::default());
+        assert_eq!(grid.cell(2, 1).symbol, '─');
+        assert_eq!(grid.cell(3, 1).symbol, '│');
+        assert_eq!(grid.cell(3, 2).symbol, '│');
+    }
+
+    #[test]
+    fn slice_mut_is_relative_to_parent() {
+        let mut grid = Grid::new(20, 10);
+        let mut parent = grid.slice_mut(Rect::new(2, 5, 10, 5));
+        {
+            let mut child = parent.slice_mut(Rect::new(1, 2, 3, 2));
+            assert_eq!(child.grid_rect(), Rect::new(3, 7, 3, 2));
+            child.set(0, 0, 'x', Style::default());
+        }
+        assert_eq!(grid.cell(7, 3).symbol, 'x');
+    }
+
+    #[test]
+    fn slice_mut_clips_fully_outside_child_to_empty() {
+        let mut grid = Grid::new(20, 10);
+        let mut parent = grid.slice_mut(Rect::new(2, 5, 10, 5));
+        let child = parent.slice_mut(Rect::new(99, 99, 3, 2));
+        assert_eq!(child.grid_rect(), Rect::new(7, 15, 0, 0));
+    }
+
+    #[test]
+    fn truncate_width_respects_display_width() {
+        assert_eq!(display_width("a語b"), 4);
+        assert_eq!(truncate_width("a語b", 3), "a語");
+        assert_eq!(truncate_width("a語b", 2), "a");
     }
 
     #[test]

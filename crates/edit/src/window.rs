@@ -3234,7 +3234,7 @@ fn paint_span_cells(
     }
 }
 
-/// Paint the scrollbar. Row offset = `viewport.rect.top - slice.area().top` so splits whose
+/// Paint the scrollbar. Row offset = `viewport.rect.top - slice.grid_rect().top` so splits whose
 /// viewport is a sub-region of the window (e.g. prompt input area) position the bar correctly.
 fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &super::Theme) {
     let Some(bar) = viewport.scrollbar else {
@@ -3242,7 +3242,7 @@ fn paint_scrollbar(slice: &mut GridSlice<'_>, viewport: WindowViewport, theme: &
     };
     let width = slice.width();
     let height = slice.height();
-    let area = slice.area();
+    let area = slice.grid_rect();
     let local_col = bar.col.saturating_sub(area.left);
     if local_col >= width {
         return;

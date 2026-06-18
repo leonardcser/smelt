@@ -6,8 +6,11 @@
 //! - [`Compositor::render_with`] - drive a frame.
 //! - [`paint_layout_tree`] - walk a [`LayoutTree`] and dispatch leaves.
 //! - [`flush_diff`] - emit SGR escapes for a `Grid` diff.
-//! - [`Grid`] / [`GridSlice`] - `set`/`put_str` (full overwrite),
-//!   `put_char`/`put_str_fg`/`put_line` (preserve bg).
+//! - [`Grid`] / [`GridSlice`] - `set` / `put_str` (full overwrite; string
+//!   writes return the clipped end column), `put_char` / `put_str_fg` /
+//!   `put_line` (preserve bg where applicable).
+//! - [`TerminalSession`] - raw-mode/alternate-screen lifecycle guard with
+//!   suspend support for shell-outs.
 
 pub mod ansi;
 pub mod compositor;
@@ -17,18 +20,24 @@ pub mod grid;
 pub mod hit;
 pub mod layout;
 pub mod line;
+pub mod session;
 pub mod snapshot;
 pub mod surface;
 
 pub use compositor::Compositor;
 pub use flush::flush_diff;
-pub use grid::{Cell, CellUpdate, Grid, GridSlice, Style};
+pub use geometry::Insets;
+pub use grid::{
+    display_width, truncate_width, Cell, CellUpdate, Grid, GridSlice, Style, TextAlign,
+};
 pub use hit::HitRegistry;
 pub use layout::{
-    Align, Border, Constraint, Corner, Gutters, LayoutTree, LeafSizer, Natural, NaturalRef,
-    NoopSizer, PaintId, Rect, StaticNatural,
+    resolve_layout, resolve_layout_ordered, resolve_layout_ordered_with, resolve_layout_with,
+    Align, Border, Constraint, Corner, Gutters, LayoutRect, LayoutTree, LeafSizer, Natural,
+    NaturalRef, NoopSizer, PaintId, Rect, StaticNatural,
 };
 pub use line::{Line, Span};
+pub use session::{SuspendScreen, TerminalSession, TerminalSessionBuilder};
 pub use smelt_style::style::Color;
 pub use smelt_style::theme::Theme;
 pub use snapshot::SnapshotFrame;
