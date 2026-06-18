@@ -516,6 +516,7 @@ fn paths_for_command(words: &[String], cwd: &Path) -> Vec<PathEffect> {
         "sed" => paths.extend(sed_paths(words, cwd)),
         "grep" | "rg" => paths.extend(grep_paths(words, cwd)),
         "find" => paths.extend(find_paths(words, cwd)),
+        "ls" => paths.extend(ls_paths(words, cwd)),
         cmd if is_read_only_command(cmd) => {
             paths.extend(generic_paths(words.iter().skip(1), cwd, PathAccess::Read))
         }
@@ -650,6 +651,22 @@ fn find_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
     for w in words.iter().skip(1) {
         if w.starts_with('-') {
             break;
+        }
+        maybe_push_dir(&mut out, w, cwd, PathAccess::Read);
+    }
+    out
+}
+
+fn ls_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    let mut options_done = false;
+    for w in words.iter().skip(1) {
+        if !options_done && w == "--" {
+            options_done = true;
+            continue;
+        }
+        if !options_done && w.starts_with('-') {
+            continue;
         }
         maybe_push_dir(&mut out, w, cwd, PathAccess::Read);
     }

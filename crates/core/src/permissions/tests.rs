@@ -1096,6 +1096,21 @@ fn workspace_bash_ignores_dev_null_redirect_in_command_substitution() {
 }
 
 #[test]
+fn workspace_bash_ls_directory_requires_that_directory() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with("command", "ls -la /tmp | head -50 && git status --short");
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![PermissionRequirement::PathPrefix {
+            dir: canonical_abs("/tmp")
+        }]
+    );
+}
+
+#[test]
 fn workspace_downgrades_bash_outside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "rm -rf /tmp/foo");
