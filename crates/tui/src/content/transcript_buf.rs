@@ -6106,11 +6106,13 @@ mod tests {
         scroll12_ms: f64,
         visible_ms: f64,
         copy_ms: f64,
+        append_ms: f64,
         no_cache_ms: f64,
         allocs: u64,
         bytes_allocated: u64,
         visible_rows: usize,
         copied_rows: RowIndex,
+        appended_rows: RowIndex,
         scroll_materialized_rows: u64,
         first_counters: TranscriptProjectionCounters,
         resize_counters: TranscriptProjectionCounters,
@@ -6118,6 +6120,7 @@ mod tests {
         scroll_counters: TranscriptProjectionCounters,
         visible_counters: TranscriptProjectionCounters,
         copy_counters: TranscriptProjectionCounters,
+        append_counters: TranscriptProjectionCounters,
         no_cache_counters: TranscriptProjectionCounters,
     }
 
@@ -6561,6 +6564,25 @@ mod tests {
         let no_cache_ms = elapsed_ms(no_cache_start.elapsed());
         let no_cache_counters = no_cache.counters();
 
+        transcript.push(Block::Text {
+            content: "live append benchmark tail\n".repeat(16),
+        });
+        cold.reset_counters();
+        let append_start = std::time::Instant::now();
+        let appended = project_with_lua(
+            &mut cold,
+            &lua,
+            &mut cold_buf,
+            &mut transcript.history,
+            72,
+            &theme,
+            ScrollTarget::visible_tail(),
+            40,
+        );
+        let append_ms = elapsed_ms(append_start.elapsed());
+        let append_counters = cold.counters();
+        let appended_rows = appended.total_rows.saturating_sub(resized.total_rows);
+
         assert!(generated_bytes >= workload.target_bytes);
         assert!(input_bytes > 0);
         assert!(first.total_rows > 0);
@@ -6577,6 +6599,7 @@ mod tests {
             resized.total_rows
         );
         assert_eq!(no_cache_projection.total_rows, first.total_rows);
+        assert!(appended.total_rows > resized.total_rows);
         assert!(first_counters.display_layouts > 0);
         assert!(first_counters.display_layouts <= blocks);
         assert!(resize_counters.display_layouts <= blocks);
@@ -6589,6 +6612,8 @@ mod tests {
         assert!(visible_counters.exact_height_measured_blocks <= blocks);
         assert!(copy_counters.display_layouts <= blocks);
         assert!(copy_counters.exact_height_measured_blocks <= blocks);
+        assert!(append_counters.display_layouts <= blocks + 1);
+        assert!(append_counters.exact_height_measured_blocks <= blocks + 1);
         assert_eq!(
             no_cache_counters.display_layouts,
             first_counters.display_layouts
@@ -6598,6 +6623,7 @@ mod tests {
         assert_projection_bench_gates(theme_counters, "theme refresh");
         assert_projection_bench_gates(visible_counters, "visible range");
         assert_projection_bench_gates(copy_counters, "copy range");
+        assert_projection_bench_gates(append_counters, "live append");
         assert_projection_bench_gates(no_cache_counters, "no-cache first paint");
         assert_projection_bench_gates(scroll_counters, "scroll jump");
         assert!(
@@ -6621,11 +6647,13 @@ mod tests {
             scroll12_ms,
             visible_ms,
             copy_ms,
+            append_ms,
             no_cache_ms,
             allocs: first_alloc.allocs,
             bytes_allocated: first_alloc.bytes_allocated,
             visible_rows: visible.rows.len(),
             copied_rows: copy_end_row.saturating_sub(mid).saturating_add(1),
+            appended_rows,
             scroll_materialized_rows,
             first_counters,
             resize_counters,
@@ -6633,6 +6661,7 @@ mod tests {
             scroll_counters,
             visible_counters,
             copy_counters,
+            append_counters,
             no_cache_counters,
         }
     }
@@ -6677,6 +6706,12 @@ mod tests {
                 .map(|sample| sample.copy_ms)
                 .collect::<Vec<_>>(),
         );
+        let append = MetricStats::from(
+            &samples
+                .iter()
+                .map(|sample| sample.append_ms)
+                .collect::<Vec<_>>(),
+        );
         let no_cache = MetricStats::from(
             &samples
                 .iter()
@@ -6685,7 +6720,7 @@ mod tests {
         );
         let sample = samples[0];
         eprintln!(
-            "| {:<18} | {:>8.2} | {:>6} | {:>8} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} |",
+            "| {:<18} | {:>8.2} | {:>6} | {:>8} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} | {:>12} |",
             workload.name,
             sample.input_bytes as f64 / (1024.0 * 1024.0),
             sample.blocks,
@@ -6696,10 +6731,11 @@ mod tests {
             scroll.display(),
             visible.display(),
             copy.display(),
+            append.display(),
             no_cache.display(),
         );
         eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_SUMMARY workload={} runs={} input_bytes={} generated_bytes={} blocks={} rows={} first_mean_ms={:.3} first_stddev_ms={:.3} resize_mean_ms={:.3} resize_stddev_ms={:.3} theme_mean_ms={:.3} theme_stddev_ms={:.3} scroll12_mean_ms={:.3} scroll12_stddev_ms={:.3} visible_mean_ms={:.3} visible_stddev_ms={:.3} copy_mean_ms={:.3} copy_stddev_ms={:.3} no_cache_mean_ms={:.3} no_cache_stddev_ms={:.3} allocs={} bytes_allocated={} visible_rows={} copied_rows={} scroll_materialized_rows={} first_min_ms={:.3} first_max_ms={:.3}",
+            "TRANSCRIPT_LAYOUT_BENCH_SUMMARY workload={} runs={} input_bytes={} generated_bytes={} blocks={} rows={} first_mean_ms={:.3} first_stddev_ms={:.3} resize_mean_ms={:.3} resize_stddev_ms={:.3} theme_mean_ms={:.3} theme_stddev_ms={:.3} scroll12_mean_ms={:.3} scroll12_stddev_ms={:.3} visible_mean_ms={:.3} visible_stddev_ms={:.3} copy_mean_ms={:.3} copy_stddev_ms={:.3} append_mean_ms={:.3} append_stddev_ms={:.3} no_cache_mean_ms={:.3} no_cache_stddev_ms={:.3} allocs={} bytes_allocated={} visible_rows={} copied_rows={} appended_rows={} scroll_materialized_rows={} first_min_ms={:.3} first_max_ms={:.3}",
             workload.name,
             samples.len(),
             sample.input_bytes,
@@ -6718,18 +6754,21 @@ mod tests {
             visible.stddev,
             copy.mean,
             copy.stddev,
+            append.mean,
+            append.stddev,
             no_cache.mean,
             no_cache.stddev,
             sample.allocs,
             sample.bytes_allocated,
             sample.visible_rows,
             sample.copied_rows,
+            sample.appended_rows,
             sample.scroll_materialized_rows,
             first.min,
             first.max,
         );
         eprintln!(
-            "TRANSCRIPT_LAYOUT_BENCH_COUNTERS workload={} first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} copy={:?} no_cache={:?}",
+            "TRANSCRIPT_LAYOUT_BENCH_COUNTERS workload={} first={:?} resize={:?} theme={:?} scroll12={:?} visible={:?} copy={:?} append={:?} no_cache={:?}",
             workload.name,
             sample.first_counters,
             sample.resize_counters,
@@ -6737,6 +6776,7 @@ mod tests {
             sample.scroll_counters,
             sample.visible_counters,
             sample.copy_counters,
+            sample.append_counters,
             sample.no_cache_counters,
         );
     }
@@ -6752,10 +6792,10 @@ mod tests {
             workloads.len()
         );
         eprintln!(
-            "| workload           |      MiB | blocks |     rows |     first ms |    resize ms |     theme ms |   scroll12 ms |   visible ms |      copy ms |   nocache ms |"
+            "| workload           |      MiB | blocks |     rows |     first ms |    resize ms |     theme ms |   scroll12 ms |   visible ms |      copy ms |    append ms |   nocache ms |"
         );
         eprintln!(
-            "|--------------------|----------|--------|----------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|"
+            "|--------------------|----------|--------|----------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|--------------|"
         );
         for workload in workloads {
             let _warmup = run_transcript_bench_sample(workload);
@@ -6763,7 +6803,7 @@ mod tests {
             for run in 0..runs {
                 let sample = run_transcript_bench_sample(workload);
                 eprintln!(
-                    "TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload={} run={} input_bytes={} generated_bytes={} blocks={} rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} copy_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={}",
+                    "TRANSCRIPT_LAYOUT_BENCH_SAMPLE workload={} run={} input_bytes={} generated_bytes={} blocks={} rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} copy_ms={:.3} append_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={}",
                     workload.name,
                     run + 1,
                     sample.input_bytes,
@@ -6776,6 +6816,7 @@ mod tests {
                     sample.scroll12_ms,
                     sample.visible_ms,
                     sample.copy_ms,
+                    sample.append_ms,
                     sample.no_cache_ms,
                     sample.allocs,
                     sample.bytes_allocated,
@@ -6806,7 +6847,7 @@ mod tests {
         };
         let sample = run_transcript_bench_sample(workload);
         eprintln!(
-            "TRANSCRIPT_LAYOUT_BASELINE input_bytes={} generated_bytes={} blocks={} total_rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} copy_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={} visible_rows={} copied_rows={} scroll_materialized_rows={}",
+            "TRANSCRIPT_LAYOUT_BASELINE input_bytes={} generated_bytes={} blocks={} total_rows={} first_ms={:.3} resize_ms={:.3} theme_ms={:.3} scroll12_ms={:.3} visible_ms={:.3} copy_ms={:.3} append_ms={:.3} no_cache_ms={:.3} allocs={} bytes_allocated={} visible_rows={} copied_rows={} appended_rows={} scroll_materialized_rows={}",
             sample.input_bytes,
             sample.generated_bytes,
             sample.blocks,
@@ -6817,11 +6858,13 @@ mod tests {
             sample.scroll12_ms,
             sample.visible_ms,
             sample.copy_ms,
+            sample.append_ms,
             sample.no_cache_ms,
             sample.allocs,
             sample.bytes_allocated,
             sample.visible_rows,
             sample.copied_rows,
+            sample.appended_rows,
             sample.scroll_materialized_rows,
         );
         eprintln!(
