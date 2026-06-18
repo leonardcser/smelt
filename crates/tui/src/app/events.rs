@@ -1410,12 +1410,7 @@ impl TuiApp {
                 };
                 win.viewer_doc_cursor(buf)
             };
-            let action = pos.and_then(|pos| {
-                self.with_display_document_for_win(win_id, |doc| {
-                    crate::smelt_edit::DisplayDocument::action_at(doc, pos)
-                })
-                .flatten()
-            });
+            let action = pos.and_then(|pos| self.document_action_at(win_id, pos));
             if let Some(action) = action {
                 self.dispatch_span_action(action);
             } else {
@@ -1447,15 +1442,7 @@ impl TuiApp {
     ) {
         match copied {
             Some(crate::smelt_edit::DocumentCopy::Rows(range)) => {
-                if let Some(out) = self
-                    .with_display_document_for_win(win_id, |doc| {
-                        crate::smelt_edit::DisplayDocument::copy_range(
-                            doc,
-                            crate::smelt_edit::TextRange::Rows(range),
-                        )
-                    })
-                    .flatten()
-                {
+                if let Some(out) = self.copy_document_rows(win_id, range) {
                     self.yank_to_clipboard(out);
                 }
             }
@@ -1528,10 +1515,7 @@ impl TuiApp {
             let win = self.ui.win(win_id)?;
             (win.row_cursor()?, win.vim_mode())
         };
-        self.with_display_document_for_win(win_id, |doc| {
-            crate::smelt_edit::resolve_document_command(doc, command, cursor, vim_mode)
-        })
-        .flatten()
+        self.resolve_document_command_for_win(win_id, command, cursor, vim_mode)
     }
 
     /// Keymap-driven dispatcher: looks up the binding under the window's
@@ -1656,15 +1640,7 @@ impl TuiApp {
                     win.execute_row_viewer_command(buf, command, viewport_rows, now)
                 };
                 if let Some(range) = copied {
-                    if let Some(out) = self
-                        .with_display_document_for_win(win_id, |doc| {
-                            crate::smelt_edit::DisplayDocument::copy_range(
-                                doc,
-                                crate::smelt_edit::TextRange::Rows(range),
-                            )
-                        })
-                        .flatten()
-                    {
+                    if let Some(out) = self.copy_document_rows(win_id, range) {
                         self.yank_to_clipboard(out);
                     }
                 }

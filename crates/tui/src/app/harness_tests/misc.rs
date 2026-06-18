@@ -427,10 +427,8 @@ fn short_transcript_display_document_surfaces_actions() {
         action,
         smelt_core::buffer::SpanAction::OpenUrl(url.to_string())
     );
-    let mut doc =
-        crate::smelt_edit::HostDisplayDocument::new(&mut app.app, crate::app::TRANSCRIPT_WIN);
     assert_eq!(
-        crate::smelt_edit::DisplayDocument::action_at(&mut doc, pos),
+        app.app.document_action_at(crate::app::TRANSCRIPT_WIN, pos),
         Some(smelt_core::buffer::SpanAction::OpenUrl(url.to_string()))
     );
 }
@@ -461,10 +459,8 @@ fn row_backed_transcript_display_document_surfaces_actions() {
         action,
         smelt_core::buffer::SpanAction::OpenUrl(url.to_string())
     );
-    let mut doc =
-        crate::smelt_edit::HostDisplayDocument::new(&mut app.app, crate::app::TRANSCRIPT_WIN);
     assert_eq!(
-        crate::smelt_edit::DisplayDocument::action_at(&mut doc, pos),
+        app.app.document_action_at(crate::app::TRANSCRIPT_WIN, pos),
         Some(smelt_core::buffer::SpanAction::OpenUrl(url.to_string()))
     );
 }

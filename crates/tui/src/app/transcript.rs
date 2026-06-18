@@ -4,9 +4,7 @@ use crate::app::TuiApp;
 use crate::content::prompt_parser::{
     build_prompt_display_lines, prompt_display_uses_cursor_padding,
 };
-use crate::smelt_edit::{
-    Buffer, DisplayDocument, DisplaySnapshot, HostDisplayDocument, TextRange, Theme,
-};
+use crate::smelt_edit::{Buffer, DisplayDocument, DisplaySnapshot, TextRange, Theme};
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_core::content::file_icons::FileIconOptions;
 use smelt_core::content::highlight::InlineOptions;
@@ -160,7 +158,6 @@ impl TranscriptView {
     pub(crate) fn plan_projection_measured(
         &mut self,
         lua: &LuaRuntime,
-        document: crate::smelt_edit::DocumentHandle,
         width: u16,
         theme: &Theme,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
@@ -169,7 +166,6 @@ impl TranscriptView {
         self.projection.plan_projection_measured(
             lua,
             &mut self.transcript.history,
-            document,
             width,
             theme,
             scroll_target,
@@ -693,10 +689,9 @@ impl TuiApp {
 
     #[cfg(test)]
     pub(crate) fn transcript_total_rows(&mut self) -> crate::smelt_edit::RowIndex {
-        self.with_display_document_for_win(crate::app::TRANSCRIPT_WIN, |document| {
-            document.snapshot().total_rows
-        })
-        .unwrap_or(0)
+        self.document_snapshot_for_win(crate::app::TRANSCRIPT_WIN)
+            .map(|snapshot| snapshot.total_rows)
+            .unwrap_or(0)
     }
 
     pub(crate) fn transcript_rows_and_breaks_range(
@@ -705,30 +700,8 @@ impl TuiApp {
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
         let _perf = smelt_perf::perf::begin("transcript:materialize_rows_range");
-        self.sync_transcript_renderer_generation();
-        let tw = self.transcript_width() as u16;
-        let theme = self.ui.theme().clone();
-        let mut document = TranscriptDocument::new(&mut self.transcript, &self.lua, tw, &theme);
-        DisplayDocument::materialize(&mut document, start..start.saturating_add(count))
-    }
-
-    pub(crate) fn with_display_document_for_win<R>(
-        &mut self,
-        win: crate::smelt_edit::WinId,
-        f: impl FnOnce(&mut dyn DisplayDocument) -> R,
-    ) -> Option<R> {
-        let document_handle = self.ui.win(win).and_then(|win| win.document_handle());
-        if document_handle == Some(crate::app::TRANSCRIPT_DOCUMENT) {
-            self.sync_transcript_renderer_generation();
-            let width = self.transcript_width() as u16;
-            let theme = self.ui.theme().clone();
-            let mut document =
-                TranscriptDocument::new(&mut self.transcript, &self.lua, width, &theme);
-            Some(f(&mut document))
-        } else {
-            let mut document = HostDisplayDocument::new(&mut self.ui, win);
-            Some(f(&mut document))
-        }
+        self.materialize_document_rows(crate::app::TRANSCRIPT_WIN, start, count)
+            .unwrap_or_default()
     }
 
     pub(crate) fn transcript_visible_rows(

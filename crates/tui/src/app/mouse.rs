@@ -498,16 +498,18 @@ impl TuiApp {
         let Some(buf_id) = self.ui.win(win).map(|w| w.buf) else {
             return (crate::smelt_edit::Status::Ignored, None);
         };
-        let total_rows =
-            crate::smelt_edit::UiHost::document_total_rows(self, win).unwrap_or_else(|| {
+        let total_rows = self
+            .document_snapshot_for_win(win)
+            .map(|snapshot| snapshot.total_rows)
+            .unwrap_or_else(|| {
                 self.ui
                     .buf(buf_id)
                     .map(|buf| buf.line_count() as crate::smelt_edit::RowIndex)
                     .unwrap_or(0)
             });
-        let display_rows =
-            crate::smelt_edit::UiHost::display_rows_for_range(self, win, 0, total_rows)
-                .unwrap_or_default();
+        let display_rows = self
+            .materialize_document_rows(win, 0, total_rows)
+            .unwrap_or_default();
         let soft = display_rows.soft_breaks();
         let hard = display_rows.hard_breaks();
         let (status, range) = {
@@ -577,11 +579,7 @@ impl TuiApp {
                 win.expect("transcript window")
                     .viewer_doc_pos_at_mouse(buf?, me, viewport)
             }?;
-            let action = self
-                .with_display_document_for_win(win_id, |doc| {
-                    crate::smelt_edit::DisplayDocument::action_at(doc, pos)
-                })
-                .flatten();
+            let action = self.document_action_at(win_id, pos);
             if let Some(action) = action {
                 self.dispatch_span_action(action);
                 return None;
@@ -603,12 +601,7 @@ impl TuiApp {
                     .handle_row_mouse(buf?, me, mouse_ctx, now);
                 range?
             };
-            let out = self.with_display_document_for_win(win_id, |doc| {
-                crate::smelt_edit::DisplayDocument::copy_range(
-                    doc,
-                    crate::smelt_edit::TextRange::Rows(range),
-                )
-            })??;
+            let out = self.copy_document_rows(win_id, range)?;
             return if out.clipboard.is_empty() && out.kill_ring.is_empty() {
                 None
             } else {

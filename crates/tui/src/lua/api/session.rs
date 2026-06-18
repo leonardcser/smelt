@@ -770,7 +770,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let theme = app.ui.theme().clone();
                 let plan = view.plan_projection_measured(
                     &app.lua,
-                    crate::smelt_edit::DocumentHandle(u64::MAX.saturating_sub(buf.id.raw())),
                     width,
                     &theme,
                     scroll_target,

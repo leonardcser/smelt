@@ -9,7 +9,7 @@ use crate::content::render_plan::{
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
-    DocRange, DocumentHandle, MaterializedRows, RowBreak, RowIndex,
+    DocRange, MaterializedRows, RowBreak, RowIndex,
 };
 use smelt_buffer::coords::copy_byte_range;
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
@@ -36,7 +36,7 @@ pub(crate) struct TranscriptProjection {
 
 #[derive(Default)]
 struct VisibleProjectionState {
-    render_cache: Option<RenderCacheEntry>,
+    materialized: Option<MaterializedProjection>,
     /// Block layout from the last visible `project()`. Surfaced to Lua via `visible_blocks`.
     block_layout: Vec<LayoutEntry>,
     /// Absolute row represented by local row 0 in the backing buffer.
@@ -563,8 +563,7 @@ pub(crate) struct TranscriptSearchLayoutEntry {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
-struct RenderCacheKey {
-    document: DocumentHandle,
+struct ProjectKey {
     generation: u64,
     width: u16,
     renderer_generation: u64,
@@ -580,14 +579,14 @@ enum ProjectionMode {
 }
 
 #[derive(Clone, Copy)]
-struct RenderCacheEntry {
-    key: RenderCacheKey,
+struct MaterializedProjection {
+    key: ProjectKey,
     buf_id: BufId,
     changedtick: u64,
 }
 
 pub(crate) struct ProjectionPlan {
-    key: RenderCacheKey,
+    key: ProjectKey,
     target: ResolvedProjectionTarget,
     scroll_top: RowIndex,
     viewport_rows: u16,
@@ -595,7 +594,7 @@ pub(crate) struct ProjectionPlan {
 }
 
 struct ProjectionRequest {
-    key: RenderCacheKey,
+    key: ProjectKey,
     target: ResolvedProjectionTarget,
     viewport_rows: u16,
 }
@@ -1096,7 +1095,7 @@ impl TranscriptProjection {
     }
 
     fn clear_visible_state(&mut self) {
-        self.visible.render_cache = None;
+        self.visible.materialized = None;
         self.visible.block_layout.clear();
         self.visible.row_base = 0;
         self.visible.row_anchors.clear();
@@ -1136,18 +1135,18 @@ impl TranscriptProjection {
         self.clear_visible_state();
     }
 
-    fn target_has_projection(&self, key: RenderCacheKey, buf: &Buffer) -> bool {
-        self.visible.render_cache.is_some_and(|m| {
+    fn target_has_projection(&self, key: ProjectKey, buf: &Buffer) -> bool {
+        self.visible.materialized.is_some_and(|m| {
             m.key == key && m.buf_id == buf.id() && m.changedtick == buf.changedtick()
         })
     }
 
-    fn last_project_key(&self) -> Option<RenderCacheKey> {
-        self.visible.render_cache.map(|m| m.key)
+    fn last_project_key(&self) -> Option<ProjectKey> {
+        self.visible.materialized.map(|m| m.key)
     }
 
-    fn mark_projected_into(&mut self, key: RenderCacheKey, buf: &Buffer) {
-        self.visible.render_cache = Some(RenderCacheEntry {
+    fn mark_projected_into(&mut self, key: ProjectKey, buf: &Buffer) {
+        self.visible.materialized = Some(MaterializedProjection {
             key,
             buf_id: buf.id(),
             changedtick: buf.changedtick(),
@@ -1799,7 +1798,6 @@ impl TranscriptProjection {
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
-        document: DocumentHandle,
         width: u16,
         theme: &Theme,
         scroll_target: ScrollTarget,
@@ -1816,7 +1814,6 @@ impl TranscriptProjection {
             ScrollTarget::Visible(ScrollAnchor::Tail) => None,
         });
         let key = self.project_key(
-            document,
             width,
             env.renderer_generation,
             env.renderer_cache_key,
@@ -1840,15 +1837,13 @@ impl TranscriptProjection {
 
     fn project_key(
         &self,
-        document: DocumentHandle,
         width: u16,
         renderer_generation: u64,
         renderer_cache_key: Option<u64>,
         scroll_target: ScrollTarget,
         viewport_rows: u16,
-    ) -> RenderCacheKey {
-        RenderCacheKey {
-            document,
+    ) -> ProjectKey {
+        ProjectKey {
             generation: self.render_plan.fingerprint,
             width,
             renderer_generation,
@@ -1876,7 +1871,6 @@ impl TranscriptProjection {
         for _ in 0..8 {
             let changed = self.exactify_node_range(env.clone(), history, plan.node_range());
             request.key = self.project_key(
-                request.key.document,
                 request.key.width,
                 env.renderer_generation,
                 env.renderer_cache_key,
@@ -1894,7 +1888,6 @@ impl TranscriptProjection {
         }
         let _ = self.exactify_node_range(env, history, plan.node_range());
         request.key = self.project_key(
-            request.key.document,
             request.key.width,
             plan.key.renderer_generation,
             plan.key.renderer_cache_key,
@@ -2014,7 +2007,6 @@ impl TranscriptProjection {
         let plan = self.plan_projection_measured(
             &lua,
             history,
-            DocumentHandle(0),
             width,
             theme,
             scroll_target,
@@ -2046,7 +2038,6 @@ impl TranscriptProjection {
         {
             self.prepare_row_index_with_env(current_env.clone(), history, plan.key.width);
             let key = self.project_key(
-                plan.key.document,
                 plan.key.width,
                 current_env.renderer_generation,
                 current_env.renderer_cache_key,
@@ -2084,13 +2075,12 @@ impl TranscriptProjection {
     fn reuse_visible_projection_for_row(
         &self,
         buf: &Buffer,
-        key: RenderCacheKey,
+        key: ProjectKey,
         row: RowIndex,
         viewport_rows: u16,
     ) -> Option<MaterializedRows> {
         let prev = self.last_project_key()?;
-        if prev.document != key.document
-            || prev.generation != key.generation
+        if prev.generation != key.generation
             || prev.width != key.width
             || prev.renderer_generation != key.renderer_generation
             || prev.renderer_cache_key != key.renderer_cache_key
@@ -3293,7 +3283,6 @@ mod tests {
         let plan = projection.plan_projection_measured(
             &lua,
             &mut transcript.history,
-            DocumentHandle(0),
             80,
             &theme,
             ScrollTarget::visible_row(0),
@@ -3993,8 +3982,7 @@ mod tests {
         projection.measurements.active.rebuild_prefix_rows();
 
         let request = ProjectionRequest {
-            key: RenderCacheKey {
-                document: DocumentHandle(0),
+            key: ProjectKey {
                 generation: 0,
                 width: 80,
                 renderer_generation: 0,
@@ -5455,7 +5443,6 @@ mod tests {
         let plan = projection.plan_projection_measured(
             lua,
             history,
-            DocumentHandle(0),
             width,
             theme,
             scroll_target,

@@ -47,16 +47,15 @@ impl crate::smelt_edit::UiHost for TuiApp {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> Option<crate::smelt_edit::DisplayRows> {
-        self.with_display_document_for_win(win, |document| {
-            document.materialize(start..start.saturating_add(count))
-        })
+        self.materialize_document_rows(win, start, count)
     }
 
     fn document_total_rows(
         &mut self,
         win: crate::smelt_edit::WinId,
     ) -> Option<crate::smelt_edit::RowIndex> {
-        self.with_display_document_for_win(win, |document| document.snapshot().total_rows)
+        self.document_snapshot_for_win(win)
+            .map(|snapshot| snapshot.total_rows)
     }
 
     fn copy_document_range(
@@ -64,9 +63,6 @@ impl crate::smelt_edit::UiHost for TuiApp {
         win: crate::smelt_edit::WinId,
         range: crate::smelt_edit::DocRange,
     ) -> Option<crate::smelt_edit::CopyOutput> {
-        self.with_display_document_for_win(win, |document| {
-            document.copy_range(crate::smelt_edit::TextRange::Rows(range))
-        })
-        .flatten()
+        self.copy_document_rows(win, range)
     }
 }

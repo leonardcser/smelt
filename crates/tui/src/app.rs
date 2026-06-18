@@ -4,6 +4,7 @@ pub(crate) mod cmdline_edit;
 pub(crate) mod cmdline_history;
 pub(crate) mod content_keys;
 pub(crate) mod cwd;
+pub(crate) mod document;
 pub(crate) mod drafts;
 pub(crate) mod engine_events;
 pub(crate) mod events;

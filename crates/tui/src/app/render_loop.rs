@@ -204,7 +204,9 @@ impl TuiApp {
                         notification.rendered_width = width;
                     }
                 }
-                if request.document_handle != Some(crate::app::TRANSCRIPT_DOCUMENT) {
+                if crate::app::document::DocumentRegistry::resolve_optional(request.document_handle)
+                    != Some(crate::app::document::RegisteredDocument::Transcript)
+                {
                     return;
                 }
                 let viewport_rows = request.rect.height;
@@ -226,7 +228,6 @@ impl TuiApp {
                     let width = request.content_width.max(1);
                     let plan = transcript.plan_projection_measured(
                         lua,
-                        crate::app::TRANSCRIPT_DOCUMENT,
                         width,
                         &theme,
                         scroll_target,

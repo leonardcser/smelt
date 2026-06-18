@@ -156,8 +156,7 @@ impl TuiApp {
             return;
         };
         let origin = self.search_origin(target).unwrap_or_default();
-        let target_document = self.ui.win(target).and_then(|win| win.document_handle());
-        if target_document == Some(crate::app::TRANSCRIPT_DOCUMENT) {
+        if self.transcript_document_is_attached_to(target) {
             let Some(mut transcript_session) = self.new_transcript_search_session(&query) else {
                 self.clear_search();
                 return;
@@ -370,22 +369,24 @@ impl TuiApp {
     /// rejected by `submit_search`; multi-line display search would need
     /// row-break-aware scanning and match storage.
     fn scan_search_matches(&mut self, win: WinId, query: &str) -> Vec<TextRange> {
-        self.with_display_document_for_win(win, |doc| {
-            let total_rows = doc.snapshot().total_rows;
-            let mut matches = Vec::new();
-            let mut start = 0;
-            while start < total_rows {
-                let count = SEARCH_SCAN_ROWS.min(total_rows - start);
-                let display = doc.materialize(start..start.saturating_add(count));
-                for (offset, row) in display.rows.iter().enumerate() {
-                    let row_index = start.saturating_add(offset as RowIndex);
-                    matches.extend(display_row_matches(row, row_index, query).map(TextRange::Rows));
-                }
-                start = start.saturating_add(count);
+        let total_rows = self
+            .document_snapshot_for_win(win)
+            .map(|snapshot| snapshot.total_rows)
+            .unwrap_or(0);
+        let mut matches = Vec::new();
+        let mut start = 0;
+        while start < total_rows {
+            let count = SEARCH_SCAN_ROWS.min(total_rows - start);
+            let display = self
+                .materialize_document_rows(win, start, count)
+                .unwrap_or_default();
+            for (offset, row) in display.rows.iter().enumerate() {
+                let row_index = start.saturating_add(offset as RowIndex);
+                matches.extend(display_row_matches(row, row_index, query).map(TextRange::Rows));
             }
-            matches
-        })
-        .unwrap_or_default()
+            start = start.saturating_add(count);
+        }
+        matches
     }
 
     fn search_origin(&self, win: WinId) -> Option<DocPosition> {
