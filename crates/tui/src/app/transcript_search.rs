@@ -10,6 +10,7 @@ const SEARCH_TRANSCRIPT_PREFETCH_MATCHES: usize = 128;
 
 #[derive(Clone, Debug)]
 pub(crate) struct TranscriptSearchSession {
+    pub(super) key: TranscriptSearchKey,
     pub(super) total_rows: RowIndex,
     pub(super) candidates: Vec<usize>,
     pub(super) scanned: Vec<bool>,
@@ -196,7 +197,12 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let origin_block = self
             .transcript
-            .block_id_at_or_before_row(&self.lua, width, origin.row)
+            .block_id_at_or_before_row(
+                &self.lua,
+                width,
+                origin.row,
+                matches!(direction, SearchDirection::Forward),
+            )
             .map(|id| id.get());
         let db_path = smelt_core::session::dir_for(&self.core.session).join("session.db");
         let store_direction = match direction {
@@ -236,9 +242,6 @@ impl TuiApp {
         else {
             return SqliteTranscriptCandidateBlocks::default();
         };
-        if candidates.is_empty() {
-            return SqliteTranscriptCandidateBlocks::default();
-        }
         SqliteTranscriptCandidateBlocks {
             block_indices: candidates
                 .into_iter()
@@ -293,7 +296,7 @@ impl TuiApp {
         direction: SearchDirection,
     ) -> Option<TranscriptSearchSession> {
         let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
-        let (candidates, scanned_len) = {
+        let (key, candidates, scanned_len) = {
             let candidate_blocks = sqlite_candidates
                 .available
                 .then_some(sqlite_candidates.block_indices.as_slice());
@@ -302,6 +305,7 @@ impl TuiApp {
                 .available
                 .then_some(sqlite_candidates.block_indices.as_slice());
             (
+                index.key,
                 index.candidate_entries(query, preferred),
                 index.entries.len(),
             )
@@ -310,6 +314,7 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let total_rows = self.transcript.estimated_total_rows(&self.lua, width);
         Some(TranscriptSearchSession {
+            key,
             total_rows,
             candidates,
             scanned: vec![false; scanned_len],
@@ -320,10 +325,22 @@ impl TuiApp {
 
     pub(super) fn sync_transcript_search_session(
         &mut self,
-        _session: &mut TranscriptSearchSession,
-        _query: &str,
+        session: &mut TranscriptSearchSession,
+        query: &str,
+        origin: DocPosition,
+        direction: SearchDirection,
     ) -> bool {
-        self.search.transcript_index.is_some()
+        let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
+        let candidate_blocks = sqlite_candidates
+            .available
+            .then_some(sqlite_candidates.block_indices.as_slice());
+        let Some(key) = self
+            .ensure_transcript_candidate_index(candidate_blocks)
+            .map(|index| index.key)
+        else {
+            return false;
+        };
+        key == session.key
     }
 
     pub(super) fn advance_transcript_search(

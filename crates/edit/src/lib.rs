@@ -2678,6 +2678,25 @@ impl DisplayDocument for HostDisplayDocument<'_> {
             TextRange::Rows(_) | TextRange::Bytes(_) => None,
         }
     }
+
+    fn search_matches(
+        &mut self,
+        query: &str,
+        origin: DocPosition,
+        _forward: bool,
+        chunk_rows: RowIndex,
+    ) -> Vec<DocRange> {
+        let Some(win) = self.ui.win(self.win) else {
+            return Vec::new();
+        };
+        let row_document = win.row_cursor().is_some() || win.materialized_rows().is_some();
+        let total_rows = self.snapshot().total_rows;
+        if row_document {
+            crate::row::scan_document_row_window(self, query, origin, total_rows, chunk_rows)
+        } else {
+            crate::row::scan_document_rows(self, query, 0, total_rows, chunk_rows)
+        }
+    }
 }
 
 impl UiHost for Ui {

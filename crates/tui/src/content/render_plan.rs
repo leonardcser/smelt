@@ -340,6 +340,7 @@ pub(crate) struct RenderPlan {
     pub(crate) group_cache_key: Option<u64>,
     pub(crate) nodes: Vec<RenderNode>,
     index_by_id: HashMap<RenderNodeId, usize>,
+    index_by_block_id: HashMap<BlockId, usize>,
     pub(crate) fingerprint: u64,
 }
 
@@ -351,6 +352,7 @@ impl RenderPlan {
             group_cache_key: None,
             nodes: Vec::new(),
             index_by_id: HashMap::new(),
+            index_by_block_id: HashMap::new(),
             fingerprint: 0,
         }
     }
@@ -367,6 +369,19 @@ impl RenderPlan {
             .enumerate()
             .map(|(index, node)| (node.id(), index))
             .collect();
+        let mut index_by_block_id = HashMap::new();
+        for (index, node) in nodes.iter().enumerate() {
+            match node {
+                RenderNode::Block { id, .. } => {
+                    index_by_block_id.insert(*id, index);
+                }
+                RenderNode::Group { child_ids, .. } => {
+                    for id in child_ids {
+                        index_by_block_id.insert(*id, index);
+                    }
+                }
+            }
+        }
         let fingerprint = smelt_core::utils::hash_serializable(&PlanFingerprint {
             group_generation,
             group_cache_key,
@@ -382,6 +397,7 @@ impl RenderPlan {
             group_cache_key,
             nodes,
             index_by_id,
+            index_by_block_id,
             fingerprint,
         }
     }
@@ -404,6 +420,17 @@ impl RenderPlan {
 
     pub(crate) fn index_of(&self, id: RenderNodeId) -> Option<usize> {
         self.index_by_id.get(&id).copied()
+    }
+
+    pub(crate) fn index_for_block(&self, id: BlockId) -> Option<usize> {
+        self.index_by_block_id.get(&id).copied()
+    }
+
+    pub(crate) fn block_ids_for_node(&self, index: usize) -> Option<Vec<BlockId>> {
+        match self.nodes.get(index)? {
+            RenderNode::Block { id, .. } => Some(vec![*id]),
+            RenderNode::Group { child_ids, .. } => Some(child_ids.clone()),
+        }
     }
 
     pub(crate) fn node_default_view_state(

@@ -109,6 +109,17 @@ pub trait DisplayDocument {
     fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows;
     fn copy_range(&mut self, range: TextRange) -> Option<CopyOutput>;
 
+    fn search_matches(
+        &mut self,
+        query: &str,
+        _origin: DocPosition,
+        _forward: bool,
+        chunk_rows: RowIndex,
+    ) -> Vec<DocRange> {
+        let total_rows = self.snapshot().total_rows;
+        scan_document_rows(self, query, 0, total_rows, chunk_rows)
+    }
+
     fn action_at(&mut self, pos: DocPosition) -> Option<SpanAction> {
         let row = self
             .materialize(pos.row..pos.row.saturating_add(1))
@@ -122,6 +133,82 @@ pub trait DisplayDocument {
             .rev()
             .find(|action| cell >= action.cell_start && cell < action.cell_end)
             .map(|action| action.action)
+    }
+}
+
+pub(crate) fn scan_document_rows<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    query: &str,
+    start: RowIndex,
+    total_rows: RowIndex,
+    chunk_rows: RowIndex,
+) -> Vec<DocRange> {
+    if query.is_empty() || start >= total_rows {
+        return Vec::new();
+    }
+    let mut matches = Vec::new();
+    let chunk_rows = chunk_rows.max(1);
+    let mut row = start;
+    while row < total_rows {
+        let count = chunk_rows.min(total_rows - row);
+        let display = document.materialize(row..row.saturating_add(count));
+        collect_display_matches(&display.rows, row, query, &mut matches);
+        row = row.saturating_add(count);
+    }
+    matches
+}
+
+pub(crate) fn scan_document_row_window<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    query: &str,
+    origin: DocPosition,
+    total_rows: RowIndex,
+    chunk_rows: RowIndex,
+) -> Vec<DocRange> {
+    if total_rows == 0 {
+        return Vec::new();
+    }
+    let chunk_rows = chunk_rows.max(1);
+    let mut matches = Vec::new();
+    let start = origin.row.min(total_rows.saturating_sub(1));
+    let count = chunk_rows.min(total_rows - start);
+    let display = document.materialize(start..start.saturating_add(count));
+    collect_display_matches(&display.rows, start, query, &mut matches);
+    if matches.is_empty() && start > 0 {
+        let count = chunk_rows.min(start);
+        let display = document.materialize(0..count);
+        collect_display_matches(&display.rows, 0, query, &mut matches);
+    }
+    matches
+}
+
+fn collect_display_matches(
+    rows: &[DisplayRow],
+    start: RowIndex,
+    query: &str,
+    matches: &mut Vec<DocRange>,
+) {
+    for (offset, row) in rows.iter().enumerate() {
+        let row_index = start.saturating_add(offset as RowIndex);
+        for (byte_col, _) in row.text.match_indices(query) {
+            let end_col = byte_col + query.len();
+            if row
+                .selectable_ranges
+                .iter()
+                .any(|range| range.start <= byte_col && end_col <= range.end)
+            {
+                matches.push(DocRange {
+                    start: DocPosition {
+                        row: row_index,
+                        byte_col,
+                    },
+                    end: DocPosition {
+                        row: row_index,
+                        byte_col: end_col,
+                    },
+                });
+            }
+        }
     }
 }
 

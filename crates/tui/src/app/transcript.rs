@@ -162,9 +162,15 @@ impl TranscriptView {
         lua: &LuaRuntime,
         width: u16,
         row: crate::smelt_edit::RowIndex,
+        forward: bool,
     ) -> Option<BlockId> {
-        self.projection
-            .block_id_at_or_before_row(lua, &mut self.transcript.history, width, row)
+        self.projection.block_id_at_or_before_row(
+            lua,
+            &mut self.transcript.history,
+            width,
+            row,
+            forward,
+        )
     }
 
     pub(crate) fn visible_block_layout(

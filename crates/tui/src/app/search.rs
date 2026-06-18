@@ -178,7 +178,7 @@ impl TuiApp {
             return;
         }
 
-        let matches = self.scan_search_matches(target, &query);
+        let matches = self.scan_search_matches(target, &query, direction);
         let current = initial_match(&matches, origin, direction);
         let changedtick = self
             .ui
@@ -245,7 +245,7 @@ impl TuiApp {
                         }
                         (None, _) => self.search_origin(target).unwrap_or_default(),
                     };
-                    if !self.sync_transcript_search_session(transcript, &query) {
+                    if !self.sync_transcript_search_session(transcript, &query, origin, direction) {
                         let Some(new_session) =
                             self.new_transcript_search_session(&query, origin, direction)
                         else {
@@ -337,7 +337,7 @@ impl TuiApp {
 
         let query = session.query.clone();
         let origin = self.search_origin(target).unwrap_or_default();
-        let matches = self.scan_search_matches(target, &query);
+        let matches = self.scan_search_matches(target, &query, direction);
         let current = initial_match(&matches, origin, direction);
         let range = current
             .and_then(|index| matches.get(index))
@@ -372,58 +372,26 @@ impl TuiApp {
     /// Finds literal, display-row-local matches. Queries containing `\n` are
     /// rejected by `submit_search`; multi-line display search would need
     /// row-break-aware scanning and match storage.
-    fn scan_search_matches(&mut self, win: WinId, query: &str) -> Vec<TextRange> {
-        let total_rows = self
-            .document_snapshot_for_win(win)
-            .map(|snapshot| snapshot.total_rows)
-            .unwrap_or(0);
-        let Some(window) = self.ui.win(win) else {
-            return Vec::new();
-        };
-        let row_document = window.row_cursor().is_some() || window.materialized_rows().is_some();
-        let origin = self.search_origin(win).unwrap_or_default();
-        if row_document {
-            return self.scan_document_search_window(win, query, total_rows, origin.row);
-        }
-
-        let mut matches = Vec::new();
-        let mut start = 0;
-        while start < total_rows {
-            let count = SEARCH_SCAN_ROWS.min(total_rows - start);
-            let display = self
-                .materialize_document_rows(win, start, count)
-                .unwrap_or_default();
-            collect_display_matches(&display.rows, start, query, &mut matches);
-            start = start.saturating_add(count);
-        }
-        matches
-    }
-
-    fn scan_document_search_window(
+    fn scan_search_matches(
         &mut self,
         win: WinId,
         query: &str,
-        total_rows: RowIndex,
-        origin_row: RowIndex,
+        direction: SearchDirection,
     ) -> Vec<TextRange> {
-        if total_rows == 0 {
-            return Vec::new();
-        }
-        let mut matches = Vec::new();
-        let start = origin_row.min(total_rows.saturating_sub(1));
-        let count = SEARCH_SCAN_ROWS.min(total_rows - start);
-        let display = self
-            .materialize_document_rows(win, start, count)
-            .unwrap_or_default();
-        collect_display_matches(&display.rows, start, query, &mut matches);
-        if matches.is_empty() && start > 0 {
-            let count = SEARCH_SCAN_ROWS.min(start);
-            let display = self
-                .materialize_document_rows(win, 0, count)
-                .unwrap_or_default();
-            collect_display_matches(&display.rows, 0, query, &mut matches);
-        }
-        matches
+        let origin = self.search_origin(win).unwrap_or_default();
+        self.with_display_document_for_win(win, |document| {
+            document
+                .search_matches(
+                    query,
+                    origin,
+                    matches!(direction, SearchDirection::Forward),
+                    SEARCH_SCAN_ROWS,
+                )
+                .into_iter()
+                .map(TextRange::Rows)
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     fn search_origin(&self, win: WinId) -> Option<DocPosition> {
@@ -473,18 +441,6 @@ fn initial_match(
             .iter()
             .rposition(starts_at_or_before)
             .or_else(|| (!matches.is_empty()).then_some(matches.len() - 1)),
-    }
-}
-
-fn collect_display_matches(
-    rows: &[DisplayRow],
-    start: RowIndex,
-    query: &str,
-    matches: &mut Vec<TextRange>,
-) {
-    for (offset, row) in rows.iter().enumerate() {
-        let row_index = start.saturating_add(offset as RowIndex);
-        matches.extend(display_row_matches(row, row_index, query).map(TextRange::Rows));
     }
 }
 

@@ -538,6 +538,31 @@ mod tests {
     }
 
     #[test]
+    fn transcript_search_pages_past_false_positive_postings() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let mut records = (0..80)
+            .map(|idx| transcript_record(idx, &format!("false-{idx}"), "abc false bcd"))
+            .collect::<Vec<_>>();
+        records.push(transcript_record(80, "true", "contains abcd exactly"));
+        db.replace_transcript_descriptor_records(&records).unwrap();
+
+        assert_eq!(
+            db.search_transcript_candidate_page(
+                "abcd",
+                None,
+                crate::TranscriptSearchDirection::Forward,
+                1,
+            )
+            .unwrap(),
+            vec![TranscriptSearchCandidate {
+                block_idx: 80,
+                history_idx: None,
+            }]
+        );
+    }
+
+    #[test]
     fn transcript_descriptor_range_and_tail_read_bounded_rows() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();

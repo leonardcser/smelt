@@ -560,39 +560,59 @@ pub(crate) fn search_transcript_candidate_page(
          JOIN transcript_search s ON s.block_idx = m.block_idx
          WHERE 1 = 1 {origin_filter}
          ORDER BY s.block_idx {order}
-         LIMIT ?"
+         LIMIT ? OFFSET ?"
     );
-    let mut values = terms.into_iter().map(SqlValue::from).collect::<Vec<_>>();
-    values.push(SqlValue::from(term_count as i64));
-    if let Some(origin) = origin_block_idx {
-        values.push(SqlValue::from(checked_i64(origin, "origin_block_idx")?));
-    }
-    let sql_limit = if limit == usize::MAX {
-        i64::MAX
-    } else {
-        checked_i64(limit.saturating_mul(16) as u64, "search_candidate_limit")?
+    let base_values = {
+        let mut values = terms.into_iter().map(SqlValue::from).collect::<Vec<_>>();
+        values.push(SqlValue::from(term_count as i64));
+        if let Some(origin) = origin_block_idx {
+            values.push(SqlValue::from(checked_i64(origin, "origin_block_idx")?));
+        }
+        values
     };
-    values.push(SqlValue::from(sql_limit));
+    let page_size = if limit == usize::MAX {
+        1024usize
+    } else {
+        limit.max(64)
+    };
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_from_iter(values), |row| {
-        Ok((
-            row.get::<_, i64>(0)? as u64,
-            row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
-            row.get::<_, String>(2)?,
-        ))
-    })?;
     let mut out = Vec::new();
-    for row in rows {
-        let (block_idx, history_idx, text) = row?;
-        if text.contains(query) {
-            out.push(TranscriptSearchCandidate {
-                block_idx,
-                history_idx,
-            });
-            if out.len() >= limit {
-                break;
+    let mut offset = 0usize;
+    loop {
+        let mut values = base_values.clone();
+        values.push(SqlValue::from(checked_i64(
+            page_size as u64,
+            "search_candidate_page_size",
+        )?));
+        values.push(SqlValue::from(checked_i64(
+            offset as u64,
+            "search_candidate_offset",
+        )?));
+        let rows = stmt.query_map(params_from_iter(values), |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut fetched = 0usize;
+        for row in rows {
+            fetched += 1;
+            let (block_idx, history_idx, text) = row?;
+            if text.contains(query) {
+                out.push(TranscriptSearchCandidate {
+                    block_idx,
+                    history_idx,
+                });
+                if out.len() >= limit {
+                    break;
+                }
             }
         }
+        if out.len() >= limit || fetched < page_size {
+            break;
+        }
+        offset = offset.saturating_add(fetched);
     }
     if matches!(direction, TranscriptSearchDirection::Backward) {
         out.reverse();

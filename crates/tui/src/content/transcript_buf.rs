@@ -1491,22 +1491,29 @@ impl TranscriptProjection {
     }
 
     fn search_layout(&self, generation: u64, history: &BlockHistory) -> TranscriptSearchLayout {
-        let mut entries = Vec::with_capacity(self.measurements.active.nodes.len());
-        let mut running_total: RowIndex = 0;
-        for (i, measured_node) in self.measurements.active.nodes.iter().enumerate() {
+        let indices = 0..self.measurements.active.nodes.len();
+        self.search_layout_for_node_indices(generation, history, indices)
+    }
+
+    fn search_layout_for_node_indices(
+        &self,
+        generation: u64,
+        history: &BlockHistory,
+        indices: impl IntoIterator<Item = usize>,
+    ) -> TranscriptSearchLayout {
+        let mut entries = Vec::new();
+        for i in indices {
+            let Some(measured_node) = self.measurements.active.nodes.get(i) else {
+                continue;
+            };
             let height = measured_node.measured_or_estimated_height();
             let gap = (self
                 .render_plan
                 .rendered_node_gap(history, i, height as usize) as RowIndex)
                 .min(height);
-            running_total = running_total.saturating_add(gap);
-            let first_row = running_total;
+            let first_row = self.measurements.active.prefix_row(i).saturating_add(gap);
             let rows = height.saturating_sub(gap);
-            let block_ids = match self.render_plan.node(i) {
-                Some(RenderNode::Block { id, .. }) => vec![*id],
-                Some(RenderNode::Group { child_ids, .. }) => child_ids.clone(),
-                None => Vec::new(),
-            };
+            let block_ids = self.render_plan.block_ids_for_node(i).unwrap_or_default();
             if !block_ids.is_empty() {
                 entries.push(TranscriptSearchLayoutEntry {
                     block_ids,
@@ -1514,7 +1521,6 @@ impl TranscriptProjection {
                     rows,
                 });
             }
-            running_total = running_total.saturating_add(rows);
         }
         TranscriptSearchLayout {
             generation,
@@ -2337,22 +2343,16 @@ impl TranscriptProjection {
         width: u16,
         block_indices: &[u64],
     ) -> TranscriptSearchLayout {
-        if block_indices.is_empty() {
-            return TranscriptSearchLayout {
-                generation: self.measurements.active.search_layout_hash(),
-                entries: Vec::new(),
-            };
-        }
-        let wanted = block_indices
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env, history, width);
+        let generation = self.measurements.active.search_layout_hash();
+        let mut seen = HashSet::new();
+        let indices = block_indices
             .iter()
-            .copied()
-            .map(BlockId::new)
-            .collect::<HashSet<_>>();
-        let mut layout = self.materialize_search_layout(lua, history, width);
-        layout
-            .entries
-            .retain(|entry| entry.block_ids.iter().any(|id| wanted.contains(id)));
-        layout
+            .filter_map(|idx| self.render_plan.index_for_block(BlockId::new(*idx)))
+            .filter(|index| seen.insert(*index))
+            .collect::<Vec<_>>();
+        self.search_layout_for_node_indices(generation, history, indices)
     }
 
     pub(crate) fn block_id_at_or_before_row(
@@ -2361,11 +2361,13 @@ impl TranscriptProjection {
         history: &mut BlockHistory,
         width: u16,
         row: RowIndex,
+        forward: bool,
     ) -> Option<BlockId> {
         let node = self.node_at_row(lua, history, width, row)?;
         match self.render_plan.node(node.index)? {
             RenderNode::Block { id, .. } => Some(*id),
-            RenderNode::Group { child_ids, .. } => child_ids.first().copied(),
+            RenderNode::Group { child_ids, .. } if forward => child_ids.first().copied(),
+            RenderNode::Group { child_ids, .. } => child_ids.last().copied(),
         }
     }
 
@@ -2942,8 +2944,6 @@ mod tests {
             });
         }
         let mut projection = TranscriptProjection::new();
-        let total = projection.exact_total_rows(&lua, &mut transcript.history, 80);
-        assert!(total > 10);
         projection.reset_counters();
 
         let out = projection.copy_range(
@@ -2966,6 +2966,7 @@ mod tests {
         let counters = projection.counters();
         assert!(!out.clipboard.is_empty());
         assert_eq!(counters.full_row_builds, 0);
+        assert!(counters.exact_height_measured_blocks <= 1);
         assert!(counters.range_materialized_blocks <= 2);
     }
 
@@ -4201,6 +4202,24 @@ mod tests {
 
         assert_eq!(layout.entries.len(), 100);
         assert!(layout.entries.iter().any(|entry| entry.first_row > 0));
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.display_layouts, 0);
+        assert_eq!(counters.exact_height_measured_blocks, 0);
+
+        projection.reset_counters();
+        let candidate_layout = projection.materialize_search_layout_for_blocks(
+            &test_lua(),
+            &mut transcript.history,
+            80,
+            &[3, 77],
+        );
+        assert_eq!(candidate_layout.entries.len(), 2);
+        assert_eq!(candidate_layout.entries[0].block_ids, vec![BlockId::new(3)]);
+        assert_eq!(
+            candidate_layout.entries[1].block_ids,
+            vec![BlockId::new(77)]
+        );
         let counters = projection.counters();
         assert_eq!(counters.full_row_builds, 0);
         assert_eq!(counters.display_layouts, 0);
