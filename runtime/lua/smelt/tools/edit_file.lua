@@ -73,7 +73,11 @@ local function replacement_line_detail(old_text, new_text)
   return line_label(old_lines, "old line") .. ", " .. line_label(new_lines, "new line")
 end
 
-local function draft_preview(args)
+local function draft_preview(args, block)
+  if not (block and block.draft_finished) then
+    return nil
+  end
+
   local path, old_string, new_string, do_all = edit_fields(args)
   if old_string == "" and new_string == "" then
     return nil
@@ -159,8 +163,9 @@ smelt.tools.register({
   preview = function(args)
     return planned_diff(args)
   end,
-  draft_preview = function(args)
-    return draft_preview(args or {})
+  draft_preview = function(args, ctx, block)
+    local _ = ctx
+    return draft_preview(args or {}, block)
   end,
 
   execute = function(args)
