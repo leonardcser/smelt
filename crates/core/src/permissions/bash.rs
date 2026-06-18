@@ -512,6 +512,7 @@ fn paths_for_command(words: &[String], cwd: &Path) -> Vec<PathEffect> {
     let mut paths = redirection_paths(words, cwd);
     match cmd {
         "git" => paths.extend(git_paths(words, cwd)),
+        "cargo" => paths.extend(cargo_paths(words, cwd)),
         "ssh" => paths.extend(ssh_paths(words, cwd)),
         "sed" => paths.extend(sed_paths(words, cwd)),
         "grep" | "rg" => paths.extend(grep_paths(words, cwd)),
@@ -570,6 +571,64 @@ fn git_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
                         }
                     }
                 }
+            }
+            w => {
+                maybe_push_path(&mut out, w, cwd, PathAccess::Unknown);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn cargo_paths(words: &[String], cwd: &Path) -> Vec<PathEffect> {
+    let mut out = Vec::new();
+    let mut i = 1;
+    while i < words.len() {
+        match words[i].as_str() {
+            "--path" => {
+                if let Some(path) = words.get(i + 1) {
+                    out.push(PathEffect::from_directory(
+                        path.clone(),
+                        cwd,
+                        PathAccess::Read,
+                    ));
+                }
+                i += 2;
+            }
+            "--root" | "--target-dir" => {
+                if let Some(path) = words.get(i + 1) {
+                    out.push(PathEffect::from_directory(
+                        path.clone(),
+                        cwd,
+                        PathAccess::Write,
+                    ));
+                }
+                i += 2;
+            }
+            w if w.starts_with("--path=") => {
+                out.push(PathEffect::from_directory(
+                    w.trim_start_matches("--path=").to_string(),
+                    cwd,
+                    PathAccess::Read,
+                ));
+                i += 1;
+            }
+            w if w.starts_with("--root=") => {
+                out.push(PathEffect::from_directory(
+                    w.trim_start_matches("--root=").to_string(),
+                    cwd,
+                    PathAccess::Write,
+                ));
+                i += 1;
+            }
+            w if w.starts_with("--target-dir=") => {
+                out.push(PathEffect::from_directory(
+                    w.trim_start_matches("--target-dir=").to_string(),
+                    cwd,
+                    PathAccess::Write,
+                ));
+                i += 1;
             }
             w => {
                 maybe_push_path(&mut out, w, cwd, PathAccess::Unknown);

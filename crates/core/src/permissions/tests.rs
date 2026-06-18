@@ -1111,6 +1111,49 @@ fn workspace_bash_ls_directory_requires_that_directory() {
 }
 
 #[test]
+fn workspace_bash_cargo_install_root_requires_root_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let package = temp.path().join("thirdparty/agent-mux");
+    let install_root = temp.path().join("home/.local");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::create_dir_all(&install_root).unwrap();
+
+    let p = perms_with_workspace(workspace.to_str().unwrap());
+    let command = format!(
+        "cd {} && cargo install --path . --root {} --force",
+        package.display(),
+        install_root.display()
+    );
+    let args = args_with("command", &command);
+    let effects = p.effects_for_tool(ToolOrigin::Lua, "bash", &args);
+    let [ToolEffect::Shell { paths, .. }] = effects.as_slice() else {
+        panic!("expected shell effect, got {effects:?}");
+    };
+    assert!(paths
+        .iter()
+        .any(|path| path.path == package && path.access == PathAccess::Read));
+    assert!(paths
+        .iter()
+        .any(|path| path.path == install_root && path.access == PathAccess::Write));
+    let outcome = p.evaluate_tool(normal(), ToolOrigin::Lua, "bash", &args);
+
+    assert_eq!(outcome.decision, Decision::Ask);
+    assert_eq!(
+        outcome.missing_requirements,
+        vec![
+            PermissionRequirement::PathPrefix {
+                dir: canonicalize_path_or_parent(&package)
+            },
+            PermissionRequirement::PathPrefix {
+                dir: canonicalize_path_or_parent(&install_root)
+            }
+        ]
+    );
+}
+
+#[test]
 fn workspace_downgrades_bash_outside() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("command", "rm -rf /tmp/foo");
