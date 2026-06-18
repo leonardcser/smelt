@@ -3,6 +3,7 @@ pub(crate) mod cmdline;
 pub(crate) mod cmdline_edit;
 pub(crate) mod cmdline_history;
 pub(crate) mod content_keys;
+pub(crate) mod cwd;
 pub(crate) mod drafts;
 pub(crate) mod engine_events;
 pub(crate) mod events;
@@ -78,7 +79,7 @@ pub struct TuiApp {
     /// the two can be polled in the same `tokio::select!`.
     pub(crate) host_rx: tokio::sync::mpsc::UnboundedReceiver<engine::HostCall>,
     pub(crate) queued_inputs: InputQueues,
-    /// Current working directory (cached at startup).
+    /// Current working directory, updated when the process cwd changes.
     pub(crate) cwd: String,
     pub(crate) cwd_project: String,
     pub(crate) cwd_branch: String,

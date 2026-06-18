@@ -8,6 +8,33 @@ static ALLOCATOR: smelt_perf::alloc::Counting = smelt_perf::alloc::Counting;
 #[cfg(test)]
 pub(crate) static COMMAND_RESOLVER_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) struct ProcessCwdGuard {
+        cwd: std::path::PathBuf,
+        pwd: Option<std::ffi::OsString>,
+    }
+
+    impl ProcessCwdGuard {
+        pub(crate) fn capture() -> Self {
+            Self {
+                cwd: std::env::current_dir().expect("capture process cwd"),
+                pwd: std::env::var_os("PWD"),
+            }
+        }
+    }
+
+    impl Drop for ProcessCwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.cwd);
+            match &self.pwd {
+                Some(pwd) => std::env::set_var("PWD", pwd),
+                None => std::env::remove_var("PWD"),
+            }
+        }
+    }
+}
+
 pub mod app;
 pub mod auto_reload;
 pub(crate) mod commands;

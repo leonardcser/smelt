@@ -655,6 +655,21 @@ impl TuiApp {
         while self.core.engine.try_recv().is_ok() {}
     }
 
+    fn install_loaded_session(&mut self, loaded: session::Session) {
+        self.core.session = loaded;
+        let session_cwd = self.core.session.cwd.clone();
+        if let crate::app::cwd::SessionCwdRestore::Fallback {
+            requested,
+            fallback,
+            error,
+        } = self.restore_session_cwd(session_cwd.as_deref())
+        {
+            self.notify_error(format!(
+                "session cwd unavailable: {requested}: {error}; using {fallback}"
+            ));
+        }
+    }
+
     pub fn load_session(&mut self, loaded: session::Session) {
         self.deferred_session_load = None;
         // Cancel any in-flight turn and Lua tasks before swapping sessions.
@@ -693,7 +708,7 @@ impl TuiApp {
             }
         }
 
-        self.core.session = loaded;
+        self.install_loaded_session(loaded);
         self.persisted_fingerprint = None;
         self.transcript_descriptors_persisted = false;
         self.bump_epoch("session_epoch");
@@ -754,7 +769,7 @@ impl TuiApp {
             }
         }
 
-        self.core.session = loaded;
+        self.install_loaded_session(loaded);
         self.deferred_session_load = Some(full_session_id);
         self.persisted_fingerprint = None;
         self.transcript_descriptors_persisted = true;
@@ -786,7 +801,7 @@ impl TuiApp {
             return;
         };
         if let Some(loaded) = session::load(&id) {
-            self.core.session = loaded;
+            self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
             self.sync_session_snapshot();
         }

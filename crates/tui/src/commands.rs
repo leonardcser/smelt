@@ -597,6 +597,7 @@ impl TuiApp {
 mod tests {
     use super::*;
 
+    use crate::test_support::ProcessCwdGuard;
     use smelt_core::transcript_model::Block;
 
     fn slash<'a>(name: &'a str, arg: Option<&'a str>) -> ParsedCommand<'a> {
@@ -754,24 +755,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_escape_uses_cwd_captured_at_submission() {
-        struct CwdGuard {
-            cwd: std::path::PathBuf,
-            pwd: Option<std::ffi::OsString>,
-        }
-        impl Drop for CwdGuard {
-            fn drop(&mut self) {
-                let _ = std::env::set_current_dir(&self.cwd);
-                match &self.pwd {
-                    Some(pwd) => std::env::set_var("PWD", pwd),
-                    None => std::env::remove_var("PWD"),
-                }
-            }
-        }
-
-        let _guard = CwdGuard {
-            cwd: std::env::current_dir().expect("capture process cwd"),
-            pwd: std::env::var_os("PWD"),
-        };
+        let _guard = ProcessCwdGuard::capture();
         let shell_cwd = tempfile::TempDir::new().expect("shell cwd");
         let later_cwd = tempfile::TempDir::new().expect("later cwd");
         let shell_cwd = std::fs::canonicalize(shell_cwd.path()).expect("canonical shell cwd");

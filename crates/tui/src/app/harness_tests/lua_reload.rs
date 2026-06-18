@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::ProcessCwdGuard;
 
 #[test]
 fn lua_config_auto_reload_success_notifies_for_real_edits() {
@@ -74,26 +75,9 @@ fn lua_config_session_and_transcript_contracts_are_available() {
 
 #[test]
 fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
-    struct CwdGuard {
-        cwd: std::path::PathBuf,
-        pwd: Option<std::ffi::OsString>,
-    }
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.cwd);
-            match &self.pwd {
-                Some(pwd) => std::env::set_var("PWD", pwd),
-                None => std::env::remove_var("PWD"),
-            }
-        }
-    }
-
     let home_guard = test_home_guard();
     let target_dir = tempfile::TempDir::new().expect("create switch cwd tempdir");
-    let _cwd_guard = CwdGuard {
-        cwd: std::env::current_dir().expect("capture process cwd"),
-        pwd: std::env::var_os("PWD"),
-    };
+    let _cwd_guard = ProcessCwdGuard::capture();
     let mut app = TestApp::builder().build_with_test_home_guard(&home_guard);
     let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
     let expected = target.to_string_lossy().into_owned();
@@ -136,6 +120,94 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
         cmd,
         protocol::UiCommand::SetCwd { cwd } if cwd == expected
     )));
+}
+
+#[test]
+fn loading_session_restores_persisted_cwd() {
+    let home_guard = test_home_guard();
+    let target_dir = tempfile::TempDir::new().expect("create resumed cwd tempdir");
+    let _cwd_guard = ProcessCwdGuard::capture();
+    let mut app = TestApp::builder().build_with_test_home_guard(&home_guard);
+    let target = std::fs::canonicalize(target_dir.path()).expect("canonical target cwd");
+    let expected = target.to_string_lossy().into_owned();
+    let _ = app.drain_engine_sends();
+
+    let mut session = smelt_core::session::Session::new(app.app.core.env.pid(), target.clone());
+    session.id = "resumed-cwd-session".into();
+    session
+        .history
+        .push(protocol::HistoryItem::user(protocol::Content::text(
+            "hello",
+        )));
+
+    app.app.load_session(session);
+
+    assert_eq!(app.app.cwd, expected);
+    assert_eq!(app.app.core.session.cwd.as_deref(), Some(expected.as_str()));
+    assert_eq!(app.app.core.env.cwd(), target);
+    assert_eq!(std::env::current_dir().expect("process cwd"), target);
+    assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
+    assert_eq!(
+        app.app.core.cells.get::<String>("cwd").as_deref(),
+        Some(expected.as_str())
+    );
+    assert_eq!(app.app.deferred_session_load, None);
+    assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
+        cmd,
+        protocol::UiCommand::SetCwd { cwd } if cwd == expected
+    )));
+
+    let display_target_dir = tempfile::TempDir::new().expect("create display-only cwd tempdir");
+    let display_target =
+        std::fs::canonicalize(display_target_dir.path()).expect("canonical display-only cwd");
+    let display_expected = display_target.to_string_lossy().into_owned();
+    let mut display_session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), display_target.clone());
+    display_session.id = "display-only-cwd-session".into();
+    let transcript = smelt_core::content::transcript::Transcript::new();
+
+    app.app.load_session_display_only(
+        display_session,
+        transcript,
+        "full-display-only-cwd-session".into(),
+    );
+
+    assert_eq!(app.app.cwd, display_expected);
+    assert_eq!(
+        app.app.core.session.cwd.as_deref(),
+        Some(display_expected.as_str())
+    );
+    assert_eq!(app.app.core.env.cwd(), display_target);
+    assert_eq!(
+        app.app.deferred_session_load.as_deref(),
+        Some("full-display-only-cwd-session")
+    );
+    assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(
+        cmd,
+        protocol::UiCommand::SetCwd { cwd } if cwd == display_expected
+    )));
+
+    let missing_dir = tempfile::TempDir::new().expect("create missing cwd tempdir");
+    let missing_path = missing_dir.path().join("gone");
+    std::fs::create_dir(&missing_path).expect("create missing cwd before deletion");
+    let missing_path = std::fs::canonicalize(&missing_path).expect("canonical missing cwd");
+    drop(missing_dir);
+    let fallback = app.app.cwd.clone();
+    let fallback_path = app.app.core.env.cwd();
+    let mut missing_session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), missing_path.clone());
+    missing_session.id = "missing-cwd-session".into();
+
+    app.app.load_session(missing_session);
+
+    assert_eq!(app.app.cwd, fallback);
+    assert_eq!(app.app.core.session.cwd.as_deref(), Some(fallback.as_str()));
+    assert_eq!(app.app.core.env.cwd(), fallback_path);
+    assert!(app
+        .app
+        .notification
+        .as_ref()
+        .is_some_and(|n| n.summary.contains("session cwd unavailable")));
 }
 
 #[test]
