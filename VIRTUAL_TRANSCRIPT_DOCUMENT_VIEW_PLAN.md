@@ -96,14 +96,14 @@ Relevant mainline changes that shape this plan:
 - The title plugin now avoids double-counting a request already committed to history. Lua session/history APIs must continue to distinguish committed history from the current input without forcing full history materialization.
 - Mainline added and then simplified diff/document foundations. The current code does not have `crates/tui/src/app/document.rs`; the actual baseline is still `DisplayDocument`, `HostDisplayDocument`, `UiHost` row callbacks, and `TranscriptDocument<'_>` in `crates/tui/src/app/transcript.rs` borrowing `TranscriptView` per call.
 
-Current seams that violate the final constraints:
+Current seams that still violate the final constraints:
 
-- `save_session()` still computes a full-session fingerprint over `Session.history`.
-- `model_history()` still returns `Vec<HistoryItem>` for engine dispatch.
-- `StartTurnPayload` still carries `history: Vec<HistoryItem>`.
-- Search still scans `HostDisplayDocument` from row zero to total rows for normal display search.
-- `HostDisplayDocument` still routes document operations through `UiHost::display_rows_for_range`, `document_total_rows`, and `copy_document_range`.
+- Normal resume can still materialize full semantic session history in `load_session_snapshot` for non-preview paths.
+- Some explicit Lua/test/debug APIs still materialize `model_history()` as `Vec<HistoryItem>` when the caller asks for the whole model-visible history. Normal interactive engine dispatch and Lua/host model-message fallback now use `ModelHistorySource` or bounded store reads when the store is current.
+- Search still has fallback paths that can scan display rows for non-transcript documents. Transcript search uses SQLite candidates first, then bounded refinement.
+- `BufferDisplayDocument` remains as the non-transcript buffer fallback adapter. It should not become a transcript path.
 - `TranscriptDocument<'_>` is currently an adapter over `TranscriptView`; it is not yet the long-lived virtual document that owns store access, sparse ranges, virtual row index, and render cache.
+- `save_session()` uses dirty suffix snapshots and a combined SQLite transaction for history plus descriptors, but full completion still requires typed append/rewind/checkpoint transactions that avoid constructing a `SessionSnapshot` for hot request paths.
 
 ## Measured Baseline After Rebase
 
@@ -135,13 +135,13 @@ Interpretation:
 | Area | Current code | Violation | Final direction |
 | --- | --- | --- | --- |
 | Session load | `load_session_snapshot` reads all `history_items` into `Vec<HistoryItem>` | resume memory and latency scale with total session size | load metadata, descriptor windows, and bounded model-history cursors separately |
-| Save decision | `save_session()` computes full `persist_fingerprint` over `Session.history` | no-op and one-row saves still scale with full history | DB revision, dirty suffix markers, and row hashes replace full fingerprint |
-| Save payload | `session_store_snapshot` clones `session.history[history_start..]` and snapshot tables compare full table contents | dirty suffix helps but metadata/snapshot comparison can still be linear | explicit typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
-| Provider dispatch | `model_history()` and `StartTurnPayload.history` allocate `Vec<HistoryItem>` | request start scales with model history size | store-backed model-history iterator or bounded snapshot consumed by provider builder |
-| Transcript resume | full descriptor load path rehydrates descriptor JSON and tool state for all blocks | display resume can scale with total transcript | `TranscriptDocument` loads sparse descriptor ranges and hydrates payloads only on demand |
-| Search storage | `search_transcript_candidates` uses `instr(text, ?)` over `transcript_search` | table scan over all searchable text | SQLite FTS5 or explicit trigram/posting tables with indexed candidate lookup |
-| Search runtime | `ensure_transcript_search_index` builds an in-memory trigram index over layout entries | first search can scale with all blocks and text | query SQLite candidates first, then exact-refine bounded display neighborhoods |
-| Generic document search | `scan_search_matches` materializes row windows from row zero to total rows | full display-row scan | document-level search API with indexed implementations and bounded refinement |
+| Save decision | Dirty suffix markers and DB row hashes avoid unchanged-prefix writes, but hot paths still build `SessionSnapshot` suffix payloads | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
+| Save payload | History and transcript descriptor suffixes are saved together in one SQLite transaction | blob externalization and snapshot construction are still snapshot-shaped | explicit append/replace transactions over dirty rows and objects |
+| Provider dispatch | Interactive `StartTurnPayload.history` uses `ModelHistorySource::Store`; engine reads the requested range from `session.db` | explicit Lua/test/debug callers can still request full model-visible history | keep materialization only for explicit APIs, and prefer store-backed message reads for runtime hooks |
+| Transcript resume | full descriptor load path can still rehydrate descriptor JSON and tool state for all blocks | display resume can scale with total transcript | `TranscriptDocument` loads sparse descriptor ranges and hydrates payloads only on demand |
+| Search storage | transcript search uses indexed SQLite candidate terms plus exact refinement | generic non-transcript document search can still scan display rows | keep transcript candidate paging; add document-level indexed search APIs for other document kinds |
+| Search runtime | transcript search asks SQLite for candidate blocks before local display refinement | fallback scan paths remain for buffer documents | document-level search API with indexed implementations and bounded refinement |
+| Generic document search | buffer fallback search can materialize row windows from row zero to total rows | full display-row scan for non-transcript documents | `BufferDisplayDocument` remains bounded to buffer fallback; indexed document implementations replace broader host scans |
 | Projection cache | `full_rows` and `build_rows` remain for full-text consumers | easy accidental full materialization | remove from hot APIs; explicit export/debug command can stream instead |
 | Schema | migration version exists but DB format has not shipped | carrying compatibility migrations would add complexity | reset/reshape schema freely before release; optimize for final query/write patterns |
 ## Current Seams to Promote or Delete
