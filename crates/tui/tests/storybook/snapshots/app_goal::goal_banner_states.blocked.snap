@@ -1,0 +1,20 @@
+---
+source: crates/tui/tests/storybook/app_ctx.rs
+expression: frame.text()
+---
+ BLOCKED migrate parser state handling without regressing strea…
+
+ Please keep working toward the parser migration.
+
+
+
+
+
+
+
+
+  tip ctrl+enter / ctrl+q, steer the current response without…
+────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────
+ ○ normal                                               1:1 100%

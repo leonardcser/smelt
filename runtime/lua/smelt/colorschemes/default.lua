@@ -37,6 +37,11 @@ return {
   SmeltHeading        = fg({ ansi = 117 }),   -- sky blue headings
   SmeltLink           = fg({ ansi = 75  }),   -- markdown link destinations
   SmeltProcess        = fg({ ansi = 117 }),   -- background-process notices and counters
+  SmeltGoalBanner     = { fg = dl(0, 0), bg = dl(39, 153) }, -- active-goal top banner row
+  SmeltGoalBannerLabel = { fg = dl(0, 0), bg = dl(39, 153), bold = true }, -- active-goal label
+  SmeltGoalBannerMode = { fg = dl(0, 0), bg = dl(39, 153), bold = true }, -- right-side goal mode
+  SmeltGoalBannerPausedLabel = { fg = dl(0, 0), bg = dl(39, 153), bold = true },
+  SmeltGoalBannerBlockedLabel = { fg = dl(0, 0), bg = dl(39, 153), bold = true },
 
   -- Background fills, light/dark aware.
   SmeltStatusBg       = bg(dl(233, 253)),

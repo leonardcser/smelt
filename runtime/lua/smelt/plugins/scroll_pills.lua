@@ -9,7 +9,6 @@ local ns_top = smelt.ns("smelt.scroll_pills.top")
 
 local PILL_BG = "SmeltScrollPillBg"
 local PILL_FG = "Comment"
-local TOP_PILL_ROW = 0
 
 local state = {
   transcript_win = nil,
@@ -149,10 +148,9 @@ local function open_top(width)
   state.top_width = width
   state.top_overlay = smelt.overlay.new({
     name = "smelt.scroll_pills.top",
-    anchor = "screen_at",
-    corner = "nw",
-    row = TOP_PILL_ROW,
-    col = 0,
+    anchor = "win",
+    target = state.transcript_win,
+    attach = "nw",
     z = 5,
     modal = false,
     blocks_agent = false,
@@ -177,7 +175,8 @@ end
 
 local function cursor_under_top_pill(scroll)
   local _, terminal_row = transcript_cursor_rows(scroll)
-  return terminal_row == TOP_PILL_ROW
+  local rect = state.transcript_win and state.transcript_win:rect()
+  return terminal_row ~= nil and rect ~= nil and terminal_row == rect.row
 end
 
 local function refresh_top(scroll)

@@ -1,6 +1,7 @@
 -- Default main TUI layout composer.
 --
 -- Splits the screen vertically into:
+--   * headerline           (1 row when a header source is visible)
 --   * transcript           (fill)
 --   * prompt block         (the four chrome+input rows, contiguous)
 --       - top bar          (rows = queued + stash + 1 bar row)
@@ -19,6 +20,7 @@
 
 local prompt_bar = require("smelt.prompt_bar")
 local statusline = require("smelt.statusline")
+local headerline = require("smelt.headerline")
 
 -- Minimum rows kept for the transcript even when the prompt block wants
 -- to grow.
@@ -28,13 +30,15 @@ smelt.ui.layout.set(function(state)
   local term_h = state.term_h or 24
   local input_rows = state.prompt_input_rows or 1
 
+  local header_rows = headerline.rows()
+
   -- prompt block = top_bar + input_rows + bottom_bar(1) + statusline(1)
   local chrome_except_top = input_rows + 2
-  local max_top_rows = math.max(1, term_h - MIN_TRANSCRIPT_ROWS - chrome_except_top)
+  local max_top_rows = math.max(1, term_h - header_rows - MIN_TRANSCRIPT_ROWS - chrome_except_top)
   local top_rows = prompt_bar.top_rows(max_top_rows)
   local block_height = top_rows + chrome_except_top
 
-  return smelt.ui.layout.vbox({
+  local main = smelt.ui.layout.vbox({
     {
       height = "fill",
       smelt.ui.layout.leaf(smelt.win.TRANSCRIPT),
@@ -61,6 +65,18 @@ smelt.ui.layout.set(function(state)
       }),
     },
   }, { gap = 1 })
+
+  if header_rows == 0 then return main end
+  return smelt.ui.layout.vbox({
+    {
+      height = header_rows,
+      smelt.ui.layout.leaf(headerline.win),
+    },
+    {
+      height = "fill",
+      main,
+    },
+  })
 end)
 
 return {}

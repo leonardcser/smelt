@@ -9,6 +9,7 @@ mod cmdline;
 mod compaction;
 mod dialogs;
 mod error_queue;
+mod goal;
 mod lua_reload;
 mod misc;
 mod mouse;

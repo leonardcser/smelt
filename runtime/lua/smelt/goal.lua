@@ -1,4 +1,4 @@
--- Goal state, model steering, tools, statusline indicator, and idle continuation.
+-- Goal state, model steering, tools, headerline source, and idle continuation.
 
 local M = {}
 
@@ -92,6 +92,12 @@ local function is_active(goal)
 end
 
 local function is_unfinished(goal)
+  return type(goal) == "table"
+    and goal.text and goal.text ~= ""
+    and (goal.status == STATUS.ACTIVE or goal.status == STATUS.PAUSED or goal.status == STATUS.BLOCKED)
+end
+
+local function is_visible(goal)
   return type(goal) == "table"
     and goal.text and goal.text ~= ""
     and (goal.status == STATUS.ACTIVE or goal.status == STATUS.PAUSED or goal.status == STATUS.BLOCKED)
@@ -253,6 +259,88 @@ local function apply(action, opts)
   if goal.status == STATUS.BLOCKED and type(goal.blocked_at_ms) ~= "number" then goal.blocked_at_ms = now end
   if goal.status ~= STATUS.BLOCKED then goal.blocked_at_ms = nil end
   return store_and_sync(goal)
+end
+
+local function banner_label(goal)
+  if goal.status == STATUS.PAUSED then return " PAUSED ", "SmeltGoalBannerPausedLabel" end
+  if goal.status == STATUS.BLOCKED then return " BLOCKED ", "SmeltGoalBannerBlockedLabel" end
+  return " GOAL ", "SmeltGoalBannerLabel"
+end
+
+local function banner_mode(goal)
+  if goal.status == STATUS.ACTIVE and goal.auto_continue ~= false then return "auto" end
+  return nil
+end
+
+local function banner_row(goal, width)
+  width = math.max(width or 0, 0)
+  if width == 0 then return { text = "", highlights = {} } end
+
+  local label, label_group = banner_label(goal)
+  local mode_text = banner_mode(goal)
+  local mode = mode_text and (" " .. mode_text .. " ") or ""
+  local fixed_width = smelt.text.width(label) + smelt.text.width(mode)
+  if fixed_width >= width then
+    local row = smelt.text.fit(label, width, { suffix = "…" })
+    return {
+      text = row,
+      highlights = {
+        {
+          bytes_start = 0,
+          bytes_end = #row,
+          style = { hl_group = label_group },
+          selectable = false,
+        },
+      },
+    }
+  end
+  local min_text_width = width - fixed_width
+  local text = smelt.text.fit(goal.text, min_text_width, { suffix = "…" })
+  local used = smelt.text.width(label) + smelt.text.width(text) + smelt.text.width(mode)
+  local fill = string.rep(" ", math.max(width - used, 0))
+  local row = label .. text .. fill .. mode
+
+  local label_end = #label
+  local highlights = {
+    {
+      bytes_start = 0,
+      bytes_end = #row,
+      style = { hl_group = "SmeltGoalBanner" },
+      selectable = false,
+    },
+    {
+      bytes_start = 0,
+      bytes_end = label_end,
+      style = { hl_group = label_group },
+      selectable = false,
+    },
+  }
+  if mode ~= "" then
+    highlights[#highlights + 1] = {
+      bytes_start = #row - #mode,
+      bytes_end = #row,
+      style = { hl_group = "SmeltGoalBannerMode" },
+      selectable = false,
+    }
+  end
+  return {
+    text = row,
+    highlights = highlights,
+  }
+end
+
+local function register_headerline()
+  local headerline = require("smelt.headerline")
+  headerline.add("goal", {
+    visible = function()
+      return is_visible(session_goal())
+    end,
+    render = function(width)
+      local goal = session_goal()
+      if not is_visible(goal) then return { text = "", highlights = {} } end
+      return banner_row(goal, width)
+    end,
+  })
 end
 
 function M.current()
@@ -453,30 +541,11 @@ local function register_tools()
   })
 end
 
-local function register_statusline()
-  local statusline = require("smelt.statusline")
-  statusline.add("goal", function()
-    local goal = session_goal()
-    if not goal or not goal.text or goal.text == "" then return {} end
-    if goal.status ~= STATUS.ACTIVE and goal.status ~= STATUS.PAUSED and goal.status ~= STATUS.BLOCKED then return {} end
-    local label = status_label(goal.status)
-    return {
-      {
-        text = label .. ": " .. goal.text,
-        style = { fg = "SmeltAccent", bold = goal.status == STATUS.ACTIVE },
-        priority = 6,
-        separated = true,
-        truncatable = true,
-      },
-    }
-  end)
-end
-
 function M.setup()
   if setup_done then return end
   setup_done = true
   register_tools()
-  register_statusline()
+  register_headerline()
   sync_context_note()
 
   smelt.cell("session_epoch"):subscribe(sync_context_note)
