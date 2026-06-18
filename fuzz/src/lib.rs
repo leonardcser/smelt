@@ -1243,7 +1243,7 @@ fn expected_completed_history_len(
         0
     };
     let queued_context_append = if completed_turn_starts_queued_followup(pre, targeted_active)
-        && pre.queued_next_context_append
+        && (pre.checkpoint_first_live_index.is_none() || pre.queued_next_context_append)
     {
         1
     } else {

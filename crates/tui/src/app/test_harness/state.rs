@@ -96,8 +96,9 @@ impl TestApp {
             .is_some_and(|text| !text.is_empty())
     }
 
-    /// Whether starting the next queued input would append a fresh context
-    /// note to session history before the next request is dispatched.
+    /// Whether starting the next queued input from the current state would
+    /// append a fresh context note to session history before the next request
+    /// is dispatched.
     pub fn next_queued_input_appends_context_note(&self) -> bool {
         if !self.next_queued_input_starts_turn() {
             return false;
