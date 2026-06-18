@@ -2,11 +2,11 @@ use super::display_layout::{
     measure_block, render_block_into, render_block_range_into, CompileJob, DisplayModel,
     MeasureCtx, RenderCtx, TranscriptRenderEnv,
 };
+use crate::content::estimate_text_rows;
 use crate::content::render_plan::{
     NodeLayoutKey, RenderNode, RenderNodeId, RenderPlan, TranscriptDefaultViewPolicy,
     TranscriptPresentationState,
 };
-use crate::content::{estimate_text_rows, estimate_text_rows_with_first_line_prefix};
 use crate::smelt_edit::Theme;
 use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
@@ -896,6 +896,30 @@ fn base_layout_key(width: u16) -> LayoutKey {
     }
 }
 
+fn estimate_text_rows_with_prefix(prefix: &str, text: &str, width: u16) -> RowIndex {
+    let width = usize::from(width.max(1));
+    let prefix_cells = if prefix.is_ascii() {
+        prefix.len()
+    } else {
+        smelt_buffer::text::byte_to_cell(prefix, prefix.len())
+    };
+    let mut rows = 0;
+    let mut first = true;
+    for line in text.lines() {
+        let mut cells = if line.is_ascii() {
+            line.len()
+        } else {
+            smelt_buffer::text::byte_to_cell(line, line.len())
+        };
+        if first {
+            cells = cells.saturating_add(prefix_cells);
+            first = false;
+        }
+        rows += cells.max(1).div_ceil(width) as RowIndex;
+    }
+    rows.max(1)
+}
+
 fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> RowIndex {
     let tool_output = history
         .tool_call_id(id)
@@ -913,11 +937,9 @@ fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> 
         | Some(Block::Compacted { summary: text })
         | Some(Block::CompactionPreview { summary: text })
         | Some(Block::CodeLine { content: text, .. }) => estimate_text_rows(text, width),
-        Some(Block::Mode { text, icon, .. }) => {
-            estimate_text_rows_with_first_line_prefix(icon, text, width)
-        }
+        Some(Block::Mode { text, icon, .. }) => estimate_text_rows_with_prefix(icon, text, width),
         Some(Block::Exec { command, output }) => {
-            let command_rows = estimate_text_rows_with_first_line_prefix("$ ", command, width);
+            let command_rows = estimate_text_rows_with_prefix("$ ", command, width);
             if output.is_empty() {
                 command_rows
             } else {
@@ -4573,14 +4595,14 @@ mod tests {
         let lua = test_lua();
         let mut transcript = Transcript::new();
         transcript.push(Block::ProcessStatus {
-            text: "background process 1 finished successfully".into(),
+            text: "Background process 1 finished successfully.".into(),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "1",
                 Some(0),
             )),
         });
         transcript.push(Block::ProcessStatus {
-            text: "background process 2 exited with code 7".into(),
+            text: "Background process 2 exited with code 7.".into(),
             event: Some(protocol::ProcessStatusEvent::background_process_completed(
                 "2",
                 Some(7),

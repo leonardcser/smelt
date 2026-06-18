@@ -1,6 +1,6 @@
 //! Mouse event handling: wheel scrolling, drag-select, scrollbar drag, cell-click hit-testing.
 
-use crate::app::transcript::TranscriptProjectionRestore;
+use crate::app::transcript::{TranscriptProjectionHint, TranscriptProjectionRestore};
 use crate::app::transcript_scroll_trace::{
     TranscriptScrollIntent, TranscriptScrollTraceRenderInput,
 };
@@ -160,6 +160,7 @@ impl TuiApp {
             candidate.window_scroll_before,
             restore,
             None,
+            None,
         );
         true
     }
@@ -307,6 +308,7 @@ impl TuiApp {
             candidate.window_scroll_before,
             TranscriptProjectionRestore::default(),
             None,
+            None,
         );
     }
 
@@ -322,6 +324,24 @@ impl TuiApp {
             window_scroll_before,
             TranscriptProjectionRestore::default(),
             None,
+            None,
+        );
+    }
+
+    pub(crate) fn record_transcript_scroll_intent_with_hint(
+        &mut self,
+        label: impl Into<String>,
+        intent: TranscriptScrollIntent,
+        window_scroll_before: RowIndex,
+        hint: TranscriptProjectionHint,
+    ) {
+        self.record_transcript_scroll_intent_for_projection(
+            label,
+            intent,
+            window_scroll_before,
+            TranscriptProjectionRestore::default(),
+            None,
+            Some(hint),
         );
     }
 
@@ -339,6 +359,7 @@ impl TuiApp {
             window_scroll_before,
             restore,
             local_scroll_top,
+            None,
         );
     }
 
@@ -349,6 +370,7 @@ impl TuiApp {
         window_scroll_before: RowIndex,
         mut restore: TranscriptProjectionRestore,
         local_scroll_top: Option<RowIndex>,
+        hint: Option<TranscriptProjectionHint>,
     ) {
         let label = label.into();
         if matches!(intent, TranscriptScrollIntent::UserDelta { .. })
@@ -370,8 +392,12 @@ impl TuiApp {
                 win.pin_current_scroll();
             }
         }
-        self.transcript
-            .set_pending_projection(intent.clone(), restore, local_scroll_top);
+        self.transcript.set_pending_projection_with_hint(
+            intent.clone(),
+            restore,
+            local_scroll_top,
+            hint,
+        );
         if !self.transcript.scroll_trace_enabled() {
             return;
         }

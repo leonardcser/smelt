@@ -1,4 +1,4 @@
-use crate::app::transcript::TranscriptSearchBound;
+use crate::app::transcript::{TranscriptProjectionHint, TranscriptSearchBound};
 use crate::app::transcript_search::{
     previous_search_position, TranscriptSearchIndex, TranscriptSearchSession, TranscriptSearchStore,
 };
@@ -448,17 +448,26 @@ impl TuiApp {
             return;
         };
         let window_scroll_before = self.transcript_scroll_top();
-        self.reveal_position(
-            target,
-            matched.range.start,
-            crate::app::reveal::RevealOptions::avoid_edge_chrome(target),
-        );
+        let transcript_width = self.transcript_width() as u16;
         let target_screen_row = self
             .ui
             .win(target)
-            .map(|win| matched.range.start.row.saturating_sub(win.scroll_top()))
+            .map(|win| {
+                crate::app::reveal::target_screen_row_for_reveal(
+                    win.scroll_top(),
+                    win.viewport.map(|v| v.rect.height).unwrap_or(1).max(1),
+                    matched.range.start.row,
+                    crate::app::reveal::RevealOptions::avoid_edge_chrome(target),
+                )
+            })
             .unwrap_or_default();
-        self.record_transcript_scroll_intent(
+        let hint = TranscriptProjectionHint::SearchProjectedRow {
+            width: transcript_width,
+            anchor: matched.anchor,
+            start_byte_col: matched.start_byte_col(),
+            row: matched.range.start.row,
+        };
+        self.record_transcript_scroll_intent_with_hint(
             "search_jump",
             crate::app::transcript_scroll_trace::TranscriptScrollIntent::SearchJump {
                 anchor: matched.anchor,
@@ -467,6 +476,7 @@ impl TuiApp {
                 match_end_byte_col: matched.end_byte_col(),
             },
             window_scroll_before,
+            hint,
         );
     }
 
