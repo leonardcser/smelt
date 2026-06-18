@@ -11,12 +11,14 @@ use crate::smelt_edit::{
     clamp_scroll, row_to_usize, BufCreateOpts, BufId, Buffer, CopyOutput, DisplayRow, DisplayRows,
     DocRange, MaterializedRows, RowBreak, RowIndex,
 };
-use smelt_buffer::coords::copy_byte_range;
+use smelt_buffer::coords::{copy_byte_range, CopyRangeAccumulator, CopyRow};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::content::highlight::InlineOptions;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
 use std::collections::HashSet;
 use std::sync::Arc;
+
+const COPY_CHUNK_NODES: usize = 64;
 
 pub(crate) struct TranscriptProjection {
     render_plan: RenderPlan,
@@ -63,6 +65,7 @@ pub(crate) struct TranscriptProjectionCounters {
     pub display_layouts: usize,
     pub exact_height_measured_blocks: usize,
     pub range_materialized_blocks: usize,
+    pub max_range_materialized_blocks: usize,
 }
 
 struct CachedRows {
@@ -1528,14 +1531,23 @@ impl TranscriptProjection {
         }
     }
 
+    pub(crate) fn prepare_layout(
+        &mut self,
+        lua: &smelt_core::lua::runtime::LuaRuntime,
+        history: &mut BlockHistory,
+        width: u16,
+    ) {
+        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
+        self.prepare_row_index_with_env(env, history, width);
+    }
+
     pub(crate) fn estimated_total_rows(
         &mut self,
         lua: &smelt_core::lua::runtime::LuaRuntime,
         history: &mut BlockHistory,
         width: u16,
     ) -> RowIndex {
-        let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
-        self.prepare_row_index_with_env(env, history, width);
+        self.prepare_layout(lua, history, width);
         self.measurements.active.total_rows()
     }
 
@@ -2183,7 +2195,10 @@ impl TranscriptProjection {
         );
         #[cfg(test)]
         {
-            self.counters.range_materialized_blocks += end.saturating_sub(start);
+            let count = end.saturating_sub(start);
+            self.counters.range_materialized_blocks += count;
+            self.counters.max_range_materialized_blocks =
+                self.counters.max_range_materialized_blocks.max(count);
         }
         let row_base = self.measurements.active.prefix_row(start);
         let mut texts = Vec::new();
@@ -2630,36 +2645,108 @@ impl TranscriptProjection {
             return CopyOutput::default();
         }
 
-        let mut scratch = Buffer::new(BufId(0), BufCreateOpts::default());
-        let materialized = self.collect_nodes_range(
-            TranscriptRenderEnv::with_renderer(
-                lua,
-                self.measurements.active.renderer_generation,
-                self.measurements.active.renderer_cache_key,
-            ),
-            history,
-            theme,
-            node_range,
+        let mut kill_ring = String::new();
+        let mut first_raw_row = true;
+        let mut clipboard = CopyRangeAccumulator::new(range.start.row, end_row);
+        let renderer_env = TranscriptRenderEnv::with_renderer(
+            lua,
+            self.measurements.active.renderer_generation,
+            self.measurements.active.renderer_cache_key,
         );
-        let row_base = materialized.row_base;
-        scratch.set_all_lines(materialized.texts);
-        for p in materialized.pending {
-            apply_row_highlights(&mut scratch, p.row, p.highlights);
-            if p.decoration != LineDecoration::default() {
-                scratch.set_decoration(p.row, p.decoration);
-            }
+        let mut start = node_range.start;
+        while start < node_range.end {
+            let end = start.saturating_add(COPY_CHUNK_NODES).min(node_range.end);
+            let materialized =
+                self.collect_nodes_range(renderer_env.clone(), history, theme, start..end);
+            append_copy_chunk(
+                &mut kill_ring,
+                &mut clipboard,
+                materialized,
+                range,
+                end_row,
+                &mut first_raw_row,
+            );
+            start = end;
         }
-
-        let start_local = row_to_usize(range.start.row.saturating_sub(row_base));
-        let end_local = row_to_usize(end_row.saturating_sub(row_base));
-        let start = scratch.byte_at_display_byte_pos(start_local, range.start.byte_col);
-        let end = scratch.byte_at_display_byte_pos(end_local, range.end.byte_col);
-        let clipboard = copy_byte_range(&scratch, start, end);
-        let raw = smelt_buffer::text::slice(&scratch.text(), start..end).to_string();
         CopyOutput {
-            kill_ring: raw,
-            clipboard,
+            kill_ring,
+            clipboard: clipboard.finish(),
         }
+    }
+}
+
+fn append_copy_chunk(
+    kill_ring: &mut String,
+    clipboard: &mut CopyRangeAccumulator,
+    materialized: MaterializedTranscriptRange,
+    range: DocRange,
+    end_row: RowIndex,
+    first_raw_row: &mut bool,
+) {
+    let row_count = materialized.texts.len();
+    if row_count == 0 {
+        return;
+    }
+    let row_base = materialized.row_base;
+    let chunk_end_row = row_base.saturating_add(row_count as RowIndex - 1);
+    let start_row = range.start.row.max(row_base);
+    let end_row = end_row.min(chunk_end_row);
+    if start_row > end_row {
+        return;
+    }
+
+    let mut highlights = vec![Vec::new(); row_count];
+    let mut decorations = vec![LineDecoration::default(); row_count];
+    for pending in materialized.pending {
+        if let Some(slot) = highlights.get_mut(pending.row) {
+            *slot = pending.highlights;
+        }
+        if let Some(slot) = decorations.get_mut(pending.row) {
+            *slot = pending.decoration;
+        }
+    }
+
+    let start_local = row_to_usize(start_row.saturating_sub(row_base));
+    let end_local = row_to_usize(end_row.saturating_sub(row_base));
+    for local in start_local..=end_local {
+        let abs_row = row_base.saturating_add(local as RowIndex);
+        let Some(text) = materialized.texts.get(local) else {
+            continue;
+        };
+        let start_col = if abs_row == range.start.row {
+            range.start.byte_col
+        } else {
+            0
+        };
+        let end_col = if abs_row == range.end.row {
+            range.end.byte_col
+        } else {
+            text.len()
+        };
+        if !*first_raw_row {
+            kill_ring.push('\n');
+        }
+        kill_ring.push_str(smelt_buffer::text::slice(text, start_col..end_col));
+        *first_raw_row = false;
+
+        let start_byte = smelt_buffer::text::snap(text, start_col.min(text.len()));
+        let end_byte = smelt_buffer::text::snap(text, end_col.min(text.len()));
+        let cell_start = smelt_buffer::text::byte_to_cell(text, start_byte);
+        let cell_end = smelt_buffer::text::byte_to_cell(text, end_byte);
+        let highlight_row = highlights.get(local).map(Vec::as_slice).unwrap_or(&[]);
+        let Some(decoration) = decorations.get(local) else {
+            continue;
+        };
+        clipboard.push_row(
+            abs_row,
+            CopyRow {
+                text,
+                highlights: highlight_row,
+                decoration,
+            },
+            cell_start,
+            cell_end,
+        );
     }
 }
 
@@ -4625,6 +4712,54 @@ mod tests {
         assert!(
             counters.range_materialized_blocks < transcript.history.order.len(),
             "copy should materialize only intersecting blocks, got {counters:?}"
+        );
+    }
+
+    #[test]
+    fn copy_large_range_streams_materialization_chunks() {
+        let mut transcript = Transcript::new();
+        for i in 0..180 {
+            transcript.push(Block::Text {
+                content: format!("line {i}"),
+            });
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+        let total_rows = projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
+
+        projection.reset_counters();
+        let copied = projection.copy_range(
+            &test_lua(),
+            &mut transcript.history,
+            80,
+            &theme,
+            DocRange {
+                start: crate::smelt_edit::DocPosition {
+                    row: 0,
+                    byte_col: 0,
+                },
+                end: crate::smelt_edit::DocPosition {
+                    row: total_rows.saturating_sub(1),
+                    byte_col: "line 179".len(),
+                },
+            },
+        );
+
+        let expected = (0..180)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(copied.clipboard, expected);
+        assert_eq!(copied.kill_ring, expected);
+        let counters = projection.counters();
+        assert_eq!(counters.full_row_builds, 0);
+        assert!(
+            counters.max_range_materialized_blocks <= COPY_CHUNK_NODES,
+            "copy should never materialize the entire selected node set at once: {counters:?}"
+        );
+        assert!(
+            counters.range_materialized_blocks >= transcript.history.order.len(),
+            "large copy should stream through selected nodes: {counters:?}"
         );
     }
 

@@ -8,7 +8,7 @@
 //! are indexed by display characters internally; `Buffer` converts public
 //! columns to and from terminal cells.
 
-use crate::buffer::{Buffer, SelectionRange, Span};
+use crate::buffer::{Buffer, LineDecoration, SelectionRange, Span};
 use crate::text;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -174,6 +174,153 @@ pub fn last_non_selectable_end(buf: &Buffer, row: usize, line_width: usize) -> u
     max_end.min(line_width)
 }
 
+pub struct CopyRow<'a> {
+    pub text: &'a str,
+    pub highlights: &'a [Span],
+    pub decoration: &'a LineDecoration,
+}
+
+struct OwnedCopyRow {
+    row: u64,
+    text: String,
+    highlights: Vec<Span>,
+    decoration: LineDecoration,
+    cell_start: usize,
+    cell_end: usize,
+}
+
+pub struct CopyRangeAccumulator {
+    out: String,
+    selection_start_row: u64,
+    selection_end_row: u64,
+    started: bool,
+    source_text_emitted: bool,
+    pending_group: Vec<OwnedCopyRow>,
+}
+
+impl CopyRangeAccumulator {
+    pub fn new(selection_start_row: u64, selection_end_row: u64) -> Self {
+        Self {
+            out: String::new(),
+            selection_start_row,
+            selection_end_row,
+            started: false,
+            source_text_emitted: false,
+            pending_group: Vec::new(),
+        }
+    }
+
+    pub fn push_row(
+        &mut self,
+        row: u64,
+        copy_row: CopyRow<'_>,
+        cell_start: usize,
+        cell_end: usize,
+    ) {
+        if external_source_group_decoration(copy_row.decoration) {
+            self.pending_group.push(OwnedCopyRow {
+                row,
+                text: copy_row.text.to_string(),
+                highlights: copy_row.highlights.to_vec(),
+                decoration: copy_row.decoration.clone(),
+                cell_start,
+                cell_end,
+            });
+            return;
+        }
+        self.flush_group();
+        self.emit_row(row, copy_row, cell_start, cell_end, row, row);
+    }
+
+    pub fn finish(mut self) -> String {
+        self.flush_group();
+        self.out
+    }
+
+    fn flush_group(&mut self) {
+        let Some(group_start) = self.pending_group.first().map(|row| row.row) else {
+            return;
+        };
+        let group_end = self
+            .pending_group
+            .last()
+            .map(|row| row.row)
+            .unwrap_or(group_start);
+        let rows = std::mem::take(&mut self.pending_group);
+        for row in &rows {
+            self.emit_row(
+                row.row,
+                CopyRow {
+                    text: &row.text,
+                    highlights: &row.highlights,
+                    decoration: &row.decoration,
+                },
+                row.cell_start,
+                row.cell_end,
+                group_start,
+                group_end,
+            );
+        }
+    }
+
+    fn emit_row(
+        &mut self,
+        _row: u64,
+        copy_row: CopyRow<'_>,
+        cell_start: usize,
+        cell_end: usize,
+        group_start: u64,
+        group_end: u64,
+    ) {
+        let line_width = text::byte_to_cell(copy_row.text, copy_row.text.len());
+        let cell_end = cell_end.min(line_width);
+        if self.started
+            && !copy_row.decoration.soft_wrapped
+            && !copy_row.decoration.copy_continuation
+        {
+            self.out.push('\n');
+            self.source_text_emitted = false;
+        }
+
+        let unselectable_intervals = collect_unselectable(copy_row.highlights, line_width);
+        let all_selectable_covered =
+            all_selectable_in_range(&unselectable_intervals, line_width, cell_start, cell_end);
+
+        if all_selectable_covered
+            && copy_row.decoration.copy_continuation
+            && self.source_text_emitted
+        {
+            self.started = true;
+            return;
+        }
+
+        if all_selectable_covered {
+            let src =
+                if self.selection_start_row < group_start || self.selection_end_row > group_end {
+                    copy_row.decoration.external_source_text.as_deref()
+                } else {
+                    None
+                }
+                .or(copy_row.decoration.source_text.as_deref());
+            if let Some(src) = src {
+                self.out.push_str(src);
+                self.source_text_emitted = true;
+                self.started = true;
+                return;
+            }
+        }
+
+        emit_row_cells(
+            copy_row.text,
+            copy_row.highlights,
+            cell_start,
+            cell_end,
+            &mut self.out,
+        );
+        self.started = true;
+    }
+}
+
 /// Render a byte range as user-facing display text.
 ///
 /// This drops non-selectable cells, applies `copy_as`, prefers `source_text`
@@ -188,84 +335,35 @@ pub fn copy_byte_range(buf: &Buffer, start: usize, end: usize) -> String {
     let (er, ec) = byte_to_row_col(lines, end);
     let er = er.min(lines.len().saturating_sub(1));
 
-    let mut out = String::new();
-    let mut source_text_emitted = false;
+    let mut out = CopyRangeAccumulator::new(sr as u64, er as u64);
     for (r, line) in lines.iter().enumerate().take(er + 1).skip(sr) {
         let line_width = text::byte_to_cell(line, line.len());
-        let dec = buf.decoration_at(r);
-        let is_soft = dec.soft_wrapped;
-        let is_copy_cont = dec.copy_continuation;
-        if r > sr && !is_soft && !is_copy_cont {
-            out.push('\n');
-            source_text_emitted = false;
-        }
-
         let is_first = r == sr;
         let is_last = r == er;
-        let c_start = if is_first { sc } else { 0 };
-        let c_end = if is_last {
+        let cell_start = if is_first { sc } else { 0 };
+        let cell_end = if is_last {
             ec.min(line_width)
         } else {
             line_width
         };
-
         let highlights = buf.highlights_at(r);
-        let unselectable_intervals = collect_unselectable(&highlights, line_width);
-        let all_selectable_covered =
-            all_selectable_in_range(&unselectable_intervals, line_width, c_start, c_end);
-
-        if all_selectable_covered && is_copy_cont && source_text_emitted {
-            continue;
-        }
-
-        if all_selectable_covered {
-            let src =
-                external_source_text_for_selection(buf, r, sr, er).or(dec.source_text.as_deref());
-            if let Some(src) = src {
-                out.push_str(src);
-                source_text_emitted = true;
-                continue;
-            }
-        }
-
-        emit_row_cells(line, &highlights, c_start, c_end, &mut out);
+        let decoration = buf.decoration_at(r);
+        out.push_row(
+            r as u64,
+            CopyRow {
+                text: line,
+                highlights: &highlights,
+                decoration,
+            },
+            cell_start,
+            cell_end,
+        );
     }
-    out
+    out.finish()
 }
 
-fn external_source_text_for_selection(
-    buf: &Buffer,
-    row: usize,
-    selection_start_row: usize,
-    selection_end_row: usize,
-) -> Option<&str> {
-    let dec = buf.decoration_at(row);
-    let src = dec.external_source_text.as_deref()?;
-    let (group_start, group_end) = external_source_group(buf, row);
-    if selection_start_row < group_start || selection_end_row > group_end {
-        Some(src)
-    } else {
-        None
-    }
-}
-
-fn external_source_group(buf: &Buffer, row: usize) -> (usize, usize) {
-    let mut start = row;
-    while start > 0 && external_source_group_row(buf, start - 1) {
-        start -= 1;
-    }
-
-    let mut end = row;
-    while end + 1 < buf.line_count() && external_source_group_row(buf, end + 1) {
-        end += 1;
-    }
-
-    (start, end)
-}
-
-fn external_source_group_row(buf: &Buffer, row: usize) -> bool {
-    let dec = buf.decoration_at(row);
-    dec.external_source_text.is_some() || dec.copy_continuation
+fn external_source_group_decoration(decoration: &LineDecoration) -> bool {
+    decoration.external_source_text.is_some() || decoration.copy_continuation
 }
 
 fn byte_to_row_col(lines: &[String], byte: usize) -> (usize, usize) {
@@ -681,6 +779,49 @@ mod tests {
             },
         );
         assert_eq!(copy_byte_range(&buf, 0, 7), "abcdef");
+    }
+
+    #[test]
+    fn streaming_copy_preserves_external_source_group_across_pushes() {
+        let mut buf = Buffer::new(BufId(1), Default::default());
+        buf.set_all_lines(vec!["before".into(), "echo hi".into(), "echo bye".into()]);
+        buf.set_decoration(
+            1,
+            LineDecoration {
+                source_text: Some("echo hi".into()),
+                external_source_text: Some("```sh\necho hi".into()),
+                ..Default::default()
+            },
+        );
+        buf.set_decoration(
+            2,
+            LineDecoration {
+                source_text: Some("echo bye".into()),
+                external_source_text: Some("echo bye\n```".into()),
+                ..Default::default()
+            },
+        );
+
+        let mut out = CopyRangeAccumulator::new(0, 2);
+        for row in 0..3 {
+            let line = buf.get_line(row).expect("line");
+            let highlights = buf.highlights_at(row);
+            out.push_row(
+                row as u64,
+                CopyRow {
+                    text: line,
+                    highlights: &highlights,
+                    decoration: buf.decoration_at(row),
+                },
+                0,
+                text::byte_to_cell(line, line.len()),
+            );
+        }
+
+        assert_eq!(
+            out.finish(),
+            copy_byte_range(&buf, 0, "before\necho hi\necho bye".len())
+        );
     }
 
     #[test]

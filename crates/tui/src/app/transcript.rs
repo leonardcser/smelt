@@ -277,6 +277,11 @@ impl TranscriptView {
         )
     }
 
+    pub(crate) fn prepare_layout(&mut self, lua: &LuaRuntime, width: u16) {
+        self.projection
+            .prepare_layout(lua, &mut self.transcript.history, width);
+    }
+
     pub(crate) fn fold_node(
         &mut self,
         lua: &LuaRuntime,
@@ -284,8 +289,7 @@ impl TranscriptView {
         id: crate::content::render_plan::RenderNodeId,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
-        self.projection
-            .rebuild_row_index(lua, &mut self.transcript.history, width);
+        self.prepare_layout(lua, width);
         self.projection
             .fold_node(&self.transcript.history, id, action)
     }
@@ -296,8 +300,7 @@ impl TranscriptView {
         width: u16,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
-        self.projection
-            .rebuild_row_index(lua, &mut self.transcript.history, width);
+        self.prepare_layout(lua, width);
         self.projection.fold_all(&self.transcript.history, action)
     }
 
@@ -308,8 +311,7 @@ impl TranscriptView {
         kind: &str,
         action: crate::content::transcript_buf::FoldAction,
     ) -> bool {
-        self.projection
-            .rebuild_row_index(lua, &mut self.transcript.history, width);
+        self.prepare_layout(lua, width);
         self.projection
             .fold_block_kind(&self.transcript.history, kind, action)
     }
