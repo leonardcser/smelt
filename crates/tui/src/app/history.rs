@@ -1059,7 +1059,7 @@ impl TuiApp {
         self.persister.save(crate::persist::PersistRequest {
             session_id,
             session_dir,
-            snapshot,
+            write: crate::persist::PersistSessionWrite::Snapshot(snapshot),
             blobs,
             descriptor_start_idx,
             descriptor_records,
@@ -1341,22 +1341,18 @@ impl TuiApp {
                 return false;
             }
         };
-        let snapshot = smelt_store::SessionSnapshot {
+        let suffix = smelt_store::SessionHistorySuffix {
             state,
-            meta_json: None,
             history_start_idx,
             history_len,
             history,
-            turn_metas: Vec::new(),
-            metadata_snapshots: Vec::new(),
-            accounting_snapshots: Vec::new(),
         };
         let session_id = session.id.clone();
         let session_dir = session::dir_for(session);
         self.persister.save(crate::persist::PersistRequest {
             session_id,
             session_dir,
-            snapshot,
+            write: crate::persist::PersistSessionWrite::HistorySuffix(suffix),
             blobs: self.pending_image_blobs(),
             descriptor_start_idx,
             descriptor_records,

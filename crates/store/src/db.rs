@@ -16,7 +16,7 @@ use crate::meta::{self, SessionMeta, SessionState, WriterLease};
 use crate::object::{self, ObjectMeta, StoredObject};
 use crate::request_audit::{self, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary};
 use crate::schema;
-use crate::session_snapshot::{self, SessionSaveReport, SessionSnapshot};
+use crate::session_snapshot::{self, SessionHistorySuffix, SessionSaveReport, SessionSnapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenMode {
@@ -332,6 +332,35 @@ impl SessionDb {
         })
     }
 
+    pub fn save_history_suffix_and_transcript_descriptor_suffix_as_writer(
+        &self,
+        suffix: &SessionHistorySuffix,
+        start_descriptor_idx: usize,
+        records: &[TranscriptDescriptorRecord],
+    ) -> Result<SessionSaveReport> {
+        let lease = self.current_process_writer_lease()?;
+        let expected_revision = self
+            .session_state()?
+            .as_ref()
+            .map_or(0, |state| state.revision);
+        self.immediate_transaction(|conn| {
+            let report = session_snapshot::save_session_history_suffix_in_transaction(
+                conn,
+                suffix,
+                Some(expected_revision),
+                Some(&lease),
+                self.object_compression,
+            )?;
+            history::replace_transcript_descriptor_suffix_in_transaction(
+                conn,
+                start_descriptor_idx,
+                records,
+                self.object_compression,
+            )?;
+            Ok(report)
+        })
+    }
+
     pub fn load_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {
         session_snapshot::load_session_snapshot(&self.conn)
     }
@@ -527,6 +556,75 @@ mod tests {
             db.search_transcript_candidates("updated two").unwrap(),
             vec![]
         );
+    }
+
+    #[test]
+    fn history_suffix_write_appends_history_and_descriptors_transactionally() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let initial_history = vec![
+            protocol::HistoryItem::user(protocol::Content::text("old user")),
+            protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text("old assistant")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        let initial_snapshot = SessionSnapshot {
+            state: test_session_state("typed-suffix", initial_history.len()),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: initial_history.len(),
+            history: initial_history.clone(),
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+        db.save_session_snapshot_for_import(&initial_snapshot)
+            .unwrap();
+        let initial_descriptors = vec![
+            transcript_record_with_history(0, 0, "old-user", "old user"),
+            transcript_record_with_history(1, 1, "old-assistant", "old assistant"),
+        ];
+        db.replace_transcript_descriptor_records(&initial_descriptors)
+            .unwrap();
+
+        let appended = protocol::HistoryItem::user(protocol::Content::text("new user"));
+        let suffix = SessionHistorySuffix {
+            state: test_session_state("typed-suffix", 3),
+            history_start_idx: 2,
+            history_len: 3,
+            history: vec![appended.clone()],
+        };
+        let appended_descriptor = transcript_record_with_history(2, 2, "new-user", "new user");
+        let report = db
+            .save_history_suffix_and_transcript_descriptor_suffix_as_writer(
+                &suffix,
+                2,
+                std::slice::from_ref(&appended_descriptor),
+            )
+            .unwrap();
+
+        assert_eq!(report.history_deleted, 0);
+        assert_eq!(report.history_inserted, 1);
+        assert_eq!(report.history_unchanged, 2);
+        assert_eq!(
+            db.read_history_items_range(0..3).unwrap(),
+            vec![
+                initial_history[0].clone(),
+                initial_history[1].clone(),
+                appended
+            ]
+        );
+        assert_eq!(
+            db.read_transcript_descriptor_records().unwrap(),
+            vec![
+                initial_descriptors[0].clone(),
+                initial_descriptors[1].clone(),
+                appended_descriptor,
+            ]
+        );
+        assert_eq!(db.session_state().unwrap().unwrap().history_len, 3);
     }
 
     #[test]
@@ -1713,6 +1811,30 @@ mod tests {
 
         let err = SessionDb::open(&path).unwrap_err();
         assert!(matches!(err, StoreError::Sqlite(_)));
+    }
+
+    fn test_session_state(id: &str, history_len: usize) -> SessionState {
+        SessionState {
+            id: id.to_string(),
+            title: None,
+            slug: None,
+            first_user_message: None,
+            cwd: None,
+            mode: None,
+            reasoning_effort: None,
+            model: None,
+            parent_id: None,
+            accounting_json: None,
+            checkpoint_json: None,
+            context_tokens: None,
+            context_tokens_history_len: None,
+            display_context_tokens: None,
+            session_cost_usd: 0.0,
+            revision: 0,
+            history_len: history_len as u64,
+            created_at: 1,
+            updated_at: 1,
+        }
     }
 
     fn transcript_record(

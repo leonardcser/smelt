@@ -25,6 +25,14 @@ pub struct SessionSnapshot {
     pub accounting_snapshots: Vec<(u64, Value)>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionHistorySuffix {
+    pub state: SessionState,
+    pub history_start_idx: usize,
+    pub history_len: usize,
+    pub history: Vec<HistoryItem>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SessionSaveReport {
     pub history_deleted: u64,
@@ -161,6 +169,71 @@ pub(crate) fn save_session_snapshot_in_transaction(
         history_deleted,
         history_inserted,
         history_unchanged: common_len as u64,
+        revision: state.revision,
+        changed,
+    })
+}
+
+pub(crate) fn save_session_history_suffix_in_transaction(
+    conn: &Connection,
+    suffix: &SessionHistorySuffix,
+    expected_revision: Option<u64>,
+    writer_lease: Option<&WriterLease>,
+    compression: ObjectCompression,
+) -> Result<SessionSaveReport> {
+    if let Some(lease) = writer_lease {
+        meta::acquire_writer_lease(conn, lease, 30 * 60)?;
+    }
+    let current_state = meta::session_state(conn)?;
+    if let Some(expected_revision) = expected_revision {
+        let current_revision = current_state.as_ref().map_or(0, |state| state.revision);
+        if current_revision != expected_revision {
+            return Err(StoreError::Integrity(format!(
+                "session revision changed: expected {expected_revision}, found {current_revision}"
+            )));
+        }
+    }
+
+    let current_len = current_state
+        .as_ref()
+        .map_or(0, |state| state.history_len as usize);
+    let history_start = suffix.history_start_idx.min(suffix.history_len);
+    if suffix.history_len != history_start + suffix.history.len() {
+        return Err(StoreError::Integrity(format!(
+            "history suffix shape is invalid: start {history_start}, suffix {}, final {}",
+            suffix.history.len(),
+            suffix.history_len
+        )));
+    }
+    if history_start > current_len {
+        return Err(StoreError::Integrity(format!(
+            "history unchanged prefix exceeds stored rows: prefix {history_start}, stored {current_len}",
+        )));
+    }
+
+    let history_deleted = current_len.saturating_sub(history_start) as u64;
+    let history_inserted = suffix.history_len.saturating_sub(history_start) as u64;
+    if history_deleted > 0 || history_inserted > 0 {
+        history::replace_history_suffix(conn, history_start, &suffix.history, compression)?;
+    }
+
+    let state_changed = session_state_changed(current_state.as_ref(), &suffix.state);
+    let changed = history_deleted > 0 || history_inserted > 0 || state_changed;
+    let mut state = suffix.state.clone();
+    state.history_len = suffix.history_len as u64;
+    state.revision = if changed {
+        current_state.as_ref().map_or(1, |state| state.revision + 1)
+    } else {
+        current_state
+            .as_ref()
+            .map_or(suffix.state.revision, |state| state.revision)
+    };
+    meta::upsert_session_state(conn, &state)?;
+
+    Ok(SessionSaveReport {
+        history_deleted,
+        history_inserted,
+        history_unchanged: history_start as u64,
         revision: state.revision,
         changed,
     })
