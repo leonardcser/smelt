@@ -289,27 +289,6 @@ pub(crate) fn read_history_items_range(
     Ok(out)
 }
 
-pub(crate) fn read_history_items_range(
-    conn: &Connection,
-    range: Range<usize>,
-) -> Result<Vec<HistoryItem>> {
-    if range.end <= range.start {
-        return Ok(Vec::new());
-    }
-    let start = checked_i64(range.start as u64, "start_idx")?;
-    let end = checked_i64(range.end as u64, "end_idx")?;
-    let mut stmt =
-        conn.prepare("SELECT json FROM history_items WHERE idx >= ?1 AND idx < ?2 ORDER BY idx")?;
-    let rows = stmt.query_map(params![start, end], |row| row.get::<_, String>(0))?;
-    let mut out = Vec::new();
-    for row in rows {
-        let mut value: Value = serde_json::from_str(&row?)?;
-        rehydrate_object_refs(conn, &mut value)?;
-        out.push(serde_json::from_value(value)?);
-    }
-    Ok(out)
-}
-
 pub(crate) fn history_text_bytes(conn: &Connection) -> Result<u64> {
     let _perf = perf::begin("store:history:text_bytes");
     let total: i64 = conn.query_row(

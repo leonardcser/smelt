@@ -336,6 +336,14 @@ struct SearchBenchSample {
     nav_ctrl_u20_ms: f64,
     nav_gg_ms: f64,
     nav_g_ms: f64,
+    prod_burst_top_ctrl_d80_ms: f64,
+    prod_burst_top_down80_ms: f64,
+    prod_burst_bottom_ctrl_u80_ms: f64,
+    prod_burst_bottom_up80_ms: f64,
+    prod_burst_mid_ctrl_d80_ms: f64,
+    prod_burst_mid_down80_ms: f64,
+    prod_burst_mid_ctrl_u80_ms: f64,
+    prod_burst_mid_up80_ms: f64,
     burst_top_ctrl_d80_ms: f64,
     burst_top_down80_ms: f64,
     burst_bottom_ctrl_u80_ms: f64,
@@ -347,10 +355,13 @@ struct SearchBenchSample {
     rare_ms: f64,
     common_submit_ms: f64,
     next100_ms: f64,
+    sparse_rare_ms: f64,
+    sparse_common_submit_ms: f64,
+    sparse_next100_ms: f64,
     after_append_ms: f64,
 }
 
-fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64); 20] {
+fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64); 31] {
     [
         ("width_resize", sample.width_resize_ms),
         ("height_resize", sample.height_resize_ms),
@@ -360,6 +371,17 @@ fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64
         ("nav_ctrl_u20", sample.nav_ctrl_u20_ms),
         ("nav_gg", sample.nav_gg_ms),
         ("nav_G", sample.nav_g_ms),
+        ("prod_burst_top_ctrl_d80", sample.prod_burst_top_ctrl_d80_ms),
+        ("prod_burst_top_down80", sample.prod_burst_top_down80_ms),
+        (
+            "prod_burst_bottom_ctrl_u80",
+            sample.prod_burst_bottom_ctrl_u80_ms,
+        ),
+        ("prod_burst_bottom_up80", sample.prod_burst_bottom_up80_ms),
+        ("prod_burst_mid_ctrl_d80", sample.prod_burst_mid_ctrl_d80_ms),
+        ("prod_burst_mid_down80", sample.prod_burst_mid_down80_ms),
+        ("prod_burst_mid_ctrl_u80", sample.prod_burst_mid_ctrl_u80_ms),
+        ("prod_burst_mid_up80", sample.prod_burst_mid_up80_ms),
         ("burst_top_ctrl_d80", sample.burst_top_ctrl_d80_ms),
         ("burst_top_down80", sample.burst_top_down80_ms),
         ("burst_bottom_ctrl_u80", sample.burst_bottom_ctrl_u80_ms),
@@ -371,6 +393,9 @@ fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64
         ("rare", sample.rare_ms),
         ("common_submit", sample.common_submit_ms),
         ("next100", sample.next100_ms),
+        ("sparse_rare", sample.sparse_rare_ms),
+        ("sparse_common_submit", sample.sparse_common_submit_ms),
+        ("sparse_next100", sample.sparse_next100_ms),
         ("after_append", sample.after_append_ms),
     ]
 }
@@ -616,6 +641,38 @@ fn measure_transcript_burst_operation(
     ms
 }
 
+fn measure_transcript_burst_operation_without_trace(
+    app: &mut TestApp,
+    label: &'static str,
+    report_perf: bool,
+    position: BurstBenchPosition,
+    key: BurstBenchKey,
+) -> f64 {
+    const BURST_EVENTS: usize = 80;
+
+    prepare_burst_bench_position(app, position);
+    let before_scroll = app.app.transcript_win().scroll_top();
+    app.app.transcript.set_scroll_trace_enabled(false);
+    smelt_perf::perf::clear();
+    let start = std::time::Instant::now();
+    for _ in 0..BURST_EVENTS {
+        key.press(app);
+    }
+    assert_eq!(
+        app.app.transcript_win().scroll_top(),
+        before_scroll,
+        "{label} mutated Window::scroll_top before projection"
+    );
+    app.render_silent();
+    let ms = elapsed_ms(start.elapsed());
+    let snapshot = smelt_perf::perf::snapshot();
+    if report_perf {
+        search_perf_snapshot(label, &snapshot);
+    }
+    assert_burst_operation_gates(&snapshot, label);
+    ms
+}
+
 fn measure_transcript_view_operation(
     app: &mut TestApp,
     label: &'static str,
@@ -668,6 +725,47 @@ fn measure_transcript_copy_operation(
     }
     assert_copy_operation_gates(&snapshot, label, copied_rows.saturating_add(1));
     ms
+}
+
+fn measure_sparse_search_navigation(app: &mut TestApp, report_perf: bool) -> (f64, f64, f64) {
+    app.app.transcript.set_scroll_trace_enabled(false);
+    smelt_perf::perf::clear();
+    let rare_start = std::time::Instant::now();
+    app.app.submit_search(
+        crate::app::TRANSCRIPT_WIN,
+        crate::app::search::SearchDirection::Forward,
+        "needle-target".into(),
+    );
+    app.render_silent();
+    let rare_ms = elapsed_ms(rare_start.elapsed());
+    let rare_snapshot = smelt_perf::perf::snapshot();
+    if report_perf {
+        search_perf_snapshot("sparse_rare_cold", &rare_snapshot);
+    }
+    assert_no_full_search_hot_path_reads(&rare_snapshot, "sparse_rare_cold");
+
+    smelt_perf::perf::clear();
+    let common_start = std::time::Instant::now();
+    app.app.submit_search(
+        crate::app::TRANSCRIPT_WIN,
+        crate::app::search::SearchDirection::Forward,
+        "common-token".into(),
+    );
+    app.render_silent();
+    let common_submit_ms = elapsed_ms(common_start.elapsed());
+
+    let next_start = std::time::Instant::now();
+    for _ in 0..100 {
+        app.type_char('n');
+        app.render_silent();
+    }
+    let next100_ms = elapsed_ms(next_start.elapsed());
+    let common_snapshot = smelt_perf::perf::snapshot();
+    if report_perf {
+        search_perf_snapshot("sparse_common_hot_next100", &common_snapshot);
+    }
+    assert_no_full_search_hot_path_reads(&common_snapshot, "sparse_common_hot_next100");
+    (rare_ms, common_submit_ms, next100_ms)
 }
 
 fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenchSample {
@@ -838,6 +936,64 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     );
 
     install_sparse_resume_bench_transcript(&mut app);
+    let prod_burst_top_ctrl_d80_ms = measure_transcript_burst_operation_without_trace(
+        &mut app,
+        "prod_burst_top_ctrl_d80",
+        report_perf,
+        BurstBenchPosition::Top,
+        BurstBenchKey::CtrlD,
+    );
+    let prod_burst_top_down80_ms = measure_transcript_burst_operation_without_trace(
+        &mut app,
+        "prod_burst_top_down80",
+        report_perf,
+        BurstBenchPosition::Top,
+        BurstBenchKey::Down,
+    );
+    let prod_burst_bottom_ctrl_u80_ms = measure_transcript_burst_operation_without_trace(
+        &mut app,
+        "prod_burst_bottom_ctrl_u80",
+        report_perf,
+        BurstBenchPosition::Bottom,
+        BurstBenchKey::CtrlU,
+    );
+    let prod_burst_bottom_up80_ms = measure_transcript_burst_operation_without_trace(
+        &mut app,
+        "prod_burst_bottom_up80",
+        report_perf,
+        BurstBenchPosition::Bottom,
+        BurstBenchKey::Up,
+    );
+    let prod_burst_mid_ctrl_d80_ms = measure_transcript_burst_operation_without_trace(
+        &mut app,
+        "prod_burst_mid_ctrl_d80",
+        report_perf,
+        BurstBenchPosition::Middle,
+        BurstBenchKey::CtrlD,
+    );
+    let prod_burst_mid_down80_ms = measure_transcript_burst_operation_without_trace(
+        &mut app,
+        "prod_burst_mid_down80",
+        report_perf,
+        BurstBenchPosition::Middle,
+        BurstBenchKey::Down,
+    );
+    let prod_burst_mid_ctrl_u80_ms = measure_transcript_burst_operation_without_trace(
+        &mut app,
+        "prod_burst_mid_ctrl_u80",
+        report_perf,
+        BurstBenchPosition::Middle,
+        BurstBenchKey::CtrlU,
+    );
+    let prod_burst_mid_up80_ms = measure_transcript_burst_operation_without_trace(
+        &mut app,
+        "prod_burst_mid_up80",
+        report_perf,
+        BurstBenchPosition::Middle,
+        BurstBenchKey::Up,
+    );
+
+    install_sparse_resume_bench_transcript(&mut app);
     let burst_top_ctrl_d80_ms = measure_transcript_burst_operation(
         &mut app,
         "burst_top_ctrl_d80",
@@ -894,6 +1050,10 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         BurstBenchPosition::Middle,
         BurstBenchKey::Up,
     );
+
+    install_sparse_resume_bench_transcript(&mut app);
+    let (sparse_rare_ms, sparse_common_submit_ms, sparse_next100_ms) =
+        measure_sparse_search_navigation(&mut app, report_perf);
     smelt_perf::perf::set_enabled(false);
 
     SearchBenchSample {
@@ -907,6 +1067,14 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         nav_ctrl_u20_ms,
         nav_gg_ms,
         nav_g_ms,
+        prod_burst_top_ctrl_d80_ms,
+        prod_burst_top_down80_ms,
+        prod_burst_bottom_ctrl_u80_ms,
+        prod_burst_bottom_up80_ms,
+        prod_burst_mid_ctrl_d80_ms,
+        prod_burst_mid_down80_ms,
+        prod_burst_mid_ctrl_u80_ms,
+        prod_burst_mid_up80_ms,
         burst_top_ctrl_d80_ms,
         burst_top_down80_ms,
         burst_bottom_ctrl_u80_ms,
@@ -918,6 +1086,9 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         rare_ms,
         common_submit_ms,
         next100_ms,
+        sparse_rare_ms,
+        sparse_common_submit_ms,
+        sparse_next100_ms,
         after_append_ms,
     }
 }
