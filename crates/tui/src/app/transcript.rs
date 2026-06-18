@@ -736,6 +736,13 @@ impl TranscriptDocument {
         } else {
             ((row / avg_rows) as usize).min(total.saturating_sub(1))
         };
+        if row != RowIndex::MAX {
+            if let Some(active) = self.active_descriptor_range.as_ref() {
+                if active.start.get() <= center && center < active.end.get() {
+                    return Some(active.clone());
+                }
+            }
+        }
         let visible_descriptors =
             (RowIndex::from(viewport_rows.max(1)) / avg_rows).saturating_add(1) as usize;
         let count = visible_descriptors.saturating_mul(4).max(32).min(total);
@@ -1376,6 +1383,31 @@ mod document_tests {
         assert_eq!(document.sparse_descriptors.loaded_ranges().len(), 2);
         assert!(compact_transcript_contains(&document, "block 40"));
         assert!(!compact_transcript_contains(&document, "block 90"));
+    }
+
+    #[test]
+    fn sparse_nearby_scroll_reuses_active_descriptor_window() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let records = transcript_records(100);
+        let mut document = TranscriptDocument::from_loaded_transcript(sparse_loaded_transcript(
+            &records,
+            40..48,
+            None,
+        ));
+        let active_before = document.active_descriptor_range.clone();
+
+        let _plan = document.plan_projection_measured(
+            &lua,
+            80,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_row(82),
+            10,
+        );
+
+        assert_eq!(document.active_descriptor_range, active_before);
+        assert_eq!(document.sparse_descriptors.loaded_ranges().len(), 1);
+        assert!(compact_transcript_contains(&document, "block 40"));
     }
 
     #[test]
@@ -2312,7 +2344,7 @@ mod tests {
             document.descriptor_range_state(3..4),
             super::DescriptorRangeState::Missing
         );
-        assert_eq!(document.history().order.len(), 4);
+        assert_eq!(document.history().order.len(), 2);
         let origins = document
             .history()
             .descriptor_records()
@@ -2324,8 +2356,6 @@ mod tests {
             vec![
                 Some(smelt_core::BlockOrigin::History(1)),
                 Some(smelt_core::BlockOrigin::History(2)),
-                Some(smelt_core::BlockOrigin::History(4)),
-                Some(smelt_core::BlockOrigin::History(5)),
             ]
         );
     }
