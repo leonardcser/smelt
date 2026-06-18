@@ -15,12 +15,16 @@ fn prompt_picker_ctrl_c_dismisses_before_idle_quit() {
     assert!(app.run_lua(
         r#"
             _G.prompt_picker_dismissed = false
+            _G.prompt_picker_on_dismiss = 0
             smelt.spawn(function()
                 local result = smelt.prompt.open_picker({
                     items = {
                         { label = "alpha" },
                         { label = "beta" },
                     },
+                    on_dismiss = function()
+                        _G.prompt_picker_on_dismiss = _G.prompt_picker_on_dismiss + 1
+                    end,
                 })
                 _G.prompt_picker_dismissed = result == nil
             end)
@@ -41,12 +45,48 @@ fn prompt_picker_ctrl_c_dismisses_before_idle_quit() {
         "first Ctrl-C should dismiss picker"
     );
     assert!(app.run_lua(r#"assert(_G.prompt_picker_dismissed == true)"#));
+    assert!(app.run_lua(r#"assert(_G.prompt_picker_on_dismiss == 1)"#));
 
     app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert!(
         app.quit_requested(),
         "second Ctrl-C after dismissal should quit"
     );
+}
+
+#[test]
+fn prompt_picker_esc_fires_on_dismiss() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+            _G.prompt_picker_esc_dismissed = false
+            _G.prompt_picker_esc_on_dismiss = 0
+            smelt.spawn(function()
+                local result = smelt.prompt.open_picker({
+                    items = {
+                        { label = "alpha" },
+                        { label = "beta" },
+                    },
+                    on_dismiss = function()
+                        _G.prompt_picker_esc_on_dismiss = _G.prompt_picker_esc_on_dismiss + 1
+                    end,
+                })
+                _G.prompt_picker_esc_dismissed = result == nil
+            end)
+        "#,
+    ));
+    drive_lua_tasks(&mut app);
+    assert!(
+        !app.app.picker_state.is_empty(),
+        "prompt picker should open"
+    );
+
+    app.press(KeyCode::Esc);
+    drive_lua_tasks(&mut app);
+
+    assert!(app.app.picker_state.is_empty(), "Esc should dismiss picker");
+    assert!(app.run_lua(r#"assert(_G.prompt_picker_esc_dismissed == true)"#));
+    assert!(app.run_lua(r#"assert(_G.prompt_picker_esc_on_dismiss == 1)"#));
 }
 
 #[test]

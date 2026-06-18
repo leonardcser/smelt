@@ -111,7 +111,7 @@ end
 ---@field on_select? fun(item: smelt.prompt.PickerItem): nil Fires on every cursor move.
 ---@field on_enter? fun(item: smelt.prompt.PickerItem, idx: integer): nil Persistent-mode accept handler.
 ---@field rank? fun(items: table[], query: string, original: smelt.prompt.PickerItem[]): integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order.
----@field on_dismiss? fun(): nil Fires on Esc.
+---@field on_dismiss? fun(): nil Fires on Esc/Ctrl-C.
 
 -- Prompt-docked picker. Filters `opts.items` (or `opts.items()`) against
 -- the current prompt buffer on every keystroke, ranked by `opts.rank` or
@@ -132,6 +132,7 @@ function smelt.prompt.open_picker(opts)
 
   local on_select = opts.on_select
   local on_enter = opts.on_enter
+  local on_dismiss = opts.on_dismiss
   local rank = opts.rank
   if rank ~= nil and type(rank) ~= "function" then
     error("smelt.prompt.open_picker: opts.rank must be a function", 2)
@@ -213,6 +214,16 @@ function smelt.prompt.open_picker(opts)
   local function close_with(result)
     teardown()
     smelt.task.resume(task_id, result)
+  end
+
+  local function dismiss()
+    if on_dismiss then
+      local ok, err = pcall(on_dismiss)
+      if not ok then
+        smelt.notify.error("prompt picker on_dismiss: " .. tostring(err))
+      end
+    end
+    close_with(nil)
   end
 
   local function move(delta)
@@ -367,8 +378,8 @@ function smelt.prompt.open_picker(opts)
     if picked then smelt.prompt.set_text(picked.label) end
     accept("tab", picked, item)
   end)
-  regs[#regs + 1] = prompt:key("esc",   function() close_with(nil) end)
-  regs[#regs + 1] = prompt:key("c-c",   function() close_with(nil) end)
+  regs[#regs + 1] = prompt:key("esc",   function() dismiss() end)
+  regs[#regs + 1] = prompt:key("c-c",   function() dismiss() end)
 
   regs[#regs + 1] = prompt:on("text_changed", function(ctx)
     query = ctx.text or ""
