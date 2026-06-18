@@ -165,9 +165,9 @@ impl SqliteTranscriptStore {
 }
 
 fn load_transcript_from_sqlite_dir(session_dir: PathBuf) -> Option<Transcript> {
-    let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
+    let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
     let rows = store.read_descriptor_records().ok()?;
-    transcript_from_descriptor_rows(rows)
+    crate::app::transcript::LoadedTranscript::from_descriptor_rows(rows)
 }
 
 fn load_transcript_tail_from_sqlite_dir(
@@ -175,7 +175,7 @@ fn load_transcript_tail_from_sqlite_dir(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    let store = SqliteTranscriptStore::open_read_only(session_dir).ok()?;
+    let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
     let target_rows = descriptor_tail_target_rows(viewport_rows);
     let slice = store
         .read_tail_descriptor_slice_for_rows(width, target_rows)
@@ -185,7 +185,7 @@ fn load_transcript_tail_from_sqlite_dir(
         slice.total_count as u64,
     );
     smelt_perf::perf::record_value("transcript:sqlite:descriptor_loaded", slice.len() as u64);
-    transcript_from_descriptor_slice(slice)
+    crate::app::transcript::LoadedTranscript::from_descriptor_slice(slice, session_dir)
 }
 
 fn descriptor_tail_target_rows(viewport_rows: u16) -> u16 {
@@ -207,39 +207,6 @@ fn estimate_descriptor_rows(
             text_rows.max(1).saturating_add(1)
         })
         .sum()
-}
-
-fn transcript_from_descriptor_slice(
-    slice: smelt_store::TranscriptDescriptorSlice,
-) -> Option<crate::app::transcript::LoadedTranscript> {
-    if slice.is_empty() {
-        return None;
-    }
-    let descriptor_slice = crate::app::transcript::LoadedTranscriptDescriptorSlice {
-        start: slice.start,
-        end: slice.end(),
-        total_count: slice.total_count,
-        hydration: slice.hydration,
-    };
-    let transcript = transcript_from_descriptor_rows(slice.into_records())?;
-    Some(crate::app::transcript::LoadedTranscript {
-        transcript,
-        descriptor_slice: Some(descriptor_slice),
-    })
-}
-
-fn transcript_from_descriptor_rows(
-    rows: Vec<smelt_store::TranscriptDescriptorRecord>,
-) -> Option<Transcript> {
-    if rows.is_empty() {
-        return None;
-    }
-    let records = rows
-        .into_iter()
-        .map(TryInto::try_into)
-        .collect::<Result<Vec<_>, serde_json::Error>>()
-        .ok()?;
-    Some(Transcript::from_descriptor_records(records))
 }
 
 fn transcript_covers_history(transcript: &Transcript, session: &session::Session) -> bool {
@@ -1031,10 +998,24 @@ impl TuiApp {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
             if !block_history_covers_history(self.transcript.history(), &self.core.session) {
-                let transcript = build_transcript_from_session(&self.lua, &self.core.session);
-                self.transcript.replace_transcript(transcript);
-                self.transcript_descriptors_persisted = false;
-                self.transcript.history_mut().mark_changed();
+                if let Some(loaded) =
+                    self.transcript
+                        .load_full_descriptor_slice()
+                        .filter(|loaded| {
+                            block_history_covers_history(
+                                &loaded.transcript.history,
+                                &self.core.session,
+                            )
+                        })
+                {
+                    self.transcript.replace_loaded_transcript(loaded);
+                    self.transcript_descriptors_persisted = true;
+                } else {
+                    let transcript = build_transcript_from_session(&self.lua, &self.core.session);
+                    self.transcript.replace_transcript(transcript);
+                    self.transcript_descriptors_persisted = false;
+                    self.transcript.history_mut().mark_changed();
+                }
             }
             self.sync_session_snapshot();
         }

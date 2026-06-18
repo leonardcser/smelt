@@ -15,6 +15,7 @@ use smelt_core::content::transcript::Transcript;
 use smelt_core::lua::runtime::LuaRuntime;
 use smelt_core::transcript_model::{Block, BlockHistory, BlockId, ToolOutputRef, ToolStatus};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +30,7 @@ pub(crate) struct LoadedTranscriptDescriptorSlice {
 pub(crate) struct LoadedTranscript {
     pub(crate) transcript: Transcript,
     pub(crate) descriptor_slice: Option<LoadedTranscriptDescriptorSlice>,
+    pub(crate) session_dir: Option<PathBuf>,
 }
 
 impl LoadedTranscript {
@@ -36,7 +38,43 @@ impl LoadedTranscript {
         Self {
             transcript,
             descriptor_slice: None,
+            session_dir: None,
         }
+    }
+
+    pub(crate) fn from_descriptor_rows(
+        rows: Vec<smelt_store::TranscriptDescriptorRecord>,
+    ) -> Option<Transcript> {
+        if rows.is_empty() {
+            return None;
+        }
+        let records = rows
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, serde_json::Error>>()
+            .ok()?;
+        Some(Transcript::from_descriptor_records(records))
+    }
+
+    pub(crate) fn from_descriptor_slice(
+        slice: smelt_store::TranscriptDescriptorSlice,
+        session_dir: PathBuf,
+    ) -> Option<Self> {
+        if slice.is_empty() {
+            return None;
+        }
+        let descriptor_slice = LoadedTranscriptDescriptorSlice {
+            start: slice.start,
+            end: slice.end(),
+            total_count: slice.total_count,
+            hydration: slice.hydration,
+        };
+        let transcript = Self::from_descriptor_rows(slice.into_records())?;
+        Some(Self {
+            transcript,
+            descriptor_slice: Some(descriptor_slice),
+            session_dir: Some(session_dir),
+        })
     }
 }
 
@@ -46,6 +84,7 @@ pub(crate) struct TranscriptDocument {
     render_cache: TranscriptRenderCache,
     compaction_preview_id: Option<BlockId>,
     descriptor_slice: Option<LoadedTranscriptDescriptorSlice>,
+    session_dir: Option<PathBuf>,
 }
 
 pub(crate) struct TranscriptRenderContext {
@@ -142,6 +181,7 @@ impl TranscriptDocument {
             render_cache: TranscriptRenderCache::new(),
             compaction_preview_id: None,
             descriptor_slice: loaded.descriptor_slice,
+            session_dir: loaded.session_dir,
         }
     }
 
@@ -153,6 +193,21 @@ impl TranscriptDocument {
         let inline_options = self.projection.inline_options().clone();
         *self = Self::from_loaded_transcript(loaded);
         self.set_inline_options(inline_options);
+    }
+
+    pub(crate) fn load_full_descriptor_slice(&self) -> Option<LoadedTranscript> {
+        let total_count = self.descriptor_slice?.total_count;
+        self.load_descriptor_slice((0..total_count).into())
+    }
+
+    pub(crate) fn load_descriptor_slice(
+        &self,
+        range: smelt_store::TranscriptDescriptorRange,
+    ) -> Option<LoadedTranscript> {
+        let session_dir = self.session_dir.clone()?;
+        let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db")).ok()?;
+        let slice = db.read_transcript_descriptor_slice(range).ok()?;
+        LoadedTranscript::from_descriptor_slice(slice, session_dir)
     }
 
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
@@ -1314,5 +1369,50 @@ mod tests {
             "selection range should be expressed in materialized buffer rows"
         );
         assert!(ranges.iter().all(|(line, _, _)| *line < line_count));
+    }
+
+    #[test]
+    fn transcript_document_loads_descriptor_slice_from_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let records = (0..4)
+            .map(|idx| smelt_store::TranscriptDescriptorRecord {
+                block_idx: idx,
+                history_idx: None,
+                kind: "text".into(),
+                tool_call_id: None,
+                tool_name: None,
+                content_hash: format!("{idx}"),
+                estimated_text_bytes: 8,
+                preview_text: format!("block {idx}"),
+                search_text: format!("block {idx}"),
+                descriptor_json: serde_json::to_string(
+                    &smelt_core::TranscriptBlockDescriptor::Text {
+                        content: format!("block {idx}"),
+                    },
+                )
+                .unwrap(),
+                origin_json: Some(
+                    serde_json::to_string(&smelt_core::BlockOrigin::History(idx as usize)).unwrap(),
+                ),
+                tool_state_json: None,
+            })
+            .collect::<Vec<_>>();
+        db.replace_transcript_descriptor_records(&records).unwrap();
+        let tail = db.read_transcript_descriptor_tail_slice(1).unwrap();
+        drop(db);
+
+        let loaded = super::LoadedTranscript::from_descriptor_slice(tail, dir.path().to_path_buf())
+            .expect("loaded tail");
+        let document = super::TranscriptDocument::from_loaded_transcript(loaded);
+
+        let slice = document
+            .load_descriptor_slice((1..3).into())
+            .expect("loaded middle slice");
+        let descriptor_slice = slice.descriptor_slice.expect("descriptor metadata");
+        assert_eq!(descriptor_slice.start.get(), 1);
+        assert_eq!(descriptor_slice.end.get(), 3);
+        assert_eq!(descriptor_slice.total_count, 4);
+        assert_eq!(slice.transcript.history.order.len(), 2);
     }
 }
