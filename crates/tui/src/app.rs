@@ -180,7 +180,7 @@ pub struct TuiApp {
     /// wrapped source/ghost-text height.
     pub(crate) prompt_input_rows_override: Option<u16>,
     /// In-flight drag from non-selectable prompt top chrome.
-    pub(crate) prompt_resize_drag: Option<PromptResizeDrag>,
+    prompt_resize_drag: Option<PromptResizeDrag>,
     /// Last prompt resize-handle click, used to reset manual height on double-click.
     pub(crate) prompt_resize_last_click: Option<PromptResizeClick>,
     /// Parser-visible prompt placeholder. `placeholders` owns the app-level text;
@@ -195,6 +195,7 @@ pub struct TuiApp {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PromptResizeDrag {
+    pub(crate) chrome: &'static str,
     pub(crate) start_row: u16,
     pub(crate) start_input_rows: u16,
     pub(crate) dragged: bool,
@@ -1426,11 +1427,30 @@ impl TuiApp {
         self.core
             .cells
             .publish_if_changed("notification_visible", self.notification.is_some());
+        self.publish_prompt_resize_state();
 
         let cursor = self.focused_cursor_pos();
         self.core.cells.publish_if_changed("cursor_pos", cursor);
 
         self.publish_work_cells();
+    }
+
+    pub(crate) fn set_prompt_resize_drag(&mut self, drag: Option<PromptResizeDrag>) {
+        self.prompt_resize_drag = drag;
+        self.publish_prompt_resize_state();
+    }
+
+    pub(crate) fn publish_prompt_resize_state(&mut self) {
+        let active_chrome = self
+            .prompt_resize_drag
+            .map(|drag| drag.chrome)
+            .unwrap_or_default();
+        self.core
+            .cells
+            .publish_if_changed("prompt_resize_active", !active_chrome.is_empty());
+        self.core
+            .cells
+            .publish_if_changed("prompt_resize_chrome", active_chrome.to_string());
     }
 
     /// User-facing vim mode label for the focused surface - or empty

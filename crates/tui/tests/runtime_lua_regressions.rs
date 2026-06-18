@@ -1,4 +1,6 @@
 const PS_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/ps.lua");
+const BAR_LUA: &str = include_str!("../../../runtime/lua/smelt/_bar.lua");
+const PROMPT_BAR_LUA: &str = include_str!("../../../runtime/lua/smelt/prompt_bar.lua");
 const COPY_LUA: &str = include_str!("../../../runtime/lua/smelt/commands/copy.lua");
 const LABEL_VALUE_LUA: &str = include_str!("../../../runtime/lua/smelt/label_value.lua");
 const SESSION_LUA: &str = include_str!("../../../runtime/lua/smelt/session.lua");
@@ -237,6 +239,243 @@ fn ps_details_dialog_uses_list_dialog_height() {
     assert!(PS_LUA.contains("height = DIALOG_HEIGHT"));
     assert!(PS_LUA.contains("height      = DIALOG_HEIGHT"));
     assert!(!PS_LUA.contains("max_height = \"70%\""));
+}
+
+fn prompt_bar_lua_fixture() -> mlua::Lua {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        local next_buf_id = 0
+        smelt = {
+          __resize = false,
+          __resize_chrome = "",
+          __wins = {},
+          ns = function(name) return name end,
+          settings = { show_tokens = true, show_cost = true },
+          model = function() return "model" end,
+          reasoning = function() return "off" end,
+          cell = function(name)
+            return {
+              get = function()
+                if name == "prompt_resize_active" then return smelt.__resize end
+                if name == "prompt_resize_chrome" then return smelt.__resize_chrome end
+                if name == "work_state" then return "working" end
+                if name == "work_label" then return "run" end
+                if name == "work_elapsed_ms" then return 0 end
+                if name == "work_retry_attempt" then return 0 end
+                if name == "work_retry_remaining_ms" then return 0 end
+                if name == "notification_visible" then return false end
+                return nil
+              end,
+            }
+          end,
+          text = {
+            width = function(text)
+              local n = 0
+              for _ in utf8.codes(text or "") do n = n + 1 end
+              return n
+            end,
+            truncate_cells = function(text, width, opts)
+              text = text or ""
+              width = math.max(width or 0, 0)
+              local chars = {}
+              for _, code in utf8.codes(text) do chars[#chars + 1] = utf8.char(code) end
+              if #chars <= width then return text end
+              local suffix = (opts and opts.suffix) or "…"
+              if width <= 0 then return "" end
+              local out = {}
+              for i = 1, math.max(width - 1, 0) do out[#out + 1] = chars[i] end
+              out[#out + 1] = suffix
+              return table.concat(out)
+            end,
+            format_tokens = function(value) return tostring(value) end,
+            format_cost = function(value) return string.format("$%.2f", value) end,
+            format_duration = function(value) return tostring(value) .. "s" end,
+          },
+          spinner = {
+            glyph = function() return "*" end,
+            wave_color_at = function() return { 1, 2, 3 } end,
+          },
+          prompt = {
+            queued_rows = function() return {} end,
+            queued = function() return {} end,
+            has_stash = function() return false end,
+            text = function() return "" end,
+            is_modal = function() return false end,
+          },
+          session = {
+            context_tokens = function() return 1200 end,
+            context_window = function() return 10000 end,
+            cost = function() return 0.23 end,
+          },
+          buf = {
+            new = function()
+              next_buf_id = next_buf_id + 1
+              local b = { id = next_buf_id, _lines = {}, _marks = {} }
+              function b:lines(lines) self._lines = lines end
+              function b:clear_ns() self._marks = {} end
+              function b:mark(ns, row, start_col, opts)
+                self._marks[#self._marks + 1] = {
+                  ns = ns,
+                  row = row,
+                  start_col = start_col,
+                  end_col = opts.end_col,
+                  fg = opts.fg,
+                  hl_group = opts.hl_group,
+                }
+              end
+              return b
+            end,
+          },
+          win = {
+            new = function(buf, opts)
+              local w = { _buf = buf, _opts = opts or {} }
+              function w:buf() return self._buf end
+              function w:content_width() return 60 end
+              function w:rect() return { height = 1 } end
+              function w:set_renderer(fn) self.renderer = fn end
+              smelt.__wins[w._opts.name] = w
+              return w
+            end,
+          },
+        }
+        package.loaded["smelt.tips"] = {
+          enabled = function() return false end,
+          prompt_tip = function() return nil end,
+        }
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+
+    let bar_src = BAR_LUA.to_string();
+    let bar_loader = lua
+        .create_function(move |lua, ()| lua.load(&bar_src).eval::<mlua::Value>())
+        .expect("bar loader");
+    let package: mlua::Table = lua.globals().get("package").expect("package table");
+    let preload: mlua::Table = package.get("preload").expect("preload table");
+    preload
+        .set("smelt._bar", bar_loader)
+        .expect("install bar preload");
+
+    lua.load(PROMPT_BAR_LUA).exec().expect("load prompt bar");
+    lua
+}
+
+#[test]
+fn prompt_resize_highlight_overrides_top_bar_chrome_and_separator_dots() {
+    let lua = prompt_bar_lua_fixture();
+
+    let (inactive_dots, inactive_bar_dots, active_dots, active_resize_dots, active_dashes, bottom_resize_dashes, bottom_bar_dashes): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = lua
+        .load(
+            r#"
+            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            local bottom = assert(smelt.__wins["smelt.prompt_bar.bottom"])
+
+            local function marked_text(buf, mark)
+              return string.sub(buf._lines[mark.row] or "", mark.start_col + 1, mark.end_col)
+            end
+            local function count_marks(buf, predicate)
+              local n = 0
+              for _, mark in ipairs(buf._marks) do
+                if predicate(mark, marked_text(buf, mark)) then n = n + 1 end
+              end
+              return n
+            end
+
+            top:renderer()
+            local inactive_dots = count_marks(top:buf(), function(_, text) return text == " ·" end)
+            local inactive_bar_dots = count_marks(top:buf(), function(mark, text)
+              return text == " ·" and mark.fg == "SmeltBar" and mark.hl_group == nil
+            end)
+
+            smelt.__resize = true
+            smelt.__resize_chrome = "top"
+            top:renderer()
+            bottom:renderer()
+            local active_dots = count_marks(top:buf(), function(_, text) return text == " ·" end)
+            local active_resize_dots = count_marks(top:buf(), function(mark, text)
+              return text == " ·" and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil
+            end)
+            local active_dashes = count_marks(top:buf(), function(mark, text)
+              return text:find("─", 1, true) ~= nil and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil
+            end)
+            local bottom_resize_dashes = count_marks(bottom:buf(), function(mark, text)
+              return text:find("─", 1, true) ~= nil and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil
+            end)
+            local bottom_bar_dashes = count_marks(bottom:buf(), function(mark, text)
+              return text:find("─", 1, true) ~= nil and mark.fg == "SmeltBar" and mark.hl_group == nil
+            end)
+            return inactive_dots, inactive_bar_dots, active_dots, active_resize_dots, active_dashes, bottom_resize_dashes, bottom_bar_dashes
+            "#,
+        )
+        .eval()
+        .expect("render prompt bars");
+
+    assert_eq!(inactive_dots, 2);
+    assert_eq!(inactive_bar_dots, inactive_dots);
+    assert_eq!(active_dots, 2);
+    assert_eq!(active_resize_dots, active_dots);
+    assert!(active_dashes >= 2);
+    assert_eq!(bottom_resize_dashes, 0);
+    assert_eq!(bottom_bar_dashes, 1);
+}
+
+#[test]
+fn prompt_resize_highlight_supports_bottom_and_both_chrome() {
+    let lua = prompt_bar_lua_fixture();
+
+    let (bottom_only_top, bottom_only_bottom, both_top, both_bottom): (i64, i64, i64, i64) = lua
+        .load(
+            r#"
+            local top = assert(smelt.__wins["smelt.prompt_bar.top"])
+            local bottom = assert(smelt.__wins["smelt.prompt_bar.bottom"])
+
+            local function marked_text(buf, mark)
+              return string.sub(buf._lines[mark.row] or "", mark.start_col + 1, mark.end_col)
+            end
+            local function count_resize_dashes(buf)
+              local n = 0
+              for _, mark in ipairs(buf._marks) do
+                local text = marked_text(buf, mark)
+                if text:find("─", 1, true) ~= nil and mark.hl_group == "SmeltResizeHandle" and mark.fg == nil then
+                  n = n + 1
+                end
+              end
+              return n
+            end
+
+            smelt.__resize = true
+            smelt.__resize_chrome = "bottom"
+            top:renderer()
+            bottom:renderer()
+            local bottom_only_top = count_resize_dashes(top:buf())
+            local bottom_only_bottom = count_resize_dashes(bottom:buf())
+
+            smelt.__resize_chrome = "both"
+            top:renderer()
+            bottom:renderer()
+            local both_top = count_resize_dashes(top:buf())
+            local both_bottom = count_resize_dashes(bottom:buf())
+
+            return bottom_only_top, bottom_only_bottom, both_top, both_bottom
+            "#,
+        )
+        .eval()
+        .expect("render prompt resize variants");
+
+    assert_eq!(bottom_only_top, 0);
+    assert_eq!(bottom_only_bottom, 1);
+    assert!(both_top >= 2);
+    assert_eq!(both_bottom, 1);
 }
 
 #[test]

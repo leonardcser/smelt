@@ -366,8 +366,37 @@ pub fn compile(spec: &ThemeSpec, is_light: bool) -> Result<Theme, String> {
     for (name, style) in resolved {
         theme.set(name, style);
     }
+    install_resize_handle_group(&mut theme);
 
     Ok(theme)
+}
+
+fn install_resize_handle_group(theme: &mut Theme) {
+    let group = theme.id_for("SmeltResizeHandle");
+    if theme.contains(group) {
+        return;
+    }
+    let target = if theme.is_light() {
+        Color::Black
+    } else {
+        Color::White
+    };
+    let fg = theme
+        .get("SmeltBar")
+        .fg
+        .or_else(|| theme.get("Comment").fg)
+        .or_else(|| theme.get("Normal").fg)
+        .and_then(|color| color.mix_toward(target, 0.75));
+    if let Some(fg) = fg {
+        theme.set(
+            "SmeltResizeHandle",
+            Style {
+                fg: Some(fg),
+                bold: true,
+                ..Style::default()
+            },
+        );
+    }
 }
 
 fn resolve_group(

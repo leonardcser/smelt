@@ -141,7 +141,9 @@ end
 -- "glyph + label" gets its own span so the traveling wave can paint a
 -- per-cell gradient.
 
-local function indicator_spans()
+local function indicator_spans(opts)
+  opts = opts or {}
+  local bar_style = opts.bar_style or { fg = "SmeltBar" }
   local state = smelt.cell("work_state"):get()
   if not state or state == "idle" then return nil end
 
@@ -188,7 +190,7 @@ local function indicator_spans()
   -- orphan edge cell.
   spans[#spans + 1] = {
     text = "\u{2500}",
-    style = { fg = "SmeltBar" },
+    style = bar_style,
     priority = INDICATOR_PRIORITY,
     selectable = false,
   }
@@ -253,7 +255,9 @@ local function reasoning_color_group(effort)
   end
 end
 
-local function right_spans()
+local function right_spans(opts)
+  opts = opts or {}
+  local bar_style = opts.bar_style or { fg = "SmeltBar" }
   local spans = {}
   local model = smelt.model()
   if model and model ~= "" then
@@ -278,7 +282,7 @@ local function right_spans()
       if #spans > 0 then
         spans[#spans + 1] = {
           text = " ·",
-          style = { fg = "SmeltBar" },
+          style = bar_style,
           priority = SECONDARY_PRIORITY,
           selectable = false,
         }
@@ -305,7 +309,7 @@ local function right_spans()
       if #spans > 0 then
         spans[#spans + 1] = {
           text = " ·",
-          style = { fg = "SmeltBar" },
+          style = bar_style,
           priority = OPTIONAL_PRIORITY,
           selectable = false,
         }
@@ -319,6 +323,15 @@ local function right_spans()
   end
 
   return spans
+end
+
+local function resize_bar_opts(position)
+  if not smelt.cell("prompt_resize_active"):get() then return nil end
+  local chrome = smelt.cell("prompt_resize_chrome"):get() or ""
+  if chrome == position or chrome == "both" then
+    return { bar_style = { hl_group = "SmeltResizeHandle" } }
+  end
+  return nil
 end
 
 -- ── renderers ───────────────────────────────────────────────────────
@@ -364,7 +377,8 @@ local function render_top(win)
     local row = tip_row(width)
     if row then rows[#rows + 1] = row end
   end
-  rows[#rows + 1] = bar.compose(width, indicator_spans(), right_spans())
+  local bar_opts = resize_bar_opts("top")
+  rows[#rows + 1] = bar.compose(width, indicator_spans(bar_opts), right_spans(bar_opts), bar_opts)
   bar.write_rows(buf, rows, TOP_NS)
 end
 
@@ -372,7 +386,7 @@ local function render_bottom(win)
   local buf = win:buf()
   if not buf then return end
   local width = win:content_width() or 80
-  bar.write_rows(buf, { bar.compose(width, nil, nil) }, BOT_NS)
+  bar.write_rows(buf, { bar.compose(width, nil, nil, resize_bar_opts("bottom")) }, BOT_NS)
 end
 
 -- ── window allocation ───────────────────────────────────────────────

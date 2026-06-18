@@ -44,6 +44,7 @@ return {
   SmeltScrollPillBg   = bg(dl(234, 253)),
   SmeltCodeBlockBg    = bg(dl(233, 253)),
   SmeltBar            = fg(dl(237, 250)),
+  SmeltResizeHandle   = fg(dl(15, 0), { bold = true }),
   SmeltSelection      = bg(dl(238, 153)),
   SmeltSearch         = { fg = { ansi = 0 }, bg = accent },
   SmeltYankFlash      = bg(dl(240, 195)),

@@ -758,15 +758,39 @@ pub fn inset_for_chrome(area: Rect, chrome: &Chrome) -> Rect {
     Rect::new(top, left, w, h)
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChromePaintCtx {
+    pub top: Option<smelt_style::theme::HlGroup>,
+    pub right: Option<smelt_style::theme::HlGroup>,
+    pub bottom: Option<smelt_style::theme::HlGroup>,
+    pub left: Option<smelt_style::theme::HlGroup>,
+}
+
+impl ChromePaintCtx {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
 /// Paint a container's border and title into `grid` at `area`.
-/// Corners are drawn only when both adjacent edges are enabled. When two
-/// adjacent edges disagree on color, the top/bottom edge wins.
-/// Title requires `border.top.is_some()`.
+/// Corners are drawn only when both adjacent edges are enabled. Active side
+/// edges own their endpoint corners; otherwise top/bottom wins when adjacent
+/// edge colors disagree. Title requires `border.top.is_some()`.
 pub fn paint_chrome(
     grid: &mut crate::grid::Grid,
     area: Rect,
     chrome: &Chrome,
     theme: &crate::Theme,
+) {
+    paint_chrome_with(grid, area, chrome, theme, ChromePaintCtx::empty());
+}
+
+pub fn paint_chrome_with(
+    grid: &mut crate::grid::Grid,
+    area: Rect,
+    chrome: &Chrome,
+    theme: &crate::Theme,
+    ctx: ChromePaintCtx,
 ) {
     let Some(border) = chrome.border else {
         return;
@@ -783,20 +807,42 @@ pub fn paint_chrome(
         BorderStyle::Rounded => ('─', '│', '╭', '╮', '╰', '╯'),
         BorderStyle::Dashed => ('╌', '╎', '┌', '┐', '└', '┘'),
     };
-    let edge_style = |e: Option<EdgeStyle>| -> super::grid::Style {
-        match e.and_then(|s| s.color) {
-            Some(hl) => {
-                let mut style = theme.resolve(hl);
-                style.bg = None;
-                style
+    let edge_style =
+        |e: Option<EdgeStyle>, active: Option<smelt_style::theme::HlGroup>| -> super::grid::Style {
+            let mut style = e
+                .and_then(|s| s.color)
+                .map(|hl| theme.resolve(hl))
+                .unwrap_or_default();
+            style.bg = None;
+            if let Some(hl) = active {
+                let mut active_style = theme.resolve(hl);
+                active_style.bg = None;
+                style = merge_title_span_style(style, active_style);
             }
-            None => super::grid::Style::default(),
-        }
-    };
-    let top_style = edge_style(border.top);
-    let bot_style = edge_style(border.bottom);
-    let left_style = edge_style(border.left);
-    let right_style = edge_style(border.right);
+            style
+        };
+    let top_style = edge_style(border.top, ctx.top);
+    let title_style = edge_style(border.top, None);
+    let bot_style = edge_style(border.bottom, ctx.bottom);
+    let left_style = edge_style(border.left, ctx.left);
+    let right_style = edge_style(border.right, ctx.right);
+    let corner_style =
+        |horizontal: super::grid::Style,
+         horizontal_active: Option<smelt_style::theme::HlGroup>,
+         vertical: super::grid::Style,
+         vertical_active: Option<smelt_style::theme::HlGroup>| {
+            if horizontal_active.is_some() {
+                horizontal
+            } else if vertical_active.is_some() {
+                vertical
+            } else {
+                horizontal
+            }
+        };
+    let top_left_style = corner_style(top_style, ctx.top, left_style, ctx.left);
+    let top_right_style = corner_style(top_style, ctx.top, right_style, ctx.right);
+    let bot_left_style = corner_style(bot_style, ctx.bottom, left_style, ctx.left);
+    let bot_right_style = corner_style(bot_style, ctx.bottom, right_style, ctx.right);
     let right = area.left + area.width - 1;
     let bottom = area.top + area.height - 1;
 
@@ -820,19 +866,20 @@ pub fn paint_chrome(
             grid.set(right, row, v, right_style);
         }
     }
-    // Corners only when both adjacent edges are present. Top/bottom wins on color.
+    // Corners only when both adjacent edges are present. Active side edges own
+    // their endpoint corners; otherwise top/bottom keeps the existing priority.
     if border.top.is_some() && border.left.is_some() {
-        grid.set(area.left, area.top, tl, top_style);
+        grid.set(area.left, area.top, tl, top_left_style);
     }
     if border.top.is_some() && border.right.is_some() && right != area.left {
-        grid.set(right, area.top, tr, top_style);
+        grid.set(right, area.top, tr, top_right_style);
     }
     if border.bottom.is_some() && border.left.is_some() && bottom != area.top {
-        grid.set(area.left, bottom, bl, bot_style);
+        grid.set(area.left, bottom, bl, bot_left_style);
     }
     if border.bottom.is_some() && border.right.is_some() && bottom != area.top && right != area.left
     {
-        grid.set(right, bottom, br, bot_style);
+        grid.set(right, bottom, br, bot_right_style);
     }
 
     if border.top.is_some() {
@@ -848,7 +895,7 @@ pub fn paint_chrome(
                     if col >= limit {
                         break;
                     }
-                    let span_style = merge_title_span_style(top_style, span.style);
+                    let span_style = merge_title_span_style(title_style, span.style);
                     let mut written = false;
                     for ch in span.text.chars() {
                         let cw = crate::grid::char_width(ch);
@@ -1794,6 +1841,75 @@ mod tests {
         assert_eq!(grid.cell(9, 4).symbol, '┘');
         assert_eq!(grid.cell(5, 0).symbol, '─');
         assert_eq!(grid.cell(0, 2).symbol, '│');
+    }
+
+    #[test]
+    fn paint_chrome_with_context_overrides_active_edges() {
+        let mut grid = crate::grid::Grid::new(10, 5);
+        let mut theme = crate::Theme::default();
+        theme.set(
+            "ActiveEdge",
+            crate::grid::Style {
+                fg: Some(crate::grid::Color::Yellow),
+                ..crate::grid::Style::default()
+            },
+        );
+        let active = theme.id_for("ActiveEdge");
+        let chrome = Chrome {
+            border: Some(Border::SINGLE),
+            ..Chrome::default()
+        };
+        paint_chrome_with(
+            &mut grid,
+            Rect::new(0, 0, 10, 5),
+            &chrome,
+            &theme,
+            ChromePaintCtx {
+                right: Some(active),
+                bottom: Some(active),
+                ..ChromePaintCtx::empty()
+            },
+        );
+        assert_eq!(grid.cell(9, 2).style.fg, Some(crate::grid::Color::Yellow));
+        assert_eq!(grid.cell(9, 0).style.fg, Some(crate::grid::Color::Yellow));
+        assert_eq!(grid.cell(9, 4).style.fg, Some(crate::grid::Color::Yellow));
+        assert_eq!(grid.cell(5, 4).style.fg, Some(crate::grid::Color::Yellow));
+        assert_eq!(grid.cell(0, 4).style.fg, Some(crate::grid::Color::Yellow));
+        assert_eq!(grid.cell(5, 0).style.fg, None);
+        assert_eq!(grid.cell(0, 0).style.fg, None);
+    }
+
+    #[test]
+    fn paint_chrome_with_context_keeps_title_on_base_style() {
+        let mut grid = crate::grid::Grid::new(12, 4);
+        let mut theme = crate::Theme::default();
+        theme.set(
+            "ActiveEdge",
+            crate::grid::Style {
+                fg: Some(crate::grid::Color::Yellow),
+                ..crate::grid::Style::default()
+            },
+        );
+        let active = theme.id_for("ActiveEdge");
+        let chrome = Chrome {
+            border: Some(Border::SINGLE),
+            title: Some("title".into()),
+            ..Chrome::default()
+        };
+        paint_chrome_with(
+            &mut grid,
+            Rect::new(0, 0, 12, 4),
+            &chrome,
+            &theme,
+            ChromePaintCtx {
+                top: Some(active),
+                ..ChromePaintCtx::empty()
+            },
+        );
+
+        assert_eq!(grid.cell(7, 0).style.fg, Some(crate::grid::Color::Yellow));
+        assert_eq!(grid.cell(1, 0).symbol, 't');
+        assert_eq!(grid.cell(1, 0).style.fg, None);
     }
 
     #[test]

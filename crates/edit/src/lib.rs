@@ -1870,6 +1870,10 @@ impl Ui {
         let term_h = self.surface.terminal_size().1;
         let theme_arc = std::sync::Arc::clone(self.surface.theme());
         let theme_for_compositor = std::sync::Arc::clone(&theme_arc);
+        let active_resize = self.chrome_drag.and_then(|drag| match drag.action {
+            overlay::ChromeAction::Resize(edges) => Some((drag.overlay, resize_chrome_ctx(edges))),
+            overlay::ChromeAction::None | overlay::ChromeAction::Move => None,
+        });
         self.surface
             .compositor_mut()
             .render_with(&theme_for_compositor, w, move |grid, _theme| {
@@ -1929,16 +1933,16 @@ impl Ui {
                     &tree_ctx,
                     &mut dispatch,
                 );
-                for (_id, rect, overlay) in &resolved {
-                    paint_overlay(
-                        grid,
-                        theme,
-                        *rect,
-                        overlay,
+                for (id, rect, overlay) in &resolved {
+                    let chrome_ctx = active_resize
+                        .and_then(|(active_id, ctx)| (*id == active_id).then_some(ctx))
+                        .unwrap_or_default();
+                    let overlay_ctx = OverlayPaintCtx {
+                        root_chrome: chrome_ctx,
                         term_size,
-                        &sizer,
-                        &mut dispatch,
-                    );
+                        sizer: &sizer,
+                    };
+                    paint_overlay(grid, theme, *rect, overlay, &overlay_ctx, &mut dispatch);
                 }
             })
     }
@@ -2734,6 +2738,16 @@ const AUTOSCROLL_START_MS: u64 = 30;
 const AUTOSCROLL_MIN_MS: u64 = 5;
 const AUTOSCROLL_RAMP_DIVISOR_MS: u64 = 120;
 
+fn resize_chrome_ctx(edges: overlay::ResizeEdges) -> layout::ChromePaintCtx {
+    let hl = smelt_buffer::theme::intern("SmeltResizeHandle");
+    layout::ChromePaintCtx {
+        top: edges.north.then_some(hl),
+        right: edges.east.then_some(hl),
+        bottom: edges.south.then_some(hl),
+        left: edges.west.then_some(hl),
+    }
+}
+
 /// Resolve the concrete action for a chrome cell. Resize handles win over drag
 /// handles, but top-row drag remains intact unless top resizing is explicitly enabled.
 fn chrome_action(rect: Rect, ov: &Overlay, row: u16, col: u16) -> overlay::ChromeAction {
@@ -2966,18 +2980,34 @@ fn resolve_decoration_size(
     (w.min(cap.0), h.min(cap.1))
 }
 
+struct OverlayPaintCtx<'a> {
+    root_chrome: layout::ChromePaintCtx,
+    term_size: (u16, u16),
+    sizer: &'a dyn layout::LeafSizer,
+}
+
 /// Paint one resolved overlay: clear the rect (overlays are opaque) then walk its layout tree.
 fn paint_overlay(
     grid: &mut Grid,
     theme: &std::sync::Arc<Theme>,
     area: Rect,
     overlay: &Overlay,
-    term_size: (u16, u16),
-    sizer: &dyn layout::LeafSizer,
+    ctx: &OverlayPaintCtx<'_>,
     paint: &mut PaintDispatch,
 ) {
     grid.clear(area);
-    smelt_term::paint_layout_tree_with(grid, theme, &overlay.layout, area, term_size, sizer, paint);
+    smelt_term::paint_layout_tree_with_options(
+        grid,
+        theme,
+        &overlay.layout,
+        area,
+        ctx.term_size,
+        smelt_term::PaintLayoutOptions {
+            sizer: ctx.sizer,
+            root_chrome: ctx.root_chrome,
+        },
+        paint,
+    );
 }
 
 fn paint_decoration(
@@ -3777,6 +3807,36 @@ mod tests {
         );
         assert_eq!(ui.dispatch_event(drag, &mut |_, _, _| {}), Status::Consumed);
         assert_eq!(ui.overlay(id).unwrap().size_override, Some((45, 12)));
+    }
+
+    #[test]
+    fn active_overlay_resize_highlights_border() {
+        let mut ui = make_ui();
+        register_window(&mut ui, WinId(99));
+        ui.theme_mut().set(
+            "SmeltResizeHandle",
+            Style {
+                fg: Some(Color::Red),
+                ..Style::default()
+            },
+        );
+        ui.overlay_open(
+            bordered_overlay(42, 10, layout::Anchor::ScreenCenter)
+                .draggable(true)
+                .resizable(true),
+        );
+        let down = mouse_event(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            16,
+            60,
+        );
+        assert_eq!(ui.dispatch_event(down, &mut |_, _, _| {}), Status::Consumed);
+
+        let frame = ui.snapshot();
+        assert_eq!(frame.styles[10][60].fg, Some(Color::Red));
+        assert_eq!(frame.styles[16][30].fg, Some(Color::Red));
+        assert_eq!(frame.styles[7][30].fg, None);
+        assert_eq!(frame.styles[10][19].fg, None);
     }
 
     #[test]

@@ -303,7 +303,7 @@ impl TuiApp {
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.prompt_resize_last_click = None;
                 drag.dragged = true;
-                self.prompt_resize_drag = Some(drag);
+                self.set_prompt_resize_drag(Some(drag));
                 let delta = drag.start_row as i32 - me.row as i32;
                 let max_rows =
                     Self::max_manual_prompt_input_rows_for(self.ui.terminal_size().1) as i32;
@@ -313,7 +313,7 @@ impl TuiApp {
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                self.prompt_resize_drag = None;
+                self.set_prompt_resize_drag(None);
                 if drag.dragged && self.prompt_input_rows_override == Some(1) {
                     self.reset_prompt_input_rows();
                 }
@@ -344,16 +344,17 @@ impl TuiApp {
 
     fn reset_prompt_input_rows(&mut self) {
         self.prompt_input_rows_override = None;
-        self.prompt_resize_drag = None;
+        self.set_prompt_resize_drag(None);
         self.prompt_resize_last_click = None;
     }
 
     fn start_prompt_resize_drag(&mut self, me: MouseEvent) {
-        self.prompt_resize_drag = Some(PromptResizeDrag {
+        self.set_prompt_resize_drag(Some(PromptResizeDrag {
+            chrome: "top",
             start_row: me.row,
             start_input_rows: self.prompt_input_rows.max(1),
             dragged: false,
-        });
+        }));
         self.app_focus = AppFocus::Prompt;
         self.ui.set_focus(crate::app::PROMPT_WIN);
         self.ui.cancel_pointer_interaction();
@@ -955,14 +956,63 @@ mod tests {
     }
 
     #[test]
+    fn prompt_resize_state_publishes_target_chrome() {
+        let mut app = crate::app::test_harness::TestApp::builder().build().app;
+
+        app.set_prompt_resize_drag(Some(PromptResizeDrag {
+            chrome: "bottom",
+            start_row: 0,
+            start_input_rows: 1,
+            dragged: false,
+        }));
+        assert_eq!(
+            app.core.cells.get::<String>("prompt_resize_chrome"),
+            Some("bottom".to_string())
+        );
+
+        app.set_prompt_resize_drag(Some(PromptResizeDrag {
+            chrome: "both",
+            start_row: 0,
+            start_input_rows: 1,
+            dragged: false,
+        }));
+        assert_eq!(
+            app.core.cells.get::<String>("prompt_resize_chrome"),
+            Some("both".to_string())
+        );
+
+        app.set_prompt_resize_drag(None);
+        assert_eq!(
+            app.core.cells.get::<String>("prompt_resize_chrome"),
+            Some(String::new())
+        );
+    }
+
+    #[test]
     fn prompt_top_chrome_drag_grows_manual_prompt_rows() {
         let mut app = crate::app::test_harness::TestApp::builder().build().app;
         let (row, col) = prompt_resize_handle_cell(&mut app);
         let start_rows = app.prompt_input_rows;
 
         app.handle_mouse(left_down(row, col));
+        assert_eq!(
+            app.core.cells.get::<bool>("prompt_resize_active"),
+            Some(true)
+        );
+        assert_eq!(
+            app.core.cells.get::<String>("prompt_resize_chrome"),
+            Some("top".to_string())
+        );
         app.handle_mouse(left_drag(row.saturating_sub(2), col));
         app.handle_mouse(left_up(row.saturating_sub(2), col));
+        assert_eq!(
+            app.core.cells.get::<bool>("prompt_resize_active"),
+            Some(false)
+        );
+        assert_eq!(
+            app.core.cells.get::<String>("prompt_resize_chrome"),
+            Some(String::new())
+        );
         app.render_normal_to(&mut std::io::sink());
 
         let expected = (start_rows + 2).min(crate::app::TuiApp::max_manual_prompt_input_rows_for(

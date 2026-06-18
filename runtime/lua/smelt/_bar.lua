@@ -63,7 +63,8 @@ end
 
 -- ── priority-drop bar row (prompt top + bottom) ─────────────────────
 
-function M.compose(width, left, right)
+function M.compose(width, left, right, opts)
+  opts = opts or {}
   width = math.max(width or 0, 0)
   local min_dashes = 4
 
@@ -134,13 +135,14 @@ function M.compose(width, left, right)
   if #left_kept > 0 then
     segs[#segs + 1] = { text = " ", style = {}, selectable = false }
   end
-  segs[#segs + 1] = { text = string.rep(DASH, bar_len), style = { fg = "SmeltBar" }, selectable = false }
+  local bar_style = opts.bar_style or { fg = "SmeltBar" }
+  segs[#segs + 1] = { text = string.rep(DASH, bar_len), style = bar_style, selectable = false }
   if #right_kept > 0 then
     for _, s in ipairs(right_kept) do
       segs[#segs + 1] = { text = s.text, style = s.style or {}, selectable = s.selectable }
     end
     segs[#segs + 1] = { text = " ", style = {}, selectable = false }
-    segs[#segs + 1] = { text = DASH, style = { fg = "SmeltBar" }, selectable = false }
+    segs[#segs + 1] = { text = DASH, style = bar_style, selectable = false }
   end
 
   return M.segments_to_line(segs)
