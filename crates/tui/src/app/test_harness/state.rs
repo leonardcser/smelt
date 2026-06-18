@@ -96,15 +96,31 @@ impl TestApp {
             .is_some_and(|text| !text.is_empty())
     }
 
-    /// Whether starting the next queued input from the current state would
-    /// append a fresh context note to session history before the next request
-    /// is dispatched.
+    /// Whether a queued follow-up will append a fresh context note after
+    /// TurnComplete applies the incoming model-history snapshot. Without a
+    /// checkpoint, that snapshot replaces local history and drops any current
+    /// context note; with a checkpoint, only notes before `first_live_index`
+    /// survive the merge.
     pub fn next_queued_input_appends_context_note(&self) -> bool {
         if !self.next_queued_input_starts_turn() {
             return false;
         }
         let context = self.app.current_context_note_text();
-        self.app.latest_context_note_text() != Some(context.as_str())
+        if let Some(first_live_index) = self.checkpoint_first_live_index() {
+            return !self
+                .app
+                .core
+                .session
+                .history
+                .iter()
+                .take(first_live_index)
+                .filter_map(protocol::HistoryItem::as_note)
+                .any(|note| {
+                    note.kind() == protocol::HistoryNoteKind::Context
+                        && note.text() == context.as_str()
+                });
+        }
+        true
     }
 
     /// Side-channel: push a synthetic queued message. In production
