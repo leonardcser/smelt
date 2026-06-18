@@ -349,7 +349,7 @@ impl TuiApp {
                 self.notify_error_sticky(message);
                 SessionControl::Error
             }
-            EngineEvent::Shutdown { .. } => SessionControl::Done,
+            EngineEvent::Shutdown { .. } => SessionControl::Error,
             EngineEvent::ToolDispatch {
                 request_id,
                 call_id,

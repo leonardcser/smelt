@@ -1,0 +1,24 @@
+{
+  "_about": "Engine shutdown regression: a queued steering message followed by an engine shutdown must end the active turn without immediately starting the queued follow-up on a dead engine channel.",
+  "_fix": "Treat engine shutdown as an interrupted turn end rather than a completed turn so queued input is preserved instead of auto-started.",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": {
+        "text": "*"
+      },
+      "kind": "steer"
+    },
+    {
+      "data": 39,
+      "kind": "start_turn"
+    },
+    {
+      "data": {
+        "reason": null
+      },
+      "kind": "engine_shutdown"
+    }
+  ],
+  "vim": true
+}

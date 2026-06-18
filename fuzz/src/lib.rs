@@ -316,8 +316,8 @@ pub enum FuzzOp {
         content: String,
         is_error: bool,
     },
-    /// Emit `Shutdown`. Active-turn dispatch yields `SessionControl::Done`
-    /// and ends the turn; idle dispatch is a no-op.
+    /// Emit `Shutdown`. Active-turn dispatch ends the turn without starting
+    /// queued follow-up input; idle dispatch is a no-op.
     EngineShutdown {
         reason: Option<String>,
     },
