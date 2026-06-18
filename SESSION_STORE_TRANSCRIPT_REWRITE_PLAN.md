@@ -4,6 +4,8 @@
 
 This plan describes the greenfield rewrite of Smelt's session persistence, large-object handling, transcript source, and transcript projection architecture. The goal is to make resume, save, memory use, scrolling, search, selection, request inspection, and rendering scale to very large sessions while leaving the code simpler and less error-prone than the current design.
 
+The durable storage, request audit, object storage, import/export, and compatibility parts of this plan remain the foundation. The transcript viewer, virtual transcript document, document-view/Vim abstraction, and no-full-session-runtime requirements are now covered by `VIRTUAL_TRANSCRIPT_DOCUMENT_VIEW_PLAN.md`, which supersedes the transcript/display portions of this first-pass plan.
+
 The immediate motivating profile is a resumed session whose `history.jsonl` is ~165 MB while the model-visible/user-visible content is closer to ~10-15 MB. The dominant cause is large tool/UI metadata, especially `edit_file` before/after file snapshots, stored inline inside durable conversation history.
 
 ## Principles
