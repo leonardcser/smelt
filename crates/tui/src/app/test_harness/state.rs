@@ -83,6 +83,16 @@ impl TestApp {
         self.app.queued_inputs.request_len()
     }
 
+    /// Whether completing the active turn would immediately start a queued
+    /// input that appends one user-visible history item.
+    pub fn next_queued_input_writes_history(&self) -> bool {
+        self.app
+            .queued_inputs
+            .display_texts()
+            .first()
+            .is_some_and(|text| !text.is_empty())
+    }
+
     /// Side-channel: push a synthetic queued message. In production
     /// `queued_inputs` is filled by pressing Enter on the prompt while a
     /// turn is active; the harness short-circuits that flow but honors

@@ -1,0 +1,22 @@
+{
+  "_about": "Regression for a smelt_loop crash where the TurnComplete post-check expected only the final model history, but a completed turn can immediately start the next queued user request and append that user message to session history.",
+  "_fix": "Account for one non-empty queued follow-up request when checking the expected session history length after a successful active TurnComplete.",
+  "mode": "yolo",
+  "ops": [
+    {
+      "data": "@",
+      "kind": "push_queued_message"
+    },
+    {
+      "data": {
+        "chunks": 33,
+        "error": false,
+        "text": "",
+        "thinking": "",
+        "turn_id": 33
+      },
+      "kind": "macro_stream_turn"
+    }
+  ],
+  "vim": true
+}

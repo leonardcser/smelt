@@ -1169,6 +1169,7 @@ struct Snapshot {
     streaming: tui::app::test_harness::StreamingState,
     session_messages: usize,
     queued_messages: usize,
+    queued_next_history_append: bool,
     working: tui::app::test_harness::WorkingSnapshot,
     session_cost_usd: f64,
     context_tokens: Option<u32>,
@@ -1200,6 +1201,7 @@ impl Snapshot {
             streaming: app.streaming_state(),
             session_messages: app.session_message_count(),
             queued_messages: app.queued_message_count(),
+            queued_next_history_append: app.next_queued_input_writes_history(),
             working: app.working_state(),
             session_cost_usd: app.session_cost_usd(),
             context_tokens: app.context_tokens(),
@@ -1224,6 +1226,10 @@ fn expected_model_history_len(pre: &Snapshot, msg_count: usize) -> usize {
     pre.checkpoint_first_live_index.unwrap_or(0) + msg_count
 }
 
+fn completed_turn_starts_queued_followup(pre: &Snapshot, targeted_active: bool) -> bool {
+    targeted_active && pre.queued_next_history_append && !pre.working.busy
+}
+
 fn expected_completed_history_len(
     pre: &Snapshot,
     msg_count: usize,
@@ -1234,7 +1240,12 @@ fn expected_completed_history_len(
     } else {
         0
     };
-    expected_model_history_len(pre, msg_count) + pending_appends
+    let queued_followup = if completed_turn_starts_queued_followup(pre, targeted_active) {
+        1
+    } else {
+        0
+    };
+    expected_model_history_len(pre, msg_count) + pending_appends + queued_followup
 }
 
 fn scheduled_reload_mode_change(
@@ -1456,7 +1467,7 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                     let max_expected = expected + usize::from(expected > 0);
                     assert!(
                         post.session_messages == expected || post.session_messages == max_expected,
-                        "TurnComplete did not merge session.messages with scheduled reload mode change: post {} (expected {expected}..={max_expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {})",
+                        "TurnComplete did not merge session.messages with scheduled reload mode change: post {} (expected {expected}..={max_expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, busy {})",
                         post.session_messages,
                         pre.checkpoint_first_live_index,
                         if targeted_active {
@@ -1464,11 +1475,13 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                         } else {
                             0
                         },
+                        pre.queued_next_history_append,
+                        pre.working.busy,
                     );
                 } else {
                     assert_eq!(
                         post.session_messages, expected,
-                        "TurnComplete did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {})",
+                        "TurnComplete did not merge session.messages: post {} (expected {expected}, incoming {msg_count}, checkpoint prefix {:?}, pending appends {}, queued follow-up {}, busy {})",
                         post.session_messages,
                         pre.checkpoint_first_live_index,
                         if targeted_active {
@@ -1476,10 +1489,12 @@ fn run_check(check: PostCheck, pre: &Snapshot, post: &Snapshot, new_actions: &[A
                         } else {
                             0
                         },
+                        pre.queued_next_history_append,
+                        pre.working.busy,
                     );
                 }
             }
-            if targeted_active {
+            if targeted_active && !completed_turn_starts_queued_followup(pre, targeted_active) {
                 assert!(
                     !post.agent_running,
                     "TurnComplete against active turn did not end it",
