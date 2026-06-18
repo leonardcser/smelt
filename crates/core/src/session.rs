@@ -1396,6 +1396,19 @@ pub fn store_snapshot_from_session(
     })
 }
 
+pub fn store_snapshot_table_suffixes_from_session(
+    session: &Session,
+    history_start_idx: usize,
+) -> Result<smelt_store::SessionSnapshotTableSuffixes, smelt_store::StoreError> {
+    let start_idx = history_start_idx.min(session.history.len());
+    Ok(smelt_store::SessionSnapshotTableSuffixes {
+        start_idx,
+        turn_metas: snapshot_values_from(&session.turn_metas, start_idx)?,
+        metadata_snapshots: snapshot_values_from(&session.metadata_snapshots, start_idx)?,
+        accounting_snapshots: snapshot_values_from(&session.context_snapshots, start_idx)?,
+    })
+}
+
 pub fn store_state_from_session(
     session: &Session,
     history_len: usize,

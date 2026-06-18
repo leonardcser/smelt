@@ -720,7 +720,7 @@ Acceptance:
 
 Goal: finish the store rewrite side that is still worth doing because save and request-start durability remain major scaling risks.
 
-Status: in progress in the current worktree. Display-only deferred request append now uses a typed `SessionHistorySuffix` write paired transactionally with transcript descriptor suffix replacement, so that hot path no longer constructs a `SessionSnapshot`. Remaining Phase 4 work is to move normal request append, assistant/tool suffix persistence, checkpoint/meta/accounting updates, and rewind/delete suffixes to the same typed transaction style.
+Status: in progress in the current worktree. Display-only deferred request append and normal request append now use typed `SessionHistorySuffix` writes paired transactionally with transcript descriptor suffix replacement, so request-start paths with a clean persisted prefix no longer construct a `SessionSnapshot`. The typed suffix can also carry requested metadata/turn/accounting table suffixes, which covers touched request-start metadata such as the first-user-message snapshot without syncing entire snapshot tables. Remaining Phase 4 work is to move assistant/tool suffix persistence, checkpoint-only updates, title/accounting updates, and rewind/delete suffixes to the same typed transaction style.
 
 Deliverables:
 

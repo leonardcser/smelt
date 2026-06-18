@@ -31,6 +31,15 @@ pub struct SessionHistorySuffix {
     pub history_start_idx: usize,
     pub history_len: usize,
     pub history: Vec<HistoryItem>,
+    pub snapshot_tables: Option<SessionSnapshotTableSuffixes>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionSnapshotTableSuffixes {
+    pub start_idx: usize,
+    pub turn_metas: Vec<(u64, Value)>,
+    pub metadata_snapshots: Vec<(u64, Value)>,
+    pub accounting_snapshots: Vec<(u64, Value)>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -218,7 +227,18 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     }
 
     let state_changed = session_state_changed(current_state.as_ref(), &suffix.state);
-    let changed = history_deleted > 0 || history_inserted > 0 || state_changed;
+    let snapshot_tables_changed = match &suffix.snapshot_tables {
+        Some(tables) => replace_snapshot_table_suffixes_if_changed(
+            conn,
+            tables.start_idx as u64,
+            &tables.turn_metas,
+            &tables.metadata_snapshots,
+            &tables.accounting_snapshots,
+        )?,
+        None => false,
+    };
+    let changed =
+        history_deleted > 0 || history_inserted > 0 || state_changed || snapshot_tables_changed;
     let mut state = suffix.state.clone();
     state.history_len = suffix.history_len as u64;
     state.revision = if changed {
@@ -268,9 +288,25 @@ fn replace_snapshot_tables_if_changed(
     snapshot: &SessionSnapshot,
 ) -> Result<bool> {
     let snapshot_start = snapshot.history_start_idx.min(snapshot.history_len) as u64;
-    let turn_metas = snapshot_rows_json_from(&snapshot.turn_metas, snapshot_start)?;
-    let metadata = snapshot_rows_json_from(&snapshot.metadata_snapshots, snapshot_start)?;
-    let accounting = snapshot_rows_json_from(&snapshot.accounting_snapshots, snapshot_start)?;
+    replace_snapshot_table_suffixes_if_changed(
+        conn,
+        snapshot_start,
+        &snapshot.turn_metas,
+        &snapshot.metadata_snapshots,
+        &snapshot.accounting_snapshots,
+    )
+}
+
+fn replace_snapshot_table_suffixes_if_changed(
+    conn: &Connection,
+    snapshot_start: u64,
+    turn_metas: &[(u64, Value)],
+    metadata_snapshots: &[(u64, Value)],
+    accounting_snapshots: &[(u64, Value)],
+) -> Result<bool> {
+    let turn_metas = snapshot_rows_json_from(turn_metas, snapshot_start)?;
+    let metadata = snapshot_rows_json_from(metadata_snapshots, snapshot_start)?;
+    let accounting = snapshot_rows_json_from(accounting_snapshots, snapshot_start)?;
 
     let mut changed =
         sync_snapshot_table_suffix(conn, SnapshotTable::TurnMetas, snapshot_start, &turn_metas)?;

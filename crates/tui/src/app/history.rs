@@ -1324,15 +1324,17 @@ impl TuiApp {
         self.publish_history_delta("rewound");
     }
 
-    fn persist_deferred_history_suffix(
+    fn persist_history_suffix(
         &mut self,
         history_start_idx: usize,
         history_len: usize,
         history: Vec<HistoryItem>,
+        snapshot_tables: Option<smelt_store::SessionSnapshotTableSuffixes>,
         descriptor_start_idx: usize,
         descriptor_records: Vec<smelt_core::TranscriptBlockRecord>,
     ) -> bool {
         self.update_session_persist_metadata();
+        self.publish_shared_session_state();
         let session = &self.core.session;
         let state = match session::store_state_from_session(session, history_len) {
             Ok(state) => state,
@@ -1346,6 +1348,7 @@ impl TuiApp {
             history_start_idx,
             history_len,
             history,
+            snapshot_tables,
         };
         let session_id = session.id.clone();
         let session_dir = session::dir_for(session);
@@ -1394,15 +1397,19 @@ impl TuiApp {
         self.core.session.history.push(item.clone());
         let history_len = history_index.saturating_add(1);
         let descriptor_count = descriptor_records.len();
-        if self.persist_deferred_history_suffix(
+        let had_descriptor_total = self.transcript.descriptor_total_count().is_some();
+        if self.persist_history_suffix(
             history_index,
             history_len,
             vec![item],
+            None,
             descriptor_start_idx,
             descriptor_records,
         ) {
-            self.transcript
-                .note_persisted_descriptor_append(descriptor_count);
+            if had_descriptor_total {
+                self.transcript
+                    .note_persisted_descriptor_append(descriptor_count);
+            }
             let checkpoint = self.core.session.checkpoint.clone();
             if let Some(deferred) = self.deferred_session_load.as_mut() {
                 deferred.history_len = history_len;
@@ -1424,11 +1431,70 @@ impl TuiApp {
         }
         let history = self.model_history_source();
         let history_index = self.core.session.history.len();
+        let can_persist_suffix = self.dirty_history_from.is_none()
+            && ((self.persisted_store_ready && self.transcript_descriptors_persisted)
+                || history_index == 0);
+        if !can_persist_suffix {
+            if let Some(block) = block {
+                self.transcript
+                    .push_with_origin(block, smelt_core::BlockOrigin::History(history_index));
+            }
+            self.append_request_history_item(item);
+            return history;
+        }
+
+        let descriptor_order_start = self.transcript.history().len();
+        let descriptor_start_idx = self.transcript.descriptor_total_count().unwrap_or_else(|| {
+            self.transcript
+                .history()
+                .descriptor_record_index_for_order_index(descriptor_order_start)
+        });
         if let Some(block) = block {
             self.transcript
                 .push_with_origin(block, smelt_core::BlockOrigin::History(history_index));
         }
-        self.append_request_history_item(item);
+        let descriptor_records = self
+            .transcript
+            .history()
+            .descriptor_records_from(descriptor_order_start);
+        self.core.session.history.push(item.clone());
+        let history_len = history_index.saturating_add(1);
+        let descriptor_count = descriptor_records.len();
+        let had_descriptor_total = self.transcript.descriptor_total_count().is_some();
+        let snapshot_table_start = if self.session_dirty { 0 } else { history_index };
+        let snapshot_tables = match session::store_snapshot_table_suffixes_from_session(
+            &self.core.session,
+            snapshot_table_start,
+        ) {
+            Ok(tables) => tables,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                self.mark_history_dirty_from(history_index);
+                self.sync_session_snapshot();
+                self.publish_history_delta("request");
+                self.save_session();
+                self.flush_persist();
+                return history;
+            }
+        };
+        let persisted = self.persist_history_suffix(
+            history_index,
+            history_len,
+            vec![item],
+            Some(snapshot_tables),
+            descriptor_start_idx,
+            descriptor_records,
+        );
+        if persisted {
+            if had_descriptor_total {
+                self.transcript
+                    .note_persisted_descriptor_append(descriptor_count);
+            }
+        } else {
+            self.mark_history_dirty_from(history_index);
+        }
+        self.publish_history_delta("request");
+        self.flush_persist();
         history
     }
 
@@ -1562,6 +1628,94 @@ mod checkpoint_tests {
         assert!(descriptors
             .iter()
             .any(|record| record.history_idx == Some(2)));
+    }
+
+    #[test]
+    fn normal_request_append_preserves_persisted_history_prefix() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        session.id = "normal-request-append".into();
+        session.first_user_message = Some("old user".into());
+        session.history = vec![user("old user"), assistant("old assistant")];
+
+        app.app.load_session(session);
+        app.app.restore_screen();
+        app.app.persisted_store_ready = false;
+        app.app.save_session();
+        app.app.flush_persist();
+
+        let id = app.app.core.session.id.clone();
+        let source = app.app.commit_request_history_item(
+            user("new user"),
+            Some(Block::User {
+                text: "new user".into(),
+                image_labels: vec![],
+            }),
+        );
+
+        assert!(matches!(
+            source,
+            protocol::ModelHistorySource::Store {
+                first_live_index: 0,
+                end_index: 2,
+                ..
+            }
+        ));
+        assert_eq!(app.app.core.session.history.len(), 3);
+
+        let db =
+            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+                .expect("open session db");
+        let rows = db
+            .read_history_items_range(0..3)
+            .expect("read persisted history");
+        assert_eq!(
+            rows,
+            vec![
+                user("old user"),
+                assistant("old assistant"),
+                user("new user")
+            ]
+        );
+        let descriptors = db
+            .read_transcript_descriptor_records()
+            .expect("read transcript descriptors");
+        assert!(descriptors
+            .iter()
+            .any(|record| record.history_idx == Some(2)));
+    }
+
+    #[test]
+    fn normal_request_append_persists_touched_metadata_suffix() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.id = "normal-request-metadata".into();
+        app.app.core.session.first_user_message = Some("new user".into());
+        app.app.core.session.snapshot_metadata_at(1);
+        app.app.session_dirty = true;
+
+        let id = app.app.core.session.id.clone();
+        app.app.commit_request_history_item(
+            user("new user"),
+            Some(Block::User {
+                text: "new user".into(),
+                image_labels: vec![],
+            }),
+        );
+
+        let db =
+            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+                .expect("open session db");
+        let snapshot = db
+            .load_session_snapshot()
+            .expect("load snapshot")
+            .expect("snapshot");
+        assert_eq!(snapshot.history, vec![user("new user")]);
+        assert_eq!(snapshot.metadata_snapshots.len(), 1);
+        assert_eq!(snapshot.metadata_snapshots[0].0, 1);
+        assert_eq!(
+            snapshot.metadata_snapshots[0].1.get("first_user_message"),
+            Some(&serde_json::Value::String("new user".into()))
+        );
     }
 
     #[test]

@@ -27,4 +27,6 @@ pub use request_audit::{
     RequestAuditOrder, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary,
 };
 pub use schema::SCHEMA_VERSION;
-pub use session_snapshot::{SessionHistorySuffix, SessionSaveReport, SessionSnapshot};
+pub use session_snapshot::{
+    SessionHistorySuffix, SessionSaveReport, SessionSnapshot, SessionSnapshotTableSuffixes,
+};

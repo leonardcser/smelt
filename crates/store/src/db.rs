@@ -496,6 +496,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::session_snapshot::SessionSnapshotTableSuffixes;
     use crate::{
         benchmark_zstd_compression, ObjectCodec, RequestAuditOrder, DEFAULT_ZSTD_LEVEL,
         DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
@@ -595,6 +596,7 @@ mod tests {
             history_start_idx: 2,
             history_len: 3,
             history: vec![appended.clone()],
+            snapshot_tables: None,
         };
         let appended_descriptor = transcript_record_with_history(2, 2, "new-user", "new user");
         let report = db
@@ -625,6 +627,59 @@ mod tests {
             ]
         );
         assert_eq!(db.session_state().unwrap().unwrap().history_len, 3);
+    }
+
+    #[test]
+    fn history_suffix_write_syncs_requested_snapshot_table_suffixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let initial_history = vec![
+            protocol::HistoryItem::user(protocol::Content::text("old user")),
+            protocol::HistoryItem::assistant(protocol::AssistantStep::terminal(
+                Some(protocol::Content::text("old assistant")),
+                None,
+                Vec::new(),
+            )),
+        ];
+        let initial_metadata = serde_json::json!({"first_user_message":"old user"});
+        let initial_snapshot = SessionSnapshot {
+            state: test_session_state("typed-side-tables", initial_history.len()),
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: initial_history.len(),
+            history: initial_history,
+            turn_metas: Vec::new(),
+            metadata_snapshots: vec![(1, initial_metadata.clone())],
+            accounting_snapshots: Vec::new(),
+        };
+        db.save_session_snapshot_for_import(&initial_snapshot)
+            .unwrap();
+
+        let appended = protocol::HistoryItem::user(protocol::Content::text("new user"));
+        let appended_metadata = serde_json::json!({"first_user_message":"new user"});
+        let suffix = SessionHistorySuffix {
+            state: test_session_state("typed-side-tables", 3),
+            history_start_idx: 2,
+            history_len: 3,
+            history: vec![appended],
+            snapshot_tables: Some(SessionSnapshotTableSuffixes {
+                start_idx: 2,
+                turn_metas: Vec::new(),
+                metadata_snapshots: vec![(3, appended_metadata.clone())],
+                accounting_snapshots: Vec::new(),
+            }),
+        };
+        db.save_history_suffix_and_transcript_descriptor_suffix_as_writer(&suffix, 0, &[])
+            .unwrap();
+
+        let snapshot = db
+            .load_session_snapshot()
+            .unwrap()
+            .expect("session snapshot");
+        assert_eq!(
+            snapshot.metadata_snapshots,
+            vec![(1, initial_metadata), (3, appended_metadata)]
+        );
     }
 
     #[test]
