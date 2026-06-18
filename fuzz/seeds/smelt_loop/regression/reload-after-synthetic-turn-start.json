@@ -1,0 +1,24 @@
+{
+  "_about": "Reload regression: the synthetic start-turn path must publish the same turn_start lifecycle signal as production so reload-survivable banner resources are torn down before streamed output makes the transcript non-empty.",
+  "_fix": "Mirror production turn_start side effects in the test harness start_turn helper before streaming engine text.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "reload_lua"
+    },
+    {
+      "data": {
+        "chunks": 187,
+        "error": true,
+        "text": "\u0000",
+        "thinking": "",
+        "turn_id": 0
+      },
+      "kind": "macro_stream_turn"
+    },
+    {
+      "kind": "reload_lua"
+    }
+  ],
+  "vim": true
+}

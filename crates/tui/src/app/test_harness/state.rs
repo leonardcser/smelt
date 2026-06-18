@@ -25,15 +25,18 @@ impl TestApp {
             permissions: self.app.core.permissions.clone(),
             _perf: smelt_perf::perf::begin("test_harness:turn"),
         });
-        // Production `dispatch_turn` flips `working` into `Working` phase
-        // at the same point it sets `agent = Some(...)`. The harness short-
-        // circuits the HTTP-bearing dispatch path; we still need to mirror
-        // the working-state transition so the
-        // `working.is_animating() => agent.is_some()` invariant in
-        // `assert_invariants` holds in both directions.
+        // Production `dispatch_prepared_turn` flips `working` into `Working`
+        // and publishes `turn_start` before yielding an active turn. The
+        // harness short-circuits the HTTP-bearing dispatch path; mirror those
+        // side effects so plugins and invariants see the same lifecycle.
         self.app
             .working
             .begin(smelt_core::working::TurnPhase::Working);
+        self.app
+            .core
+            .cells
+            .set_dyn("turn_start", std::rc::Rc::new(smelt_core::cells::EventStub));
+        self.app.pump_lua();
     }
 
     /// Whether an agent turn is currently active.
