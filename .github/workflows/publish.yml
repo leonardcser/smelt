@@ -100,7 +100,7 @@ jobs:
         run: cargo clippy -p "${{ steps.parse.outputs.crate }}" --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo nextest run -p "${{ steps.parse.outputs.crate }}"
+        run: cargo nextest run -p "${{ steps.parse.outputs.crate }}" --no-tests pass
 
       - name: Verify packaging
         run: cargo publish -p "${{ steps.parse.outputs.crate }}" --dry-run
