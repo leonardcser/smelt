@@ -1041,12 +1041,30 @@ impl TuiApp {
             return;
         }
         let session = &self.core.session;
-        let snapshot = match session::store_snapshot_from_session(session, history_start_idx) {
-            Ok(snapshot) => snapshot,
+        let history_suffix_start = history_start_idx.min(session.history.len());
+        let state = match session::store_state_from_session(session, session.history.len()) {
+            Ok(state) => state,
             Err(err) => {
                 self.notify_error_sticky(format!("failed to prepare session save: {err}"));
                 return;
             }
+        };
+        let snapshot_tables = match session::store_snapshot_table_suffixes_from_session(
+            session,
+            history_suffix_start,
+        ) {
+            Ok(tables) => tables,
+            Err(err) => {
+                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                return;
+            }
+        };
+        let suffix = smelt_store::SessionHistorySuffix {
+            state,
+            history_start_idx: history_suffix_start,
+            history_len: session.history.len(),
+            history: session.history[history_suffix_start..].to_vec(),
+            snapshot_tables: Some(snapshot_tables),
         };
         let session_id = session.id.clone();
         let session_dir = session::dir_for(session);
@@ -1059,7 +1077,7 @@ impl TuiApp {
         self.persister.save(crate::persist::PersistRequest {
             session_id,
             session_dir,
-            write: crate::persist::PersistSessionWrite::Snapshot(snapshot),
+            history_suffix: suffix,
             blobs,
             descriptor_start_idx,
             descriptor_records,
@@ -1355,7 +1373,7 @@ impl TuiApp {
         self.persister.save(crate::persist::PersistRequest {
             session_id,
             session_dir,
-            write: crate::persist::PersistSessionWrite::HistorySuffix(suffix),
+            history_suffix: suffix,
             blobs: self.pending_image_blobs(),
             descriptor_start_idx,
             descriptor_records,

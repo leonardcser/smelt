@@ -17,15 +17,10 @@ pub(crate) struct Blob {
     pub(crate) data_url: String,
 }
 
-pub(crate) enum PersistSessionWrite {
-    Snapshot(smelt_store::SessionSnapshot),
-    HistorySuffix(smelt_store::SessionHistorySuffix),
-}
-
 pub(crate) struct PersistRequest {
     pub(crate) session_id: String,
     pub(crate) session_dir: PathBuf,
-    pub(crate) write: PersistSessionWrite,
+    pub(crate) history_suffix: smelt_store::SessionHistorySuffix,
     pub(crate) blobs: Vec<Blob>,
     pub(crate) descriptor_start_idx: usize,
     pub(crate) descriptor_records: Vec<TranscriptBlockRecord>,
@@ -124,31 +119,18 @@ fn report_error(result: Result<(), String>, session_id: &str, errors: &Sender<Pe
 
 fn write(req: &PersistRequest) -> Result<(), String> {
     let _perf = smelt_perf::perf::begin("persist:write");
-    let history_items = match &req.write {
-        PersistSessionWrite::Snapshot(snapshot) => snapshot.history.len(),
-        PersistSessionWrite::HistorySuffix(suffix) => suffix.history.len(),
-    };
-    smelt_perf::perf::record_value("persist:write:history_items", history_items as u64);
+    smelt_perf::perf::record_value(
+        "persist:write:history_items",
+        req.history_suffix.history.len() as u64,
+    );
     smelt_perf::perf::record_value("persist:write:blobs", req.blobs.len() as u64);
     std::fs::create_dir_all(&req.session_dir)
         .map_err(|err| format!("create session directory: {err}"))?;
     let blob_dir = req.session_dir.join("blobs");
     let url_to_blob = write_blobs(&blob_dir, &req.blobs)?;
-    let mut write = match &req.write {
-        PersistSessionWrite::Snapshot(snapshot) => PersistSessionWrite::Snapshot(snapshot.clone()),
-        PersistSessionWrite::HistorySuffix(suffix) => {
-            PersistSessionWrite::HistorySuffix(suffix.clone())
-        }
-    };
+    let mut history_suffix = req.history_suffix.clone();
     if !url_to_blob.is_empty() {
-        match &mut write {
-            PersistSessionWrite::Snapshot(snapshot) => {
-                smelt_core::session::externalize_blobs(&mut snapshot.history, &url_to_blob);
-            }
-            PersistSessionWrite::HistorySuffix(suffix) => {
-                smelt_core::session::externalize_blobs(&mut suffix.history, &url_to_blob);
-            }
-        }
+        smelt_core::session::externalize_blobs(&mut history_suffix.history, &url_to_blob);
     }
     let db = smelt_store::SessionDb::open(req.session_dir.join("session.db"))
         .map_err(|err| format!("open session database: {err}"))?;
@@ -161,22 +143,13 @@ fn write(req: &PersistRequest) -> Result<(), String> {
         })
         .collect::<Result<Vec<_>, smelt_store::StoreError>>()
         .map_err(|err| format!("prepare transcript descriptors: {err}"))?;
-    let save_report = match &write {
-        PersistSessionWrite::Snapshot(snapshot) => db
-            .save_session_snapshot_and_transcript_descriptor_suffix_as_writer(
-                snapshot,
-                req.descriptor_start_idx,
-                &descriptor_rows,
-            )
-            .map_err(|err| format!("save session database: {err}"))?,
-        PersistSessionWrite::HistorySuffix(suffix) => db
-            .save_history_suffix_and_transcript_descriptor_suffix_as_writer(
-                suffix,
-                req.descriptor_start_idx,
-                &descriptor_rows,
-            )
-            .map_err(|err| format!("save session database: {err}"))?,
-    };
+    let save_report = db
+        .save_history_suffix_and_transcript_descriptor_suffix_as_writer(
+            &history_suffix,
+            req.descriptor_start_idx,
+            &descriptor_rows,
+        )
+        .map_err(|err| format!("save session database: {err}"))?;
     smelt_perf::perf::record_value("persist:write:history_deleted", save_report.history_deleted);
     smelt_perf::perf::record_value(
         "persist:write:history_inserted",
