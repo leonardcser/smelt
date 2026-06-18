@@ -28,6 +28,8 @@ Type `/` to open the command picker with fuzzy search.
 | `/help`                   | Show keybindings (also `F1`)                                         |
 | `/docs`                   | Open the smelt documentation in your browser                         |
 | `/btw <question>`         | Ask a side question; answer streams into a dialog                    |
+| `/brief [scope] [focus]`  | Summarize planned or completed changes compactly                     |
+| `/handoff [focus]`        | Write a continuation handoff for another agent                       |
 | `/reflect [focus]`        | Step back and rethink recent changes before moving on                |
 | `/simplify [focus]`       | Review changed code for reuse, quality, and efficiency               |
 | `/trust`                  | Trust the current project's `.smelt/` content                        |
