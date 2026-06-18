@@ -98,7 +98,11 @@ const EARLY_DIRS: &[&str] = &["early"];
 /// calling `require("smelt.plugins.<name>")` from their `init.lua`. Exposed
 /// so the `gen-lua-docs` xtask can emit an opt-in vs autoload table in the
 /// `customize` skill.
-pub const OPTIONAL_PLUGINS: &[&str] = &["smelt.plugins.which_key", "smelt.plugins.inspect"];
+pub const OPTIONAL_PLUGINS: &[&str] = &[
+    "smelt.plugins.which_key",
+    "smelt.plugins.inspect",
+    "smelt.plugins.lsp",
+];
 
 /// Command metadata used by command-line completion UIs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1247,6 +1251,10 @@ impl LuaRuntime {
             .ok()
             .and_then(|v| v.as_boolean())
             .unwrap_or(true)
+    }
+
+    pub fn system_prompt_fragments(&self) -> Vec<String> {
+        crate::lua::api::agent::system_prompt_fragments(&self.lua)
     }
 
     pub fn tool_defs(

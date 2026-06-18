@@ -269,6 +269,58 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         )?;
     }
     {
+        m.fn_(
+            "patch",
+            "Patch metadata for an already-registered tool without replacing its handler. Supports `description` and `parameters`. Returns a `Reg` whose `:remove()` restores the previous metadata.",
+            &["name", "patch"],
+            move |lua, (name, patch): (String, mlua::Table)| -> LuaResult<LuaReg> {
+                let key = format!("__pt_meta_{name}");
+                let meta = lua.named_registry_value::<mlua::Table>(&key).map_err(|_| {
+                    LuaError::RuntimeError(format!("tools.patch: no registered tool named `{name}`"))
+                })?;
+
+                let old_description: Option<String> = meta.get("description").ok();
+                let old_parameters_json: Option<String> = meta
+                    .get::<mlua::String>("parameters_json")
+                    .ok()
+                    .map(|s| s.to_string_lossy().to_string());
+
+                if let Ok(Some(description)) = patch.get::<Option<String>>("description") {
+                    meta.set("description", description)?;
+                }
+                if let Ok(Some(parameters)) = patch.get::<Option<mlua::Table>>("parameters") {
+                    if let Ok(json_str) = serde_json::to_string(&lua_table_to_json(lua, &parameters)) {
+                        meta.set("parameters_json", json_str)?;
+                    }
+                }
+
+                let lua_clone = lua.clone();
+                Ok(LuaReg::new(move || {
+                    let Ok(meta) = lua_clone.named_registry_value::<mlua::Table>(&key) else {
+                        return false;
+                    };
+                    match old_description {
+                        Some(description) => {
+                            let _ = meta.set("description", description);
+                        }
+                        None => {
+                            let _ = meta.set("description", mlua::Value::Nil);
+                        }
+                    }
+                    match old_parameters_json {
+                        Some(parameters_json) => {
+                            let _ = meta.set("parameters_json", parameters_json);
+                        }
+                        None => {
+                            let _ = meta.set("parameters_json", mlua::Value::Nil);
+                        }
+                    }
+                    true
+                }))
+            },
+        )?;
+    }
+    {
         let s = shared.clone();
         m.fn_(
             "unregister",

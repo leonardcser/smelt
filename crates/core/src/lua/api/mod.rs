@@ -9,6 +9,7 @@ macro_rules! host_read {
     }};
 }
 
+pub(crate) mod agent;
 mod auth;
 mod builtins;
 mod cli;
@@ -29,6 +30,7 @@ mod json;
 pub mod layout;
 mod lifecycle;
 mod log;
+mod lsp;
 mod mcp;
 mod messages;
 pub mod mode;
@@ -134,6 +136,7 @@ pub fn register_host_api(
     shared: &Arc<crate::lua::LuaShared>,
 ) -> LuaResult<()> {
     crate::lua::reg::register_class_doc();
+    agent::register(lua, smelt)?;
     auth::register(lua, smelt, shared)?;
     builtins::register(lua, smelt, shared)?;
     clock::register(lua, smelt)?;
@@ -154,6 +157,7 @@ pub fn register_host_api(
     layout::register(lua, smelt)?;
     lifecycle::register(lua, smelt, shared)?;
     log::register(lua, smelt)?;
+    lsp::register(lua, smelt, shared)?;
     mcp::register(lua, smelt, shared)?;
     messages::register(lua, smelt, shared)?;
     mode::register(lua, smelt)?;

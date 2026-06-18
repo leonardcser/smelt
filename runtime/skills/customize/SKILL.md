@@ -852,6 +852,13 @@ Structured JSONL log entries written to the engine log file.
 - `smelt.log.warn` :: `fun(event: string, data: any?): nil`
   Write a JSONL log entry at Warn level.
 
+#### `smelt.lsp`
+
+Generic stdio Language Server Protocol client.
+
+- `smelt.lsp.configure` :: `fun(config: table): nil`
+  Configure available language servers.
+
 #### `smelt.mcp`
 
 Config-time MCP server registration.

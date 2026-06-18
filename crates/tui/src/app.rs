@@ -1474,7 +1474,7 @@ impl TuiApp {
 
     /// Returns the system prompt without mutating app state.
     pub(crate) fn assemble_system_prompt(&self) -> String {
-        engine::assemble_system_prompt(
+        let mut prompt = engine::assemble_system_prompt(
             self.prompt_inputs.system_prompt_override.as_deref(),
             engine::SystemPromptBehavior::Interactive,
             engine::SystemPromptCapabilities::from_tool_calling(
@@ -1482,7 +1482,13 @@ impl TuiApp {
             ),
             self.prompt_inputs.instructions.as_deref(),
             self.prompt_inputs.skill_section.as_deref(),
-        )
+        );
+        let fragments = self.lua.system_prompt_fragments();
+        if !fragments.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&fragments.join("\n\n"));
+        }
+        prompt
     }
 
     pub(crate) fn stop_background_processes(&mut self) {

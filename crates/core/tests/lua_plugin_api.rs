@@ -10,7 +10,7 @@
 //! `process.run`) use `#[tokio::test]`; everything else uses the
 //! plain `#[test]` form.
 
-use smelt_core::lua::{LuaRuntime, TaskDriveOutput, ToolEnv, ToolExecResult};
+use smelt_core::lua::{LuaRuntime, TaskDriveOutput, ToolEnv, ToolExecResult, ToolVisibility};
 use smelt_core::permissions::ToolEffectKind;
 use std::collections::HashMap;
 use std::path::Path;
@@ -138,6 +138,75 @@ fn tools_register_records_effect_metadata() {
         defaults.tool_effects.get("test_process_tool"),
         Some(&ToolEffectKind::ProcessControl)
     );
+}
+
+#[test]
+fn tools_patch_updates_and_restores_metadata() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            smelt.tools.register({
+                name = "patchable_tool",
+                description = "before",
+                parameters = { type = "object", properties = {} },
+                execute = function() return "ok" end,
+            })
+            reg = smelt.tools.patch("patchable_tool", {
+                description = "after",
+                parameters = {
+                    type = "object",
+                    properties = { query = { type = "string" } },
+                    required = { "query" },
+                },
+            })
+            "#,
+        )
+        .exec()
+        .expect("patch tool metadata");
+
+    let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
+    let def = defs
+        .iter()
+        .find(|def| def.name == "patchable_tool")
+        .expect("patched tool def");
+    assert_eq!(def.description, "after");
+    assert!(def.parameters["properties"].get("query").is_some());
+
+    rt.lua
+        .load("reg:remove()")
+        .exec()
+        .expect("restore tool metadata");
+    let defs = rt.tool_defs(protocol::AgentMode::normal(), ToolVisibility::Interactive);
+    let def = defs
+        .iter()
+        .find(|def| def.name == "patchable_tool")
+        .expect("restored tool def");
+    assert_eq!(def.description, "before");
+    assert!(def.parameters["properties"].get("query").is_none());
+}
+
+#[test]
+fn agent_system_prompt_fragments_are_registered_and_removed() {
+    let rt = fresh();
+    rt.lua
+        .load(
+            r#"
+            reg = smelt.agent.add_system_prompt("extra guidance")
+            "#,
+        )
+        .exec()
+        .expect("add system prompt fragment");
+    assert_eq!(
+        rt.system_prompt_fragments(),
+        vec!["extra guidance".to_string()]
+    );
+
+    rt.lua
+        .load("reg:remove()")
+        .exec()
+        .expect("remove system prompt fragment");
+    assert!(rt.system_prompt_fragments().is_empty());
 }
 
 #[test]

@@ -26,6 +26,7 @@ pub mod host;
 pub mod html;
 pub mod http;
 pub mod keymap;
+pub mod lsp;
 pub mod lua;
 pub mod mcp;
 pub mod messages;
