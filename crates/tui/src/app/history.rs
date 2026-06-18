@@ -451,12 +451,12 @@ mod tests {
 
         let loaded = load_transcript_tail_from_sqlite_dir(dir.path().to_path_buf(), 10, 1)
             .expect("tail transcript");
-        let descriptor_slice = loaded.descriptor_slice.expect("descriptor slice");
-        assert_eq!(descriptor_slice.start.get(), 160);
-        assert_eq!(descriptor_slice.end.get(), 200);
-        assert_eq!(descriptor_slice.total_count, 200);
+        let descriptor_window = loaded.descriptor_window.expect("descriptor window");
+        assert_eq!(descriptor_window.start.get(), 160);
+        assert_eq!(descriptor_window.end().get(), 200);
+        assert_eq!(descriptor_window.total_count, 200);
         assert_eq!(
-            descriptor_slice.hydration,
+            descriptor_window.hydration,
             smelt_store::TranscriptDescriptorHydration::ObjectBacked
         );
         assert_eq!(loaded.transcript.history.order.len(), 40);
@@ -928,17 +928,11 @@ impl TuiApp {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
             if !block_history_covers_history(self.transcript.history(), &self.core.session) {
-                if let Some(loaded) =
-                    self.transcript
-                        .load_full_descriptor_slice()
-                        .filter(|loaded| {
-                            block_history_covers_history(
-                                &loaded.transcript.history,
-                                &self.core.session,
-                            )
-                        })
+                if self
+                    .transcript
+                    .legacy_merge_full_descriptor_slice_for_deferred_load()
+                    && block_history_covers_history(self.transcript.history(), &self.core.session)
                 {
-                    self.transcript.replace_loaded_transcript(loaded);
                     self.transcript_descriptors_persisted = true;
                 } else {
                     let transcript = build_transcript_from_session(&self.lua, &self.core.session);

@@ -46,6 +46,14 @@ with `COMPAT(<id>)`.
 - Code:
   - `crates/core/src/session.rs`: session listing/search blob fallbacks
 
+## transcript-deferred-full-descriptor-bridge
+
+- Remove after: normal session resume opens metadata and sparse transcript windows without `session::load` / `load_session_snapshot`
+- Why: deferred load currently validates the display transcript against a fully materialized semantic session, so it may need a full descriptor merge as a temporary repair bridge
+- Code:
+  - `crates/tui/src/app/transcript.rs`: `legacy_merge_full_descriptor_slice_for_deferred_load`
+  - `crates/tui/src/app/history.rs`: deferred session load fallback
+
 ## openai-reasoning-summary-shape
 
 - Remove after: sessions with object/string OpenAI reasoning summaries no longer

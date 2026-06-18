@@ -83,26 +83,30 @@ These are design constraints, not optimization goals.
 - Scrollbar extent and coarse scrollbar landing are the only approximate operations. Every user-visible row, command result, selection, copy result, search target, fold target, and action target is exact.
 - Explicit export, import, repair, and diagnostic commands may stream the whole session, but they must be named as such and stay out of hot resume/render/request paths.
 
-## Current Mainline Checkpoint After Rebase
+## Current Branch Checkpoint
 
-The branch was rebased onto `main` at `520e1325`.
+The branch was rebased onto `main` at `520e1325`, then added store, history, and transcript-document hardening commits through `a4dc0541`.
 
-Relevant mainline changes that shape this plan:
+Relevant completed changes that shape the remaining plan:
 
 - `777d8663 fix(session): preserve in-flight request history` made request-start history durable. User/process/command request items are appended before engine dispatch, transcript blocks are tagged with their future `History(idx)` origin, and engine dispatch receives pre-request history to avoid duplicating the current input.
 - The same commit fixed history suffix persistence so truncating history by index no longer deletes transcript blocks by mismatched `block_idx`. Final storage APIs must preserve this rule: originated transcript rows are deleted by `history_idx`, while stale unoriginated descriptor tails are cleared only beyond the preserved originated range.
-- Engine `HistoryUpdated` now triggers `save_session()` for per-request/tool-loop durability. The final design keeps that durability but replaces any full fingerprint, full clone, or full rewrite underneath it.
-- Resume/deferred load now validates transcript descriptor coverage and falls back to rebuilding when descriptors are incomplete. The final architecture should turn descriptor coverage into an invariant. Fallback rebuild is acceptable only as importer/repair behavior, not as a normal hot path.
-- The title plugin now avoids double-counting a request already committed to history. Lua session/history APIs must continue to distinguish committed history from the current input without forcing full history materialization.
-- Mainline added and then simplified diff/document foundations. The current code does not have `crates/tui/src/app/document.rs`; the actual baseline is still `DisplayDocument`, `HostDisplayDocument`, `UiHost` row callbacks, and `TranscriptDocument<'_>` in `crates/tui/src/app/transcript.rs` borrowing `TranscriptView` per call.
+- `77323b61 feat(engine): load model history from store` and `17bbc0a0 refactor(history): share model history sources` moved normal interactive provider-history reads to store-backed sources. Explicit Lua, test, and debug callers can still request full materialization.
+- `6f305b90 fix(store): save transcript descriptors transactionally` made history and descriptor suffix writes atomic.
+- `bc4d6b2a perf(tui): bound model history message reads` bounded model history reads for runtime hooks.
+- `41639f7c refactor(edit): narrow buffer display document adapter` clarified that buffer display adapters are not transcript ownership.
+- `4c7fc1c4 refactor(transcript): promote document owner` made `TranscriptDocument` the long-lived TUI owner, renamed the borrowed adapter to `TranscriptDisplayDocument`, and moved transcript render cache ownership under the document.
+- `c4304828 refactor(transcript): attach store identity to document`, `3df39b8d refactor(transcript): keep loaded store backing`, and `a4dc0541 refactor(transcript): own descriptor loading policy` attached `session_dir` and descriptor-window metadata to loaded transcript documents, added document-owned descriptor range reads, preserved store identity through full and tail SQLite transcript loads, and moved descriptor load policy out of `app/history.rs`.
+- Resume/deferred load now can ask `TranscriptDocument` to reload descriptor windows from its store backing before falling back to rebuilding from the semantic session. That fallback is still a repair/import behavior that needs to leave hot paths.
 
 Current seams that still violate the final constraints:
 
 - Normal resume can still materialize full semantic session history in `load_session_snapshot` for non-preview paths.
-- Some explicit Lua/test/debug APIs still materialize `model_history()` as `Vec<HistoryItem>` when the caller asks for the whole model-visible history. Normal interactive engine dispatch and Lua/host model-message fallback now use `ModelHistorySource` or bounded store reads when the store is current.
+- Some explicit Lua, test, and debug APIs still materialize `model_history()` as `Vec<HistoryItem>` when the caller asks for the whole model-visible history.
+- `TranscriptDocument` is now the long-lived owner, but it still wraps a mostly eager `Transcript`/`BlockHistory` for rendering. It owns store identity, descriptor load policy, sparse descriptor ranges, and render cache, but not yet a virtual row index, folds, anchors, or payload hydration policy.
+- Display-only preview and resume tail-load descriptors, but arbitrary scroll, copy, search refinement, folds, and anchors do not yet page sparse descriptor windows through the document owner.
 - Search still has fallback paths that can scan display rows for non-transcript documents. Transcript search uses SQLite candidates first, then bounded refinement.
 - `BufferDisplayDocument` remains as the non-transcript buffer fallback adapter. It should not become a transcript path.
-- `TranscriptDocument<'_>` is currently an adapter over `TranscriptView`; it is not yet the long-lived virtual document that owns store access, sparse ranges, virtual row index, and render cache.
 - `save_session()` uses dirty suffix snapshots and a combined SQLite transaction for history plus descriptors, but full completion still requires typed append/rewind/checkpoint transactions that avoid constructing a `SessionSnapshot` for hot request paths.
 
 ## Measured Baseline After Rebase
@@ -138,12 +142,14 @@ Interpretation:
 | Save decision | Dirty suffix markers and DB row hashes avoid unchanged-prefix writes, but hot paths still build `SessionSnapshot` suffix payloads | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
 | Save payload | History and transcript descriptor suffixes are saved together in one SQLite transaction | blob externalization and snapshot construction are still snapshot-shaped | explicit append/replace transactions over dirty rows and objects |
 | Provider dispatch | Interactive `StartTurnPayload.history` uses `ModelHistorySource::Store`; engine reads the requested range from `session.db` | explicit Lua/test/debug callers can still request full model-visible history | keep materialization only for explicit APIs, and prefer store-backed message reads for runtime hooks |
-| Transcript resume | full descriptor load path can still rehydrate descriptor JSON and tool state for all blocks | display resume can scale with total transcript | `TranscriptDocument` loads sparse descriptor ranges and hydrates payloads only on demand |
+| Transcript document owner | `TranscriptDocument` owns store identity, descriptor loading policy, sparse descriptor ranges, and render cache, but still delegates most row/index state to eager `Transcript`/`TranscriptProjection` | document ownership is real but not yet sparse enough for arbitrary large-session navigation | move virtual row index, folds, anchors, and payload hydration under `TranscriptDocument` |
+| Transcript resume | tail resume loads bounded descriptor windows, while full resume still can load every descriptor and full session history | normal display resume can still scale with total transcript/session | open `TranscriptDocument` from metadata and sparse descriptor windows without full history or full descriptor hydration |
 | Search storage | transcript search uses indexed SQLite candidate terms plus exact refinement | generic non-transcript document search can still scan display rows | keep transcript candidate paging; add document-level indexed search APIs for other document kinds |
 | Search runtime | transcript search asks SQLite for candidate blocks before local display refinement | fallback scan paths remain for buffer documents | document-level search API with indexed implementations and bounded refinement |
 | Generic document search | buffer fallback search can materialize row windows from row zero to total rows | full display-row scan for non-transcript documents | `BufferDisplayDocument` remains bounded to buffer fallback; indexed document implementations replace broader host scans |
-| Projection cache | `full_rows` and `build_rows` remain for full-text consumers | easy accidental full materialization | remove from hot APIs; explicit export/debug command can stream instead |
+| Projection cache | `build_rows`, `full_rows`, and projection-owned row vectors remain reachable for full-text consumers | easy accidental full materialization | remove from hot APIs; explicit export/debug command can stream instead |
 | Schema | migration version exists but DB format has not shipped | carrying compatibility migrations would add complexity | reset/reshape schema freely before release; optimize for final query/write patterns |
+
 ## Current Seams to Promote or Delete
 
 ### Promote
@@ -152,7 +158,8 @@ Interpretation:
 - `DisplayRows`, `DisplayRow`, `DisplaySnapshot`, `DocPosition`, `DocRange`, and `TextRange` are the current basis for row-document coordinates.
 - `RowTextState` in `crates/edit/src/window/row_text.rs` already keeps cursor and selection in document row coordinates. This should become `DocumentViewState`, not remain a window sub-mode.
 - `ViewerCommand` and `resolve_row_document_viewer_command` in `crates/edit/src/window/row_text.rs` are close to the semantic command executor. They should be renamed, completed, and moved behind a document-view boundary.
-- `TranscriptDocument<'_>` in `crates/tui/src/app/transcript.rs` is a useful proof that transcript can implement `DisplayDocument`, but the final type must own virtual document state instead of borrowing `TranscriptView` for one call.
+- `TranscriptDocument` in `crates/tui/src/app/transcript.rs` is now the long-lived transcript owner. Promote it further from store-aware eager owner to sparse virtual document owner.
+- `TranscriptDisplayDocument<'_>` is the intentionally borrowed per-render `DisplayDocument` adapter. Keep it only while `DisplayDocument` cannot be implemented directly on the long-lived owner without borrow conflicts.
 - The current SQLite transcript descriptor and payload APIs are the storage seed for durable block records.
 - The request-start durability path is the seed for the final transaction model, but its save/request payload implementation must become store-backed and bounded.
 
@@ -593,54 +600,136 @@ Target:
 
 The document split and provider-history split reinforce each other: one prevents display from loading everything, the other prevents request dispatch and save from loading everything.
 
-## Big Implementation Phases
+## Execution Phases From Current Branch
 
-### Phase 1: Store-backed runtime and document-view foundation
+The original phase list was intentionally broad. The current branch has already completed parts of the store, history, and document-owner foundation, so the remaining work should be tracked as smaller phases with explicit acceptance gates.
 
-Goal: establish the two non-negotiable foundations before more transcript tuning: runtime session state is store-backed and incremental, and viewer semantics are document-backed. This phase removes the architecture that forces full-session load/save or uses `Window`/`Buffer` as semantic owner.
+### Phase 0: Completed foundation now on this branch
+
+Status: completed and validated through `a4dc0541`.
+
+Completed work:
+
+- Store-backed model history is used by normal interactive engine dispatch instead of cloning full provider history.
+- Runtime hooks that need model messages use shared bounded `ModelHistorySource` paths when the store is current.
+- Transcript descriptor suffix writes are saved transactionally with history suffix writes.
+- Dirty suffix markers and row hashes reduce unchanged-prefix work, though hot saves still construct snapshot-shaped payloads.
+- Large copy and fold preparation have bounded paths for current materialized transcript ranges.
+- `BufferDisplayDocument` is narrowed to non-transcript buffer fallback use.
+- The long-lived TUI transcript owner is now `TranscriptDocument`.
+- The borrowed per-call adapter is now `TranscriptDisplayDocument<'_>`.
+- Transcript row render cache ownership moved under `TranscriptDocument`.
+- Loaded transcript documents retain descriptor-window metadata and `session_dir` store identity.
+- `TranscriptDocument` can read descriptor windows from its backing `session.db`.
+- Descriptor load policy for full and tail SQLite transcript reads lives in the transcript module instead of `app/history.rs`.
+- Deferred display-only loads can ask the current `TranscriptDocument` to reload descriptor windows from its store backing before falling back to rebuilding from `Session.history`.
+
+Validation already run after these slices:
+
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo nextest run --workspace`
+
+What this phase did not finish:
+
+- `TranscriptDocument` is store-aware, but not yet a true sparse document. It still wraps eager `Transcript`/`BlockHistory` for loaded blocks.
+- Full resume can still load full semantic history and full descriptor sets.
+- Save paths are transactional but not yet typed append/rewind/checkpoint transactions.
+- Viewer semantics still rely on existing row-text/window paths and transcript-specific app branches.
+
+### Phase 1: Make `TranscriptDocument` a sparse transcript owner
+
+Status: implemented for sparse descriptor-window ownership in the current worktree. `TranscriptDocument` now tracks total descriptor count, loaded descriptor ranges, descriptor records by durable descriptor index, and can merge newly loaded descriptor windows without discarding already loaded ranges. It still renders through an isolated compact `Transcript` bridge until Phase 3 adds virtual row gaps and exact viewport row indexing.
+
+Goal: replace the eager transcript block owner inside `TranscriptDocument` with sparse descriptor and payload ownership while keeping live append behavior intact.
 
 Deliverables:
 
-- Replace hot runtime dependence on `Session { history: Vec<HistoryItem> }` with a store-backed session runtime:
-  - small mutable session metadata in memory
-  - append/update/delete suffix APIs over SQLite `history_items`
-  - bounded model-history cursor/snapshot for provider request building
-  - no full-history clone for request start, save, fingerprint, title generation, Lua conversation views, or display resume
-- Replace full-session fingerprinting with DB revision, dirty suffix markers, row hashes, and expected-history-length checks.
-- Make request start a transaction boundary:
-  - append the user/process/command request item to `history_items`
-  - append the corresponding transcript descriptor with `History(idx)` origin
-  - update title/metadata/accounting snapshots as needed
-  - commit before engine dispatch
-  - dispatch the engine with prior provider history plus typed current input, without duplicating the request in the provider payload
-- Make engine `HistoryUpdated` and tool-loop snapshots transactional suffix updates, not full session rewrites.
-- Extend the benchmark before claiming improvement:
-  - request-start transaction latency
-  - engine `HistoryUpdated` save latency
-  - provider history rows read
-  - snapshot table rows touched
-  - SQLite rows inserted/updated/deleted
-  - bytes hydrated from objects
-- Preserve the latest main fix in the final model: history suffix truncation must delete transcript rows by `history_idx`, while stale unoriginated descriptor tails are cleared only after the preserved originated block range.
-- Rename or replace row-text viewer types with document-view types:
-  - `ViewerCommand` -> `DocumentCommand`
-  - `RowTextState` -> `DocumentViewState`
-  - row-text executor -> `DocumentViewExecutor`
-- Extend `DisplayDocument` only as needed for exact anchors, estimated extent, capabilities, and generation revalidation.
-- Add `StaticRowsDocument` and focused executor tests.
-- Add `BufferDocument` so readonly viewers use the same semantic path as transcript.
-- Add a document handle or registry owned by the edit/UI layer.
-- Move Vim motions, selection, copy/yank, action opening, and mouse drag semantics to the executor.
-- Keep renderer/layout reads of backing buffers, but stop using backing buffers as the semantic source for document windows.
+- Define a small `TranscriptStore` or equivalent private store helper owned by `TranscriptDocument`, backed by `SessionDb`.
+- Replace document fields that assume one fully loaded `Transcript` with:
+  - total descriptor count
+  - loaded descriptor ranges
+  - loaded payload state per descriptor or block
+  - live unsaved suffix blocks
+  - cache invalidation hooks once the virtual row index exists
+  - object hydration counters for instrumentation
+- Keep durable descriptor indices, history indices, and transient UI ids distinct in API shape.
+- Teach `TranscriptDocument` to load arbitrary descriptor ranges and merge them into its sparse store instead of returning isolated `LoadedTranscript` values for callers to install.
+- Keep object-backed metadata and sidecars unhydrated until visible rendering, exact copy, explicit inspection, or exact search refinement needs them.
+- Move descriptor coverage checks toward a storage invariant. Keep rebuild-from-session only as repair/import fallback with explicit logging.
+- Add tests for range merge, overlapping range reads, empty ranges, tail ranges, range invalidation after append, and descriptor identity correctness.
 
-Deletion targets:
+Acceptance:
 
-- Full-session `persist_fingerprint` over `Session.history`.
-- `model_history() -> Vec<HistoryItem>` as the request-start hot path.
-- Save paths that serialize, diff, or clone all history to decide whether one request changed.
-- Materialized-row semantic mode on `Window`.
-- Viewer command resolution that wraps a `Buffer` slice as the semantic document.
-- New transcript-specific app cursor snapping.
+- A display-only document can hold total transcript extent plus a bounded loaded tail without owning all blocks.
+- Loading a middle descriptor range does not replace the document or discard the tail unless the caller explicitly requests a reset.
+- `TranscriptDocument` can answer whether a descriptor range is loaded, missing, stale, or live-suffix.
+- The app no longer owns descriptor-window loading policy beyond choosing the session id and viewport parameters.
+- Descriptor-window reads and merges are sparse; the remaining compact `Transcript` rebuild is isolated as a legacy render bridge to delete in Phase 3.
+
+### Phase 2: Normal resume without full semantic session load
+
+Goal: make normal resume follow the same bounded document path as display-only preview, while still providing provider history on demand.
+
+Deliverables:
+
+- Split session open into metadata/state load, transcript document open, and lazy provider-history access.
+- Avoid reading all `history_items` into `Session.history` for display resume.
+- Keep a bounded model-history cursor or source for request dispatch and runtime hooks.
+- Preserve Lua/session APIs that explicitly ask for full history, but keep them out of hot resume/render/request paths.
+- Make descriptor coverage a store invariant checked cheaply by metadata or row counts rather than by building a full transcript.
+
+Acceptance:
+
+- Opening a large session for normal resume does not hydrate full provider history or all transcript descriptors.
+- First paint for normal resume and preview uses the same bounded document path.
+- Request start can still build provider context from the store-backed model-history source.
+- Full history materialization happens only for explicit APIs, export/import/repair, or tests that deliberately request it.
+
+### Phase 3: Add virtual row index and viewport materialization
+
+Goal: make scrolling, resize, and viewport rendering operate over document coordinates and local exactification instead of full transcript rows.
+
+Deliverables:
+
+- Move row-estimate and exact-row state under `TranscriptDocument`.
+- Represent row anchors by stable descriptor/block identity plus intra-block row or text position, not by materialized buffer offsets.
+- Maintain a virtual row index that can:
+  - estimate global extent
+  - exactify visible plus overscan windows
+  - map row ranges to descriptor ranges
+  - map descriptor ranges back to exact row spans after local render
+- Make nearby scroll load only missing descriptor/payload ranges needed for visible plus overscan rows.
+- Make arbitrary jumps use estimated position plus bounded local refinement, not global layout.
+- Make width changes invalidate only affected local row estimates and visible caches.
+- Keep `TranscriptProjection` only as a local block/range renderer, or fold its responsibilities into `TranscriptDocument` if that is simpler.
+
+Acceptance:
+
+- First tail paint exactifies only visible rows plus configured overscan.
+- Scrolling near the current viewport does not layout the whole transcript.
+- `gg`, `G`, row jump, scrollbar landing, resize, and follow-tail all route through document anchors and local exactification.
+- Render-cache keys include document generation, width, theme, renderer generation, and exact row range.
+- Bench output reports descriptor rows loaded, payload bytes hydrated, exact rows materialized, and render-cache hit/miss counts per viewport operation.
+
+### Phase 4: Replace snapshot-shaped hot persistence with typed transactions
+
+Goal: finish the store rewrite side that is still worth doing because save and request-start durability remain major scaling risks.
+
+Deliverables:
+
+- Add typed transactions for:
+  - request item append
+  - transcript descriptor append
+  - assistant/tool history suffix append
+  - checkpoint update
+  - title and metadata update
+  - turn metadata/accounting update
+  - rewind/delete suffix
+- Avoid constructing `SessionSnapshot` for hot request start, engine `HistoryUpdated`, tool-loop checkpoint, append, and rewind paths.
+- Replace full-session fingerprinting in hot paths with DB revision, expected-history-length checks, dirty suffix markers, and row hashes.
+- Keep the existing history/transcript suffix delete rule: originated transcript rows are deleted by `history_idx`; stale unoriginated descriptor tails are cleared only after preserved originated block range.
+- Keep explicit export/import/repair commands as the only full-session streaming paths.
 
 Acceptance:
 
@@ -649,119 +738,67 @@ Acceptance:
 - Save after request start, a tool-loop snapshot, or one assistant update writes only dirty suffix rows and objects.
 - No-op save and one-row append save do not call full-session fingerprint, full history serialization, or full snapshot-table comparison.
 - Replacing a later user request preserves prior multi-block assistant descriptors and deletes only the correct originated or stale-unoriginated suffix.
-- Unit tests prove Vim row motions, word motions, visual selection, linewise selection, yank ranges, page movement, top/bottom, and action hit testing through `StaticRowsDocument`.
-- Readonly buffer viewers and transcript windows execute the same document command path.
-- `Window` no longer decides document text semantics.
-- Only scrollbar extent can be estimated. All command results are exact against the document rows they consume.
 
-### Phase 2: Make `TranscriptDocument` the real transcript runtime
+### Phase 5: Finish document-view semantics and remove host special cases
 
-Goal: replace eager in-memory transcript blocks with a virtual document backed by SQLite descriptors and sparse payload loading.
+Goal: make transcript, readonly buffers, and static/test documents share the same viewer command and materialization path.
 
 Deliverables:
 
-- Define `TranscriptStore` over existing `SessionDb` descriptor/payload APIs.
-- Split durable descriptor identity from transient UI ids everywhere.
-- Make descriptor coverage a storage/runtime invariant, not a normal fallback rebuild path.
-- Make `TranscriptDocument` own sparse loaded descriptor/payload ranges, live suffix blocks, block fold state, virtual row index, and render cache.
-- Tail resume opens a `TranscriptDocument` from SQLite and loads only enough tail records to fill visible rows plus overscan.
-- Live streaming appends records to the live suffix and updates dirty persistence state without rebuilding all prior blocks.
-- Save persists only new/changed descriptor and payload suffixes.
-- Rewind/delete suffix updates SQLite and invalidates only affected document ranges.
-- Keep large tool metadata and sidecars object-backed until visible rendering, exact copy, explicit inspection, or exact search refinement requires hydration.
-
-Deletion targets:
-
-- Normal resumed-session `build_transcript_from_session` path.
-- Descriptor coverage fallback rebuild as a hot path. It may remain only as an importer/repair diagnostic with explicit logging.
-- Full `BlockHistory` construction for display-only resume.
-- Host transcript row methods as the primary row-document API.
-- Full transcript row vector used as the render source.
+- Rename or replace row-text viewer types with document-view types:
+  - `ViewerCommand` to `DocumentCommand`
+  - `RowTextState` to `DocumentViewState`
+  - row-text executor to `DocumentViewExecutor`
+- Add or finish `StaticRowsDocument` for focused command tests.
+- Add `BufferDocument` so readonly buffer viewers use the same command path as transcript.
+- Attach a `DocumentHandle` or direct document reference to windows that display row documents.
+- Resolve documents through a registry or explicit handle, not `WinId` comparisons.
+- Replace `UiHost::display_rows_for_range`, `document_total_rows`, and `copy_document_range` as general lookup paths with document calls.
+- Move Vim motions, visual selection, linewise selection, copy/yank, page movement, mouse drag, action opening, and top/bottom to the executor.
+- Keep backing buffers only as renderer/layout targets, not semantic sources.
 
 Acceptance:
 
-- Opening a large session for preview or resume does not load every block payload or provider history row.
-- First tail paint exactifies only visible plus overscan rows.
-- Jump top, jump bottom, explicit row jump, scrollbar drag, and manual scroll all route through `TranscriptDocument` anchors and exact local materialization.
-- Copy/yank/search/fold/action paths never use estimated rows as semantic data.
-- Descriptor indices, history indices, and transient UI ids cannot be confused by type or API shape.
+- Transcript windows and readonly buffer viewers execute the same document command path.
+- `Window` no longer decides row-document text semantics.
+- Existing user interactions pass without transcript-specific app cursor snapping.
+- Focused executor tests cover Vim row motions, word motions, visual selection, linewise selection, yank ranges, page movement, top/bottom, and action hit testing through `StaticRowsDocument`.
 
-### Phase 3: Replace host lookups with document registry and render cache
+### Phase 6: Complete exact sparse search, copy, folds, and actions
 
-Goal: remove the old host-special-case document lookup and make rendering a document pipeline.
+Goal: make semantic operations exact across unloaded transcript ranges without falling back to full layout or paint-buffer text.
 
 Deliverables:
 
-- Attach a `DocumentHandle` to windows that display row documents.
-- Resolve documents through an explicit registry or direct handle, not `WinId` comparisons.
-- Replace `UiHost::display_rows_for_range`, `document_total_rows`, and `copy_document_range` as general lookup paths with document-handle calls.
-- Add `RenderCache` keyed by document handle, generation, width, style/theme, renderer generation, and row range.
-- Have window painting consume cached/materialized rows while document commands continue to use the document directly.
-- Make resize re-materialize visible rows only and preserve anchors.
-- Keep the current `TranscriptDocument<'_>` adapter in `crates/tui/src/app/transcript.rs` only as the seed to replace, not the final owner. The final `TranscriptDocument` owns store/cache/view state instead of borrowing `TranscriptView` per call.
-
-Deletion targets:
-
-- `TRANSCRIPT_WIN` branches in `TuiApp`'s `UiHost` implementation.
-- `HostDisplayDocument` as the normal transcript adapter.
-- App-level transcript cursor snapping and transcript-specific row total plumbing.
-- Search code that scans a `HostDisplayDocument` from row zero to total rows.
+- Keep transcript search candidate lookup in SQLite, and page candidates around the current origin.
+- Replace any remaining `instr(text, ?)` or full display-row scans for transcript hot paths with indexed candidate queries plus bounded exact refinement.
+- Add document-level indexed search APIs so non-transcript documents do not need broad host scans for large row documents.
+- Stream large-range copy through descriptor records and exact chunk rendering.
+- Ensure copy cost is proportional to selected content, not total transcript size.
+- Implement fold/expand/collapse on stable descriptor/block keys with generation invalidation.
+- Implement action hit testing from exact materialized spans, never estimated rows.
+- Implement drag selection and autoscroll across unloaded range boundaries.
+- Add regression tests for UTF-8 stale offsets, soft wraps, hard breaks, selectable ranges, non-selectable chrome, action spans, and visual paragraph behavior.
 
 Acceptance:
 
-- Transcript, buffer, and static/test documents all use the same document lookup path.
-- Rendering and command execution share generation and materialization state without coupling through a backing buffer.
-- Width changes do not trigger global transcript layout.
-- Existing user interactions pass through the new path without transcript-specific app branches.
-
-### Phase 4: Complete exact search, copy, folds, and anchor correctness at scale
-
-Goal: harden all semantic operations so virtual loading is invisible to users.
-
-Deliverables:
-
-- Implement search candidate lookup through SQLite FTS5 or explicit trigram/posting tables and exact local display refinement.
-- Page search candidates around the current origin and prefetch bounded neighborhoods only.
-- Remove `instr(text, ?)` full-table transcript search and generic `scan_search_matches` full display-row scans for document windows.
-- Remove full in-memory transcript search-index construction as a hot path. Keep only bounded per-query/per-window caches.
-- Implement large-range copy streaming through block records and exact chunk rendering.
-- Implement fold/expand/collapse on stable block keys with generation invalidation.
-- Implement drag autoscroll across unloaded ranges.
-- Implement top, bottom, row, block, and search-match anchors with revalidation after exactification, resize, append, and fold changes.
-- Add regression tests for multi-byte UTF-8, stale byte columns, soft/hard row breaks, selectable ranges, action spans, non-selectable chrome, and transcript visual paragraph behavior.
-
-Deletion targets:
-
-- Any remaining fallback that layouts the whole transcript for search, copy, fold, or navigation.
-- Any semantic selection/copy path reading transcript text from the paint buffer.
-- Any remaining approximations outside scrollbar extent and coarse scrollbar landing.
-
-Acceptance:
-
-- `gg` and `G` are exact without global layout.
 - Search in huge sessions does not layout the whole transcript, scan every row, or build a full in-memory text index.
-- First search result and `n`/`N` feel instant for indexed queries because SQLite returns bounded candidates and display refinement is local.
-- Copy of a large selected range is exact and bounded by selected content, not full transcript size.
-- Drag selection can cross materialized range boundaries without losing anchor correctness.
-- Fold changes preserve cursor/selection/follow-tail semantics.
+- `n` and `N` use bounded SQLite candidate paging and local display refinement.
+- Copy/yank across unloaded ranges loads and renders only selected chunks.
+- Fold changes preserve cursor, selection, follow-tail, and search anchors.
+- No semantic operation uses estimated rows except scrollbar extent and coarse landing before exact local refinement.
 
-### Phase 5: Cleanup, compatibility isolation, and hard performance gates
+### Phase 7: Cleanup, compatibility isolation, and hard performance gates
 
-Goal: delete old paths after the correct abstractions cover all hot operations, and prove the application scales to very large sessions.
+Goal: delete old paths after the correct abstractions cover hot operations, and prove the application scales to very large sessions.
 
 Deliverables:
 
 - Ensure provider-visible history, display transcript records, object-backed metadata, and request audit payloads remain distinct.
 - Keep legacy JSON importers isolated at the storage boundary and `COMPAT`-tracked according to repo convention.
-- Delete obsolete transcript compatibility adapters, old row cache paths, duplicate display-document concepts, and direct legacy hot load/read paths.
+- Delete obsolete transcript compatibility adapters, duplicate display-document concepts, old row-cache paths, and direct legacy hot load/read paths.
 - Add instrumentation that records rows loaded, descriptors loaded, payloads loaded, history rows read, bytes hydrated, DB writes, dirty suffix size, render cache hit/miss, and exactified row count per operation.
 - Add large-session regression benchmarks that fail when resume, request start, save, search, copy, resize, or scrollbar drag scale with total session size instead of requested range size.
-
-Deletion targets:
-
-- Display resume path that requires hydrated provider history.
-- Any compatibility reader used as a hot runtime load/render path after migrate-on-open covers it.
-- Any remaining code path that loads the whole session in memory except explicit export/import/repair commands.
 
 Acceptance:
 
@@ -769,6 +806,19 @@ Acceptance:
 - Save after no-op or one turn is independent of full session size except for SQLite index maintenance.
 - Request start, request snapshot save, and tool-loop durability are incremental transactions.
 - There is one canonical load/save/render/audit path.
+- Any remaining compatibility or repair path is explicitly named, instrumented, and excluded from normal hot paths.
+
+### Worthwhile deferred work that remains in scope
+
+These items are not distractions. They are deferred only because they depend on the document owner and store boundaries being stable first.
+
+- Indexed transcript search beyond the current candidate paging if measurements show `instr` or existing indexed terms are insufficient.
+- A complete `DocumentViewExecutor` and `StaticRowsDocument` test suite for viewer semantics.
+- `BufferDocument` for readonly buffers, so buffer viewers do not become a second semantic path.
+- Typed incremental persistence transactions that bypass `SessionSnapshot` construction in hot paths.
+- Normal resume metadata-only open with lazy history and transcript document loading.
+- Hard asymptotic benchmark gates, including 100 MiB, 500 MiB, and 1 GiB class smoke coverage.
+- Deleting old host callback paths only after the document path covers transcript, readonly buffers, search, copy, folds, anchors, and actions.
 
 ## Validation Gates
 
