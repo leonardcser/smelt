@@ -73,24 +73,26 @@ impl TuiApp {
         self.core.env.set_cwd(cwd.clone());
         self.core.session.cwd = Some(self.cwd.clone());
         self.refresh_cwd_status();
-        self.core.cells.publish_if_changed("cwd", self.cwd.clone());
         self.core
-            .cells
+            .signals
+            .publish_if_changed("cwd", self.cwd.clone());
+        self.core
+            .signals
             .publish_if_changed("cwd_project", self.cwd_project.clone());
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_branch", self.cwd_branch.clone());
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_worktree", self.cwd_worktree.clone());
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_worktree_path", self.cwd_worktree_path.clone());
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_managed_worktree", self.cwd_managed_worktree);
         let branch = engine::paths::git_branch(&cwd).unwrap_or_default();
-        self.core.cells.publish_if_changed("branch", branch);
+        self.core.signals.publish_if_changed("branch", branch);
         Ok(cwd)
     }
 

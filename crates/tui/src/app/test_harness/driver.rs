@@ -111,11 +111,11 @@ impl TestApp {
     /// bytes are written to a sink so tests stay quiet.
     pub fn render_to_frame(&mut self) -> crate::smelt_edit::SnapshotFrame {
         let _guard = crate::lua::install_app_ptr(&mut self.app);
-        // The main loop refreshes diff cells once per tick before
+        // The main loop refreshes diff signals once per tick before
         // rendering; storybook drives the render path directly without
         // that loop, so we have to publish here or Lua renderers see
         // stale `work_*` / `vim_mode` / `now` values.
-        self.app.publish_diff_cells();
+        self.app.publish_diff_signals();
         let mut sink = std::io::sink();
         self.app.render_normal_to(&mut sink);
         self.app.ui.snapshot()

@@ -26,7 +26,7 @@ impl LuaType for LuaSignalName {
         record_alias(LuaAliasDecl {
             name: "smelt.signal.Name",
             doc: "Name of a reactive signal. Open alias - plugin-defined signals declared via `smelt.signal.new` are accepted alongside the well-known runtime signals listed here.",
-            variants: crate::cells::builtin_signal_names(),
+            variants: crate::signals::builtin_signal_names(),
             open: true,
         });
         "smelt.signal.Name".into()
@@ -62,7 +62,7 @@ impl std::ops::Deref for LuaSignalName {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    use crate::cells::{LuaCellValue, SubscriberKind};
+    use crate::signals::{LuaSignalValue, SubscriberKind};
     use std::rc::Rc;
 
     record_class(LuaClassDecl {
@@ -93,7 +93,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |lua, (name, initial): (LuaSignalName, mlua::Value)| -> LuaResult<()> {
             let key = lua.create_registry_value(initial)?;
             crate::host::try_with_core(|core| {
-                core.cells.declare_if_missing(name.0, LuaCellValue { key });
+                core.signals.declare_if_missing(name.0, LuaSignalValue { key });
             });
             Ok(())
         },
@@ -110,12 +110,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 .map_err(|e| LuaError::RuntimeError(format!("invalid glob `{pattern}`: {e}")))?;
             let handle = LuaHandle::from_func(lua, handler.into_inner())?;
             let id = crate::host::try_with_core(|core| {
-                core.cells
+                core.signals
                     .glob_subscribe(pat, SubscriberKind::Lua(Rc::new(handle)))
             })
             .unwrap_or(0);
             Ok(LuaReg::new(move || {
-                crate::host::try_with_core(|core| core.cells.unsubscribe_glob(id)).unwrap_or(false)
+                crate::host::try_with_core(|core| core.signals.unsubscribe_glob(id)).unwrap_or(false)
             }))
         },
     )?;
@@ -131,6 +131,30 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
     Ok(())
 }
 
+pub(super) fn subscribe_lua_signal(name: String, handle: LuaHandle) -> LuaReg {
+    let sub_id = crate::host::try_with_core(|core| {
+        core.signals.subscribe_kind(
+            &name,
+            crate::signals::SubscriberKind::Lua(std::rc::Rc::new(handle)),
+        )
+    })
+    .flatten();
+    let Some(sub_id) = sub_id else {
+        return LuaReg::new(|| false);
+    };
+    LuaReg::new(move || {
+        crate::host::try_with_core(|core| core.signals.unsubscribe(&name, sub_id)).unwrap_or(false)
+    })
+}
+
+pub(super) fn subscribe_lua_event(name: String, handle: LuaHandle) -> LuaReg {
+    crate::host::try_with_core(|core| {
+        core.signals
+            .declare_if_missing(name.clone(), crate::signals::EventStub);
+    });
+    subscribe_lua_signal(name, handle)
+}
+
 /// Sticky handle for a single signal. Returned by `smelt.signal(name)`.
 pub struct LuaSignal {
     name: String,
@@ -144,7 +168,7 @@ impl LuaType for LuaSignal {
 
 impl mlua::UserData for LuaSignal {
     fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
-        use crate::cells::{LuaCellValue, SubscriberKind};
+        use crate::signals::LuaSignalValue;
         use std::rc::Rc;
 
         methods.add_meta_method(mlua::MetaMethod::ToString, |_, this, ()| {
@@ -153,7 +177,7 @@ impl mlua::UserData for LuaSignal {
 
         methods.add_method("get", |lua, this, _: ()| -> LuaResult<mlua::Value> {
             Ok(
-                crate::host::try_with_core(|core| core.cells.get_lua(&this.name, lua))
+                crate::host::try_with_core(|core| core.signals.get_lua(&this.name, lua))
                     .unwrap_or(mlua::Value::Nil),
             )
         });
@@ -166,7 +190,7 @@ impl mlua::UserData for LuaSignal {
                 let name = this_ud.borrow::<LuaSignal>()?.name.clone();
                 let key = lua.create_registry_value(value)?;
                 crate::host::try_with_core(|core| {
-                    core.cells.set_dyn(&name, Rc::new(LuaCellValue { key }))
+                    core.signals.set_dyn(&name, Rc::new(LuaSignalValue { key }))
                 });
                 Ok(this_ud)
             },
@@ -177,19 +201,7 @@ impl mlua::UserData for LuaSignal {
             |lua, this, handler: mlua::Function| -> LuaResult<LuaReg> {
                 let name = this.name.clone();
                 let handle = LuaHandle::from_func(lua, handler)?;
-                let sub_id = crate::host::try_with_core(|core| {
-                    core.cells
-                        .subscribe_kind(&name, SubscriberKind::Lua(Rc::new(handle)))
-                })
-                .flatten();
-                let Some(sub_id) = sub_id else {
-                    return Ok(LuaReg::new(|| false));
-                };
-                let name_for_reg = name;
-                Ok(LuaReg::new(move || {
-                    crate::host::try_with_core(|core| core.cells.unsubscribe(&name_for_reg, sub_id))
-                        .unwrap_or(false)
-                }))
+                Ok(subscribe_lua_signal(name, handle))
             },
         );
 

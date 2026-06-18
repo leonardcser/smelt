@@ -9,7 +9,7 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
             "#,
     );
     assert!(lua_ok, "smelt.work.busy snippet failed");
-    app.tick_cells();
+    app.tick_signals();
     let _guard = crate::lua::install_app_ptr(&mut app.app);
     let state: String = app
         .app
@@ -45,7 +45,7 @@ fn smelt_work_busy_pushes_token_and_flips_work_cells() {
 
     let ok = app.run_lua("_G._busy_handle:remove(); _G._busy_handle = nil");
     assert!(ok);
-    app.tick_cells();
+    app.tick_signals();
     let _guard = crate::lua::install_app_ptr(&mut app.app);
     let state_after: String = app
         .app

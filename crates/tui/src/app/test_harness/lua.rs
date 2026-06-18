@@ -3,7 +3,7 @@ use super::*;
 impl TestApp {
     /// Side-channel: invoke the `/reload` pipeline. Wipes every Lua
     /// registry (commands, keymaps, statusline, tools, hooks, timers,
-    /// cell subscribers), re-runs `init.lua` and bundled plugins, then
+    /// signals), re-runs `init.lua` and bundled plugins, then
     /// re-fires `on_ready` hooks with `ctx.kind = "reload"`. Named
     /// resources (paint slots, NamedSlots bindings on bufs/wins/overlays)
     /// must keep stable ids; anonymous ones get reaped. Exercises the
@@ -42,15 +42,15 @@ impl TestApp {
         self.app.lua.lua.globals().get(name).ok()
     }
 
-    /// Re-publish the cell diff + fire queued subscribers. Production
+    /// Re-publish the signal diff + fire queued subscribers. Production
     /// runs this every main-loop tick (`app.rs:1068`); the harness
     /// skips that loop and exposes it here so tests can assert against
-    /// the reactive `work_*` / `vim_mode` / `now` cells without driving
+    /// the reactive `work_*` / `vim_mode` / `now` signals without driving
     /// a synthetic event.
-    pub fn tick_cells(&mut self) {
+    pub fn tick_signals(&mut self) {
         let _guard = crate::lua::install_app_ptr(&mut self.app);
-        self.app.publish_diff_cells();
-        self.app.drain_cells_pending();
+        self.app.publish_diff_signals();
+        self.app.drain_signals_pending();
     }
 
     /// Counts of bound names across the four reload-survival registries:

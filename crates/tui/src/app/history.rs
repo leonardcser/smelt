@@ -540,9 +540,9 @@ impl TuiApp {
             self.bump_epoch("history_epoch");
         }
         let count = self.core.session.history.len();
-        self.core.cells.set_dyn(
+        self.core.signals.emit_dyn(
             "history",
-            std::rc::Rc::new(smelt_core::cells::HistoryDelta {
+            std::rc::Rc::new(smelt_core::signals::HistoryDelta {
                 kind: kind.into(),
                 count,
             }),
@@ -679,9 +679,9 @@ impl TuiApp {
         self.save_session();
         self.flush_persist();
         self.core
-            .cells
-            .set_dyn("session_ended", std::rc::Rc::new(original_id.clone()));
-        self.core.cells.set_dyn(
+            .signals
+            .emit_dyn("session_ended", std::rc::Rc::new(original_id.clone()));
+        self.core.signals.emit_dyn(
             "session_started",
             std::rc::Rc::new(self.core.session.id.clone()),
         );
@@ -731,9 +731,9 @@ impl TuiApp {
             *guard = None;
         }
         self.core
-            .cells
-            .set_dyn("session_ended", std::rc::Rc::new(old_id));
-        self.core.cells.set_dyn(
+            .signals
+            .emit_dyn("session_ended", std::rc::Rc::new(old_id));
+        self.core.signals.emit_dyn(
             "session_started",
             std::rc::Rc::new(self.core.session.id.clone()),
         );
@@ -810,9 +810,9 @@ impl TuiApp {
         self.stop_background_processes();
         self.sync_session_snapshot();
         self.core
-            .cells
-            .set_dyn("session_ended", std::rc::Rc::new(old_id));
-        self.core.cells.set_dyn(
+            .signals
+            .emit_dyn("session_ended", std::rc::Rc::new(old_id));
+        self.core.signals.emit_dyn(
             "session_started",
             std::rc::Rc::new(self.core.session.id.clone()),
         );
@@ -873,9 +873,9 @@ impl TuiApp {
         self.transcript.replace_transcript(transcript);
         self.publish_shared_session_state();
         self.core
-            .cells
-            .set_dyn("session_ended", std::rc::Rc::new(old_id));
-        self.core.cells.set_dyn(
+            .signals
+            .emit_dyn("session_ended", std::rc::Rc::new(old_id));
+        self.core.signals.emit_dyn(
             "session_started",
             std::rc::Rc::new(self.core.session.id.clone()),
         );
@@ -1409,7 +1409,7 @@ mod checkpoint_tests {
         let usage = app
             .app
             .core
-            .cells
+            .signals
             .get::<protocol::TokenUsage>("tokens_used")
             .expect("tokens_used reset");
         assert_eq!(usage.context_tokens, Some(0));

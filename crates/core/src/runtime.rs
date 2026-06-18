@@ -1,8 +1,8 @@
 //! Headless-safe runtime core shared by `TuiApp` and `HeadlessApp`.
 
 use super::{
-    app_config::AppConfig, cells, cells::Cells, confirms::Confirms, engine_client::EngineClient,
-    timers::Timers, Osc52Sink, SystemSink,
+    app_config::AppConfig, confirms::Confirms, engine_client::EngineClient, signals,
+    signals::Signals, timers::Timers, Osc52Sink, SystemSink,
 };
 use crate::process::ProcessRegistry;
 use crate::session::Session;
@@ -37,7 +37,7 @@ pub struct Core {
     pub confirms: Confirms,
     pub clipboard: crate::Clipboard,
     pub timers: Timers,
-    pub cells: Cells,
+    pub signals: Signals,
     pub engine: EngineClient,
     pub frontend: FrontendKind,
     pub skills: Option<Arc<SkillLoader>>,
@@ -70,7 +70,7 @@ impl Core {
         env: Arc<engine::env::RuntimeEnv>,
     ) -> Self {
         let cwd = env.cwd().to_str().map(String::from).unwrap_or_default();
-        let cells = cells::build_with_builtins(cells::BuiltinSeeds {
+        let signals = signals::build_with_builtins(signals::SignalSeeds {
             vim_mode: "Insert".to_string(),
             agent_mode: config.mode.as_str().to_string(),
             model: config.model.clone(),
@@ -95,7 +95,7 @@ impl Core {
                 FrontendKind::Headless => Box::new(SystemSink),
             }),
             timers: Timers::new(Arc::clone(&clock)),
-            cells,
+            signals,
             engine: EngineClient::new(engine, confirms_flag),
             frontend,
             skills: None,

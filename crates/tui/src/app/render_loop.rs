@@ -19,7 +19,7 @@ impl TuiApp {
         if !self.transient_render_requested {
             return false;
         }
-        self.publish_diff_cells();
+        self.publish_diff_signals();
         self.render_normal_to(out);
         self.save_session_if_pending();
         true

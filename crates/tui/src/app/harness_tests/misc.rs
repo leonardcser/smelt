@@ -13,7 +13,7 @@ fn signal_api_reads_sets_and_subscribes_to_values() {
         smelt.signal("work_state"):set("testing")
         "#
     ));
-    app.app.drain_cells_pending();
+    app.app.drain_signals_pending();
 
     let globals = app.app.lua.lua.globals();
     assert_eq!(
@@ -38,7 +38,7 @@ fn events_on_subscribes_to_event_shaped_signals() {
         smelt.events.emit("turn_start", { kind = "manual" })
         "#
     ));
-    app.app.drain_cells_pending();
+    app.app.drain_signals_pending();
 
     let globals = app.app.lua.lua.globals();
     assert_eq!(
@@ -59,10 +59,37 @@ fn custom_events_declare_and_emit_through_events_api() {
         smelt.events.emit("plugin:ready", { answer = 42 })
         "#
     ));
-    app.app.drain_cells_pending();
+    app.app.drain_signals_pending();
 
     let globals = app.app.lua.lua.globals();
     assert_eq!(globals.get::<i64>("custom_event_seen").ok(), Some(42));
+}
+
+#[test]
+fn events_emit_does_not_replace_signal_value() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+        smelt.events.new("plugin:tick")
+        _G.before_tick = smelt.signal("plugin:tick"):get()
+        smelt.events.on("plugin:tick", function(payload)
+            _G.tick_payload = payload.value
+        end)
+        smelt.events.emit("plugin:tick", { value = 7 })
+        _G.after_tick = smelt.signal("plugin:tick"):get()
+        "#
+    ));
+    app.app.drain_signals_pending();
+
+    let globals = app.app.lua.lua.globals();
+    assert!(globals
+        .get::<mlua::Value>("before_tick")
+        .is_ok_and(|v| v.is_nil()));
+    assert!(globals
+        .get::<mlua::Value>("after_tick")
+        .is_ok_and(|v| v.is_nil()));
+    assert_eq!(globals.get::<i64>("tick_payload").ok(), Some(7));
 }
 
 #[test]

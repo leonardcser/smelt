@@ -1,8 +1,8 @@
-//! Typed reactive name → value registry with deferred subscriber notification.
+//! Typed reactive signal registry with deferred subscriber notification.
 //!
-//! Each cell is an `Rc<dyn Any>` slot. Writes queue direct + glob subscribers for firing after
-//! the `&mut Cells` borrow releases, so subscriber bodies can re-enter `Cells` freely. Lua cells
-//! store an `mlua::RegistryKey`; Rust-typed cells use a per-`TypeId` `LuaProjector` to convert to
+//! Each signal is an `Rc<dyn Any>` slot. Writes queue direct + glob subscribers for firing after
+//! the `&mut Signals` borrow releases, so subscriber bodies can re-enter `Signals` freely. Lua signals
+//! store an `mlua::RegistryKey`; Rust-typed signals use a per-`TypeId` `LuaProjector` to convert to
 //! `mlua::Value` at drain time.
 
 use std::any::{Any, TypeId};
@@ -13,12 +13,12 @@ use protocol::{TokenUsage, TurnMeta};
 
 use crate::lua::LuaHandle;
 
-/// Value for Lua-originated cells. Stored as a stable `mlua::RegistryKey` so it survives GC.
-pub(crate) struct LuaCellValue {
+/// Value for Lua-originated signals. Stored as a stable `mlua::RegistryKey` so it survives GC.
+pub(crate) struct LuaSignalValue {
     pub(crate) key: mlua::RegistryKey,
 }
 
-/// Converter from a stored cell value (`&dyn Any`) to a Lua value, keyed by `TypeId`.
+/// Converter from a stored signal value (`&dyn Any`) to a Lua value, keyed by `TypeId`.
 pub(crate) type LuaProjector = Box<dyn Fn(&dyn Any, &mlua::Lua) -> mlua::Value>;
 
 /// Stable id returned by `subscribe_kind` and consumed by `unsubscribe`.
@@ -53,16 +53,16 @@ pub struct PendingCallback {
     pub is_glob: bool,
 }
 
-/// One queued notification: value snapshot, previous value, and subscriber callbacks.
-/// Fired in registration order after the `&mut Cells` borrow releases.
+/// One queued notification: value snapshot, optional previous value, and subscriber callbacks.
+/// Fired in registration order after the `&mut Signals` borrow releases.
 pub struct PendingFire {
     pub name: String,
     pub value: Rc<dyn Any>,
-    pub prev: Rc<dyn Any>,
+    pub prev: Option<Rc<dyn Any>>,
     pub callbacks: Vec<PendingCallback>,
 }
 
-pub struct Cells {
+pub struct Signals {
     slots: HashMap<String, Slot>,
     glob_subs: Vec<GlobSubscriber>,
     pending: Vec<PendingFire>,
@@ -70,13 +70,13 @@ pub struct Cells {
     lua_projectors: HashMap<TypeId, LuaProjector>,
 }
 
-impl Default for Cells {
+impl Default for Signals {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Cells {
+impl Signals {
     pub(crate) fn new() -> Self {
         let mut s = Self {
             slots: HashMap::new(),
@@ -85,7 +85,7 @@ impl Cells {
             next_id: 0,
             lua_projectors: HashMap::new(),
         };
-        s.register_lua_projector::<LuaCellValue, _>(|v, lua| {
+        s.register_lua_projector::<LuaSignalValue, _>(|v, lua| {
             lua.registry_value::<mlua::Value>(&v.key)
                 .unwrap_or(mlua::Value::Nil)
         });
@@ -104,14 +104,14 @@ impl Cells {
         self.lua_projectors.insert(TypeId::of::<T>(), wrapper);
     }
 
-    /// Return the typed value at `name`, if the cell exists with that exact type.
+    /// Return the typed value at `name`, if the signal exists with that exact type.
     pub fn get<T: Any + Clone + 'static>(&self, name: &str) -> Option<T> {
         self.slots
             .get(name)
             .and_then(|slot| slot.value.downcast_ref::<T>().cloned())
     }
 
-    /// Project the cell at `name` to a Lua value. Returns `Nil` when undeclared or no projector.
+    /// Project the signal at `name` to a Lua value. Returns `Nil` when undeclared or no projector.
     pub(crate) fn get_lua(&self, name: &str, lua: &mlua::Lua) -> mlua::Value {
         let Some(slot) = self.slots.get(name) else {
             return mlua::Value::Nil;
@@ -127,7 +127,7 @@ impl Cells {
         }
     }
 
-    /// Declare or reset a cell. Re-declaration resets the value and drops all subscribers.
+    /// Declare or reset a signal. Re-declaration resets the value and drops all subscribers.
     pub(crate) fn declare<T: Any + 'static>(&mut self, name: impl Into<String>, initial: T) {
         self.slots.insert(
             name.into(),
@@ -138,7 +138,7 @@ impl Cells {
         );
     }
 
-    /// Declare a cell only when it does not already exist.
+    /// Declare a signal only when it does not already exist.
     pub(crate) fn declare_if_missing<T: Any + 'static>(
         &mut self,
         name: impl Into<String>,
@@ -150,14 +150,8 @@ impl Cells {
         });
     }
 
-    /// Overwrite a cell and queue subscribers. Returns `false` when `name` is undeclared.
-    pub fn set_dyn(&mut self, name: &str, value: Rc<dyn Any>) -> bool {
-        let Some(slot) = self.slots.get_mut(name) else {
-            return false;
-        };
-        let prev = std::mem::replace(&mut slot.value, value);
-        let mut callbacks: Vec<PendingCallback> = slot
-            .subscribers
+    fn callbacks_for(&self, name: &str, subscribers: &[Subscriber]) -> Vec<PendingCallback> {
+        let mut callbacks: Vec<PendingCallback> = subscribers
             .iter()
             .map(|s| PendingCallback {
                 kind: s.kind.clone(),
@@ -172,20 +166,68 @@ impl Cells {
                 });
             }
         }
+        callbacks
+    }
+
+    /// Overwrite a signal and queue subscribers. Returns `false` when `name` is undeclared.
+    pub fn set_dyn(&mut self, name: &str, value: Rc<dyn Any>) -> bool {
+        let (prev, snapshot, direct_callbacks) = {
+            let Some(slot) = self.slots.get_mut(name) else {
+                return false;
+            };
+            let prev = std::mem::replace(&mut slot.value, value);
+            let snapshot = Rc::clone(&slot.value);
+            let callbacks: Vec<PendingCallback> = slot
+                .subscribers
+                .iter()
+                .map(|s| PendingCallback {
+                    kind: s.kind.clone(),
+                    is_glob: false,
+                })
+                .collect();
+            (prev, snapshot, callbacks)
+        };
+
+        let mut callbacks = direct_callbacks;
+        for g in &self.glob_subs {
+            if g.pattern.matches(name) {
+                callbacks.push(PendingCallback {
+                    kind: g.kind.clone(),
+                    is_glob: true,
+                });
+            }
+        }
         if callbacks.is_empty() {
             return true;
         }
-        let snapshot = Rc::clone(&slot.value);
         self.pending.push(PendingFire {
             name: name.to_string(),
             value: snapshot,
-            prev,
+            prev: Some(prev),
             callbacks,
         });
         true
     }
 
-    /// Subscribe to `name`. Returns `None` when the cell is undeclared.
+    /// Queue an occurrence without replacing the signal's current value.
+    pub fn emit_dyn(&mut self, name: &str, payload: Rc<dyn Any>) -> bool {
+        let Some(slot) = self.slots.get(name) else {
+            return false;
+        };
+        let callbacks = self.callbacks_for(name, &slot.subscribers);
+        if callbacks.is_empty() {
+            return true;
+        }
+        self.pending.push(PendingFire {
+            name: name.to_string(),
+            value: payload,
+            prev: None,
+            callbacks,
+        });
+        true
+    }
+
+    /// Subscribe to `name`. Returns `None` when the signal is undeclared.
     pub(crate) fn subscribe_kind(
         &mut self,
         name: &str,
@@ -198,7 +240,7 @@ impl Cells {
         Some(id)
     }
 
-    /// Remove a subscriber. Returns `false` when the cell is undeclared or `id` is unknown.
+    /// Remove a subscriber. Returns `false` when the signal is undeclared or `id` is unknown.
     pub(crate) fn unsubscribe(&mut self, name: &str, id: SubscriptionId) -> bool {
         let Some(slot) = self.slots.get_mut(name) else {
             return false;
@@ -237,6 +279,11 @@ impl Cells {
         !self.pending.is_empty()
     }
 
+    #[cfg(test)]
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.slots.keys().map(String::as_str)
+    }
+
     /// Drop every Lua subscriber (direct + glob) plus queued fires.
     /// Dropping `pending` too prevents one stale post-reload firing.
     pub fn clear_lua_subscribers(&mut self) {
@@ -264,8 +311,8 @@ impl Cells {
     }
 }
 
-/// Seed values for stateful built-in cells, so plugins read correct state at startup.
-pub(crate) struct BuiltinSeeds {
+/// Seed values for stateful built-in signals, so plugins read correct state at startup.
+pub(crate) struct SignalSeeds {
     pub(crate) vim_mode: String,
     pub(crate) agent_mode: String,
     pub(crate) model: String,
@@ -275,17 +322,17 @@ pub(crate) struct BuiltinSeeds {
     pub(crate) branch: String,
 }
 
-/// Placeholder for event-shaped cells before the first typed payload is published. Projects to `nil`.
+/// Placeholder for event-shaped signals before the first typed payload is published. Projects to `nil`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EventStub;
 
-/// Payload for the `turn_error` cell.
+/// Payload for the `turn_error` signal.
 #[derive(Debug, Default, Clone)]
 pub struct TurnError {
     pub message: String,
 }
 
-/// Payload for the `confirm_resolved` cell. `decision` is a stable string matching the
+/// Payload for the `confirm_resolved` signal. `decision` is a stable string matching the
 /// resolved `ConfirmChoice` variant + scope (e.g. `"yes"`, `"always_session"`).
 #[derive(Debug, Clone)]
 pub struct ConfirmResolved {
@@ -293,27 +340,27 @@ pub struct ConfirmResolved {
     pub decision: String,
 }
 
-/// Payload for the `history` cell. `kind` is `"set" | "cleared" | "forked" | "loaded"`.
+/// Payload for the `history` signal. `kind` is `"set" | "cleared" | "forked" | "loaded"`.
 #[derive(Debug, Clone)]
 pub struct HistoryDelta {
     pub kind: String,
     pub count: usize,
 }
 
-/// Payload for the `turn_end` cell. `cancelled` is `true` for cancel/error legs.
+/// Payload for the `turn_end` signal. `cancelled` is `true` for cancel/error legs.
 #[derive(Debug, Clone)]
 pub struct TurnEnd {
     pub cancelled: bool,
 }
 
-/// Payload for the `tool_start` cell.
+/// Payload for the `tool_start` signal.
 #[derive(Debug, Clone)]
 pub struct ToolStart {
     pub tool: String,
     pub args: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// Payload for the `tool_end` cell. `elapsed_ms` is `None` when not timed.
+/// Payload for the `tool_end` signal. `elapsed_ms` is `None` when not timed.
 #[derive(Debug, Clone)]
 pub struct ToolEnd {
     pub tool: String,
@@ -321,8 +368,8 @@ pub struct ToolEnd {
     pub elapsed_ms: Option<u64>,
 }
 
-/// Payload for the `confirm_requested` cell. Full snapshot the Lua dialog reads.
-#[derive(Debug, Clone)]
+/// Payload for the `confirm_requested` signal. Full snapshot the Lua dialog reads.
+#[derive(Debug, Clone, Default)]
 pub struct ConfirmRequested {
     pub handle_id: u64,
     pub tool_name: String,
@@ -332,7 +379,7 @@ pub struct ConfirmRequested {
     pub grant_options: Vec<crate::transcript_model::ConfirmApprovalOption>,
 }
 
-/// Single entry in the `work_busy` cell payload. One per live
+/// Single entry in the `work_busy` signal payload. One per live
 /// `smelt.work.busy` token, projected newest-last as
 /// `{ id, label }` Lua tables. `id` is the monotonic token id returned
 /// by `push`; plugins compare it across ticks to spot specific tokens.
@@ -342,7 +389,7 @@ pub struct WorkBusyEntry {
     pub label: String,
 }
 
-/// Payload for the `cursor_pos` cell. Tracks the focused window's
+/// Payload for the `cursor_pos` signal. Tracks the focused window's
 /// cursor for the statusline position pill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CursorPos {
@@ -351,7 +398,7 @@ pub struct CursorPos {
     pub scroll_pct: u8,
 }
 
-/// Payload for the `stream_delta` cell. Emitted for every streaming
+/// Payload for the `stream_delta` signal. Emitted for every streaming
 /// chunk arriving from the provider - text, thinking, and tool-call
 /// argument JSON fragments. Use `bytes` for cheap counters (live TPS);
 /// `text` carries the raw delta. For `kind == "tool_args"`, `call_id`
@@ -406,9 +453,9 @@ pub const BUILTIN_SIGNALS: &[BuiltinSignal] = &[
     state("agent_mode"),
     event("block_done"),
     state("branch"),
-    state("cmd_post"),
-    state("cmd_pre"),
-    event("confirm_requested"),
+    event("cmd_post"),
+    event("cmd_pre"),
+    state("confirm_requested"),
     event("confirm_resolved"),
     state("confirms_pending"),
     state("cursor_pos"),
@@ -534,20 +581,20 @@ fn styled_lines_to_lua(lua: &mlua::Lua, sl: &protocol::StyledLines) -> mlua::Val
     mlua::Value::Table(out)
 }
 
-/// Register projectors and declare all built-in cells with their initial values.
-pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
-    let mut cells = Cells::new();
+/// Register projectors and declare all built-in signals with their initial values.
+pub(crate) fn build_with_builtins(seeds: SignalSeeds) -> Signals {
+    let mut signals = Signals::new();
 
-    cells.register_lua_projector::<String, _>(|s, lua| match lua.create_string(s.as_str()) {
+    signals.register_lua_projector::<String, _>(|s, lua| match lua.create_string(s.as_str()) {
         Ok(s) => mlua::Value::String(s),
         Err(_) => mlua::Value::Nil,
     });
-    cells.register_lua_projector::<bool, _>(|b, _| mlua::Value::Boolean(*b));
-    cells.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
-    cells.register_lua_projector::<u64, _>(|n, _| mlua::Value::Integer(*n as i64));
-    cells.register_lua_projector::<u8, _>(|n, _| mlua::Value::Integer(*n as i64));
-    cells.register_lua_projector::<f64, _>(|n, _| mlua::Value::Number(*n));
-    cells.register_lua_projector::<CursorPos, _>(|p, lua| {
+    signals.register_lua_projector::<bool, _>(|b, _| mlua::Value::Boolean(*b));
+    signals.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
+    signals.register_lua_projector::<u64, _>(|n, _| mlua::Value::Integer(*n as i64));
+    signals.register_lua_projector::<u8, _>(|n, _| mlua::Value::Integer(*n as i64));
+    signals.register_lua_projector::<f64, _>(|n, _| mlua::Value::Number(*n));
+    signals.register_lua_projector::<CursorPos, _>(|p, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -556,9 +603,9 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("scroll_pct", p.scroll_pct as i64);
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<EventStub, _>(|_, _| mlua::Value::Nil);
+    signals.register_lua_projector::<EventStub, _>(|_, _| mlua::Value::Nil);
     // `None` fields are absent so plugins can write `usage.prompt_tokens or 0`.
-    cells.register_lua_projector::<TokenUsage, _>(|u, lua| {
+    signals.register_lua_projector::<TokenUsage, _>(|u, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -582,7 +629,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<TurnMeta, _>(|m, lua| {
+    signals.register_lua_projector::<TurnMeta, _>(|m, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -602,14 +649,14 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<TurnError, _>(|e, lua| {
+    signals.register_lua_projector::<TurnError, _>(|e, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
         let _ = t.set("message", e.message.as_str());
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<ConfirmResolved, _>(|r, lua| {
+    signals.register_lua_projector::<ConfirmResolved, _>(|r, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -617,7 +664,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("decision", r.decision.as_str());
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<HistoryDelta, _>(|d, lua| {
+    signals.register_lua_projector::<HistoryDelta, _>(|d, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -625,14 +672,14 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         let _ = t.set("count", d.count as i64);
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<TurnEnd, _>(|e, lua| {
+    signals.register_lua_projector::<TurnEnd, _>(|e, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
         let _ = t.set("cancelled", e.cancelled);
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<ToolStart, _>(|s, lua| {
+    signals.register_lua_projector::<ToolStart, _>(|s, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -647,7 +694,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<ToolEnd, _>(|s, lua| {
+    signals.register_lua_projector::<ToolEnd, _>(|s, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -658,7 +705,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<StreamDelta, _>(|d, lua| {
+    signals.register_lua_projector::<StreamDelta, _>(|d, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -673,7 +720,7 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(t)
     });
-    cells.register_lua_projector::<ConfirmRequested, _>(|r, lua| {
+    signals.register_lua_projector::<ConfirmRequested, _>(|r, lua| {
         let Ok(t) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -701,36 +748,36 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         mlua::Value::Table(t)
     });
 
-    cells.declare("vim_mode", seeds.vim_mode);
-    cells.declare("agent_mode", seeds.agent_mode);
-    cells.declare("model", seeds.model);
-    cells.declare("reasoning", seeds.reasoning);
-    cells.declare("confirms_pending", false);
-    cells.declare("tokens_used", TokenUsage::default());
-    cells.declare("errors", 0u32);
-    cells.declare("cwd", seeds.cwd);
-    cells.declare("cwd_branch", String::new());
-    cells.declare("cwd_managed_worktree", false);
-    cells.declare("cwd_project", String::new());
-    cells.declare("cwd_worktree", String::new());
-    cells.declare("cwd_worktree_path", String::new());
-    cells.declare("session_epoch", 0u64);
-    cells.declare("session_title", seeds.session_title);
-    cells.declare("branch", seeds.branch);
-    cells.declare("history_epoch", 0u64);
-    cells.declare("input_epoch", 0u64);
-    cells.declare("now", 0u64);
-    cells.declare("spinner_frame", 0u8);
-    cells.declare("tps", 0.0f64);
-    cells.declare("task_label", String::new());
-    cells.declare("running_procs", 0u32);
-    cells.declare("permission_pending", false);
-    cells.declare("notification_visible", false);
-    cells.declare("prompt_resize_active", false);
-    cells.declare("prompt_resize_chrome", String::new());
-    cells.declare("cursor_pos", CursorPos::default());
+    signals.declare("vim_mode", seeds.vim_mode);
+    signals.declare("agent_mode", seeds.agent_mode);
+    signals.declare("model", seeds.model);
+    signals.declare("reasoning", seeds.reasoning);
+    signals.declare("confirms_pending", false);
+    signals.declare("tokens_used", TokenUsage::default());
+    signals.declare("errors", 0u32);
+    signals.declare("cwd", seeds.cwd);
+    signals.declare("cwd_branch", String::new());
+    signals.declare("cwd_managed_worktree", false);
+    signals.declare("cwd_project", String::new());
+    signals.declare("cwd_worktree", String::new());
+    signals.declare("cwd_worktree_path", String::new());
+    signals.declare("session_epoch", 0u64);
+    signals.declare("session_title", seeds.session_title);
+    signals.declare("branch", seeds.branch);
+    signals.declare("history_epoch", 0u64);
+    signals.declare("input_epoch", 0u64);
+    signals.declare("now", 0u64);
+    signals.declare("spinner_frame", 0u8);
+    signals.declare("tps", 0.0f64);
+    signals.declare("task_label", String::new());
+    signals.declare("running_procs", 0u32);
+    signals.declare("permission_pending", false);
+    signals.declare("notification_visible", false);
+    signals.declare("prompt_resize_active", false);
+    signals.declare("prompt_resize_chrome", String::new());
+    signals.declare("cursor_pos", CursorPos::default());
 
-    cells.register_lua_projector::<Vec<WorkBusyEntry>, _>(|v, lua| {
+    signals.register_lua_projector::<Vec<WorkBusyEntry>, _>(|v, lua| {
         let Ok(out) = lua.create_table() else {
             return mlua::Value::Nil;
         };
@@ -742,37 +789,26 @@ pub(crate) fn build_with_builtins(seeds: BuiltinSeeds) -> Cells {
         }
         mlua::Value::Table(out)
     });
-    cells.declare("work_state", String::from("idle"));
-    cells.declare("work_label", String::new());
-    cells.declare("work_elapsed_ms", 0u64);
-    cells.declare("work_busy", Vec::<WorkBusyEntry>::new());
-    cells.declare("work_outcome", String::new());
-    cells.declare("work_retry_attempt", 0u32);
-    cells.declare("work_retry_remaining_ms", 0u64);
+    signals.declare("work_state", String::from("idle"));
+    signals.declare("work_label", String::new());
+    signals.declare("work_elapsed_ms", 0u64);
+    signals.declare("work_busy", Vec::<WorkBusyEntry>::new());
+    signals.declare("work_outcome", String::new());
+    signals.declare("work_retry_attempt", 0u32);
+    signals.declare("work_retry_remaining_ms", 0u64);
 
-    // Event-shaped signals: declared with an `EventStub` placeholder so `smelt.events.on(name, handler)` works.
-    cells.declare("history", EventStub);
-    cells.declare("turn_complete", EventStub);
-    cells.declare("turn_error", EventStub);
-    cells.declare("confirm_requested", EventStub);
-    cells.declare("confirm_resolved", EventStub);
-    cells.declare("session_started", EventStub);
-    cells.declare("session_ended", EventStub);
-    cells.declare("block_done", EventStub);
-    cells.declare("cmd_pre", String::new());
-    cells.declare("cmd_post", String::new());
-    cells.declare("shutdown", EventStub);
-    cells.declare("turn_start", EventStub);
-    cells.declare("turn_end", EventStub);
-    cells.declare("tool_start", EventStub);
-    cells.declare("tool_end", EventStub);
-    cells.declare("stream_delta", EventStub);
-    cells.declare("stream_phase", EventStub);
-    cells.declare("input_submit", String::new());
-    cells.declare("keymap_pending", String::new());
-    cells.declare("vim_pending_input", String::new());
+    signals.declare("keymap_pending", String::new());
+    signals.declare("vim_pending_input", String::new());
+    signals.declare("confirm_requested", ConfirmRequested::default());
 
-    cells
+    for signal in BUILTIN_SIGNALS
+        .iter()
+        .filter(|signal| signal.kind == BuiltinSignalKind::Event)
+    {
+        signals.declare(signal.name, EventStub);
+    }
+
+    signals
 }
 
 #[cfg(test)]
@@ -786,9 +822,27 @@ mod tests {
     }
 
     #[test]
+    fn builtin_signal_metadata_matches_declarations() {
+        let signals = build_with_builtins(SignalSeeds {
+            vim_mode: "insert".into(),
+            agent_mode: "normal".into(),
+            model: "model".into(),
+            reasoning: "off".into(),
+            cwd: "/tmp".into(),
+            session_title: "session".into(),
+            branch: "main".into(),
+        });
+        let mut declared: Vec<_> = signals.names().collect();
+        let mut metadata: Vec<_> = BUILTIN_SIGNALS.iter().map(|signal| signal.name).collect();
+        declared.sort_unstable();
+        metadata.sort_unstable();
+        assert_eq!(declared, metadata);
+    }
+
+    #[test]
     fn declare_then_get_lua_returns_initial_value() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
         c.declare("count", 7u32);
         match c.get_lua("count", &lua) {
@@ -800,14 +854,14 @@ mod tests {
     #[test]
     fn get_lua_returns_nil_for_undeclared() {
         let lua = Lua::new();
-        let c = Cells::new();
+        let c = Signals::new();
         assert!(matches!(c.get_lua("missing", &lua), mlua::Value::Nil));
     }
 
     #[test]
     fn set_dyn_updates_value() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.register_lua_projector::<u32, _>(|n, _| mlua::Value::Integer(*n as i64));
         c.declare("count", 0u32);
         assert!(c.set_dyn("count", Rc::new(42u32)));
@@ -819,13 +873,13 @@ mod tests {
 
     #[test]
     fn set_dyn_returns_false_for_undeclared() {
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         assert!(!c.set_dyn("missing", Rc::new(1u32)));
     }
 
     #[test]
     fn set_without_subscribers_does_not_queue() {
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("count", 0u32);
         c.set_dyn("count", Rc::new(1u32));
         assert!(!c.has_pending());
@@ -835,7 +889,7 @@ mod tests {
     #[test]
     fn subscribe_queues_fire_on_set() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("count", 0u32);
         let id = c
             .subscribe_kind(
@@ -858,7 +912,7 @@ mod tests {
     #[test]
     fn multiple_subscribers_appear_in_registration_order() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("count", 0u32);
         for src in [
             "function() return 1 end",
@@ -877,7 +931,7 @@ mod tests {
     #[test]
     fn unsubscribe_removes_callback() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("count", 0u32);
         let id = c
             .subscribe_kind("count", SubscriberKind::Lua(handle(&lua, "function() end")))
@@ -893,7 +947,7 @@ mod tests {
     #[test]
     fn snapshot_carries_value_at_set_time() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("count", 0u32);
         c.subscribe_kind("count", SubscriberKind::Lua(handle(&lua, "function() end")))
             .unwrap();
@@ -908,7 +962,7 @@ mod tests {
     #[test]
     fn fire_carries_prev_value() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("count", 7u32);
         c.subscribe_kind("count", SubscriberKind::Lua(handle(&lua, "function() end")))
             .unwrap();
@@ -919,15 +973,40 @@ mod tests {
         let fires = c.drain_pending();
         assert_eq!(fires.len(), 2);
         assert_eq!(fires[0].value.downcast_ref::<u32>(), Some(&8u32));
-        assert_eq!(fires[0].prev.downcast_ref::<u32>(), Some(&7u32));
+        assert_eq!(
+            fires[0]
+                .prev
+                .as_deref()
+                .and_then(|v| v.downcast_ref::<u32>()),
+            Some(&7u32)
+        );
         assert_eq!(fires[1].value.downcast_ref::<u32>(), Some(&9u32));
-        assert_eq!(fires[1].prev.downcast_ref::<u32>(), Some(&8u32));
+        assert_eq!(
+            fires[1]
+                .prev
+                .as_deref()
+                .and_then(|v| v.downcast_ref::<u32>()),
+            Some(&8u32)
+        );
+    }
+
+    #[test]
+    fn emit_dyn_has_no_previous_value() {
+        let lua = Lua::new();
+        let mut c = Signals::new();
+        c.declare("event", EventStub);
+        c.subscribe_kind("event", SubscriberKind::Lua(handle(&lua, "function() end")))
+            .unwrap();
+        c.emit_dyn("event", Rc::new(42u32));
+        let fires = c.drain_pending();
+        assert_eq!(fires.len(), 1);
+        assert!(fires[0].prev.is_none());
     }
 
     #[test]
     fn drain_pending_is_idempotent() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("count", 0u32);
         c.subscribe_kind("count", SubscriberKind::Lua(handle(&lua, "function() end")))
             .unwrap();
@@ -939,7 +1018,7 @@ mod tests {
     #[test]
     fn redeclare_resets_value_and_drops_subscribers() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.register_lua_projector::<bool, _>(|b, _| mlua::Value::Boolean(*b));
         c.declare("flag", false);
         c.subscribe_kind("flag", SubscriberKind::Lua(handle(&lua, "function() end")))
@@ -957,7 +1036,7 @@ mod tests {
     #[test]
     fn subscribe_returns_none_for_undeclared() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         assert!(c
             .subscribe_kind(
                 "missing",
@@ -969,7 +1048,7 @@ mod tests {
     #[test]
     fn glob_subscribe_fires_for_matching_names() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("agent:1:status", "idle");
         c.declare("agent:2:status", "idle");
         c.declare("vim_mode", "Insert");
@@ -991,7 +1070,7 @@ mod tests {
     #[test]
     fn glob_and_direct_subscribers_both_fire() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("turn_complete", false);
         c.subscribe_kind(
             "turn_complete",
@@ -1014,7 +1093,7 @@ mod tests {
     #[test]
     fn unsubscribe_glob_removes_callback() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.declare("foo", 0u32);
         let id = c.glob_subscribe(
             glob::Pattern::new("*").unwrap(),
@@ -1030,23 +1109,23 @@ mod tests {
     #[test]
     fn glob_subscriber_does_not_fire_for_undeclared_name() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         c.glob_subscribe(
             glob::Pattern::new("*").unwrap(),
             SubscriberKind::Lua(handle(&lua, "function() end")),
         );
-        // No declared cell, so set_dyn returns false and queues nothing.
+        // No declared signal, so set_dyn returns false and queues nothing.
         assert!(!c.set_dyn("missing", Rc::new(1u32)));
         assert!(!c.has_pending());
     }
 
     #[test]
-    fn lua_cell_value_round_trip() {
+    fn lua_signal_value_round_trip() {
         let lua = Lua::new();
         let value: mlua::Value = lua.load("\"hello\"").eval().unwrap();
         let key = lua.create_registry_value(value).unwrap();
-        let mut c = Cells::new();
-        c.declare("greeting", LuaCellValue { key });
+        let mut c = Signals::new();
+        c.declare("greeting", LuaSignalValue { key });
         match c.get_lua("greeting", &lua) {
             mlua::Value::String(s) => {
                 assert_eq!(s.to_str().unwrap(), "hello");
@@ -1056,9 +1135,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_seeds_declare_every_cell() {
+    fn builtin_seeds_declare_every_signal() {
         let lua = Lua::new();
-        let cells = build_with_builtins(BuiltinSeeds {
+        let signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
             agent_mode: "normal".into(),
             model: "anthropic/claude-opus-4-7".into(),
@@ -1068,7 +1147,7 @@ mod tests {
             branch: String::new(),
         });
 
-        // Stateful cells with primitive projectors return their seeds.
+        // Stateful signals with primitive projectors return their seeds.
         for (name, expected) in [
             ("vim_mode", "Insert"),
             ("agent_mode", "normal"),
@@ -1076,43 +1155,41 @@ mod tests {
             ("reasoning", "off"),
             ("cwd", "/tmp/work"),
         ] {
-            match cells.get_lua(name, &lua) {
+            match signals.get_lua(name, &lua) {
                 mlua::Value::String(s) => assert_eq!(s.to_str().unwrap(), expected),
-                other => panic!("cell {name}: expected String({expected}), got {other:?}"),
+                other => panic!("signal {name}: expected String({expected}), got {other:?}"),
             }
         }
 
-        // Event-shaped cells project to nil while their setters are
-        // un-migrated.
+        // Event-shaped signals project to nil before their first payload.
         for name in [
             "history",
             "turn_complete",
             "turn_error",
-            "confirm_requested",
             "confirm_resolved",
             "session_started",
             "session_ended",
         ] {
             assert!(
-                matches!(cells.get_lua(name, &lua), mlua::Value::Nil),
-                "cell {name} should project to Nil"
+                matches!(signals.get_lua(name, &lua), mlua::Value::Nil),
+                "signal {name} should project to Nil"
             );
         }
 
         // `now` initialises at 0 (epoch); `spinner_frame` at 0; both
         // project as Lua integers via the u64 / u8 projectors.
         assert!(matches!(
-            cells.get_lua("now", &lua),
+            signals.get_lua("now", &lua),
             mlua::Value::Integer(0)
         ));
         assert!(matches!(
-            cells.get_lua("spinner_frame", &lua),
+            signals.get_lua("spinner_frame", &lua),
             mlua::Value::Integer(0)
         ));
 
         // `tokens_used` initialises as `TokenUsage::default()` whose
         // every field is `None`; the projector returns an empty table.
-        match cells.get_lua("tokens_used", &lua) {
+        match signals.get_lua("tokens_used", &lua) {
             mlua::Value::Table(t) => {
                 assert_eq!(t.len().unwrap(), 0);
                 assert_eq!(t.pairs::<String, i64>().count(), 0);
@@ -1121,14 +1198,14 @@ mod tests {
         }
 
         // Every name in `BUILTIN_SIGNALS` must round-trip through
-        // `Cells::get_lua` (i.e. actually be declared above). Adding a
+        // `Signals::get_lua` (i.e. actually be declared above). Adding a
         // new builtin without updating the metadata trips this test.
         for signal in BUILTIN_SIGNALS {
             let name = signal.name;
-            let v = cells.get_lua(name, &lua);
+            let v = signals.get_lua(name, &lua);
             assert!(
                 !matches!(v, mlua::Value::Nil) || signal.kind == BuiltinSignalKind::Event,
-                "BUILTIN_SIGNALS lists `{name}` but Cells::get_lua returned Nil for a non-event signal"
+                "BUILTIN_SIGNALS lists `{name}` but Signals::get_lua returned Nil for a non-event signal"
             );
         }
     }
@@ -1136,7 +1213,7 @@ mod tests {
     #[test]
     fn token_usage_projector_emits_named_fields() {
         let lua = Lua::new();
-        let mut c = Cells::new();
+        let mut c = Signals::new();
         // The TokenUsage projector lives in build_with_builtins; mirror
         // the registration here so the unit test is hermetic.
         c.register_lua_projector::<TokenUsage, _>(|u, lua| {
@@ -1182,7 +1259,7 @@ mod tests {
     #[test]
     fn event_payload_projectors_emit_named_fields() {
         let lua = Lua::new();
-        let cells = build_with_builtins(BuiltinSeeds {
+        let signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
             agent_mode: "normal".into(),
             model: "m".into(),
@@ -1192,13 +1269,13 @@ mod tests {
             branch: String::new(),
         });
 
-        // Set typed payloads via set_dyn - Cells::project_to_lua keys
+        // Set typed payloads via set_dyn - Signals::project_to_lua keys
         // on the stored value's TypeId, so the typed projector takes
         // over even though the slot was declared with EventStub.
-        let mut cells = cells;
+        let mut signals = signals;
         let mut tool_elapsed = std::collections::HashMap::new();
         tool_elapsed.insert("call_42".to_string(), 1500u64);
-        cells.set_dyn(
+        signals.set_dyn(
             "turn_complete",
             Rc::new(TurnMeta {
                 elapsed_ms: 12000,
@@ -1208,28 +1285,28 @@ mod tests {
                 tool_elapsed,
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "turn_error",
             Rc::new(TurnError {
                 message: "boom".into(),
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "confirm_resolved",
             Rc::new(ConfirmResolved {
                 handle_id: 7,
                 decision: "always_session".into(),
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "history",
             Rc::new(HistoryDelta {
                 kind: "set".into(),
                 count: 4,
             }),
         );
-        cells.set_dyn("session_started", Rc::new(String::from("sess-001")));
-        cells.set_dyn(
+        signals.set_dyn("session_started", Rc::new(String::from("sess-001")));
+        signals.set_dyn(
             "confirm_requested",
             Rc::new(ConfirmRequested {
                 handle_id: 42,
@@ -1245,7 +1322,7 @@ mod tests {
             }),
         );
 
-        match cells.get_lua("turn_complete", &lua) {
+        match signals.get_lua("turn_complete", &lua) {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("elapsed_ms").unwrap(), 12000);
                 assert!((t.get::<f64>("avg_tps").unwrap() - 33.5).abs() < f64::EPSILON);
@@ -1256,31 +1333,31 @@ mod tests {
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match cells.get_lua("turn_error", &lua) {
+        match signals.get_lua("turn_error", &lua) {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<String>("message").unwrap(), "boom");
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match cells.get_lua("confirm_resolved", &lua) {
+        match signals.get_lua("confirm_resolved", &lua) {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("handle_id").unwrap(), 7);
                 assert_eq!(t.get::<String>("decision").unwrap(), "always_session");
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match cells.get_lua("history", &lua) {
+        match signals.get_lua("history", &lua) {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<String>("kind").unwrap(), "set");
                 assert_eq!(t.get::<i64>("count").unwrap(), 4);
             }
             other => panic!("expected Table, got {other:?}"),
         }
-        match cells.get_lua("session_started", &lua) {
+        match signals.get_lua("session_started", &lua) {
             mlua::Value::String(s) => assert_eq!(s.to_str().unwrap(), "sess-001"),
             other => panic!("expected String, got {other:?}"),
         }
-        match cells.get_lua("confirm_requested", &lua) {
+        match signals.get_lua("confirm_requested", &lua) {
             mlua::Value::Table(t) => {
                 assert_eq!(t.get::<i64>("handle_id").unwrap(), 42);
                 assert_eq!(t.get::<String>("tool_name").unwrap(), "bash");
@@ -1301,11 +1378,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_cells_queue_subscribers_on_set() {
+    fn builtin_signals_queue_subscribers_on_set() {
         // Every state-changing event in the engine pipeline reaches
-        // the right cell setter and queues subscribers.
+        // the right signal setter and queues subscribers.
         let lua = Lua::new();
-        let mut cells = build_with_builtins(BuiltinSeeds {
+        let mut signals = build_with_builtins(SignalSeeds {
             vim_mode: "Insert".into(),
             agent_mode: "normal".into(),
             model: "m".into(),
@@ -1315,7 +1392,7 @@ mod tests {
             branch: String::new(),
         });
 
-        // Subscribe to a mix of stateful and event-shaped built-in cells.
+        // Subscribe to a mix of stateful and event-shaped built-in signals.
         for name in [
             "agent_mode",
             "turn_complete",
@@ -1326,13 +1403,13 @@ mod tests {
             "confirm_requested",
             "confirm_resolved",
         ] {
-            cells
+            signals
                 .subscribe_kind(name, SubscriberKind::Lua(handle(&lua, "function() end")))
-                .expect("builtin cell should be declared");
+                .expect("builtin signal should be declared");
         }
 
-        cells.set_dyn("agent_mode", Rc::new("apply".to_string()));
-        cells.set_dyn(
+        signals.set_dyn("agent_mode", Rc::new("apply".to_string()));
+        signals.set_dyn(
             "turn_complete",
             Rc::new(TurnMeta {
                 elapsed_ms: 100,
@@ -1342,20 +1419,20 @@ mod tests {
                 tool_elapsed: std::collections::HashMap::new(),
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "turn_error",
             Rc::new(TurnError {
                 message: "err".into(),
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "tool_start",
             Rc::new(ToolStart {
                 tool: "bash".into(),
                 args: std::collections::HashMap::new(),
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "tool_end",
             Rc::new(ToolEnd {
                 tool: "bash".into(),
@@ -1363,14 +1440,14 @@ mod tests {
                 elapsed_ms: None,
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "history",
             Rc::new(HistoryDelta {
                 kind: "append".into(),
                 count: 1,
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "confirm_requested",
             Rc::new(ConfirmRequested {
                 handle_id: 1,
@@ -1380,7 +1457,7 @@ mod tests {
                 grant_options: vec![],
             }),
         );
-        cells.set_dyn(
+        signals.set_dyn(
             "confirm_resolved",
             Rc::new(ConfirmResolved {
                 handle_id: 1,
@@ -1388,12 +1465,12 @@ mod tests {
             }),
         );
 
-        let fires = cells.drain_pending();
+        let fires = signals.drain_pending();
         let names: std::collections::HashSet<_> = fires.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             fires.len(),
             8,
-            "missing cells: {:?}",
+            "missing signals: {:?}",
             [
                 "agent_mode",
                 "turn_complete",

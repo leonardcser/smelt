@@ -234,9 +234,9 @@ impl TuiApp {
         let arg = arg.map(str::to_string);
         let next_turn_id = self.next_turn_id;
         self.core
-            .cells
-            .set_dyn("cmd_pre", std::rc::Rc::new(name.clone()));
-        self.drain_cells_pending();
+            .signals
+            .emit_dyn("cmd_pre", std::rc::Rc::new(name.clone()));
+        self.drain_signals_pending();
         if !name.is_empty() && self.lua.has_command(&name) {
             self.lua
                 .run_command_with_queue_target(&name, arg, ctx.queue_target.into());
@@ -247,8 +247,10 @@ impl TuiApp {
             };
             self.notify_error(format!("unknown command: {prefix}{name}"));
         }
-        self.core.cells.set_dyn("cmd_post", std::rc::Rc::new(name));
-        self.drain_cells_pending();
+        self.core
+            .signals
+            .emit_dyn("cmd_post", std::rc::Rc::new(name));
+        self.drain_signals_pending();
         self.flush_lua_callbacks();
         if self.next_turn_id == next_turn_id {
             self.invalidate_prompt_prediction();
@@ -478,7 +480,7 @@ impl TuiApp {
         });
         if old != self.core.config.model {
             self.core
-                .cells
+                .signals
                 .set_dyn("model", std::rc::Rc::new(self.core.config.model.clone()));
         }
         self.refresh_context_window();
@@ -568,9 +570,9 @@ impl TuiApp {
         if old != mode {
             self.session_dirty = true;
             self.core
-                .cells
+                .signals
                 .set_dyn("agent_mode", std::rc::Rc::new(mode.as_str().to_string()));
-            self.drain_cells_pending();
+            self.drain_signals_pending();
             self.core
                 .engine
                 .send(UiCommand::SetMode { mode: mode.clone() });
@@ -600,7 +602,7 @@ impl TuiApp {
             state::set_reasoning_effort(effort);
         }
         self.core
-            .cells
+            .signals
             .set_dyn("reasoning", std::rc::Rc::new(effort.label().to_string()));
         self.core
             .engine

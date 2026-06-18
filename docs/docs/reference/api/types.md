@@ -1077,7 +1077,7 @@ Variants: `"boolean"` \| `"string"` \| `"integer"`
 
 Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.
 
-Open alias - accepts any `string`. Well-known names: `"block_done"` \| `"confirm_requested"` \| `"confirm_resolved"` \| `"history"` \| `"input_submit"` \| `"session_ended"` \| `"session_started"` \| `"shutdown"` \| `"stream_delta"` \| `"stream_phase"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"`.
+Open alias - accepts any `string`. Well-known names: `"block_done"` \| `"cmd_post"` \| `"cmd_pre"` \| `"confirm_resolved"` \| `"history"` \| `"input_submit"` \| `"session_ended"` \| `"session_started"` \| `"shutdown"` \| `"stream_delta"` \| `"stream_phase"` \| `"tool_end"` \| `"tool_start"` \| `"turn_complete"` \| `"turn_end"` \| `"turn_error"` \| `"turn_start"`.
 
 ### `smelt.input.Event`
 

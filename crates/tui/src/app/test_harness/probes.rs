@@ -140,9 +140,9 @@ impl TestApp {
 
     fn publish_turn_end_for_probe(&mut self) {
         let _g = crate::lua::install_app_ptr(&mut self.app);
-        self.app.core.cells.set_dyn(
+        self.app.core.signals.emit_dyn(
             "turn_end",
-            std::rc::Rc::new(smelt_core::cells::TurnEnd { cancelled: false }),
+            std::rc::Rc::new(smelt_core::signals::TurnEnd { cancelled: false }),
         );
         self.app.pump_lua();
     }
@@ -431,7 +431,7 @@ impl TestApp {
             decision => panic!("expected compaction replacement, got {decision:?}"),
         };
         assert!(!replacement.is_empty(), "compaction replacement is empty");
-        self.tick_cells();
+        self.tick_signals();
         if should_preserve_turn {
             assert!(self.agent_running(), "compaction ended the active turn");
         }

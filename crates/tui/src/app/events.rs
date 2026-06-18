@@ -2403,11 +2403,11 @@ mod tests {
 
         assert_eq!(app.state().prompt_text, "");
         assert!(app.app.timers.pending_chord.is_some());
-        app.app.publish_diff_cells();
+        app.app.publish_diff_signals();
         assert_eq!(
             app.app
                 .core
-                .cells
+                .signals
                 .get::<String>("keymap_pending")
                 .as_deref(),
             Some("<space>")
@@ -2436,13 +2436,13 @@ mod tests {
 
         app.press(KeyCode::Char(' '));
         app.press(KeyCode::Esc);
-        app.app.publish_diff_cells();
+        app.app.publish_diff_signals();
 
         assert!(app.app.timers.pending_chord.is_none());
         assert_eq!(
             app.app
                 .core
-                .cells
+                .signals
                 .get::<String>("keymap_pending")
                 .as_deref(),
             Some("")
@@ -2499,13 +2499,13 @@ mod tests {
         app.feed_one(crate::app::test_harness::SourceEvent::Tick(
             crate::app::ESC_CHORD_TIMEOUT_MS + 1,
         ));
-        app.app.publish_diff_cells();
+        app.app.publish_diff_signals();
 
         assert!(app.app.timers.pending_chord.is_none());
         assert_eq!(
             app.app
                 .core
-                .cells
+                .signals
                 .get::<String>("keymap_pending")
                 .as_deref(),
             Some("")

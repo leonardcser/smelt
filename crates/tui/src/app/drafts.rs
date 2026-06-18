@@ -227,9 +227,9 @@ impl TuiApp {
         delta: String,
     ) {
         let bytes = delta.len();
-        self.core.cells.set_dyn(
+        self.core.signals.emit_dyn(
             "stream_delta",
-            std::rc::Rc::new(smelt_core::cells::StreamDelta {
+            std::rc::Rc::new(smelt_core::signals::StreamDelta {
                 kind: "tool_args".to_string(),
                 bytes,
                 text: delta.clone(),

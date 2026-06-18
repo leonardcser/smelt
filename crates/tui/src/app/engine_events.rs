@@ -8,7 +8,7 @@ use std::time::Duration;
 impl TuiApp {
     pub(crate) fn publish_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
         self.core
-            .cells
+            .signals
             .set_dyn("tokens_used", std::rc::Rc::new(usage));
     }
 
@@ -132,9 +132,9 @@ impl TuiApp {
             EngineEvent::ThinkingDelta { delta } => {
                 let bytes = delta.len();
                 self.append_streaming_thinking(&delta);
-                self.core.cells.set_dyn(
+                self.core.signals.emit_dyn(
                     "stream_delta",
-                    std::rc::Rc::new(smelt_core::cells::StreamDelta {
+                    std::rc::Rc::new(smelt_core::signals::StreamDelta {
                         kind: "thinking".to_string(),
                         bytes,
                         text: delta,
@@ -152,9 +152,9 @@ impl TuiApp {
             EngineEvent::TextDelta { delta } => {
                 let bytes = delta.len();
                 self.append_streaming_text(&delta);
-                self.core.cells.set_dyn(
+                self.core.signals.emit_dyn(
                     "stream_delta",
-                    std::rc::Rc::new(smelt_core::cells::StreamDelta {
+                    std::rc::Rc::new(smelt_core::signals::StreamDelta {
                         kind: "text".to_string(),
                         bytes,
                         text: delta,
@@ -219,9 +219,9 @@ impl TuiApp {
                 ) {
                     self.start_tool(call_id.clone(), tool_name.clone(), summary, args.clone());
                 }
-                self.core.cells.set_dyn(
+                self.core.signals.emit_dyn(
                     "tool_start",
-                    std::rc::Rc::new(smelt_core::cells::ToolStart {
+                    std::rc::Rc::new(smelt_core::signals::ToolStart {
                         tool: tool_name.clone(),
                         args: args.clone(),
                     }),
@@ -260,9 +260,9 @@ impl TuiApp {
                     }
                 }
                 if let Some(tool_name) = finished_tool_name {
-                    self.core.cells.set_dyn(
+                    self.core.signals.emit_dyn(
                         "tool_end",
-                        std::rc::Rc::new(smelt_core::cells::ToolEnd {
+                        std::rc::Rc::new(smelt_core::signals::ToolEnd {
                             tool: tool_name,
                             is_error: finished_is_error,
                             elapsed_ms,
@@ -345,8 +345,8 @@ impl TuiApp {
                     tool_elapsed: std::collections::HashMap::new(),
                 });
                 self.core
-                    .cells
-                    .set_dyn("turn_complete", std::rc::Rc::new(payload));
+                    .signals
+                    .emit_dyn("turn_complete", std::rc::Rc::new(payload));
                 self.pending_turn_meta = meta;
                 SessionControl::Done
             }
@@ -354,9 +354,9 @@ impl TuiApp {
                 {
                     self.working.finish(TurnOutcome::Interrupted);
                 };
-                self.core.cells.set_dyn(
+                self.core.signals.emit_dyn(
                     "turn_error",
-                    std::rc::Rc::new(smelt_core::cells::TurnError {
+                    std::rc::Rc::new(smelt_core::signals::TurnError {
                         message: message.clone(),
                     }),
                 );

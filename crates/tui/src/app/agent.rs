@@ -159,9 +159,10 @@ impl TuiApp {
             self.working.begin(TurnPhase::Working);
         };
 
-        self.core
-            .cells
-            .set_dyn("turn_start", std::rc::Rc::new(smelt_core::cells::EventStub));
+        self.core.signals.set_dyn(
+            "turn_start",
+            std::rc::Rc::new(smelt_core::signals::EventStub),
+        );
         self.pump_lua();
 
         let (system_prompt, tools) = self.prepare_turn_context();
@@ -477,9 +478,9 @@ impl TuiApp {
         }
 
         let interrupted = !matches!(end, TurnEnd::Complete);
-        self.core.cells.set_dyn(
+        self.core.signals.set_dyn(
             "turn_end",
-            std::rc::Rc::new(smelt_core::cells::TurnEnd {
+            std::rc::Rc::new(smelt_core::signals::TurnEnd {
                 cancelled: interrupted,
             }),
         );
@@ -794,9 +795,9 @@ impl TuiApp {
     ) {
         if let Some(handle_id) = handle_id {
             self.core.confirms.take(handle_id);
-            self.core.cells.set_dyn(
+            self.core.signals.set_dyn(
                 "confirm_resolved",
-                std::rc::Rc::new(smelt_core::cells::ConfirmResolved {
+                std::rc::Rc::new(smelt_core::signals::ConfirmResolved {
                     handle_id,
                     decision: label.into(),
                 }),
@@ -908,7 +909,7 @@ impl TuiApp {
                 self.close_focused_non_blocking_overlay();
                 self.set_active_status(&req.call_id, ToolStatus::Confirm);
 
-                let snapshot = smelt_core::cells::ConfirmRequested {
+                let snapshot = smelt_core::signals::ConfirmRequested {
                     handle_id: 0,
                     tool_name: req.tool_name.clone(),
                     summary: req.summary.clone(),
@@ -916,9 +917,9 @@ impl TuiApp {
                     grant_options: req.grant_options.clone(),
                 };
                 let handle_id = self.core.confirms.register(*req);
-                self.core.cells.set_dyn(
+                self.core.signals.set_dyn(
                     "confirm_requested",
-                    std::rc::Rc::new(smelt_core::cells::ConfirmRequested {
+                    std::rc::Rc::new(smelt_core::signals::ConfirmRequested {
                         handle_id,
                         ..snapshot
                     }),

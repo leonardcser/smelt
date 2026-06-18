@@ -21,9 +21,9 @@
 
 use mlua::prelude::*;
 
-use smelt_core::cells::ConfirmResolved;
 use smelt_core::lua::doc::Tier;
 use smelt_core::lua::module::LuaMod;
+use smelt_core::signals::ConfirmResolved;
 use smelt_core::transcript_model::{ConfirmChoice, ConfirmRequest};
 
 use super::buf::LuaBuf;
@@ -98,7 +98,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     None => return,
                 };
                 let choice = parse_decision(&decision, &entry.req);
-                app.core.cells.set_dyn(
+                app.core.signals.emit_dyn(
                     "confirm_resolved",
                     std::rc::Rc::new(ConfirmResolved {
                         handle_id,

@@ -597,7 +597,7 @@ Wall-clock time primitives.
 
 #### `smelt.events`
 
-Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `confirm_requested`.
+Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`.
 
 - `smelt.events.emit` :: `fun(event: smelt.events.Name, payload: any): nil`
   Publish `payload` for the event named `event`.

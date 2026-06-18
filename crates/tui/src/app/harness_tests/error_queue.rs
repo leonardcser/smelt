@@ -22,14 +22,14 @@ fn turn_error_preserves_request_queue() {
         "error should archive an interrupted outcome"
     );
 
-    // Plugins observe the turn_end cell; it must signal interruption on error.
+    // Plugins observe the turn_end event; it must signal interruption on error.
     assert!(
         app.app
             .core
-            .cells
-            .get::<smelt_core::cells::TurnEnd>("turn_end")
+            .signals
+            .get::<smelt_core::signals::TurnEnd>("turn_end")
             .is_some_and(|end| end.cancelled),
-        "turn_end cell should be cancelled on error"
+        "turn_end event should be cancelled on error"
     );
 }
 

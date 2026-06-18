@@ -966,7 +966,7 @@ mod tests {
             dragged: false,
         }));
         assert_eq!(
-            app.core.cells.get::<String>("prompt_resize_chrome"),
+            app.core.signals.get::<String>("prompt_resize_chrome"),
             Some("bottom".to_string())
         );
 
@@ -977,13 +977,13 @@ mod tests {
             dragged: false,
         }));
         assert_eq!(
-            app.core.cells.get::<String>("prompt_resize_chrome"),
+            app.core.signals.get::<String>("prompt_resize_chrome"),
             Some("both".to_string())
         );
 
         app.set_prompt_resize_drag(None);
         assert_eq!(
-            app.core.cells.get::<String>("prompt_resize_chrome"),
+            app.core.signals.get::<String>("prompt_resize_chrome"),
             Some(String::new())
         );
     }
@@ -996,21 +996,21 @@ mod tests {
 
         app.handle_mouse(left_down(row, col));
         assert_eq!(
-            app.core.cells.get::<bool>("prompt_resize_active"),
+            app.core.signals.get::<bool>("prompt_resize_active"),
             Some(true)
         );
         assert_eq!(
-            app.core.cells.get::<String>("prompt_resize_chrome"),
+            app.core.signals.get::<String>("prompt_resize_chrome"),
             Some("top".to_string())
         );
         app.handle_mouse(left_drag(row.saturating_sub(2), col));
         app.handle_mouse(left_up(row.saturating_sub(2), col));
         assert_eq!(
-            app.core.cells.get::<bool>("prompt_resize_active"),
+            app.core.signals.get::<bool>("prompt_resize_active"),
             Some(false)
         );
         assert_eq!(
-            app.core.cells.get::<String>("prompt_resize_chrome"),
+            app.core.signals.get::<String>("prompt_resize_chrome"),
             Some(String::new())
         );
         app.render_normal_to(&mut std::io::sink());

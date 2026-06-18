@@ -159,7 +159,7 @@ impl TuiApp {
         self.clear_tui_for_reload();
         // Refresh stateful cells before ready hooks run so reloaded plugins
         // see the live turn/busy state, not the previous main-loop tick.
-        self.publish_diff_cells();
+        self.publish_diff_signals();
         let cwd = std::env::current_dir().ok();
         let err = self.lua.reload(cwd.as_deref());
         if err.is_none() {
@@ -243,7 +243,7 @@ impl TuiApp {
     /// the reload integration tests assert each one is empty/refreshed
     /// after a cycle.
     fn clear_tui_for_reload(&mut self) {
-        self.core.cells.clear_lua_subscribers();
+        self.core.signals.clear_lua_subscribers();
         self.core.timers.clear();
         // Window/event keymaps live on the UI tree, including named and
         // built-in windows that survive reload. Drop their Lua handles before

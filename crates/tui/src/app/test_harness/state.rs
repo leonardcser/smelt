@@ -32,10 +32,10 @@ impl TestApp {
         self.app
             .working
             .begin(smelt_core::working::TurnPhase::Working);
-        self.app
-            .core
-            .cells
-            .set_dyn("turn_start", std::rc::Rc::new(smelt_core::cells::EventStub));
+        self.app.core.signals.emit_dyn(
+            "turn_start",
+            std::rc::Rc::new(smelt_core::signals::EventStub),
+        );
         self.app.pump_lua();
     }
 

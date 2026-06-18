@@ -303,7 +303,7 @@ pub(crate) struct BusyStack {
     since: Option<Instant>,
 }
 
-pub use smelt_core::cells::WorkBusyEntry;
+pub use smelt_core::signals::WorkBusyEntry;
 
 impl BusyStack {
     pub(crate) fn push(&mut self, label: String) -> u64 {
@@ -774,8 +774,8 @@ impl TuiApp {
         self.invalidate_prompt_prediction();
         if !submitted.is_empty() {
             self.core
-                .cells
-                .set_dyn("input_submit", std::rc::Rc::new(submitted));
+                .signals
+                .emit_dyn("input_submit", std::rc::Rc::new(submitted));
         }
         self.pump_lua();
     }
@@ -783,11 +783,11 @@ impl TuiApp {
     pub(crate) fn bump_epoch(&mut self, name: &str) {
         let next = self
             .core
-            .cells
+            .signals
             .get::<u64>(name)
             .unwrap_or_default()
             .wrapping_add(1);
-        self.core.cells.set_dyn(name, std::rc::Rc::new(next));
+        self.core.signals.set_dyn(name, std::rc::Rc::new(next));
     }
 
     pub(crate) fn mode_history_base(&self) -> protocol::AgentMode {
@@ -1361,20 +1361,20 @@ impl TuiApp {
 
     /// Publish `vim_mode`, `vim_pending_input`, `keymap_pending`,
     /// `confirms_pending`, `now`, `notification_visible`, `spinner_frame`,
-    /// and the `work_*` family of cells whenever their values change.
-    pub(crate) fn publish_diff_cells(&mut self) {
+    /// and the `work_*` family of signals whenever their values change.
+    pub(crate) fn publish_diff_signals(&mut self) {
         let keymap_pending = self.keymap_pending_cell_value();
         self.core
-            .cells
+            .signals
             .publish_if_changed("vim_mode", self.vim_mode_cell_value());
         self.core
-            .cells
+            .signals
             .publish_if_changed("vim_pending_input", self.vim_pending_input_cell_value());
         self.core
-            .cells
+            .signals
             .publish_if_changed("keymap_pending", keymap_pending);
         self.core
-            .cells
+            .signals
             .publish_if_changed("confirms_pending", !self.core.confirms.is_clear());
         let now_secs = self
             .core
@@ -1383,56 +1383,58 @@ impl TuiApp {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.core.cells.publish_if_changed("now", now_secs);
+        self.core.signals.publish_if_changed("now", now_secs);
         let frame = self
             .working
             .elapsed()
             .filter(|_| self.working.is_animating())
             .map(|e| smelt_core::content::spinner_frame_index(e) as u8)
             .unwrap_or(0);
-        self.core.cells.publish_if_changed("spinner_frame", frame);
+        self.core.signals.publish_if_changed("spinner_frame", frame);
 
         let tps = self.working.display_tps().unwrap_or(0.0);
-        self.core.cells.publish_if_changed("tps", tps);
+        self.core.signals.publish_if_changed("tps", tps);
 
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_project", self.cwd_project.clone());
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_branch", self.cwd_branch.clone());
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_worktree", self.cwd_worktree.clone());
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_worktree_path", self.cwd_worktree_path.clone());
         self.core
-            .cells
+            .signals
             .publish_if_changed("cwd_managed_worktree", self.cwd_managed_worktree);
 
         let task_label = self.task_label.clone().unwrap_or_default();
-        self.core.cells.publish_if_changed("task_label", task_label);
+        self.core
+            .signals
+            .publish_if_changed("task_label", task_label);
 
         let running_procs = self.core.processes.running_count() as u32;
         self.core
-            .cells
+            .signals
             .publish_if_changed("running_procs", running_procs);
 
         let permission_pending = self.pending_dialog && !self.focused_overlay_blocks_agent();
         self.core
-            .cells
+            .signals
             .publish_if_changed("permission_pending", permission_pending);
 
         self.core
-            .cells
+            .signals
             .publish_if_changed("notification_visible", self.notification.is_some());
         self.publish_prompt_resize_state();
 
         let cursor = self.focused_cursor_pos();
-        self.core.cells.publish_if_changed("cursor_pos", cursor);
+        self.core.signals.publish_if_changed("cursor_pos", cursor);
 
-        self.publish_work_cells();
+        self.publish_work_signals();
     }
 
     pub(crate) fn set_prompt_resize_drag(&mut self, drag: Option<PromptResizeDrag>) {
@@ -1446,10 +1448,10 @@ impl TuiApp {
             .map(|drag| drag.chrome)
             .unwrap_or_default();
         self.core
-            .cells
+            .signals
             .publish_if_changed("prompt_resize_active", !active_chrome.is_empty());
         self.core
-            .cells
+            .signals
             .publish_if_changed("prompt_resize_chrome", active_chrome.to_string());
     }
 
@@ -1478,13 +1480,13 @@ impl TuiApp {
 
     /// Cursor position of the focused window, published as `cursor_pos`.
     /// Returns the default `(0, 0, 0)` when no focused window has lines.
-    fn focused_cursor_pos(&self) -> smelt_core::cells::CursorPos {
+    fn focused_cursor_pos(&self) -> smelt_core::signals::CursorPos {
         let Some(w) = self.ui.focused_window() else {
-            return smelt_core::cells::CursorPos::default();
+            return smelt_core::signals::CursorPos::default();
         };
         let total = self.ui.buf(w.buf).map(|b| b.line_count()).unwrap_or(0);
         if total == 0 {
-            return smelt_core::cells::CursorPos::default();
+            return smelt_core::signals::CursorPos::default();
         }
         let line_idx = w.cursor_abs_row();
         let col = w.cursor_col() as usize;
@@ -1493,7 +1495,7 @@ impl TuiApp {
         } else {
             ((line_idx * 100) / (total.saturating_sub(1) as u64)) as u8
         };
-        smelt_core::cells::CursorPos {
+        smelt_core::signals::CursorPos {
             line: (line_idx as u32) + 1,
             col: (col as u32) + 1,
             scroll_pct: scroll_pct.min(100),
@@ -1539,9 +1541,9 @@ impl TuiApp {
         (state, label)
     }
 
-    /// Derive and publish the `work_*` cells from `WorkingState` and the
+    /// Derive and publish the `work_*` signals from `WorkingState` and the
     /// per-app busy stack.
-    fn publish_work_cells(&mut self) {
+    fn publish_work_signals(&mut self) {
         use smelt_core::working::TurnOutcome;
 
         let (state, label) = self.resolve_work_state();
@@ -1567,39 +1569,43 @@ impl TuiApp {
         let (retry_attempt, retry_remaining_ms) = self.working.retry_info().unwrap_or((0, 0));
 
         self.core
-            .cells
+            .signals
             .publish_if_changed("work_state", state.as_str().to_string());
-        self.core.cells.publish_if_changed("work_label", label);
+        self.core.signals.publish_if_changed("work_label", label);
         self.core
-            .cells
+            .signals
             .publish_if_changed("work_elapsed_ms", elapsed_ms);
         self.core
-            .cells
+            .signals
             .publish_if_changed("work_outcome", outcome_str.to_string());
         self.core
-            .cells
+            .signals
             .publish_if_changed("work_retry_attempt", retry_attempt);
         self.core
-            .cells
+            .signals
             .publish_if_changed("work_retry_remaining_ms", retry_remaining_ms);
         self.core
-            .cells
+            .signals
             .publish_if_changed("work_busy", self.busy_stack.entries_snapshot());
     }
 
-    /// Drain pending cell-fire notifications and invoke subscribers.
-    pub(crate) fn drain_cells_pending(&mut self) {
-        if !self.core.cells.has_pending() {
+    /// Drain pending signal notifications and invoke subscribers.
+    pub(crate) fn drain_signals_pending(&mut self) {
+        if !self.core.signals.has_pending() {
             return;
         }
-        let fires = self.core.cells.drain_pending();
+        let fires = self.core.signals.drain_pending();
         let lua = self.lua.lua();
         let mut calls = Vec::new();
         for fire in fires {
-            let value = self.core.cells.project_to_lua(&*fire.value, lua);
-            let prev = self.core.cells.project_to_lua(&*fire.prev, lua);
+            let value = self.core.signals.project_to_lua(&*fire.value, lua);
+            let prev = fire
+                .prev
+                .as_deref()
+                .map(|prev| self.core.signals.project_to_lua(prev, lua))
+                .unwrap_or(mlua::Value::Nil);
             for cb in &fire.callbacks {
-                let smelt_core::cells::SubscriberKind::Lua(handle) = &cb.kind;
+                let smelt_core::signals::SubscriberKind::Lua(handle) = &cb.kind;
                 let func = match lua.registry_value::<mlua::Function>(&handle.key) {
                     Ok(f) => f,
                     Err(_) => continue,
@@ -2171,11 +2177,11 @@ impl TuiApp {
 
         {
             let _guard = crate::lua::install_app_ptr(self);
-            self.core.cells.set_dyn(
+            self.core.signals.set_dyn(
                 "session_started",
                 std::rc::Rc::new(self.core.session.id.clone()),
             );
-            self.drain_cells_pending();
+            self.drain_signals_pending();
         }
         if let Some(state) = self.project_trust.take() {
             if matches!(state, smelt_core::trust::TrustState::Untrusted { .. }) {
@@ -2258,13 +2264,14 @@ impl TuiApp {
             }
             self.tick_timers();
             self.drain_persist_errors();
-            self.publish_diff_cells();
-            self.drain_cells_pending();
+            self.publish_diff_signals();
+            self.drain_signals_pending();
             self.drive_lua_tasks();
             for _id in self.drain_finished_blocks() {
-                self.core
-                    .cells
-                    .set_dyn("block_done", std::rc::Rc::new(smelt_core::cells::EventStub));
+                self.core.signals.emit_dyn(
+                    "block_done",
+                    std::rc::Rc::new(smelt_core::signals::EventStub),
+                );
             }
             self.pump_lua();
             self.dispatch_ui_window_events(true);
@@ -2475,7 +2482,7 @@ impl TuiApp {
                     }
 
                     self.dispatch_ui_window_events(false);
-                    self.publish_diff_cells();
+                    self.publish_diff_signals();
                     self.render_normal();
                 }
 
@@ -2578,7 +2585,7 @@ impl TuiApp {
                     if self.ui.tick_drag_autoscroll() {
                         self.dispatch_ui_window_events(false);
                     }
-                    self.publish_diff_cells();
+                    self.publish_diff_signals();
                     self.render_normal();
                 }
 
@@ -2588,7 +2595,7 @@ impl TuiApp {
                     self.dismiss_expired_notification();
                     self.expire_pending_keymap_chord();
                     self.flush_due_tool_drafts();
-                    self.publish_diff_cells();
+                    self.publish_diff_signals();
                     self.render_normal();
                 }
 
@@ -2608,9 +2615,9 @@ impl TuiApp {
                 app.finish_turn(crate::app::TurnEnd::Cancelled);
             }
             app.core
-                .cells
-                .set_dyn("shutdown", std::rc::Rc::new(smelt_core::cells::EventStub));
-            app.drain_cells_pending();
+                .signals
+                .emit_dyn("shutdown", std::rc::Rc::new(smelt_core::signals::EventStub));
+            app.drain_signals_pending();
             app.stop_background_processes();
             app.save_session();
         });

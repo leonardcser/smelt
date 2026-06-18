@@ -20,7 +20,7 @@ impl LuaType for LuaEventName {
         record_alias(LuaAliasDecl {
             name: "smelt.events.Name",
             doc: "Name of an event-shaped signal. Open alias - plugin-defined event names are accepted alongside the built-in events listed here.",
-            variants: crate::cells::builtin_event_names(),
+            variants: crate::signals::builtin_event_names(),
             open: true,
         });
         "smelt.events.Name".into()
@@ -43,7 +43,6 @@ impl FromLua for LuaEventName {
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
-    use crate::cells::SubscriberKind;
     use std::rc::Rc;
 
     let _ = shared;
@@ -52,7 +51,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         lua,
         smelt,
         "events",
-        "Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `confirm_requested`. Use `smelt.signal` when the current value matters; use `smelt.events.on` when only future occurrences matter.",
+        "Occurrence-oriented subscriptions over event-shaped signals such as `turn_start`, `tool_start`, and `turn_complete`. Use `smelt.signal` when the current value matters; use `smelt.events.on` when only future occurrences matter.",
         Tier::Host,
     )?;
 
@@ -62,7 +61,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         &["event"],
         |_, event: LuaEventName| -> LuaResult<()> {
             crate::host::try_with_core(|core| {
-                core.cells.declare_if_missing(event.0, crate::cells::EventStub);
+                core.signals.declare_if_missing(event.0, crate::signals::EventStub);
             });
             Ok(())
         },
@@ -75,10 +74,10 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         |lua, (event, payload): (LuaEventName, mlua::Value)| -> LuaResult<()> {
             let key = lua.create_registry_value(payload)?;
             crate::host::try_with_core(|core| {
-                core.cells
-                    .declare_if_missing(event.0.clone(), crate::cells::EventStub);
-                core.cells
-                    .set_dyn(&event.0, Rc::new(crate::cells::LuaCellValue { key }));
+                core.signals
+                    .declare_if_missing(event.0.clone(), crate::signals::EventStub);
+                core.signals
+                    .emit_dyn(&event.0, Rc::new(crate::signals::LuaSignalValue { key }));
             });
             Ok(())
         },
@@ -95,21 +94,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 handler.call::<()>(payload)
             })?;
             let handle = LuaHandle::from_func(lua, wrapper)?;
-            let sub_id = crate::host::try_with_core(|core| {
-                core.cells
-                    .declare_if_missing(event.0.clone(), crate::cells::EventStub);
-                core.cells
-                    .subscribe_kind(&event.0, SubscriberKind::Lua(Rc::new(handle)))
-            })
-            .flatten();
-            let Some(sub_id) = sub_id else {
-                return Ok(LuaReg::new(|| false));
-            };
-            let name_for_reg = event.0;
-            Ok(LuaReg::new(move || {
-                crate::host::try_with_core(|core| core.cells.unsubscribe(&name_for_reg, sub_id))
-                    .unwrap_or(false)
-            }))
+            Ok(super::signal::subscribe_lua_event(event.0, handle))
         },
     )?;
 

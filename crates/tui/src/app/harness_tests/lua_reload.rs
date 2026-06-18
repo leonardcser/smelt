@@ -272,7 +272,7 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
     assert_eq!(std::env::current_dir().expect("process cwd"), target);
     assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
     assert_eq!(
-        app.app.core.cells.get::<String>("cwd").as_deref(),
+        app.app.core.signals.get::<String>("cwd").as_deref(),
         Some(expected.as_str())
     );
     assert!(app
@@ -316,7 +316,7 @@ fn loading_session_restores_persisted_cwd() {
     assert_eq!(std::env::current_dir().expect("process cwd"), target);
     assert_eq!(std::env::var_os("PWD").as_deref(), Some(target.as_os_str()));
     assert_eq!(
-        app.app.core.cells.get::<String>("cwd").as_deref(),
+        app.app.core.signals.get::<String>("cwd").as_deref(),
         Some(expected.as_str())
     );
     assert_eq!(app.app.deferred_session_load, None);

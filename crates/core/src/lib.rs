@@ -4,7 +4,6 @@
 extern crate self as smelt_core;
 
 pub mod app_config;
-pub mod cells;
 pub mod commands;
 pub mod config;
 pub mod confirms;
@@ -35,6 +34,7 @@ pub mod process;
 pub mod runtime;
 pub mod session;
 pub mod session_migration;
+pub mod signals;
 pub mod state;
 pub mod timers;
 pub mod tools;
@@ -64,7 +64,6 @@ pub mod theme {
 }
 
 pub use app_config::AppConfig;
-pub use cells::Cells;
 pub use clipboard::{Clipboard, NullSink, Sink};
 pub(crate) use clipboard::{Osc52Sink, SystemSink};
 pub use engine_client::EngineClient;
@@ -72,6 +71,7 @@ pub use headless::{ColorMode, HeadlessSink, OutputFormat};
 pub use headless_app::HeadlessApp;
 pub use runtime::{Core, FrontendKind};
 pub use session::{ContextCheckpoint, Session};
+pub use signals::Signals;
 pub use timers::Timers;
 
 pub use crate::transcript_model::{

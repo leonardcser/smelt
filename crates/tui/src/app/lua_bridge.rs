@@ -103,12 +103,12 @@ impl TuiApp {
     /// Either pass can re-feed the other, so loop until both are quiet.
     pub(crate) fn pump_lua(&mut self) {
         loop {
-            let cells_had_work = self.core.cells.has_pending();
+            let cells_had_work = self.core.signals.has_pending();
             if cells_had_work {
-                self.drain_cells_pending();
+                self.drain_signals_pending();
             }
             self.flush_lua_callbacks();
-            if !self.core.cells.has_pending() {
+            if !self.core.signals.has_pending() {
                 break;
             }
         }

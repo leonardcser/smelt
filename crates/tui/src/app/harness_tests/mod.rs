@@ -94,16 +94,16 @@ fn publish_input_submit(app: &mut TestApp, text: &str) {
     app.app.bump_epoch("input_epoch");
     app.app
         .core
-        .cells
-        .set_dyn("input_submit", std::rc::Rc::new(text.to_string()));
+        .signals
+        .emit_dyn("input_submit", std::rc::Rc::new(text.to_string()));
     app.app.pump_lua();
 }
 
 fn publish_turn_end(app: &mut TestApp) {
     let _g = crate::lua::install_app_ptr(&mut app.app);
-    app.app.core.cells.set_dyn(
+    app.app.core.signals.emit_dyn(
         "turn_end",
-        std::rc::Rc::new(smelt_core::cells::TurnEnd { cancelled: false }),
+        std::rc::Rc::new(smelt_core::signals::TurnEnd { cancelled: false }),
     );
     app.app.pump_lua();
 }
