@@ -211,6 +211,7 @@ pub(crate) struct PromptResizeClick {
 #[derive(Debug)]
 pub enum AppEvent {
     SessionMigration(smelt_core::session::SessionMigrationEvent),
+    ShutdownSignal,
 }
 
 type AutoReloadSetup = Option<(
@@ -1851,6 +1852,7 @@ impl TuiApp {
     pub(crate) fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::SessionMigration(event) => self.handle_session_migration_event(event),
+            AppEvent::ShutdownSignal => self.pending_quit = true,
         }
     }
 

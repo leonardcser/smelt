@@ -429,12 +429,14 @@ async fn main() {
 
     let shared_session: Arc<Mutex<Option<tui::app::SharedSessionState>>> =
         Arc::new(Mutex::new(None));
+    let (app_event_tx, app_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let headless_cancel = Arc::new(tokio::sync::Notify::new());
 
     {
         let shared = shared_session.clone();
         let is_headless = args.headless;
         let headless_cancel = headless_cancel.clone();
+        let app_event_tx = app_event_tx.clone();
         tokio::spawn(async move {
             #[cfg(unix)]
             {
@@ -456,6 +458,12 @@ async fn main() {
                 headless_cancel.notify_one();
                 return;
             }
+            if app_event_tx
+                .send(tui::app::AppEvent::ShutdownSignal)
+                .is_ok()
+            {
+                return;
+            }
             let session_id = if let Ok(guard) = shared.lock() {
                 guard
                     .as_ref()
@@ -469,9 +477,6 @@ async fn main() {
             let _ = crossterm::terminal::disable_raw_mode();
             let _ = std::io::stdout().execute(crossterm::event::DisableBracketedPaste);
             let _ = std::io::stdout().execute(crossterm::event::DisableFocusChange);
-            // SIGINT / SIGTERM bypass the normal exit path, so the Lua
-            // `"shutdown"` hooks never fire here. Print a no-frills resume
-            // hint as a fallback so the user can still recover the session.
             if let Some(id) = session_id {
                 eprintln!("\nresume with:\nsmelt --resume {id}\n");
             }
@@ -672,9 +677,11 @@ async fn main() {
             remember: cfg.remember.clone(),
             context_window: None,
         };
-        let (app_event_tx, app_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        smelt_core::session::spawn_background_migration_with_event(move |event| {
-            let _ = app_event_tx.send(tui::app::AppEvent::SessionMigration(event));
+        smelt_core::session::spawn_background_migration_with_event({
+            let app_event_tx = app_event_tx.clone();
+            move |event| {
+                let _ = app_event_tx.send(tui::app::AppEvent::SessionMigration(event));
+            }
         });
         let mut app = tui::app::TuiApp::new(
             app_config,
@@ -712,6 +719,9 @@ async fn main() {
             .drain_shutdown_hooks(&shutdown_ctx.session_id, shutdown_ctx.has_messages);
         for err in errs {
             eprintln!("smelt: lifecycle.shutdown: {err}");
+        }
+        if let Some(err) = app.lua.flush_persistent_state() {
+            eprintln!("smelt: flush persistent state: {err}");
         }
     }
     smelt_perf::perf::print_summary();

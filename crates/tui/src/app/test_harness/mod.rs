@@ -162,15 +162,19 @@ impl TestAppBuilder {
     pub fn build(self) -> TestApp {
         let _home_guard = test_home_guard();
         reset_test_home();
-        self.build_after_test_home_reset()
+        self.build_after_test_home_setup()
     }
 
     pub(crate) fn build_with_test_home_guard(self, _guard: &MutexGuard<'static, ()>) -> TestApp {
         reset_test_home();
-        self.build_after_test_home_reset()
+        self.build_after_test_home_setup()
     }
 
-    fn build_after_test_home_reset(self) -> TestApp {
+    pub(crate) fn build_without_test_home_reset(self, _guard: &MutexGuard<'static, ()>) -> TestApp {
+        self.build_after_test_home_setup()
+    }
+
+    fn build_after_test_home_setup(self) -> TestApp {
         let (engine, cmd_rx, event_tx) = EngineHandle::for_test();
 
         let permissions = Arc::new(smelt_core::permissions::Permissions::load());

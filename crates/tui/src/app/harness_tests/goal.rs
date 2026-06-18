@@ -35,6 +35,70 @@ fn lua_goal_renders_top_banner_not_statusline() {
 }
 
 #[test]
+fn lua_goal_state_writes_nested_session_updates_immediately() {
+    let mut app = TestApp::builder().build();
+    let session_id = app.app.core.session.id.clone();
+
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            assert(goal.create("persist goal state updates", { auto_continue = true }))
+            assert(goal.update_status({ progress = "1/2", activity = "Saving goal state" }))
+            assert(goal.block("waiting for persisted blocker"))
+        "#,
+    ));
+
+    let state_home = std::env::var_os("XDG_STATE_HOME").expect("XDG_STATE_HOME set by test harness");
+    let state_path = std::path::PathBuf::from(state_home)
+        .join("smelt")
+        .join("plugins")
+        .join("goal.json");
+    let raw = std::fs::read_to_string(&state_path).unwrap_or_else(|err| {
+        panic!("read {}: {err}", state_path.display());
+    });
+    let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let goal = &json["sessions"][session_id.as_str()];
+
+    assert_eq!(goal["objective"], "persist goal state updates");
+    assert_eq!(goal["state"], "blocked");
+    assert_eq!(goal["reason"], "waiting for persisted blocker");
+    assert_eq!(goal["progress"]["label"], "1/2");
+    assert_eq!(goal["activity"], "Saving goal state");
+    assert_eq!(goal["auto_continue"], false);
+}
+
+#[test]
+fn lua_goal_state_restores_for_same_resumed_session_id() {
+    let guard = test_home_guard();
+    let session_id = {
+        let mut app = TestApp::builder().build_with_test_home_guard(&guard);
+        let session_id = app.app.core.session.id.clone();
+        assert!(app.run_lua(
+            r#"
+                local goal = require("smelt.goal")
+                assert(goal.create("restore persisted goal on resume", { auto_continue = false }))
+                assert(goal.update_status({ progress = "saved", activity = "Waiting for resume" }))
+            "#,
+        ));
+        session_id
+    };
+
+    let mut resumed = TestApp::builder().build_without_test_home_reset(&guard);
+    resumed.app.core.session.id = session_id;
+
+    assert!(resumed.run_lua(
+        r#"
+            local current = assert(require("smelt.goal").current())
+            assert(current.objective == "restore persisted goal on resume")
+            assert(current.state == "active")
+            assert(current.auto_continue == false)
+            assert(current.progress.label == "saved")
+            assert(current.activity == "Waiting for resume")
+        "#,
+    ));
+}
+
+#[test]
 fn lua_goal_banner_prefers_live_progress() {
     let mut app = TestApp::builder().build();
     app.set_terminal_size(72, 16);

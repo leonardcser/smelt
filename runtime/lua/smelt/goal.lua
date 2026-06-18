@@ -124,6 +124,7 @@ end
 
 local function store_goal(goal)
   sessions()[session_id()] = normalize_goal(goal)
+  state.save()
   generation = generation + 1
 end
 
