@@ -796,6 +796,12 @@ impl Session {
         self.context_tokens_history_len = None;
     }
 
+    pub fn reset_context_tokens_for_checkpoint(&mut self) {
+        self.context_tokens = None;
+        self.context_tokens_history_len = None;
+        self.display_context_tokens = Some(0);
+    }
+
     pub fn current_context_tokens(&self) -> Option<u32> {
         (self.context_tokens_history_len == Some(self.history.len()))
             .then_some(self.context_tokens)
@@ -1006,8 +1012,9 @@ impl Session {
             pre_checkpoint_context_history_len: self.context_tokens_history_len,
         });
         // The next provider response is the first authoritative baseline
-        // token reading for checkpointed model history.
-        self.clear_context_tokens_baseline();
+        // token reading for checkpointed model history. Show zero until then
+        // so the prompt bar reflects that the full old context was compacted.
+        self.reset_context_tokens_for_checkpoint();
         self.snapshot_context();
         true
     }
@@ -2654,7 +2661,7 @@ mod tests {
     }
 
     #[test]
-    fn install_context_checkpoint_clears_authoritative_context_tokens() {
+    fn install_context_checkpoint_clears_authoritative_context_tokens_and_resets_display() {
         let mut s = fixture_session();
         s.history = vec![
             user_item("old"),
@@ -2670,7 +2677,7 @@ mod tests {
         assert!(installed);
         assert!(s.context_tokens.is_none());
         assert!(s.context_tokens_history_len.is_none());
-        assert_eq!(s.display_context_tokens, Some(500));
+        assert_eq!(s.display_context_tokens, Some(0));
         assert_eq!(s.checkpoint.as_ref().unwrap().first_live_index, 2);
         assert_eq!(
             s.checkpoint.as_ref().unwrap().pre_checkpoint_context_tokens,

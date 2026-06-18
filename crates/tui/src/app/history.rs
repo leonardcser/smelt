@@ -991,6 +991,7 @@ impl TuiApp {
             return false;
         }
         self.clear_compaction_preview();
+        self.reset_visible_context_tokens();
         self.refresh_compaction_marker();
         self.publish_history_delta("checkpoint");
         self.schedule_session_save();
@@ -1264,6 +1265,15 @@ mod checkpoint_tests {
                 .install_context_checkpoint("compaction".into(), "summary".into(), 2, Some(100));
 
         assert!(installed);
+        assert_eq!(app.app.core.session.display_context_tokens(), Some(0));
+        let usage = app
+            .app
+            .core
+            .cells
+            .get::<protocol::TokenUsage>("tokens_used")
+            .expect("tokens_used reset");
+        assert_eq!(usage.context_tokens, Some(0));
+        assert_eq!(usage.prompt_tokens, Some(0));
         let history = app.app.transcript.history();
         assert_eq!(history.order.len(), before.len() + 1);
         assert_eq!(history.order[0], before[0]);

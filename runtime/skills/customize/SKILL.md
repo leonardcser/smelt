@@ -1449,7 +1449,7 @@ Paint text / markdown / syntax-highlighted code / split diffs into a `Buf`.
 
 Current session metadata, turn list, message snapshots, rewind, and persisted session management.
 
-- `smelt.session.checkpoint` :: `fun(spec: table): table?`
+- `smelt.session.checkpoint` :: `fun(spec: table): boolean?`
   Install a model-context checkpoint without deleting transcript history.
 - `smelt.session.context_tokens` :: `fun(): integer?`
   Latest non-background provider-reported active-context token count, or `nil` before the first usage report.

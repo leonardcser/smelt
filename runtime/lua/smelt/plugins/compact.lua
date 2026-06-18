@@ -388,10 +388,13 @@ local function summarize_by_group_boundary(history, instructions, handle, done)
 			return
 		end
 		finished = true
+		local ok, callback_err = pcall(done, summary, err, first_live_message_index)
 		if handle then
 			handle:remove()
 		end
-		done(summary, err, first_live_message_index)
+		if not ok then
+			error(callback_err)
+		end
 	end
 
 	local function attempt()
@@ -485,14 +488,14 @@ local function run_compact(opts)
 			record_failure()
 			return
 		end
-		local model_messages = smelt.session.checkpoint({
+		local installed = smelt.session.checkpoint({
 			kind = "compaction",
 			summary = summary,
 			first_live_message_index = first_live_message_index,
 			tokens_before = before_tokens,
 			guard = guard,
 		})
-		if not model_messages then
+		if not installed then
 			return
 		end
 		record_compaction("manual", "summarize", before_tokens, first_live_message_index)
@@ -548,14 +551,14 @@ local function compact_live_session(before_tokens, phase, opts, done)
 			done(nil, err)
 			return
 		end
-		local model_messages = smelt.session.checkpoint({
+		local installed = smelt.session.checkpoint({
 			kind = "compaction",
 			summary = summary,
 			first_live_message_index = first_live_message_index,
 			tokens_before = before_tokens,
 			guard = opts and opts.guard or nil,
 		})
-		if not model_messages then
+		if not installed then
 			done(nil)
 			return
 		end
@@ -563,7 +566,7 @@ local function compact_live_session(before_tokens, phase, opts, done)
 		emit_event(phase, before_tokens, nil, {
 			first_live_message_index = first_live_message_index,
 		})
-		done(model_messages)
+		done(true)
 	end)
 end
 
@@ -596,12 +599,16 @@ smelt.engine.on_prepare_request(function(request, reply)
 		current_history_len = estimate and estimate.current_history_len or nil,
 	})
 	local guard = smelt.work.guard()
-	compact_live_session(estimated_tokens, "summarize-pre-request", { guard = guard }, function(messages, err)
+	compact_live_session(estimated_tokens, "summarize-pre-request", { guard = guard }, function(replaced, err)
 		if is_terminal_provider_error(err) then
 			reply({ action = "abort", message = err.message })
 			return
 		end
-		reply({ action = "replace", messages = messages })
+		if not replaced then
+			reply(nil)
+			return
+		end
+		reply({ action = "replace", source = "model_history" })
 	end)
 end)
 

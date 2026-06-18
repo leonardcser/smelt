@@ -6,6 +6,30 @@ use smelt_core::ConfirmRequest;
 use std::time::Duration;
 
 impl TuiApp {
+    pub(crate) fn publish_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
+        self.core
+            .cells
+            .set_dyn("tokens_used", std::rc::Rc::new(usage));
+    }
+
+    pub(crate) fn reset_visible_context_tokens(&mut self) {
+        self.publish_visible_token_usage(protocol::TokenUsage {
+            context_tokens: Some(0),
+            prompt_tokens: Some(0),
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn record_visible_token_usage(&mut self, usage: protocol::TokenUsage) {
+        if let Some(tokens) = usage.context_tokens.or(usage.prompt_tokens) {
+            if tokens > 0 {
+                self.core.session.record_context_tokens(tokens);
+                self.context_tokens_updated_this_turn = true;
+            }
+        }
+        self.publish_visible_token_usage(usage);
+    }
+
     /// Route an `EngineEvent` through the correct branch of the agent
     /// state machine. When a turn is active, delegates to
     /// `handle_engine_event` + `dispatch_control` and discards the turn on
@@ -56,12 +80,7 @@ impl TuiApp {
                 background,
             } => {
                 if !background {
-                    if let Some(tokens) = usage.context_tokens.or(usage.prompt_tokens) {
-                        if tokens > 0 {
-                            self.core.session.record_context_tokens(tokens);
-                            self.context_tokens_updated_this_turn = true;
-                        }
-                    }
+                    self.record_visible_token_usage(usage.clone());
                     if let Some(tps) = tokens_per_sec {
                         self.working.record_tokens_per_sec(tps);
                     }
@@ -86,12 +105,6 @@ impl TuiApp {
                     cache_write_tokens: usage.cache_write_tokens,
                     reasoning_tokens: usage.reasoning_tokens,
                 });
-                // Background requests excluded so `tokens_used` sees only user-visible context.
-                if !background {
-                    self.core
-                        .cells
-                        .set_dyn("tokens_used", std::rc::Rc::new(usage));
-                }
                 SessionControl::Continue
             }
             EngineEvent::ToolOutput { call_id, chunk } => {

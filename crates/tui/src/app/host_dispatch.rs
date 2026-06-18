@@ -7,6 +7,7 @@ use engine::{HostCall, HostRequestDecision};
 use protocol::Message;
 use smelt_core::lua::{HookRegistry, LuaShared};
 use smelt_core::working::TurnPhase;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
@@ -19,6 +20,91 @@ fn restore_working_phase() {
             app.working.begin(TurnPhase::Working);
         }
     });
+}
+
+fn current_model_history_decision() -> HostRequestDecision {
+    crate::lua::try_with_app(|app| {
+        HostRequestDecision::Replace(protocol::history_to_messages(&app.model_history()))
+    })
+    .unwrap_or(HostRequestDecision::Continue)
+}
+
+fn request_decision_from_lua(
+    inner_lua: &mlua::Lua,
+    value: mlua::Value,
+) -> mlua::Result<HostRequestDecision> {
+    let mlua::Value::Table(t) = value else {
+        return Ok(HostRequestDecision::Continue);
+    };
+
+    match t.get::<Option<String>>("action")?.as_deref() {
+        Some("continue") | None => Ok(HostRequestDecision::Continue),
+        Some("abort") => Ok(HostRequestDecision::Abort(t.get::<String>("message")?)),
+        Some("replace") => {
+            if t.get::<Option<String>>("source")?.as_deref() == Some("model_history") {
+                return Ok(current_model_history_decision());
+            }
+            Ok(t.get::<mlua::Value>("messages")
+                .ok()
+                .and_then(|v| smelt_core::lua::lua_to_serde::<Vec<Message>>(inner_lua, &v))
+                .map(HostRequestDecision::Replace)
+                .unwrap_or(HostRequestDecision::Continue))
+        }
+        Some(_) => Ok(HostRequestDecision::Continue),
+    }
+}
+
+fn create_message_reply_fn(
+    lua: &mlua::Lua,
+    reply_for_closure: MessageReplySlot,
+    compact_phase: bool,
+) -> mlua::Result<mlua::Function> {
+    lua.create_function(move |inner_lua, value: mlua::Value| {
+        if compact_phase {
+            restore_working_phase();
+        }
+        let Some(tx) = reply_for_closure.lock().ok().and_then(|mut g| g.take()) else {
+            // Already replied; subsequent calls are silent no-ops so
+            // hook authors aren't punished for defensive double-calls.
+            return Ok(());
+        };
+        let decision = request_decision_from_lua(inner_lua, value)?;
+        let _ = tx.send(decision);
+        Ok(())
+    })
+}
+
+fn prepare_request_to_lua(
+    lua: &mlua::Lua,
+    messages: Vec<Message>,
+    estimated_tokens: u32,
+    context_estimate: PrepareContextEstimate,
+) -> mlua::Result<mlua::Table> {
+    let request = lua.create_table()?;
+    request.set("estimated_tokens", estimated_tokens)?;
+    request.set(
+        "estimated_context_tokens",
+        context_estimate.total_context_tokens,
+    )?;
+    request.set("context_estimate", context_estimate.into_lua_table(lua)?)?;
+
+    let messages = Rc::new(messages);
+    let mt = lua.create_table()?;
+    mt.set(
+        "__index",
+        lua.create_function(move |lua, (table, key): (mlua::Table, mlua::Value)| {
+            if let mlua::Value::String(s) = key {
+                if s.to_str()?.as_ref() == "messages" {
+                    let value = smelt_core::lua::serde_to_lua(lua, messages.as_ref())?;
+                    table.raw_set("messages", value.clone())?;
+                    return Ok(value);
+                }
+            }
+            Ok(mlua::Value::Nil)
+        })?,
+    )?;
+    request.set_metatable(Some(mt))?;
+    Ok(request)
 }
 
 impl TuiApp {
@@ -76,10 +162,9 @@ impl TuiApp {
     }
 
     /// Hand the first registered `smelt.engine.on_prepare_request`
-    /// hook the exact non-system message slice the engine is about to
-    /// send, plus a conservative token estimate for that slice. The
-    /// hook can return a decision via `reply({ action = "replace", messages = messages })`;
-    /// `nil` means "send the original request".
+    /// hook the request metadata immediately. The `messages` field is built
+    /// lazily if the hook reads it, so metadata-only hooks do not pay to
+    /// serialize large histories into Lua.
     fn dispatch_prepare_request(
         &mut self,
         messages: Vec<Message>,
@@ -89,6 +174,17 @@ impl TuiApp {
         while let Ok(ev) = self.core.engine.try_recv() {
             self.dispatch_engine_event(ev);
         }
+        let lua = self.lua.lua();
+        let funcs = self
+            .lua
+            .core_shared()
+            .hooks
+            .prepare_request
+            .snapshot_for(lua, "");
+        let Some(func) = funcs.into_iter().next() else {
+            let _ = reply.send(HostRequestDecision::Continue);
+            return;
+        };
         let context_estimate = PrepareContextEstimate::from_request(
             self.core.session.context_tokens,
             self.core.session.context_tokens_history_len,
@@ -96,24 +192,51 @@ impl TuiApp {
             &messages,
             estimated_tokens,
         );
-        self.call_message_reply_hook(
-            "on_prepare_request",
-            |s| &s.hooks.prepare_request,
-            messages,
-            reply,
-            true,
-            |lua, func, messages_table, reply_fn| {
-                let request = lua.create_table()?;
-                request.set("messages", messages_table)?;
-                request.set("estimated_tokens", estimated_tokens)?;
-                request.set(
-                    "estimated_context_tokens",
-                    context_estimate.total_context_tokens,
-                )?;
-                request.set("context_estimate", context_estimate.into_lua_table(lua)?)?;
-                func.call::<()>((request, reply_fn))
-            },
-        );
+        if self.agent_is_running() {
+            self.working.begin(TurnPhase::Compacting);
+        }
+        let reply_slot: MessageReplySlot = Arc::new(Mutex::new(Some(reply)));
+        let reply_for_closure = Arc::clone(&reply_slot);
+        let reply_fn = match create_message_reply_fn(lua, reply_for_closure, true) {
+            Ok(f) => f,
+            Err(e) => {
+                self.lua
+                    .record_error(format!("on_prepare_request: build reply: {e}"));
+                restore_working_phase();
+                if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
+                    let _ = tx.send(HostRequestDecision::Continue);
+                }
+                return;
+            }
+        };
+        let request =
+            match prepare_request_to_lua(lua, messages, estimated_tokens, context_estimate) {
+                Ok(request) => request,
+                Err(e) => {
+                    self.lua
+                        .record_error(format!("on_prepare_request: build request: {e}"));
+                    restore_working_phase();
+                    if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
+                        let _ = tx.send(HostRequestDecision::Continue);
+                    }
+                    return;
+                }
+            };
+        match func.call::<()>((request, reply_fn)) {
+            Ok(()) => {
+                let replied = reply_slot.lock().ok().is_some_and(|g| g.is_none());
+                if replied && self.agent_is_running() {
+                    self.working.begin(TurnPhase::Working);
+                }
+            }
+            Err(e) => {
+                self.lua.record_error(format!("on_prepare_request: {e}"));
+                restore_working_phase();
+                if let Some(tx) = reply_slot.lock().ok().and_then(|mut g| g.take()) {
+                    let _ = tx.send(HostRequestDecision::Continue);
+                }
+            }
+        }
     }
 
     fn call_message_reply_hook(
@@ -145,36 +268,7 @@ impl TuiApp {
         }
         let reply_slot: MessageReplySlot = Arc::new(Mutex::new(Some(reply)));
         let reply_for_closure = Arc::clone(&reply_slot);
-        let reply_fn = match lua.create_function(move |inner_lua, value: mlua::Value| {
-            if compact_phase {
-                restore_working_phase();
-            }
-            let Some(tx) = reply_for_closure.lock().ok().and_then(|mut g| g.take()) else {
-                // Already replied; subsequent calls are silent no-ops so
-                // hook authors aren't punished for defensive double-calls.
-                return Ok(());
-            };
-            let decision = match value {
-                mlua::Value::Nil => HostRequestDecision::Continue,
-                mlua::Value::Table(t) => match t.get::<Option<String>>("action")?.as_deref() {
-                    Some("continue") | None => HostRequestDecision::Continue,
-                    Some("abort") => {
-                        let message = t.get::<String>("message")?;
-                        HostRequestDecision::Abort(message)
-                    }
-                    Some("replace") => t
-                        .get::<mlua::Value>("messages")
-                        .ok()
-                        .and_then(|v| smelt_core::lua::lua_to_serde::<Vec<Message>>(inner_lua, &v))
-                        .map(HostRequestDecision::Replace)
-                        .unwrap_or(HostRequestDecision::Continue),
-                    Some(_) => HostRequestDecision::Continue,
-                },
-                _ => HostRequestDecision::Continue,
-            };
-            let _ = tx.send(decision);
-            Ok(())
-        }) {
+        let reply_fn = match create_message_reply_fn(lua, reply_for_closure, compact_phase) {
             Ok(f) => f,
             Err(e) => {
                 self.lua.record_error(format!("{label}: build reply: {e}"));
@@ -574,5 +668,35 @@ mod tests {
             estimate.source,
             PrepareContextEstimateSource::FullRequestEstimate
         );
+    }
+
+    #[test]
+    fn prepare_request_builds_messages_lazily_on_access() {
+        let lua = mlua::Lua::new();
+        let messages = vec![Message::user(Content::text("hello"))];
+        let request = prepare_request_to_lua(
+            &lua,
+            messages,
+            42,
+            PrepareContextEstimate::full_request(42, 1),
+        )
+        .expect("request table");
+
+        assert!(request.raw_get::<mlua::Value>("messages").unwrap().is_nil());
+        assert_eq!(request.get::<u32>("estimated_tokens").unwrap(), 42);
+
+        let messages = request.get::<mlua::Table>("messages").unwrap();
+        assert_eq!(
+            messages
+                .get::<mlua::Table>(1)
+                .unwrap()
+                .get::<String>("role")
+                .unwrap(),
+            "user"
+        );
+        assert!(matches!(
+            request.raw_get::<mlua::Value>("messages").unwrap(),
+            mlua::Value::Table(_)
+        ));
     }
 }

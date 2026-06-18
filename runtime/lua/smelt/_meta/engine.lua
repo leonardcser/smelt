@@ -28,7 +28,7 @@ engine.is_running = nil
 ---@type fun(hook: fun(arg1: smelt.engine.AskMessage[], arg2: fun(value: any))): smelt.Reg
 engine.on_context_limit = nil
 
---- Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once - with `{ action = "replace", messages = messages }` (engine swaps it in before sampling), `{ action = "abort", message = message }` (engine aborts with that terminal error), or `nil` / `{ action = "continue" }` (engine sends the original request). Returns a `Reg` whose `:remove()` drops the hook.
+--- Register a hook the engine calls immediately before each provider request. `hook` receives `{ messages, estimated_tokens, estimated_context_tokens }` and a `reply` callback the hook MUST call exactly once - with `{ action = "replace", messages = messages }` (engine swaps it in before sampling), `{ action = "replace", source = "model_history" }` (engine uses the current checkpointed session model history), `{ action = "abort", message = message }` (engine aborts with that terminal error), or `nil` / `{ action = "continue" }` (engine sends the original request). `messages` is built lazily when the hook reads it. Returns a `Reg` whose `:remove()` drops the hook.
 ---@type fun(hook: fun(arg1: smelt.engine.PrepareRequest, arg2: fun(value: any))): smelt.Reg
 engine.on_prepare_request = nil
 

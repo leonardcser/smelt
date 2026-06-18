@@ -7,9 +7,10 @@
 ---@class smelt.session
 local session = {}
 
---- Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns the model-visible messages after the checkpoint is installed, or `nil` when the boundary would be a no-op.
+--- Install a model-context checkpoint without deleting transcript history. Takes `{ kind?, summary, first_live_message_index, tokens_before?, guard? }`; future model requests use the summary plus the original model-visible suffix starting at `first_live_message_index`. When `guard` from `smelt.work.guard()` is provided, the checkpoint is installed only if that lifecycle is still current; late callbacks after cancel or turn replacement return `nil`. Returns `true` when a checkpoint was installed, or `nil` when the boundary would be a no-op. Use `smelt.session.model_messages()` to read the model-visible messages after checkpointing.
 ---@see smelt.work.guard
----@type fun(spec: table): table?
+---@see smelt.session.model_messages
+---@type fun(spec: table): boolean?
 session.checkpoint = nil
 
 --- Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update.
