@@ -97,19 +97,20 @@ impl TranscriptSearchIndex {
 fn build_transcript_search_index(
     key: TranscriptSearchKey,
     layout: &TranscriptSearchLayout,
+    index_trigrams: bool,
     mut search_text_for_entry: impl FnMut(&TranscriptSearchLayoutEntry) -> String,
 ) -> TranscriptSearchIndex {
     let mut entries = Vec::with_capacity(layout.entries.len());
     let mut block_entries: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut trigrams: HashMap<u32, Vec<usize>> = HashMap::new();
     for layout_entry in &layout.entries {
-        let search_text = search_text_for_entry(layout_entry);
+        let search_text = index_trigrams.then(|| search_text_for_entry(layout_entry));
         push_search_entry(
             &mut entries,
             &mut block_entries,
             &mut trigrams,
             layout_entry,
-            search_text,
+            search_text.as_deref(),
         );
     }
     TranscriptSearchIndex {
@@ -125,7 +126,7 @@ fn push_search_entry(
     block_entries: &mut HashMap<u64, Vec<usize>>,
     trigrams: &mut HashMap<u32, Vec<usize>>,
     layout_entry: &TranscriptSearchLayoutEntry,
-    search_text: String,
+    search_text: Option<&str>,
 ) {
     let entry_index = entries.len();
     entries.push(TranscriptSearchEntry {
@@ -138,8 +139,10 @@ fn push_search_entry(
             .or_default()
             .push(entry_index);
     }
-    for gram in unique_trigrams(&search_text) {
-        trigrams.entry(gram).or_default().push(entry_index);
+    if let Some(search_text) = search_text {
+        for gram in unique_trigrams(search_text) {
+            trigrams.entry(gram).or_default().push(entry_index);
+        }
     }
 }
 
@@ -186,12 +189,41 @@ impl TuiApp {
         text
     }
 
+    fn dirty_transcript_candidate_blocks(&self, query: &str) -> Vec<u64> {
+        let Some(start) = self.transcript.history().descriptor_dirty_from() else {
+            return Vec::new();
+        };
+        let _perf = smelt_perf::perf::begin("search:transcript:dirty_candidate_scan");
+        let history = self.transcript.history();
+        let mut scanned = 0u64;
+        let mut out = Vec::new();
+        for id in history.order.iter().skip(start.min(history.order.len())) {
+            let Some(descriptor) = history.descriptor(*id) else {
+                continue;
+            };
+            scanned = scanned.saturating_add(1);
+            let tool_state = descriptor
+                .tool_call_id()
+                .and_then(|call_id| history.tool_state(call_id));
+            if descriptor_search_text(&descriptor, tool_state).contains(query) {
+                out.push(id.get());
+            }
+        }
+        smelt_perf::perf::record_value("search:transcript:dirty_candidates_scanned", scanned);
+        smelt_perf::perf::record_value(
+            "search:transcript:dirty_candidate_blocks",
+            out.len() as u64,
+        );
+        out
+    }
+
     fn sqlite_transcript_candidate_blocks(
         &mut self,
         query: &str,
         origin: DocPosition,
         direction: SearchDirection,
     ) -> SqliteTranscriptCandidateBlocks {
+        let dirty_blocks = self.dirty_transcript_candidate_blocks(query);
         let width = self.transcript_width() as u16;
         let origin_block = self
             .transcript
@@ -208,7 +240,7 @@ impl TuiApp {
             SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
         };
         let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
-        let Some(candidates) = smelt_store::SessionDb::open_read_only(db_path)
+        let sqlite_candidates = smelt_store::SessionDb::open_read_only(db_path)
             .ok()
             .and_then(|db| {
                 let mut page = db
@@ -236,22 +268,31 @@ impl TuiApp {
                     return None;
                 }
                 Some(page)
-            })
-        else {
+            });
+        let mut block_indices = Vec::new();
+        let sqlite_available = sqlite_candidates.is_some();
+        if let Some(candidates) = sqlite_candidates {
+            smelt_perf::perf::record_value("search:transcript:sqlite_available", 1);
+            smelt_perf::perf::record_value(
+                "search:transcript:sqlite_candidate_blocks",
+                candidates.len() as u64,
+            );
+            block_indices.extend(candidates.into_iter().map(|candidate| candidate.block_idx));
+        } else {
             smelt_perf::perf::record_value("search:transcript:sqlite_available", 0);
+        }
+        for block_idx in dirty_blocks {
+            if !block_indices.contains(&block_idx) {
+                block_indices.push(block_idx);
+            }
+        }
+        let available = sqlite_available || !block_indices.is_empty();
+        if !available {
             return SqliteTranscriptCandidateBlocks::default();
-        };
-        smelt_perf::perf::record_value("search:transcript:sqlite_available", 1);
-        smelt_perf::perf::record_value(
-            "search:transcript:sqlite_candidate_blocks",
-            candidates.len() as u64,
-        );
+        }
         SqliteTranscriptCandidateBlocks {
-            block_indices: candidates
-                .into_iter()
-                .map(|candidate| candidate.block_idx)
-                .collect(),
-            available: true,
+            block_indices,
+            available,
         }
     }
 
@@ -284,9 +325,15 @@ impl TuiApp {
         }
 
         let _perf = smelt_perf::perf::begin("search:transcript:index_build");
+        let index_trigrams = candidate_blocks.is_none();
+        smelt_perf::perf::record_value(
+            "search:transcript:index_trigram_build_enabled",
+            u64::from(index_trigrams),
+        );
         self.search.transcript_index = Some(build_transcript_search_index(
             key,
             &layout,
+            index_trigrams,
             |layout_entry| self.transcript_search_text_for_entry(layout_entry),
         ));
         record_index_size(self.search.transcript_index.as_ref()?);
@@ -300,14 +347,12 @@ impl TuiApp {
         direction: SearchDirection,
     ) -> Option<TranscriptSearchSession> {
         let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
+        let candidate_backed = sqlite_candidates.available;
+        let candidate_blocks = sqlite_candidates.block_indices;
         let (key, candidates, scanned_len) = {
-            let candidate_blocks = sqlite_candidates
-                .available
-                .then_some(sqlite_candidates.block_indices.as_slice());
-            let index = self.ensure_transcript_candidate_index(candidate_blocks)?;
-            let preferred = sqlite_candidates
-                .available
-                .then_some(sqlite_candidates.block_indices.as_slice());
+            let candidate_blocks_slice = candidate_backed.then_some(candidate_blocks.as_slice());
+            let index = self.ensure_transcript_candidate_index(candidate_blocks_slice)?;
+            let preferred = candidate_backed.then_some(candidate_blocks.as_slice());
             (
                 index.key,
                 index.candidate_entries(query, preferred),
@@ -327,6 +372,24 @@ impl TuiApp {
         })
     }
 
+    fn transcript_search_session_can_advance(
+        &mut self,
+        session: &TranscriptSearchSession,
+        origin: DocPosition,
+        direction: SearchDirection,
+    ) -> bool {
+        self.sync_transcript_renderer_generation();
+        let current_key = self.search.transcript_index.as_ref().map(|index| index.key);
+        current_key == Some(session.key)
+            && session.key.width == self.transcript_width() as u16
+            && (self
+                .cached_transcript_match(session, origin, direction)
+                .is_some()
+                || self
+                    .next_unscanned_transcript_candidate(session, origin, direction)
+                    .is_some())
+    }
+
     pub(super) fn sync_transcript_search_session(
         &mut self,
         session: &mut TranscriptSearchSession,
@@ -334,6 +397,9 @@ impl TuiApp {
         origin: DocPosition,
         direction: SearchDirection,
     ) -> bool {
+        if self.transcript_search_session_can_advance(session, origin, direction) {
+            return true;
+        }
         let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
         let candidate_blocks = sqlite_candidates
             .available
@@ -612,7 +678,7 @@ mod tests {
                 &mut block_entries,
                 &mut trigrams,
                 &layout_entry,
-                (*search_text).to_string(),
+                Some(search_text),
             );
         }
         TranscriptSearchIndex {
@@ -666,7 +732,7 @@ mod tests {
             &mut block_entries,
             &mut trigrams,
             &layout_entry,
-            "group text".to_string(),
+            Some("group text"),
         );
         let index = TranscriptSearchIndex {
             key: TranscriptSearchKey {

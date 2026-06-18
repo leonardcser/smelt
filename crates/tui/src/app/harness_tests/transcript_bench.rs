@@ -282,6 +282,23 @@ fn assert_search_refinement_gates(
     }
 }
 
+fn assert_search_uses_candidate_index(
+    snapshot: &smelt_perf::perf::Snapshot,
+    label: &str,
+    max_index_entries: u64,
+) {
+    let trigram_build = perf_value_max(snapshot, "search:transcript:index_trigram_build_enabled");
+    assert_eq!(
+        trigram_build, 0,
+        "{label} rebuilt the full transcript trigram index"
+    );
+    let entries = perf_value_max(snapshot, "search:transcript:index_entries");
+    assert!(
+        entries <= max_index_entries,
+        "{label} indexed {entries} candidate entries, expected <= {max_index_entries}"
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SearchBenchSample {
     bytes: usize,
@@ -299,6 +316,9 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     app.app.handle_resize(100, 32);
     let bytes = push_search_bench_transcript(&mut app, target_bytes);
     app.render_silent();
+    app.app.save_session();
+    app.app.flush_persist();
+    smelt_perf::perf::clear();
     app.app.app_focus = AppFocus::Content;
     app.app.ui.set_focus(crate::app::TRANSCRIPT_WIN);
     let win = app.app.transcript_win_mut();
@@ -317,6 +337,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     assert!(transcript_row_cursor_row(&app) > rows / 2);
     let rare_snapshot = smelt_perf::perf::snapshot();
     assert_search_refinement_gates(&rare_snapshot, "rare_cold", 80, 160);
+    assert_search_uses_candidate_index(&rare_snapshot, "rare_cold", 64);
     if report_perf {
         search_perf_snapshot("rare_cold", &rare_snapshot);
     }
@@ -339,6 +360,7 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     let next100_ms = elapsed_ms(next_start.elapsed());
     let common_snapshot = smelt_perf::perf::snapshot();
     assert_search_refinement_gates(&common_snapshot, "common_hot_next100", 512, 32_000);
+    assert_search_uses_candidate_index(&common_snapshot, "common_hot_next100", 512);
     if report_perf {
         search_perf_snapshot("common_hot_next100", &common_snapshot);
     }
@@ -358,6 +380,15 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     let after_append_ms = elapsed_ms(after_append_start.elapsed());
     let after_append_snapshot = smelt_perf::perf::snapshot();
     assert_search_refinement_gates(&after_append_snapshot, "after_append", 80, 160);
+    assert_search_uses_candidate_index(&after_append_snapshot, "after_append", 1);
+    let dirty_scanned = perf_value_max(
+        &after_append_snapshot,
+        "search:transcript:dirty_candidates_scanned",
+    );
+    assert!(
+        dirty_scanned <= 1,
+        "after_append scanned {dirty_scanned} dirty blocks, expected only the appended suffix"
+    );
     if report_perf {
         search_perf_snapshot("after_append", &after_append_snapshot);
     }

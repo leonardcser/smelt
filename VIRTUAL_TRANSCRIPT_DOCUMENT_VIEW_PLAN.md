@@ -994,6 +994,8 @@ Status: complete. Layout perf snapshots now expose per-label allocation rows for
 
 ### Follow-up 4: Make search indexing durable or truly incremental
 
+Status: complete. The search benchmark now persists the generated transcript before timed searches, so rare cold search exercises the durable SQLite transcript search records instead of an all-dirty in-memory fixture. Candidate-backed transcript searches build only the candidate layout/index and skip full trigram construction; dirty in-memory suffix blocks are merged with SQLite candidates so an append after the persisted baseline searches only the appended suffix. The benchmark now gates that rare/common/after-append searches use candidate indexes and that after-append scans at most the dirty suffix. On the 10 MiB search benchmark, rare cold dropped from 54.479 ms with a 47.400 ms full index build to 5.120 ms with 11 candidate entries and no trigram build; after-append dropped from 53.114 ms with a 47.648 ms full index build to 8.659 ms with one candidate entry, one dirty block scanned, and no trigram build. Common `n` navigation reuses the active candidate page instead of requerying SQLite on every repeat and measured 152.868 ms for the next 100 matches.
+
 Goal: cold and after-append transcript search should avoid rebuilding the same large in-memory index when SQLite descriptor/search records are current.
 
 Deliverables:
