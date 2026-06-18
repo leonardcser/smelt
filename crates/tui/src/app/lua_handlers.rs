@@ -229,6 +229,9 @@ impl TuiApp {
             }
         }
         self.clear_tui_for_reload();
+        // Refresh stateful cells before ready hooks run so reloaded plugins
+        // see the live turn/busy state, not the previous main-loop tick.
+        self.publish_diff_cells();
         let cwd = std::env::current_dir().ok();
         let err = self.lua.reload(cwd.as_deref());
         if err.is_none() {

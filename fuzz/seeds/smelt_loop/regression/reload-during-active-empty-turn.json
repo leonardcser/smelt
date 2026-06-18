@@ -1,0 +1,22 @@
+{
+  "_about": "Reload regression: a reload during an active but empty turn must not reopen the empty-session banner, or later streamed output makes the next reload drop the stale named banner window.",
+  "_fix": "Refresh work_state before Lua ready hooks run and have the banner suppress its splash while a turn is active.",
+  "mode": "normal",
+  "ops": [
+    {
+      "data": 0,
+      "kind": "start_turn"
+    },
+    {
+      "kind": "reload_lua"
+    },
+    {
+      "data": "7",
+      "kind": "engine_text"
+    },
+    {
+      "kind": "reload_lua"
+    }
+  ],
+  "vim": true
+}

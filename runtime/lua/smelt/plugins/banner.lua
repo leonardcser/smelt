@@ -381,8 +381,14 @@ local function transcript_fits_banner()
 	return rect.height >= logo_h + FIRE_HEADROOM + label_h
 end
 
+local function turn_active()
+	local cell = smelt.cell("work_state")
+	local work_state = cell and cell.get and cell:get() or nil
+	return work_state == "working" or work_state == "retrying" or work_state == "paused"
+end
+
 local function refresh(force_reopen)
-	if smelt.transcript.is_empty() and transcript_fits_banner() then
+	if not turn_active() and smelt.transcript.is_empty() and transcript_fits_banner() then
 		if force_reopen == true and state.decoration then
 			teardown()
 		end
