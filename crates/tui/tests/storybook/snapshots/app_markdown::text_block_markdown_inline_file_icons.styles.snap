@@ -9,8 +9,8 @@ dim: 80 10
   0  31  14 fg=AnsiValue(75)
   0  47   2 fg=Rgb { r: 237, g: 237, b: 237 }
   0  49   9 fg=AnsiValue(75)
-  0  64   2 fg=Rgb { r: 77, g: 90, b: 94 }
-  1   0  14 fg=AnsiValue(75)
+  1   0   2 fg=Rgb { r: 77, g: 90, b: 94 }
+  1   2  14 fg=AnsiValue(75)
   6   0   1 fg=AnsiValue(237)
   6   1   1 fg=Rgb { r: 198, g: 198, b: 198 } attrs=bold
   6   2   1 fg=Rgb { r: 175, g: 175, b: 175 } attrs=bold
