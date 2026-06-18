@@ -448,7 +448,12 @@ async fn list_sessions() -> (&'static str, &'static str, String) {
 
 async fn session_detail(id: &str) -> (&'static str, &'static str, String) {
     let id = id.to_string();
-    let session = match tokio::task::spawn_blocking(move || smelt_core::session::load(&id)).await {
+    let session = match tokio::task::spawn_blocking(move || {
+        smelt_perf::perf::record_value("inspect:session:detail_load_full", 1);
+        smelt_core::session::load(&id)
+    })
+    .await
+    {
         Ok(s) => s,
         Err(e) => return server_error(&e.to_string()),
     };
