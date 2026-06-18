@@ -720,29 +720,26 @@ impl TranscriptDocument {
         self.projection.visible_block_layout()
     }
 
-    fn descriptor_window_range_for_virtual_row(
+    fn descriptor_window_range_around_center(
         &self,
         width: u16,
-        row: RowIndex,
+        center: usize,
         viewport_rows: u16,
+        reuse_active: bool,
     ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
         let total = self.sparse_descriptors.total_count()?;
         if total == 0 {
             return None;
         }
-        let avg_rows = self.average_descriptor_rows(width).max(1);
-        let center = if row == RowIndex::MAX {
-            total.saturating_sub(1)
-        } else {
-            ((row / avg_rows) as usize).min(total.saturating_sub(1))
-        };
-        if row != RowIndex::MAX {
+        let center = center.min(total.saturating_sub(1));
+        if reuse_active {
             if let Some(active) = self.active_descriptor_range.as_ref() {
                 if active.start.get() <= center && center < active.end.get() {
                     return Some(active.clone());
                 }
             }
         }
+        let avg_rows = self.average_descriptor_rows(width).max(1);
         let visible_descriptors =
             (RowIndex::from(viewport_rows.max(1)) / avg_rows).saturating_add(1) as usize;
         let count = visible_descriptors.saturating_mul(4).max(32).min(total);
@@ -756,16 +753,36 @@ impl TranscriptDocument {
         )
     }
 
-    fn activate_descriptor_window_for_virtual_row(
-        &mut self,
+    fn descriptor_window_range_for_virtual_row(
+        &self,
         width: u16,
         row: RowIndex,
         viewport_rows: u16,
+    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
+        let avg_rows = self.average_descriptor_rows(width).max(1);
+        let total = self.sparse_descriptors.total_count()?;
+        let center = ((row / avg_rows) as usize).min(total.saturating_sub(1));
+        self.descriptor_window_range_around_center(width, center, viewport_rows, true)
+    }
+
+    fn tail_descriptor_window_range(
+        &self,
+        width: u16,
+        viewport_rows: u16,
+    ) -> Option<Range<smelt_store::TranscriptDescriptorIndex>> {
+        let total = self.sparse_descriptors.total_count()?;
+        self.descriptor_window_range_around_center(
+            width,
+            total.saturating_sub(1),
+            viewport_rows,
+            false,
+        )
+    }
+
+    fn activate_descriptor_window_range(
+        &mut self,
+        range: Range<smelt_store::TranscriptDescriptorIndex>,
     ) -> bool {
-        let Some(range) = self.descriptor_window_range_for_virtual_row(width, row, viewport_rows)
-        else {
-            return false;
-        };
         if self.active_descriptor_range.as_ref() == Some(&range) {
             return false;
         }
@@ -779,6 +796,26 @@ impl TranscriptDocument {
             return false;
         };
         self.merge_descriptor_window(window)
+    }
+
+    fn activate_descriptor_window_for_virtual_row(
+        &mut self,
+        width: u16,
+        row: RowIndex,
+        viewport_rows: u16,
+    ) -> bool {
+        let Some(range) = self.descriptor_window_range_for_virtual_row(width, row, viewport_rows)
+        else {
+            return false;
+        };
+        self.activate_descriptor_window_range(range)
+    }
+
+    fn activate_tail_descriptor_window(&mut self, width: u16, viewport_rows: u16) -> bool {
+        let Some(range) = self.tail_descriptor_window_range(width, viewport_rows) else {
+            return false;
+        };
+        self.activate_descriptor_window_range(range)
     }
 
     pub(crate) fn plan_projection_measured(
@@ -798,11 +835,7 @@ impl TranscriptDocument {
             crate::content::transcript_buf::ScrollTarget::Visible(
                 crate::content::transcript_buf::ScrollAnchor::Tail,
             ) => {
-                let _ = self.activate_descriptor_window_for_virtual_row(
-                    width,
-                    RowIndex::MAX,
-                    viewport_rows,
-                );
+                let _ = self.activate_tail_descriptor_window(width, viewport_rows);
             }
         }
         let row_offset = self.sparse_prefix_row_offset(width);
