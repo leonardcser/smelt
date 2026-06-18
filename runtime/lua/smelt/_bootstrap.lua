@@ -433,8 +433,13 @@ end
 -- bootstrap run re-wraps the same raw - never the previous wrap.
 __smelt_raw_tools_register__ = __smelt_raw_tools_register__ or smelt.tools.register
 smelt.tools.register = function(def)
-  if type(def) == "table" and def.summary == nil then
-    def.summary = smelt.tools.default_summary
+  if type(def) == "table" then
+    if def.summary == nil then
+      def.summary = smelt.tools.default_summary
+    end
+    if def.draft_preview ~= nil then
+      require("smelt.transcript.defaults").__tool_draft_preview_renderers[def.name or ""] = def.draft_preview
+    end
   end
   return __smelt_raw_tools_register__(def)
 end

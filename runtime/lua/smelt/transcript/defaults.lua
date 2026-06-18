@@ -3,6 +3,7 @@ smelt.transcript.defaults = smelt.transcript.defaults or {}
 
 local M = smelt.transcript.defaults
 M.__tool_body_renderers = M.__tool_body_renderers or {}
+M.__tool_draft_preview_renderers = M.__tool_draft_preview_renderers or {}
 M.__tool_collapsed_details = M.__tool_collapsed_details or {}
 M.__tool_header_rest_prefixes = M.__tool_header_rest_prefixes or {}
 
@@ -301,12 +302,18 @@ function smelt.transcript.defaults.tool_collapsed_detail(block, ctx)
   return renderer(block, ctx)
 end
 
---- Render a tool body. Raw output is capped by the safe tail-output helper;
---- structured renderers are guttered but otherwise left uncapped.
+--- Render a tool body. Drafts can provide an explicit best-effort preview;
+--- completed tools fall back to raw output or their structured body renderer.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node?
 function smelt.transcript.defaults.render_tool_body(block, ctx, opts)
   opts = opts or {}
   local renderer = M.__tool_body_renderers[block.name or ""]
+  local draft_renderer = M.__tool_draft_preview_renderers[block.name or ""]
+  if block.draft and draft_renderer then
+    local body = draft_renderer(block.args or {}, ctx, block, opts)
+    if not body then return nil end
+    return layout.gutter(body, { text = opts.gutter or "  " })
+  end
   if not block.output and not renderer then return nil end
 
   local output = block.output or { content = "", is_error = false }

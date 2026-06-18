@@ -47,6 +47,9 @@ smelt.tools.register({
   preview = function(args)
     return file_view(args)
   end,
+  draft_preview = function(args)
+    return file_view(args or {})
+  end,
   execute = function(args)
     local path = args.file_path or ""
     local content = args.content or ""

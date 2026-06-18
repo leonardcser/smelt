@@ -88,6 +88,15 @@ app_story!(streaming_tool_draft_syntax_highlighting, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(streaming_edit_file_draft_diff, |ctx| {
+    ctx.set_viewport(78, 14);
+    ctx.tool_draft_delta(
+        "edit_file",
+        r#"{"file_path":"src/live.rs","old_string":"pub fn live() -> i32 {\n    1\n}","new_string":"pub fn live() -> i32 {\n    2"#,
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(edit_file_tool_states, |ctx| {
     ctx.set_viewport(84, 30);
     ctx.tool_draft(

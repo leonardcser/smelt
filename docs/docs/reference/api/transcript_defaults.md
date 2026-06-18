@@ -215,8 +215,8 @@ fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?):
 
 Types: [`smelt.transcript.Block`](types.md#smelttranscriptblock), [`smelt.transcript.Context`](types.md#smelttranscriptcontext), [`smelt.layout.Node`](types.md#smeltlayoutnode)
 
-Render a tool body. Raw output is capped by the safe tail-output helper;
-structured renderers are guttered but otherwise left uncapped.
+Render a tool body. Drafts can provide an explicit best-effort preview;
+completed tools fall back to raw output or their structured body renderer.
 
 ## `smelt.transcript.defaults.render_tool_full`
 

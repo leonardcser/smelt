@@ -595,6 +595,7 @@
 ---@field preflight? function `preflight(args, ctx) -> table?` - validation hook; nil result skips.
 ---@field paths_for_workspace? function `paths_for_workspace(args) -> (string|{ path: string, kind?: "file"|"directory"|"unknown" })[]` - paths this invocation will touch.
 ---@field preview? function `preview(args) -> smelt.layout` - pre-execute preview render. The confirm dialog renders it directly into the preview pane.
+---@field draft_preview? function `draft_preview(args, ctx, block, opts) -> smelt.layout|nil` - best-effort renderer for streamed partial arguments in the transcript.
 ---@field watchdog_timeout_ms? integer Outer watchdog deadline for this tool's coroutine, in milliseconds. This is separate from any timeout the tool implements internally.
 ---@field watchdog_max_timeout_ms? integer Maximum watchdog deadline accepted from tool arguments, in milliseconds.
 ---@field watchdog_timeout_arg? string Tool argument that controls the watchdog deadline. Defaults to `timeout_ms`.

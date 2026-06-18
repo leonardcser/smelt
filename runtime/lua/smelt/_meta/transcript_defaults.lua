@@ -88,8 +88,8 @@ transcript_defaults.render_thinking_summary = nil
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context): smelt.layout.Node
 transcript_defaults.render_tool = nil
 
---- Render a tool body. Raw output is capped by the safe tail-output helper;
---- structured renderers are guttered but otherwise left uncapped.
+--- Render a tool body. Drafts can provide an explicit best-effort preview;
+--- completed tools fall back to raw output or their structured body renderer.
 ---@type fun(block: smelt.transcript.Block, ctx: smelt.transcript.Context, opts: table?): smelt.layout.Node?
 transcript_defaults.render_tool_body = nil
 

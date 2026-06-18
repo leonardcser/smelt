@@ -73,11 +73,28 @@ local function replacement_line_detail(old_text, new_text)
   return line_label(old_lines, "old line") .. ", " .. line_label(new_lines, "new line")
 end
 
-transcript_defaults.__tool_body_renderers.edit_file = function(block)
-  local args = block.args or {}
-  if block.draft and not block.draft_finished then
+local function draft_preview(args)
+  local path, old_string, new_string, do_all = edit_fields(args)
+  if old_string == "" and new_string == "" then
     return nil
   end
+
+  local cached = path ~= "" and old_string ~= "" and smelt.fs.file_state.get(path) or nil
+  local content = cached and cached.content or nil
+  if content then
+    return diff_from_content(path, content, apply_edit(content, old_string, new_string, do_all), old_string)
+  end
+
+  return smelt.layout.diff({
+    old = old_string,
+    new = new_string,
+    path = path,
+    anchor = old_string,
+  })
+end
+
+transcript_defaults.__tool_body_renderers.edit_file = function(block)
+  local args = block.args or {}
 
   local meta = block.output and block.output.metadata
   if meta then
@@ -141,6 +158,9 @@ smelt.tools.register({
   end,
   preview = function(args)
     return planned_diff(args)
+  end,
+  draft_preview = function(args)
+    return draft_preview(args or {})
   end,
 
   execute = function(args)
