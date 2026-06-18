@@ -42,8 +42,13 @@ pub(crate) fn save_session_snapshot(
     compression: ObjectCompression,
 ) -> Result<SessionSaveReport> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result =
-        save_session_snapshot_inner(conn, snapshot, expected_revision, writer_lease, compression);
+    let result = save_session_snapshot_in_transaction(
+        conn,
+        snapshot,
+        expected_revision,
+        writer_lease,
+        compression,
+    );
     match result {
         Ok(report) => {
             conn.execute_batch("COMMIT")?;
@@ -56,7 +61,7 @@ pub(crate) fn save_session_snapshot(
     }
 }
 
-fn save_session_snapshot_inner(
+pub(crate) fn save_session_snapshot_in_transaction(
     conn: &Connection,
     snapshot: &SessionSnapshot,
     expected_revision: Option<u64>,

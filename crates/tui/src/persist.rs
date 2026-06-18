@@ -134,8 +134,21 @@ fn write(req: &PersistRequest) -> Result<(), String> {
     }
     let db = smelt_store::SessionDb::open(req.session_dir.join("session.db"))
         .map_err(|err| format!("open session database: {err}"))?;
+    let descriptor_rows = req
+        .descriptor_records
+        .iter()
+        .enumerate()
+        .map(|(offset, record)| {
+            transcript_descriptor_row(req.descriptor_start_idx + offset, record)
+        })
+        .collect::<Result<Vec<_>, smelt_store::StoreError>>()
+        .map_err(|err| format!("prepare transcript descriptors: {err}"))?;
     let save_report = db
-        .save_session_snapshot_as_writer(&snapshot)
+        .save_session_snapshot_and_transcript_descriptor_suffix_as_writer(
+            &snapshot,
+            req.descriptor_start_idx,
+            &descriptor_rows,
+        )
         .map_err(|err| format!("save session database: {err}"))?;
     smelt_perf::perf::record_value("persist:write:history_deleted", save_report.history_deleted);
     smelt_perf::perf::record_value(
@@ -154,17 +167,6 @@ fn write(req: &PersistRequest) -> Result<(), String> {
         "persist:write:descriptor_records",
         req.descriptor_records.len() as u64,
     );
-    let descriptor_rows = req
-        .descriptor_records
-        .iter()
-        .enumerate()
-        .map(|(offset, record)| {
-            transcript_descriptor_row(req.descriptor_start_idx + offset, record)
-        })
-        .collect::<Result<Vec<_>, smelt_store::StoreError>>()
-        .map_err(|err| format!("prepare transcript descriptors: {err}"))?;
-    db.replace_transcript_descriptor_suffix(req.descriptor_start_idx, &descriptor_rows)
-        .map_err(|err| format!("save transcript descriptors: {err}"))?;
     db.write_meta_sidecar(req.session_dir.join("meta.json"))
         .map_err(|err| format!("write session metadata: {err}"))?;
     let blob = db

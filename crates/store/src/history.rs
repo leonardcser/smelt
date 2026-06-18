@@ -301,7 +301,7 @@ pub(crate) fn replace_transcript_descriptor_suffix(
     compression: ObjectCompression,
 ) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = replace_transcript_descriptor_suffix_inner(
+    let result = replace_transcript_descriptor_suffix_in_transaction(
         conn,
         start_descriptor_idx,
         records,
@@ -319,7 +319,7 @@ pub(crate) fn replace_transcript_descriptor_suffix(
     }
 }
 
-fn replace_transcript_descriptor_suffix_inner(
+pub(crate) fn replace_transcript_descriptor_suffix_in_transaction(
     conn: &Connection,
     start_descriptor_idx: usize,
     records: &[TranscriptDescriptorRecord],

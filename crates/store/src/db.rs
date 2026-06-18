@@ -288,6 +288,46 @@ impl SessionDb {
         )
     }
 
+    pub fn save_session_snapshot_and_transcript_descriptor_suffix_as_writer(
+        &self,
+        snapshot: &SessionSnapshot,
+        start_descriptor_idx: usize,
+        records: &[TranscriptDescriptorRecord],
+    ) -> Result<SessionSaveReport> {
+        let lease = self.current_process_writer_lease()?;
+        let expected_revision = self
+            .session_state()?
+            .as_ref()
+            .map_or(0, |state| state.revision);
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let report = session_snapshot::save_session_snapshot_in_transaction(
+                &self.conn,
+                snapshot,
+                Some(expected_revision),
+                Some(&lease),
+                self.object_compression,
+            )?;
+            history::replace_transcript_descriptor_suffix_in_transaction(
+                &self.conn,
+                start_descriptor_idx,
+                records,
+                self.object_compression,
+            )?;
+            Ok(report)
+        })();
+        match result {
+            Ok(report) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(report)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
     pub fn load_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {
         session_snapshot::load_session_snapshot(&self.conn)
     }
@@ -892,6 +932,79 @@ mod tests {
         assert_eq!(db.search_blob().unwrap(), "first\nuser\nsecond\nuser\n");
         assert_eq!(db.read_history_items_range(1..2).unwrap(), vec![second]);
         assert!(db.read_history_items_range(2..2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn combined_snapshot_and_descriptor_save_rolls_back_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let first = protocol::HistoryItem::user(protocol::Content::text("first"));
+        let second = protocol::HistoryItem::user(protocol::Content::text("second"));
+        let mut snapshot = SessionSnapshot {
+            state: SessionState {
+                id: "s1".into(),
+                title: Some("title".into()),
+                slug: Some("title".into()),
+                first_user_message: None,
+                cwd: Some("/tmp/project".into()),
+                mode: Some("normal".into()),
+                reasoning_effort: None,
+                model: Some("model-a".into()),
+                parent_id: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
+                revision: 0,
+                history_len: 1,
+                created_at: 10,
+                updated_at: 20,
+            },
+            meta_json: Some(serde_json::json!({"id": "s1", "schema_version": 2})),
+            history_start_idx: 0,
+            history_len: 1,
+            history: vec![first.clone()],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+
+        db.save_session_snapshot_and_transcript_descriptor_suffix_as_writer(
+            &snapshot,
+            0,
+            &[transcript_record_with_history(
+                0,
+                0,
+                "first",
+                "first descriptor",
+            )],
+        )
+        .unwrap();
+        assert_eq!(db.search_blob().unwrap(), "first descriptor\n");
+
+        snapshot.history_start_idx = 1;
+        snapshot.history = vec![second];
+        snapshot.history_len = 2;
+        snapshot.state.history_len = 2;
+        snapshot.state.updated_at = 30;
+        let mut invalid_record =
+            transcript_record_with_history(1, 1, "second", "second descriptor");
+        invalid_record.descriptor_json = "{invalid".into();
+
+        db.save_session_snapshot_and_transcript_descriptor_suffix_as_writer(
+            &snapshot,
+            1,
+            &[invalid_record],
+        )
+        .unwrap_err();
+
+        let loaded = db.load_session_snapshot().unwrap().unwrap();
+        assert_eq!(loaded.history, vec![first]);
+        assert_eq!(loaded.state.history_len, 1);
+        assert_eq!(db.search_blob().unwrap(), "first descriptor\n");
+        assert_eq!(db.read_transcript_descriptor_records().unwrap().len(), 1);
     }
 
     #[test]
