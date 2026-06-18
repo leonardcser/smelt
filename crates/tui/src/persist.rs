@@ -134,8 +134,26 @@ fn write(req: &PersistRequest) -> Result<(), String> {
     }
     let db = smelt_store::SessionDb::open(req.session_dir.join("session.db"))
         .map_err(|err| format!("open session database: {err}"))?;
-    db.save_session_snapshot_as_writer(&snapshot)
+    let save_report = db
+        .save_session_snapshot_as_writer(&snapshot)
         .map_err(|err| format!("save session database: {err}"))?;
+    smelt_perf::perf::record_value("persist:write:history_deleted", save_report.history_deleted);
+    smelt_perf::perf::record_value(
+        "persist:write:history_inserted",
+        save_report.history_inserted,
+    );
+    smelt_perf::perf::record_value(
+        "persist:write:history_unchanged",
+        save_report.history_unchanged,
+    );
+    smelt_perf::perf::record_value(
+        "persist:write:descriptor_start_idx",
+        req.descriptor_start_idx as u64,
+    );
+    smelt_perf::perf::record_value(
+        "persist:write:descriptor_records",
+        req.descriptor_records.len() as u64,
+    );
     let descriptor_rows = req
         .descriptor_records
         .iter()

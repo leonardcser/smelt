@@ -357,6 +357,13 @@ impl SessionDb {
         )
     }
 
+    pub fn read_history_items_range(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> Result<Vec<protocol::HistoryItem>> {
+        history::read_history_items_range(&self.conn, range)
+    }
+
     pub fn history_text_bytes(&self) -> Result<u64> {
         session_snapshot::history_text_bytes(&self.conn)
     }
@@ -868,7 +875,7 @@ mod tests {
         assert_eq!(first_created_at, second_created_at);
 
         snapshot.history_start_idx = 1;
-        snapshot.history = vec![second];
+        snapshot.history = vec![second.clone()];
         snapshot.history_len = 2;
         snapshot.state.history_len = 2;
         snapshot.state.updated_at = 30;
@@ -883,6 +890,8 @@ mod tests {
             2
         );
         assert_eq!(db.search_blob().unwrap(), "first\nuser\nsecond\nuser\n");
+        assert_eq!(db.read_history_items_range(1..2).unwrap(), vec![second]);
+        assert!(db.read_history_items_range(2..2).unwrap().is_empty());
     }
 
     #[test]
@@ -962,7 +971,7 @@ mod tests {
         );
 
         snapshot.history_start_idx = 1;
-        snapshot.history = vec![second];
+        snapshot.history = vec![second.clone()];
         snapshot.history_len = 2;
         snapshot.state.history_len = 2;
         snapshot.state.updated_at = 30;

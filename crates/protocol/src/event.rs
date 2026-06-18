@@ -409,10 +409,65 @@ impl StartTurnInput {
     }
 }
 
+/// Provider-visible history for a turn. Interactive frontends use the store
+/// variant so request start does not clone full session history through the UI
+/// channel; tests and headless callers can still provide already materialized
+/// items explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ModelHistorySource {
+    Items(Vec<crate::history::HistoryItem>),
+    Store {
+        summary_prefix: String,
+        summary: Option<String>,
+        first_live_index: usize,
+        end_index: usize,
+    },
+}
+
+impl ModelHistorySource {
+    pub fn items(items: Vec<crate::history::HistoryItem>) -> Self {
+        Self::Items(items)
+    }
+
+    pub fn store(
+        summary_prefix: impl Into<String>,
+        summary: Option<String>,
+        first_live_index: usize,
+        end_index: usize,
+    ) -> Self {
+        Self::Store {
+            summary_prefix: summary_prefix.into(),
+            summary,
+            first_live_index,
+            end_index,
+        }
+    }
+
+    pub fn requested_len(&self) -> usize {
+        match self {
+            Self::Items(items) => items.len(),
+            Self::Store {
+                summary,
+                first_live_index,
+                end_index,
+                ..
+            } => end_index
+                .saturating_sub(*first_live_index)
+                .saturating_add(usize::from(summary.is_some())),
+        }
+    }
+}
+
+impl Default for ModelHistorySource {
+    fn default() -> Self {
+        Self::Items(Vec::new())
+    }
+}
+
 /// Payload for [`UiCommand::StartTurn`]. Boxed at the variant so the
 /// enum stays small - the other variants are channel-frequent
-/// (`Steer`, `Cancel`, `PermissionDecision`, …) while StartTurn is
-/// once-per-turn and carries the full message history + tool list.
+/// (`Steer`, `Cancel`, `PermissionDecision`, …) while StartTurn carries
+/// once-per-turn request metadata and a provider-history source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTurnPayload {
     pub turn_id: u64,
@@ -420,7 +475,7 @@ pub struct StartTurnPayload {
     pub mode: AgentMode,
     pub model: String,
     pub reasoning_effort: ReasoningEffort,
-    pub history: Vec<crate::history::HistoryItem>,
+    pub history: ModelHistorySource,
     /// Override API base URL for this turn (uses engine default if None).
     pub api_base: Option<String>,
     /// Override API key for this turn (uses engine default if None).
@@ -734,7 +789,7 @@ mod tests {
             mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,
-            history: vec![],
+            history: ModelHistorySource::default(),
             api_base: None,
             api_key: None,
             session_id: "s".into(),

@@ -82,6 +82,13 @@ pub(crate) async fn engine_task(
                             tools,
                         } = *payload;
                         let display = input.display();
+                        let history = match load_model_history(history, &session_dir) {
+                            Ok(history) => history,
+                            Err(message) => {
+                                let _ = event_tx.send(EngineEvent::TurnError { message });
+                                continue;
+                            }
+                        };
 
                         let provider = build_provider(
                             &config.api, &client,
@@ -168,6 +175,52 @@ pub(crate) async fn engine_task(
     }
 
     let _ = event_tx.send(EngineEvent::Shutdown { reason: None });
+}
+
+fn load_model_history(
+    source: protocol::ModelHistorySource,
+    session_dir: &std::path::Path,
+) -> Result<Vec<HistoryItem>, String> {
+    match source {
+        protocol::ModelHistorySource::Items(items) => {
+            smelt_perf::perf::record_value("engine:model_history:source_items", 1);
+            smelt_perf::perf::record_value("engine:model_history:items", items.len() as u64);
+            Ok(items)
+        }
+        protocol::ModelHistorySource::Store {
+            summary_prefix,
+            summary,
+            first_live_index,
+            end_index,
+        } => {
+            smelt_perf::perf::record_value("engine:model_history:source_store", 1);
+            smelt_perf::perf::record_value(
+                "engine:model_history:first_live_index",
+                first_live_index as u64,
+            );
+            smelt_perf::perf::record_value("engine:model_history:end_index", end_index as u64);
+            let mut history = Vec::new();
+            if let Some(summary) = summary {
+                history.push(HistoryItem::user(protocol::Content::text(format!(
+                    "{}\n{}",
+                    summary_prefix.trim_end(),
+                    summary
+                ))));
+            }
+            if end_index > first_live_index {
+                let db_path = session_dir.join("session.db");
+                let db = smelt_store::SessionDb::open(&db_path)
+                    .map_err(|err| format!("open model history database {db_path:?}: {err}"))?;
+                let mut rows = db
+                    .read_history_items_range(first_live_index..end_index)
+                    .map_err(|err| format!("read model history rows: {err}"))?;
+                smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
+                history.append(&mut rows);
+            }
+            smelt_perf::perf::record_value("engine:model_history:items", history.len() as u64);
+            Ok(history)
+        }
+    }
 }
 
 /// Resolve an `AskModel` override (or the primary) into `(ApiConfig, model_name)`.
@@ -2494,6 +2547,63 @@ mod tests {
     use super::*;
 
     #[test]
+    fn load_model_history_reads_requested_store_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        let old = HistoryItem::user(protocol::Content::text("old"));
+        let recent = HistoryItem::user(protocol::Content::text("recent"));
+        let reply = HistoryItem::Assistant(protocol::AssistantStep::terminal(
+            Some(protocol::Content::text("reply")),
+            None,
+            Vec::new(),
+        ));
+        let snapshot = smelt_store::SessionSnapshot {
+            state: smelt_store::SessionState {
+                id: "s1".into(),
+                title: None,
+                slug: None,
+                first_user_message: None,
+                cwd: None,
+                mode: None,
+                reasoning_effort: None,
+                model: None,
+                parent_id: None,
+                accounting_json: None,
+                checkpoint_json: None,
+                context_tokens: None,
+                context_tokens_history_len: None,
+                display_context_tokens: None,
+                session_cost_usd: 0.0,
+                revision: 0,
+                history_len: 3,
+                created_at: 10,
+                updated_at: 20,
+            },
+            meta_json: None,
+            history_start_idx: 0,
+            history_len: 3,
+            history: vec![old, recent.clone(), reply.clone()],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+        db.save_session_snapshot(&snapshot, None).unwrap();
+
+        let history = load_model_history(
+            protocol::ModelHistorySource::store("SUMMARY:", Some("compact".into()), 1, 3),
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(history.len(), 3);
+        assert!(
+            matches!(&history[0], HistoryItem::User { content, .. } if content.text_content() == "SUMMARY:\ncompact")
+        );
+        assert_eq!(history[1], recent);
+        assert_eq!(history[2], reply);
+    }
+
+    #[test]
     fn classify_provider_error_detects_kimi_model_token_limit() {
         let err = ProviderError::InvalidResponse(
             r#"{"error":{"type":"invalid_request_error","message":"Invalid request: Your request exceeded model token limit: 262144 (requested: 264866)"},"type":"error"}"#.into(),
@@ -2685,7 +2795,7 @@ mod tests {
             mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,
-            history: Vec::new(),
+            history: protocol::ModelHistorySource::items(Vec::new()),
             api_base: None,
             api_key: None,
             session_id: "s".into(),

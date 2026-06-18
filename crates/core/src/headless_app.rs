@@ -358,7 +358,7 @@ impl HeadlessApp {
                 mode: self.core.config.mode.clone(),
                 model: self.core.config.model.clone(),
                 reasoning_effort: self.core.config.reasoning_effort,
-                history,
+                history: protocol::ModelHistorySource::items(history),
                 api_base: Some(self.core.config.api_base.clone()),
                 api_key: Some(self.api_key()),
                 session_id: self.core.session.id.clone(),

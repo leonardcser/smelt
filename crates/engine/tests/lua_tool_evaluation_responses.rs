@@ -201,7 +201,7 @@ async fn lua_tool_evaluation_responses_are_not_lost_while_classifying_parallel_c
                 mode: AgentMode::normal(),
                 model: "test-model".into(),
                 reasoning_effort: ReasoningEffort::Off,
-                history: Vec::new(),
+                history: protocol::ModelHistorySource::items(Vec::new()),
                 api_base: None,
                 api_key: None,
                 session_id: "sess".into(),

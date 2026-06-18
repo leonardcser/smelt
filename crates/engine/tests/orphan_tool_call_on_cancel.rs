@@ -151,7 +151,7 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
         mode: AgentMode::normal(),
         model: "test-model".into(),
         reasoning_effort: ReasoningEffort::Off,
-        history: Vec::new(),
+        history: protocol::ModelHistorySource::items(Vec::new()),
         api_base: None,
         api_key: None,
         session_id: "sess".into(),

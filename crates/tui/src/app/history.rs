@@ -1249,6 +1249,19 @@ impl TuiApp {
         true
     }
 
+    pub(crate) fn model_history_source(&self) -> protocol::ModelHistorySource {
+        let end_index = self.core.session.history.len();
+        match &self.core.session.checkpoint {
+            Some(checkpoint) => protocol::ModelHistorySource::store(
+                engine::SUMMARY_PREFIX,
+                Some(checkpoint.summary.clone()),
+                checkpoint.first_live_index,
+                end_index,
+            ),
+            None => protocol::ModelHistorySource::store(engine::SUMMARY_PREFIX, None, 0, end_index),
+        }
+    }
+
     pub(crate) fn model_history(&self) -> Vec<HistoryItem> {
         self.core.session.model_history(engine::SUMMARY_PREFIX)
     }
@@ -1340,8 +1353,8 @@ impl TuiApp {
         &mut self,
         item: HistoryItem,
         block: Option<Block>,
-    ) -> Vec<HistoryItem> {
-        let history = self.model_history();
+    ) -> protocol::ModelHistorySource {
+        let history = self.model_history_source();
         let history_index = self.core.session.history.len();
         if let Some(block) = block {
             self.transcript

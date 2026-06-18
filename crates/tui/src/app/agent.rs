@@ -11,7 +11,7 @@ use std::time::Duration;
 
 struct PreparedTurn {
     input: protocol::StartTurnInput,
-    history: Vec<HistoryItem>,
+    history: protocol::ModelHistorySource,
     model: String,
     reasoning_effort: protocol::ReasoningEffort,
     api_base: String,
@@ -108,7 +108,7 @@ impl TuiApp {
         self.prepare_user_visible_turn();
         if content.is_empty() {
             self.publish_turn_input(submitted);
-            let history = self.model_history();
+            let history = self.model_history_source();
             return self.dispatch_turn(content, history);
         }
         if self.core.session.first_user_message.is_none() {
@@ -129,7 +129,11 @@ impl TuiApp {
         self.dispatch_turn(content, history)
     }
 
-    fn dispatch_turn(&mut self, content: Content, history: Vec<HistoryItem>) -> TurnState {
+    fn dispatch_turn(
+        &mut self,
+        content: Content,
+        history: protocol::ModelHistorySource,
+    ) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
             {
                 self.working.finish(TurnOutcome::Done);
@@ -155,6 +159,19 @@ impl TuiApp {
         })
     }
 
+    fn persist_model_history_source(&mut self, history: &protocol::ModelHistorySource) {
+        if matches!(history, protocol::ModelHistorySource::Store { .. })
+            && history.requested_len() > 0
+            && (self.session_dirty
+                || !self.persisted_store_ready
+                || !self.transcript_descriptors_persisted
+                || self.transcript.history().descriptor_dirty_from().is_some())
+        {
+            self.save_session();
+            self.flush_persist();
+        }
+    }
+
     fn dispatch_prepared_turn(&mut self, turn: PreparedTurn) -> TurnState {
         self.pending_continuation_token = None;
         {
@@ -168,6 +185,7 @@ impl TuiApp {
         self.pump_lua();
 
         let (system_prompt, tools) = self.prepare_turn_context();
+        self.persist_model_history_source(&turn.history);
 
         let turn_id = self.next_turn_id;
         self.next_turn_id += 1;
@@ -214,7 +232,7 @@ impl TuiApp {
             if let Some(block) = block {
                 self.push_block(block);
             }
-            self.model_history()
+            self.model_history_source()
         };
         let api_key = match self.resolve_api_key() {
             Some(api_key) => api_key,
@@ -316,7 +334,7 @@ impl TuiApp {
             )
         } else {
             self.show_user_message(&display, vec![]);
-            self.model_history()
+            self.model_history_source()
         };
         self.publish_turn_input(submitted);
 
@@ -1178,9 +1196,10 @@ mod tests {
                 _ => None,
             })
             .expect("turn dispatched");
-        assert!(payload.history.iter().all(
-            |item| !matches!(item, HistoryItem::User { content, .. } if content.text_content() == "first request")
-        ));
+        let protocol::ModelHistorySource::Store { end_index, .. } = &payload.history else {
+            panic!("interactive turn should dispatch store-backed model history");
+        };
+        assert_eq!(*end_index, app.app.core.session.history.len() - 1);
         assert_eq!(
             payload.input.provider_content().text_content(),
             "first request"

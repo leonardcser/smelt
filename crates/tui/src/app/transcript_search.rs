@@ -240,8 +240,14 @@ impl TuiApp {
                 Some(page)
             })
         else {
+            smelt_perf::perf::record_value("search:transcript:sqlite_available", 0);
             return SqliteTranscriptCandidateBlocks::default();
         };
+        smelt_perf::perf::record_value("search:transcript:sqlite_available", 1);
+        smelt_perf::perf::record_value(
+            "search:transcript:sqlite_candidate_blocks",
+            candidates.len() as u64,
+        );
         SqliteTranscriptCandidateBlocks {
             block_indices: candidates
                 .into_iter()

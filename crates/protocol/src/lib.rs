@@ -22,8 +22,8 @@ pub mod usage;
 pub use content::{Content, ContentPart};
 pub use event::{
     AskModel, AskResponseFormat, Decision, EngineAskError, EngineAskErrorKind, EngineEvent,
-    StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation, ToolExecutionMode, ToolHookFlags,
-    ToolMetadata, UiCommand,
+    ModelHistorySource, StartTurnInput, StartTurnPayload, ToolDef, ToolEvaluation,
+    ToolExecutionMode, ToolHookFlags, ToolMetadata, UiCommand,
 };
 pub use history::{
     apply_history_append, effective_mode_at, history_from_messages, history_item_from_user_content,

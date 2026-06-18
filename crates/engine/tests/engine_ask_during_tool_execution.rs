@@ -182,7 +182,7 @@ async fn engine_ask_during_tool_execution_is_not_silently_dropped() {
         mode: AgentMode::normal(),
         model: "test-model".into(),
         reasoning_effort: ReasoningEffort::Off,
-        history: Vec::new(),
+        history: protocol::ModelHistorySource::items(Vec::new()),
         api_base: None,
         api_key: None,
         session_id: "sess".into(),

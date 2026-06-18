@@ -22,6 +22,7 @@ futures-util = { workspace = true }
 rand = "0.10"
 keyring = "3"
 regex = "1"
+smelt-perf = { version = "0.1.3", path = "../perf" }
 
 [features]
 # Exposes `fuzz_build_anthropic_body` / `fuzz_build_openai_body` for the
