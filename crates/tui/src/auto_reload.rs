@@ -40,9 +40,9 @@ enum AutoReloadMsg {
 }
 
 /// Roots the auto-reloader watches. This intentionally covers Lua config
-/// development only; prompt inputs (`AGENTS.md`, `SKILL.md`, and
-/// `--system-prompt`) are refreshed by manual `/reload` so instruction
-/// changes remain explicit.
+/// development only; prompt inputs (`AGENTS.md`, `SKILL.md`, command-backed
+/// skill metadata in `commands/*.md`, and `--system-prompt`) are refreshed by
+/// manual `/reload` so instruction changes remain explicit.
 pub struct WatchPaths {
     /// `~/.config/smelt/` - recursive.
     pub global_config: Option<PathBuf>,
@@ -323,7 +323,7 @@ fn try_watch(watcher: &mut RecommendedWatcher, path: &Path, mode: RecursiveMode)
 /// Keep only events that can plausibly affect Lua config behavior. Drops
 /// metadata-only events (atime bumps from `cat`, permission probes from
 /// editors) and prompt-input file events (`AGENTS.md`, `SKILL.md`, markdown
-/// commands, system-prompt files) so instruction changes remain explicit
+/// command skills, system-prompt files) so instruction changes remain explicit
 /// through manual `/reload`.
 #[cfg(test)]
 fn relevant(event: &notify::Event, roots: &[PathBuf]) -> bool {

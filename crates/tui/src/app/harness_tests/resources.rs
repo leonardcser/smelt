@@ -50,6 +50,30 @@ fn keystroke_stays_within_default_alloc_budget() {
 }
 
 #[test]
+fn skill_backed_commands_submit_skill_body_and_focus() {
+    let mut app = TestApp::builder().with_vim(false).build();
+    app.app.core.skills = Some(std::sync::Arc::new(engine::SkillLoader::load(&[])));
+    app.type_text("/reflect focus area");
+    app.press(KeyCode::Enter);
+    let payload = app
+        .actions()
+        .iter()
+        .find_map(|action| match action {
+            Action::EngineSend(cmd) => match cmd.as_ref() {
+                protocol::UiCommand::StartTurn(payload) => Some((**payload).clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("/reflect should start a turn");
+    let content = payload.input.provider_content();
+    let text = content.text_content();
+    assert!(text.contains("# Reflect"));
+    assert!(text.contains("## Additional Focus\n\nfocus area"));
+    assert!(!text.contains("<skill name="));
+}
+
+#[test]
 fn custom_command_turn_includes_registered_lua_tools() {
     let mut app = TestApp::builder().with_vim(false).build();
     let payload = app

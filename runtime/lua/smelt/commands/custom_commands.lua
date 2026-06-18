@@ -2,7 +2,10 @@
 -- and registers a `/<name>` command per file; re-reads on each invocation.
 --
 -- Each file may carry YAML frontmatter with `description`, model/sampling overrides,
--- and permission rule-set overrides (`tools`, `bash`, `web_fetch`).
+-- permission rule-set overrides (`tools`, `bash`, `web_fetch`), and
+-- `agent_skill: true` to expose the static command body through `load_skill`.
+-- Agent-loaded command skills refresh on `/reload`; they do not receive
+-- slash-command arguments and do not evaluate shell output markers.
 --
 -- Shell output markers in the body:
 --   ` ```!\n<script>\n``` ` - runs the script, replaces the fence with its output.
@@ -144,7 +147,7 @@ end
 local RESERVED = {
   description = true, provider = true, model = true, temperature = true,
   top_p = true, top_k = true, min_p = true, repeat_penalty = true,
-  reasoning_effort = true, tools = true,
+  reasoning_effort = true, tools = true, agent_skill = true, ["agent-skill"] = true,
 }
 
 local function build_overrides(fm)

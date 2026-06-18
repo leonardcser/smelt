@@ -1313,14 +1313,16 @@ mod tests {
     }
 
     #[test]
-    fn autoload_registers_rewind_command() {
+    fn autoload_registers_builtin_commands() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
         assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
-        assert!(
-            rt.has_command("rewind"),
-            "/rewind should be registered by the autoloaded plugin"
-        );
+        for name in ["brief", "handoff", "rewind"] {
+            assert!(
+                rt.has_command(name),
+                "/{name} should be registered by autoload"
+            );
+        }
     }
 
     #[test]

@@ -28,10 +28,28 @@ struct SkillEntry {
 /// supported for built-ins - there's no real on-disk path to point the
 /// agent at. If a built-in needs ancillary content, inline it into the
 /// SKILL.md body.
-static BUILTIN_SKILLS: &[(&str, &str)] = &[(
-    "customize",
-    include_str!("../../../runtime/skills/customize/SKILL.md"),
-)];
+static BUILTIN_SKILLS: &[(&str, &str)] = &[
+    (
+        "brief",
+        include_str!("../../../runtime/skills/brief/SKILL.md"),
+    ),
+    (
+        "customize",
+        include_str!("../../../runtime/skills/customize/SKILL.md"),
+    ),
+    (
+        "handoff",
+        include_str!("../../../runtime/skills/handoff/SKILL.md"),
+    ),
+    (
+        "reflect",
+        include_str!("../../../runtime/skills/reflect/SKILL.md"),
+    ),
+    (
+        "simplify",
+        include_str!("../../../runtime/skills/simplify/SKILL.md"),
+    ),
+];
 
 #[derive(Debug, Clone)]
 pub struct SkillLoader {
@@ -60,6 +78,7 @@ impl SkillLoader {
 
         let global = crate::config_dir().join("skills");
         scan_dir(&global, &mut skills);
+        scan_command_dir(&crate::config_dir().join("commands"), &mut skills);
 
         let home = crate::home_dir();
         scan_dir(&home.join(".claude/skills"), &mut skills);
@@ -67,6 +86,7 @@ impl SkillLoader {
 
         if let Ok(cwd) = std::env::current_dir() {
             scan_dir(&cwd.join(".smelt/skills"), &mut skills);
+            scan_command_dir(&cwd.join(".smelt/commands"), &mut skills);
             scan_dir(&cwd.join(".claude/skills"), &mut skills);
             scan_dir(&cwd.join(".agents/skills"), &mut skills);
         }
@@ -166,6 +186,47 @@ fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
     }
 }
 
+fn scan_command_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(entry) = parse_command_skill(&path) {
+            skills.insert(entry.name.clone(), entry);
+        }
+    }
+}
+
+fn parse_command_skill(path: &Path) -> Option<SkillEntry> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (fm, body) = split_frontmatter(&text)?;
+    if !frontmatter_bool(fm, &["agent_skill", "agent-skill"]) {
+        return None;
+    }
+    let name = path.file_stem()?.to_string_lossy().to_string();
+    if name.is_empty() || name.contains(['/', '.']) {
+        return None;
+    }
+    let description = frontmatter_string(fm, "description")
+        .or_else(|| first_nonempty_line(body).map(trim_description))
+        .unwrap_or_default();
+    let location = path.display().to_string();
+    let body = body.trim_start();
+    let formatted = format!(
+        "<skill name=\"{name}\">\n{body}\n\n## Slash command\n\nThis skill is also available to users as `/{name}`. When loaded as a skill, it is static, receives no slash-command arguments, and does not evaluate shell output markers.\n</skill>"
+    );
+    Some(SkillEntry {
+        name,
+        description,
+        location,
+        formatted,
+    })
+}
+
 fn parse_skill(path: &Path) -> Option<SkillEntry> {
     let text = std::fs::read_to_string(path).ok()?;
     let location = path.display().to_string();
@@ -253,6 +314,41 @@ fn parse_frontmatter(yaml: &str) -> Option<SkillFrontmatter> {
     }
 
     name.map(|name| SkillFrontmatter { name, description })
+}
+
+fn frontmatter_string(yaml: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
+    yaml.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
+        .map(unquote_yaml)
+        .filter(|s| !s.is_empty())
+}
+
+fn frontmatter_bool(yaml: &str, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        frontmatter_string(yaml, key).is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "1"
+            )
+        })
+    })
+}
+
+fn first_nonempty_line(body: &str) -> Option<&str> {
+    body.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+fn trim_description(s: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let mut chars = s.chars();
+    let out: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{out}…")
+    } else {
+        out
+    }
 }
 
 fn unquote_yaml(s: &str) -> String {
@@ -405,17 +501,36 @@ mod tests {
     }
 
     #[test]
-    fn builtin_customize_has_description_and_real_location() {
+    fn builtins_have_descriptions_and_real_locations() {
         let l = SkillLoader::load(&[]);
-        let info = l
-            .info()
-            .into_iter()
-            .find(|skill| skill.name == "customize")
-            .unwrap();
-        assert!(info.description.contains("Customize smelt"));
-        assert!(info
+        let info = l.info();
+        let customize = info.iter().find(|skill| skill.name == "customize").unwrap();
+        assert!(customize.description.contains("Customize smelt"));
+        assert!(customize
             .location
             .ends_with("builtins/skills/customize/SKILL.md"));
+
+        let brief = info.iter().find(|skill| skill.name == "brief").unwrap();
+        assert!(brief.description.contains("compact but exhaustive brief"));
+        assert!(brief.location.ends_with("builtins/skills/brief/SKILL.md"));
+
+        let handoff = info.iter().find(|skill| skill.name == "handoff").unwrap();
+        assert!(handoff.description.contains("handoff summary"));
+        assert!(handoff
+            .location
+            .ends_with("builtins/skills/handoff/SKILL.md"));
+
+        let reflect = info.iter().find(|skill| skill.name == "reflect").unwrap();
+        assert!(reflect.description.contains("Step back"));
+        assert!(reflect
+            .location
+            .ends_with("builtins/skills/reflect/SKILL.md"));
+
+        let simplify = info.iter().find(|skill| skill.name == "simplify").unwrap();
+        assert!(simplify.description.contains("Review changed code"));
+        assert!(simplify
+            .location
+            .ends_with("builtins/skills/simplify/SKILL.md"));
     }
 
     #[test]
@@ -479,6 +594,50 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn scan_command_dir_loads_opted_in_markdown_command_as_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("review.md"),
+            "---\ndescription: Review the current diff\nagent_skill: true\n---\n\nReview changed files.",
+        );
+        let mut map = HashMap::new();
+        scan_command_dir(dir.path(), &mut map);
+        let entry = map.get("review").unwrap();
+        assert_eq!(entry.description, "Review the current diff");
+        assert!(entry.formatted.contains("Review changed files."));
+        assert!(entry
+            .formatted
+            .contains("also available to users as `/review`"));
+        assert!(entry
+            .formatted
+            .contains("does not evaluate shell output markers"));
+    }
+
+    #[test]
+    fn scan_command_dir_skips_commands_without_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("private.md"),
+            "---\ndescription: private\n---\n\nDo private things.",
+        );
+        let mut map = HashMap::new();
+        scan_command_dir(dir.path(), &mut map);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn scan_command_dir_uses_body_for_missing_description() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("body-desc.md"),
+            "---\nagent-skill: yes\n---\n\nFirst useful line.\n\nMore detail.",
+        );
+        let mut map = HashMap::new();
+        scan_command_dir(dir.path(), &mut map);
+        assert_eq!(map["body-desc"].description, "First useful line.");
     }
 
     #[test]
