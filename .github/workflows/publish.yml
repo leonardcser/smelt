@@ -103,7 +103,7 @@ jobs:
         run: cargo nextest run -p "${{ steps.parse.outputs.crate }}" --no-tests pass
 
       - name: Verify packaging
-        run: cargo publish -p "${{ steps.parse.outputs.crate }}" --dry-run
+        run: cargo publish -p "${{ steps.parse.outputs.crate }}" --dry-run --allow-dirty
 
       - name: Authenticate to crates.io
         id: auth
@@ -112,7 +112,7 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p "${{ steps.parse.outputs.crate }}"
+        run: cargo publish -p "${{ steps.parse.outputs.crate }}" --allow-dirty
 
       - name: Commit version bump
         run: |
