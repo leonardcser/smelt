@@ -14,8 +14,8 @@ use smelt_term::grid::{GridSlice, Style};
 use smelt_term::layout::{Gutters, Rect};
 use std::sync::Arc;
 
-mod row_text;
-pub use row_text::{
+mod document_view;
+pub use document_view::{
     resolve_document_command, DocumentCommand, DocumentCopy, DocumentKeyResult, DocumentTextObject,
     DocumentViewExecutor, DocumentViewState, RowYankFlash,
 };
