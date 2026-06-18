@@ -188,9 +188,12 @@ impl TestApp {
     /// `SourceEvent::ExecOutput`/`ExecDone` to stream output and close
     /// the block. The production path is `start_shell_escape`, which
     /// also spawns a real `sh -c`; stories don't want a subprocess, so
-    /// the harness invokes the transcript hook directly.
+    /// the harness invokes the transcript hook and input-submit signal
+    /// directly.
     pub fn start_exec(&mut self, command: &str) {
         self.app.start_exec(command.to_string());
+        self.app.publish_input_submit(format!("!{command}"));
+        self.tick_cells();
     }
 
     /// Cancel the active turn (or idle background tasks). Mirrors

@@ -1,0 +1,20 @@
+{
+  "_about": "Regression for a smelt_loop crash where start_exec queued reactive history-cell work, leaving the startup banner's named window alive until the next Lua reload. The reload-survival invariant then reported a dropped named window.",
+  "_fix": "Settle reactive cells around side-channel ops and reload survival checks so conditional UI subscribers match the production tick boundary before the next fuzz op.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "reload_lua"
+    },
+    {
+      "data": {
+        "command": ""
+      },
+      "kind": "start_exec"
+    },
+    {
+      "kind": "reload_lua"
+    }
+  ],
+  "vim": true
+}
