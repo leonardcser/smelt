@@ -581,3 +581,495 @@ fn transcript_layout_navigation_benchmark_suite() {
         g.display(),
     );
 }
+
+#[derive(Clone, Copy, Debug)]
+struct HotPathCounters {
+    history_suffix_rows: u64,
+    history_inserted: u64,
+    history_deleted: u64,
+    descriptor_suffix_rows: u64,
+    descriptor_inserted: u64,
+    descriptor_deleted: u64,
+    read_range_rows: u64,
+}
+
+impl HotPathCounters {
+    fn from(snapshot: &smelt_perf::perf::Snapshot) -> Self {
+        Self {
+            history_suffix_rows: perf_value_max(
+                snapshot,
+                "store:session:dirty_suffix_history_rows",
+            ),
+            history_inserted: perf_value_max(snapshot, "store:session:history_rows_inserted"),
+            history_deleted: perf_value_max(snapshot, "store:session:history_rows_deleted"),
+            descriptor_suffix_rows: perf_value_max(
+                snapshot,
+                "store:transcript:dirty_descriptor_suffix_rows",
+            ),
+            descriptor_inserted: perf_value_max(
+                snapshot,
+                "store:transcript:descriptor_db_rows_inserted",
+            ),
+            descriptor_deleted: perf_value_max(
+                snapshot,
+                "store:transcript:descriptor_db_rows_deleted",
+            ),
+            read_range_rows: perf_value_max(snapshot, "store:history:read_range_rows"),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HotPathSample {
+    operation: &'static str,
+    history_len: usize,
+    ms: f64,
+    counters: HotPathCounters,
+}
+
+fn hot_path_enabled() -> bool {
+    matches!(
+        std::env::var("SMELT_TRANSCRIPT_HOT_PATH").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
+fn hot_path_history_len() -> usize {
+    std::env::var("SMELT_TRANSCRIPT_HOT_PATH_HISTORY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|rows| *rows >= 4)
+        .unwrap_or(1024)
+}
+
+fn hot_path_session_id(label: &str) -> String {
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "transcript-hot-path-{label}-{}-{counter}-{nanos}",
+        std::process::id()
+    )
+}
+
+fn hot_path_user(text: &str) -> protocol::HistoryItem {
+    protocol::HistoryItem::user(protocol::Content::text(text))
+}
+
+fn hot_path_assistant(text: &str) -> protocol::HistoryItem {
+    protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+        Some(protocol::Content::text(text)),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn hot_path_history_item(idx: usize) -> protocol::HistoryItem {
+    if idx.is_multiple_of(2) {
+        hot_path_user(&format!("hot path old user {idx}"))
+    } else {
+        hot_path_assistant(&format!("hot path old assistant {idx}"))
+    }
+}
+
+fn saved_hot_path_app(
+    label: &str,
+    history_len: usize,
+    checkpoint_first_live: Option<usize>,
+) -> TestApp {
+    let mut app = TestApp::builder().build();
+    let mut session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    session.id = hot_path_session_id(label);
+    session.first_user_message = Some("hot path old user 0".into());
+    session.history = (0..history_len).map(hot_path_history_item).collect();
+    if let Some(first_live_index) = checkpoint_first_live {
+        session.checkpoint = Some(smelt_core::ContextCheckpoint {
+            kind: "benchmark".into(),
+            summary: "checkpointed benchmark prefix".into(),
+            first_live_index: first_live_index.min(history_len),
+            created_at_ms: smelt_core::session::now_ms(),
+            tokens_before: Some(10_000),
+            tokens_after_estimate: Some(1_000),
+            pre_checkpoint_context_tokens: None,
+            pre_checkpoint_context_history_len: None,
+        });
+    }
+
+    app.app.load_session(session);
+    app.app.restore_screen();
+    app.app.persisted_store_ready = false;
+    app.app.save_session();
+    app.app.flush_persist();
+    app
+}
+
+fn assert_no_full_hot_path_reads(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
+    for metric in [
+        "store:history:read_all",
+        "store:history:read_all_rows",
+        "store:session:load_full_snapshot",
+        "store:session:full_snapshot_rows_read",
+        "store:transcript:search_blob_full",
+        "store:transcript:read_descriptors_full",
+        "store:transcript:descriptors_full_loaded",
+        "transcript:build_from_session:history_items",
+        "transcript:render_plan:fingerprint",
+        "persist:write:blobs",
+    ] {
+        let value = perf_value_max(snapshot, metric);
+        assert_eq!(
+            value, 0,
+            "{operation} recorded {metric}={value}, expected no full-session hot-path work"
+        );
+    }
+}
+
+fn assert_hot_path_at_most(
+    snapshot: &smelt_perf::perf::Snapshot,
+    operation: &str,
+    metric: &str,
+    max: u64,
+) {
+    let value = perf_value_max(snapshot, metric);
+    assert!(
+        value <= max,
+        "{operation} recorded {metric}={value}, expected <= {max}"
+    );
+}
+
+fn capture_hot_path_sample(
+    operation: &'static str,
+    history_len: usize,
+    body: impl FnOnce(),
+) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    smelt_perf::perf::clear();
+    smelt_perf::perf::set_enabled(true);
+    let start = std::time::Instant::now();
+    body();
+    let ms = elapsed_ms(start.elapsed());
+    let snapshot = smelt_perf::perf::snapshot();
+    smelt_perf::perf::set_enabled(false);
+    let sample = HotPathSample {
+        operation,
+        history_len,
+        ms,
+        counters: HotPathCounters::from(&snapshot),
+    };
+    (sample, snapshot)
+}
+
+fn read_provider_history_source(
+    source: protocol::ModelHistorySource,
+    session_dir: &std::path::Path,
+) -> Vec<protocol::HistoryItem> {
+    match source {
+        protocol::ModelHistorySource::Items(items) => items,
+        protocol::ModelHistorySource::Store {
+            prefix,
+            first_live_index,
+            end_index,
+        } => {
+            smelt_perf::perf::record_value("engine:model_history:source_store", 1);
+            smelt_perf::perf::record_value(
+                "engine:model_history:first_live_index",
+                first_live_index as u64,
+            );
+            smelt_perf::perf::record_value("engine:model_history:end_index", end_index as u64);
+            let mut history = prefix;
+            if end_index > first_live_index {
+                let db = smelt_store::SessionDb::open_read_only(session_dir.join("session.db"))
+                    .expect("open provider history database");
+                let mut rows = db
+                    .read_history_items_range(first_live_index..end_index)
+                    .expect("read provider history rows");
+                smelt_perf::perf::record_value("engine:model_history:rows_read", rows.len() as u64);
+                history.append(&mut rows);
+            }
+            smelt_perf::perf::record_value("engine:model_history:items", history.len() as u64);
+            history
+        }
+    }
+}
+
+fn run_noop_save_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let mut app = saved_hot_path_app("noop-save", history_len, None);
+    let (sample, snapshot) = capture_hot_path_sample("noop_save", history_len, || {
+        app.app.save_session();
+        app.app.flush_persist();
+    });
+    assert_eq!(
+        perf_value_max(&snapshot, "session:save:skipped_unchanged"),
+        1,
+        "no-op save did not take the unchanged fast path"
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "persist:write:history_items",
+        0,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "persist:write:descriptor_records",
+        0,
+    );
+    assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    (sample, snapshot)
+}
+
+fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let mut app = saved_hot_path_app("request-append", history_len, None);
+    let (sample, snapshot) = capture_hot_path_sample("request_append", history_len, || {
+        let source = app.app.commit_request_history_item(
+            hot_path_user("hot path new user"),
+            Some(smelt_core::Block::User {
+                text: "hot path new user".into(),
+                image_labels: vec![],
+            }),
+        );
+        assert!(matches!(
+            source,
+            protocol::ModelHistorySource::Store { end_index, .. } if end_index == history_len
+        ));
+    });
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "persist:write:history_items",
+        1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:session:dirty_suffix_history_rows",
+        1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:history:dirty_suffix_rows",
+        1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:transcript:dirty_descriptor_suffix_rows",
+        1,
+    );
+    assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    (sample, snapshot)
+}
+
+fn run_history_updated_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let mut app = saved_hot_path_app("history-updated", history_len, None);
+    app.start_turn(1);
+    let mut updated = app.app.core.session.history.clone();
+    updated.push(hot_path_assistant("hot path assistant update"));
+    let (sample, snapshot) = capture_hot_path_sample("history_updated", history_len, || {
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::HistoryUpdated {
+                turn_id: 1,
+                history: updated,
+            });
+        app.app.flush_persist();
+    });
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "persist:write:history_items",
+        1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:session:dirty_suffix_history_rows",
+        1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:history:dirty_suffix_rows",
+        1,
+    );
+    assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    (sample, snapshot)
+}
+
+fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let mut app = saved_hot_path_app("rewind-delete", history_len, None);
+    let rewind_block = history_len.saturating_sub(2);
+    let expected_deleted = history_len.saturating_sub(rewind_block) as u64;
+    let (sample, snapshot) = capture_hot_path_sample("rewind_delete_suffix", history_len, || {
+        let _ = app.app.rewind_to(rewind_block);
+        app.app.save_session();
+        app.app.flush_persist();
+    });
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "persist:write:history_items",
+        0,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:session:dirty_suffix_history_rows",
+        0,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:session:history_rows_deleted",
+        expected_deleted,
+    );
+    assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    (sample, snapshot)
+}
+
+fn run_provider_history_hot_path(
+    history_len: usize,
+) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let first_live = history_len.saturating_sub(32);
+    let app = saved_hot_path_app("provider-history", history_len, Some(first_live));
+    let source = app.app.model_history_source();
+    let session_dir = smelt_core::session::dir_for(&app.app.core.session);
+    let (sample, snapshot) = capture_hot_path_sample("provider_history_read", history_len, || {
+        let history = read_provider_history_source(source, &session_dir);
+        assert_eq!(history.len(), history_len - first_live + 1);
+    });
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:history:read_range_rows",
+        (history_len - first_live) as u64,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "engine:model_history:rows_read",
+        (history_len - first_live) as u64,
+    );
+    assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    (sample, snapshot)
+}
+
+fn print_hot_path_perf(operation: &str, snapshot: &smelt_perf::perf::Snapshot) {
+    for row in snapshot.durations.iter().filter(|row| {
+        [
+            "session:", "persist:", "store:", "engine:", "tui:", "bench:",
+        ]
+        .iter()
+        .any(|prefix| row.label.starts_with(prefix))
+    }) {
+        eprintln!(
+            "TRANSCRIPT_HOT_PATH_PERF_DURATION operation={} metric={} count={} last_us={} total_us={} p95_us={} max_us={}",
+            operation, row.label, row.count, row.last_us, row.total_us, row.p95_us, row.max_us
+        );
+    }
+    for row in snapshot.values.iter().filter(|row| {
+        [
+            "session:", "persist:", "store:", "engine:", "tui:", "bench:",
+        ]
+        .iter()
+        .any(|prefix| row.label.starts_with(prefix))
+    }) {
+        eprintln!(
+            "TRANSCRIPT_HOT_PATH_PERF_VALUE operation={} metric={} count={} last={} total={} p95={} max={}",
+            operation, row.label, row.count, row.last, row.total, row.p95, row.max
+        );
+    }
+}
+
+fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
+    let c = sample.counters;
+    eprintln!(
+        "TRANSCRIPT_HOT_PATH_BENCH_SAMPLE run={} operation={} history_len={} ms={:.3} history_suffix_rows={} history_inserted={} history_deleted={} descriptor_suffix_rows={} descriptor_inserted={} descriptor_deleted={} read_range_rows={}",
+        run,
+        sample.operation,
+        sample.history_len,
+        sample.ms,
+        c.history_suffix_rows,
+        c.history_inserted,
+        c.history_deleted,
+        c.descriptor_suffix_rows,
+        c.descriptor_inserted,
+        c.descriptor_deleted,
+        c.read_range_rows,
+    );
+    eprintln!(
+        "TRANSCRIPT_HOT_PATH_BENCH_JSON {{\"type\":\"hot_path_sample\",\"run\":{},\"operation\":\"{}\",\"history_len\":{},\"ms\":{:.3},\"history_suffix_rows\":{},\"history_inserted\":{},\"history_deleted\":{},\"descriptor_suffix_rows\":{},\"descriptor_inserted\":{},\"descriptor_deleted\":{},\"read_range_rows\":{}}}",
+        run,
+        sample.operation,
+        sample.history_len,
+        sample.ms,
+        c.history_suffix_rows,
+        c.history_inserted,
+        c.history_deleted,
+        c.descriptor_suffix_rows,
+        c.descriptor_inserted,
+        c.descriptor_deleted,
+        c.read_range_rows,
+    );
+}
+
+#[test]
+#[ignore = "manual transcript save/request hot-path benchmark suite; prefer `cargo xtask bench-transcript-layout`"]
+fn transcript_layout_hot_path_benchmark_suite() {
+    if !hot_path_enabled() {
+        eprintln!("TRANSCRIPT_HOT_PATH_BENCH_SKIPPED set SMELT_TRANSCRIPT_HOT_PATH=1 to run");
+        return;
+    }
+
+    let runs = navigation_bench_runs();
+    let history_len = hot_path_history_len();
+    let mut samples = Vec::new();
+    for run in 1..=runs {
+        for (sample, snapshot) in [
+            run_noop_save_hot_path(history_len),
+            run_request_append_hot_path(history_len),
+            run_history_updated_hot_path(history_len),
+            run_rewind_delete_hot_path(history_len),
+            run_provider_history_hot_path(history_len),
+        ] {
+            print_hot_path_perf(sample.operation, &snapshot);
+            print_hot_path_sample(run, &sample);
+            samples.push(sample);
+        }
+    }
+
+    for operation in [
+        "noop_save",
+        "request_append",
+        "history_updated",
+        "rewind_delete_suffix",
+        "provider_history_read",
+    ] {
+        let operation_samples = samples
+            .iter()
+            .filter(|sample| sample.operation == operation)
+            .map(|sample| sample.ms)
+            .collect::<Vec<_>>();
+        let stats = NavStats::from(&operation_samples);
+        eprintln!(
+            "TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation={} runs={} history_len={} mean_ms={:.3} stddev_ms={:.3}",
+            operation,
+            operation_samples.len(),
+            history_len,
+            stats.mean,
+            stats.stddev,
+        );
+        eprintln!(
+            "TRANSCRIPT_HOT_PATH_BENCH_SUMMARY_JSON {{\"type\":\"hot_path_summary\",\"operation\":\"{}\",\"runs\":{},\"history_len\":{},\"mean_ms\":{:.3},\"stddev_ms\":{:.3}}}",
+            operation,
+            operation_samples.len(),
+            history_len,
+            stats.mean,
+            stats.stddev,
+        );
+    }
+}

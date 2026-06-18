@@ -42,7 +42,7 @@ fn print_usage() {
         "  bench-store-compression STATE_DIR [--max-samples N] [--max-bytes N] sample store compression"
     );
     eprintln!(
-        "  bench-transcript-layout [--runs N] [--workloads CSV] run transcript layout benches"
+        "  bench-transcript-layout [--runs N] [--workloads CSV] [--save-request] run transcript layout benches"
     );
     eprintln!("  gen-file-icons [DEVICONS_DIR]          regenerate nvim-web-devicons registry");
     eprintln!("  gen-lua-docs                          regenerate Lua API stubs + reference docs");

@@ -1042,3 +1042,5 @@ Acceptance:
 
 - Benchmark output includes save/request latency and dirty suffix row counts.
 - No benchmarked hot save/request path performs full session history reads, clones, serialization, fingerprinting, or sidecar rewrites.
+
+Status: complete. `cargo xtask bench-transcript-layout --runs 1 --workloads tiny_blocks_1mib --skip-nav --save-request --save-request-history 256` now emits `TRANSCRIPT_HOT_PATH_BENCH_SAMPLE` and JSON rows for no-op save, one-row request append, engine `HistoryUpdated`, rewind/delete suffix, and provider history read. The 256-row release sample measured no-op save at 0.016 ms with no dirty rows, request append at 0.969 ms with one dirty history row and one descriptor row, `HistoryUpdated` at 1.027 ms with one dirty history row, rewind/delete suffix at 0.999 ms with two deleted history rows and no rewritten suffix rows, and provider history read at 0.278 ms with 32 range-read rows. The benchmark asserts the robust asymptotic counters by default and leaves wall time advisory through the emitted summaries.

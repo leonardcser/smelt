@@ -9,6 +9,8 @@ pub fn run(args: Vec<String>) {
     let mut search_bytes: Option<String> = None;
     let mut resume = false;
     let mut resume_bytes: Option<String> = None;
+    let mut hot_path = false;
+    let mut hot_path_history: Option<String> = None;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -45,6 +47,21 @@ pub fn run(args: Vec<String>) {
                     eprintln!("bench-transcript-layout: --resume-bytes requires a value");
                     std::process::exit(2);
                 }));
+            }
+            "--save-request" => hot_path = true,
+            "--save-request-history" => {
+                let value = iter.next().unwrap_or_else(|| {
+                    eprintln!("bench-transcript-layout: --save-request-history requires a value");
+                    std::process::exit(2);
+                });
+                if value.parse::<usize>().ok().filter(|n| *n >= 4).is_none() {
+                    eprintln!(
+                        "bench-transcript-layout: --save-request-history must be an integer >= 4"
+                    );
+                    std::process::exit(2);
+                }
+                hot_path = true;
+                hot_path_history = Some(value);
             }
             "--debug" => release = false,
             "-h" | "--help" => {
@@ -83,6 +100,12 @@ pub fn run(args: Vec<String>) {
     }
     if let Some(bytes) = search_bytes {
         cmd.env("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES", bytes);
+    }
+    if hot_path {
+        cmd.env("SMELT_TRANSCRIPT_HOT_PATH", "1");
+    }
+    if let Some(history_len) = hot_path_history {
+        cmd.env("SMELT_TRANSCRIPT_HOT_PATH_HISTORY", history_len);
     }
 
     eprintln!(
@@ -129,7 +152,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--save-request] [--save-request-history N] [--debug]");
     eprintln!();
     eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -140,4 +163,8 @@ fn print_usage() {
     eprintln!("--search-bytes N sets its generated transcript size; default is 50 MiB.");
     eprintln!("--resume runs the true session resume benchmark after layout/search.");
     eprintln!("--resume-bytes N sets its generated resume session size; default is 10 MiB.");
+    eprintln!("--save-request enables no-op save, append, HistoryUpdated, rewind, and provider-history wall-time samples.");
+    eprintln!(
+        "--save-request-history N sets its generated hot-path history length; default is 1024."
+    );
 }

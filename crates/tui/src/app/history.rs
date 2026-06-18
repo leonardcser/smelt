@@ -476,13 +476,16 @@ mod tests {
             descriptor_window.hydration,
             smelt_store::TranscriptDescriptorHydration::ObjectBacked
         );
-        assert_eq!(loaded.transcript.history.order.len(), 40);
+        assert!(loaded.transcript.history.order.is_empty());
+        assert_eq!(descriptor_window.records.len(), 40);
+        assert_eq!(descriptor_window.records[0].block_id.get(), 160);
         assert_eq!(
-            loaded.transcript.history.descriptor_records()[0].origin,
+            descriptor_window.records[0].record.origin,
             Some(smelt_core::BlockOrigin::History(160))
         );
+        assert_eq!(descriptor_window.records[39].block_id.get(), 199);
         assert_eq!(
-            loaded.transcript.history.descriptor_records()[39].origin,
+            descriptor_window.records[39].record.origin,
             Some(smelt_core::BlockOrigin::History(199))
         );
     }
