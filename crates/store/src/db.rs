@@ -254,6 +254,19 @@ impl SessionDb {
         )
     }
 
+    pub fn save_session_snapshot_for_import(
+        &self,
+        snapshot: &SessionSnapshot,
+    ) -> Result<SessionSaveReport> {
+        session_snapshot::save_session_snapshot(
+            &self.conn,
+            snapshot,
+            Some(0),
+            None,
+            self.object_compression,
+        )
+    }
+
     pub fn save_session_snapshot_as_writer(
         &self,
         snapshot: &SessionSnapshot,
@@ -319,7 +332,7 @@ impl SessionDb {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".to_string());
+        let hostname = local_hostname();
         let pid = std::process::id();
         let owner_id = format!("{hostname}:{pid}");
         let started_at = self
@@ -335,6 +348,14 @@ impl SessionDb {
             heartbeat_at: now,
         })
     }
+}
+
+fn local_hostname() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|name| name.into_string().ok())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "unknown-host".to_string())
 }
 
 fn apply_pragmas(conn: &Connection, mode: OpenMode) -> Result<()> {
@@ -455,7 +476,7 @@ mod tests {
         assert_eq!(db.object_bytes(&meta.hash).unwrap().unwrap(), object.bytes);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn writer_lease_allows_dead_same_host_pid() {
         let dir = tempfile::tempdir().unwrap();
@@ -463,6 +484,34 @@ mod tests {
         let existing = WriterLease {
             owner_id: "host:4294967295".into(),
             hostname: "host".into(),
+            pid: u32::MAX,
+            app_version: "test".into(),
+            started_at: 100,
+            heartbeat_at: 100,
+        };
+        db.set_writer_lease(&existing).unwrap();
+
+        let replacement = WriterLease {
+            owner_id: "host:1".into(),
+            hostname: "host".into(),
+            pid: 1,
+            app_version: "test".into(),
+            started_at: 200,
+            heartbeat_at: 200,
+        };
+
+        crate::meta::acquire_writer_lease(db.connection(), &replacement, 30 * 60).unwrap();
+        assert_eq!(db.writer_lease().unwrap().unwrap().owner_id, "host:1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_lease_allows_dead_unknown_host_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let existing = WriterLease {
+            owner_id: "unknown-host:4294967295".into(),
+            hostname: "unknown-host".into(),
             pid: u32::MAX,
             app_version: "test".into(),
             started_at: 100,
@@ -1072,6 +1121,47 @@ mod tests {
             exported_request_value["provider_kind"],
             request["provider_kind"]
         );
+    }
+
+    #[test]
+    fn imports_concatenated_legacy_requests_jsonl_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy-session");
+        fs::create_dir(&legacy_dir).unwrap();
+        let first = serde_json::json!({
+            "request_id": 1,
+            "kind": "turn",
+            "timestamp_ms": 10,
+            "provider_kind": "openai",
+            "model": "model-a",
+            "body": {"messages": [{"role": "user", "content": "one"}]},
+        });
+        let second = serde_json::json!({
+            "request_id": 2,
+            "kind": "turn",
+            "timestamp_ms": 20,
+            "provider_kind": "openai",
+            "model": "model-a",
+            "body": {"messages": [{"role": "user", "content": "two"}]},
+        });
+        fs::write(
+            legacy_dir.join("requests.jsonl"),
+            format!(
+                "{}{}\n",
+                serde_json::to_string(&first).unwrap(),
+                serde_json::to_string(&second).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let imported = db.import_legacy_requests_jsonl(&legacy_dir).unwrap();
+
+        assert_eq!(imported, 2);
+        let attempts = db.request_attempts().unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].request_id.as_deref(), Some("1"));
+        assert_eq!(attempts[1].request_id.as_deref(), Some("2"));
     }
 
     #[test]

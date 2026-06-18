@@ -98,7 +98,10 @@ pub(crate) fn acquire_writer_lease(
 }
 
 fn same_host_dead_writer(existing: &WriterLease, lease: &WriterLease) -> bool {
-    existing.hostname == lease.hostname && !process_is_alive(existing.pid)
+    let same_host = existing.hostname == lease.hostname
+        || existing.hostname == "unknown-host"
+        || lease.hostname == "unknown-host";
+    same_host && !process_is_alive(existing.pid)
 }
 
 #[cfg(target_os = "linux")]
@@ -106,7 +109,21 @@ fn process_is_alive(pid: u32) -> bool {
     std::path::Path::new("/proc").join(pid.to_string()).exists()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(unix))]
 fn process_is_alive(_pid: u32) -> bool {
     true
 }

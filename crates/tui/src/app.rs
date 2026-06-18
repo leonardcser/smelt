@@ -1804,6 +1804,15 @@ impl TuiApp {
         );
     }
 
+    pub(crate) fn notify_sticky(&mut self, message: String) {
+        self.record_notice_with_lifetime(
+            smelt_core::messages::MessageKind::Info,
+            "smelt".into(),
+            message,
+            NotificationLifetime::Sticky,
+        );
+    }
+
     pub(crate) fn drain_persist_errors(&mut self) {
         for err in self.persister.drain_errors() {
             self.notify_error_sticky(format!(
@@ -1847,7 +1856,7 @@ impl TuiApp {
                 report.migrated, report.failed
             ));
         } else {
-            self.notify(format!(
+            self.notify_sticky(format!(
                 "session migration completed: {} migrated",
                 report.migrated
             ));

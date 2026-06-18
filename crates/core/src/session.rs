@@ -205,7 +205,7 @@ struct SessionWire {
     pub cwd: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_legacy_messages")]
     pub messages: Vec<Message>,
     #[serde(default)]
     pub checkpoint: Option<ContextCheckpoint>,
@@ -279,6 +279,28 @@ struct SessionWireProbe {
     schema_version: Option<u32>,
     #[serde(default)]
     history: Option<serde_json::Value>,
+}
+
+// COMPAT(session-v1-messages): old provider-message sessions sometimes stored
+// subagent transcript entries with role "agent". Treat them as assistant text
+// while importing the legacy shape.
+fn deserialize_legacy_messages<'de, D>(deserializer: D) -> Result<Vec<Message>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut values = Vec::<Value>::deserialize(deserializer)?;
+    for value in &mut values {
+        if value.get("role").and_then(Value::as_str) == Some("agent") {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("role".to_string(), Value::String("assistant".to_string()));
+            }
+        }
+    }
+    values
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(serde::de::Error::custom)
 }
 
 // COMPAT(session-v1-messages): old snapshot keys were stored in provider-message
@@ -1478,7 +1500,7 @@ pub(crate) fn import_legacy_session_to_db(
     let db = smelt_store::SessionDb::open(&temp_path)?;
     let result = (|| {
         let snapshot = session_store_snapshot(session, 0)?;
-        db.save_session_snapshot_as_writer(&snapshot)?;
+        db.save_session_snapshot_for_import(&snapshot)?;
         db.import_legacy_requests_jsonl(dir_path)?;
         db.connection()
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -2177,6 +2199,37 @@ mod tests {
         assert!(!dir.path().join("session.json").exists());
         let migrated = load_db_session(dir.path()).expect("load migrated session");
         assert_eq!(migrated.history.len(), 1);
+        let db = smelt_store::SessionDb::open(dir.path().join("session.db")).unwrap();
+        assert_eq!(db.writer_lease().unwrap(), None);
+    }
+
+    #[test]
+    fn legacy_json_session_imports_agent_role_messages() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("session.json"),
+            serde_json::json!({
+                "id": "legacy-agent-role",
+                "created_at_ms": 1,
+                "updated_at_ms": 2,
+                "messages": [
+                    {"role": "user", "content": "ask"},
+                    {"role": "agent", "content": "subagent answer", "agent_from_id": "a", "agent_from_slug": "scout"},
+                    {"role": "assistant", "content": "final answer"}
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write legacy session");
+
+        let loaded = read_legacy_json_session(dir.path()).expect("load legacy agent session");
+
+        assert_eq!(loaded.history.len(), 3);
+        assert!(matches!(
+            &loaded.history[1],
+            HistoryItem::Assistant(step)
+                if step.content.as_ref().is_some_and(|content| content.text_content() == "subagent answer")
+        ));
     }
 
     #[test]

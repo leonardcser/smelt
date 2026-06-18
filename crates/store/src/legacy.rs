@@ -398,13 +398,9 @@ pub(crate) fn import_requests_jsonl(
     let file = fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut count = 0usize;
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(&line)?;
-        request_audit::import_request_value(conn, &value, compression)?;
+    let values = serde_json::Deserializer::from_reader(reader).into_iter::<Value>();
+    for value in values {
+        request_audit::import_request_value(conn, &value?, compression)?;
         count += 1;
     }
     Ok(count)
