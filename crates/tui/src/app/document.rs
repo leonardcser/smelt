@@ -17,39 +17,6 @@ pub(crate) enum RegisteredDocument {
     Transcript,
 }
 
-impl RegisteredDocument {
-    fn render_cache_key(
-        self,
-        app: &mut TuiApp,
-        handle: DocumentHandle,
-        theme: u64,
-        start: RowIndex,
-        count: RowIndex,
-    ) -> DocumentRenderCacheKey {
-        match self {
-            Self::Transcript => {
-                app.sync_transcript_renderer_generation();
-                let inline_options = app.inline_options();
-                let renderer_cache_key =
-                    crate::content::display_layout::transcript_renderer_cache_key(
-                        &app.lua,
-                        &inline_options,
-                    );
-                DocumentRenderCacheKey {
-                    document: DocumentRenderCacheDocument::Registered(handle),
-                    generation: app.transcript.projection_generation(),
-                    width: app.transcript_width() as u16,
-                    theme,
-                    renderer_generation: app.lua.transcript_renderer_generation(),
-                    renderer_cache_key,
-                    start,
-                    count,
-                }
-            }
-        }
-    }
-}
-
 pub(crate) struct DocumentRegistry;
 
 impl DocumentRegistry {
@@ -188,7 +155,25 @@ impl TuiApp {
         let handle = self.document_handle_for_win(win);
         let theme = theme_cache_key(self.ui.theme());
         match DocumentRegistry::resolve_optional(handle) {
-            Some(document) => Some(document.render_cache_key(self, handle?, theme, start, count)),
+            Some(RegisteredDocument::Transcript) => {
+                self.sync_transcript_renderer_generation();
+                let inline_options = self.inline_options();
+                let renderer_cache_key =
+                    crate::content::display_layout::transcript_renderer_cache_key(
+                        &self.lua,
+                        &inline_options,
+                    );
+                Some(DocumentRenderCacheKey {
+                    document: DocumentRenderCacheDocument::Registered(handle?),
+                    generation: self.transcript.projection_generation(),
+                    width: self.transcript_width() as u16,
+                    theme,
+                    renderer_generation: self.lua.transcript_renderer_generation(),
+                    renderer_cache_key,
+                    start,
+                    count,
+                })
+            }
             None if handle.is_some() => None,
             None => {
                 let win = self.ui.win(win)?;
@@ -504,6 +489,42 @@ impl TuiApp {
                 }),
             );
         }
+        if defer_local_transcript_scroll
+            && !trace_transcript_command
+            && state.active
+            && viewport_rows > 0
+        {
+            if let Some(local_scroll) = self.transcript.local_scroll_for_document_command(
+                command,
+                viewport_rows,
+                scroll_top,
+                state.cursor.row,
+            ) {
+                if !pending_local_scroll_before {
+                    self.transcript.prime_local_scroll_base(
+                        &self.lua,
+                        viewport_cols.max(1),
+                        viewport_rows,
+                        local_scroll.base_scroll,
+                    );
+                }
+                let restore = TranscriptProjectionRestore {
+                    cursor_screen_row: Some(local_scroll.cursor_screen_row),
+                    drag_endpoint_screen_row: None,
+                };
+                self.record_transcript_scroll_intent_from_document_command(
+                    "document_command",
+                    TranscriptScrollIntent::UserDelta {
+                        rows: local_scroll.rows,
+                    },
+                    window_scroll_before,
+                    restore,
+                    Some(local_scroll.next_scroll),
+                );
+                return None;
+            }
+        }
+
         let copy = self.with_display_document_for_win(win, |document| {
             let total_rows = document.snapshot().total_rows;
             if !state.active {
