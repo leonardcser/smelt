@@ -5,7 +5,7 @@ use crate::content::prompt_parser::{
     build_prompt_display_lines, prompt_display_uses_cursor_padding,
 };
 use crate::smelt_edit::{
-    Buffer, DisplayDocument, DisplayRows, DisplaySnapshot, RowIndex, TextRange, Theme,
+    Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, RowIndex, TextRange, Theme,
 };
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_core::content::file_icons::FileIconOptions;
@@ -199,6 +199,16 @@ fn estimate_descriptor_rows(
         .sum()
 }
 
+fn estimate_text_rows_for_width(text: &str, width: usize) -> RowIndex {
+    text.lines()
+        .map(|line| {
+            let cells = smelt_buffer::text::byte_to_cell(line, line.len());
+            cells.max(1).div_ceil(width.max(1)) as RowIndex
+        })
+        .sum::<RowIndex>()
+        .max(1)
+}
+
 #[derive(Default)]
 struct SparseTranscriptDescriptors {
     total_count: Option<usize>,
@@ -263,9 +273,29 @@ impl SparseTranscriptDescriptors {
         self.total_count
     }
 
-    #[cfg(test)]
+    fn first_loaded_index(&self) -> usize {
+        self.loaded_ranges
+            .first()
+            .map_or(0, |range| range.start.get())
+    }
+
+    fn loaded_end_index(&self) -> usize {
+        self.loaded_ranges.last().map_or(0, |range| range.end.get())
+    }
+
     fn loaded_descriptor_count(&self) -> usize {
         self.records.len()
+    }
+
+    fn missing_prefix_count(&self) -> usize {
+        self.first_loaded_index()
+            .min(self.total_count.unwrap_or_default())
+    }
+
+    fn missing_suffix_count(&self) -> usize {
+        self.total_count
+            .map(|total| total.saturating_sub(self.loaded_end_index()))
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -296,6 +326,14 @@ pub(crate) struct TranscriptRenderContext {
     pub(crate) theme_key: u64,
     pub(crate) renderer_generation: u64,
     pub(crate) renderer_cache_key: Option<u64>,
+}
+
+pub(crate) struct TranscriptProjectionPlan {
+    inner: crate::content::transcript_buf::ProjectionPlan,
+    row_offset: RowIndex,
+    total_rows: RowIndex,
+    prefix_gap_scroll: Option<RowIndex>,
+    viewport_rows: u16,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -444,6 +482,63 @@ impl TranscriptDocument {
         self.render_cache.clear();
     }
 
+    fn estimated_loaded_descriptor_rows(&self, width: u16) -> RowIndex {
+        let width = usize::from(width.max(1));
+        self.sparse_descriptors
+            .records
+            .values()
+            .map(|record| {
+                record
+                    .descriptor
+                    .raw_text()
+                    .map(|text| estimate_text_rows_for_width(&text, width))
+                    .unwrap_or(1)
+                    .saturating_add(1)
+            })
+            .sum()
+    }
+
+    fn average_descriptor_rows(&self, width: u16) -> RowIndex {
+        let loaded = self.sparse_descriptors.loaded_descriptor_count() as RowIndex;
+        if loaded == 0 {
+            return 2;
+        }
+        self.estimated_loaded_descriptor_rows(width)
+            .saturating_add(loaded.saturating_sub(1))
+            .saturating_div(loaded)
+            .max(1)
+    }
+
+    fn sparse_prefix_row_offset(&self, width: u16) -> RowIndex {
+        (self.sparse_descriptors.missing_prefix_count() as RowIndex)
+            .saturating_mul(self.average_descriptor_rows(width))
+    }
+
+    fn sparse_suffix_rows(&self, width: u16) -> RowIndex {
+        (self.sparse_descriptors.missing_suffix_count() as RowIndex)
+            .saturating_mul(self.average_descriptor_rows(width))
+    }
+
+    fn virtual_total_rows(&self, width: u16, loaded_rows: RowIndex) -> RowIndex {
+        self.sparse_prefix_row_offset(width)
+            .saturating_add(loaded_rows)
+            .saturating_add(self.sparse_suffix_rows(width))
+    }
+
+    fn virtual_row_to_loaded_row(&self, width: u16, row: RowIndex) -> RowIndex {
+        row.saturating_sub(self.sparse_prefix_row_offset(width))
+    }
+
+    fn offset_node_row(
+        &self,
+        width: u16,
+        mut node: crate::content::transcript_buf::TranscriptNodeRow,
+    ) -> crate::content::transcript_buf::TranscriptNodeRow {
+        let offset = self.sparse_prefix_row_offset(width);
+        node.first_row = node.first_row.saturating_add(offset);
+        node
+    }
+
     pub(crate) fn set_inline_options(&mut self, options: InlineOptions) {
         self.projection.set_inline_options(options);
     }
@@ -467,8 +562,10 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> crate::smelt_edit::RowIndex {
-        self.projection
-            .estimated_total_rows(lua, &mut self.transcript.history, width)
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
+        self.virtual_total_rows(width, loaded_rows)
     }
 
     pub(crate) fn materialize_block_layout(
@@ -480,8 +577,12 @@ impl TranscriptDocument {
         crate::smelt_edit::RowIndex,
         crate::smelt_edit::RowIndex,
     )> {
+        let offset = self.sparse_prefix_row_offset(width);
         self.projection
             .materialize_block_layout(lua, &mut self.transcript.history, width)
+            .into_iter()
+            .map(|(id, first_row, rows)| (id, first_row.saturating_add(offset), rows))
+            .collect()
     }
 
     pub(crate) fn materialize_search_layout(
@@ -489,8 +590,14 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         width: u16,
     ) -> crate::content::transcript_buf::TranscriptSearchLayout {
-        self.projection
-            .materialize_search_layout(lua, &mut self.transcript.history, width)
+        let offset = self.sparse_prefix_row_offset(width);
+        let mut layout =
+            self.projection
+                .materialize_search_layout(lua, &mut self.transcript.history, width);
+        for entry in &mut layout.entries {
+            entry.first_row = entry.first_row.saturating_add(offset);
+        }
+        layout
     }
 
     pub(crate) fn materialize_search_layout_for_blocks(
@@ -499,12 +606,17 @@ impl TranscriptDocument {
         width: u16,
         block_indices: &[u64],
     ) -> crate::content::transcript_buf::TranscriptSearchLayout {
-        self.projection.materialize_search_layout_for_blocks(
+        let offset = self.sparse_prefix_row_offset(width);
+        let mut layout = self.projection.materialize_search_layout_for_blocks(
             lua,
             &mut self.transcript.history,
             width,
             block_indices,
-        )
+        );
+        for entry in &mut layout.entries {
+            entry.first_row = entry.first_row.saturating_add(offset);
+        }
+        layout
     }
 
     pub(crate) fn block_id_at_or_before_row(
@@ -514,11 +626,12 @@ impl TranscriptDocument {
         row: crate::smelt_edit::RowIndex,
         forward: bool,
     ) -> Option<BlockId> {
+        let local_row = self.virtual_row_to_loaded_row(width, row);
         self.projection.block_id_at_or_before_row(
             lua,
             &mut self.transcript.history,
             width,
-            row,
+            local_row,
             forward,
         )
     }
@@ -542,15 +655,42 @@ impl TranscriptDocument {
         theme: &Theme,
         scroll_target: crate::content::transcript_buf::ScrollTarget,
         viewport_rows: u16,
-    ) -> crate::content::transcript_buf::ProjectionPlan {
-        self.projection.plan_projection_measured(
+    ) -> TranscriptProjectionPlan {
+        let row_offset = self.sparse_prefix_row_offset(width);
+        let prefix_gap_scroll = match scroll_target {
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::Row(row),
+            ) if row < row_offset => Some(row),
+            _ => None,
+        };
+        let local_target = match scroll_target {
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::Row(row),
+            ) => crate::content::transcript_buf::ScrollTarget::visible_row(
+                row.saturating_sub(row_offset),
+            ),
+            crate::content::transcript_buf::ScrollTarget::Visible(
+                crate::content::transcript_buf::ScrollAnchor::Tail,
+            ) => crate::content::transcript_buf::ScrollTarget::visible_tail(),
+        };
+        let inner = self.projection.plan_projection_measured(
             lua,
             &mut self.transcript.history,
             width,
             theme,
-            scroll_target,
+            local_target,
             viewport_rows,
-        )
+        );
+        let loaded_rows =
+            self.projection
+                .estimated_total_rows(lua, &mut self.transcript.history, width);
+        TranscriptProjectionPlan {
+            inner,
+            row_offset,
+            total_rows: self.virtual_total_rows(width, loaded_rows),
+            prefix_gap_scroll,
+            viewport_rows,
+        }
     }
 
     pub(crate) fn project_planned(
@@ -558,10 +698,36 @@ impl TranscriptDocument {
         lua: &LuaRuntime,
         buf: &mut Buffer,
         theme: &Theme,
-        plan: crate::content::transcript_buf::ProjectionPlan,
+        plan: TranscriptProjectionPlan,
     ) -> crate::smelt_edit::MaterializedRows {
-        self.projection
-            .project_planned(lua, buf, &mut self.transcript.history, theme, plan)
+        if let Some(scroll_top) = plan.prefix_gap_scroll {
+            let viewport_rows = RowIndex::from(plan.viewport_rows.max(1));
+            let row_base = scroll_top
+                .saturating_sub(viewport_rows / 2)
+                .min(plan.row_offset);
+            let materialized_rows = plan
+                .row_offset
+                .saturating_sub(row_base)
+                .min(plan.total_rows.saturating_sub(row_base));
+            buf.set_all_lines(vec![String::new(); materialized_rows as usize]);
+            return crate::smelt_edit::MaterializedRows {
+                clamped_scroll: scroll_top,
+                row_base,
+                total_rows: plan.total_rows,
+                materialized_rows,
+            };
+        }
+        let mut rows = self.projection.project_planned(
+            lua,
+            buf,
+            &mut self.transcript.history,
+            theme,
+            plan.inner,
+        );
+        rows.clamped_scroll = rows.clamped_scroll.saturating_add(plan.row_offset);
+        rows.row_base = rows.row_base.saturating_add(plan.row_offset);
+        rows.total_rows = plan.total_rows;
+        rows
     }
 
     pub(crate) fn display_rows_for_range(
@@ -572,13 +738,33 @@ impl TranscriptDocument {
         start: crate::smelt_edit::RowIndex,
         count: crate::smelt_edit::RowIndex,
     ) -> crate::smelt_edit::DisplayRows {
-        self.projection.display_rows_for_range(
+        let row_offset = self.sparse_prefix_row_offset(width);
+        let end = start.saturating_add(count);
+        if count == 0 || end <= start {
+            return DisplayRows::empty();
+        }
+        let mut rows = Vec::new();
+        if start < row_offset {
+            let prefix_end = end.min(row_offset);
+            rows.extend((start..prefix_end).map(|_| {
+                DisplayRow::new(String::new(), Vec::new())
+                    .with_break_before(crate::smelt_edit::RowBreak::Hard)
+            }));
+            if end <= row_offset {
+                return DisplayRows { rows };
+            }
+        }
+        let local_start = start.saturating_sub(row_offset);
+        let local_end = end.saturating_sub(row_offset);
+        let mut loaded = self.projection.display_rows_for_range(
             lua,
             &mut self.transcript.history,
             width,
             theme,
-            start..start.saturating_add(count),
-        )
+            local_start..local_end,
+        );
+        rows.append(&mut loaded.rows);
+        DisplayRows { rows }
     }
 
     pub(crate) fn cached_display_rows_for_range(
@@ -599,8 +785,10 @@ impl TranscriptDocument {
             count,
         };
         if let Some(rows) = self.render_cache.get(key) {
+            smelt_perf::perf::record_value("transcript:render_cache:hit", 1);
             return rows;
         }
+        smelt_perf::perf::record_value("transcript:render_cache:miss", 1);
         let rows = self.display_rows_for_range(lua, render.width, theme, start, count);
         self.render_cache.insert(key, rows.clone());
         rows
@@ -612,8 +800,10 @@ impl TranscriptDocument {
         width: u16,
         row: crate::smelt_edit::RowIndex,
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
+        let local_row = self.virtual_row_to_loaded_row(width, row);
         self.projection
-            .node_metadata_at_row(lua, &mut self.transcript.history, width, row)
+            .node_metadata_at_row(lua, &mut self.transcript.history, width, local_row)
+            .map(|node| self.offset_node_row(width, node))
     }
 
     pub(crate) fn block_node_before_or_at_row(
@@ -623,13 +813,16 @@ impl TranscriptDocument {
         row: crate::smelt_edit::RowIndex,
         matches: impl FnMut(&BlockHistory, BlockId) -> bool,
     ) -> Option<crate::content::transcript_buf::TranscriptNodeRow> {
-        self.projection.block_node_before_or_at_row(
-            lua,
-            &mut self.transcript.history,
-            width,
-            row,
-            matches,
-        )
+        let local_row = self.virtual_row_to_loaded_row(width, row);
+        self.projection
+            .block_node_before_or_at_row(
+                lua,
+                &mut self.transcript.history,
+                width,
+                local_row,
+                matches,
+            )
+            .map(|node| self.offset_node_row(width, node))
     }
 
     pub(crate) fn fold_node_at_row(
@@ -640,12 +833,13 @@ impl TranscriptDocument {
         action: crate::content::transcript_buf::FoldAction,
         activation: crate::content::transcript_buf::FoldActivation,
     ) -> bool {
+        let local_row = self.virtual_row_to_loaded_row(width, row);
         self.projection.fold_node_at_row(
             lua,
             &mut self.transcript.history,
             width,
             crate::content::transcript_buf::FoldAtRow {
-                row,
+                row: local_row,
                 action,
                 activation,
             },
@@ -698,8 +892,15 @@ impl TranscriptDocument {
         theme: &Theme,
         range: crate::smelt_edit::DocRange,
     ) -> crate::smelt_edit::CopyOutput {
+        let row_offset = self.sparse_prefix_row_offset(width);
+        if range.end.row < row_offset {
+            return crate::smelt_edit::CopyOutput::default();
+        }
+        let mut local_range = range;
+        local_range.start.row = local_range.start.row.saturating_sub(row_offset);
+        local_range.end.row = local_range.end.row.saturating_sub(row_offset);
         self.projection
-            .copy_range(lua, &mut self.transcript.history, width, theme, range)
+            .copy_range(lua, &mut self.transcript.history, width, theme, local_range)
     }
 
     pub(crate) fn history(&self) -> &BlockHistory {
@@ -846,6 +1047,85 @@ impl TranscriptDocument {
 impl Default for TranscriptDocument {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod document_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_tail_document_reports_virtual_prefix_rows() {
+        let lua = LuaRuntime::new();
+        let mut source = Transcript::new();
+        source.push(Block::Text {
+            content: "tail one".into(),
+        });
+        source.push(Block::Text {
+            content: "tail two".into(),
+        });
+        let records = source.history.descriptor_records();
+        let loaded = LoadedTranscript {
+            transcript: Transcript::from_descriptor_records(records.clone()),
+            descriptor_window: Some(LoadedDescriptorWindow {
+                start: smelt_store::TranscriptDescriptorIndex::new(8),
+                total_count: 10,
+                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+                records,
+            }),
+            session_dir: None,
+        };
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let loaded_rows =
+            document
+                .projection
+                .estimated_total_rows(&lua, &mut document.transcript.history, 80);
+
+        let total_rows = document.estimated_total_rows(&lua, 80);
+
+        assert!(total_rows > loaded_rows);
+        assert!(document.sparse_prefix_row_offset(80) > 0);
+    }
+
+    #[test]
+    fn sparse_tail_projection_offsets_materialized_rows() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let mut source = Transcript::new();
+        source.push(Block::Text {
+            content: "tail one".into(),
+        });
+        source.push(Block::Text {
+            content: "tail two".into(),
+        });
+        let records = source.history.descriptor_records();
+        let loaded = LoadedTranscript {
+            transcript: Transcript::from_descriptor_records(records.clone()),
+            descriptor_window: Some(LoadedDescriptorWindow {
+                start: smelt_store::TranscriptDescriptorIndex::new(8),
+                total_count: 10,
+                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+                records,
+            }),
+            session_dir: None,
+        };
+        let mut document = TranscriptDocument::from_loaded_transcript(loaded);
+        let offset = document.sparse_prefix_row_offset(80);
+        let plan = document.plan_projection_measured(
+            &lua,
+            80,
+            &theme,
+            crate::content::transcript_buf::ScrollTarget::visible_tail(),
+            10,
+        );
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(401), Default::default());
+
+        let rows = document.project_planned(&lua, &mut buf, &theme, plan);
+
+        assert!(rows.total_rows > rows.materialized_rows);
+        assert!(rows.row_base >= offset);
+        assert!(rows.clamped_scroll >= offset);
+        assert!(buf.lines().iter().any(|line| line == "tail two"));
     }
 }
 

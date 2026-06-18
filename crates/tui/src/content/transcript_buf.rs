@@ -2221,6 +2221,7 @@ impl TranscriptProjection {
             self.append_projected_node(history, theme, block_index, id, key, &mut rows);
         }
 
+        smelt_perf::perf::record_value("transcript:collect_nodes_range:rows", texts.len() as u64);
         self.measurements.active.refresh_prefix_rows();
         MaterializedTranscriptRange {
             row_base,
@@ -2542,7 +2543,7 @@ impl TranscriptProjection {
 
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         self.prepare_row_index_with_env(env.clone(), history, width);
-        let _ = self.exactify_row_range(env.clone(), history, 0..end);
+        let _ = self.exactify_row_range(env.clone(), history, start..end);
         let total_rows = self.measurements.active.total_rows();
         if total_rows == 0 || start >= total_rows {
             return DisplayRows::empty();
@@ -3054,6 +3055,35 @@ mod tests {
         assert!(!out.clipboard.is_empty());
         assert_eq!(counters.full_row_builds, 0);
         assert!(counters.exact_height_measured_blocks <= 1);
+        assert!(counters.range_materialized_blocks <= 2);
+    }
+
+    #[test]
+    fn display_rows_for_range_exactifies_only_requested_window() {
+        let lua = test_lua();
+        let theme = Theme::default();
+        let mut transcript = Transcript::new();
+        for i in 0..200 {
+            transcript.push(Block::Text {
+                content: format!("assistant response {i}\n{}", "detail line\n".repeat(8)),
+            });
+        }
+        let mut projection = TranscriptProjection::new();
+        let total_rows = projection.estimated_total_rows(&lua, &mut transcript.history, 80);
+        projection.reset_counters();
+
+        let rows = projection.display_rows_for_range(
+            &lua,
+            &mut transcript.history,
+            80,
+            &theme,
+            total_rows.saturating_sub(2)..total_rows.saturating_sub(1),
+        );
+
+        let counters = projection.counters();
+        assert!(!rows.rows.is_empty());
+        assert_eq!(counters.full_row_builds, 0);
+        assert!(counters.exact_height_measured_blocks <= 2);
         assert!(counters.range_materialized_blocks <= 2);
     }
 
