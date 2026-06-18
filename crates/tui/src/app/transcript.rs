@@ -528,6 +528,7 @@ impl TuiApp {
             );
         }
         self.transcript_win_mut().follow_tail();
+        self.request_transient_render();
     }
 
     pub(crate) fn clear_compaction_preview(&mut self) {

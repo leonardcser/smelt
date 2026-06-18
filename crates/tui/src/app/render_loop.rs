@@ -12,6 +12,38 @@ impl TuiApp {
         self.save_session_if_pending();
     }
 
+    pub(crate) fn render_requested_transient_frame_to<W: std::io::Write>(
+        &mut self,
+        out: &mut W,
+    ) -> bool {
+        if !self.transient_render_requested {
+            return false;
+        }
+        self.publish_diff_cells();
+        self.render_normal_to(out);
+        self.save_session_if_pending();
+        true
+    }
+
+    pub(crate) fn render_transient_frame_before_engine_event(
+        &mut self,
+        ev: &protocol::EngineEvent,
+    ) -> bool {
+        let mut stdout = std::io::stdout();
+        self.render_transient_frame_before_engine_event_to(ev, &mut stdout)
+    }
+
+    pub(crate) fn render_transient_frame_before_engine_event_to<W: std::io::Write>(
+        &mut self,
+        ev: &protocol::EngineEvent,
+        out: &mut W,
+    ) -> bool {
+        if !matches!(ev, protocol::EngineEvent::EngineAskResponse { .. }) {
+            return false;
+        }
+        self.render_requested_transient_frame_to(out)
+    }
+
     pub(crate) fn max_auto_prompt_input_rows_for(term_h: u16) -> u16 {
         (term_h / 2).max(1)
     }
@@ -51,6 +83,7 @@ impl TuiApp {
     /// every code path under `content/*` and `compositor:*` runs without
     /// dumping megabytes of ANSI per scenario into libFuzzer's log file.
     pub(crate) fn render_normal_to<W: std::io::Write>(&mut self, out: &mut W) {
+        self.clear_transient_render_request();
         let _perf = smelt_perf::perf::begin("app:tick_compositor");
         self.update_spinner();
 

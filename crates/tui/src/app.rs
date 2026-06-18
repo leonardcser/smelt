@@ -113,6 +113,8 @@ pub struct TuiApp {
     pub(crate) transcript_descriptors_persisted: bool,
     pub(crate) session_dirty: bool,
     pub(crate) dirty_history_from: Option<usize>,
+    /// Set by transient UI updates that can disappear before the next normal frame.
+    transient_render_requested: bool,
     pub(crate) deferred_session_load: Option<String>,
     pub(crate) last_width: u16,
     pub(crate) last_height: u16,
@@ -611,6 +613,14 @@ impl TuiApp {
 
     pub(crate) fn agent_is_running(&self) -> bool {
         self.active_agent_turn_id().is_some()
+    }
+
+    pub(crate) fn request_transient_render(&mut self) {
+        self.transient_render_requested = true;
+    }
+
+    pub(crate) fn clear_transient_render_request(&mut self) {
+        self.transient_render_requested = false;
     }
 
     pub(crate) fn prompt_work_state(&self) -> PromptWorkState {
@@ -1184,6 +1194,7 @@ impl TuiApp {
             transcript_descriptors_persisted: false,
             session_dirty: false,
             dirty_history_from: None,
+            transient_render_requested: false,
             deferred_session_load: None,
             last_width: term_w,
             last_height: term_h,
@@ -2206,6 +2217,7 @@ impl TuiApp {
                         break;
                     }
                 };
+                self.render_transient_frame_before_engine_event(&ev);
                 let action = self.dispatch_engine_event(ev);
                 if !action {
                     break;
@@ -2396,6 +2408,7 @@ impl TuiApp {
                 }
 
                 Some(ev) = self.core.engine.recv() => {
+                    self.render_transient_frame_before_engine_event(&ev);
                     self.dispatch_engine_event(ev);
                 }
 

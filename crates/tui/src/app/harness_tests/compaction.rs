@@ -33,6 +33,84 @@ fn compact_command_streams_preview_into_rendered_transcript() {
 }
 
 #[test]
+fn auto_compaction_requests_frame_before_coalesced_response_clears_preview() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(80, 24);
+    app.app.core.config.context_window = Some(100);
+    app.app
+        .core
+        .session
+        .history
+        .push(protocol::HistoryItem::user(protocol::Content::text("u1")));
+    app.push_assistant_text("a1");
+    app.app
+        .core
+        .session
+        .history
+        .push(protocol::HistoryItem::user(protocol::Content::text("u2")));
+    app.start_turn(42);
+
+    let messages = protocol::history_to_messages(&app.app.model_history());
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        app.app
+            .dispatch_host_call(engine::HostCall::PrepareRequest {
+                messages,
+                estimated_tokens: 200,
+                reply: tx,
+            });
+    }
+    let ask_id = app
+        .drain_engine_sends()
+        .into_iter()
+        .filter_map(|cmd| match cmd {
+            protocol::UiCommand::EngineAsk { id, stream, .. } => {
+                assert!(stream, "auto-compaction EngineAsk should stream");
+                Some(id)
+            }
+            _ => None,
+        })
+        .next_back()
+        .expect("prepare-request compaction should issue EngineAsk");
+
+    app.app
+        .dispatch_engine_event(protocol::EngineEvent::EngineAskDelta {
+            id: ask_id,
+            delta: "# Goal\nstreamed before response".into(),
+        });
+    let response = protocol::EngineEvent::EngineAskResponse {
+        id: ask_id,
+        message: Some(protocol::Message::assistant(
+            Some(protocol::Content::text("# Goal\nfinal summary")),
+            None,
+            None,
+        )),
+        error: None,
+    };
+    {
+        let _guard = crate::lua::install_app_ptr(&mut app.app);
+        let mut sink = std::io::sink();
+        assert!(app
+            .app
+            .render_transient_frame_before_engine_event_to(&response, &mut sink));
+    }
+
+    let streamed_frame = app.app.ui.snapshot().text();
+    assert!(
+        streamed_frame.contains("compacting"),
+        "frame: {streamed_frame}"
+    );
+    assert!(
+        streamed_frame.contains("streamed before response"),
+        "frame: {streamed_frame}"
+    );
+
+    app.app.dispatch_engine_event(response);
+    assert!(app.app.transcript.compaction_preview_id().is_none());
+}
+
+#[test]
 fn engine_ask_delta_callbacks_can_update_compaction_preview_from_dispatch() {
     let mut app = TestApp::builder().build();
     assert!(app.run_lua(
