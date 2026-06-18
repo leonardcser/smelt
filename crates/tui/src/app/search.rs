@@ -178,8 +178,12 @@ impl TuiApp {
             return;
         }
 
-        let matches = self.scan_search_matches(target, &query, direction);
-        let current = initial_match(&matches, origin, direction);
+        let current_range = self.search_next_match(target, &query, origin, direction);
+        let matches = current_range
+            .map(TextRange::Rows)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let current = (!matches.is_empty()).then_some(0);
         let changedtick = self
             .ui
             .buf(target_buf)
@@ -276,42 +280,46 @@ impl TuiApp {
             FullSearchRefresh::Changed(None) => return false,
         }
 
-        let Some((next, range)) = self.search.session.as_ref().and_then(|session| {
+        let Some((query, origin)) = self.search.session.as_ref().and_then(|session| {
             let SearchBackend::Full {
                 matches, current, ..
             } = &session.backend
             else {
                 return None;
             };
-            if matches.is_empty() {
-                return None;
-            }
-            let len = matches.len();
-            let current = current.unwrap_or_else(|| {
-                initial_match(
-                    matches,
-                    self.search_origin(target).unwrap_or_default(),
-                    direction,
-                )
-                .unwrap_or(0)
-            });
-            let next = match direction {
-                SearchDirection::Forward => (current + 1) % len,
-                SearchDirection::Backward => (current + len - 1) % len,
+            let current_range = current
+                .and_then(|index| matches.get(index))
+                .and_then(TextRange::rows);
+            let origin = match (current_range, direction) {
+                (Some(range), SearchDirection::Forward) => range.end,
+                (Some(range), SearchDirection::Backward)
+                    if range.start.row == 0 && range.start.byte_col == 0 =>
+                {
+                    DocPosition {
+                        row: RowIndex::MAX,
+                        byte_col: usize::MAX,
+                    }
+                }
+                (Some(range), SearchDirection::Backward) => previous_search_position(range.start),
+                (None, _) => self.search_origin(target).unwrap_or_default(),
             };
-            matches
-                .get(next)
-                .and_then(TextRange::rows)
-                .map(|range| (next, range))
+            Some((session.query.clone(), origin))
         }) else {
             return false;
         };
+        let Some(range) = self.search_next_match(target, &query, origin, direction) else {
+            return false;
+        };
         if let Some(SearchSession {
-            backend: SearchBackend::Full { current, .. },
+            backend: SearchBackend::Full {
+                matches, current, ..
+            },
             ..
         }) = self.search.session.as_mut()
         {
-            *current = Some(next);
+            matches.clear();
+            matches.push(TextRange::Rows(range));
+            *current = Some(0);
         }
         self.jump_to_search_range(range);
         true
@@ -337,11 +345,9 @@ impl TuiApp {
 
         let query = session.query.clone();
         let origin = self.search_origin(target).unwrap_or_default();
-        let matches = self.scan_search_matches(target, &query, direction);
-        let current = initial_match(&matches, origin, direction);
-        let range = current
-            .and_then(|index| matches.get(index))
-            .and_then(TextRange::rows);
+        let range = self.search_next_match(target, &query, origin, direction);
+        let matches = range.map(TextRange::Rows).into_iter().collect::<Vec<_>>();
+        let current = (!matches.is_empty()).then_some(0);
         if let Some(SearchSession {
             backend:
                 SearchBackend::Full {
@@ -369,29 +375,25 @@ impl TuiApp {
             .find(|&win| self.ui.win(win).is_some_and(|w| w.supports_search()))
     }
 
-    /// Finds literal, display-row-local matches. Queries containing `\n` are
-    /// rejected by `submit_search`; multi-line display search would need
+    /// Finds the next literal, display-row-local match. Queries containing `\n`
+    /// are rejected by `submit_search`; multi-line display search would need
     /// row-break-aware scanning and match storage.
-    fn scan_search_matches(
+    fn search_next_match(
         &mut self,
         win: WinId,
         query: &str,
+        origin: DocPosition,
         direction: SearchDirection,
-    ) -> Vec<TextRange> {
-        let origin = self.search_origin(win).unwrap_or_default();
+    ) -> Option<DocRange> {
         self.with_display_document_for_win(win, |document| {
-            document
-                .search_matches(
-                    query,
-                    origin,
-                    matches!(direction, SearchDirection::Forward),
-                    SEARCH_SCAN_ROWS,
-                )
-                .into_iter()
-                .map(TextRange::Rows)
-                .collect()
+            document.search_next_match(
+                query,
+                origin,
+                matches!(direction, SearchDirection::Forward),
+                SEARCH_SCAN_ROWS,
+            )
         })
-        .unwrap_or_default()
+        .flatten()
     }
 
     fn search_origin(&self, win: WinId) -> Option<DocPosition> {
@@ -416,31 +418,6 @@ impl TuiApp {
             range.start,
             crate::app::reveal::RevealOptions::avoid_edge_chrome(target),
         );
-    }
-}
-
-fn initial_match(
-    matches: &[TextRange],
-    origin: DocPosition,
-    direction: SearchDirection,
-) -> Option<usize> {
-    let starts_at_or_after = |m: &TextRange| {
-        m.start_position()
-            .is_some_and(|pos| (pos.row, pos.byte_col) >= (origin.row, origin.byte_col))
-    };
-    let starts_at_or_before = |m: &TextRange| {
-        m.start_position()
-            .is_some_and(|pos| (pos.row, pos.byte_col) <= (origin.row, origin.byte_col))
-    };
-    match direction {
-        SearchDirection::Forward => matches
-            .iter()
-            .position(starts_at_or_after)
-            .or_else(|| (!matches.is_empty()).then_some(0)),
-        SearchDirection::Backward => matches
-            .iter()
-            .rposition(starts_at_or_before)
-            .or_else(|| (!matches.is_empty()).then_some(matches.len() - 1)),
     }
 }
 

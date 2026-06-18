@@ -120,6 +120,17 @@ pub trait DisplayDocument {
         scan_document_rows(self, query, 0, total_rows, chunk_rows)
     }
 
+    fn search_next_match(
+        &mut self,
+        query: &str,
+        origin: DocPosition,
+        forward: bool,
+        chunk_rows: RowIndex,
+    ) -> Option<DocRange> {
+        let total_rows = self.snapshot().total_rows;
+        search_document_next(self, query, origin, forward, total_rows, chunk_rows)
+    }
+
     fn action_at(&mut self, pos: DocPosition) -> Option<SpanAction> {
         let row = self
             .materialize(pos.row..pos.row.saturating_add(1))
@@ -158,6 +169,159 @@ pub(crate) fn scan_document_rows<D: DisplayDocument + ?Sized>(
     matches
 }
 
+pub(crate) fn search_document_next<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    query: &str,
+    origin: DocPosition,
+    forward: bool,
+    total_rows: RowIndex,
+    chunk_rows: RowIndex,
+) -> Option<DocRange> {
+    if query.is_empty() || total_rows == 0 {
+        return None;
+    }
+    let start = origin.row.min(total_rows.saturating_sub(1));
+    if forward {
+        search_forward_range(document, query, start..total_rows, Some(origin), chunk_rows).or_else(
+            || {
+                search_forward_range(
+                    document,
+                    query,
+                    0..start.saturating_add(1),
+                    None,
+                    chunk_rows,
+                )
+            },
+        )
+    } else {
+        search_backward_range(
+            document,
+            query,
+            0..start.saturating_add(1),
+            Some(origin),
+            chunk_rows,
+        )
+        .or_else(|| search_backward_range(document, query, start..total_rows, None, chunk_rows))
+    }
+}
+
+fn search_forward_range<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    query: &str,
+    range: std::ops::Range<RowIndex>,
+    min_pos: Option<DocPosition>,
+    chunk_rows: RowIndex,
+) -> Option<DocRange> {
+    if range.start >= range.end {
+        return None;
+    }
+    let chunk_rows = chunk_rows.max(1);
+    let mut row = range.start;
+    while row < range.end {
+        let count = chunk_rows.min(range.end - row);
+        let display = document.materialize(row..row.saturating_add(count));
+        if let Some(found) = first_forward_match(&display.rows, row, query, min_pos) {
+            return Some(found);
+        }
+        row = row.saturating_add(count);
+    }
+    None
+}
+
+fn search_backward_range<D: DisplayDocument + ?Sized>(
+    document: &mut D,
+    query: &str,
+    range: std::ops::Range<RowIndex>,
+    max_pos: Option<DocPosition>,
+    chunk_rows: RowIndex,
+) -> Option<DocRange> {
+    if range.start >= range.end {
+        return None;
+    }
+    let chunk_rows = chunk_rows.max(1);
+    let mut end = range.end;
+    while end > range.start {
+        let start = end.saturating_sub(chunk_rows).max(range.start);
+        let display = document.materialize(start..end);
+        if let Some(found) = first_backward_match(&display.rows, start, query, max_pos) {
+            return Some(found);
+        }
+        end = start;
+    }
+    None
+}
+
+fn first_forward_match(
+    rows: &[DisplayRow],
+    start: RowIndex,
+    query: &str,
+    min_pos: Option<DocPosition>,
+) -> Option<DocRange> {
+    for (offset, row) in rows.iter().enumerate() {
+        let row_index = start.saturating_add(offset as RowIndex);
+        for (byte_col, _) in row.text.match_indices(query) {
+            if min_pos.is_some_and(|pos| {
+                row_index < pos.row || (row_index == pos.row && byte_col < pos.byte_col)
+            }) {
+                continue;
+            }
+            let end_col = byte_col + query.len();
+            if row_match_is_selectable(row, byte_col, end_col) {
+                return Some(DocRange {
+                    start: DocPosition {
+                        row: row_index,
+                        byte_col,
+                    },
+                    end: DocPosition {
+                        row: row_index,
+                        byte_col: end_col,
+                    },
+                });
+            }
+        }
+    }
+    None
+}
+
+fn first_backward_match(
+    rows: &[DisplayRow],
+    start: RowIndex,
+    query: &str,
+    max_pos: Option<DocPosition>,
+) -> Option<DocRange> {
+    for (offset, row) in rows.iter().enumerate().rev() {
+        let row_index = start.saturating_add(offset as RowIndex);
+        let matches = row.text.match_indices(query).collect::<Vec<_>>();
+        for (byte_col, _) in matches.into_iter().rev() {
+            if max_pos.is_some_and(|pos| {
+                row_index > pos.row || (row_index == pos.row && byte_col > pos.byte_col)
+            }) {
+                continue;
+            }
+            let end_col = byte_col + query.len();
+            if row_match_is_selectable(row, byte_col, end_col) {
+                return Some(DocRange {
+                    start: DocPosition {
+                        row: row_index,
+                        byte_col,
+                    },
+                    end: DocPosition {
+                        row: row_index,
+                        byte_col: end_col,
+                    },
+                });
+            }
+        }
+    }
+    None
+}
+
+fn row_match_is_selectable(row: &DisplayRow, byte_col: usize, end_col: usize) -> bool {
+    row.selectable_ranges
+        .iter()
+        .any(|range| range.start <= byte_col && end_col <= range.end)
+}
+
 pub(crate) fn scan_document_row_window<D: DisplayDocument + ?Sized>(
     document: &mut D,
     query: &str,
@@ -192,11 +356,7 @@ fn collect_display_matches(
         let row_index = start.saturating_add(offset as RowIndex);
         for (byte_col, _) in row.text.match_indices(query) {
             let end_col = byte_col + query.len();
-            if row
-                .selectable_ranges
-                .iter()
-                .any(|range| range.start <= byte_col && end_col <= range.end)
-            {
+            if row_match_is_selectable(row, byte_col, end_col) {
                 matches.push(DocRange {
                     start: DocPosition {
                         row: row_index,
@@ -516,6 +676,104 @@ mod tests {
             }))
             .expect("copy range");
         assert_eq!(copied.kill_ring, "lpha\nbeta\nga");
+    }
+
+    #[test]
+    fn search_next_match_scans_document_chunks_until_first_match() {
+        struct CountingDoc {
+            rows: Vec<DisplayRow>,
+            materialized: Vec<Range<RowIndex>>,
+        }
+
+        impl DisplayDocument for CountingDoc {
+            fn snapshot(&mut self) -> DisplaySnapshot {
+                DisplaySnapshot {
+                    generation: 0,
+                    total_rows: self.rows.len() as RowIndex,
+                }
+            }
+
+            fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+                self.materialized.push(range.clone());
+                let start = row_to_usize(range.start).min(self.rows.len());
+                let end = row_to_usize(range.end).min(self.rows.len());
+                DisplayRows {
+                    rows: self.rows[start..end].to_vec(),
+                }
+            }
+
+            fn copy_range(&mut self, _range: TextRange) -> Option<CopyOutput> {
+                None
+            }
+        }
+
+        let mut rows = (0..20)
+            .map(|i| DisplayRow::new(format!("row {i}"), std::iter::once(0..5).collect()))
+            .collect::<Vec<_>>();
+        rows[3] = DisplayRow::new("hidden needle".into(), Vec::new());
+        rows[12] = DisplayRow::new("visible needle".into(), std::iter::once(0..14).collect());
+        let mut doc = CountingDoc {
+            rows,
+            materialized: Vec::new(),
+        };
+
+        let found = doc.search_next_match(
+            "needle",
+            DocPosition {
+                row: 0,
+                byte_col: 0,
+            },
+            true,
+            4,
+        );
+
+        assert_eq!(
+            found,
+            Some(DocRange {
+                start: DocPosition {
+                    row: 12,
+                    byte_col: 8
+                },
+                end: DocPosition {
+                    row: 12,
+                    byte_col: 14
+                },
+            })
+        );
+        assert_eq!(doc.materialized, vec![0..4, 4..8, 8..12, 12..16]);
+    }
+
+    #[test]
+    fn search_next_match_wraps_backward_from_origin() {
+        let mut doc = StaticRowsDocument::from_text_rows(vec![
+            "first needle".into(),
+            "middle".into(),
+            "last needle".into(),
+        ]);
+
+        let found = doc.search_next_match(
+            "needle",
+            DocPosition {
+                row: 0,
+                byte_col: 0,
+            },
+            false,
+            2,
+        );
+
+        assert_eq!(
+            found,
+            Some(DocRange {
+                start: DocPosition {
+                    row: 2,
+                    byte_col: 5
+                },
+                end: DocPosition {
+                    row: 2,
+                    byte_col: 11
+                },
+            })
+        );
     }
 
     #[test]
