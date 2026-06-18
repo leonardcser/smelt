@@ -1,0 +1,20 @@
+{
+  "_about": "Regression for a smelt_loop crash where the compaction prepare-request probe queued reactive history-cell work, leaving the startup banner's named window alive until the next Lua reload. The reload-survival invariant then reported a dropped named window.",
+  "_fix": "Drain reactive cells after the compaction prepare-request probe so conditional UI subscribers settle before the next fuzz op.",
+  "mode": "normal",
+  "ops": [
+    {
+      "kind": "reload_lua"
+    },
+    {
+      "data": {
+        "variant": 0
+      },
+      "kind": "probe_compaction_prepare_request"
+    },
+    {
+      "kind": "reload_lua"
+    }
+  ],
+  "vim": true
+}

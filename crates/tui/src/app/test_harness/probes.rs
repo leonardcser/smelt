@@ -431,6 +431,7 @@ impl TestApp {
             decision => panic!("expected compaction replacement, got {decision:?}"),
         };
         assert!(!replacement.is_empty(), "compaction replacement is empty");
+        self.tick_cells();
         if should_preserve_turn {
             assert!(self.agent_running(), "compaction ended the active turn");
         }
