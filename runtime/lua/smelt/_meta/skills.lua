@@ -11,7 +11,7 @@ local skills = {}
 ---@type fun(name: string): string?, string?
 skills.content = nil
 
---- Return every discovered skill as `{ name, description, location }` rows sorted by name.
+--- Return every discovered skill as `{ name, description, source, location, shadowed }` rows sorted by name.
 ---@type fun(): table
 skills.info = nil
 

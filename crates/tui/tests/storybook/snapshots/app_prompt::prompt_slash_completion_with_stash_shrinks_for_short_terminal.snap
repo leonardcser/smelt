@@ -1,9 +1,10 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 515
 expression: frame.text()
 ---
- /changelog    show release notes for the latest s
  /btw          ask a side question
+ /brief        summarize planned or completed chan
  /branch       fork current session
   ◌ Stashed (ctrl+s to unstash)
 ──────────────────────────────────────────────────

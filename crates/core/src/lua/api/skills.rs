@@ -51,7 +51,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
 
     m.fn_(
         "info",
-        "Return every discovered skill as `{ name, description, location }` rows sorted by name.",
+        "Return every discovered skill as `{ name, description, source, location, shadowed }` rows sorted by name.",
         &[],
         |lua, ()| -> LuaResult<mlua::Table> {
             let rows = crate::host::try_with_core(|core| {
@@ -66,7 +66,16 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                 let row = lua.create_table()?;
                 row.set("name", info.name)?;
                 row.set("description", info.description)?;
+                row.set("source", info.source.as_str())?;
                 row.set("location", info.location)?;
+                let shadowed = lua.create_table()?;
+                for (j, shadow) in info.shadowed.into_iter().enumerate() {
+                    let item = lua.create_table()?;
+                    item.set("source", shadow.source.as_str())?;
+                    item.set("location", shadow.location)?;
+                    shadowed.set(j + 1, item)?;
+                }
+                row.set("shadowed", shadowed)?;
                 t.set(i + 1, row)?;
             }
             Ok(t)

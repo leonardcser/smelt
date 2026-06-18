@@ -48,6 +48,7 @@ impl Phase {
 
 pub struct RegisteredCommand {
     pub handle: LuaHandle,
+    pub token: u64,
     pub description: Option<String>,
     pub args: Vec<String>,
     /// If false, dispatcher rejects this command while the agent is mid-turn.
@@ -171,6 +172,7 @@ pub struct LuaShared {
     /// call_id only ever lands in one of them.
     pub ask_callbacks: Mutex<HashMap<u64, AskCallbacks>>,
     pub next_id: AtomicU64,
+    pub next_registry_token: AtomicU64,
     /// Starts at `LUA_BUF_ID_BASE` so Lua-allocated `BufId`s never collide with Rust-side buffers.
     pub next_buf_id: AtomicU64,
     /// Lives on the shared arc (not `LuaTaskRuntime`) so a coroutine inside `drive_tasks`
@@ -327,6 +329,7 @@ impl Default for LuaShared {
             callbacks: Mutex::new(HashMap::new()),
             ask_callbacks: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            next_registry_token: AtomicU64::new(1),
             next_buf_id: AtomicU64::new(LUA_BUF_ID_BASE),
             next_external_id: AtomicU64::new(1),
             tasks: Mutex::new(LuaTaskRuntime::new()),
@@ -360,6 +363,55 @@ impl LuaShared {
     }
     pub fn set_phase(&self, p: Phase) {
         self.phase.store(p as u8, Ordering::Release);
+    }
+
+    fn next_registry_token(&self) -> u64 {
+        self.next_registry_token.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn register_command(
+        &self,
+        name: String,
+        mut command: RegisteredCommand,
+        override_existing: bool,
+    ) -> Result<u64, String> {
+        let token = self.next_registry_token();
+        command.token = token;
+        let mut commands = self
+            .commands
+            .lock()
+            .map_err(|_| "command registry unavailable".to_string())?;
+        if !override_existing && commands.contains_key(&name) {
+            return Err(format!(
+                "command `{name}` is already registered; pass override = true to replace it"
+            ));
+        }
+        commands.insert(name.clone(), command);
+        if let Ok(mut set) = self.command_names.lock() {
+            set.insert(name);
+        }
+        Ok(token)
+    }
+
+    pub fn unregister_command_token(&self, name: &str, token: u64) -> bool {
+        let removed = self
+            .commands
+            .lock()
+            .map(|mut commands| {
+                if commands.get(name).is_some_and(|cmd| cmd.token == token) {
+                    commands.remove(name);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        if removed {
+            if let Ok(mut set) = self.command_names.lock() {
+                set.remove(name);
+            }
+        }
+        removed
     }
 
     /// Drop every Lua handle from registries repopulated by `/reload`.

@@ -118,6 +118,7 @@ Options accepted by `smelt.cmd.register`.
 | `queue_when_busy` | `boolean` |  | If true, busy invocations are queued instead of rejected. Defaults to `false`. |
 | `startup_ok` | `boolean` |  | If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`. |
 | `hidden` | `boolean` |  | If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`. |
+| `override` | `boolean` |  | If true, replace an existing command with the same name. Defaults to `false`. |
 
 ### `smelt.dialog.Keymap`
 

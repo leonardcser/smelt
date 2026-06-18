@@ -1,8 +1,9 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 515
 expression: frame.text()
 ---
- /btw          ask a side question
+ /brief        summarize planned or completed chan
  /branch       fork current session
 ──────────────────────────────────────────────────
  /

@@ -20,7 +20,7 @@ Load the skill named `name` and return `(content, nil)` on success or `(nil, err
 fun(): table
 ```
 
-Return every discovered skill as `{ name, description, location }` rows sorted by name.
+Return every discovered skill as `{ name, description, source, location, shadowed }` rows sorted by name.
 
 ## `smelt.skills.list`
 

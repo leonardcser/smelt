@@ -83,6 +83,7 @@
 ---@field queue_when_busy? boolean If true, busy invocations are queued instead of rejected. Defaults to `false`.
 ---@field startup_ok? boolean If true, the command may run before the runtime has finished bootstrapping. Defaults to `false`.
 ---@field hidden? boolean If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`.
+---@field override? boolean If true, replace an existing command with the same name. Defaults to `false`.
 
 --- One dialog-level keymap entry. `on_press(ctx)` receives the dialog
 --- context exposing `ctx.close()` and `ctx.resolve(value)` so the

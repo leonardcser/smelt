@@ -249,6 +249,7 @@ impl TestAppBuilder {
         {
             let _guard = crate::lua::install_app_ptr(&mut app);
             let _ = app.lua.reload(None);
+            app.pending_history_appends.clear();
         }
 
         // Pin spinner glyph and wall-clock time for snapshot determinism.

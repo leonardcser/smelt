@@ -7,18 +7,51 @@ struct SkillFrontmatter {
 }
 
 #[derive(Debug, Clone)]
+pub struct SkillShadowInfo {
+    pub source: SkillSource,
+    pub location: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
+    pub source: SkillSource,
     pub location: String,
+    pub shadowed: Vec<SkillShadowInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSource {
+    Builtin,
+    Skill,
+    Command,
+}
+
+impl SkillSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Skill => "skill",
+            Self::Command => "command",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SkillShadow {
+    source: SkillSource,
+    location: String,
 }
 
 #[derive(Debug, Clone)]
 struct SkillEntry {
     name: String,
     description: String,
+    source: SkillSource,
     location: String,
     formatted: String,
+    shadowed: Vec<SkillShadow>,
 }
 
 /// Built-in skills shipped with smelt. Embedded at compile time and seeded
@@ -66,9 +99,9 @@ impl SkillLoader {
 
         for (name, body) in BUILTIN_SKILLS {
             let location = builtin_skill_path(name).display().to_string();
-            match parse_skill_text(body, None, &location) {
+            match parse_skill_text(body, None, &location, SkillSource::Builtin) {
                 Some(entry) => {
-                    skills.insert(entry.name.clone(), entry);
+                    insert_skill(&mut skills, entry);
                 }
                 None => {
                     eprintln!("smelt: built-in skill `{name}` failed to parse");
@@ -133,7 +166,16 @@ impl SkillLoader {
             .map(|entry| SkillInfo {
                 name: entry.name.clone(),
                 description: entry.description.clone(),
+                source: entry.source,
                 location: entry.location.clone(),
+                shadowed: entry
+                    .shadowed
+                    .iter()
+                    .map(|shadow| SkillShadowInfo {
+                        source: shadow.source,
+                        location: shadow.location.clone(),
+                    })
+                    .collect(),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -167,12 +209,29 @@ fn build_prompt_section(skills: &HashMap<String, SkillEntry>) -> Option<String> 
     Some(lines.join("\n"))
 }
 
-fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
+fn insert_skill(skills: &mut HashMap<String, SkillEntry>, mut entry: SkillEntry) {
+    if let Some(previous) = skills.remove(&entry.name) {
+        let mut shadowed = previous.shadowed;
+        shadowed.push(SkillShadow {
+            source: previous.source,
+            location: previous.location,
+        });
+        entry.shadowed = shadowed;
+    }
+    skills.insert(entry.name.clone(), entry);
+}
+
+fn sorted_dir_entries(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return Vec::new();
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    paths
+}
+
+fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
+    for path in sorted_dir_entries(dir) {
         if !path.is_dir() {
             continue;
         }
@@ -181,22 +240,18 @@ fn scan_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
             continue;
         }
         if let Some(entry) = parse_skill(&skill_file) {
-            skills.insert(entry.name.clone(), entry);
+            insert_skill(skills, entry);
         }
     }
 }
 
 fn scan_command_dir(dir: &Path, skills: &mut HashMap<String, SkillEntry>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in sorted_dir_entries(dir) {
         if path.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
         if let Some(entry) = parse_command_skill(&path) {
-            skills.insert(entry.name.clone(), entry);
+            insert_skill(skills, entry);
         }
     }
 }
@@ -222,21 +277,28 @@ fn parse_command_skill(path: &Path) -> Option<SkillEntry> {
     Some(SkillEntry {
         name,
         description,
+        source: SkillSource::Command,
         location,
         formatted,
+        shadowed: Vec::new(),
     })
 }
 
 fn parse_skill(path: &Path) -> Option<SkillEntry> {
     let text = std::fs::read_to_string(path).ok()?;
     let location = path.display().to_string();
-    parse_skill_text(&text, path.parent(), &location)
+    parse_skill_text(&text, path.parent(), &location, SkillSource::Skill)
 }
 
 /// Parse a `SKILL.md` body into a [`SkillEntry`]. `dir` is the on-disk
 /// directory the skill came from - used to enumerate bundled files. Pass
 /// `None` for built-ins, which have no on-disk base directory.
-fn parse_skill_text(text: &str, dir: Option<&Path>, location: &str) -> Option<SkillEntry> {
+fn parse_skill_text(
+    text: &str,
+    dir: Option<&Path>,
+    location: &str,
+    source: SkillSource,
+) -> Option<SkillEntry> {
     let (fm, body) = split_frontmatter(text)?;
     let meta = parse_frontmatter(fm)?;
 
@@ -258,8 +320,10 @@ fn parse_skill_text(text: &str, dir: Option<&Path>, location: &str) -> Option<Sk
     Some(SkillEntry {
         name: meta.name,
         description: meta.description,
+        source,
         location: location.to_string(),
         formatted,
+        shadowed: Vec::new(),
     })
 }
 
@@ -488,8 +552,10 @@ mod tests {
                 SkillEntry {
                     name: name.into(),
                     description: description.into(),
+                    source: SkillSource::Skill,
                     location: format!("/skills/{name}/SKILL.md"),
                     formatted: formatted.into(),
+                    shadowed: Vec::new(),
                 },
             );
         }
@@ -685,6 +751,40 @@ mod tests {
         let mut map = HashMap::new();
         scan_dir(Path::new("/nonexistent/path/xyzzy"), &mut map);
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn later_skill_shadows_earlier_skill_and_records_source() {
+        let mut map = HashMap::new();
+        insert_skill(
+            &mut map,
+            SkillEntry {
+                name: "same".into(),
+                description: "old".into(),
+                source: SkillSource::Builtin,
+                location: "/builtin/SKILL.md".into(),
+                formatted: "old body".into(),
+                shadowed: Vec::new(),
+            },
+        );
+        insert_skill(
+            &mut map,
+            SkillEntry {
+                name: "same".into(),
+                description: "new".into(),
+                source: SkillSource::Skill,
+                location: "/user/SKILL.md".into(),
+                formatted: "new body".into(),
+                shadowed: Vec::new(),
+            },
+        );
+
+        let entry = map.get("same").unwrap();
+        assert_eq!(entry.description, "new");
+        assert_eq!(entry.source, SkillSource::Skill);
+        assert_eq!(entry.shadowed.len(), 1);
+        assert_eq!(entry.shadowed[0].source, SkillSource::Builtin);
+        assert_eq!(entry.shadowed[0].location, "/builtin/SKILL.md");
     }
 
     #[test]

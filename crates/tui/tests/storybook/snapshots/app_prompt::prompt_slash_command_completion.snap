@@ -1,16 +1,17 @@
 ---
 source: crates/tui/tests/storybook/app_ctx.rs
+assertion_line: 515
 expression: frame.text()
 ---
 
 
- /docs         open the smelt documentation in you
- /cost         show session cost and active provid
+ /copy         copy recent conversation message(s)
  /compact      compact conversation history
  /color        set session color
  /clear        start new conversation
  /changelog    show release notes for the latest s
  /btw          ask a side question
+ /brief        summarize planned or completed chan
  /branch       fork current session
 ──────────────────────────────────────────────────
  /

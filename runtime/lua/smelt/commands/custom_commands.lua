@@ -142,12 +142,27 @@ local function file_desc(path)
   return ""
 end
 
+local function file_overrides_existing(path)
+  local content = read_file(path)
+  if not content then return false end
+  local fm = smelt.parse.frontmatter(content)
+  if not fm then return false end
+  local v = fm.override
+  if type(v) == "boolean" then return v end
+  if type(v) == "string" then
+    v = v:lower():match("^%s*(.-)%s*$")
+    return v == "true" or v == "yes" or v == "1"
+  end
+  return v == 1
+end
+
 -- Reserved frontmatter keys map to CommandOverrides; any other sub-table becomes
 -- a per-tool subpattern bucket.
 local RESERVED = {
   description = true, provider = true, model = true, temperature = true,
   top_p = true, top_k = true, min_p = true, repeat_penalty = true,
-  reasoning_effort = true, tools = true, agent_skill = true, ["agent-skill"] = true,
+  reasoning_effort = true, tools = true, override = true,
+  agent_skill = true, ["agent-skill"] = true,
 }
 
 local function build_overrides(fm)
@@ -184,8 +199,9 @@ local function run_custom(name, path, arg)
   smelt.engine.submit_command(name, body, build_overrides(fm), command_display(name, arg))
 end
 
-local function register_all()
-  local dir = smelt.path.commands_dir()
+local M = {}
+
+local function register_dir(dir)
   local paths = smelt.fs.read_dir(dir)
   if not paths then return end
 
@@ -205,15 +221,33 @@ local function register_all()
 
   for _, f in ipairs(files) do
     local stem, path = f.stem, f.path
-    smelt.cmd.register(stem, function(arg)
+    local ok, err = pcall(smelt.cmd.register, stem, function(arg)
       smelt.spawn(function() run_custom(stem, path, arg) end)
     end, {
       desc            = file_desc(path),
       args            = { "<arg>" },
       while_busy      = false,
       queue_when_busy = true,
+      override        = file_overrides_existing(path),
     })
+    if not ok then
+      smelt.log.warn("custom_command_skipped", { name = stem, path = path, error = tostring(err) })
+    end
   end
 end
 
-register_all()
+function M.register_dir(dir)
+  register_dir(dir)
+end
+
+function M.register_global()
+  register_dir(smelt.path.commands_dir())
+end
+
+function M.register_project()
+  local cwd = smelt.os.cwd()
+  if not cwd or cwd == "" then return end
+  register_dir(smelt.path.join(cwd, ".smelt", "commands"))
+end
+
+return M

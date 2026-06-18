@@ -26,6 +26,9 @@ pub struct LuaCmdRegisterOpts {
     pub startup_ok: Option<bool>,
     /// If true, the command is hidden from `/help` and the picker (still callable). Defaults to `false`.
     pub hidden: Option<bool>,
+    /// If true, replace an existing command with the same name. Defaults to `false`.
+    #[lua(rename = "override", default)]
+    pub override_existing: bool,
 }
 
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) -> LuaResult<()> {
@@ -40,7 +43,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
         let s = shared.clone();
         m.fn_(
             "register",
-            "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), and `hidden` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.",
+            "Register a slash command `name` whose `handler` is invoked when the user runs it. `opts` accepts `desc`, `args`, `while_busy` (default `true`), `queue_when_busy` (default `false`), `startup_ok` (default `false`), `hidden` (default `false`), and `override` (default `false`). Returns a `Reg` whose `:remove()` unregisters the command.",
             &["name", "handler", "opts"],
             move |lua,
                   (name, handler, opts): (
@@ -51,11 +54,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                   -> LuaResult<LuaReg> {
                 let opts = opts.unwrap_or_default();
                 let handle = LuaHandle::from_func(lua, handler.into_inner())?;
-                if let Ok(mut map) = s.commands.lock() {
-                    map.insert(
+                let token = s
+                    .register_command(
                         name.clone(),
                         RegisteredCommand {
                             handle,
+                            token: 0,
                             description: opts.desc,
                             args: opts.args,
                             while_busy: opts.while_busy.unwrap_or(true),
@@ -63,24 +67,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             startup_ok: opts.startup_ok.unwrap_or(false),
                             hidden: opts.hidden.unwrap_or(false),
                         },
-                    );
-                }
-                if let Ok(mut set) = s.command_names.lock() {
-                    set.insert(name.clone());
-                }
+                        opts.override_existing,
+                    )
+                    .map_err(LuaError::RuntimeError)?;
                 let s_for_reg = s.clone();
                 Ok(LuaReg::new(move || {
-                    let removed = s_for_reg
-                        .commands
-                        .lock()
-                        .map(|mut m| m.remove(&name).is_some())
-                        .unwrap_or(false);
-                    if removed {
-                        if let Ok(mut set) = s_for_reg.command_names.lock() {
-                            set.remove(&name);
-                        }
-                    }
-                    removed
+                    s_for_reg.unregister_command_token(&name, token)
                 }))
             },
         )?;

@@ -77,6 +77,11 @@ pub const BOOTSTRAP_FILES: &[&str] = &[
 /// Subdirectories whose files are `require`'d at startup as side-effect registrations.
 const AUTOLOAD_DIRS: &[&str] = &["tools", "commands", "completers", "plugins", "dialogs"];
 
+/// Lua helper for filesystem-backed markdown slash commands. The regular
+/// autoloader skips it; startup calls it explicitly after built-in commands
+/// so `override: true` in command frontmatter can replace built-ins.
+const CUSTOM_COMMANDS_MODULE: &str = "smelt.commands.custom_commands";
+
 /// Subdirectory whose files run during the Early phase under the restricted
 /// `smelt` view, BEFORE user `early.lua`. Plugins drop a file here to declare
 /// CLI flags (`smelt.cli.register_flag{}`) or opt out of bundled modules
@@ -471,12 +476,43 @@ impl LuaRuntime {
         self.mark_init();
         let disabled = self.disabled_modules();
         for name in autoload_modules_filtered(&disabled) {
-            let code = format!("require('{name}')");
-            if let Err(e) = self.lua.load(&code).set_name(name.as_str()).exec() {
+            if let Err(e) = self.require_module(&name) {
                 self.load_error = Some(format!("autoload {name}: {e}"));
                 return;
             }
         }
+        self.load_global_commands();
+    }
+
+    fn load_global_commands(&mut self) {
+        self.load_command_dir("register_global", "global commands");
+    }
+
+    fn load_project_commands(&mut self) {
+        self.load_command_dir("register_project", "project commands");
+    }
+
+    fn load_command_dir(&mut self, function_name: &str, label: &str) {
+        if self.disabled_modules().contains(CUSTOM_COMMANDS_MODULE) {
+            return;
+        }
+        let result: LuaResult<()> = (|| {
+            let module: mlua::Table = self
+                .lua
+                .load(format!("return require('{CUSTOM_COMMANDS_MODULE}')"))
+                .set_name(CUSTOM_COMMANDS_MODULE)
+                .eval()?;
+            let register: mlua::Function = module.get(function_name)?;
+            register.call(())
+        })();
+        if let Err(e) = result {
+            self.load_error = Some(format!("{label}: {e}"));
+        }
+    }
+
+    fn require_module(&self, name: &str) -> LuaResult<()> {
+        let code = format!("require('{name}')");
+        self.lua.load(&code).set_name(name).exec()
     }
 
     /// Flush dirty `smelt.state.persistent` entries before reload clears the
@@ -572,6 +608,10 @@ impl LuaRuntime {
             return state;
         }
         let smelt_dir = cwd.join(".smelt");
+        self.load_project_commands();
+        if self.load_error.is_some() {
+            return state;
+        }
         for path in lua_files_in(&smelt_dir.join("plugins")) {
             if let Err(e) = self.load_plugin_file(&path) {
                 self.load_error = Some(format!("{}: {e}", path.display()));
@@ -2800,6 +2840,7 @@ pub fn autoload_modules_filtered(disabled: &std::collections::HashSet<String>) -
             .filter_map(|f| f.path().to_str().map(path_to_module))
             .filter(|m| !bootstrap_modules.contains(m))
             .filter(|m| !OPTIONAL_PLUGINS.contains(&m.as_str()))
+            .filter(|m| m != CUSTOM_COMMANDS_MODULE)
             .filter(|m| !disabled.contains(m))
             .collect();
         names.sort();
@@ -3001,6 +3042,50 @@ mod tests {
         assert!(modules.contains(&"smelt.commands.mcp".to_string()));
         assert!(modules.contains(&"smelt.plugins.esc_chord".to_string()));
         assert!(modules.contains(&"smelt.plugins.plan_mode".to_string()));
+    }
+
+    #[test]
+    fn autoload_defers_custom_markdown_commands() {
+        let modules = autoload_modules();
+        assert!(!modules.contains(&CUSTOM_COMMANDS_MODULE.to_string()));
+    }
+
+    #[test]
+    fn command_register_requires_explicit_override_for_duplicates() {
+        let rt = LuaRuntime::new();
+        let (ok, err): (bool, String) = rt
+            .lua
+            .load(
+                r#"
+                smelt.cmd.register("same", function() end)
+                local ok, err = pcall(smelt.cmd.register, "same", function() end)
+                return ok, tostring(err)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(!ok);
+        assert!(err.contains("override = true"));
+    }
+
+    #[test]
+    fn command_register_override_replaces_without_old_reg_removing_new_entry() {
+        let rt = LuaRuntime::new();
+        let names: Vec<String> = rt
+            .lua
+            .load(
+                r#"
+                local old = smelt.cmd.register("same", function() end)
+                smelt.cmd.register("same", function() end, { override = true })
+                old:remove()
+                local names = {}
+                for _, row in ipairs(smelt.cmd.list()) do names[#names + 1] = row.name end
+                return names
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(names, vec!["same"]);
     }
 
     #[test]
