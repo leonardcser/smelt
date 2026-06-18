@@ -103,6 +103,24 @@ impl LoadedTranscript {
         Self::from_descriptor_slice(slice, session_dir)
     }
 
+    pub(crate) fn from_full_descriptor_rows(
+        rows: Vec<smelt_store::TranscriptDescriptorRecord>,
+        session_dir: PathBuf,
+    ) -> Option<Self> {
+        let total_count = rows.len();
+        let transcript = Self::from_descriptor_rows(rows)?;
+        Some(Self {
+            transcript,
+            descriptor_slice: Some(LoadedTranscriptDescriptorSlice {
+                start: smelt_store::TranscriptDescriptorIndex::new(0),
+                end: smelt_store::TranscriptDescriptorIndex::new(total_count),
+                total_count,
+                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
+            }),
+            session_dir: Some(session_dir),
+        })
+    }
+
     pub(crate) fn from_descriptor_slice(
         slice: smelt_store::TranscriptDescriptorSlice,
         session_dir: PathBuf,
