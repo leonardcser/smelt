@@ -2400,36 +2400,6 @@ impl TranscriptDocument {
         )
     }
 
-    pub(crate) fn materialize_search_layout_for_blocks(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        block_indices: &[u64],
-    ) -> crate::content::transcript_buf::TranscriptSearchLayout {
-        self.projection.materialize_search_layout_for_blocks(
-            lua,
-            &mut self.transcript.history,
-            width,
-            block_indices,
-        )
-    }
-
-    pub(crate) fn block_id_at_or_before_row(
-        &mut self,
-        lua: &LuaRuntime,
-        width: u16,
-        row: crate::smelt_edit::RowIndex,
-        forward: bool,
-    ) -> Option<BlockId> {
-        self.projection.block_id_at_or_before_row(
-            lua,
-            &mut self.transcript.history,
-            width,
-            row,
-            forward,
-        )
-    }
-
     pub(crate) fn visible_block_layout(
         &self,
     ) -> impl Iterator<
