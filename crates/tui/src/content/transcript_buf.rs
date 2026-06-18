@@ -6834,6 +6834,21 @@ mod tests {
             tail_load_ms,
             tail_render_ms,
         );
+        eprintln!(
+            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"target_bytes\":{},\"history_items\":{},\"rows\":{},\"build_ms\":{:.3},\"first_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3},\"descriptor_load_ms\":{:.3},\"descriptor_render_ms\":{:.3},\"legacy_load_ms\":{:.3},\"legacy_rebuild_ms\":{:.3},\"legacy_render_ms\":{:.3}}}",
+            target_bytes,
+            history_items,
+            first.total_rows,
+            build_ms,
+            first_ms,
+            tail_load_ms,
+            tail_render_ms,
+            descriptor_load_ms,
+            descriptor_render_ms,
+            load_ms,
+            rebuild_ms,
+            render_ms,
+        );
     }
     fn assert_projection_bench_gates(counters: TranscriptProjectionCounters, label: &str) {
         const MAX_MATERIALIZED_ROWS_PER_OPERATION: usize = 80;
