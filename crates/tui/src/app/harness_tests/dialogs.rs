@@ -295,13 +295,22 @@ fn present_plan_save_draft_writes_artifact_and_manifest() {
     let artifact_dir = std::fs::canonicalize(artifact_dir).unwrap();
     let grants = app.app.session_path_grants();
     assert!(grants.iter().any(|grant| {
-        grant.mode.as_str() == "plan"
+        grant.mode.is_none()
             && grant.tool == "read_file"
             && grant.access == smelt_core::permissions::PathAccess::Read
             && grant.dir == artifact_dir
     }));
     assert!(grants.iter().any(|grant| {
-        grant.mode.as_str() == "plan"
+        grant.mode.is_none()
+            && grant.tool == "edit_file"
+            && grant.access == smelt_core::permissions::PathAccess::Write
+            && grant.dir == artifact_dir
+    }));
+    assert!(grants.iter().any(|grant| {
+        grant
+            .mode
+            .as_ref()
+            .is_some_and(|mode| mode.as_str() == "plan")
             && grant.tool == "edit_file"
             && grant.access == smelt_core::permissions::PathAccess::Write
             && grant.dir == artifact_dir

@@ -636,22 +636,21 @@ impl TuiApp {
             .read()
             .unwrap()
             .session_path_grants()
-            .to_vec()
     }
 
     pub(crate) fn grant_session_path(
         &mut self,
-        mode: protocol::AgentMode,
+        mode: Option<protocol::AgentMode>,
         tool: String,
         access: smelt_core::permissions::PathAccess,
         dir: PathBuf,
     ) {
-        self.core
-            .permissions
-            .approvals
-            .write()
-            .unwrap()
-            .add_session_path_grant(mode, tool, access, dir);
+        let mut approvals = self.core.permissions.approvals.write().unwrap();
+        if let Some(mode) = mode {
+            approvals.add_session_path_grant(mode, tool, access, dir);
+        } else {
+            approvals.add_session_path_trust(tool, access, dir);
+        }
     }
 
     pub(crate) fn sync_permissions(

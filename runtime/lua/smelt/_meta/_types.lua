@@ -400,10 +400,10 @@
 ---@field tool string Tool name the rule applies to (e.g. `"bash"`). Special value `"directory"` grants generic path access.
 ---@field pattern string Pattern matched against the tool's argument bucket.
 
---- A mode/tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. Write grants also allow that tool to write under `path_prefix` in read-only modes.
+--- A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, write grants also allow that tool to write under `path_prefix` in that read-only mode.
 ---@class smelt.permissions.SessionPathGrant
 ---@field kind string Grant kind. Currently only `"path"` is supported.
----@field mode string Mode the grant applies in, e.g. `"plan"`.
+---@field mode? string Optional mode for read-only write exceptions, e.g. `"plan"`. Omit for mode-independent path trust.
 ---@field tool string Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`.
 ---@field access string Path access granted: `"read"` or `"write"`.
 ---@field path_prefix string Directory prefix covered by the grant.
@@ -411,7 +411,7 @@
 --- Spec for `smelt.permissions.sync`.
 ---@class smelt.permissions.SyncSpec
 ---@field session? smelt.permissions.SessionEntry[] Session entries; applied for this run only.
----@field path_grants? smelt.permissions.SessionPathGrant[] Mode/tool-specific session path grants; applied for this run only.
+---@field path_grants? smelt.permissions.SessionPathGrant[] Tool-specific session path grants; applied for this run only.
 ---@field workspace? smelt.permissions.WorkspaceRule[] Workspace rules; persisted to disk under the current cwd.
 
 --- A workspace permission rule (one tool with N patterns, persisted to disk).

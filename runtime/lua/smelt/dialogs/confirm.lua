@@ -41,11 +41,60 @@ local function render_bash_header(buf, tool_name, command, desc, width)
   end
 end
 
+local function summary_text(summary_lines)
+  local out = {}
+  for _, line in ipairs(summary_lines or {}) do
+    local parts = {}
+    for _, span in ipairs(line) do
+      if not span.title_suffix then
+        parts[#parts + 1] = tostring(span.text or "")
+      end
+    end
+    out[#out + 1] = table.concat(parts)
+  end
+  return table.concat(out, "\n")
+end
+
+local function render_label_value_header(buf, tool_name, summary_lines, desc, width)
+  local value = summary_text(summary_lines)
+  if value == "" then
+    local lines = { {
+      { text = tool_name, style = { hl = "SmeltAccent" } },
+      { text = ":" },
+    } }
+    if type(desc) == "string" and desc ~= "" then
+      lines[#lines + 1] = { { text = desc, style = { dim = true } } }
+    end
+    buf:styled(lines)
+    return
+  end
+
+  local lines = {}
+  for _, row in ipairs(label_value.rows(tool_name, value, width, { separator = ": " })) do
+    local spans
+    if row.is_first then
+      spans = {
+        { text = tool_name, style = { hl = "SmeltAccent" } },
+        { text = ": " },
+      }
+    else
+      spans = { { text = row.label } }
+    end
+    spans[#spans + 1] = { text = row.value }
+    lines[#lines + 1] = spans
+  end
+
+  if type(desc) == "string" and desc ~= "" then
+    lines[#lines + 1] = { { text = desc, style = { dim = true } } }
+  end
+
+  buf:styled(lines)
+end
+
 -- Compose the body header: `tool_name: ` followed by the tool's
--- `summary(args)` output. Continuation lines of a multi-line non-bash summary
--- are indented to align under the first character after the colon. Bash command
--- text wraps to the available dialog width, with continuation lines aligned to
--- the command column. An optional dim subtitle from `args.description` follows.
+-- `summary(args)` output. Continuation lines are indented to align under the
+-- first value column. Bash command text keeps a specialized renderer so it can
+-- preserve command syntax highlighting and its timeout suffix.
 local function render_header(buf, req, width)
   local tool_name = req.tool_name or ""
   local command = req.args and req.args.command
@@ -55,40 +104,7 @@ local function render_header(buf, req, width)
     return
   end
 
-  local indent = string.rep(" ", #tool_name + 2)
-
-  local lines = {}
-  local summary_lines = req.summary or {}
-  if #summary_lines == 0 then
-    lines[#lines + 1] = {
-      { text = tool_name, style = { hl = "SmeltAccent" } },
-      { text = ":" },
-    }
-  else
-    for i, line in ipairs(summary_lines) do
-      local new_line
-      if i == 1 then
-        new_line = {
-          { text = tool_name, style = { hl = "SmeltAccent" } },
-          { text = ": " },
-        }
-      else
-        new_line = { { text = indent } }
-      end
-      for _, span in ipairs(line) do
-        if not span.title_suffix then
-          new_line[#new_line + 1] = span
-        end
-      end
-      lines[#lines + 1] = new_line
-    end
-  end
-
-  if type(desc) == "string" and desc ~= "" then
-    lines[#lines + 1] = { { text = desc, style = { dim = true } } }
-  end
-
-  buf:styled(lines)
+  render_label_value_header(buf, tool_name, req.summary or {}, desc, width)
 end
 
 -- Drive the bundled tool-permission confirm dialog for `handle_id`.

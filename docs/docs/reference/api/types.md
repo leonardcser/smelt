@@ -580,12 +580,12 @@ A single session permission entry (one approved tool/pattern pair).
 
 ### `smelt.permissions.SessionPathGrant`
 
-A mode/tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. Write grants also allow that tool to write under `path_prefix` in read-only modes.
+A tool-specific session path grant. Grants are in-memory only and can satisfy workspace path checks for the matching tool. When `mode` is set, write grants also allow that tool to write under `path_prefix` in that read-only mode.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `kind` | `string` | yes | Grant kind. Currently only `"path"` is supported. |
-| `mode` | `string` | yes | Mode the grant applies in, e.g. `"plan"`. |
+| `mode` | `string` |  | Optional mode for read-only write exceptions, e.g. `"plan"`. Omit for mode-independent path trust. |
 | `tool` | `string` | yes | Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`. |
 | `access` | `string` | yes | Path access granted: `"read"` or `"write"`. |
 | `path_prefix` | `string` | yes | Directory prefix covered by the grant. |
@@ -597,7 +597,7 @@ Spec for `smelt.permissions.sync`.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `session` | [smelt.permissions.SessionEntry[]](types.md#smeltpermissionssessionentry) |  | Session entries; applied for this run only. |
-| `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) |  | Mode/tool-specific session path grants; applied for this run only. |
+| `path_grants` | [smelt.permissions.SessionPathGrant[]](types.md#smeltpermissionssessionpathgrant) |  | Tool-specific session path grants; applied for this run only. |
 | `workspace` | [smelt.permissions.WorkspaceRule[]](types.md#smeltpermissionsworkspacerule) |  | Workspace rules; persisted to disk under the current cwd. |
 
 ### `smelt.permissions.WorkspaceRule`

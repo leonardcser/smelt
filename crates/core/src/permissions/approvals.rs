@@ -15,17 +15,33 @@ use std::path::{Path, PathBuf};
 pub struct RuntimeApprovals {
     session_tools: HashMap<String, Vec<glob::Pattern>>,
     session_dirs: Vec<PathBuf>,
-    session_path_grants: Vec<SessionPathGrant>,
+    session_path_trusts: Vec<SessionPathTrust>,
+    session_path_write_exceptions: Vec<SessionPathWriteException>,
     workspace_tools: HashMap<String, Vec<glob::Pattern>>,
     workspace_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPathGrant {
-    pub mode: AgentMode,
+    pub mode: Option<AgentMode>,
     pub tool: String,
     pub access: PathAccess,
     pub dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionPathTrust {
+    mode: Option<AgentMode>,
+    tool: String,
+    access: PathAccess,
+    dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionPathWriteException {
+    mode: AgentMode,
+    tool: String,
+    dir: PathBuf,
 }
 
 impl RuntimeApprovals {
@@ -64,19 +80,58 @@ impl RuntimeApprovals {
         dir: PathBuf,
     ) {
         let tool = tool.into();
+        self.add_session_path_trust_inner(
+            Some(mode.clone()),
+            tool.clone(),
+            access.clone(),
+            dir.clone(),
+        );
+        if access == PathAccess::Write {
+            self.add_session_path_write_exception(mode, tool, dir);
+        }
+    }
+
+    pub fn add_session_path_trust(
+        &mut self,
+        tool: impl Into<String>,
+        access: PathAccess,
+        dir: PathBuf,
+    ) {
+        self.add_session_path_trust_inner(None, tool.into(), access, dir);
+    }
+
+    fn add_session_path_trust_inner(
+        &mut self,
+        mode: Option<AgentMode>,
+        tool: String,
+        access: PathAccess,
+        dir: PathBuf,
+    ) {
         let dir = normalize_approval_dir(&dir);
-        if !self.session_path_grants.iter().any(|existing| {
+        if !self.session_path_trusts.iter().any(|existing| {
             existing.mode == mode
                 && existing.tool == tool
                 && existing.access == access
                 && workspace::paths_equivalent(&existing.dir, &dir)
         }) {
-            self.session_path_grants.push(SessionPathGrant {
+            self.session_path_trusts.push(SessionPathTrust {
                 mode,
                 tool,
                 access,
                 dir,
             });
+        }
+    }
+
+    fn add_session_path_write_exception(&mut self, mode: AgentMode, tool: String, dir: PathBuf) {
+        let dir = normalize_approval_dir(&dir);
+        if !self.session_path_write_exceptions.iter().any(|existing| {
+            existing.mode == mode
+                && existing.tool == tool
+                && workspace::paths_equivalent(&existing.dir, &dir)
+        }) {
+            self.session_path_write_exceptions
+                .push(SessionPathWriteException { mode, tool, dir });
         }
     }
 
@@ -94,7 +149,8 @@ impl RuntimeApprovals {
     pub fn clear_session(&mut self) {
         self.session_tools.clear();
         self.session_dirs.clear();
-        self.session_path_grants.clear();
+        self.session_path_trusts.clear();
+        self.session_path_write_exceptions.clear();
     }
 
     /// Load workspace approvals from pre-compiled patterns (called at startup
@@ -236,8 +292,16 @@ impl RuntimeApprovals {
         &self.session_dirs
     }
 
-    pub fn session_path_grants(&self) -> &[SessionPathGrant] {
-        &self.session_path_grants
+    pub fn session_path_grants(&self) -> Vec<SessionPathGrant> {
+        self.session_path_trusts
+            .iter()
+            .map(|grant| SessionPathGrant {
+                mode: grant.mode.clone(),
+                tool: grant.tool.clone(),
+                access: grant.access.clone(),
+                dir: grant.dir.clone(),
+            })
+            .collect()
     }
 
     /// Rebuild session state from flattened entries (used by permissions sync UI).
@@ -252,13 +316,15 @@ impl RuntimeApprovals {
             .into_iter()
             .map(|d| normalize_approval_dir(&d))
             .collect();
-        self.session_path_grants = path_grants
-            .into_iter()
-            .map(|grant| SessionPathGrant {
-                dir: normalize_approval_dir(&grant.dir),
-                ..grant
-            })
-            .collect();
+        self.session_path_trusts.clear();
+        self.session_path_write_exceptions.clear();
+        for grant in path_grants {
+            if let Some(mode) = grant.mode {
+                self.add_session_path_grant(mode, grant.tool, grant.access, grant.dir);
+            } else {
+                self.add_session_path_trust(grant.tool, grant.access, grant.dir);
+            }
+        }
     }
 
     pub fn session_path_grant_approved_for_path(
@@ -268,10 +334,26 @@ impl RuntimeApprovals {
         access: &PathAccess,
         path: &Path,
     ) -> bool {
-        self.session_path_grants.iter().any(|grant| {
-            grant.mode == *mode
+        self.session_path_trusts.iter().any(|grant| {
+            grant
+                .mode
+                .as_ref()
+                .is_none_or(|grant_mode| grant_mode == mode)
                 && grant.tool == tool
                 && grant.access == *access
+                && workspace::path_prefix_matches(&grant.dir, path)
+        })
+    }
+
+    pub fn session_path_write_exception_approved_for_path(
+        &self,
+        mode: &AgentMode,
+        tool: &str,
+        path: &Path,
+    ) -> bool {
+        self.session_path_write_exceptions.iter().any(|grant| {
+            grant.mode == *mode
+                && grant.tool == tool
                 && workspace::path_prefix_matches(&grant.dir, path)
         })
     }

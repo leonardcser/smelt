@@ -105,6 +105,23 @@ app_story!(edit_file_permission_dialog_with_diff, |ctx| {
     ctx.assert_snapshot();
 });
 
+app_story!(edit_file_long_path_permission_dialog_wraps, |ctx| {
+    ctx.set_viewport(70, 24);
+    ctx.request_permission(
+        "edit_file",
+        args([
+            (
+                "file_path",
+                json!("/home/dev/.local/state/smelt/sessions/93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md"),
+            ),
+            ("old_string", json!("# Plan\n")),
+            ("new_string", json!("# Updated plan\n")),
+        ]),
+        vec![],
+    );
+    ctx.assert_snapshot();
+});
+
 app_story!(edit_file_permission_dialog_multiline_diff, |ctx| {
     ctx.set_viewport(80, 28);
     ctx.request_permission(
@@ -251,6 +268,23 @@ app_story!(read_file_permission_dialog, |ctx| {
             ("file_path", json!("crates/tui/src/app.rs")),
             ("offset", json!(120)),
             ("limit", json!(40)),
+        ]),
+        vec![],
+    );
+    ctx.assert_snapshot();
+});
+
+app_story!(read_file_long_path_permission_dialog_wraps, |ctx| {
+    ctx.set_viewport(70, 18);
+    ctx.request_permission(
+        "read_file",
+        args([
+            (
+                "file_path",
+                json!("/home/dev/.local/state/smelt/sessions/93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md"),
+            ),
+            ("offset", json!(1)),
+            ("limit", json!(80)),
         ]),
         vec![],
     );

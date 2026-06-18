@@ -19,16 +19,17 @@ pub struct LuaPermissionSessionEntry {
     pub pattern: String,
 }
 
-/// A mode/tool-specific session path grant. Grants are in-memory only and can
-/// satisfy workspace path checks for the matching tool. Write grants also allow
-/// that tool to write under `path_prefix` in read-only modes.
+/// A tool-specific session path grant. Grants are in-memory only and can
+/// satisfy workspace path checks for the matching tool. When `mode` is set,
+/// write grants also allow that tool to write under `path_prefix` in that
+/// read-only mode.
 #[derive(Debug, LuaOpts)]
 #[lua(name = "smelt.permissions.SessionPathGrant")]
 pub struct LuaPermissionSessionPathGrant {
     /// Grant kind. Currently only `"path"` is supported.
     pub kind: String,
-    /// Mode the grant applies in, e.g. `"plan"`.
-    pub mode: String,
+    /// Optional mode for read-only write exceptions, e.g. `"plan"`. Omit for mode-independent path trust.
+    pub mode: Option<String>,
     /// Tool name the grant applies to, e.g. `"read_file"` or `"edit_file"`.
     pub tool: String,
     /// Path access granted: `"read"` or `"write"`.
@@ -93,7 +94,7 @@ pub struct LuaPermissionSyncSpec {
     /// Session entries; applied for this run only.
     #[lua(default)]
     pub session: Vec<LuaPermissionSessionEntry>,
-    /// Mode/tool-specific session path grants; applied for this run only.
+    /// Tool-specific session path grants; applied for this run only.
     #[lua(default)]
     pub path_grants: Vec<LuaPermissionSessionPathGrant>,
     /// Workspace rules; persisted to disk under the current cwd.
@@ -179,7 +180,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "list",
-        "Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = \"path\", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
+        "Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = \"path\", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.",
         &[],
         |lua, ()| -> LuaResult<LuaPermissionList> {
             let (session_entries, path_grants, cwd) = crate::lua::try_with_app(|app| {
@@ -204,7 +205,9 @@ pub(super) fn register(
             for (i, grant) in path_grants.into_iter().enumerate() {
                 let row = lua.create_table()?;
                 row.set("kind", "path")?;
-                row.set("mode", grant.mode.as_str())?;
+                if let Some(mode) = grant.mode.as_ref() {
+                    row.set("mode", mode.as_str())?;
+                }
                 row.set("tool", grant.tool)?;
                 row.set("access", path_access_label(&grant.access))?;
                 row.set("path_prefix", grant.dir.display().to_string())?;
@@ -263,7 +266,7 @@ pub(super) fn register(
     )?;
     m.fn_(
         "grant_session",
-        "Add one session-scoped grant. Currently supports `{ kind = \"path\", mode, tool, access = \"read\"|\"write\", path_prefix }` for mode/tool-specific path access.",
+        "Add one session-scoped grant. Currently supports `{ kind = \"path\", mode?, tool, access = \"read\"|\"write\", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` for a read-only write exception in that mode.",
         &["grant"],
         |_, grant: LuaPermissionSessionPathGrant| -> LuaResult<()> {
             let grant = lua_path_grant_to_runtime(grant)?;
@@ -347,7 +350,7 @@ fn lua_path_grant_to_runtime(
         ));
     }
     Ok(smelt_core::permissions::SessionPathGrant {
-        mode: parse_grant_mode(&grant.mode)?,
+        mode: grant.mode.map(|mode| parse_grant_mode(&mode)).transpose()?,
         tool: grant.tool,
         access: parse_path_access(&grant.access)?,
         dir: std::path::PathBuf::from(grant.path_prefix),

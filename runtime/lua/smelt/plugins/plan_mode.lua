@@ -163,22 +163,22 @@ local function manifest_table(title, slug, status, created_at, updated_at)
   }
 end
 
+local function grant_session_path(tool, access, dir, mode)
+  local grant = {
+    kind        = "path",
+    tool        = tool,
+    access      = access,
+    path_prefix = dir,
+  }
+  if mode then grant.mode = mode end
+  smelt.permissions.grant_session(grant)
+end
+
 local function grant_plan_dir(dir)
   if not smelt.permissions or not smelt.permissions.grant_session then return end
-  smelt.permissions.grant_session({
-    kind        = "path",
-    mode        = "plan",
-    tool        = "read_file",
-    access      = "read",
-    path_prefix = dir,
-  })
-  smelt.permissions.grant_session({
-    kind        = "path",
-    mode        = "plan",
-    tool        = "edit_file",
-    access      = "write",
-    path_prefix = dir,
-  })
+  grant_session_path("read_file", "read", dir)
+  grant_session_path("edit_file", "write", dir)
+  grant_session_path("edit_file", "write", dir, "plan")
 end
 
 local function read_manifest(path)
@@ -348,7 +348,7 @@ local function register_present_plan()
           { leaf = md_leaf, height = "fit" },
         },
         bottom_panels = {
-          { leaf = options_leaf, height = "fit" },
+          { leaf = options_leaf, height = "fit", border = { style = "dashed", top = "Comment" } },
         },
       })
 

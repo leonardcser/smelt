@@ -1169,6 +1169,60 @@ fn session_path_grant_covers_matching_outside_workspace_tool_path() {
 }
 
 #[test]
+fn session_path_trust_covers_matching_outside_workspace_tool_path_in_all_modes() {
+    let p = perms_with_workspace("/home/user/project");
+    let args = args_with("file_path", "/tmp/plan.md");
+
+    p.approvals.write().unwrap().add_session_path_trust(
+        "read_file",
+        PathAccess::Read,
+        PathBuf::from("/tmp"),
+    );
+
+    for mode in [normal(), plan(), apply()] {
+        let outcome = p.evaluate_tool_with_approvals(mode, ToolOrigin::Lua, "read_file", &args);
+        assert_eq!(outcome.decision, Decision::Allow);
+        assert!(outcome.missing_requirements.is_empty());
+    }
+}
+
+#[test]
+fn session_path_grant_removes_path_requirement_but_not_tool_ask() {
+    let mut p = perms_with_workspace("/home/user/project");
+    p.modes.get_mut("normal").unwrap().tools.remove("edit_file");
+    let args = args_with("file_path", "/tmp/plan.md");
+
+    let before = p.evaluate_tool(normal(), ToolOrigin::Lua, "edit_file", &args);
+    assert_eq!(before.decision, Decision::Ask);
+    assert_eq!(
+        before.missing_requirements,
+        vec![
+            PermissionRequirement::Tool {
+                tool: "edit_file".to_string()
+            },
+            PermissionRequirement::PathPrefix {
+                dir: canonical_abs("/tmp")
+            }
+        ]
+    );
+
+    p.approvals.write().unwrap().add_session_path_trust(
+        "edit_file",
+        PathAccess::Write,
+        PathBuf::from("/tmp"),
+    );
+
+    let after = p.evaluate_tool_with_approvals(normal(), ToolOrigin::Lua, "edit_file", &args);
+    assert_eq!(after.decision, Decision::Ask);
+    assert_eq!(
+        after.missing_requirements,
+        vec![PermissionRequirement::Tool {
+            tool: "edit_file".to_string()
+        }]
+    );
+}
+
+#[test]
 fn session_path_grant_does_not_cover_other_outside_workspace_tools() {
     let p = perms_with_workspace("/home/user/project");
     let args = args_with("file_path", "/tmp/plan.md");
@@ -1614,6 +1668,24 @@ fn read_only_mode_generic_directory_approval_does_not_allow_writes() {
         .write()
         .unwrap()
         .add_session_dir(approved_dir.clone());
+
+    let outcome = p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args);
+    assert_eq!(outcome.decision, Decision::Deny);
+}
+
+#[test]
+fn read_only_mode_path_trust_does_not_allow_writes() {
+    let p = read_only_permissions();
+    let temp = tempfile::tempdir().unwrap();
+    let approved_dir = temp.path().join("approved");
+    std::fs::create_dir_all(&approved_dir).unwrap();
+    let args = args_with("file_path", approved_dir.join("notes.md").to_str().unwrap());
+
+    p.approvals.write().unwrap().add_session_path_trust(
+        "edit_file",
+        PathAccess::Write,
+        approved_dir.clone(),
+    );
 
     let outcome = p.evaluate_tool_with_approvals(plan(), ToolOrigin::Lua, "edit_file", &args);
     assert_eq!(outcome.decision, Decision::Deny);

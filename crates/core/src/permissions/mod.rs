@@ -1080,10 +1080,9 @@ fn read_only_session_write_approved(
         match effect {
             ToolEffect::Fs(path) if path.access == PathAccess::Write => {
                 saw_write = true;
-                if !approvals.session_path_grant_approved_for_path(
+                if !approvals.session_path_write_exception_approved_for_path(
                     mode,
                     tool_name,
-                    &PathAccess::Write,
                     &display_dir_for_effect(path),
                 ) {
                     return false;

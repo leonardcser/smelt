@@ -15,11 +15,11 @@ permissions.check = nil
 ---@type fun(mode_str: string, name: string): string
 permissions.check_tool = nil
 
---- Add one session-scoped grant. Currently supports `{ kind = "path", mode, tool, access = "read"|"write", path_prefix }` for mode/tool-specific path access.
+--- Add one session-scoped grant. Currently supports `{ kind = "path", mode?, tool, access = "read"|"write", path_prefix }` for tool-specific path access. Omit `mode` for mode-independent path trust; set `mode` for a read-only write exception in that mode.
 ---@type fun(grant: smelt.permissions.SessionPathGrant): nil
 permissions.grant_session = nil
 
---- Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.
+--- Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`. Session entries and path grants come from runtime approvals; workspace entries come from the on-disk store rooted at the current cwd.
 ---@type fun(): smelt.permissions.ListResult
 permissions.list = nil
 

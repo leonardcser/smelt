@@ -1389,7 +1389,7 @@ List session/workspace rules and sync a Lua-built ruleset back through the App.
 - `smelt.permissions.grant_session` :: `fun(grant: smelt.permissions.SessionPathGrant): nil`
   Add one session-scoped grant.
 - `smelt.permissions.list` :: `fun(): smelt.permissions.ListResult`
-  Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`.
+  Return current permission rules as `{ session = { { tool, pattern } }, path_grants = { { kind = "path", mode?, tool, access, path_prefix } }, workspace = { { tool, patterns } } }`.
 - `smelt.permissions.set_rules` :: `fun(spec: smelt.permissions.RulesSpec): nil`
   Install the per-mode permission ruleset.
 - `smelt.permissions.sync` :: `fun(spec: smelt.permissions.SyncSpec): nil`
