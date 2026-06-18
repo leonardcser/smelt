@@ -1339,6 +1339,67 @@ mod document_tests {
         assert!(buf.lines().iter().any(|line| line == "tail two"));
     }
 
+    #[test]
+    fn transcript_action_at_materializes_exact_unrendered_span() {
+        let lua = LuaRuntime::new();
+        let theme = Theme::default();
+        let url = "https://example.test/exact-action";
+        let target_index = 120usize;
+        let mut source = Transcript::new();
+        for index in 0..240 {
+            let content = if index == target_index {
+                format!("target [link]({url})")
+            } else {
+                format!("block {index}")
+            };
+            source.push(Block::Text { content });
+        }
+        let mut document = TranscriptDocument::from_transcript(source);
+        let (_id, target_row, target_rows) = document
+            .materialize_block_layout(&lua, 80)
+            .into_iter()
+            .find(|(id, _, _)| *id == BlockId::new(target_index as u64))
+            .expect("target block row");
+        let target_display_rows =
+            document.display_rows_for_range(&lua, 80, &theme, target_row, target_rows);
+        let (row_offset, byte_col) = target_display_rows
+            .rows
+            .iter()
+            .enumerate()
+            .find_map(|(offset, row)| {
+                row.actions.first().map(|action| {
+                    (
+                        offset as crate::smelt_edit::RowIndex,
+                        crate::smelt_edit::text::cell_to_byte(&row.text, action.cell_start),
+                    )
+                })
+            })
+            .expect("target action span");
+        let pos = crate::smelt_edit::DocPosition {
+            row: target_row.saturating_add(row_offset),
+            byte_col,
+        };
+
+        document.projection.reset_counters();
+        let action = {
+            let mut display_document =
+                TranscriptDisplayDocument::new(&mut document, &lua, 80, &theme);
+            DisplayDocument::action_at(&mut display_document, pos)
+        };
+        let counters = document.projection.counters();
+
+        assert_eq!(
+            action,
+            Some(smelt_core::buffer::SpanAction::OpenUrl(url.to_string()))
+        );
+        assert_eq!(counters.full_row_builds, 0);
+        assert_eq!(counters.max_range_materialized_blocks, 1);
+        assert!(
+            counters.max_range_materialized_rows <= target_rows.saturating_add(1) as usize,
+            "action hit testing should render only the target block and its leading gap, counters: {counters:?}"
+        );
+    }
+
     fn transcript_records(count: usize) -> Vec<TranscriptBlockRecord> {
         let mut source = Transcript::new();
         for idx in 0..count {
