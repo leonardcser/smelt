@@ -112,7 +112,7 @@ app_story!(edit_file_long_path_permission_dialog_wraps, |ctx| {
         args([
             (
                 "file_path",
-                json!("/home/dev/.local/state/smelt/sessions/93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md"),
+                json!("/tmp/smelt-storybook-nonexistent-session-93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md"),
             ),
             ("old_string", json!("# Plan\n")),
             ("new_string", json!("# Updated plan\n")),
@@ -281,7 +281,7 @@ app_story!(read_file_long_path_permission_dialog_wraps, |ctx| {
         args([
             (
                 "file_path",
-                json!("/home/dev/.local/state/smelt/sessions/93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md"),
+                json!("/tmp/smelt-storybook-nonexistent-session-93e4220e873c55398e6e22ff065d617e27efc1a9b326032e323d00a522764901/plans/20260618-083946-virtual-transcript-performance/plan.md"),
             ),
             ("offset", json!(1)),
             ("limit", json!(80)),
