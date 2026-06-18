@@ -14,7 +14,7 @@ use crate::smelt_edit::{
 use smelt_buffer::coords::{copy_byte_range, CopyRangeAccumulator, CopyRow};
 use smelt_core::buffer::{LineDecoration, Span, SpanMeta};
 use smelt_core::content::highlight::InlineOptions;
-use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
+use smelt_core::transcript_model::{Block, BlockHistory, BlockId, LayoutKey, ViewState};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -781,11 +781,39 @@ fn estimate_text_rows(text: &str, width: u16) -> RowIndex {
     let width = usize::from(width.max(1));
     text.lines()
         .map(|line| {
-            let cells = smelt_buffer::text::byte_to_cell(line, line.len());
+            let cells = if line.is_ascii() {
+                line.len()
+            } else {
+                smelt_buffer::text::byte_to_cell(line, line.len())
+            };
             cells.max(1).div_ceil(width) as RowIndex
         })
         .sum::<RowIndex>()
         .max(1)
+}
+
+fn estimate_text_rows_with_prefix(prefix: &str, text: &str, width: u16) -> RowIndex {
+    let width = usize::from(width.max(1));
+    let prefix_cells = if prefix.is_ascii() {
+        prefix.len()
+    } else {
+        smelt_buffer::text::byte_to_cell(prefix, prefix.len())
+    };
+    let mut rows = 0;
+    let mut first = true;
+    for line in text.lines() {
+        let mut cells = if line.is_ascii() {
+            line.len()
+        } else {
+            smelt_buffer::text::byte_to_cell(line, line.len())
+        };
+        if first {
+            cells = cells.saturating_add(prefix_cells);
+            first = false;
+        }
+        rows += cells.max(1).div_ceil(width) as RowIndex;
+    }
+    rows.max(1)
 }
 
 fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> RowIndex {
@@ -794,14 +822,28 @@ fn estimate_block_text_rows(history: &BlockHistory, id: BlockId, width: u16) -> 
         .and_then(|call_id| history.tool_state(call_id))
         .and_then(|state| state.output.as_ref())
         .map(|output| output.content.as_str());
-    tool_output
-        .map(|text| estimate_text_rows(text, width))
-        .or_else(|| {
-            history
-                .raw_text(id)
-                .map(|text| estimate_text_rows(&text, width))
-        })
-        .unwrap_or(1)
+    if let Some(text) = tool_output {
+        return estimate_text_rows(text, width);
+    }
+    match history.block(id) {
+        Some(Block::User { text, .. })
+        | Some(Block::ProcessStatus { text, .. })
+        | Some(Block::Text { content: text })
+        | Some(Block::Thinking { content: text })
+        | Some(Block::Compacted { summary: text })
+        | Some(Block::CompactionPreview { summary: text })
+        | Some(Block::CodeLine { content: text, .. }) => estimate_text_rows(text, width),
+        Some(Block::Mode { text, icon, .. }) => estimate_text_rows_with_prefix(icon, text, width),
+        Some(Block::Exec { command, output }) => {
+            let command_rows = estimate_text_rows_with_prefix("$ ", command, width);
+            if output.is_empty() {
+                command_rows
+            } else {
+                command_rows.saturating_add(estimate_text_rows(output, width))
+            }
+        }
+        Some(Block::ToolDraft { .. }) | Some(Block::ToolCall { .. }) | None => 1,
+    }
 }
 
 fn estimate_node_height(
@@ -930,17 +972,20 @@ fn render_cached_layout_to_buffer(
 ) -> Option<(Buffer, usize)> {
     let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-    let outcome = render_block_into(
-        &mut buf,
-        layout,
-        RenderCtx {
-            width: key.width,
-            view_state: layout_view_state(id, key.view_state, history),
-            theme,
-            history: Some(history),
-            inline_options: inline_options.clone(),
-        },
-    );
+    let outcome = {
+        let _perf = smelt_perf::perf::begin("transcript:display_model:render_full_to_buffer");
+        render_block_into(
+            &mut buf,
+            layout,
+            RenderCtx {
+                width: key.width,
+                view_state: layout_view_state(id, key.view_state, history),
+                theme,
+                history: Some(history),
+                inline_options: inline_options.clone(),
+            },
+        )
+    };
     Some((buf, outcome.line_count))
 }
 
@@ -959,22 +1004,9 @@ fn render_cached_layout_range_to_buffer(
 ) -> Option<(Buffer, usize)> {
     let layout = display_model.get(id, key, renderer_generation, renderer_cache_key)?;
     let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-    let outcome = render_block_range_into(
-        &mut buf,
-        layout,
-        RenderCtx {
-            width: key.width,
-            view_state: layout_view_state(id, key.view_state, history),
-            theme,
-            history: Some(history),
-            inline_options: inline_options.clone(),
-        },
-        row_to_usize(row_start),
-        row_to_usize(row_count),
-    );
-    if outcome.line_count == 0 && row_count > 0 {
-        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
-        let outcome = render_block_into(
+    let outcome = {
+        let _perf = smelt_perf::perf::begin("transcript:display_model:render_range_to_buffer");
+        render_block_range_into(
             &mut buf,
             layout,
             RenderCtx {
@@ -984,7 +1016,26 @@ fn render_cached_layout_range_to_buffer(
                 history: Some(history),
                 inline_options: inline_options.clone(),
             },
-        );
+            row_to_usize(row_start),
+            row_to_usize(row_count),
+        )
+    };
+    if outcome.line_count == 0 && row_count > 0 {
+        let mut buf = Buffer::new(BufId(0), BufCreateOpts::default());
+        let outcome = {
+            let _perf = smelt_perf::perf::begin("transcript:display_model:render_full_fallback");
+            render_block_into(
+                &mut buf,
+                layout,
+                RenderCtx {
+                    width: key.width,
+                    view_state: layout_view_state(id, key.view_state, history),
+                    theme,
+                    history: Some(history),
+                    inline_options: inline_options.clone(),
+                },
+            )
+        };
         let start = row_to_usize(row_start).min(outcome.line_count);
         let end = start
             .saturating_add(row_to_usize(row_count))
@@ -2260,11 +2311,14 @@ impl TranscriptProjection {
         let row_base = materialized.row_base;
         let total_rows = materialized.total_rows;
         let materialized_rows = materialized.texts.len() as RowIndex;
-        buf.set_all_lines(materialized.texts);
-        for p in materialized.pending {
-            apply_row_highlights(buf, p.row, p.highlights);
-            if p.decoration != LineDecoration::default() {
-                buf.set_decoration(p.row, p.decoration);
+        {
+            let _perf = smelt_perf::perf::begin("transcript:project_visible_range:buffer_install");
+            buf.set_all_lines(materialized.texts);
+            for p in materialized.pending {
+                apply_row_highlights(buf, p.row, p.highlights);
+                if p.decoration != LineDecoration::default() {
+                    buf.set_decoration(p.row, p.decoration);
+                }
             }
         }
         self.visible.block_layout = materialized.layout;
@@ -2445,30 +2499,34 @@ impl TranscriptProjection {
             let block_anchors = block_id.and_then(|id| {
                 (local_row_start == 0).then(|| rendered_row_anchors(&node_buf, id, rendered_rows))
             });
-            for r in 0..rendered_rows {
-                let row_idx = rows.texts.len();
-                rows.texts
-                    .push(node_buf.get_line(r).unwrap_or("").to_string());
-                let h = node_buf.highlights_at(r);
-                let dec = node_buf.decoration_at(r).clone();
-                if !h.is_empty() || dec != LineDecoration::default() {
-                    rows.pending.push(PendingRow {
-                        row: row_idx,
-                        highlights: h,
-                        decoration: dec,
-                    });
+            {
+                let _perf =
+                    smelt_perf::perf::begin("transcript:project_visible_range:clone_display_rows");
+                for r in 0..rendered_rows {
+                    let row_idx = rows.texts.len();
+                    rows.texts
+                        .push(node_buf.get_line(r).unwrap_or("").to_string());
+                    let h = node_buf.highlights_at(r);
+                    let dec = node_buf.decoration_at(r).clone();
+                    if !h.is_empty() || dec != LineDecoration::default() {
+                        rows.pending.push(PendingRow {
+                            row: row_idx,
+                            highlights: h,
+                            decoration: dec,
+                        });
+                    }
+                    rows.row_anchors.push(block_id.map(|id| {
+                        block_anchors
+                            .as_ref()
+                            .map(|anchors| anchors[r])
+                            .unwrap_or_else(|| {
+                                ProjectionAnchor::rendered_block_without_display_offset(
+                                    id,
+                                    local_row_start.saturating_add(r as RowIndex),
+                                )
+                            })
+                    }));
                 }
-                rows.row_anchors.push(block_id.map(|id| {
-                    block_anchors
-                        .as_ref()
-                        .map(|anchors| anchors[r])
-                        .unwrap_or_else(|| {
-                            ProjectionAnchor::rendered_block_without_display_offset(
-                                id,
-                                local_row_start.saturating_add(r as RowIndex),
-                            )
-                        })
-                }));
             }
         }
         if let Some(block_id) = block_id {
@@ -6340,6 +6398,39 @@ mod tests {
         }
     }
 
+    fn print_layout_alloc_snapshot(workload: &str, snapshot: &smelt_perf::perf::Snapshot) {
+        for row in snapshot
+            .allocs
+            .iter()
+            .filter(|row| row.label.starts_with("transcript:"))
+        {
+            eprintln!(
+                "TRANSCRIPT_LAYOUT_ALLOC workload={} metric={} count={} allocs_last={} allocs_total={} bytes_last={} bytes_total={} bytes_p95={} bytes_max={}",
+                workload,
+                row.label,
+                row.count,
+                row.allocs_last,
+                row.allocs_total,
+                row.bytes_last,
+                row.bytes_total,
+                row.bytes_p95,
+                row.bytes_max
+            );
+            eprintln!(
+                "TRANSCRIPT_LAYOUT_ALLOC_JSON {{\"type\":\"layout_alloc\",\"workload\":\"{}\",\"metric\":\"{}\",\"count\":{},\"allocs_last\":{},\"allocs_total\":{},\"bytes_last\":{},\"bytes_total\":{},\"bytes_p95\":{},\"bytes_max\":{}}}",
+                workload,
+                row.label,
+                row.count,
+                row.allocs_last,
+                row.allocs_total,
+                row.bytes_last,
+                row.bytes_total,
+                row.bytes_p95,
+                row.bytes_max
+            );
+        }
+    }
+
     fn transcript_bench_runs() -> usize {
         std::env::var("SMELT_TRANSCRIPT_BENCH_RUNS")
             .ok()
@@ -6607,6 +6698,8 @@ mod tests {
         );
         let first_ms = elapsed_ms(first_start.elapsed());
         let first_alloc = smelt_perf::alloc::delta(alloc_start, smelt_perf::alloc::snapshot());
+        let first_snapshot = smelt_perf::perf::snapshot();
+        print_layout_alloc_snapshot(workload.name, &first_snapshot);
         let first_counters = cold.counters();
 
         cold.reset_counters();

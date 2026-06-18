@@ -1,7 +1,8 @@
 use mlua::{Lua, Table, Value};
 use smelt_core::lua::TranscriptGroupSpec;
 use smelt_core::transcript_model::{BlockHistory, BlockId, LayoutKey, ViewState};
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -363,34 +364,39 @@ impl RenderPlan {
         group_generation: u64,
         group_cache_key: Option<u64>,
     ) -> Self {
-        let nodes = build_nodes(history, groups);
-        let index_by_id = nodes
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (node.id(), index))
-            .collect();
+        let _perf = smelt_perf::perf::begin("transcript:render_plan");
+        let nodes = {
+            let _perf = smelt_perf::perf::begin("transcript:render_plan:build_nodes");
+            build_nodes(history, groups)
+        };
+        let index_by_id = {
+            let _perf = smelt_perf::perf::begin("transcript:render_plan:index_by_id");
+            nodes
+                .iter()
+                .enumerate()
+                .map(|(index, node)| (node.id(), index))
+                .collect()
+        };
         let mut index_by_block_id = HashMap::new();
-        for (index, node) in nodes.iter().enumerate() {
-            match node {
-                RenderNode::Block { id, .. } => {
-                    index_by_block_id.insert(*id, index);
-                }
-                RenderNode::Group { child_ids, .. } => {
-                    for id in child_ids {
+        {
+            let _perf = smelt_perf::perf::begin("transcript:render_plan:index_by_block_id");
+            for (index, node) in nodes.iter().enumerate() {
+                match node {
+                    RenderNode::Block { id, .. } => {
                         index_by_block_id.insert(*id, index);
+                    }
+                    RenderNode::Group { child_ids, .. } => {
+                        for id in child_ids {
+                            index_by_block_id.insert(*id, index);
+                        }
                     }
                 }
             }
         }
-        let fingerprint = smelt_core::utils::hash_serializable(&PlanFingerprint {
-            group_generation,
-            group_cache_key,
-            node_ids: nodes.iter().map(RenderNode::id).collect(),
-            node_keys: nodes
-                .iter()
-                .map(|node| node_fingerprint(history, node))
-                .collect(),
-        });
+        let fingerprint = {
+            let _perf = smelt_perf::perf::begin("transcript:render_plan:fingerprint");
+            render_plan_fingerprint(history, &nodes, group_generation, group_cache_key)
+        };
         Self {
             history_generation: history.generation(),
             group_generation,
@@ -550,12 +556,21 @@ impl RenderPlan {
     }
 }
 
-#[derive(serde::Serialize)]
-struct PlanFingerprint {
+fn render_plan_fingerprint(
+    history: &BlockHistory,
+    nodes: &[RenderNode],
     group_generation: u64,
     group_cache_key: Option<u64>,
-    node_ids: Vec<RenderNodeId>,
-    node_keys: Vec<u64>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    group_generation.hash(&mut hasher);
+    group_cache_key.hash(&mut hasher);
+    nodes.len().hash(&mut hasher);
+    for node in nodes {
+        node.id().hash(&mut hasher);
+        node_fingerprint(history, node).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 #[derive(serde::Serialize)]
@@ -723,21 +738,27 @@ fn json_bucket_value(value: &serde_json::Value) -> String {
 
 fn node_fingerprint(history: &BlockHistory, node: &RenderNode) -> u64 {
     match node {
-        RenderNode::Block { id, .. } => smelt_core::utils::hash_serializable(&(
-            history.content_hash(*id),
-            block_sidecar_hash(history, *id),
-        )),
+        RenderNode::Block { id, .. } => {
+            hash_values([history.content_hash(*id), block_sidecar_hash(history, *id)])
+        }
         RenderNode::Group { child_range, .. } => group_sidecar_hash(history, child_range.clone()),
     }
 }
 
 fn group_sidecar_hash(history: &BlockHistory, child_range: Range<usize>) -> u64 {
-    smelt_core::utils::hash_serializable(
-        &child_range
+    hash_values(
+        child_range
             .filter_map(|block_index| history.order.get(block_index).copied())
-            .map(|id| block_sidecar_hash(history, id))
-            .collect::<Vec<_>>(),
+            .map(|id| block_sidecar_hash(history, id)),
     )
+}
+
+fn hash_values(values: impl IntoIterator<Item = u64>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for value in values {
+        value.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn block_sidecar_hash(history: &BlockHistory, id: BlockId) -> u64 {

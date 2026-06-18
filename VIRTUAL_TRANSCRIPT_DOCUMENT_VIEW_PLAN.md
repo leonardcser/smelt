@@ -990,6 +990,8 @@ Acceptance:
 - First-paint allocation for `tiny_blocks_1mib` is materially lower without regressing the bounded row counters.
 - The benchmark reports enough allocation labels to catch future allocation regressions.
 
+Status: complete. Layout perf snapshots now expose per-label allocation rows for transcript first paint, including render-plan construction, row-index rebuilds, display-model compile/insert/render, bounded row materialization, buffer installation, and display-row cloning. The large avoidable churn was render-plan fingerprinting: the old path collected node id/key vectors and JSON-serialized them, and block node fingerprints also used JSON serialization per node. The render plan now hashes incrementally with no per-node temporary vectors, and row-height estimation borrows block text instead of cloning raw text. On `tiny_blocks_1mib`, first-paint allocations dropped from the follow-up baseline of 196,685 allocs / 133,944,399 bytes to 36,137 allocs / 101,409,850 bytes, while first-paint bounded counters stayed at 60 materialized rows and 26 materialized blocks.
+
 ### Follow-up 4: Make search indexing durable or truly incremental
 
 Goal: cold and after-append transcript search should avoid rebuilding the same large in-memory index when SQLite descriptor/search records are current.

@@ -340,9 +340,13 @@ impl DisplayModel {
         env: TranscriptRenderEnv<'_>,
         jobs: Vec<CompileJob>,
     ) {
+        let _perf = smelt_perf::perf::begin("transcript:display_model:compile_and_insert");
         let mut layouts = Vec::with_capacity(jobs.len());
-        for job in jobs {
-            layouts.push(job.compile(env.clone(), &mut self.source_views));
+        {
+            let _perf = smelt_perf::perf::begin("transcript:display_model:compile_layouts");
+            for job in jobs {
+                layouts.push(job.compile(env.clone(), &mut self.source_views));
+            }
         }
         self.insert_compiled_blocks(layouts);
     }
@@ -351,6 +355,7 @@ impl DisplayModel {
         &mut self,
         layouts: Vec<(RenderNodeId, DisplayCacheKey, LayoutIr)>,
     ) {
+        let _perf = smelt_perf::perf::begin("transcript:display_model:insert_cache");
         for (id, key, layout) in layouts {
             self.blocks.insert(id, CachedLayout { key, layout });
         }

@@ -100,10 +100,23 @@ pub struct ValueRow {
     pub total: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct AllocRow {
+    pub label: &'static str,
+    pub count: usize,
+    pub allocs_last: u64,
+    pub allocs_total: u64,
+    pub bytes_last: u64,
+    pub bytes_total: u64,
+    pub bytes_p95: u64,
+    pub bytes_max: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub durations: Vec<DurationRow>,
     pub values: Vec<ValueRow>,
+    pub allocs: Vec<AllocRow>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,7 +179,25 @@ fn value_row(label: &'static str, vs: &[u64]) -> Option<ValueRow> {
     })
 }
 
-/// Snapshot current sample buffers. Durations sorted by total descending; values by label.
+fn alloc_row(label: &'static str, samples: &[(u64, u64)]) -> Option<AllocRow> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut bytes = samples.iter().map(|(_, bytes)| *bytes).collect::<Vec<_>>();
+    bytes.sort_unstable();
+    Some(AllocRow {
+        label,
+        count: samples.len(),
+        allocs_last: samples.last().map(|(allocs, _)| *allocs).unwrap_or(0),
+        allocs_total: samples.iter().map(|(allocs, _)| *allocs).sum(),
+        bytes_last: samples.last().map(|(_, bytes)| *bytes).unwrap_or(0),
+        bytes_total: samples.iter().map(|(_, bytes)| *bytes).sum(),
+        bytes_p95: bytes[pct_idx(bytes.len(), 95)],
+        bytes_max: *bytes.last().unwrap(),
+    })
+}
+
+/// Snapshot current sample buffers. Durations sorted by total descending; values and allocs by label.
 pub fn snapshot() -> Snapshot {
     let _perf = begin("perf:snapshot");
     let mut out = Snapshot::default();
@@ -190,6 +221,15 @@ pub fn snapshot() -> Snapshot {
         }
     }
     out.values.sort_by(|a, b| a.label.cmp(b.label));
+
+    if let Ok(map) = alloc_samples().lock() {
+        for (label, samples) in map.iter() {
+            if let Some(row) = alloc_row(label, samples) {
+                out.allocs.push(row);
+            }
+        }
+    }
+    out.allocs.sort_by(|a, b| a.label.cmp(b.label));
     out
 }
 
