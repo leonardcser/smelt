@@ -3367,6 +3367,76 @@ mod tests {
     }
 
     #[test]
+    fn row_document_autoscroll_refreshes_endpoint_after_new_slice_loads() {
+        let mut win = make_win();
+        let mut buf = make_buf(vec![
+            "row 10".into(),
+            "row 11".into(),
+            "row 12".into(),
+            "row 13".into(),
+            "row 14".into(),
+        ]);
+        win.ensure_layout(&buf, 80);
+        win.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 10,
+            row_base: 10,
+            total_rows: 30,
+            materialized_rows: 5,
+        });
+        win.set_scroll(10, &buf);
+        {
+            let state = win.document_view_state_mut();
+            state.cursor = DocPosition {
+                row: 14,
+                byte_col: 1,
+            };
+            state.drag_endpoint = Some(state.cursor);
+            state.selection_anchor = Some(DocPosition {
+                row: 10,
+                byte_col: 0,
+            });
+            state.preferred_cell_col = Some(4);
+        }
+
+        assert!(win.drag_autoscroll_step(&buf, 5, 1));
+        assert_eq!(win.document_view_state_ref().cursor.row, 15);
+        assert_eq!(win.document_view_state_ref().cursor.byte_col, 1);
+
+        buf.set_all_lines(vec![
+            "row 11".into(),
+            "row 12".into(),
+            "row 13".into(),
+            "row 14".into(),
+            "αβγδε".into(),
+        ]);
+        win.apply_materialized_rows(MaterializedRows {
+            clamped_scroll: 11,
+            row_base: 11,
+            total_rows: 30,
+            materialized_rows: 5,
+        });
+        win.ensure_layout(&buf, 80);
+        assert!(win.refresh_document_view_position_from_buffer(&buf));
+
+        let expected = text::cell_to_byte("αβγδε", 4);
+        let state = win.document_view_state_ref();
+        assert_eq!(
+            state.cursor,
+            DocPosition {
+                row: 15,
+                byte_col: expected
+            }
+        );
+        assert_eq!(
+            state.drag_endpoint,
+            Some(DocPosition {
+                row: 15,
+                byte_col: expected
+            })
+        );
+    }
+
+    #[test]
     fn text_hit_at_mouse_distinguishes_selectable_text_from_chrome() {
         let w = make_win();
         let mut buf = make_buf(vec!["abc----xyz".into()]);

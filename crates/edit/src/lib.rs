@@ -1741,6 +1741,7 @@ impl Ui {
         }
         if let (Some(buf), Some(win)) = (self.bufs.get(&buf_id), self.wins.get_mut(&win_id)) {
             win.ensure_layout(buf, content_width);
+            win.refresh_document_view_position_from_buffer(buf);
         }
         let total_rows = match (self.bufs.get(&buf_id), self.wins.get(&win_id)) {
             (Some(buf), Some(win)) => win.scroll_row_total(buf),

@@ -296,6 +296,32 @@ impl Window {
         *self.document_view_state_mut() = DocumentViewState::default();
     }
 
+    pub fn refresh_document_view_position_from_buffer(&mut self, buf: &Buffer) -> bool {
+        if !self.document_view_state_ref().active {
+            return false;
+        }
+
+        let mut state = *self.document_view_state_ref();
+        let mut changed = false;
+        if let Some(cell) = state.preferred_cell_col {
+            let cursor_byte_col = self.row_byte_col_at_cell(state, buf, state.cursor.row, cell);
+            let drag_byte_col = state
+                .drag_endpoint
+                .and_then(|drag| self.row_byte_col_at_cell(state, buf, drag.row, cell));
+            if let Some(byte_col) = cursor_byte_col {
+                changed |= state.cursor.byte_col != byte_col;
+                state.cursor.byte_col = byte_col;
+            }
+            if let (Some(drag), Some(byte_col)) = (&mut state.drag_endpoint, drag_byte_col) {
+                changed |= drag.byte_col != byte_col;
+                drag.byte_col = byte_col;
+            }
+            *self.document_view_state_mut() = state;
+        }
+
+        self.project_row_cursor_to_local(state, buf) || changed
+    }
+
     pub fn scroll_row_total(&self, buf: &Buffer) -> RowIndex {
         let state = self.document_view_state_ref();
         if state.active {
