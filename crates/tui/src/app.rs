@@ -720,10 +720,8 @@ impl TuiApp {
             return String::new();
         }
         if let Some(base_path) = ctx.base_path.as_deref() {
-            if let Some(parent) = base_path.parent() {
-                if let Ok(suffix) = ctx.active_root.strip_prefix(parent) {
-                    return suffix.display().to_string();
-                }
+            if let Ok(suffix) = ctx.active_root.strip_prefix(base_path) {
+                return suffix.display().to_string();
             }
         }
         engine::paths::collapse_tilde(&ctx.active_root)
@@ -2453,7 +2451,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worktree_display_path_starts_at_base_checkout_name() {
+    fn worktree_display_path_is_relative_to_project_root() {
         let ctx = smelt_core::worktree::ProjectContext {
             project_name: "smelt".into(),
             active_root: std::path::PathBuf::from("/home/dev/dev/smelt/.worktrees/test"),
@@ -2464,7 +2462,7 @@ mod tests {
             allowed_roots: Vec::new(),
         };
 
-        assert_eq!(TuiApp::worktree_display_path(&ctx), "smelt/.worktrees/test");
+        assert_eq!(TuiApp::worktree_display_path(&ctx), ".worktrees/test");
     }
 
     #[test]
