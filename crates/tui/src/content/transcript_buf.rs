@@ -44,7 +44,7 @@ struct VisibleProjectionState {
     /// Total rows in the logical transcript represented by the visible projection.
     total_rows: RowIndex,
     /// Rendered-row anchors for the materialized rows, parallel to the backing buffer lines.
-    row_anchors: Vec<Option<RenderedRowAnchor>>,
+    row_anchors: Vec<Option<ProjectionAnchor>>,
     /// Cached `build_rows` result for full-text consumers (Lua API, vim navigation).
     full_rows: Option<CachedRows>,
 }
@@ -329,30 +329,25 @@ impl TranscriptHeightIndex {
         self.prefix_rows.last().copied().unwrap_or(0)
     }
 
-    fn calibrate_estimates_from_exact(&mut self) {
-        let mut measured = 0usize;
-        let mut total: RowIndex = 0;
-        for node in &self.nodes {
-            if let Some(height) = node.exact_height {
-                measured += 1;
-                total = total.saturating_add(height);
-            }
-        }
-        if measured == 0 {
-            return;
-        }
-        let estimate = total
-            .saturating_add(measured as RowIndex - 1)
-            .saturating_div(measured as RowIndex)
-            .max(1);
-        let mut changed = false;
-        for node in &mut self.nodes {
-            if node.exact_height.is_none() && node.estimated_height != estimate {
-                node.estimated_height = estimate;
-                changed = true;
-            }
-        }
-        self.prefix_dirty |= changed;
+    fn scroll_anchor_at_row(&self, row: RowIndex) -> Option<ProjectionAnchor> {
+        let index = self.node_index_before_or_at_row(row)?;
+        let node = self.nodes.get(index)?;
+        let first_row = self.prefix_row(index);
+        let rows = node.measured_or_estimated_height().max(1);
+        Some(ProjectionAnchor::Node {
+            id: node.id,
+            row_offset: row.saturating_sub(first_row).min(rows.saturating_sub(1)),
+        })
+    }
+
+    fn row_for_node_anchor(&self, id: RenderNodeId, row_offset: RowIndex) -> Option<RowIndex> {
+        let index = self.nodes.iter().position(|node| node.id == id)?;
+        let node = self.nodes.get(index)?;
+        let rows = node.measured_or_estimated_height().max(1);
+        Some(
+            self.prefix_row(index)
+                .saturating_add(row_offset.min(rows.saturating_sub(1))),
+        )
     }
 
     fn search_layout_hash(&self) -> u64 {
@@ -529,17 +524,32 @@ impl MeasurementIndexStore {
 }
 
 #[derive(Clone, Copy)]
-struct RenderedRowAnchor {
-    id: BlockId,
-    row_offset: RowIndex,
-    display_offset: usize,
+enum ProjectionAnchor {
+    Node {
+        id: RenderNodeId,
+        row_offset: RowIndex,
+    },
+    RenderedBlock {
+        id: BlockId,
+        row_offset: RowIndex,
+        display_offset: Option<usize>,
+    },
+}
+
+impl ProjectionAnchor {
+    fn rendered_block(id: BlockId, row_offset: RowIndex, display_offset: usize) -> Self {
+        Self::RenderedBlock {
+            id,
+            row_offset,
+            display_offset: Some(display_offset),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
-struct ResizeAnchor {
-    id: BlockId,
-    row_offset: RowIndex,
-    display_offset: Option<usize>,
+struct ResolvedProjectionTarget {
+    requested: ScrollTarget,
+    anchor: Option<ProjectionAnchor>,
 }
 
 #[derive(Clone, Copy)]
@@ -590,7 +600,7 @@ struct MaterializedProjection {
 
 pub(crate) struct ProjectionPlan {
     key: ProjectKey,
-    scroll_target: ScrollTarget,
+    target: ResolvedProjectionTarget,
     scroll_top: RowIndex,
     viewport_rows: u16,
     node_range: std::ops::Range<usize>,
@@ -598,9 +608,8 @@ pub(crate) struct ProjectionPlan {
 
 struct ProjectionRequest {
     key: ProjectKey,
-    scroll_target: ScrollTarget,
+    target: ResolvedProjectionTarget,
     viewport_rows: u16,
-    resize_anchor: Option<ResizeAnchor>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -738,7 +747,7 @@ struct ProjectRows<'a> {
     texts: &'a mut Vec<String>,
     pending: &'a mut Vec<PendingRow>,
     layout: &'a mut Vec<LayoutEntry>,
-    row_anchors: &'a mut Vec<Option<RenderedRowAnchor>>,
+    row_anchors: &'a mut Vec<Option<ProjectionAnchor>>,
 }
 
 struct MaterializedTranscriptRange {
@@ -747,7 +756,7 @@ struct MaterializedTranscriptRange {
     texts: Vec<String>,
     pending: Vec<PendingRow>,
     layout: Vec<LayoutEntry>,
-    row_anchors: Vec<Option<RenderedRowAnchor>>,
+    row_anchors: Vec<Option<ProjectionAnchor>>,
 }
 
 fn base_layout_key(width: u16) -> LayoutKey {
@@ -846,15 +855,15 @@ fn selectable_row_text(buf: &Buffer, row: usize) -> String {
         .collect()
 }
 
-fn rendered_row_anchors(buf: &Buffer, id: BlockId, rows: usize) -> Vec<RenderedRowAnchor> {
+fn rendered_row_anchors(buf: &Buffer, id: BlockId, rows: usize) -> Vec<ProjectionAnchor> {
     let mut anchors = Vec::with_capacity(rows);
     let mut display_offset = 0usize;
     for row in 0..rows {
-        anchors.push(RenderedRowAnchor {
+        anchors.push(ProjectionAnchor::rendered_block(
             id,
-            row_offset: row as RowIndex,
+            row as RowIndex,
             display_offset,
-        });
+        ));
         display_offset = display_offset.saturating_add(selectable_row_text(buf, row).len());
     }
     anchors
@@ -1306,7 +1315,6 @@ impl TranscriptProjection {
             );
         }
         if changed {
-            self.measurements.active.calibrate_estimates_from_exact();
             self.measurements.active.refresh_prefix_rows();
         }
         changed
@@ -1766,7 +1774,11 @@ impl TranscriptProjection {
         self.node_at_row(lua, history, width, row)
     }
 
-    fn resize_anchor_for(&self, width: u16, scroll_target: ScrollTarget) -> Option<ResizeAnchor> {
+    fn width_change_anchor_for(
+        &self,
+        width: u16,
+        scroll_target: ScrollTarget,
+    ) -> Option<ProjectionAnchor> {
         let row = scroll_target.visible_row_anchor()?;
         let width_changed = self
             .last_project_key()
@@ -1779,15 +1791,11 @@ impl TranscriptProjection {
             .checked_sub(self.visible.row_base)
             .and_then(|local| self.visible.row_anchors.get(local as usize))
             .and_then(|anchor| *anchor);
-        if let Some(anchor) = rendered {
-            return Some(ResizeAnchor {
-                id: anchor.id,
-                row_offset: anchor.row_offset,
-                display_offset: Some(anchor.display_offset),
-            });
+        if rendered.is_some() {
+            return rendered;
         }
         let (id, row_offset) = self.block_anchor_at(row)?;
-        Some(ResizeAnchor {
+        Some(ProjectionAnchor::RenderedBlock {
             id,
             row_offset,
             display_offset: None,
@@ -1805,19 +1813,15 @@ impl TranscriptProjection {
         viewport_rows: u16,
     ) -> ProjectionPlan {
         let _perf = smelt_perf::perf::begin("transcript:plan_projection_measured");
-        let resize_anchor = self.resize_anchor_for(width, scroll_target);
+        let width_change_anchor = self.width_change_anchor_for(width, scroll_target);
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         self.prepare_row_index_with_env(env.clone(), history, width);
-        if let Some(anchor) = resize_anchor {
-            if let Some(index) = self.measurements.active.block_index(anchor.id) {
-                let _ =
-                    self.exactify_node_range(env.clone(), history, index..index.saturating_add(1));
+        let anchor = width_change_anchor.or_else(|| match scroll_target {
+            ScrollTarget::Visible(ScrollAnchor::Row(row)) => {
+                self.measurements.active.scroll_anchor_at_row(row)
             }
-        }
-        if let ScrollTarget::Visible(ScrollAnchor::Row(row)) = scroll_target {
-            let end = row.saturating_add(viewport_rows.max(1) as RowIndex);
-            let _ = self.exactify_row_range(env.clone(), history, row..end);
-        }
+            ScrollTarget::Visible(ScrollAnchor::Tail) => None,
+        });
         let key = self.project_key(
             width,
             env.renderer_generation,
@@ -1831,9 +1835,11 @@ impl TranscriptProjection {
             theme,
             ProjectionRequest {
                 key,
-                scroll_target,
+                target: ResolvedProjectionTarget {
+                    requested: scroll_target,
+                    anchor,
+                },
                 viewport_rows,
-                resize_anchor,
             },
         )
     }
@@ -1864,31 +1870,23 @@ impl TranscriptProjection {
         theme: &Theme,
         mut request: ProjectionRequest,
     ) -> ProjectionPlan {
-        let mut plan = self.plan_projection_from_prepared(
-            history,
-            request.key,
-            request.scroll_target,
-            request.viewport_rows,
-            theme,
-            request.resize_anchor,
-        );
+        if let Some(ProjectionAnchor::RenderedBlock { id, .. }) = request.target.anchor {
+            if let Some(index) = self.measurements.active.block_index(id) {
+                let _ =
+                    self.exactify_node_range(env.clone(), history, index..index.saturating_add(1));
+            }
+        }
+        let mut plan = self.plan_projection_from_prepared(history, theme, &request);
         for _ in 0..8 {
             let changed = self.exactify_node_range(env.clone(), history, plan.node_range());
             request.key = self.project_key(
                 request.key.width,
                 env.renderer_generation,
                 env.renderer_cache_key,
-                request.scroll_target,
+                request.target.requested,
                 request.viewport_rows,
             );
-            let refined = self.plan_projection_from_prepared(
-                history,
-                request.key,
-                request.scroll_target,
-                request.viewport_rows,
-                theme,
-                request.resize_anchor,
-            );
+            let refined = self.plan_projection_from_prepared(history, theme, &request);
             if !changed
                 && refined.node_range == plan.node_range
                 && refined.scroll_top == plan.scroll_top
@@ -1902,85 +1900,86 @@ impl TranscriptProjection {
             request.key.width,
             plan.key.renderer_generation,
             plan.key.renderer_cache_key,
-            request.scroll_target,
+            request.target.requested,
             request.viewport_rows,
         );
-        self.plan_projection_from_prepared(
-            history,
-            request.key,
-            request.scroll_target,
-            request.viewport_rows,
-            theme,
-            request.resize_anchor,
-        )
+        self.plan_projection_from_prepared(history, theme, &request)
     }
 
-    fn scroll_top_for_resize_anchor(
+    fn scroll_top_for_anchor(
         &self,
         history: &BlockHistory,
         theme: &Theme,
-        anchor: Option<ResizeAnchor>,
+        anchor: ProjectionAnchor,
     ) -> Option<RowIndex> {
-        let anchor = anchor?;
-        let index = self.measurements.active.block_index(anchor.id)?;
-        let node = self.measurements.active.nodes.get(index)?;
-        let exact_height = node.exact_height?;
-        let gap = (self
-            .render_plan
-            .rendered_node_gap(history, index, exact_height as usize)
-            as RowIndex)
-            .min(exact_height);
-        let block_rows = exact_height.saturating_sub(gap);
-        let offset = anchor
-            .display_offset
-            .and_then(|display_offset| {
-                let (block_buf, rendered_rows) = render_cached_layout_to_buffer(
-                    &self.display_layouts,
-                    node.id,
-                    node.key,
-                    self.measurements.active.renderer_generation,
-                    self.measurements.active.renderer_cache_key,
-                    theme,
-                    history,
-                    &self.inline_options,
-                )?;
-                Some(row_offset_for_display_offset(
-                    &block_buf,
-                    rendered_rows,
-                    display_offset,
-                    anchor.row_offset,
-                ))
-            })
-            .unwrap_or(anchor.row_offset);
-        Some(
-            self.measurements
-                .active
-                .prefix_row(index)
-                .saturating_add(gap)
-                .saturating_add(offset.min(block_rows.saturating_sub(1))),
-        )
+        match anchor {
+            ProjectionAnchor::Node { id, row_offset } => {
+                self.measurements.active.row_for_node_anchor(id, row_offset)
+            }
+            ProjectionAnchor::RenderedBlock {
+                id,
+                row_offset,
+                display_offset,
+            } => {
+                let index = self.measurements.active.block_index(id)?;
+                let node = self.measurements.active.nodes.get(index)?;
+                let exact_height = node.exact_height?;
+                let gap = (self
+                    .render_plan
+                    .rendered_node_gap(history, index, exact_height as usize)
+                    as RowIndex)
+                    .min(exact_height);
+                let block_rows = exact_height.saturating_sub(gap);
+                let offset = display_offset
+                    .and_then(|display_offset| {
+                        let (block_buf, rendered_rows) = render_cached_layout_to_buffer(
+                            &self.display_layouts,
+                            node.id,
+                            node.key,
+                            self.measurements.active.renderer_generation,
+                            self.measurements.active.renderer_cache_key,
+                            theme,
+                            history,
+                            &self.inline_options,
+                        )?;
+                        Some(row_offset_for_display_offset(
+                            &block_buf,
+                            rendered_rows,
+                            display_offset,
+                            row_offset,
+                        ))
+                    })
+                    .unwrap_or(row_offset);
+                Some(
+                    self.measurements
+                        .active
+                        .prefix_row(index)
+                        .saturating_add(gap)
+                        .saturating_add(offset.min(block_rows.saturating_sub(1))),
+                )
+            }
+        }
     }
 
     fn plan_projection_from_prepared(
         &self,
         history: &BlockHistory,
-        key: ProjectKey,
-        scroll_target: ScrollTarget,
-        viewport_rows: u16,
         theme: &Theme,
-        resize_anchor: Option<ResizeAnchor>,
+        request: &ProjectionRequest,
     ) -> ProjectionPlan {
         let total_rows = self.measurements.active.total_rows();
-        let requested_scroll_top = self
-            .scroll_top_for_resize_anchor(history, theme, resize_anchor)
-            .unwrap_or_else(|| scroll_target.as_scroll_top());
-        let scroll_top = clamp_scroll(requested_scroll_top, total_rows, viewport_rows);
-        let visible_rows = viewport_rows.max(1) as RowIndex;
+        let requested_scroll_top = request
+            .target
+            .anchor
+            .and_then(|anchor| self.scroll_top_for_anchor(history, theme, anchor))
+            .unwrap_or_else(|| request.target.requested.as_scroll_top());
+        let scroll_top = clamp_scroll(requested_scroll_top, total_rows, request.viewport_rows);
+        let visible_rows = request.viewport_rows.max(1) as RowIndex;
         let viewport_end = scroll_top.saturating_add(visible_rows).min(total_rows);
         // Exact row heights make the visible window precise; keep half a viewport
         // preloaded so nearby scrolls can reuse the materialized buffer.
         let preload_rows = visible_rows / 2;
-        let row_window = match scroll_target {
+        let row_window = match request.target.requested {
             ScrollTarget::Visible(ScrollAnchor::Row(_)) => {
                 let start = scroll_top.saturating_sub(preload_rows);
                 let end = viewport_end.saturating_add(preload_rows).min(total_rows);
@@ -1993,10 +1992,10 @@ impl TranscriptProjection {
         };
         let node_range = self.measurements.active.node_range_for_rows(row_window);
         ProjectionPlan {
-            key,
-            scroll_target,
+            key: request.key,
+            target: request.target,
             scroll_top,
-            viewport_rows,
+            viewport_rows: request.viewport_rows,
             node_range,
         }
     }
@@ -2051,7 +2050,7 @@ impl TranscriptProjection {
                 plan.key.width,
                 current_env.renderer_generation,
                 current_env.renderer_cache_key,
-                plan.scroll_target,
+                plan.target.requested,
                 plan.viewport_rows,
             );
             plan = self.plan_projection_progressive(
@@ -2060,9 +2059,8 @@ impl TranscriptProjection {
                 theme,
                 ProjectionRequest {
                     key,
-                    scroll_target: plan.scroll_target,
+                    target: plan.target,
                     viewport_rows: plan.viewport_rows,
-                    resize_anchor: None,
                 },
             );
         }
@@ -2074,7 +2072,7 @@ impl TranscriptProjection {
             return out;
         }
 
-        match plan.scroll_target {
+        match plan.target.requested {
             ScrollTarget::Visible(_) => {
                 let out = self.project_visible_range(lua, buf, history, theme, &plan);
                 debug_assert_materialized_viewport(out, plan.viewport_rows);
@@ -2688,7 +2686,9 @@ mod tests {
     use super::*;
     use smelt_core::content::stream_parser::StreamParser;
     use smelt_core::content::transcript::Transcript;
-    use smelt_core::transcript_model::{Block, BlockHistory, ToolOutput, ToolState, ToolStatus};
+    use smelt_core::transcript_model::{
+        Block, BlockHistory, BlockId, ToolOutput, ToolState, ToolStatus,
+    };
 
     fn test_lua() -> smelt_core::lua::runtime::LuaRuntime {
         smelt_core::lua::runtime::LuaRuntime::new()
@@ -3918,6 +3918,163 @@ mod tests {
                     == "background processes finished: 2, 1 failed: 2 exited with code 7")
         );
         assert!(rows.iter().any(|line| line == "legacy process note"));
+    }
+
+    #[test]
+    fn visible_projection_resolves_scroll_top_from_semantic_anchor_after_prefix_changes() {
+        let theme = Theme::default();
+        let transcript = Transcript::new();
+        let mut projection = TranscriptProjection::new();
+        let layout_key = base_layout_key(80);
+        projection.measurements.active.nodes = vec![
+            TranscriptHeightNode {
+                id: RenderNodeId::Block(BlockId::new(1)),
+                key: layout_key,
+                estimated_height: 100,
+                exact_height: None,
+            },
+            TranscriptHeightNode {
+                id: RenderNodeId::Block(BlockId::new(2)),
+                key: layout_key,
+                estimated_height: 10,
+                exact_height: None,
+            },
+        ];
+        projection.measurements.active.rebuild_prefix_rows();
+
+        let anchor = projection
+            .measurements
+            .active
+            .scroll_anchor_at_row(105)
+            .expect("row lands in second node before measurements change");
+        projection.measurements.active.nodes[0].exact_height = Some(1);
+        projection.measurements.active.rebuild_prefix_rows();
+
+        let request = ProjectionRequest {
+            key: ProjectKey {
+                generation: 0,
+                width: 80,
+                renderer_generation: 0,
+                renderer_cache_key: None,
+                presentation_generation: 0,
+                row_generation: 0,
+                mode: ProjectionMode::Visible { viewport_rows: 3 },
+            },
+            target: ResolvedProjectionTarget {
+                requested: ScrollTarget::visible_row(105),
+                anchor: Some(anchor),
+            },
+            viewport_rows: 3,
+        };
+        let plan = projection.plan_projection_from_prepared(&transcript.history, &theme, &request);
+
+        assert_eq!(plan.scroll_top, 6);
+        assert_eq!(plan.node_range(), 1..2);
+    }
+
+    #[test]
+    fn visible_projection_keeps_semantic_top_when_prefix_measurements_shrink() {
+        let lua = test_lua();
+        lua.lua
+            .load(
+                r#"
+                require("smelt.transcript")
+                smelt.transcript.extend_renderer("semantic-anchor-test", function(next, block, ctx)
+                  if block.kind == "tool" and block.name == "prefix_short" then
+                    return smelt.layout.text("prefix exact row")
+                  end
+                  if block.kind == "tool" and block.name == "target_rows" then
+                    local rows = {}
+                    local content = (block.output and block.output.content) or ""
+                    for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+                      rows[#rows + 1] = smelt.layout.text(line)
+                    end
+                    return smelt.layout.vbox(rows)
+                  end
+                  return next(block, ctx)
+                end, { cache_key = "semantic-anchor-test:v1" })
+                "#,
+            )
+            .exec()
+            .expect("register semantic anchor renderer");
+        let theme = Theme::default();
+        let mut transcript = Transcript::new();
+        let prefix_output = (0..120)
+            .map(|i| format!("prefix estimated row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        transcript.push_tool_call(
+            Block::ToolCall {
+                call_id: "prefix".into(),
+                name: "prefix_short".into(),
+                summary: protocol::StyledLines::from_plain("prefix"),
+                args: std::collections::HashMap::new(),
+            },
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: None,
+                output: Some(Box::new(ToolOutput {
+                    content: prefix_output,
+                    is_error: false,
+                    metadata: None,
+                })),
+                user_message: None,
+            },
+        );
+        let target_output = (0..60)
+            .map(|i| format!("target row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        transcript.push_tool_call(
+            Block::ToolCall {
+                call_id: "target".into(),
+                name: "target_rows".into(),
+                summary: protocol::StyledLines::from_plain("target"),
+                args: std::collections::HashMap::new(),
+            },
+            ToolState {
+                status: ToolStatus::Ok,
+                elapsed: None,
+                output: Some(Box::new(ToolOutput {
+                    content: target_output,
+                    is_error: false,
+                    metadata: None,
+                })),
+                user_message: None,
+            },
+        );
+        let target = transcript.history.order[1];
+        let mut projection = TranscriptProjection::new();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(103), Default::default());
+
+        let rows = project_with_lua(
+            &mut projection,
+            &lua,
+            &mut buf,
+            &mut transcript.history,
+            80,
+            &theme,
+            ScrollTarget::visible_row(125),
+            40,
+        );
+
+        let target_layout = projection
+            .visible_block_layout()
+            .find(|(id, _, _)| *id == target)
+            .expect("target block is materialized");
+        assert!(
+            rows.clamped_scroll >= target_layout.1
+                && rows.clamped_scroll < target_layout.1.saturating_add(target_layout.2),
+            "scroll top should remain in the target block after prefix exactification"
+        );
+        let top_line = buf
+            .get_line((rows.clamped_scroll - rows.row_base) as usize)
+            .expect("visible top row");
+        assert_eq!(top_line, "target row 4");
+        assert!(
+            rows.total_rows < 125,
+            "the requested numeric row should be stale after exact heights are known"
+        );
     }
 
     #[test]
