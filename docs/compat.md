@@ -53,6 +53,7 @@ with `COMPAT(<id>)`.
 - Code:
   - `crates/tui/src/app/lua_handlers.rs`: fallback in `load_session_by_id`
   - `crates/tui/src/lua/api/session.rs`: fallback in `smelt.session.render_preview_into`
+  - `crates/tui/src/app/history.rs`: fallback transcript rebuild in `rebuild_screen_from_history`
 
 ## transcript-deferred-full-descriptor-bridge
 

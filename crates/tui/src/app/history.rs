@@ -929,6 +929,8 @@ impl TuiApp {
         let Some(deferred) = self.deferred_session_load.take() else {
             return;
         };
+        // COMPAT(transcript-deferred-full-descriptor-bridge): semantic operations that need the full session still load it after display-only resume.
+        smelt_perf::perf::record_value("compat:session:deferred_load_full", 1);
         if let Some(loaded) = session::load(&deferred.id) {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
@@ -965,13 +967,19 @@ impl TuiApp {
         let (loaded_transcript, descriptors_persisted) =
             match load_transcript_from_sqlite(&self.core.session) {
                 Some(loaded_transcript) => (loaded_transcript, true),
-                None => (
-                    crate::app::transcript::LoadedTranscript::full(build_transcript_from_session(
-                        &self.lua,
-                        &self.core.session,
-                    )),
-                    false,
-                ),
+                None => {
+                    // COMPAT(legacy-session-full-load-fallbacks): legacy or partially migrated sessions without descriptor rows rebuild the display transcript from the loaded session.
+                    smelt_perf::perf::record_value(
+                        "compat:session:rebuild_transcript_full_fallback",
+                        1,
+                    );
+                    (
+                        crate::app::transcript::LoadedTranscript::full(
+                            build_transcript_from_session(&self.lua, &self.core.session),
+                        ),
+                        false,
+                    )
+                }
             };
         self.transcript.replace_loaded_transcript(loaded_transcript);
         self.transcript_descriptors_persisted = descriptors_persisted;
