@@ -198,8 +198,9 @@ pub struct StreamConfig {
     pub timeout: Duration,
     pub shell: ShellSpec,
     pub cancel: Option<CancellationToken>,
-    pub detach_on_timeout: Option<StreamDetach>,
-    pub manual_detach: Option<StreamDetach>,
+    pub detach: Option<StreamDetach>,
+    pub detach_on_timeout: bool,
+    pub manual_detach: bool,
 }
 
 /// Shell used to run a string-form command (`sh -c <cmd>` by default).
@@ -326,23 +327,25 @@ pub async fn run_streaming_with_shell(
     let deadline = tokio::time::sleep(config.timeout);
     tokio::pin!(deadline);
 
-    let mut foreground = config
-        .manual_detach
-        .as_ref()
-        .map(|detach| detach.registry.register_foreground_stream());
+    let mut foreground = if config.manual_detach {
+        config
+            .detach
+            .as_ref()
+            .map(|detach| detach.registry.register_foreground_stream())
+    } else {
+        None
+    };
 
     enum StreamTick {
         Cancel,
-        Detach,
+        Control(Option<StreamControl>),
         Stdout(io::Result<Option<String>>),
         Stderr(io::Result<Option<String>>),
         Timeout,
+        Exit(io::Result<std::process::ExitStatus>),
     }
 
     loop {
-        if stdout_done && stderr_done {
-            break;
-        }
         let tick = tokio::select! {
             biased;
             _ = async {
@@ -352,16 +355,17 @@ pub async fn run_streaming_with_shell(
                     std::future::pending::<()>().await;
                 }
             } => StreamTick::Cancel,
-            _ = async {
+            control = async {
                 if let Some(registration) = foreground.as_mut() {
-                    registration.detach_requested().await;
+                    registration.recv_control().await
                 } else {
-                    std::future::pending::<()>().await;
+                    std::future::pending::<Option<StreamControl>>().await
                 }
-            } => StreamTick::Detach,
+            } => StreamTick::Control(control),
             line = stdout_reader.next_line(), if !stdout_done => StreamTick::Stdout(line),
             line = stderr_reader.next_line(), if !stderr_done => StreamTick::Stderr(line),
             _ = &mut deadline => StreamTick::Timeout,
+            status = child.wait(), if stdout_done && stderr_done => StreamTick::Exit(status),
         };
 
         match tick {
@@ -374,8 +378,8 @@ pub async fn run_streaming_with_shell(
                     background_id: None,
                 };
             }
-            StreamTick::Detach => {
-                if let Some(detach) = config.manual_detach.clone() {
+            StreamTick::Control(Some(StreamControl::Detach)) => {
+                if let Some(detach) = config.detach.clone() {
                     let id =
                         detach_streaming_child(detach, child, stdout_reader, stderr_reader, output);
                     return StreamOutput {
@@ -385,6 +389,9 @@ pub async fn run_streaming_with_shell(
                         background_id: Some(id),
                     };
                 }
+            }
+            StreamTick::Control(None) => {
+                foreground = None;
             }
             StreamTick::Stdout(line) => match line {
                 Ok(Some(line)) => {
@@ -401,18 +408,25 @@ pub async fn run_streaming_with_shell(
                 _ => stderr_done = true,
             },
             StreamTick::Timeout => {
-                if let Some(detach) = config.detach_on_timeout.clone() {
-                    let id =
-                        detach_streaming_child(detach, child, stdout_reader, stderr_reader, output);
-                    return StreamOutput {
-                        content: format!(
-                            "timed out after {:.0}s; moved to background as {id}",
-                            config.timeout.as_secs_f64()
-                        ),
-                        is_error: false,
-                        timed_out: true,
-                        background_id: Some(id),
-                    };
+                if config.detach_on_timeout {
+                    if let Some(detach) = config.detach.clone() {
+                        let id = detach_streaming_child(
+                            detach,
+                            child,
+                            stdout_reader,
+                            stderr_reader,
+                            output,
+                        );
+                        return StreamOutput {
+                            content: format!(
+                                "timed out after {:.0}s; moved to background as {id}",
+                                config.timeout.as_secs_f64()
+                            ),
+                            is_error: false,
+                            timed_out: true,
+                            background_id: Some(id),
+                        };
+                    }
                 }
                 kill_process_group(&child);
                 return StreamOutput {
@@ -422,18 +436,17 @@ pub async fn run_streaming_with_shell(
                     background_id: None,
                 };
             }
+            StreamTick::Exit(status) => {
+                drop(foreground);
+                let is_error = status.map(|s| !s.success()).unwrap_or(true);
+                return StreamOutput {
+                    content: output.format_text(),
+                    is_error,
+                    timed_out: false,
+                    background_id: None,
+                };
+            }
         }
-    }
-
-    drop(foreground);
-
-    let status = child.wait().await;
-    let is_error = status.map(|s| !s.success()).unwrap_or(true);
-    StreamOutput {
-        content: output.format_text(),
-        is_error,
-        timed_out: false,
-        background_id: None,
     }
 }
 
@@ -502,11 +515,8 @@ impl Drop for ForegroundRegistration {
 }
 
 impl ForegroundRegistration {
-    async fn detach_requested(&mut self) {
-        if self.detach_rx.recv().await.is_some() {
-            return;
-        }
-        std::future::pending::<()>().await
+    async fn recv_control(&mut self) -> Option<StreamControl> {
+        self.detach_rx.recv().await
     }
 }
 
@@ -1073,12 +1083,13 @@ mod tests {
                 timeout: Duration::from_millis(100),
                 shell: ShellSpec::default(),
                 cancel: None,
-                detach_on_timeout: Some(StreamDetach {
+                detach: Some(StreamDetach {
                     registry: registry.clone(),
                     command: "echo start; sleep 5".into(),
                     now: Instant::now(),
                 }),
-                manual_detach: None,
+                detach_on_timeout: true,
+                manual_detach: false,
             },
             |_| {},
         )
@@ -1092,6 +1103,30 @@ mod tests {
         assert!(snapshot.running);
         assert!(snapshot.text.contains("start"));
         let _ = registry.stop(&id).await;
+    }
+
+    #[tokio::test]
+    async fn streaming_timeout_still_applies_after_output_closes() {
+        let out = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_streaming_with_shell(
+                "exec >/dev/null 2>/dev/null; sleep 5",
+                StreamConfig {
+                    timeout: Duration::from_millis(100),
+                    shell: ShellSpec::default(),
+                    cancel: None,
+                    detach: None,
+                    detach_on_timeout: false,
+                    manual_detach: false,
+                },
+                |_| {},
+            ),
+        )
+        .await
+        .expect("streaming timeout should not wait for child exit");
+
+        assert!(out.timed_out);
+        assert!(out.is_error);
     }
 
     #[tokio::test]
@@ -1109,8 +1144,9 @@ mod tests {
                     timeout: Duration::from_secs(5),
                     shell: ShellSpec::default(),
                     cancel: None,
-                    detach_on_timeout: None,
-                    manual_detach: Some(detach),
+                    detach: Some(detach),
+                    detach_on_timeout: false,
+                    manual_detach: true,
                 },
                 |_| {},
             )
@@ -1164,8 +1200,9 @@ mod tests {
                 timeout: Duration::from_secs(1),
                 shell: ShellSpec::default(),
                 cancel: None,
-                detach_on_timeout: None,
-                manual_detach: None,
+                detach: None,
+                detach_on_timeout: false,
+                manual_detach: false,
             },
             |_| {},
         )
@@ -1219,8 +1256,9 @@ mod tests {
                 timeout: Duration::from_secs(5),
                 shell: ShellSpec::default(),
                 cancel: None,
-                detach_on_timeout: None,
-                manual_detach: None,
+                detach: None,
+                detach_on_timeout: false,
+                manual_detach: false,
             },
             |_| {},
         )

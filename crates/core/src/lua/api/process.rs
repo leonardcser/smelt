@@ -214,7 +214,6 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                     command: command.clone(),
                     now,
                 };
-                let detach_on_timeout = background_on_timeout.then(|| detach.clone());
                 tokio::spawn(async move {
                     let on_line = |line: String| {
                         injector.inject_tool_output(call_id.clone(), line);
@@ -225,8 +224,9 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             timeout,
                             shell,
                             cancel: cancel.clone(),
-                            detach_on_timeout,
-                            manual_detach: Some(detach),
+                            detach: Some(detach),
+                            detach_on_timeout: background_on_timeout,
+                            manual_detach: true,
                         },
                         on_line,
                     )
