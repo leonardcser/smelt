@@ -776,6 +776,8 @@ Acceptance:
 
 Goal: make semantic operations exact across unloaded transcript ranges without falling back to full layout or paint-buffer text.
 
+Status: in progress in the current worktree. Transcript search still uses SQLite candidate blocks plus bounded display-row exact refinement, and candidate scanning no longer falls back to descriptor search-text line matches when exact display rows have no match. Remaining work is to add document-level indexed search APIs for large non-transcript documents, verify/finish streamed copy across unloaded ranges, folds, action hit testing, drag autoscroll across unloaded boundaries, and the requested regression coverage.
+
 Deliverables:
 
 - Keep transcript search candidate lookup in SQLite, and page candidates around the current origin.

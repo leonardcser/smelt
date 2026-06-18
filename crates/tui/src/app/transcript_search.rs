@@ -30,7 +30,6 @@ pub(super) struct TranscriptSearchIndex {
 struct TranscriptSearchEntry {
     first_row: RowIndex,
     rows: RowIndex,
-    search_text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +131,6 @@ fn push_search_entry(
     entries.push(TranscriptSearchEntry {
         first_row: layout_entry.first_row,
         rows: layout_entry.rows,
-        search_text: search_text.clone(),
     });
     for block_id in &layout_entry.block_ids {
         block_entries
@@ -513,12 +511,12 @@ impl TuiApp {
         entry_index: usize,
     ) {
         let _perf = smelt_perf::perf::begin("search:transcript:scan_candidate");
-        let Some((first_row, rows, search_text)) = self
+        let Some((first_row, rows)) = self
             .search
             .transcript_index
             .as_ref()
             .and_then(|index| index.entries.get(entry_index))
-            .map(|entry| (entry.first_row, entry.rows, entry.search_text.clone()))
+            .map(|entry| (entry.first_row, entry.rows))
         else {
             return;
         };
@@ -530,24 +528,11 @@ impl TuiApp {
         if rows == 0 {
             return;
         }
-        let mut semantic_found = Vec::new();
-        for (offset, line) in search_text.lines().enumerate() {
-            let row = DisplayRow::new(line.to_string(), std::iter::once(0..line.len()).collect());
-            collect_row_matches(
-                first_row.saturating_add(offset as RowIndex),
-                &row,
-                query,
-                &mut semantic_found,
-            );
-        }
         let display = self.transcript_rows_and_breaks_range(first_row, rows);
         let mut found = Vec::new();
         for (offset, row) in display.rows.iter().enumerate() {
             let row_index = first_row.saturating_add(offset as RowIndex);
             collect_row_matches(row_index, row, query, &mut found);
-        }
-        if found.is_empty() {
-            found = semantic_found;
         }
         merge_doc_ranges(&mut session.matches, found);
         smelt_perf::perf::record_value(
