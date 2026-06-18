@@ -2075,6 +2075,29 @@ mod checkpoint_tests {
     }
 
     #[test]
+    fn history_updated_save_persists_only_dirty_suffix_rows() {
+        const OLD_HISTORY_LEN: usize = 256;
+        let mut app = large_saved_session_app("history-updated-dirty-suffix-gate", OLD_HISTORY_LEN);
+        let mut updated = app.app.core.session.history.clone();
+        updated.push(assistant("new assistant"));
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        app.app.set_history(updated);
+        app.app.save_session();
+        app.app.flush_persist();
+        smelt_perf::perf::set_enabled(false);
+
+        assert_eq!(app.app.core.session.history.len(), OLD_HISTORY_LEN + 1);
+        assert_perf_value_at_most("persist:write:history_items", 1);
+        assert_perf_value_at_most("store:session:dirty_suffix_history_rows", 1);
+        assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
+        assert_perf_value_at_most("store:session:history_rows_inserted", 1);
+        assert_perf_value_at_most("store:session:history_rows_deleted", 0);
+        assert_no_full_store_reads();
+    }
+
+    #[test]
     fn no_op_save_does_not_enqueue_history_or_descriptor_work() {
         let mut app = large_saved_session_app("normal-save-noop-gate", 256);
 
