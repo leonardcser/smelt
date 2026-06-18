@@ -180,15 +180,28 @@ impl DisplayDocument for MaterializedBufferDocument<'_> {
     }
 
     fn materialize(&mut self, range: Range<RowIndex>) -> DisplayRows {
+        let start = range.start;
         let rows = range
             .filter_map(|row| {
                 if !self.materialized.contains_abs_row(row) {
                     return None;
                 }
                 let local = self.materialized.local_row(row);
-                self.buf
-                    .get_line(row_to_usize(local))
-                    .map(|line| DisplayRow::new(line.to_string(), Vec::new()))
+                self.buf.get_line(row_to_usize(local)).map(|line| {
+                    let display_row = DisplayRow::new(line.to_string(), Vec::new());
+                    if row == start {
+                        display_row
+                    } else if self.buf.decoration_at(row_to_usize(local)).soft_wrapped
+                        || self
+                            .buf
+                            .decoration_at(row_to_usize(local))
+                            .copy_continuation
+                    {
+                        display_row.with_break_before(RowBreak::Soft)
+                    } else {
+                        display_row.with_break_before(RowBreak::Hard)
+                    }
+                })
             })
             .collect();
         DisplayRows { rows }
@@ -251,7 +264,10 @@ impl Window {
     }
 
     pub fn apply_materialized_rows(&mut self, rows: MaterializedRows) {
-        if rows.row_base == 0 && rows.materialized_rows >= rows.total_rows {
+        if rows.row_base == 0
+            && rows.materialized_rows >= rows.total_rows
+            && !self.document_view_state_ref().active
+        {
             self.clear_materialized_rows();
         } else {
             self.set_row_materialization(rows);
@@ -639,172 +655,27 @@ impl Window {
             return (Status::Ignored, None);
         }
         let mut state = *self.document_view_state_ref();
-        if ctx.viewport.rect.height == 0
-            || state.materialized.total_rows == 0
-            || buf.lines().is_empty()
-        {
-            return (Status::Consumed, None);
+        let materialized = state.materialized;
+        let mut document = MaterializedBufferDocument { buf, materialized };
+        let mut vim_mode = self.vim_mode();
+        let (status, range) = DocumentViewExecutor::handle_mouse(
+            &mut state,
+            &mut document,
+            event,
+            ctx.viewport,
+            self.config.gutters.pad_left,
+            self.scroll_top,
+            self.scroll_left,
+            ctx.click_count,
+            self.vim_enabled(),
+            &mut vim_mode,
+            now,
+        );
+        *self.document_view_state_mut() = state;
+        if self.vim_mode() != vim_mode {
+            self.set_vim_mode(vim_mode);
         }
-        let pos = self.row_doc_pos_at_mouse(buf, event, ctx.viewport);
-        if let Some(cell) = self.row_position_cell(state, buf, pos) {
-            state.preferred_cell_col = Some(cell);
-        }
-        match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                state.cursor = pos;
-                state.drag_endpoint = Some(pos);
-                state.selection_anchor = None;
-                state.yank_flash = None;
-                state.selection_includes_cursor_cell = false;
-                match ctx.click_count {
-                    2 => {
-                        let local = state
-                            .materialized
-                            .local_row(pos.row)
-                            .min(self.visual_row_total(buf).saturating_sub(1));
-                        if let Some(line) = buf.get_line(row_to_usize(local)) {
-                            let snap_col = text::snap(line, pos.byte_col.min(line.len()));
-                            if let Some((start, end)) =
-                                text::big_word_range_at_transparent(line, snap_col, &[])
-                            {
-                                state.selection_anchor = Some(DocPosition {
-                                    row: pos.row,
-                                    byte_col: start,
-                                });
-                                state.cursor = DocPosition {
-                                    row: pos.row,
-                                    byte_col: end,
-                                };
-                            }
-                        }
-                    }
-                    3 => {
-                        if let Some((start, end)) = self.row_copy_group_range(&state, buf, pos.row)
-                        {
-                            state.selection_anchor = Some(DocPosition {
-                                row: start,
-                                byte_col: 0,
-                            });
-                            state.cursor = DocPosition {
-                                row: end,
-                                byte_col: self.row_line_len(&state, buf, end),
-                            };
-                        }
-                    }
-                    _ => {}
-                }
-                if let Some(cell) = self.row_position_cell(state, buf, state.cursor) {
-                    state.preferred_cell_col = Some(cell);
-                }
-                *self.document_view_state_mut() = state;
-                // A new mouse gesture starts fresh: exit any existing visual
-                // mode so the old anchor doesn't pollute the new selection.
-                if self.vim_enabled()
-                    && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine)
-                {
-                    self.set_vim_mode(VimMode::Normal);
-                }
-                (Status::Capture, None)
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if state.selection_anchor.is_none() {
-                    state.selection_anchor = state.drag_endpoint.or(Some(state.cursor));
-                    state.selection_includes_cursor_cell = true;
-                }
-                state.cursor = pos;
-                state.drag_endpoint = Some(pos);
-                state.yank_flash = None;
-                *self.document_view_state_mut() = state;
-                (Status::Consumed, None)
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                // Use the cursor position that was built up during the gesture
-                // (e.g. word_end for double-click, line_end for triple-click,
-                // or the last drag position for a normal drag) rather than
-                // the release coordinates, which may truncate the selection.
-                let copy = state
-                    .selection_anchor
-                    .map(|anchor| {
-                        order_doc_range_including_cursor_cell(
-                            buf,
-                            state.materialized,
-                            anchor,
-                            state.cursor,
-                            state.selection_includes_cursor_cell,
-                        )
-                    })
-                    .filter(|range| {
-                        (range.start.row, range.start.byte_col)
-                            < (range.end.row, range.end.byte_col)
-                    });
-                state.cursor = pos;
-                state.drag_endpoint = None;
-                state.selection_anchor = None;
-                state.selection_includes_cursor_cell = false;
-                state.yank_flash = copy.map(|range| RowYankFlash {
-                    range,
-                    until: now + YANK_FLASH_DURATION,
-                });
-                *self.document_view_state_mut() = state;
-                // Mouse-up concludes the gesture: exit visual mode so the
-                // selection is not left dangling.
-                if self.vim_enabled()
-                    && matches!(self.vim_mode(), VimMode::Visual | VimMode::VisualLine)
-                {
-                    self.set_vim_mode(VimMode::Normal);
-                }
-                (Status::Consumed, copy)
-            }
-            _ => (Status::Ignored, None),
-        }
-    }
-
-    fn row_copy_group_range(
-        &self,
-        state: &DocumentViewState,
-        buf: &Buffer,
-        row: RowIndex,
-    ) -> Option<(RowIndex, RowIndex)> {
-        let row_count = buf.line_count() as RowIndex;
-        if row_count == 0 {
-            return None;
-        }
-        let is_continuation = |row: RowIndex| {
-            let dec = buf.decoration_at(row_to_usize(row));
-            dec.soft_wrapped || dec.copy_continuation
-        };
-        let mut first = state
-            .materialized
-            .local_row(row)
-            .min(row_count.saturating_sub(1));
-        while first > 0 && is_continuation(first) {
-            first -= 1;
-        }
-
-        let mut last = state
-            .materialized
-            .local_row(row)
-            .min(row_count.saturating_sub(1));
-        while last + 1 < row_count && is_continuation(last + 1) {
-            last += 1;
-        }
-
-        Some((
-            state.materialized.absolute_row(first),
-            state.materialized.absolute_row(last),
-        ))
-    }
-
-    fn row_line_len(&self, state: &DocumentViewState, buf: &Buffer, row: RowIndex) -> usize {
-        let row_count = buf.line_count() as RowIndex;
-        if row_count == 0 {
-            return 0;
-        }
-        let local = state
-            .materialized
-            .local_row(row)
-            .min(row_count.saturating_sub(1));
-        buf.get_line(row_to_usize(local)).map(str::len).unwrap_or(0)
+        (status, range)
     }
 
     fn row_doc_pos_at_mouse(

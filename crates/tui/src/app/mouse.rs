@@ -230,12 +230,9 @@ impl TuiApp {
                         }
                     }
                 }
-                let yank = if self.transcript_win().has_materialized_rows() {
-                    self.handle_document_view_mouse_for_win(win, me, count, now)
-                        .1
-                } else {
-                    self.handle_content_mouse(me, count)
-                };
+                let yank = self
+                    .handle_document_view_mouse_for_win(win, me, count, now)
+                    .1;
                 if is_up {
                     if let Some(out) = yank {
                         self.yank_to_clipboard(out);
@@ -553,6 +550,7 @@ impl TuiApp {
     /// On `MouseUp`, returns the yanked range as `CopyOutput` via `Buffer::copy_range` -
     /// the transcript's `BufferCopy` impl walks the latest snapshot so `copy_as`
     /// substitutions, soft-wrap merging, and non-selectable cells are honored.
+    #[cfg(test)]
     fn handle_content_mouse(
         &mut self,
         me: MouseEvent,
