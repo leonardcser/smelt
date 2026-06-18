@@ -1,0 +1,24 @@
+{
+  "_about": "Transcript tool header regression: a raw DEL byte in serialized tool args must be clipped with the same display width model used by window layout.",
+  "_fix": "Count control characters as cells when clipping buffered layout rows so row-prefixed transcript headers stay within the viewport.",
+  "mode": "plan",
+  "ops": [
+    {
+      "data": 0,
+      "kind": "start_turn"
+    },
+    {
+      "data": {
+        "args": {
+          "": null,
+          "\u0000\u0000\u0000���": {},
+          "�������u>��\u007f\u0000\u0000\u0000": null
+        },
+        "call_id": 255,
+        "tool_name": ""
+      },
+      "kind": "engine_tool_start"
+    }
+  ],
+  "vim": true
+}

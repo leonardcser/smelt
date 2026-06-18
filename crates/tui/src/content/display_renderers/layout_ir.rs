@@ -1774,7 +1774,12 @@ fn row_prefix_width(spec: &RowPrefixSpec) -> u16 {
 }
 
 fn display_width_u16(text: &str) -> u16 {
-    unicode_width::UnicodeWidthStr::width(text).min(u16::MAX as usize) as u16
+    display_width(text).min(u16::MAX as usize) as u16
+}
+
+fn char_display_width(ch: char) -> u16 {
+    let mut buf = [0; 4];
+    display_width(ch.encode_utf8(&mut buf)).min(u16::MAX as usize) as u16
 }
 
 fn child_width_after_gutter(width: u16, gutter_width: u16) -> u16 {
@@ -1788,8 +1793,6 @@ fn emit_buffer_row_clipped(
     out: &mut LineBuilder,
     style_overlay: Option<(bool, bool)>,
 ) -> u16 {
-    use unicode_width::UnicodeWidthChar;
-
     let text = buf.get_line(row as usize).unwrap_or("");
     let mut highlights = buf.highlights_at(row as usize);
     highlights.sort_by_key(|h| h.col_start);
@@ -1859,7 +1862,6 @@ fn emit_buffer_row_clipped(
         );
         emitted_cols = emitted_cols.saturating_add(used);
     }
-    let _ = UnicodeWidthChar::width(' '); // satisfy import even if loop empty
     emitted_cols
 }
 
@@ -1885,7 +1887,6 @@ fn emit_clipped(
     max_cols: u16,
     already: u16,
 ) -> u16 {
-    use unicode_width::UnicodeWidthChar;
     let budget = max_cols.saturating_sub(already);
     if budget == 0 {
         return 0;
@@ -1893,7 +1894,7 @@ fn emit_clipped(
     let mut acc = String::new();
     let mut acc_w: u16 = 0;
     for ch in segment.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        let cw = char_display_width(ch);
         if acc_w.saturating_add(cw) > budget {
             break;
         }
@@ -1928,6 +1929,26 @@ mod tests {
         (0..buf.line_count())
             .filter_map(|row| buf.get_line(row).map(str::to_string))
             .collect()
+    }
+
+    #[test]
+    fn clipped_rows_count_controls_as_cells() {
+        let theme = Theme::default();
+        let mut src = Buffer::new(BufId(1), BufCreateOpts::default());
+        src.set_all_lines(vec!["abcdefghi\u{7f}j".into()]);
+        let mut dst = Buffer::new(BufId(2), BufCreateOpts::default());
+
+        let emitted = {
+            let mut out = LineBuilder::new(&mut dst, &theme, 10);
+            let emitted = emit_buffer_row_clipped(&src, 0, 10, &mut out, None);
+            out.finish();
+            emitted
+        };
+
+        let line = dst.get_line(0).expect("clipped row");
+        assert_eq!(emitted, 10);
+        assert_eq!(display_width(line), 10);
+        assert_eq!(line, "abcdefghi\u{7f}");
     }
 
     #[test]
