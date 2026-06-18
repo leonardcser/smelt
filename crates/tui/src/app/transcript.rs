@@ -271,6 +271,14 @@ impl TranscriptView {
         self.transcript.push(block);
     }
 
+    pub(crate) fn push_with_origin(
+        &mut self,
+        block: Block,
+        origin: smelt_core::transcript_model::BlockOrigin,
+    ) {
+        self.transcript.push_with_origin(block, origin);
+    }
+
     pub(crate) fn set_compaction_preview(&mut self, summary: String) -> Option<BlockId> {
         let summary = summary.trim().to_string();
         if summary.is_empty() {

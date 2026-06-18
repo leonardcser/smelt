@@ -69,6 +69,11 @@ smelt.cell("history_epoch"):subscribe(reset_sent_messages)
 
 local function update_title(new_text)
 
+  if new_text and new_text ~= "" then
+    local submitted = new_text:gsub("^%s+", ""):gsub("%s+$", "")
+    if submitted == "" or submitted:sub(1, 1) == "!" then return end
+  end
+
   -- Gather all prior user messages from the session history.
   local history = smelt.session.messages()
   local target_history_len = #smelt.session.history()
@@ -79,17 +84,17 @@ local function update_title(new_text)
     end
   end
 
-  -- Append the newly submitted text.
-  if new_text and new_text ~= "" then
+  -- Include the submitted text only when this signal arrived before history changed.
+  if new_text and new_text ~= "" and #user_msgs <= #sent_messages then
     table.insert(user_msgs, new_text)
     target_history_len = target_history_len + 1
   end
 
-  -- Skip shell escapes and empty submissions.
+  -- Skip empty history.
   local last = user_msgs[#user_msgs]
   if not last then return end
   local trimmed = last:gsub("^%s+", ""):gsub("%s+$", "")
-  if trimmed == "" or trimmed:sub(1, 1) == "!" then return end
+  if trimmed == "" then return end
 
   -- Build messages from accumulated user texts.
   local messages = {}

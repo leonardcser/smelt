@@ -1,6 +1,7 @@
 use crate::app::TuiApp;
 use smelt_core::content::transcript::Transcript;
 use smelt_core::session;
+use smelt_core::transcript_model::BlockHistory;
 use smelt_core::{
     Block, ToolOutput, ToolState, ToolStatus, TranscriptBlockDescriptor, TranscriptBlockRecord,
 };
@@ -98,11 +99,13 @@ pub(crate) fn build_transcript_from_session(
 }
 
 pub(crate) fn load_transcript_from_sqlite(session: &session::Session) -> Option<Transcript> {
-    load_transcript_from_sqlite_dir(session::dir_for(session))
+    let transcript = load_transcript_from_sqlite_dir(session::dir_for(session))?;
+    transcript_covers_history(&transcript, session).then_some(transcript)
 }
 
 pub(crate) fn load_transcript_from_sqlite_id(id: &str) -> Option<Transcript> {
-    load_transcript_from_sqlite_dir(session::dir_for_id(id))
+    let transcript = load_transcript_from_sqlite_dir(session::dir_for_id(id))?;
+    transcript_has_contiguous_history_origins(&transcript).then_some(transcript)
 }
 
 fn load_transcript_from_sqlite_dir(session_dir: std::path::PathBuf) -> Option<Transcript> {
@@ -141,6 +144,46 @@ fn load_transcript_from_sqlite_dir(session_dir: std::path::PathBuf) -> Option<Tr
         .collect::<Result<Vec<_>, serde_json::Error>>()
         .ok()?;
     Some(Transcript::from_descriptor_records(records))
+}
+
+fn transcript_has_contiguous_history_origins(transcript: &Transcript) -> bool {
+    let mut origins = transcript
+        .history
+        .descriptor_records()
+        .into_iter()
+        .filter_map(|record| match record.origin {
+            Some(smelt_core::BlockOrigin::History(idx)) => Some(idx),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if origins.is_empty() {
+        return true;
+    }
+    origins.sort_unstable();
+    origins.dedup();
+    origins
+        .iter()
+        .enumerate()
+        .all(|(expected, actual)| expected == *actual)
+}
+
+fn transcript_covers_history(transcript: &Transcript, session: &session::Session) -> bool {
+    block_history_covers_history(&transcript.history, session)
+}
+
+fn block_history_covers_history(history: &BlockHistory, session: &session::Session) -> bool {
+    if session.history.is_empty() {
+        return true;
+    }
+    let records = history.descriptor_records();
+    session.history.iter().enumerate().all(|(idx, item)| {
+        if fallback_history_item_block_count(item) == 0 {
+            return true;
+        }
+        records.iter().any(|record| {
+            matches!(record.origin, Some(smelt_core::BlockOrigin::History(origin)) if origin == idx)
+        })
+    })
 }
 
 fn fallback_transcript_index_for_history_index(
@@ -378,6 +421,50 @@ mod tests {
 
         let transcript = build_transcript_from_session(&lua, &session);
         assert!(transcript.history.order.is_empty());
+    }
+
+    #[test]
+    fn transcript_coverage_requires_rendered_history_origins() {
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session
+            .history
+            .push(HistoryItem::user(Content::text("first")));
+        session
+            .history
+            .push(HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("answer")),
+                None,
+                Vec::new(),
+            )));
+
+        let mut transcript = Transcript::new();
+        transcript.push_with_origin(
+            Block::Text {
+                content: "answer".into(),
+            },
+            smelt_core::BlockOrigin::History(1),
+        );
+        assert!(!transcript_covers_history(&transcript, &session));
+
+        transcript.push_with_origin(
+            Block::User {
+                text: "first".into(),
+                image_labels: vec![],
+            },
+            smelt_core::BlockOrigin::History(0),
+        );
+        assert!(transcript_covers_history(&transcript, &session));
+    }
+
+    #[test]
+    fn transcript_coverage_ignores_unrendered_context_notes() {
+        let mut session = session::Session::new(1, std::path::PathBuf::from("/tmp"));
+        session
+            .history
+            .push(HistoryItem::note(protocol::HistoryNote::context(
+                "Current working directory: /tmp.",
+            )));
+        assert!(transcript_covers_history(&Transcript::new(), &session));
     }
 
     #[test]
@@ -803,6 +890,12 @@ impl TuiApp {
         if let Some(loaded) = session::load(&id) {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
+            if !block_history_covers_history(self.transcript.history(), &self.core.session) {
+                let transcript = build_transcript_from_session(&self.lua, &self.core.session);
+                self.transcript.replace_transcript(transcript);
+                self.transcript_descriptors_persisted = false;
+                self.transcript.history_mut().mark_changed();
+            }
             self.sync_session_snapshot();
         }
     }
@@ -1099,6 +1192,30 @@ impl TuiApp {
         self.reset_session_permissions();
         self.sync_session_snapshot();
         self.publish_history_delta("rewound");
+    }
+
+    pub(crate) fn commit_request_history_item(
+        &mut self,
+        item: HistoryItem,
+        block: Option<Block>,
+    ) -> Vec<HistoryItem> {
+        let history = self.model_history();
+        let history_index = self.core.session.history.len();
+        if let Some(block) = block {
+            self.transcript
+                .push_with_origin(block, smelt_core::BlockOrigin::History(history_index));
+        }
+        self.append_request_history_item(item);
+        history
+    }
+
+    pub(crate) fn append_request_history_item(&mut self, item: HistoryItem) {
+        let old_len = self.core.session.history.len();
+        self.core.session.history.push(item);
+        self.mark_history_dirty_from(old_len);
+        self.sync_session_snapshot();
+        self.publish_history_delta("request");
+        self.save_session();
     }
 
     pub(crate) fn show_user_message(&mut self, input: &str, image_labels: Vec<String>) {

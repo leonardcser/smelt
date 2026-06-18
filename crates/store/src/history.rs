@@ -61,8 +61,18 @@ pub(crate) fn write_history_item(
     item: &HistoryItem,
     compression: ObjectCompression,
 ) -> Result<()> {
+    write_history_item_at_block(conn, idx, idx, item, compression)
+}
+
+fn write_history_item_at_block(
+    conn: &Connection,
+    idx: usize,
+    block_idx: usize,
+    item: &HistoryItem,
+    compression: ObjectCompression,
+) -> Result<()> {
     let normalized = normalized_history_value(item, compression, Some(conn))?;
-    insert_normalized_history_item(conn, idx, &normalized)
+    insert_normalized_history_item(conn, idx, block_idx, &normalized)
 }
 
 pub(crate) fn replace_history_suffix(
@@ -72,21 +82,36 @@ pub(crate) fn replace_history_suffix(
     compression: ObjectCompression,
 ) -> Result<()> {
     let start_idx_sql = checked_i64(start_idx as u64, "start_idx")?;
+    let preserve_through_block_idx = conn
+        .query_row(
+            "SELECT MAX(block_idx) FROM transcript_blocks WHERE history_idx < ?1",
+            [start_idx_sql],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .unwrap_or(-1);
     conn.execute(
         "DELETE FROM transcript_search
-         WHERE block_idx >= ?1
-            OR block_idx IN (
-                SELECT block_idx FROM transcript_blocks WHERE history_idx >= ?1
-            )",
-        [start_idx_sql],
+         WHERE block_idx IN (
+             SELECT block_idx FROM transcript_blocks
+             WHERE history_idx >= ?1
+                OR (history_idx IS NULL AND block_idx > ?2)
+         )",
+        params![start_idx_sql, preserve_through_block_idx],
     )?;
     conn.execute(
-        "DELETE FROM transcript_blocks WHERE block_idx >= ?1 OR history_idx >= ?1",
-        [start_idx_sql],
+        "DELETE FROM transcript_blocks
+         WHERE history_idx >= ?1
+            OR (history_idx IS NULL AND block_idx > ?2)",
+        params![start_idx_sql, preserve_through_block_idx],
     )?;
     conn.execute("DELETE FROM history_items WHERE idx >= ?1", [start_idx_sql])?;
-    for (offset, item) in items.iter().enumerate() {
-        write_history_item(conn, start_idx + offset, item, compression)?;
+    let first_block_idx = conn.query_row(
+        "SELECT COALESCE(MAX(block_idx) + 1, 0) FROM transcript_blocks",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? as usize;
+    for (block_idx, (offset, item)) in (first_block_idx..).zip(items.iter().enumerate()) {
+        write_history_item_at_block(conn, start_idx + offset, block_idx, item, compression)?;
     }
     Ok(())
 }
@@ -354,9 +379,11 @@ fn normalized_history_value(
 fn insert_normalized_history_item(
     conn: &Connection,
     idx: usize,
+    block_idx: usize,
     item: &NormalizedHistoryItem,
 ) -> Result<()> {
     let idx = checked_i64(idx as u64, "history_idx")?;
+    let block_idx = checked_i64(block_idx as u64, "block_idx")?;
     conn.execute(
         "INSERT INTO history_items (idx, kind, json, hash, search_text, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())",
@@ -371,6 +398,7 @@ fn insert_normalized_history_item(
     }
     insert_transcript_block(
         conn,
+        block_idx,
         idx,
         &item.kind,
         &item.value,
@@ -426,7 +454,8 @@ fn object_ref_json(hash: &str, raw_size: u64) -> Value {
 
 fn insert_transcript_block(
     conn: &Connection,
-    idx: i64,
+    block_idx: i64,
+    history_idx: i64,
     kind: &str,
     value: &Value,
     search_text: &str,
@@ -442,8 +471,8 @@ fn insert_transcript_block(
             estimated_text_bytes, preview_text, search_text
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
-            idx,
-            idx,
+            block_idx,
+            history_idx,
             kind,
             tool_call_id,
             tool_name,
@@ -456,7 +485,7 @@ fn insert_transcript_block(
     conn.execute(
         "INSERT INTO transcript_search (block_idx, history_idx, text)
          VALUES (?1, ?2, ?3)",
-        params![idx, idx, search_text],
+        params![block_idx, history_idx, search_text],
     )?;
     Ok(())
 }

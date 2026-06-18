@@ -725,6 +725,61 @@ mod tests {
     }
 
     #[test]
+    fn session_snapshot_suffix_preserves_prior_multi_block_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SessionDb::open(dir.path().join("session.db")).unwrap();
+        let first = protocol::HistoryItem::user(protocol::Content::text("first"));
+        let assistant = protocol::HistoryItem::user(protocol::Content::text("assistant history"));
+        let old_request = protocol::HistoryItem::user(protocol::Content::text("old request"));
+        let new_request = protocol::HistoryItem::user(protocol::Content::text("new request"));
+        let mut snapshot = SessionSnapshot {
+            state: SessionState {
+                id: "s1".into(),
+                title: Some("title".into()),
+                slug: Some("title".into()),
+                cwd: Some("/tmp/project".into()),
+                mode: Some("normal".into()),
+                model: Some("model-a".into()),
+                accounting_json: None,
+                checkpoint_json: None,
+                revision: 0,
+                history_len: 3,
+                created_at: 10,
+                updated_at: 20,
+            },
+            meta_json: Some(serde_json::json!({"id": "s1", "schema_version": 2})),
+            history_start_idx: 0,
+            history_len: 3,
+            history: vec![first, assistant, old_request],
+            turn_metas: Vec::new(),
+            metadata_snapshots: Vec::new(),
+            accounting_snapshots: Vec::new(),
+        };
+
+        let first_report = db.save_session_snapshot(&snapshot, None).unwrap();
+        db.replace_transcript_descriptor_records(&[
+            transcript_record_with_history(0, 0, "first", "first descriptor"),
+            transcript_record_with_history(1, 1, "thinking", "assistant thinking"),
+            transcript_record_with_history(2, 1, "answer", "assistant answer"),
+            transcript_record_with_history(3, 2, "old-request", "old request descriptor"),
+        ])
+        .unwrap();
+
+        snapshot.history_start_idx = 2;
+        snapshot.history = vec![new_request];
+        snapshot.history_len = 3;
+        snapshot.state.history_len = 3;
+        snapshot.state.updated_at = 30;
+        db.save_session_snapshot(&snapshot, Some(first_report.revision))
+            .unwrap();
+
+        let search = db.search_blob().unwrap();
+        assert!(search.contains("assistant answer\n"));
+        assert!(search.contains("new request\n"));
+        assert!(!search.contains("old request descriptor"));
+    }
+
+    #[test]
     fn transcript_descriptors_roundtrip_and_feed_search_candidates() {
         let dir = tempfile::tempdir().unwrap();
         let db = SessionDb::open(dir.path().join("session.db")).unwrap();
@@ -1241,6 +1296,38 @@ mod tests {
             origin_json: Some(
                 serde_json::json!({
                     "History": block_idx,
+                })
+                .to_string(),
+            ),
+            tool_state_json: None,
+        }
+    }
+
+    fn transcript_record_with_history(
+        block_idx: u64,
+        history_idx: u64,
+        label: &str,
+        search_text: &str,
+    ) -> TranscriptDescriptorRecord {
+        TranscriptDescriptorRecord {
+            block_idx,
+            history_idx: Some(history_idx),
+            kind: "assistant".to_string(),
+            tool_call_id: None,
+            tool_name: None,
+            content_hash: format!("hash-{label}"),
+            estimated_text_bytes: search_text.len() as u64,
+            preview_text: search_text.to_string(),
+            search_text: search_text.to_string(),
+            descriptor_json: serde_json::json!({
+                "kind": "assistant",
+                "label": label,
+                "text": search_text,
+            })
+            .to_string(),
+            origin_json: Some(
+                serde_json::json!({
+                    "History": history_idx,
                 })
                 .to_string(),
             ),

@@ -324,6 +324,7 @@ impl TuiApp {
             } => {
                 if id == turn_id {
                     self.set_history(history);
+                    self.save_session();
                 }
                 SessionControl::Continue
             }

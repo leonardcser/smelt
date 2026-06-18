@@ -11,6 +11,7 @@ use std::time::Duration;
 
 struct PreparedTurn {
     input: protocol::StartTurnInput,
+    history: Vec<HistoryItem>,
     model: String,
     reasoning_effort: protocol::ReasoningEffort,
     api_base: String,
@@ -103,12 +104,12 @@ impl TuiApp {
             "" => None,
             trimmed => Some(trimmed.to_string()),
         };
-        self.publish_turn_input(submitted);
         self.prepare_user_visible_turn();
         if content.is_empty() {
-            return self.dispatch_turn(content);
+            self.publish_turn_input(submitted);
+            let history = self.model_history();
+            return self.dispatch_turn(content, history);
         }
-        self.show_user_message(display, content.image_labels());
         if self.core.session.first_user_message.is_none() {
             self.core.session.first_user_message = Some(text.clone().into_owned());
             self.core
@@ -116,16 +117,18 @@ impl TuiApp {
                 .snapshot_metadata_at(self.core.session.history.len() + 1);
             self.session_dirty = true;
         }
-        self.core
-            .session
-            .history
-            .push(protocol::history_item_from_user_content(content.clone()));
-        self.sync_session_snapshot();
-        self.core.session.history.pop();
-        self.dispatch_turn(content)
+        let history = self.commit_request_history_item(
+            protocol::history_item_from_user_content(content.clone()),
+            Some(Block::User {
+                text: display.to_string(),
+                image_labels: content.image_labels(),
+            }),
+        );
+        self.publish_turn_input(submitted);
+        self.dispatch_turn(content, history)
     }
 
-    fn dispatch_turn(&mut self, content: Content) -> TurnState {
+    fn dispatch_turn(&mut self, content: Content, history: Vec<HistoryItem>) -> TurnState {
         let Some(api_key) = self.resolve_api_key() else {
             {
                 self.working.finish(TurnOutcome::Done);
@@ -140,6 +143,7 @@ impl TuiApp {
 
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(content, None),
+            history,
             model: self.core.config.model.clone(),
             reasoning_effort: self.core.config.reasoning_effort,
             api_base: self.core.config.api_base.clone(),
@@ -174,7 +178,7 @@ impl TuiApp {
                 mode: self.core.config.mode.clone(),
                 model: turn.model,
                 reasoning_effort: turn.reasoning_effort,
-                history: self.model_history(),
+                history: turn.history,
                 api_base: Some(turn.api_base),
                 api_key: Some(turn.api_key),
                 session_id: self.core.session.id.clone(),
@@ -199,17 +203,15 @@ impl TuiApp {
     ) -> TurnState {
         self.invalidate_prompt_prediction();
         self.prepare_user_visible_turn();
-        if let Some(block) = crate::app::history::history_note_to_block(&self.lua, &history_note) {
-            self.push_block(block);
-        }
-        if !history_note.text().is_empty() {
-            self.core
-                .session
-                .history
-                .push(HistoryItem::note(history_note.clone()));
-            self.sync_session_snapshot();
-            self.core.session.history.pop();
-        }
+        let block = crate::app::history::history_note_to_block(&self.lua, &history_note);
+        let history = if !history_note.text().is_empty() {
+            self.commit_request_history_item(HistoryItem::note(history_note.clone()), block)
+        } else {
+            if let Some(block) = block {
+                self.push_block(block);
+            }
+            self.model_history()
+        };
         let api_key = match self.resolve_api_key() {
             Some(api_key) => api_key,
             None => {
@@ -224,6 +226,7 @@ impl TuiApp {
         };
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::note(history_note),
+            history,
             model: self.core.config.model.clone(),
             reasoning_effort: self.core.config.reasoning_effort,
             api_base: self.core.config.api_base.clone(),
@@ -261,22 +264,31 @@ impl TuiApp {
             "" => None,
             trimmed => Some(trimmed.to_string()),
         };
-        self.publish_turn_input(submitted);
         self.prepare_user_visible_turn();
 
-        if !evaluated.is_empty() {
-            // Publish the expanded command body to session observers before dispatch;
-            // the engine receives the same text as this turn's user content below.
-            self.core
-                .session
-                .history
-                .push(protocol::HistoryItem::user_with_display(
+        let history = if !evaluated.is_empty() {
+            if self.core.session.first_user_message.is_none() {
+                self.core.session.first_user_message = Some(display.clone());
+                self.core
+                    .session
+                    .snapshot_metadata_at(self.core.session.history.len() + 1);
+                self.session_dirty = true;
+            }
+            self.commit_request_history_item(
+                protocol::HistoryItem::user_with_display(
                     Content::text(evaluated.clone()),
                     display.clone(),
-                ));
-            self.sync_session_snapshot();
-            self.core.session.history.pop();
-        }
+                ),
+                Some(Block::User {
+                    text: display.clone(),
+                    image_labels: vec![],
+                }),
+            )
+        } else {
+            self.show_user_message(&display, vec![]);
+            self.model_history()
+        };
+        self.publish_turn_input(submitted);
 
         let (model, api_base, api_key) = {
             let target_model = overrides.model.as_deref();
@@ -391,17 +403,9 @@ impl TuiApp {
             .map(|overrides| std::sync::Arc::new(self.core.permissions.with_overrides(overrides)))
             .unwrap_or_else(|| self.core.permissions.clone());
 
-        self.show_user_message(&display, vec![]);
-        if self.core.session.first_user_message.is_none() {
-            self.core.session.first_user_message = Some(display.clone());
-            self.core
-                .session
-                .snapshot_metadata_at(self.core.session.history.len() + 1);
-            self.session_dirty = true;
-        }
-
         self.dispatch_prepared_turn(PreparedTurn {
             input: protocol::StartTurnInput::user(Content::text(evaluated), Some(display)),
+            history,
             model,
             reasoning_effort: reasoning,
             api_base,
@@ -1056,6 +1060,70 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn user_turn_commits_request_before_dispatch_without_duplicate_history() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+
+        let turn = app
+            .app
+            .begin_agent_turn("first request", Content::text("first request"));
+        app.app.agent = Some(turn);
+
+        assert!(matches!(
+            app.app.core.session.history.last(),
+            Some(HistoryItem::User { content, .. }) if content.text_content() == "first request"
+        ));
+        let payload = app
+            .drain_engine_sends()
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                protocol::UiCommand::StartTurn(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("turn dispatched");
+        assert!(payload.history.iter().all(
+            |item| !matches!(item, HistoryItem::User { content, .. } if content.text_content() == "first request")
+        ));
+        assert_eq!(
+            payload.input.provider_content().text_content(),
+            "first request"
+        );
+
+        app.app.flush_persist();
+        let loaded = smelt_core::session::load(&app.app.core.session.id).expect("session saved");
+        assert!(matches!(
+            loaded.history.last(),
+            Some(HistoryItem::User { content, .. }) if content.text_content() == "first request"
+        ));
+    }
+
+    #[test]
+    fn command_turn_metadata_snapshot_matches_committed_request() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+
+        let turn = app.app.begin_command_request_turn(
+            "/fix".into(),
+            "fix it".into(),
+            smelt_core::custom_commands::CommandOverrides::default(),
+        );
+        app.app.agent = Some(turn);
+
+        assert_eq!(
+            app.app.core.session.first_user_message.as_deref(),
+            Some("/fix")
+        );
+        assert_eq!(
+            app.app
+                .core
+                .session
+                .metadata_snapshots
+                .as_slice()
+                .last()
+                .map(|(idx, _)| *idx),
+            Some(app.app.core.session.history.len())
+        );
     }
 
     #[test]
