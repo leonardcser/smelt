@@ -1242,14 +1242,19 @@ fn expected_completed_history_len(
     } else {
         0
     };
-    let queued_context_append = if completed_turn_starts_queued_followup(pre, targeted_active)
+    let queued_followup = completed_turn_starts_queued_followup(pre, targeted_active);
+    let queued_context_append = if queued_followup
         && (pre.checkpoint_first_live_index.is_none() || pre.queued_next_context_append)
     {
         1
     } else {
         0
     };
-    expected_model_history_len(pre, msg_count) + pending_appends + queued_context_append
+    let queued_request_append = usize::from(queued_followup);
+    expected_model_history_len(pre, msg_count)
+        + pending_appends
+        + queued_context_append
+        + queued_request_append
 }
 
 fn scheduled_reload_mode_change(
