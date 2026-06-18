@@ -893,6 +893,34 @@ impl<'a> Turn<'a> {
     }
 
     fn queue_history_item(&mut self, append: protocol::HistoryAppend) {
+        match &append.policy {
+            protocol::HistoryAppendPolicy::ReplaceContextNote { name } => {
+                if protocol::replace_context_note(
+                    &mut self.pending_history_items,
+                    &append.item,
+                    name,
+                ) {
+                    return;
+                }
+                if protocol::replace_context_note(&mut self.history, &append.item, name) {
+                    self.emit_messages_snapshot();
+                    return;
+                }
+                protocol::apply_history_append(&mut self.pending_history_items, &append);
+                return;
+            }
+            protocol::HistoryAppendPolicy::RemoveContextNote { name } => {
+                if protocol::remove_context_note(&mut self.pending_history_items, name) {
+                    return;
+                }
+                if protocol::remove_context_note(&mut self.history, name) {
+                    self.emit_messages_snapshot();
+                }
+                return;
+            }
+            _ => {}
+        }
+
         let replace_note_kind = append.replacement_note_kind();
         if replace_note_kind == Some(protocol::HistoryNoteKind::ModeChange) {
             if let Some(idx) = self

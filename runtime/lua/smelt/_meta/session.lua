@@ -13,6 +13,10 @@ local session = {}
 ---@type fun(spec: table): boolean?
 session.checkpoint = nil
 
+--- Set or clear a named hidden model-visible context note. `context_note(name, text)` creates or replaces that note for future turns; `context_note(name, nil)` clears it. Named notes do not replace each other, so plugins can maintain independent steering state. UiHost-only.
+---@type fun(name: string, text: string?, opts: table?): nil
+session.context_note = nil
+
 --- Latest non-background provider-reported active-context token count, or `nil` before the first usage report. While a request is in flight this may be the previous turn's reading until the provider sends a fresh usage update.
 ---@type fun(): integer?
 session.context_tokens = nil

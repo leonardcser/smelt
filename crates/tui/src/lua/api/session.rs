@@ -145,6 +145,9 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
                 if let Some(mode) = note.mode() {
                     entry.set("mode", mode)?;
                 }
+                if let Some(context_name) = note.context_name() {
+                    entry.set("context_name", context_name)?;
+                }
             }
         }
         tbl.set(i + 1, entry)?;
@@ -214,6 +217,21 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "Current working directory. Updated when Smelt enters a managed worktree.",
         &[],
         |_, ()| Ok(crate::lua::try_with_app(|app| app.cwd.clone()).unwrap_or_default()),
+    )?;
+    m.fn_(
+        "context_note",
+        "Set or clear a named hidden model-visible context note. `context_note(name, text)` creates or replaces that note for future turns; `context_note(name, nil)` clears it. Named notes do not replace each other, so plugins can maintain independent steering state. UiHost-only.",
+        &["name", "text", "opts"],
+        |_, (name, text, _opts): (String, Option<String>, Option<mlua::Table>)| -> LuaResult<()> {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return Err(LuaError::RuntimeError(
+                    "smelt.session.context_note: name must be non-empty".into(),
+                ));
+            }
+            crate::lua::with_app(|app| app.set_context_note(name, text));
+            Ok(())
+        },
     )?;
     m.fn_(
         "enter_worktree",

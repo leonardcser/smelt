@@ -6,6 +6,7 @@ Type `/` to open the command picker with fuzzy search.
 
 | Command                   | Description                                                          |
 | ------------------------- | -------------------------------------------------------------------- |
+| `/goal [objective]`       | Manage a persistent session goal                                     |
 | `/clear`, `/new`          | Start a new conversation                                             |
 | `/rewind`                 | Rewind to a previous turn (same as `Esc Esc`)                        |
 | `/resume`                 | Resume a saved session                                               |

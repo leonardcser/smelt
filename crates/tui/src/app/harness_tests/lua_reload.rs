@@ -74,6 +74,146 @@ fn lua_config_session_and_transcript_contracts_are_available() {
 }
 
 #[test]
+fn lua_context_note_updates_named_history_notes_independently() {
+    let mut app = TestApp::builder().build();
+    app.app
+        .core
+        .session
+        .history
+        .push(protocol::HistoryItem::User {
+            content: protocol::Content::text("hello"),
+            display: None,
+        });
+
+    assert!(app.run_lua(
+        r#"
+            smelt.session.context_note("goal", "first goal")
+            smelt.session.context_note("cwd", "custom cwd")
+            smelt.session.context_note("goal", "second goal")
+        "#,
+    ));
+
+    let history = &app.app.core.session.history;
+    assert!(history.iter().any(|item| matches!(
+        item,
+        protocol::HistoryItem::Note(note)
+            if note.context_name() == Some("goal") && note.text() == "second goal"
+    )));
+    assert!(history.iter().any(|item| matches!(
+        item,
+        protocol::HistoryItem::Note(note)
+            if note.context_name() == Some("cwd") && note.text() == "custom cwd"
+    )));
+    assert_eq!(
+        history
+            .iter()
+            .filter_map(protocol::HistoryItem::as_note)
+            .filter(|note| note.kind() == protocol::HistoryNoteKind::Context)
+            .count(),
+        2
+    );
+
+    assert!(app.run_lua(r#"smelt.session.context_note("goal", nil)"#));
+    let history = &app.app.core.session.history;
+    assert!(!history.iter().any(|item| matches!(
+        item,
+        protocol::HistoryItem::Note(note) if note.context_name() == Some("goal")
+    )));
+    assert!(history.iter().any(|item| matches!(
+        item,
+        protocol::HistoryItem::Note(note)
+            if note.context_name() == Some("cwd") && note.text() == "custom cwd"
+    )));
+}
+
+#[test]
+fn lua_goal_module_persists_and_updates_session_goal() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            local created = assert(goal.create("finish named context notes", { auto_continue = false }))
+            assert(created.id ~= nil and created.id ~= "")
+            assert(type(created.created_at_ms) == "number")
+            assert(goal.current().text == "finish named context notes")
+            assert(goal.current().status == "active")
+            assert(goal.describe():find("Auto%-continue: off"))
+            assert(goal.describe():find("ID:"))
+            assert(goal.pause())
+            assert(goal.current().status == "paused")
+            assert(goal.status_text():find("goal paused", 1, true))
+            assert(goal.block("waiting for input"))
+            assert(goal.current().status == "blocked")
+            assert(goal.current().auto_continue == false)
+            assert(goal.current().reason == "waiting for input")
+            assert(goal.status_text():find("goal blocked", 1, true))
+            assert(goal.complete())
+            assert(type(goal.current().completed_at_ms) == "number")
+            assert(goal.status_text() == nil)
+            goal.clear()
+            assert(goal.current() == nil)
+        "#,
+    ));
+}
+
+#[test]
+fn lua_goal_tools_limit_model_updates_to_done_or_blocked() {
+    let mut app = TestApp::builder().build();
+
+    assert!(app.run_lua(r#"require("smelt.goal").setup()"#));
+    let tools = app.app.lua.tool_defs(
+        protocol::AgentMode::normal(),
+        smelt_core::lua::ToolVisibility::Interactive,
+    );
+    let update = tools
+        .iter()
+        .find(|tool| tool.name == "update_goal")
+        .expect("update_goal should be registered");
+    assert!(update
+        .description
+        .contains("cannot pause, resume, clear, or rewrite"));
+    assert_eq!(
+        update.parameters["properties"]["status"]["enum"],
+        serde_json::json!(["done", "blocked"])
+    );
+    assert_eq!(update.parameters["required"], serde_json::json!(["status"]));
+}
+
+#[test]
+fn lua_goal_auto_continue_scheduled_during_turn_starts_when_idle() {
+    let mut app = TestApp::builder().build();
+    let _ = app.drain_engine_sends();
+
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            smelt.engine.is_running = function() return _G.__goal_running == true end
+            smelt.engine.submit_command = function(name, body, _overrides, display)
+                _G.__goal_submit = { name = name, body = body, display = display }
+            end
+            _G.__goal_running = true
+            assert(goal.create("finish <the> & goal", { auto_continue = true }))
+            goal.schedule_auto_continue()
+            _G.__goal_running = false
+        "#,
+    ));
+
+    app.feed_one(SourceEvent::Tick(1300));
+    app.app.tick_timers();
+    assert!(app.run_lua(
+        r##"
+            assert(_G.__goal_submit.name == "goal")
+            assert(_G.__goal_submit.display == "goal continue")
+            assert(_G.__goal_submit.body:find("# Continue goal", 1, true))
+            assert(_G.__goal_submit.body:find("finish &lt;the&gt; &amp; goal", 1, true))
+            assert(_G.__goal_submit.body:find("status=\"done\"", 1, true))
+            assert(_G.__goal_submit.body:find("status=\"blocked\"", 1, true))
+        "##,
+    ));
+}
+
+#[test]
 fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
     let home_guard = test_home_guard();
     let target_dir = tempfile::TempDir::new().expect("create switch cwd tempdir");
@@ -113,7 +253,7 @@ fn lua_switch_cwd_updates_runtime_state_and_engine_cwd() {
         .iter()
         .any(|pending| matches!(
             pending.history_item(),
-            protocol::HistoryItem::Note(protocol::HistoryNote::Context { ref text })
+            protocol::HistoryItem::Note(protocol::HistoryNote::Context { ref text, .. })
                 if text == &format!("Current working directory: {expected}.")
         )));
     assert!(app.drain_engine_sends().into_iter().any(|cmd| matches!(

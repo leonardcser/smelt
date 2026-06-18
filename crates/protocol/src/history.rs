@@ -118,6 +118,16 @@ impl ProcessStatusEvent {
     }
 }
 
+pub const DEFAULT_CONTEXT_NOTE_NAME: &str = "cwd";
+
+fn default_context_note_name() -> String {
+    DEFAULT_CONTEXT_NOTE_NAME.to_string()
+}
+
+fn is_default_context_note_name(name: &str) -> bool {
+    name == DEFAULT_CONTEXT_NOTE_NAME
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "note_kind", rename_all = "snake_case")]
 pub enum HistoryNote {
@@ -129,6 +139,11 @@ pub enum HistoryNote {
         text: String,
     },
     Context {
+        #[serde(
+            default = "default_context_note_name",
+            skip_serializing_if = "is_default_context_note_name"
+        )]
+        name: String,
         text: String,
     },
     ProcessStatus {
@@ -151,6 +166,8 @@ pub enum HistoryNoteKind {
 pub enum HistoryAppendPolicy {
     Append,
     ReplaceNoteKind { kind: HistoryNoteKind },
+    ReplaceContextNote { name: String },
+    RemoveContextNote { name: String },
     ModeChange { base: crate::mode::AgentMode },
 }
 
@@ -173,6 +190,9 @@ impl HistoryAppendPolicy {
         match self {
             Self::Append => None,
             Self::ReplaceNoteKind { kind } => Some(*kind),
+            Self::ReplaceContextNote { .. } | Self::RemoveContextNote { .. } => {
+                Some(HistoryNoteKind::Context)
+            }
             Self::ModeChange { .. } => Some(HistoryNoteKind::ModeChange),
         }
     }
@@ -190,6 +210,21 @@ impl HistoryAppend {
         Self {
             item,
             policy: HistoryAppendPolicy::ReplaceNoteKind { kind },
+        }
+    }
+
+    pub fn replace_context_note(item: HistoryItem, name: impl Into<String>) -> Self {
+        Self {
+            item,
+            policy: HistoryAppendPolicy::ReplaceContextNote { name: name.into() },
+        }
+    }
+
+    pub fn remove_context_note(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            item: HistoryItem::note(HistoryNote::named_context(name.clone(), String::new())),
+            policy: HistoryAppendPolicy::RemoveContextNote { name },
         }
     }
 
@@ -235,7 +270,14 @@ impl HistoryNote {
     }
 
     pub fn context(text: impl Into<String>) -> Self {
-        Self::Context { text: text.into() }
+        Self::named_context(DEFAULT_CONTEXT_NOTE_NAME, text)
+    }
+
+    pub fn named_context(name: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::Context {
+            name: name.into(),
+            text: text.into(),
+        }
     }
 
     pub fn process_status(text: impl Into<String>) -> Self {
@@ -270,7 +312,7 @@ impl HistoryNote {
     pub fn text(&self) -> &str {
         match self {
             HistoryNote::ModeChange { text, .. }
-            | HistoryNote::Context { text }
+            | HistoryNote::Context { text, .. }
             | HistoryNote::ProcessStatus { text, .. } => text,
         }
     }
@@ -289,6 +331,13 @@ impl HistoryNote {
         }
     }
 
+    pub fn context_name(&self) -> Option<&str> {
+        match self {
+            HistoryNote::Context { name, .. } => Some(name),
+            HistoryNote::ModeChange { .. } | HistoryNote::ProcessStatus { .. } => None,
+        }
+    }
+
     pub fn process_status_event_ref(&self) -> Option<&ProcessStatusEvent> {
         match self {
             HistoryNote::ProcessStatus { event, .. } => event.as_ref(),
@@ -299,7 +348,7 @@ impl HistoryNote {
     pub fn to_model_text(&self) -> String {
         match self {
             HistoryNote::ModeChange { text, .. } => crate::note::mode_change_note(text),
-            HistoryNote::Context { text } => crate::note::context_note(text),
+            HistoryNote::Context { text, .. } => crate::note::context_note(text),
             HistoryNote::ProcessStatus { text, .. } => crate::note::process_status_note(text),
         }
     }
@@ -476,6 +525,38 @@ pub fn replace_last_note_kind(
     true
 }
 
+pub fn replace_context_note(items: &mut [HistoryItem], item: &HistoryItem, name: &str) -> bool {
+    let Some(note) = item.as_note() else {
+        return false;
+    };
+    if note.context_name() != Some(name) {
+        return false;
+    }
+    let Some(existing) = items.iter_mut().rev().find(|existing| {
+        existing
+            .as_note()
+            .and_then(HistoryNote::context_name)
+            .is_some_and(|context_name| context_name == name)
+    }) else {
+        return false;
+    };
+    *existing = item.clone();
+    true
+}
+
+pub fn remove_context_note(items: &mut Vec<HistoryItem>, name: &str) -> bool {
+    let Some(idx) = items.iter().rposition(|existing| {
+        existing
+            .as_note()
+            .and_then(HistoryNote::context_name)
+            .is_some_and(|context_name| context_name == name)
+    }) else {
+        return false;
+    };
+    items.remove(idx);
+    true
+}
+
 pub fn apply_history_append(
     items: &mut Vec<HistoryItem>,
     append: &HistoryAppend,
@@ -491,6 +572,24 @@ pub fn apply_history_append(
             } else {
                 items.push(append.item.clone());
                 HistoryAppendResult::Pushed
+            }
+        }
+        HistoryAppendPolicy::ReplaceContextNote { name } => {
+            if append.item.as_note().and_then(HistoryNote::context_name) != Some(name.as_str()) {
+                return HistoryAppendResult::Unchanged;
+            }
+            if replace_context_note(items, &append.item, name) {
+                HistoryAppendResult::ReplacedLast
+            } else {
+                items.push(append.item.clone());
+                HistoryAppendResult::Pushed
+            }
+        }
+        HistoryAppendPolicy::RemoveContextNote { name } => {
+            if remove_context_note(items, name) {
+                HistoryAppendResult::RemovedLast
+            } else {
+                HistoryAppendResult::Unchanged
             }
         }
         HistoryAppendPolicy::ModeChange { base } => {
@@ -992,6 +1091,87 @@ mod tests {
                 .as_deref(),
             Some("[smelt:context] Current working directory: /work.")
         );
+    }
+
+    #[test]
+    fn named_context_notes_replace_only_matching_name() {
+        let mut history = vec![
+            HistoryItem::note(HistoryNote::named_context("cwd", "cwd one")),
+            HistoryItem::note(HistoryNote::named_context("goal", "goal one")),
+        ];
+
+        assert_eq!(
+            apply_history_append(
+                &mut history,
+                &HistoryAppend::replace_context_note(
+                    HistoryItem::note(HistoryNote::named_context("cwd", "cwd two")),
+                    "cwd",
+                ),
+            ),
+            HistoryAppendResult::ReplacedLast
+        );
+
+        assert_eq!(
+            history,
+            vec![
+                HistoryItem::note(HistoryNote::named_context("cwd", "cwd two")),
+                HistoryItem::note(HistoryNote::named_context("goal", "goal one")),
+            ]
+        );
+    }
+
+    #[test]
+    fn context_note_policy_name_mismatch_is_unchanged() {
+        let mut history = vec![HistoryItem::note(HistoryNote::named_context(
+            "cwd", "cwd one",
+        ))];
+
+        assert_eq!(
+            apply_history_append(
+                &mut history,
+                &HistoryAppend::replace_context_note(
+                    HistoryItem::note(HistoryNote::named_context("goal", "goal one")),
+                    "cwd",
+                ),
+            ),
+            HistoryAppendResult::Unchanged
+        );
+
+        assert_eq!(
+            history,
+            vec![HistoryItem::note(HistoryNote::named_context(
+                "cwd", "cwd one"
+            ))]
+        );
+    }
+
+    #[test]
+    fn removing_named_context_note_leaves_other_names() {
+        let mut history = vec![
+            HistoryItem::note(HistoryNote::named_context("cwd", "cwd")),
+            HistoryItem::note(HistoryNote::named_context("goal", "goal")),
+        ];
+
+        assert_eq!(
+            apply_history_append(&mut history, &HistoryAppend::remove_context_note("goal")),
+            HistoryAppendResult::RemovedLast
+        );
+
+        assert_eq!(
+            history,
+            vec![HistoryItem::note(HistoryNote::named_context("cwd", "cwd"))]
+        );
+    }
+
+    #[test]
+    fn context_note_deserialize_defaults_to_cwd_name() {
+        let note: HistoryNote = serde_json::from_value(serde_json::json!({
+            "note_kind": "context",
+            "text": "Current working directory: /work."
+        }))
+        .expect("deserialize context note");
+
+        assert_eq!(note.context_name(), Some(DEFAULT_CONTEXT_NOTE_NAME));
     }
 
     #[test]

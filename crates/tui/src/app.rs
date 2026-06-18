@@ -501,6 +501,8 @@ pub(crate) struct PendingTool {
 pub(crate) struct PendingHistoryAppend {
     item: protocol::HistoryItem,
     replace_note_kind: Option<protocol::HistoryNoteKind>,
+    replace_context_name: Option<String>,
+    remove_context: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -516,13 +518,32 @@ impl PendingHistoryAppend {
                 mode, text,
             )),
             replace_note_kind: Some(protocol::HistoryNoteKind::ModeChange),
+            replace_context_name: None,
+            remove_context: false,
         }
     }
 
-    pub(crate) fn context(text: String) -> Self {
+    pub(crate) fn context(name: String, text: String) -> Self {
         Self {
-            item: protocol::HistoryItem::note(protocol::HistoryNote::context(text)),
+            item: protocol::HistoryItem::note(protocol::HistoryNote::named_context(
+                name.clone(),
+                text,
+            )),
             replace_note_kind: Some(protocol::HistoryNoteKind::Context),
+            replace_context_name: Some(name),
+            remove_context: false,
+        }
+    }
+
+    pub(crate) fn remove_context(name: String) -> Self {
+        Self {
+            item: protocol::HistoryItem::note(protocol::HistoryNote::named_context(
+                name.clone(),
+                String::new(),
+            )),
+            replace_note_kind: Some(protocol::HistoryNoteKind::Context),
+            replace_context_name: Some(name),
+            remove_context: true,
         }
     }
 
@@ -530,6 +551,8 @@ impl PendingHistoryAppend {
         Self {
             item: protocol::HistoryItem::note(note),
             replace_note_kind: None,
+            replace_context_name: None,
+            remove_context: false,
         }
     }
 
@@ -549,6 +572,17 @@ impl PendingHistoryAppend {
 
     pub(crate) fn replacement_note_kind(&self) -> Option<protocol::HistoryNoteKind> {
         self.replace_note_kind
+    }
+
+    fn same_replacement_target(&self, other: &Self) -> bool {
+        match (&self.replace_context_name, &other.replace_context_name) {
+            (Some(a), Some(b)) => a == b,
+            (Some(_), None) | (None, Some(_)) => false,
+            (None, None) => {
+                self.replace_note_kind.is_some()
+                    && self.replace_note_kind == other.replace_note_kind
+            }
+        }
     }
 
     pub(crate) fn mode(&self) -> Option<&str> {
@@ -584,6 +618,17 @@ impl PendingHistoryAppend {
                     ));
                 protocol::HistoryAppend::mode_change(item, base)
             }
+            Some(protocol::HistoryNoteKind::Context) => {
+                let name = self
+                    .replace_context_name
+                    .clone()
+                    .unwrap_or_else(|| protocol::DEFAULT_CONTEXT_NOTE_NAME.to_string());
+                if self.remove_context {
+                    protocol::HistoryAppend::remove_context_note(name)
+                } else {
+                    protocol::HistoryAppend::replace_context_note(self.item.clone(), name)
+                }
+            }
             Some(kind) => protocol::HistoryAppend::replace_note_kind(self.item.clone(), kind),
             None => protocol::HistoryAppend::append(self.item.clone()),
         }
@@ -599,7 +644,9 @@ impl PendingHistoryAppend {
         let Some(actual) = item.as_note() else {
             return false;
         };
-        expected.kind() == actual.kind() && expected.text() == actual.text()
+        expected.kind() == actual.kind()
+            && expected.context_name() == actual.context_name()
+            && expected.text() == actual.text()
     }
 }
 
@@ -814,38 +861,40 @@ impl TuiApp {
         smelt_core::worktree::project_context(cwd, Some(worktree_root))
     }
 
-    fn latest_context_note_text(&self) -> Option<&str> {
-        self.pending_history_appends
+    fn latest_context_note_text(&self, name: &str) -> Option<&str> {
+        for pending in self.pending_history_appends.iter().rev() {
+            if pending.replace_context_name.as_deref() != Some(name) {
+                continue;
+            }
+            if pending.remove_context {
+                return None;
+            }
+            return pending.item.as_note().map(protocol::HistoryNote::text);
+        }
+        self.core
+            .session
+            .history
             .iter()
             .rev()
-            .filter(|pending| {
-                pending.replacement_note_kind() == Some(protocol::HistoryNoteKind::Context)
-            })
-            .filter_map(|pending| pending.item.as_note())
+            .filter_map(protocol::HistoryItem::as_note)
+            .find(|note| note.context_name() == Some(name))
             .map(protocol::HistoryNote::text)
-            .next()
-            .or_else(|| {
-                self.core
-                    .session
-                    .history
-                    .iter()
-                    .rev()
-                    .filter_map(protocol::HistoryItem::as_note)
-                    .find(|note| note.kind() == protocol::HistoryNoteKind::Context)
-                    .map(protocol::HistoryNote::text)
-            })
     }
 
     pub(crate) fn ensure_current_context_note(&mut self) {
         let text = self.current_context_note_text();
-        if self.latest_context_note_text() == Some(text.as_str()) {
+        if self.latest_context_note_text(protocol::DEFAULT_CONTEXT_NOTE_NAME) == Some(text.as_str())
+        {
             return;
         }
-        self.append_context_note(text);
+        self.set_context_note(protocol::DEFAULT_CONTEXT_NOTE_NAME.to_string(), Some(text));
     }
 
-    pub(crate) fn append_context_note(&mut self, text: String) {
-        let append = PendingHistoryAppend::context(text);
+    pub(crate) fn set_context_note(&mut self, name: String, text: Option<String>) {
+        let append = match text {
+            Some(text) => PendingHistoryAppend::context(name, text),
+            None => PendingHistoryAppend::remove_context(name),
+        };
         if self.agent_is_running() || self.has_visible_session_history() {
             self.queue_history_append(append);
         } else {
@@ -883,11 +932,11 @@ impl TuiApp {
     }
 
     fn replace_or_push_pending_history_append(&mut self, append: PendingHistoryAppend) {
-        if let Some(kind) = append.replacement_note_kind() {
+        if append.replacement_note_kind().is_some() {
             if let Some(existing) = self
                 .pending_history_appends
                 .iter_mut()
-                .find(|pending| pending.replacement_note_kind() == Some(kind))
+                .find(|pending| pending.same_replacement_target(&append))
             {
                 *existing = append;
                 return;
@@ -907,6 +956,8 @@ impl TuiApp {
                 PendingHistoryAppend {
                     item: history_append.item.clone(),
                     replace_note_kind: append.replace_note_kind,
+                    replace_context_name: None,
+                    remove_context: false,
                 }
             } else {
                 append.clone()
@@ -928,9 +979,9 @@ impl TuiApp {
             if let Some(block) = append.transcript_block(&self.lua) {
                 self.commit_history_append_block(block, replace_note_kind, result);
             }
-        } else if let Some(kind) = replace_note_kind {
+        } else if replace_note_kind.is_some() {
             self.pending_history_appends
-                .retain(|pending| pending.replacement_note_kind() != Some(kind));
+                .retain(|pending| !pending.same_replacement_target(&append));
         }
     }
 

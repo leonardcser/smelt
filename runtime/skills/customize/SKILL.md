@@ -442,6 +442,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.compact` | Compaction plugin. |
 | `smelt.plugins.debug_panel` | F3 debug panel. |
 | `smelt.plugins.esc_chord` | Esc-Esc: cancel in-flight foreground/background work (`smelt.work.busy` tokens, e.g. /compact), or rewind to the previous turn when idle. |
+| `smelt.plugins.goal` | Goal lifecycle plugin. |
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `present_plan` tool. |
 | `smelt.plugins.predict` | Input prediction plugin. |
@@ -1454,6 +1455,8 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
 
 - `smelt.session.checkpoint` :: `fun(spec: table): boolean?`
   Install a model-context checkpoint without deleting transcript history.
+- `smelt.session.context_note` :: `fun(name: string, text: string?, opts: table?): nil`
+  Set or clear a named hidden model-visible context note.
 - `smelt.session.context_tokens` :: `fun(): integer?`
   Latest non-background provider-reported active-context token count, or `nil` before the first usage report.
 - `smelt.session.context_window` :: `fun(): integer?`
