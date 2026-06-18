@@ -10,6 +10,87 @@ fn picker_open_focuses_overlay() {
 }
 
 #[test]
+fn prompt_picker_ctrl_c_dismisses_before_idle_quit() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+            _G.prompt_picker_dismissed = false
+            smelt.spawn(function()
+                local result = smelt.prompt.open_picker({
+                    items = {
+                        { label = "alpha" },
+                        { label = "beta" },
+                    },
+                })
+                _G.prompt_picker_dismissed = result == nil
+            end)
+        "#,
+    ));
+    drive_lua_tasks(&mut app);
+    assert!(
+        !app.app.picker_state.is_empty(),
+        "prompt picker should open"
+    );
+
+    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    drive_lua_tasks(&mut app);
+
+    assert!(!app.quit_requested(), "first Ctrl-C should not quit");
+    assert!(
+        app.app.picker_state.is_empty(),
+        "first Ctrl-C should dismiss picker"
+    );
+    assert!(app.run_lua(r#"assert(_G.prompt_picker_dismissed == true)"#));
+
+    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(
+        app.quit_requested(),
+        "second Ctrl-C after dismissal should quit"
+    );
+}
+
+#[test]
+fn floating_picker_ctrl_c_dismisses_before_idle_quit() {
+    let mut app = TestApp::builder().build();
+    assert!(app.run_lua(
+        r#"
+            _G.floating_picker_dismissed = false
+            smelt.spawn(function()
+                local result = smelt.picker.open({
+                    items = {
+                        { label = "alpha" },
+                        { label = "beta" },
+                    },
+                    placement = "center",
+                })
+                _G.floating_picker_dismissed = result == nil
+            end)
+        "#,
+    ));
+    drive_lua_tasks(&mut app);
+    assert!(
+        !app.app.picker_state.is_empty(),
+        "floating picker should open"
+    );
+
+    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    drive_lua_tasks(&mut app);
+
+    assert!(!app.quit_requested(), "first Ctrl-C should not quit");
+    assert!(
+        app.app.picker_state.is_empty(),
+        "first Ctrl-C should dismiss picker"
+    );
+    assert!(app.run_lua(r#"assert(_G.floating_picker_dismissed == true)"#));
+
+    app.press_mod(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(
+        app.quit_requested(),
+        "second Ctrl-C after dismissal should quit"
+    );
+}
+
+#[test]
 fn picker_open_renders_items_into_buffer() {
     let mut app = TestApp::builder().build();
     let leaf = open_test_picker(&mut app, &["alpha", "beta", "gamma"], 0);

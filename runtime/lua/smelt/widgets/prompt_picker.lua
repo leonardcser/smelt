@@ -1,5 +1,5 @@
 -- `smelt.prompt.open_picker(opts)` - prompt-docked picker.
--- Up/Down navigate, Tab inserts the label, Esc dismisses.
+-- Up/Down navigate, Tab inserts the label, Esc/Ctrl-C dismiss.
 --
 -- Two modes, distinguished by whether `on_enter` is supplied:
 --
@@ -368,6 +368,7 @@ function smelt.prompt.open_picker(opts)
     accept("tab", picked, item)
   end)
   regs[#regs + 1] = prompt:key("esc",   function() close_with(nil) end)
+  regs[#regs + 1] = prompt:key("c-c",   function() close_with(nil) end)
 
   regs[#regs + 1] = prompt:on("text_changed", function(ctx)
     query = ctx.text or ""

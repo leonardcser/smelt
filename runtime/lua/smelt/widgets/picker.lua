@@ -14,7 +14,7 @@ local M = {}
 -- Open a floating picker over `opts.items` and yield until the user
 -- accepts or dismisses. `opts` is forwarded to `smelt.picker.new` for
 -- placement / styling; up/down/ctrl-j/k/p/n navigate, Enter resolves,
--- Esc dismisses. Returns `{ index, item }` on accept or `nil` on
+-- Esc/Ctrl-C dismisses. Returns `{ index, item }` on accept or `nil` on
 -- dismiss. Must run inside a `smelt.spawn` (or tool execute) frame.
 ---@type fun(opts: smelt.picker.NewOpts): smelt.picker.OpenResult?
 function smelt.picker.open(opts)
@@ -64,6 +64,10 @@ function smelt.picker.open(opts)
     end
   end)
   win:key("esc", function()
+    picker:close()
+    smelt.task.resume(task_id, nil)
+  end)
+  win:key("c-c", function()
     picker:close()
     smelt.task.resume(task_id, nil)
   end)
