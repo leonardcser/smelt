@@ -5,6 +5,7 @@ use smelt_core::content::highlight::{
     parse_inline_spans_with_options, render_code_block, render_markdown_table_with_options,
     wrap_inline_spans, InlineOptions, InlineSpan, InlineStyle,
 };
+use smelt_core::content::inline_line::BreakPolicy;
 use smelt_core::content::markdown_ir::{
     parse_markdown_with_options, MarkdownBlock, MarkdownLine, MarkdownNode, MarkdownTextKind,
 };
@@ -615,6 +616,7 @@ fn markdown_line_spans(
                     ..Default::default()
                 },
                 meta: Default::default(),
+                break_policy: BreakPolicy::Normal,
             });
         }
         if !prefix.is_empty() {
@@ -625,6 +627,7 @@ fn markdown_line_spans(
                     ..Default::default()
                 },
                 meta: Default::default(),
+                break_policy: BreakPolicy::Normal,
             });
         }
         line_spans.extend(base_spans.iter().cloned().map(|mut span| {

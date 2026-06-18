@@ -563,6 +563,7 @@ pub struct InlineSpan {
     pub text: String,
     pub style: InlineStyle,
     pub meta: SpanMeta,
+    pub break_policy: BreakPolicy,
 }
 
 pub fn parse_inline_spans(text: &str, dim: bool) -> Vec<InlineSpan> {
@@ -946,7 +947,13 @@ fn lower_inline_event(
                     icon_style.group = Some(group);
                 }
                 let icon_text = format!("{} ", icon.icon);
-                push_inline_span_meta(out, &icon_text, icon_style, SpanMeta::unselectable());
+                push_inline_span_meta_with_policy(
+                    out,
+                    &icon_text,
+                    icon_style,
+                    SpanMeta::unselectable(),
+                    BreakPolicy::AttachNext,
+                );
             }
             if let Some(file) = inline_file_reference(text, &options.file_icons) {
                 push_inline_span_meta(
@@ -1024,19 +1031,29 @@ fn push_inline_span_meta(
     style: InlineStyle,
     meta: SpanMeta,
 ) {
+    push_inline_span_meta_with_policy(out, text, style, meta, BreakPolicy::Normal);
+}
+
+fn push_inline_span_meta_with_policy(
+    out: &mut Vec<InlineSpan>,
+    text: &str,
+    style: InlineStyle,
+    meta: SpanMeta,
+    break_policy: BreakPolicy,
+) {
     if text.is_empty() {
         return;
     }
-    if let Some(last) = out
-        .last_mut()
-        .filter(|span| span.style == style && span.meta == meta)
-    {
+    if let Some(last) = out.last_mut().filter(|span| {
+        span.style == style && span.meta == meta && span.break_policy == break_policy
+    }) {
         last.text.push_str(text);
     } else {
         out.push(InlineSpan {
             text: text.to_string(),
             style,
             meta,
+            break_policy,
         });
     }
 }
@@ -1048,8 +1065,8 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
             .map(|span| {
                 InlineRun::new(
                     span.text.clone(),
-                    (span.style, span.meta.clone()),
-                    BreakPolicy::Normal,
+                    (span.style, span.meta.clone(), span.break_policy),
+                    span.break_policy,
                 )
             })
             .collect(),
@@ -1062,6 +1079,7 @@ pub fn wrap_inline_spans(spans: &[InlineSpan], max_cols: usize) -> Vec<Vec<Inlin
                     text: run.text,
                     style: run.meta.0,
                     meta: run.meta.1,
+                    break_policy: run.meta.2,
                 })
                 .collect()
         })
@@ -1274,6 +1292,50 @@ mod tests {
 
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].text, "Cargo.toml");
+    }
+
+    #[test]
+    fn file_icon_wraps_with_long_file_name() {
+        let spans = vec![
+            InlineSpan {
+                text: "see ".into(),
+                style: InlineStyle::default(),
+                meta: SpanMeta::default(),
+                break_policy: BreakPolicy::Normal,
+            },
+            InlineSpan {
+                text: "R ".into(),
+                style: InlineStyle::default(),
+                meta: SpanMeta::unselectable(),
+                break_policy: BreakPolicy::AttachNext,
+            },
+            InlineSpan {
+                text: "verylongfilename.rs".into(),
+                style: InlineStyle::default(),
+                meta: SpanMeta::action(SpanAction::OpenFile {
+                    path: PathBuf::from("verylongfilename.rs"),
+                    line: None,
+                    col: None,
+                }),
+                break_policy: BreakPolicy::Normal,
+            },
+        ];
+        let rows = wrap_inline_spans(&spans, 6);
+        let text_rows: Vec<String> = rows
+            .into_iter()
+            .map(|row| row.into_iter().map(|span| span.text).collect())
+            .collect();
+
+        assert_eq!(
+            text_rows,
+            vec![
+                String::from("see "),
+                String::from("R very"),
+                String::from("longfi"),
+                String::from("lename"),
+                String::from(".rs"),
+            ]
+        );
     }
 
     // ── Plain ──────────────────────────────────────────────────────────
@@ -1842,11 +1904,13 @@ mod tests {
                 text: "ab".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
+                break_policy: BreakPolicy::Normal,
             },
             InlineSpan {
                 text: "cd".into(),
                 style: InlineStyle::default(),
                 meta: SpanMeta::default(),
+                break_policy: BreakPolicy::Normal,
             },
         ];
         assert_eq!(inline_spans_width(&spans), 4);
@@ -1858,6 +1922,7 @@ mod tests {
             text: "hello world".into(),
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
+            break_policy: BreakPolicy::Normal,
         }];
         let rows = wrap_inline_spans(&spans, 0);
         assert_eq!(rows.len(), 1);
@@ -1895,6 +1960,7 @@ mod tests {
             text: "abcdefghij".into(),
             style: InlineStyle::default(),
             meta: SpanMeta::default(),
+            break_policy: BreakPolicy::Normal,
         }];
         let rows = wrap_inline_spans(&spans, 3);
         assert!(rows.len() >= 3);

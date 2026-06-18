@@ -20,6 +20,9 @@ pub enum BreakPolicy {
     Unbreakable,
     /// Preserve every character and break strictly by display width.
     PreserveSpaces,
+    /// Keep this run attached to the start of the next run. If the next run
+    /// wraps to a new row, this run moves with it.
+    AttachNext,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,8 +133,10 @@ impl<T: Clone> InlineLine<T> {
                 }
                 BreakPolicy::Unbreakable => append_unbreakable_fragment(run_index, run, &mut state),
                 BreakPolicy::PreserveSpaces => {
+                    state.flush_pending_attach();
                     append_preserve_space_fragments(run_index, run, &mut state)
                 }
+                BreakPolicy::AttachNext => state.push_pending_attach(run_index, run),
             }
         }
 
@@ -169,6 +174,8 @@ impl<T: Clone + PartialEq> InlineLine<T> {
 struct WrapState<T> {
     rows: Vec<Vec<WrappedRun<T>>>,
     cur: Vec<WrappedRun<T>>,
+    pending_attach: Vec<WrappedRun<T>>,
+    pending_attach_width: usize,
     col: usize,
     first_cells: usize,
     continuation_cells: usize,
@@ -179,6 +186,8 @@ impl<T: Clone> WrapState<T> {
         Self {
             rows: Vec::new(),
             cur: Vec::new(),
+            pending_attach: Vec::new(),
+            pending_attach_width: 0,
             col: 0,
             first_cells,
             continuation_cells,
@@ -199,6 +208,7 @@ impl<T: Clone> WrapState<T> {
     }
 
     fn append_fragment(&mut self, run_index: usize, range: Range<usize>, run: &InlineRun<T>) {
+        self.flush_pending_attach();
         if range.is_empty() {
             return;
         }
@@ -216,7 +226,34 @@ impl<T: Clone> WrapState<T> {
         });
     }
 
+    fn push_pending_attach(&mut self, run_index: usize, run: &InlineRun<T>) {
+        if run.text.is_empty() {
+            return;
+        }
+        self.pending_attach.push(WrappedRun {
+            run_index,
+            range: 0..run.text.len(),
+            meta: run.meta.clone(),
+            break_policy: run.break_policy,
+        });
+        self.pending_attach_width += text_width(&run.text);
+    }
+
+    fn flush_pending_attach(&mut self) {
+        if self.pending_attach.is_empty() {
+            return;
+        }
+        self.cur.append(&mut self.pending_attach);
+        self.col += self.pending_attach_width;
+        self.pending_attach_width = 0;
+    }
+
+    fn pending_width(&self) -> usize {
+        self.pending_attach_width
+    }
+
     fn finish(mut self) -> Vec<Vec<WrappedRun<T>>> {
+        self.flush_pending_attach();
         if !self.cur.is_empty() || self.rows.is_empty() {
             self.rows.push(self.cur);
         }
@@ -243,7 +280,7 @@ fn append_normal_fragments<T: Clone>(
         let word_width = text_width(&text[word_start..word_end]);
 
         let word_overflows_current_row =
-            state.col + segment_width > state.max_cells() && state.col > 0;
+            state.col + state.pending_width() + segment_width > state.max_cells() && state.col > 0;
         if word_overflows_current_row && word_width <= state.max_cells() {
             state.push_row();
         }
@@ -256,10 +293,13 @@ fn append_normal_fragments<T: Clone>(
         }
 
         if has_space {
-            if state.col + 1 > state.max_cells() && state.col > 0 && break_on_spaces {
+            if state.col + state.pending_width() + 1 > state.max_cells()
+                && state.col > 0
+                && break_on_spaces
+            {
                 state.push_row();
             } else {
-                if state.col + 1 > state.max_cells() && state.col > 0 {
+                if state.col + state.pending_width() + 1 > state.max_cells() && state.col > 0 {
                     state.push_row();
                 }
                 state.append_fragment(run_index, word_end..space_end, run);
@@ -276,7 +316,7 @@ fn append_unbreakable_fragment<T: Clone>(
     state: &mut WrapState<T>,
 ) {
     let width = text_width(&run.text);
-    if state.col + width > state.max_cells() && state.col > 0 {
+    if state.col + state.pending_width() + width > state.max_cells() && state.col > 0 {
         state.push_row();
     }
     state.append_fragment(run_index, 0..run.text.len(), run);
@@ -301,7 +341,7 @@ fn append_char_fragments<T: Clone>(
     for ch in run.text[range].chars() {
         let next = idx + ch.len_utf8();
         let cw = char_width(ch);
-        if state.col + cw > state.max_cells() && state.col > 0 {
+        if state.col + state.pending_width() + cw > state.max_cells() && state.col > 0 {
             state.push_row();
         }
         state.append_fragment(run_index, idx..next, run);
@@ -462,6 +502,24 @@ mod tests {
         assert_eq!(rows[0][0].meta, 1);
         assert_eq!(rows[0][1].meta, 2);
         assert_eq!(rows[1][0].meta, 2);
+    }
+
+    #[test]
+    fn attach_next_moves_prefix_with_wrapped_word() {
+        let line = InlineLine::new(vec![
+            InlineRun::new("see ", (), BreakPolicy::Normal),
+            InlineRun::new("I ", (), BreakPolicy::AttachNext),
+            InlineRun::new("verylongfilename", (), BreakPolicy::Normal),
+        ]);
+        assert_eq!(
+            texts(line.wrap_ranges(6)),
+            vec![
+                vec![String::from("see ")],
+                vec![String::from("I "), String::from("very")],
+                vec![String::from("longfi")],
+                vec![String::from("lename")],
+            ]
+        );
     }
 
     #[test]

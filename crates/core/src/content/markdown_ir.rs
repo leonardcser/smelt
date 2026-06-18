@@ -5,6 +5,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use crate::content::highlight::{
     lower_inline_event_lines_with_options, InlineOptions, InlineSpan, InlineStyle,
 };
+use crate::content::inline_line::BreakPolicy;
 use crate::content::ColumnAlignment;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -411,6 +412,7 @@ fn structural_prefix_spans<'a>(
             text: prefix.to_string(),
             style: InlineStyle::default(),
             meta: Default::default(),
+            break_policy: BreakPolicy::Normal,
         }]
     }
 }
