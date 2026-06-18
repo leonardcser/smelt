@@ -749,6 +749,8 @@ Acceptance:
 
 Goal: make transcript, readonly buffers, and static/test documents share the same viewer command and materialization path.
 
+Status: partially implemented in the current worktree. `DocumentViewExecutor` now executes row motions, word motions, page movement, visual selection, linewise yank, text objects, and action lookup against `DisplayDocument`; focused `StaticRowsDocument` tests cover the shared executor. Transcript key and keymap commands now run through the document registry and `TranscriptDisplayDocument` instead of resolving text semantics from the materialized backing buffer. Remaining work is to route non-transcript readonly buffer viewers through the same executor by default, finish mouse/drag semantics that still live on `Window`, and rename or delete the remaining internal `row_text` compatibility names once the buffer path is unified.
+
 Deliverables:
 
 - Rename or replace row-text viewer types with document-view types:
