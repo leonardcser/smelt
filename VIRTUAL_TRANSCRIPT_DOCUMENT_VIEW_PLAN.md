@@ -690,7 +690,7 @@ Acceptance:
 
 ### Phase 3: Add virtual row index and viewport materialization
 
-Status: in progress in the current worktree. `TranscriptProjection::display_rows_for_range` now exactifies only the requested row window instead of the range from row zero, viewport materialization records exact materialized row counts, render-cache hit/miss metrics are emitted, and tail-loaded sparse transcript documents report virtual row coordinates that include estimated unloaded prefix/suffix gaps. The remaining Phase 3 work is to replace estimated gap placeholders with descriptor-window loading around arbitrary row jumps and to make width-change anchors and row-to-descriptor mapping exact across multiple sparse ranges.
+Status: in progress in the current worktree. `TranscriptProjection::display_rows_for_range` now exactifies only the requested row window instead of the range from row zero, viewport materialization records exact materialized row counts, render-cache hit/miss metrics are emitted, and tail-loaded sparse transcript documents report virtual row coordinates that include estimated unloaded prefix/suffix gaps. Sparse documents now keep one active descriptor window in the compact render bridge, so loading a middle range does not collapse gaps to an already loaded tail range, and row/tail projection planning can activate bounded descriptor windows from the document store. The remaining Phase 3 work is to replace estimated gap placeholders with an exact descriptor row index for anchors, resize, and row-to-descriptor mapping across unloaded ranges.
 
 Goal: make scrolling, resize, and viewport rendering operate over document coordinates and local exactification instead of full transcript rows.
 
