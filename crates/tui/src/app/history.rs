@@ -995,7 +995,11 @@ impl TuiApp {
             self.session_save_pending = false;
             return;
         }
-        if self.core.session.history.is_empty() {
+        if self.core.session.history.is_empty()
+            && !self.session_dirty
+            && !self.persisted_store_ready
+            && self.transcript.history().descriptor_dirty_from().is_none()
+        {
             self.session_save_pending = false;
             return;
         }
@@ -1733,6 +1737,43 @@ mod checkpoint_tests {
         assert_eq!(
             snapshot.metadata_snapshots[0].1.get("first_user_message"),
             Some(&serde_json::Value::String("new user".into()))
+        );
+    }
+
+    #[test]
+    fn rewind_to_start_persists_empty_history_and_descriptor_delete() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        let mut session = session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+        session.id = "rewind-empty-delete".into();
+        session.first_user_message = Some("old user".into());
+        session.history = vec![user("old user"), assistant("old assistant")];
+
+        app.app.load_session(session);
+        app.app.restore_screen();
+        app.app.persisted_store_ready = false;
+        app.app.save_session();
+        app.app.flush_persist();
+
+        let id = app.app.core.session.id.clone();
+        app.app.rewind_to_start();
+        app.app.save_session();
+        app.app.flush_persist();
+
+        let db =
+            smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
+                .expect("open session db");
+        assert_eq!(
+            db.read_history_items_range(0..10)
+                .expect("read persisted history"),
+            Vec::<HistoryItem>::new()
+        );
+        assert!(db
+            .read_transcript_descriptor_records()
+            .expect("read descriptors")
+            .is_empty());
+        assert_eq!(
+            db.session_state().expect("read state").unwrap().history_len,
+            0
         );
     }
 
