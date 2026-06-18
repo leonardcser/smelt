@@ -1480,7 +1480,7 @@ fn reload_clears_every_lua_surface() {
         r#"
             -- LuaShared registries
             smelt.cmd.register("seed_cmd", function() end)
-            smelt.keymap.set("n", "<C-g>", function() end)
+            smelt.keymap.set("n", "<C-o>", function() end)
             smelt.tools.register({
                 name = "seed_tool",
                 description = "",
@@ -1544,7 +1544,7 @@ fn reload_clears_every_lua_surface() {
         .lock()
         .unwrap()
         .keys()
-        .any(|(_, c)| c == "<C-g>"));
+        .any(|(_, c)| c == "<C-o>"));
     assert!(shared.tools.lock().unwrap().contains_key("seed_tool"));
     assert!(shared
         .tool_defaults
@@ -1591,7 +1591,7 @@ fn reload_clears_every_lua_surface() {
             .lock()
             .unwrap()
             .keys()
-            .any(|(_, c)| c == "<C-g>"),
+            .any(|(_, c)| c == "<C-o>"),
         "user keymap cleared"
     );
     assert!(

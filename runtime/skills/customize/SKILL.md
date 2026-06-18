@@ -445,6 +445,7 @@ Loaded on every launch unless opted out via `smelt.builtins.disable({ plugins = 
 | `smelt.plugins.perf_panel` | F12 perf panel. |
 | `smelt.plugins.plan_mode` | Plan-mode plugin: registers the `plan` mode and `present_plan` tool. |
 | `smelt.plugins.predict` | Input prediction plugin. |
+| `smelt.plugins.process_control` | Ctrl-G: move a foreground bash command to the background registry. |
 | `smelt.plugins.scroll_pills` | Scroll-pill overlays for transcript navigation: * Bottom pill - " ↓ jump to bottom " while scrolled off-tail; click re-pins to tail. * Top pill - first line of the nearest user message above the viewport; click reveals it with one row of gap so repeated clicks walk back. |
 | `smelt.plugins.title` | Session title plugin. |
 | `smelt.plugins.upgrade` | Autoupgrade plugin. |
@@ -936,6 +937,8 @@ Lightweight scope timers that feed `smelt.metrics.perf_snapshot`.
 
 Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.
 
+- `smelt.process.detach_foreground` :: `fun(): boolean`
+  Move the most recently started foreground streaming process to the background process registry.
 - `smelt.process.get_default_shell` :: `fun(): any`
   Return the current default shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in effect.
 - `smelt.process.kill` :: `fun(id: string): nil`

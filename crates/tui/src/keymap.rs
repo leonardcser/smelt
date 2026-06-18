@@ -593,6 +593,7 @@ pub(crate) mod hints {
         ("ctrl+c", "clear / cancel / quit"),
         ("ctrl+r", "search input history"),
         ("ctrl+t", "cycle reasoning effort"),
+        ("ctrl+g", "move running command to background"),
         ("ctrl+s", "stash / unstash input"),
         (
             "shift+tab",

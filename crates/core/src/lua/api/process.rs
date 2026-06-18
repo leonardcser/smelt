@@ -89,6 +89,15 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
             Ok(())
         },
     )?;
+    m.fn_(
+        "detach_foreground",
+        "Move the most recently started foreground streaming process to the background process registry. Returns true when a detach request was sent, false when no detachable foreground process is running.",
+        &[],
+        |_, ()| -> LuaResult<bool> {
+            Ok(crate::host::try_with_core(|core| core.processes.detach_latest_foreground().requested())
+                .unwrap_or(false))
+        },
+    )?;
     {
         let s = Arc::clone(shared);
         m.private_fn(
@@ -200,11 +209,12 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                 let cancel = crate::lua::current_task_cancel();
                 let timeout = std::time::Duration::from_millis(timeout_ms);
                 let shell = current_shell_spec(&shared_run_streaming);
-                let detach_on_timeout = background_on_timeout.then(|| process::StreamDetach {
+                let detach = process::StreamDetach {
                     registry,
                     command: command.clone(),
                     now,
-                });
+                };
+                let detach_on_timeout = background_on_timeout.then(|| detach.clone());
                 tokio::spawn(async move {
                     let on_line = |line: String| {
                         injector.inject_tool_output(call_id.clone(), line);
@@ -216,6 +226,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table, shared: &Arc<LuaShared>) 
                             shell,
                             cancel: cancel.clone(),
                             detach_on_timeout,
+                            manual_detach: Some(detach),
                         },
                         on_line,
                     )

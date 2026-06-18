@@ -7,6 +7,10 @@
 ---@class smelt.process
 local process = {}
 
+--- Move the most recently started foreground streaming process to the background process registry. Returns true when a detach request was sent, false when no detachable foreground process is running.
+---@type fun(): boolean
+process.detach_foreground = nil
+
 --- Return the current default shell as `{ program, args }`, or `nil` when the built-in `sh -c` default is in effect.
 ---@type fun(): any
 process.get_default_shell = nil

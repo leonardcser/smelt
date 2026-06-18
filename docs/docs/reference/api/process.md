@@ -6,6 +6,14 @@
 
 Run, spawn, list, and kill processes against the `ProcessRegistry`. spawned processes are non-blocking; run processes wait for completion.
 
+## `smelt.process.detach_foreground`
+
+```lua
+fun(): boolean
+```
+
+Move the most recently started foreground streaming process to the background process registry. Returns true when a detach request was sent, false when no detachable foreground process is running.
+
 ## `smelt.process.get_default_shell`
 
 ```lua

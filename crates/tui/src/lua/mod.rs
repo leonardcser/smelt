@@ -1270,6 +1270,26 @@ mod tests {
     }
 
     #[test]
+    fn autoload_registers_process_detach_keymap() {
+        let mut rt = LuaRuntime::new();
+        rt.load_autoload();
+        assert!(rt.load_error.is_none(), "load_error: {:?}", rt.load_error);
+
+        let rows: mlua::Table = rt.lua.load("return smelt.keymap.list()").eval().unwrap();
+        let mut found = false;
+        for row in rows.sequence_values::<mlua::Table>() {
+            let row = row.unwrap();
+            let chord: String = row.get("chord").unwrap();
+            let desc: Option<String> = row.get("desc").unwrap();
+            if chord == "<C-g>" {
+                assert_eq!(desc.as_deref(), Some("move running command to background"));
+                found = true;
+            }
+        }
+        assert!(found, "process detach keymap should be autoloaded");
+    }
+
+    #[test]
     fn autoload_registers_export_command() {
         let mut rt = LuaRuntime::new();
         rt.load_autoload();
@@ -1706,7 +1726,7 @@ mod tests {
             &init,
             r#"
                 smelt.cmd.register("plug_cmd", function() end)
-                smelt.keymap.set("n", "<C-g>", function() end)
+                smelt.keymap.set("n", "<C-o>", function() end)
             "#,
         )
         .unwrap();
@@ -1723,7 +1743,7 @@ mod tests {
         let shared = rt.shared.clone();
         assert!(shared.commands.lock().unwrap().contains_key("plug_cmd"));
         let has_user_chord = |k: &std::collections::HashMap<(String, String), _>| {
-            k.keys().any(|(_, c)| c == "<C-g>")
+            k.keys().any(|(_, c)| c == "<C-o>")
         };
         assert!(has_user_chord(&shared.keymaps.lock().unwrap()));
 

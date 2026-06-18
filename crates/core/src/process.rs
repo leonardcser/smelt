@@ -6,7 +6,7 @@ use crate::output_limit::{limit_text_tail, OutputLimiter, DEFAULT_MAX_BYTES, TRU
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader, Lines};
@@ -187,6 +187,7 @@ pub struct StreamOutput {
     pub background_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct StreamDetach {
     pub registry: ProcessRegistry,
     pub command: String,
@@ -198,6 +199,7 @@ pub struct StreamConfig {
     pub shell: ShellSpec,
     pub cancel: Option<CancellationToken>,
     pub detach_on_timeout: Option<StreamDetach>,
+    pub manual_detach: Option<StreamDetach>,
 }
 
 /// Shell used to run a string-form command (`sh -c <cmd>` by default).
@@ -264,6 +266,23 @@ pub fn spawn_shell_child(command: &str, shell: &ShellSpec) -> io::Result<Child> 
     cmd.spawn()
 }
 
+fn detach_streaming_child(
+    detach: StreamDetach,
+    child: Child,
+    stdout_reader: Lines<BufReader<ChildStdout>>,
+    stderr_reader: Lines<BufReader<ChildStderr>>,
+    output: OutputLimiter,
+) -> String {
+    detach.registry.adopt_streaming(
+        &detach.command,
+        child,
+        stdout_reader,
+        stderr_reader,
+        detach.now,
+        output,
+    )
+}
+
 /// Spawn `<shell> <args...> command`, stream lines through `on_line`, return
 /// aggregated output once the child exits or the timeout expires. Child runs
 /// in its own session so it has no controlling terminal, and its process group
@@ -307,11 +326,24 @@ pub async fn run_streaming_with_shell(
     let deadline = tokio::time::sleep(config.timeout);
     tokio::pin!(deadline);
 
+    let mut foreground = config
+        .manual_detach
+        .as_ref()
+        .map(|detach| detach.registry.register_foreground_stream());
+
+    enum StreamTick {
+        Cancel,
+        Detach,
+        Stdout(io::Result<Option<String>>),
+        Stderr(io::Result<Option<String>>),
+        Timeout,
+    }
+
     loop {
         if stdout_done && stderr_done {
             break;
         }
-        tokio::select! {
+        let tick = tokio::select! {
             biased;
             _ = async {
                 if let Some(cancel) = config.cancel.as_ref() {
@@ -319,7 +351,21 @@ pub async fn run_streaming_with_shell(
                 } else {
                     std::future::pending::<()>().await;
                 }
-            } => {
+            } => StreamTick::Cancel,
+            _ = async {
+                if let Some(registration) = foreground.as_mut() {
+                    registration.detach_requested().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => StreamTick::Detach,
+            line = stdout_reader.next_line(), if !stdout_done => StreamTick::Stdout(line),
+            line = stderr_reader.next_line(), if !stderr_done => StreamTick::Stderr(line),
+            _ = &mut deadline => StreamTick::Timeout,
+        };
+
+        match tick {
+            StreamTick::Cancel => {
                 kill_process_group(&child);
                 return StreamOutput {
                     content: "cancelled".to_string(),
@@ -328,36 +374,41 @@ pub async fn run_streaming_with_shell(
                     background_id: None,
                 };
             }
-            line = stdout_reader.next_line(), if !stdout_done => {
-                match line {
-                    Ok(Some(line)) => {
-                        on_line(line.clone());
-                        output.push_line(line);
-                    }
-                    _ => stdout_done = true,
-                }
-            }
-            line = stderr_reader.next_line(), if !stderr_done => {
-                match line {
-                    Ok(Some(line)) => {
-                        on_line(line.clone());
-                        output.push_line(line);
-                    }
-                    _ => stderr_done = true,
-                }
-            }
-            _ = &mut deadline => {
-                if let Some(detach) = config.detach_on_timeout {
-                    let id = detach.registry.adopt_streaming(
-                        &detach.command,
-                        child,
-                        stdout_reader,
-                        stderr_reader,
-                        detach.now,
-                        output,
-                    );
+            StreamTick::Detach => {
+                if let Some(detach) = config.manual_detach.clone() {
+                    let id =
+                        detach_streaming_child(detach, child, stdout_reader, stderr_reader, output);
                     return StreamOutput {
-                        content: format!("timed out after {:.0}s; moved to background as {id}", config.timeout.as_secs_f64()),
+                        content: format!("moved to background as {id}"),
+                        is_error: false,
+                        timed_out: false,
+                        background_id: Some(id),
+                    };
+                }
+            }
+            StreamTick::Stdout(line) => match line {
+                Ok(Some(line)) => {
+                    on_line(line.clone());
+                    output.push_line(line);
+                }
+                _ => stdout_done = true,
+            },
+            StreamTick::Stderr(line) => match line {
+                Ok(Some(line)) => {
+                    on_line(line.clone());
+                    output.push_line(line);
+                }
+                _ => stderr_done = true,
+            },
+            StreamTick::Timeout => {
+                if let Some(detach) = config.detach_on_timeout.clone() {
+                    let id =
+                        detach_streaming_child(detach, child, stdout_reader, stderr_reader, output);
+                    return StreamOutput {
+                        content: format!(
+                            "timed out after {:.0}s; moved to background as {id}",
+                            config.timeout.as_secs_f64()
+                        ),
                         is_error: false,
                         timed_out: true,
                         background_id: Some(id),
@@ -373,6 +424,8 @@ pub async fn run_streaming_with_shell(
             }
         }
     }
+
+    drop(foreground);
 
     let status = child.wait().await;
     let is_error = status.map(|s| !s.success()).unwrap_or(true);
@@ -423,6 +476,51 @@ fn kill_group_sigkill(_child: &tokio::process::Child) {}
 // ── Background-process registry ──────────────────────────────────────────
 
 static NEXT_PROC_ID: AtomicU32 = AtomicU32::new(1);
+static NEXT_FOREGROUND_ID: AtomicU64 = AtomicU64::new(1);
+
+enum StreamControl {
+    Detach,
+}
+
+struct ForegroundStream {
+    id: u64,
+    detach_tx: mpsc::UnboundedSender<StreamControl>,
+}
+
+struct ForegroundRegistration {
+    registry: Arc<ProcessRegistryInner>,
+    id: u64,
+    detach_rx: mpsc::UnboundedReceiver<StreamControl>,
+}
+
+impl Drop for ForegroundRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut streams) = self.registry.foreground.lock() {
+            streams.remove(&self.id);
+        }
+    }
+}
+
+impl ForegroundRegistration {
+    async fn detach_requested(&mut self) {
+        if self.detach_rx.recv().await.is_some() {
+            return;
+        }
+        std::future::pending::<()>().await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachForegroundResult {
+    Requested,
+    NoForegroundProcess,
+}
+
+impl DetachForegroundResult {
+    pub fn requested(self) -> bool {
+        matches!(self, Self::Requested)
+    }
+}
 
 struct Process {
     pid: Option<u32>,
@@ -445,6 +543,7 @@ pub struct ProcessCompletion {
 
 struct ProcessRegistryInner {
     processes: Mutex<HashMap<String, Process>>,
+    foreground: Mutex<HashMap<u64, ForegroundStream>>,
     completion_tx: Mutex<Option<mpsc::UnboundedSender<ProcessCompletion>>>,
 }
 
@@ -490,6 +589,7 @@ impl Default for ProcessRegistry {
     fn default() -> Self {
         Self(Arc::new(ProcessRegistryInner {
             processes: Mutex::new(HashMap::new()),
+            foreground: Mutex::new(HashMap::new()),
             completion_tx: Mutex::new(None),
         }))
     }
@@ -502,6 +602,43 @@ impl ProcessRegistry {
 
     pub fn set_completion_sender(&self, tx: mpsc::UnboundedSender<ProcessCompletion>) {
         *self.0.completion_tx.lock().unwrap() = Some(tx);
+    }
+
+    fn register_foreground_stream(&self) -> ForegroundRegistration {
+        let id = NEXT_FOREGROUND_ID.fetch_add(1, Ordering::Relaxed);
+        let (detach_tx, detach_rx) = mpsc::unbounded_channel();
+        let stream = ForegroundStream { id, detach_tx };
+        self.0.foreground.lock().unwrap().insert(id, stream);
+        ForegroundRegistration {
+            registry: self.0.clone(),
+            id,
+            detach_rx,
+        }
+    }
+
+    pub fn detach_latest_foreground(&self) -> DetachForegroundResult {
+        let stream = {
+            let mut streams = self.0.foreground.lock().unwrap();
+            loop {
+                let Some(id) = streams.values().map(|stream| stream.id).max() else {
+                    return DetachForegroundResult::NoForegroundProcess;
+                };
+                let Some(stream) = streams.get(&id) else {
+                    continue;
+                };
+                if stream.detach_tx.is_closed() {
+                    streams.remove(&id);
+                    continue;
+                }
+                break stream.detach_tx.clone();
+            }
+        };
+
+        if stream.send(StreamControl::Detach).is_ok() {
+            DetachForegroundResult::Requested
+        } else {
+            DetachForegroundResult::NoForegroundProcess
+        }
     }
 
     pub fn child_id(&self, child: &Child) -> String {
@@ -756,6 +893,7 @@ impl ProcessRegistry {
     }
 
     pub fn clear(&self) {
+        self.0.foreground.lock().unwrap().clear();
         let mut map = self.0.processes.lock().unwrap();
         for p in map.values_mut() {
             p.suppress_notify = true;
@@ -940,6 +1078,7 @@ mod tests {
                     command: "echo start; sleep 5".into(),
                     now: Instant::now(),
                 }),
+                manual_detach: None,
             },
             |_| {},
         )
@@ -952,6 +1091,53 @@ mod tests {
         let snapshot = registry.snapshot_output(&id).unwrap();
         assert!(snapshot.running);
         assert!(snapshot.text.contains("start"));
+        let _ = registry.stop(&id).await;
+    }
+
+    #[tokio::test]
+    async fn streaming_foreground_can_detach_to_registry() {
+        let registry = ProcessRegistry::new();
+        let detach = StreamDetach {
+            registry: registry.clone(),
+            command: "echo start; sleep 5".into(),
+            now: Instant::now(),
+        };
+        let handle = tokio::spawn(async move {
+            run_streaming_with_shell(
+                "echo start; sleep 5",
+                StreamConfig {
+                    timeout: Duration::from_secs(5),
+                    shell: ShellSpec::default(),
+                    cancel: None,
+                    detach_on_timeout: None,
+                    manual_detach: Some(detach),
+                },
+                |_| {},
+            )
+            .await
+        });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if registry.detach_latest_foreground().requested() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "streaming process never registered as detachable"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let out = handle.await.unwrap();
+        let id = out.background_id.expect("detached process id");
+        assert!(!out.timed_out);
+        assert!(!out.is_error);
+        assert_eq!(registry.running_count(), 1);
+
+        let snapshot =
+            wait_for_snapshot(&registry, &id, |snapshot| snapshot.text.contains("start")).await;
+        assert!(snapshot.running);
         let _ = registry.stop(&id).await;
     }
 
@@ -979,6 +1165,7 @@ mod tests {
                 shell: ShellSpec::default(),
                 cancel: None,
                 detach_on_timeout: None,
+                manual_detach: None,
             },
             |_| {},
         )
@@ -1033,6 +1220,7 @@ mod tests {
                 shell: ShellSpec::default(),
                 cancel: None,
                 detach_on_timeout: None,
+                manual_detach: None,
             },
             |_| {},
         )

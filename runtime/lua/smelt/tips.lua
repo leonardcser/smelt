@@ -242,6 +242,12 @@ M.register({
 })
 
 M.register({
+  id = "process.detach",
+  key = "ctrl+g",
+  text = "move a running bash command to the background so the agent can continue",
+})
+
+M.register({
   id = "settings.discover",
   text = "toggle settings like show_tokens, show_cost, vim, and auto_compact in init.lua",
 })
