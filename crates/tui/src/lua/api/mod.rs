@@ -21,6 +21,7 @@ mod permissions;
 mod picker;
 mod prompt;
 mod render;
+mod search;
 mod session;
 mod settings;
 mod text;
@@ -106,6 +107,7 @@ impl LuaRuntime {
         notebook::register(lua, &smelt, shared)?;
         paint::register(lua, &smelt, shared)?;
         render::register(lua, &smelt)?;
+        search::register(lua, &smelt)?;
         text::register(lua, &smelt)?;
         engine::register(lua, &smelt, shared)?;
         inspect::register(lua, &smelt, shared)?;

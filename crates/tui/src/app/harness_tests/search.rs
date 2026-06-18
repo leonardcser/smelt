@@ -178,8 +178,39 @@ fn transcript_cursor_api_reads_absolute_row_after_scroll() {
 }
 
 #[test]
+fn transcript_search_paints_visible_matches_and_nohl_aliases_clear() {
+    for command in ["nohl", "nohlsearch", "noh"] {
+        let mut app = row_document_transcript_app(20, true);
+        start_visible_transcript_search(&mut app);
+
+        run_cmdline(&mut app, command);
+        app.render_silent();
+
+        let win = app.app.transcript_win();
+        assert!(
+            win.range_layer(crate::smelt_edit::RangeLayer::Search)
+                .is_empty(),
+            "{command} should clear search highlights"
+        );
+        assert!(app.app.search.session.is_none());
+    }
+}
+
+#[test]
 fn transcript_search_paints_visible_matches_and_esc_clears() {
     let mut app = row_document_transcript_app(20, true);
+    start_visible_transcript_search(&mut app);
+
+    app.press(KeyCode::Esc);
+    app.render_silent();
+    let win = app.app.transcript_win();
+    assert!(win
+        .range_layer(crate::smelt_edit::RangeLayer::Search)
+        .is_empty());
+    assert!(app.app.search.session.is_none());
+}
+
+fn start_visible_transcript_search(app: &mut TestApp) {
     app.type_char('g');
     app.type_char('g');
     app.type_char('/');
@@ -193,14 +224,12 @@ fn transcript_search_paints_visible_matches_and_esc_clears() {
             .is_empty(),
         "submitted search should paint visible matches"
     );
+}
 
-    app.press(KeyCode::Esc);
-    app.render_silent();
-    let win = app.app.transcript_win();
-    assert!(win
-        .range_layer(crate::smelt_edit::RangeLayer::Search)
-        .is_empty());
-    assert!(app.app.search.session.is_none());
+fn run_cmdline(app: &mut TestApp, command: &str) {
+    app.press(KeyCode::Char(':'));
+    app.type_text(command);
+    app.press(KeyCode::Enter);
 }
 
 #[test]
