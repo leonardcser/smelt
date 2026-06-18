@@ -524,6 +524,7 @@ impl Window {
     }
 
     pub fn sync_row_render_state(&mut self, buf: &mut Buffer, viewport_rows: u16, now: Instant) {
+        self.refresh_row_cursor_columns(buf);
         self.resync_row_display_coords(buf);
         let text = buf.text();
         self.clamp_anchors_to_source(&text);
@@ -538,6 +539,38 @@ impl Window {
             .map(|r| self.doc_range_to_row_ranges(buf, viewport_rows, r))
             .unwrap_or_default();
         buf.set_range_layer(crate::RangeLayer::YankFlash, flash_ranges);
+    }
+
+    fn refresh_row_cursor_columns(&mut self, buf: &Buffer) {
+        if !self.row_text_state().active {
+            return;
+        }
+        let mut state = *self.row_text_state();
+        let cell = state
+            .preferred_cell_col
+            .or_else(|| {
+                state
+                    .drag_endpoint
+                    .and_then(|pos| self.row_position_cell(state, buf, pos))
+            })
+            .or_else(|| self.row_position_cell(state, buf, state.cursor));
+        let Some(cell) = cell else {
+            return;
+        };
+        state.preferred_cell_col = Some(cell);
+        if let Some(byte_col) = self.row_byte_col_at_cell(state, buf, state.cursor.row, cell) {
+            state.cursor.byte_col = byte_col;
+        }
+        if let Some(mut endpoint) = state.drag_endpoint {
+            if let Some(byte_col) = self.row_byte_col_at_cell(state, buf, endpoint.row, cell) {
+                endpoint.byte_col = byte_col;
+                if endpoint.row == state.cursor.row {
+                    state.cursor.byte_col = byte_col;
+                }
+                state.drag_endpoint = Some(endpoint);
+            }
+        }
+        *self.row_text_state_mut() = state;
     }
 
     pub fn row_yank_flash_until(&self) -> Option<Instant> {

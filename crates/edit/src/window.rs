@@ -5156,6 +5156,64 @@ mod tests {
     }
 
     #[test]
+    fn row_text_drag_autoscroll_refreshes_endpoint_after_rematerialize() {
+        let mut w = make_win();
+        let mut buf = make_buf((0..10).map(|i| format!("short {i}")).collect());
+        w.set_materialized_rows(0, 10, 30);
+        w.scroll_top = 0;
+
+        let viewport = WindowViewport {
+            rect: Rect::new(0, 0, 40, 10),
+            gutter_width: 0,
+            content_width: 40,
+            scroll_top: 0,
+            total_rows: 30,
+            scrollbar: None,
+        };
+        let now = std::time::Instant::now();
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: 9,
+            column: 6,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        w.handle_row_mouse(
+            &buf,
+            event,
+            MouseCtx {
+                soft_breaks: &[],
+                hard_breaks: &[],
+                viewport,
+                click_count: 1,
+            },
+            now,
+        );
+
+        assert!(w.drag_autoscroll_step(&buf, 10, 1));
+        assert_eq!(w.row_text_state().cursor.row, 10);
+        assert_eq!(w.row_text_state().drag_endpoint.unwrap().row, 10);
+
+        let rows = (1..=10)
+            .map(|i| {
+                if i == 10 {
+                    "ééézzz row 10".to_string()
+                } else {
+                    format!("wide row {i}")
+                }
+            })
+            .collect();
+        buf.set_all_lines(rows);
+        w.set_materialized_rows(1, 10, 30);
+        w.sync_row_render_state(&mut buf, 10, now);
+
+        let state = w.row_text_state();
+        assert_eq!(state.cursor.row, 10);
+        assert_eq!(state.drag_endpoint.unwrap().row, 10);
+        assert_eq!(state.cursor.byte_col, "ééézzz".len());
+        assert_eq!(state.drag_endpoint.unwrap().byte_col, "ééézzz".len());
+    }
+
+    #[test]
     fn row_text_drag_autoscroll_top_edge_keeps_cursor_parked() {
         let mut w = make_win();
         let rows = sample_rows(100);
