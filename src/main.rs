@@ -706,9 +706,10 @@ async fn main() {
         // down at this point so stdout is in cooked mode - plugins (e.g.
         // the bundled resume-hint banner) can `print(...)` straight to the
         // user's terminal scrollback.
-        let session_id = app.core.session.id.clone();
-        let has_messages = !app.core.session.history.is_empty();
-        let errs = app.lua.drain_shutdown_hooks(&session_id, has_messages);
+        let shutdown_ctx = app.shutdown_context();
+        let errs = app
+            .lua
+            .drain_shutdown_hooks(&shutdown_ctx.session_id, shutdown_ctx.has_messages);
         for err in errs {
             eprintln!("smelt: lifecycle.shutdown: {err}");
         }

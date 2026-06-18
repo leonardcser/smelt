@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn display_only_resume_sets_resume_hint_state() {
+    let mut app = TestApp::builder().build();
+    let mut session =
+        smelt_core::session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
+    session.id = "display-session".into();
+    let mut transcript = smelt_core::content::transcript::Transcript::new();
+    transcript.push(smelt_core::transcript_model::Block::Text {
+        content: "restored transcript".into(),
+    });
+
+    app.app
+        .load_session_display_only(session, transcript, "full-session".into());
+
+    assert!(app.app.core.session.history.is_empty());
+    assert_eq!(
+        app.app.deferred_session_load.as_deref(),
+        Some("full-session")
+    );
+    assert!(app.app.has_resume_hint_messages());
+    let shutdown = app.app.shutdown_context();
+    assert_eq!(shutdown.session_id, "display-session");
+    assert!(shutdown.has_messages);
+    let state = app
+        .app
+        .shared_session
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("shared session state");
+    assert_eq!(state.id, "display-session");
+    assert!(state.has_messages);
+}
+
+#[test]
+fn shared_session_state_uses_resume_hint_message_state() {
+    let mut app = TestApp::builder().build();
+    app.app.deferred_session_load = Some("saved-session".into());
+
+    app.app.publish_shared_session_state();
+
+    let state = app
+        .app
+        .shared_session
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("shared session state");
+    assert_eq!(state.id, app.app.core.session.id);
+    assert!(state.has_messages);
+}
+
+#[test]
 fn assembled_system_prompt_uses_engine_template() {
     let app = TestApp::builder().build();
 

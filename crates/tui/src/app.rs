@@ -54,6 +54,12 @@ pub struct SharedSessionState {
     pub has_messages: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct ShutdownContext {
+    pub session_id: String,
+    pub has_messages: bool,
+}
+
 pub struct TuiApp {
     pub core: smelt_core::Core,
     pub lua: crate::lua::LuaRuntime,
@@ -605,6 +611,28 @@ impl TuiApp {
             .history
             .iter()
             .any(protocol::HistoryItem::is_transcript_visible)
+    }
+
+    pub(crate) fn has_resume_hint_messages(&self) -> bool {
+        !self.core.session.history.is_empty()
+            || !self.transcript.is_empty()
+            || self.deferred_session_load.is_some()
+    }
+
+    pub fn shutdown_context(&self) -> ShutdownContext {
+        ShutdownContext {
+            session_id: self.core.session.id.clone(),
+            has_messages: self.has_resume_hint_messages(),
+        }
+    }
+
+    pub(crate) fn publish_shared_session_state(&self) {
+        if let Ok(mut guard) = self.shared_session.lock() {
+            *guard = Some(SharedSessionState {
+                id: self.core.session.id.clone(),
+                has_messages: self.has_resume_hint_messages(),
+            });
+        }
     }
 
     pub(crate) fn can_continue_turn(&self) -> bool {

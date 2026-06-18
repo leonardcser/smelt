@@ -495,12 +495,7 @@ impl TuiApp {
         self.core.session.mode = Some(self.core.config.mode.as_str().to_string());
         self.core.session.reasoning_effort = Some(self.core.config.reasoning_effort);
         self.core.session.model = Some(self.current_model_key());
-        if let Ok(mut guard) = self.shared_session.lock() {
-            *guard = Some(crate::app::SharedSessionState {
-                id: self.core.session.id.clone(),
-                has_messages: !self.core.session.history.is_empty(),
-            });
-        }
+        self.publish_shared_session_state();
     }
 
     /// Full `provider/model` key so resuming a session restores the correct provider/auth.
@@ -774,6 +769,7 @@ impl TuiApp {
         self.stop_background_processes();
         self.clear_transcript();
         self.transcript.replace_transcript(transcript);
+        self.publish_shared_session_state();
         self.core
             .cells
             .set_dyn("session_ended", std::rc::Rc::new(old_id));
