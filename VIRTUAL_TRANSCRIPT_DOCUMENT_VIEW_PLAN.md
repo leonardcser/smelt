@@ -211,7 +211,7 @@ At this checkpoint, candidate layout still prepared an index for the full loaded
 
 ### Transcript search and view operations after bounded row-index reuse
 
-The search benchmark now also times terminal width resize, terminal height resize, and theme color mutation at the same 500 MiB scale. Candidate-layout hashing no longer walks every measured node; it keys off row/projection generations, renderer identity, presentation generation, width, node count, and total rows. Prefix row invalidation now starts at the first changed node instead of recomputing from row zero. Width resize preserves the current node order as an approximate index, invalidates exact heights for the new width, and exactifies only the anchor and visible nodes. Full exact APIs still remeasure every block after a width change and revisiting a previously measured width can hydrate the cached exact row index. Common-match search navigation now prefetches relative to the current match instead of scanning another batch on every `n`, and SQLite driver-term selection uses capped posting counts so common terms do not force full posting-list counts before candidate paging.
+The search benchmark now also times terminal width resize, terminal height resize, theme color mutation, and an 8-row midpoint copy/yank at the same 500 MiB scale. Candidate-layout hashing no longer walks every measured node; it keys off row/projection generations, renderer identity, presentation generation, width, node count, and total rows. Prefix row invalidation now starts at the first changed node instead of recomputing from row zero. Width resize preserves the current node order as an approximate index, invalidates exact heights for the new width, and exactifies only the anchor and visible nodes. Full exact APIs still remeasure every block after a width change and revisiting a previously measured width can hydrate the cached exact row index. Common-match search navigation now prefetches relative to the current match instead of scanning another batch on every `n`, and SQLite driver-term selection uses capped posting counts so common terms do not force full posting-list counts before candidate paging.
 
 Result:
 
@@ -234,6 +234,19 @@ TRANSCRIPT_SEARCH_PERF_DURATION label=common_hot_next100 metric=search:transcrip
 TRANSCRIPT_SEARCH_PERF_VALUE label=common_hot_next100 metric=search:transcript:scanned_entries count=16 total=16
 TRANSCRIPT_SEARCH_PERF_DURATION label=common_hot_next100 metric=store:transcript:search_driver_term count=1 total_us=452
 ```
+
+The copy coverage verifies the copy/yank invariant directly. A follow-up 500 MiB run with `copy_mid_ms` included copied 8 rows near the middle of a 6.4M-row transcript in 0.509 ms, exactified 8 rows, materialized 8 rows from 2 blocks, reused the existing row index, and did not record any full-session reads:
+
+```text
+TRANSCRIPT_SEARCH_PERF_DURATION label=copy_mid_rows metric=transcript:copy_range count=1 total_us=336
+TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:exactified_rows count=1 last=8 total=8
+TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:collect_nodes_range:rows count=1 last=8 total=8
+TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:collect_nodes_range:blocks count=1 last=2 total=2
+TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:prepare_row_index:reused_index count=1 last=1 total=1
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=16.707 height_resize_ms=4.414 theme_color_ms=3.043 copy_mid_ms=0.509 rare_ms=21.320 common_submit_ms=6.884 next100_ms=51.762 after_append_ms=17.639
+```
+
+Copy is therefore bounded by selected display rows in this scenario. The remaining copy-related architecture work is ownership cleanup, not a current measured 500 MiB bottleneck.
 
 The append search bottleneck is now mostly outside transcript layout/indexing: render plan reuse is still hit, candidate layout is 10 us, append row-index sync is bounded to the new suffix plus local prefix update, and SQLite candidate lookup is capped to page-sized work.
 
