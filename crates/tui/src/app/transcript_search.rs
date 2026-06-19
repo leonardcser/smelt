@@ -1,8 +1,8 @@
-use crate::app::search::{doc_range_for_match, row_match_is_selectable, SearchDirection};
+use crate::app::search::SearchDirection;
 use crate::app::TuiApp;
 use crate::content::transcript_buf::{TranscriptSearchLayout, TranscriptSearchLayoutEntry};
 use crate::content::transcript_search_text::descriptor_search_text;
-use crate::smelt_edit::{DisplayRow, DocPosition, DocRange, RowIndex};
+use crate::smelt_edit::{DocPosition, DocRange, RowIndex};
 use std::collections::HashMap;
 
 const SEARCH_TRANSCRIPT_PREFETCH_ENTRIES: usize = 64;
@@ -617,31 +617,17 @@ impl TuiApp {
         if rows == 0 {
             return;
         }
-        let display = self.transcript_rows_and_breaks_range(first_row, rows);
-        let mut found = Vec::new();
-        for (offset, row) in display.rows.iter().enumerate() {
-            let row_index = first_row.saturating_add(offset as RowIndex);
-            collect_row_matches(row_index, row, query, &mut found);
-        }
+        self.sync_transcript_renderer_generation();
+        let width = self.transcript_width() as u16;
+        let theme = self.ui.theme().clone();
+        let found = self
+            .transcript
+            .search_matches_for_row_range(&self.lua, width, &theme, first_row, rows, query);
         merge_doc_ranges(&mut session.matches, found);
         smelt_perf::perf::record_value(
             "search:transcript:cached_matches",
             session.matches.len() as u64,
         );
-    }
-}
-
-fn collect_row_matches(
-    row_index: RowIndex,
-    row: &DisplayRow,
-    query: &str,
-    out: &mut Vec<DocRange>,
-) {
-    for (byte_col, _) in row.text.match_indices(query) {
-        let end_col = byte_col + query.len();
-        if row_match_is_selectable(row, byte_col, end_col) {
-            out.push(doc_range_for_match(row_index, byte_col, end_col));
-        }
     }
 }
 

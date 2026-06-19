@@ -5,7 +5,8 @@ use crate::content::prompt_parser::{
     build_prompt_display_lines, prompt_display_uses_cursor_padding,
 };
 use crate::smelt_edit::{
-    Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, RowIndex, TextRange, Theme,
+    Buffer, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot, DocRange, RowIndex,
+    TextRange, Theme,
 };
 use smelt_buffer::wrap_layout::WrappedLayout;
 use smelt_core::content::file_icons::FileIconOptions;
@@ -1057,6 +1058,29 @@ impl TranscriptDocument {
         );
         rows.append(&mut loaded.rows);
         DisplayRows { rows }
+    }
+
+    pub(crate) fn search_matches_for_row_range(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        theme: &Theme,
+        start: RowIndex,
+        count: RowIndex,
+        query: &str,
+    ) -> Vec<DocRange> {
+        if query.is_empty() || count == 0 {
+            return Vec::new();
+        }
+        let display = self.display_rows_for_range(lua, width, theme, start, count);
+        let mut matches = Vec::new();
+        for (offset, row) in display.rows.iter().enumerate() {
+            let row_index = start.saturating_add(offset as RowIndex);
+            matches.extend(crate::app::search::display_row_matches(
+                row, row_index, query,
+            ));
+        }
+        matches
     }
 
     pub(crate) fn cached_display_rows_for_range(

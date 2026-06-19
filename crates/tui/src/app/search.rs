@@ -432,7 +432,7 @@ pub(super) fn row_match_is_selectable(
         .any(|range| range.start <= byte_col && end_col <= range.end)
 }
 
-pub(super) fn display_row_matches<'a>(
+pub(crate) fn display_row_matches<'a>(
     row: &'a DisplayRow,
     row_index: RowIndex,
     query: &'a str,
