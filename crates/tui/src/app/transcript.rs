@@ -68,12 +68,6 @@ impl LoadedTranscript {
         }
     }
 
-    pub(crate) fn from_sqlite_dir(session_dir: PathBuf) -> Option<Self> {
-        let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
-        let rows = store.read_all_descriptor_records_expensive().ok()?;
-        Self::from_full_descriptor_rows(rows, session_dir)
-    }
-
     pub(crate) fn tail_from_sqlite_dir(
         session_dir: PathBuf,
         width: u16,
@@ -97,24 +91,6 @@ impl LoadedTranscript {
         smelt_perf::perf::record_value("transcript:sqlite:descriptor_loaded", slice.len() as u64);
         let _perf = smelt_perf::perf::begin("transcript:resume_tail:build_loaded");
         Self::from_descriptor_slice(slice, session_dir)
-    }
-
-    pub(crate) fn from_full_descriptor_rows(
-        rows: Vec<smelt_store::TranscriptDescriptorRecord>,
-        session_dir: PathBuf,
-    ) -> Option<Self> {
-        let total_count = rows.len();
-        let records = descriptor_records_from_rows(rows)?;
-        Some(Self {
-            transcript: Transcript::new(),
-            descriptor_window: Some(LoadedDescriptorWindow {
-                start: smelt_store::TranscriptDescriptorIndex::new(0),
-                total_count,
-                hydration: smelt_store::TranscriptDescriptorHydration::Hydrated,
-                records,
-            }),
-            session_dir: Some(session_dir),
-        })
     }
 
     pub(crate) fn from_descriptor_slice(
@@ -155,12 +131,6 @@ impl SqliteTranscriptStore {
     fn open_read_only(session_dir: impl AsRef<std::path::Path>) -> smelt_store::Result<Self> {
         let db = smelt_store::SessionDb::open_read_only(session_dir.as_ref().join("session.db"))?;
         Ok(Self { db })
-    }
-
-    fn read_all_descriptor_records_expensive(
-        &self,
-    ) -> smelt_store::Result<Vec<smelt_store::TranscriptDescriptorRecord>> {
-        self.db.read_all_transcript_descriptor_records()
     }
 
     fn read_tail_descriptor_slice_for_rows(
@@ -415,6 +385,15 @@ pub(crate) struct TranscriptRenderContext {
     pub(crate) theme_key: u64,
     pub(crate) renderer_generation: u64,
     pub(crate) renderer_cache_key: Option<u64>,
+}
+
+pub(crate) enum TranscriptDescriptorSaveSuffix {
+    Unchanged,
+    Suffix {
+        descriptor_start_idx: usize,
+        descriptor_records: Vec<smelt_core::TranscriptBlockRecord>,
+    },
+    NeedsFullRebuild,
 }
 
 pub(crate) struct TranscriptProjectionPlan {
@@ -1292,6 +1271,71 @@ impl TranscriptDocument {
         local_range.end.row = local_range.end.row.saturating_sub(row_offset);
         self.projection
             .copy_range(lua, &mut self.transcript.history, width, theme, local_range)
+    }
+
+    pub(crate) fn descriptor_save_suffix(
+        &self,
+        descriptors_persisted: bool,
+        dirty_history_from: Option<usize>,
+    ) -> TranscriptDescriptorSaveSuffix {
+        let history = self.history();
+        let descriptor_order_dirty = if descriptors_persisted {
+            history.descriptor_dirty_from().or_else(|| {
+                dirty_history_from
+                    .and_then(|idx| history.first_block_index_for_history_origin_at_or_after(idx))
+            })
+        } else {
+            Some(0)
+        };
+        let Some(descriptor_order_start) = descriptor_order_dirty else {
+            return TranscriptDescriptorSaveSuffix::Unchanged;
+        };
+        if descriptors_persisted
+            && self.dirty_history_precedes_active_descriptor_window(dirty_history_from)
+        {
+            return TranscriptDescriptorSaveSuffix::NeedsFullRebuild;
+        }
+        let local_descriptor_start_idx = if descriptors_persisted {
+            history.descriptor_record_index_for_order_index(descriptor_order_start)
+        } else {
+            0
+        };
+        let descriptor_start_idx = if descriptors_persisted {
+            self.active_descriptor_range
+                .as_ref()
+                .map(|range| range.start.get().saturating_add(local_descriptor_start_idx))
+                .unwrap_or(local_descriptor_start_idx)
+        } else {
+            0
+        };
+        TranscriptDescriptorSaveSuffix::Suffix {
+            descriptor_start_idx,
+            descriptor_records: history.descriptor_records_from(descriptor_order_start),
+        }
+    }
+
+    fn dirty_history_precedes_active_descriptor_window(
+        &self,
+        dirty_history_from: Option<usize>,
+    ) -> bool {
+        let Some(dirty_history_from) = dirty_history_from else {
+            return false;
+        };
+        let Some(active_range) = self.active_descriptor_range.as_ref() else {
+            return false;
+        };
+        if active_range.start.get() == 0 {
+            return false;
+        }
+        let first_loaded_history_origin = self
+            .history()
+            .descriptor_records_from(0)
+            .into_iter()
+            .find_map(|record| match record.origin {
+                Some(smelt_core::BlockOrigin::History(index)) => Some(index),
+                _ => None,
+            });
+        first_loaded_history_origin.is_none_or(|origin| origin > dirty_history_from)
     }
 
     pub(crate) fn history(&self) -> &BlockHistory {

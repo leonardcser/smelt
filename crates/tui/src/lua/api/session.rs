@@ -807,7 +807,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                     let cache_key = cache_key_hint.clone().unwrap_or_else(|| id.clone());
                     cached_key = Some(cache_key.clone());
                     if cached_view.is_none() {
-                        if let Some(transcript) = crate::app::history::load_transcript_from_sqlite_id(&id, width, height) {
+                        if let Some(transcript) = crate::app::history::load_transcript_tail_from_sqlite_id(&id, width, height) {
                             let mut view = crate::app::transcript::TranscriptDocument::from_loaded_transcript(transcript);
                             view.set_inline_options(app.inline_options());
                             cached_view = Some(view);

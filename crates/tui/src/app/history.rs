@@ -106,26 +106,21 @@ pub(crate) fn build_transcript_from_session(
     transcript
 }
 
-pub(crate) fn load_transcript_from_sqlite(
+pub(crate) fn load_transcript_tail_from_sqlite(
     session: &session::Session,
+    width: u16,
+    viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    let loaded = load_transcript_from_sqlite_dir(session::dir_for(session))?;
-    loaded_transcript_covers_history(&loaded, session).then_some(loaded)
+    load_transcript_tail_from_sqlite_dir(session::dir_for(session), width, viewport_rows)
 }
 
-pub(crate) fn load_transcript_from_sqlite_id(
+pub(crate) fn load_transcript_tail_from_sqlite_id(
     id: &str,
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
     let session_dir = session::prepare_session_dir_for_read(id)?;
     load_transcript_tail_from_sqlite_dir(session_dir, width, viewport_rows)
-}
-
-fn load_transcript_from_sqlite_dir(
-    session_dir: PathBuf,
-) -> Option<crate::app::transcript::LoadedTranscript> {
-    crate::app::transcript::LoadedTranscript::from_sqlite_dir(session_dir)
 }
 
 pub(crate) fn load_transcript_tail_from_sqlite_dir(
@@ -140,19 +135,7 @@ pub(crate) fn load_transcript_tail_from_sqlite_dir(
     )
 }
 
-fn loaded_transcript_covers_history(
-    loaded: &crate::app::transcript::LoadedTranscript,
-    session: &session::Session,
-) -> bool {
-    if let Some(window) = loaded.descriptor_window.as_ref() {
-        return descriptor_records_cover_history(
-            window.records.iter().map(|record| &record.record),
-            session,
-        );
-    }
-    transcript_covers_history(&loaded.transcript, session)
-}
-
+#[cfg(test)]
 fn transcript_covers_history(transcript: &Transcript, session: &session::Session) -> bool {
     block_history_covers_history(&transcript.history, session)
 }
@@ -1035,8 +1018,10 @@ impl TuiApp {
         self.clear_transcript();
         self.prune_rewindable_session_state(self.core.session.history.len());
         self.persisted_store_ready = true;
+        let width = self.transcript_width() as u16;
+        let viewport_rows = self.viewport_rows_estimate();
         let (loaded_transcript, descriptors_persisted) =
-            match load_transcript_from_sqlite(&self.core.session) {
+            match load_transcript_tail_from_sqlite(&self.core.session, width, viewport_rows) {
                 Some(loaded_transcript) => (loaded_transcript, true),
                 None => {
                     // COMPAT(legacy-session-full-load-fallbacks): legacy or partially migrated sessions without descriptor rows rebuild the display transcript from the loaded session.
@@ -1094,10 +1079,9 @@ impl TuiApp {
             return;
         }
         self.update_session_persist_metadata();
-        let transcript_history = self.transcript.history();
         let no_history_work = self.persisted_store_ready && self.dirty_history_from.is_none();
         let no_descriptor_work = self.transcript_descriptors_persisted
-            && transcript_history.descriptor_dirty_from().is_none();
+            && self.transcript.history().descriptor_dirty_from().is_none();
         if self.session_dirty && no_history_work && no_descriptor_work && blobs.is_empty() {
             let session = &self.core.session;
             let state = match session::store_state_from_session(session, session.history.len()) {
@@ -1143,24 +1127,30 @@ impl TuiApp {
         } else {
             0
         };
-        let descriptor_order_dirty = if self.transcript_descriptors_persisted {
-            transcript_history.descriptor_dirty_from().or_else(|| {
-                self.dirty_history_from.and_then(|idx| {
-                    transcript_history.first_block_index_for_history_origin_at_or_after(idx)
-                })
-            })
-        } else {
-            Some(0)
+        let descriptor_save = self.transcript.descriptor_save_suffix(
+            self.transcript_descriptors_persisted,
+            self.dirty_history_from,
+        );
+        let (descriptor_start_idx, descriptor_records, descriptor_work) = match descriptor_save {
+            crate::app::transcript::TranscriptDescriptorSaveSuffix::Unchanged => {
+                (0, Vec::new(), false)
+            }
+            crate::app::transcript::TranscriptDescriptorSaveSuffix::Suffix {
+                descriptor_start_idx,
+                descriptor_records,
+            } => (descriptor_start_idx, descriptor_records, true),
+            crate::app::transcript::TranscriptDescriptorSaveSuffix::NeedsFullRebuild => {
+                let transcript = build_transcript_from_session(&self.lua, &self.core.session);
+                self.transcript.replace_transcript(transcript);
+                self.transcript_descriptors_persisted = false;
+                self.transcript.history_mut().mark_changed();
+                (
+                    0,
+                    self.transcript.history().descriptor_records_from(0),
+                    true,
+                )
+            }
         };
-        let descriptor_order_start =
-            descriptor_order_dirty.unwrap_or_else(|| transcript_history.len());
-        let descriptor_start_idx = if self.transcript_descriptors_persisted {
-            transcript_history.descriptor_record_index_for_order_index(descriptor_order_start)
-        } else {
-            0
-        };
-        let descriptor_records = transcript_history.descriptor_records_from(descriptor_order_start);
-        let descriptor_work = descriptor_order_dirty.is_some();
         if !descriptor_work && blobs.is_empty() && !self.session_dirty {
             smelt_perf::perf::record_value("session:save:skipped_unchanged", 1);
             return;
@@ -1791,7 +1781,7 @@ mod checkpoint_tests {
         app.app.flush_persist();
 
         let id = app.app.core.session.id.clone();
-        let loaded_transcript = load_transcript_from_sqlite_id(&id, 80, 24)
+        let loaded_transcript = load_transcript_tail_from_sqlite_id(&id, 80, 24)
             .expect("display-only transcript tail should load");
         let mut display_session =
             session::Session::new(app.app.core.env.pid(), app.app.core.env.cwd());
@@ -1914,6 +1904,8 @@ mod checkpoint_tests {
         const OLD_HISTORY_LEN: usize = 256;
         let mut app = large_saved_session_app("normal-request-dirty-suffix-gate", OLD_HISTORY_LEN);
 
+        app.app.restore_screen();
+
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
         let source = app.app.commit_request_history_item(
@@ -1949,6 +1941,19 @@ mod checkpoint_tests {
         assert_perf_value_at_most("store:transcript:descriptor_db_rows_inserted", 1);
         assert_cached_persist_db();
         assert_no_full_store_reads();
+
+        let db = smelt_store::SessionDb::open_read_only(
+            session::dir_for_id("normal-request-dirty-suffix-gate").join("session.db"),
+        )
+        .expect("open session db");
+        let descriptors = db
+            .read_all_transcript_descriptor_records()
+            .expect("read transcript descriptors");
+        assert_eq!(descriptors.len(), OLD_HISTORY_LEN + 1);
+        assert_eq!(
+            descriptors.last().and_then(|row| row.history_idx),
+            Some(OLD_HISTORY_LEN as u64)
+        );
     }
 
     #[test]

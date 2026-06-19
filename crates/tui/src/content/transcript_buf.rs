@@ -6727,7 +6727,7 @@ mod tests {
         smelt_perf::perf::clear();
         let tail_load_start = std::time::Instant::now();
         let tail_resumed =
-            crate::app::history::load_transcript_from_sqlite_id(&session_id, 100, 40)
+            crate::app::history::load_transcript_tail_from_sqlite_id(&session_id, 100, 40)
                 .expect("tail-load benchmark transcript descriptors");
         let mut tail_document =
             crate::app::transcript::TranscriptDocument::from_loaded_transcript(tail_resumed);
