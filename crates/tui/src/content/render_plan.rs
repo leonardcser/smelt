@@ -334,6 +334,12 @@ impl TranscriptPresentationState {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RenderPlanPrefix {
+    len: usize,
+    fingerprint: u64,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RenderPlan {
     pub(crate) history_generation: u64,
@@ -345,6 +351,7 @@ pub(crate) struct RenderPlan {
     index_by_id: HashMap<RenderNodeId, usize>,
     index_by_block_id: HashMap<BlockId, usize>,
     pub(crate) fingerprint: u64,
+    append_prefix: Option<RenderPlanPrefix>,
 }
 
 impl RenderPlan {
@@ -359,6 +366,7 @@ impl RenderPlan {
             index_by_id: HashMap::new(),
             index_by_block_id: HashMap::new(),
             fingerprint: 0,
+            append_prefix: None,
         }
     }
 
@@ -441,6 +449,7 @@ impl RenderPlan {
             index_by_id,
             index_by_block_id,
             fingerprint,
+            append_prefix: None,
         }
     }
 
@@ -466,6 +475,7 @@ impl RenderPlan {
             self.history_generation = history.generation();
             self.group_generation = group_generation;
             self.group_cache_key = group_cache_key;
+            self.append_prefix = None;
             self.refresh_fingerprint(history);
             return Some(false);
         }
@@ -512,8 +522,13 @@ impl RenderPlan {
         self.group_cache_key = group_cache_key;
         if pure_append {
             self.extend_fingerprint(history, old_fingerprint, old_order_len, old_node_len);
+            self.append_prefix = Some(RenderPlanPrefix {
+                len: old_node_len,
+                fingerprint: old_fingerprint,
+            });
         } else {
             self.refresh_fingerprint(history);
+            self.append_prefix = None;
         }
         Some(prune_required)
     }
@@ -581,6 +596,11 @@ impl RenderPlan {
 
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
+    }
+
+    pub(crate) fn append_prefix(&self) -> Option<(usize, u64)> {
+        self.append_prefix
+            .map(|prefix| (prefix.len, prefix.fingerprint))
     }
 
     pub(crate) fn node(&self, index: usize) -> Option<&RenderNode> {

@@ -124,7 +124,7 @@ impl RowIndexKey {
 struct TranscriptHeightIndex {
     nodes: Vec<TranscriptHeightNode>,
     prefix_rows: Vec<RowIndex>,
-    prefix_dirty: bool,
+    prefix_dirty_from: Option<usize>,
     generation: u64,
     renderer_generation: u64,
     renderer_cache_key: Option<u64>,
@@ -232,8 +232,25 @@ impl TranscriptHeightIndex {
             return false;
         }
         node.exact_height = Some(rows);
-        self.prefix_dirty = true;
+        self.mark_prefix_dirty_from(index);
         true
+    }
+
+    fn invalidate_for_width(&mut self, width: u16) {
+        if self.width == width {
+            return;
+        }
+        self.width = width;
+        if self.nodes.is_empty() {
+            self.prefix_dirty_from = None;
+            return;
+        }
+        for node in &mut self.nodes {
+            node.estimated_height = node.measured_or_estimated_height();
+            node.exact_height = None;
+            node.key.width = width;
+        }
+        self.mark_prefix_dirty_from(0);
     }
 
     /// Sync the index when the current history keeps the old order as a prefix.
@@ -264,8 +281,45 @@ impl TranscriptHeightIndex {
         {
             return true;
         }
+        if old_len == plan.len()
+            && self.generation == plan.fingerprint
+            && self.renderer_generation == key.renderer_generation
+            && self.renderer_cache_key == key.renderer_cache_key
+            && self.presentation_generation == key.presentation_generation
+        {
+            self.invalidate_for_width(key.width);
+            return true;
+        }
+        if self.width == key.width && self.presentation_generation == key.presentation_generation {
+            if let Some((prefix_len, prefix_fingerprint)) = plan.append_prefix() {
+                if old_len == prefix_len && self.generation == prefix_fingerprint {
+                    for index in old_len..plan.len() {
+                        let Some(id) = plan.node_id(index) else {
+                            return false;
+                        };
+                        let Some(node_key) =
+                            plan.node_key(policy, history, presentation, index, key.base_key)
+                        else {
+                            return false;
+                        };
+                        self.nodes.push(TranscriptHeightNode {
+                            id,
+                            key: node_key,
+                            estimated_height: estimate_node_height(history, plan, index, node_key),
+                            exact_height: None,
+                        });
+                    }
+                    self.generation = plan.fingerprint;
+                    self.renderer_generation = key.renderer_generation;
+                    self.renderer_cache_key = key.renderer_cache_key;
+                    self.presentation_generation = key.presentation_generation;
+                    self.mark_prefix_dirty_from(old_len);
+                    return true;
+                }
+            }
+        }
         let mut prev_key_changed = false;
-        let mut prefix_dirty = false;
+        let mut prefix_dirty_from = None;
         for index in 0..old_len {
             let Some(id) = plan.node_id(index) else {
                 return false;
@@ -283,15 +337,18 @@ impl TranscriptHeightIndex {
                 node.estimated_height = estimate_node_height(history, plan, index, node_key);
                 node.exact_height = None;
                 prev_key_changed = true;
-                prefix_dirty = true;
+                prefix_dirty_from =
+                    Some(prefix_dirty_from.map_or(index, |dirty: usize| dirty.min(index)));
             } else if prev_key_changed {
                 node.exact_height = None;
                 prev_key_changed = false;
-                prefix_dirty = true;
+                prefix_dirty_from =
+                    Some(prefix_dirty_from.map_or(index, |dirty: usize| dirty.min(index)));
             }
         }
         if old_len < plan.len() {
-            prefix_dirty = true;
+            prefix_dirty_from =
+                Some(prefix_dirty_from.map_or(old_len, |dirty: usize| dirty.min(old_len)));
         }
         for index in old_len..plan.len() {
             let Some(id) = plan.node_id(index) else {
@@ -313,7 +370,9 @@ impl TranscriptHeightIndex {
         self.renderer_cache_key = key.renderer_cache_key;
         self.presentation_generation = key.presentation_generation;
         self.width = key.width;
-        self.prefix_dirty |= prefix_dirty;
+        if let Some(index) = prefix_dirty_from {
+            self.mark_prefix_dirty_from(index);
+        }
         true
     }
 
@@ -322,9 +381,10 @@ impl TranscriptHeightIndex {
     }
 
     fn refresh_prefix_rows(&mut self) {
-        if self.prefix_dirty {
-            self.rebuild_prefix_rows();
-        }
+        let Some(start) = self.prefix_dirty_from else {
+            return;
+        };
+        self.rebuild_prefix_rows_from(start);
     }
 
     fn prefix_row(&self, index: usize) -> RowIndex {
@@ -356,17 +416,16 @@ impl TranscriptHeightIndex {
         )
     }
 
-    fn search_layout_hash(&self) -> u64 {
+    fn search_layout_hash(&self, projection_generation: u64) -> u64 {
         smelt_core::utils::hash_serializable(&(
+            projection_generation,
             self.generation,
             self.renderer_generation,
             self.renderer_cache_key,
             self.presentation_generation,
             self.width,
-            self.nodes
-                .iter()
-                .map(|node| (node.id, node.key))
-                .collect::<Vec<_>>(),
+            self.nodes.len(),
+            self.total_rows(),
         ))
     }
 
@@ -495,7 +554,28 @@ impl TranscriptHeightIndex {
             total = total.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
             self.prefix_rows.push(total);
         }
-        self.prefix_dirty = false;
+        self.prefix_dirty_from = None;
+    }
+
+    fn rebuild_prefix_rows_from(&mut self, start: usize) {
+        if start == 0 || self.prefix_rows.len() <= start {
+            self.rebuild_prefix_rows();
+            return;
+        }
+        self.prefix_rows.truncate(start + 1);
+        let mut total = self.prefix_rows[start];
+        for node in self.nodes.iter().skip(start) {
+            total = total.saturating_add(node.exact_height.unwrap_or(node.estimated_height));
+            self.prefix_rows.push(total);
+        }
+        self.prefix_dirty_from = None;
+    }
+
+    fn mark_prefix_dirty_from(&mut self, index: usize) {
+        self.prefix_dirty_from = Some(
+            self.prefix_dirty_from
+                .map_or(index, |existing| existing.min(index)),
+        );
     }
 }
 
@@ -503,10 +583,6 @@ impl MeasurementIndexStore {
     fn clear(&mut self) {
         self.active = TranscriptHeightIndex::default();
         self.entries.clear();
-    }
-
-    fn clear_active(&mut self) {
-        self.active = TranscriptHeightIndex::default();
     }
 
     fn remember_active(&mut self) {
@@ -1191,12 +1267,39 @@ impl TranscriptProjection {
         let _ = compiled;
     }
 
+    fn refresh_measurement_node_key(&mut self, history: &BlockHistory, index: usize) {
+        let Some(node_key) = self.render_plan.node_key(
+            &self.default_view_policy,
+            history,
+            &self.presentation,
+            index,
+            base_layout_key(self.measurements.active.width),
+        ) else {
+            return;
+        };
+        let Some(node) = self.measurements.active.nodes.get_mut(index) else {
+            return;
+        };
+        if node.key == node_key {
+            return;
+        }
+        node.key = node_key;
+        node.estimated_height = estimate_node_height(history, &self.render_plan, index, node_key);
+        node.exact_height = None;
+        self.measurements.active.mark_prefix_dirty_from(index);
+    }
+
     fn ensure_node_indices(
         &mut self,
         env: TranscriptRenderEnv<'_>,
         history: &BlockHistory,
         indices: impl IntoIterator<Item = usize>,
     ) {
+        let indices = indices.into_iter().collect::<Vec<_>>();
+        for index in indices.iter().copied() {
+            self.refresh_measurement_node_key(history, index);
+        }
+        self.measurements.active.refresh_prefix_rows();
         let jobs = {
             let row_nodes = &self.measurements.active.nodes;
             let nodes = indices
@@ -1237,9 +1340,9 @@ impl TranscriptProjection {
 
     fn clear_width_dependent_state(&mut self) {
         self.measurements.remember_active();
-        self.measurements.clear_active();
         self.clear_visible_state();
         self.visible.full_rows = None;
+        self.projection_generation = self.projection_generation.wrapping_add(1);
     }
 
     fn gc_if_stale(
@@ -2592,7 +2695,10 @@ impl TranscriptProjection {
     ) -> TranscriptSearchLayout {
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         self.prepare_row_index_with_env(env, history, width);
-        let generation = self.measurements.active.search_layout_hash();
+        let generation = self
+            .measurements
+            .active
+            .search_layout_hash(self.projection_generation);
         self.search_layout(generation, history)
     }
 
@@ -2605,7 +2711,10 @@ impl TranscriptProjection {
     ) -> TranscriptSearchLayout {
         let env = TranscriptRenderEnv::with_inline_options(lua, self.inline_options.clone());
         self.prepare_row_index_with_env(env, history, width);
-        let generation = self.measurements.active.search_layout_hash();
+        let generation = self
+            .measurements
+            .active
+            .search_layout_hash(self.projection_generation);
         let mut seen = HashSet::new();
         let indices = block_indices
             .iter()
@@ -4861,6 +4970,52 @@ mod tests {
             projection.counters().exact_height_measured_blocks,
             0,
             "revisiting a measured width should hydrate the exact row index from memory"
+        );
+    }
+
+    #[test]
+    fn visible_width_change_remeasures_only_visible_window() {
+        let mut projection = TranscriptProjection::new();
+        let block_count = 512;
+        let mut transcript = Transcript::new();
+        for i in 0..block_count {
+            transcript.push(Block::Text {
+                content: format!("block {i} {}", "wrapped text ".repeat(12)),
+            });
+        }
+        let theme = Theme::default();
+        let mut buf = Buffer::new(crate::smelt_edit::BufId(31), Default::default());
+
+        projection.exact_total_rows(&test_lua(), &mut transcript.history, 80);
+        projection.project(
+            &mut buf,
+            &mut transcript.history,
+            80,
+            &theme,
+            ScrollTarget::visible_tail(),
+            12,
+        );
+        projection.reset_counters();
+
+        let out = projection.project(
+            &mut buf,
+            &mut transcript.history,
+            40,
+            &theme,
+            ScrollTarget::visible_tail(),
+            12,
+        );
+
+        assert!(buf.lines().iter().any(|line| line.contains("block 511")));
+        assert!(out.materialized_rows <= 24);
+        let counters = projection.counters();
+        assert!(
+            counters.exact_height_measured_blocks < block_count / 8,
+            "visible width change should not remeasure every block: {counters:?}"
+        );
+        assert_eq!(
+            counters.display_layouts, 0,
+            "display layouts are width-independent across visible width changes"
         );
     }
 

@@ -237,6 +237,15 @@ fn perf_value_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
         .unwrap_or(0)
 }
 
+fn perf_duration_max(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
+    snapshot
+        .durations
+        .iter()
+        .find(|row| row.label == label)
+        .map(|row| row.max_us)
+        .unwrap_or(0)
+}
+
 fn perf_value_total(snapshot: &smelt_perf::perf::Snapshot, label: &str) -> u64 {
     snapshot
         .values
@@ -310,10 +319,51 @@ fn assert_search_uses_candidate_index(
 struct SearchBenchSample {
     bytes: usize,
     rows: crate::smelt_edit::RowIndex,
+    width_resize_ms: f64,
+    height_resize_ms: f64,
+    theme_color_ms: f64,
     rare_ms: f64,
     common_submit_ms: f64,
     next100_ms: f64,
     after_append_ms: f64,
+}
+
+fn assert_view_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
+    assert_no_full_search_hot_path_reads(snapshot, label);
+    let materialized_rows = perf_value_total(snapshot, "transcript:collect_nodes_range:rows");
+    assert!(
+        materialized_rows <= 1024,
+        "{label} materialized {materialized_rows} rows, expected bounded viewport work"
+    );
+    let prepared = perf_value_max(snapshot, "transcript:prepare_row_index:reused_index");
+    assert_eq!(
+        prepared, 1,
+        "{label} rebuilt the row index instead of reusing it"
+    );
+    let rebuild_us = perf_duration_max(snapshot, "transcript:prepare_row_index:rebuild_index");
+    assert_eq!(
+        rebuild_us, 0,
+        "{label} rebuilt the full row index in {rebuild_us}us"
+    );
+}
+
+fn measure_transcript_view_operation(
+    app: &mut TestApp,
+    label: &'static str,
+    report_perf: bool,
+    operation: impl FnOnce(&mut TestApp),
+) -> f64 {
+    smelt_perf::perf::clear();
+    let start = std::time::Instant::now();
+    operation(app);
+    app.render_silent();
+    let ms = elapsed_ms(start.elapsed());
+    let snapshot = smelt_perf::perf::snapshot();
+    if report_perf {
+        search_perf_snapshot(label, &snapshot);
+    }
+    assert_view_operation_gates(&snapshot, label);
+    ms
 }
 
 fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenchSample {
@@ -333,6 +383,31 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     win.set_vim_mode(VimMode::Normal);
     let rows = transcript_total_rows(&app);
 
+    let width_resize_ms =
+        measure_transcript_view_operation(&mut app, "resize_width", report_perf, |app| {
+            app.app.handle_resize(140, 32)
+        });
+    let height_resize_ms =
+        measure_transcript_view_operation(&mut app, "resize_height", report_perf, |app| {
+            app.app.handle_resize(140, 48)
+        });
+    let theme_color_ms =
+        measure_transcript_view_operation(&mut app, "theme_color", report_perf, |app| {
+            app.app.mutate_theme(|theme| {
+                theme.set(
+                    "SmeltAccent",
+                    smelt_core::style::Style::new().fg(smelt_core::style::Color::Rgb {
+                        r: 190,
+                        g: 120,
+                        b: 255,
+                    }),
+                );
+            });
+        });
+    app.app.handle_resize(100, 32);
+    app.render_silent();
+
+    smelt_perf::perf::clear();
     let rare_start = std::time::Instant::now();
     app.app.submit_search(
         crate::app::TRANSCRIPT_WIN,
@@ -404,6 +479,9 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     SearchBenchSample {
         bytes,
         rows,
+        width_resize_ms,
+        height_resize_ms,
+        theme_color_ms,
         rare_ms,
         common_submit_ms,
         next100_ms,
@@ -431,10 +509,13 @@ fn transcript_layout_search_benchmark_suite() {
     for run in 0..runs {
         let sample = run_search_bench_sample(target_bytes, true);
         eprintln!(
-            "TRANSCRIPT_SEARCH_BENCH_SAMPLE run={} bytes={} rows={} rare_ms={:.3} common_submit_ms={:.3} next100_ms={:.3} after_append_ms={:.3}",
+            "TRANSCRIPT_SEARCH_BENCH_SAMPLE run={} bytes={} rows={} width_resize_ms={:.3} height_resize_ms={:.3} theme_color_ms={:.3} rare_ms={:.3} common_submit_ms={:.3} next100_ms={:.3} after_append_ms={:.3}",
             run + 1,
             sample.bytes,
             sample.rows,
+            sample.width_resize_ms,
+            sample.height_resize_ms,
+            sample.theme_color_ms,
             sample.rare_ms,
             sample.common_submit_ms,
             sample.next100_ms,
@@ -442,6 +523,24 @@ fn transcript_layout_search_benchmark_suite() {
         );
         samples.push(sample);
     }
+    let width_resize = NavStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.width_resize_ms)
+            .collect::<Vec<_>>(),
+    );
+    let height_resize = NavStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.height_resize_ms)
+            .collect::<Vec<_>>(),
+    );
+    let theme_color = NavStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.theme_color_ms)
+            .collect::<Vec<_>>(),
+    );
     let rare = NavStats::from(
         &samples
             .iter()
@@ -467,10 +566,16 @@ fn transcript_layout_search_benchmark_suite() {
             .collect::<Vec<_>>(),
     );
     eprintln!(
-        "TRANSCRIPT_SEARCH_BENCH_SUMMARY runs={} bytes={} rows={} rare_mean_ms={:.3} rare_stddev_ms={:.3} common_submit_mean_ms={:.3} common_submit_stddev_ms={:.3} next100_mean_ms={:.3} next100_stddev_ms={:.3} after_append_mean_ms={:.3} after_append_stddev_ms={:.3}",
+        "TRANSCRIPT_SEARCH_BENCH_SUMMARY runs={} bytes={} rows={} width_resize_mean_ms={:.3} width_resize_stddev_ms={:.3} height_resize_mean_ms={:.3} height_resize_stddev_ms={:.3} theme_color_mean_ms={:.3} theme_color_stddev_ms={:.3} rare_mean_ms={:.3} rare_stddev_ms={:.3} common_submit_mean_ms={:.3} common_submit_stddev_ms={:.3} next100_mean_ms={:.3} next100_stddev_ms={:.3} after_append_mean_ms={:.3} after_append_stddev_ms={:.3}",
         samples.len(),
         samples[0].bytes,
         samples[0].rows,
+        width_resize.mean,
+        width_resize.stddev,
+        height_resize.mean,
+        height_resize.stddev,
+        theme_color.mean,
+        theme_color.stddev,
         rare.mean,
         rare.stddev,
         common.mean,
@@ -481,10 +586,16 @@ fn transcript_layout_search_benchmark_suite() {
         after_append.stddev,
     );
     eprintln!(
-        "TRANSCRIPT_SEARCH_BENCH_JSON {{\"type\":\"search_summary\",\"runs\":{},\"bytes\":{},\"rows\":{},\"rare_mean_ms\":{:.3},\"rare_stddev_ms\":{:.3},\"common_submit_mean_ms\":{:.3},\"common_submit_stddev_ms\":{:.3},\"next100_mean_ms\":{:.3},\"next100_stddev_ms\":{:.3},\"after_append_mean_ms\":{:.3},\"after_append_stddev_ms\":{:.3}}}",
+        "TRANSCRIPT_SEARCH_BENCH_JSON {{\"type\":\"search_summary\",\"runs\":{},\"bytes\":{},\"rows\":{},\"width_resize_mean_ms\":{:.3},\"width_resize_stddev_ms\":{:.3},\"height_resize_mean_ms\":{:.3},\"height_resize_stddev_ms\":{:.3},\"theme_color_mean_ms\":{:.3},\"theme_color_stddev_ms\":{:.3},\"rare_mean_ms\":{:.3},\"rare_stddev_ms\":{:.3},\"common_submit_mean_ms\":{:.3},\"common_submit_stddev_ms\":{:.3},\"next100_mean_ms\":{:.3},\"next100_stddev_ms\":{:.3},\"after_append_mean_ms\":{:.3},\"after_append_stddev_ms\":{:.3}}}",
         samples.len(),
         samples[0].bytes,
         samples[0].rows,
+        width_resize.mean,
+        width_resize.stddev,
+        height_resize.mean,
+        height_resize.stddev,
+        theme_color.mean,
+        theme_color.stddev,
         rare.mean,
         rare.stddev,
         common.mean,
