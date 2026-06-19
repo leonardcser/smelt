@@ -764,12 +764,19 @@ impl<'a> Turn<'a> {
     }
 
     fn public_history_len(&self) -> usize {
-        self.history.len().saturating_sub(
-            self.history
-                .first()
-                .is_some_and(|item| matches!(item, HistoryItem::System { .. }))
-                as usize,
-        )
+        self.history
+            .len()
+            .saturating_sub(self.system_history_offset())
+    }
+
+    fn system_history_offset(&self) -> usize {
+        self.history
+            .first()
+            .is_some_and(|item| matches!(item, HistoryItem::System { .. })) as usize
+    }
+
+    fn raw_history_index(&self, public_idx: usize) -> usize {
+        public_idx.saturating_add(self.system_history_offset())
     }
 
     fn mark_history_changed_from(&mut self, public_idx: usize) {
@@ -942,6 +949,20 @@ impl<'a> Turn<'a> {
         }
     }
 
+    fn emit_history_appended_from(&mut self, first_index: usize) {
+        let start = self.raw_history_index(first_index).min(self.history.len());
+        let items = self.history[start..].to_vec();
+        if items.is_empty() {
+            return;
+        }
+        self.next_history_changed_from = self.public_history_len();
+        self.emit(EngineEvent::HistoryAppended {
+            turn_id: self.turn_id,
+            first_index,
+            items,
+        });
+    }
+
     /// Emit the public-visible slice of history (everything except the
     /// leading system item). Callers can rely on the invariant: every
     /// `HistoryItem::Assistant` in the emitted vec carries its full set of
@@ -1036,15 +1057,16 @@ impl<'a> Turn<'a> {
             return;
         }
         let items = std::mem::take(&mut self.pending_history_items);
+        let first_index = self.public_history_len();
         self.mark_append_history_changed();
         self.history.extend(items);
-        self.emit_messages_snapshot();
+        self.emit_history_appended_from(first_index);
     }
 
     /// Commit a streamed-but-cancelled assistant message. The model never
     /// asked for any tools, so this is a terminal step - `invocations` is
     /// empty by construction.
-    fn commit_partial_assistant(&mut self, text: String, reasoning: String) {
+    fn commit_partial_assistant(&mut self, text: String, reasoning: String) -> Option<usize> {
         let content = if text.trim().is_empty() {
             None
         } else {
@@ -1056,7 +1078,11 @@ impl<'a> Turn<'a> {
             Some(reasoning)
         };
         if content.is_some() || reasoning.is_some() {
+            let first_index = self.public_history_len();
             self.push_assistant_step(AssistantStep::terminal(content, reasoning, Vec::new()));
+            Some(first_index)
+        } else {
+            None
         }
     }
 
@@ -1166,6 +1192,7 @@ impl<'a> Turn<'a> {
                 "new_message_count": new.len() + 1,
             }),
         );
+        self.mark_history_changed_from(0);
         self.history.truncate(1);
         self.history.extend(new);
         self.emit_messages_snapshot();
@@ -1203,8 +1230,9 @@ impl<'a> Turn<'a> {
                     text: text.clone(),
                     count: 1,
                 });
+                let first_index = self.public_history_len();
                 self.push_user(Content::text(text), None);
-                self.emit_messages_snapshot();
+                self.emit_history_appended_from(first_index);
                 true
             }
             UiCommand::Unsteer { count } => {
@@ -1355,7 +1383,11 @@ impl<'a> Turn<'a> {
             let (resp, had_injected) = match result {
                 Ok(r) => r,
                 Err(ProviderError::Cancelled) => {
-                    self.commit_partial_assistant(partial_text, partial_reasoning);
+                    if let Some(first_index) =
+                        self.commit_partial_assistant(partial_text, partial_reasoning)
+                    {
+                        self.emit_history_appended_from(first_index);
+                    }
                     self.emit_turn_complete(true);
                     return;
                 }
@@ -1524,8 +1556,9 @@ impl<'a> Turn<'a> {
                     hooked.reasoning_content,
                     hooked.reasoning_details.unwrap_or_default(),
                 );
+                let first_index = self.public_history_len();
                 self.push_assistant_step(turn);
-                self.emit_messages_snapshot();
+                self.emit_history_appended_from(first_index);
                 self.emit_turn_complete(false);
                 return;
             }
@@ -1579,13 +1612,14 @@ impl<'a> Turn<'a> {
                         .elapsed_ms
                         .map(|ms| (invocation.call_id.clone(), ms))
                 }));
+            let first_index = self.public_history_len();
             self.push_assistant_step(AssistantStep::with_invocations(
                 post_hook_content,
                 post_hook_reasoning,
                 post_hook_reasoning_blocks,
                 invocations,
             ));
-            self.emit_messages_snapshot();
+            self.emit_history_appended_from(first_index);
             for cmd in deferred {
                 self.handle_turn_cmd(cmd);
             }

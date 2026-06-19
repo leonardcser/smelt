@@ -1112,17 +1112,18 @@ fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf
     (sample, snapshot)
 }
 
-fn run_history_updated_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
-    let mut app = saved_hot_path_app("history-updated", history_len, None);
+fn run_history_appended_hot_path(
+    history_len: usize,
+) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let mut app = saved_hot_path_app("history-appended", history_len, None);
     app.start_turn(1);
-    let mut updated = app.app.core.session.history.clone();
-    updated.push(hot_path_assistant("hot path assistant update"));
-    let (sample, snapshot) = capture_hot_path_sample("history_updated", history_len, || {
+    let item = hot_path_assistant("hot path assistant update");
+    let (sample, snapshot) = capture_hot_path_sample("history_appended", history_len, || {
         app.app
-            .dispatch_engine_event(protocol::EngineEvent::HistoryUpdated {
+            .dispatch_engine_event(protocol::EngineEvent::HistoryAppended {
                 turn_id: 1,
-                first_changed_index: history_len,
-                history: updated,
+                first_index: history_len,
+                items: vec![item],
             });
         app.app.flush_persist();
     });
@@ -1290,7 +1291,7 @@ fn transcript_layout_hot_path_benchmark_suite() {
         for (sample, snapshot) in [
             run_noop_save_hot_path(history_len),
             run_request_append_hot_path(history_len),
-            run_history_updated_hot_path(history_len),
+            run_history_appended_hot_path(history_len),
             run_rewind_delete_hot_path(history_len),
             run_provider_history_hot_path(history_len),
         ] {
@@ -1303,7 +1304,7 @@ fn transcript_layout_hot_path_benchmark_suite() {
     for operation in [
         "noop_save",
         "request_append",
-        "history_updated",
+        "history_appended",
         "rewind_delete_suffix",
         "provider_history_read",
     ] {

@@ -316,12 +316,26 @@ TRANSCRIPT_HOT_PATH_PERF_VALUE operation=history_updated metric=store:history:di
 
 This is a bounded-work checkpoint, not the final protocol shape. `HistoryUpdated` still carries a full snapshot, so request/turn completion can still allocate and clone total history. The final direction remains typed append, replace, rewind, and checkpoint events that let both TUI and persistence apply bounded SQLite transactions without constructing full-session vectors.
 
+### Engine history append events
+
+The next protocol step introduces `HistoryAppended` for the normal append-only committed-history path. Engine-side assistant, steer, and deferred note appends now send only the appended item range instead of cloning and transmitting the full public history snapshot. The TUI applies these items directly to the session history, commits matching pending transcript note blocks, and saves the same one-row dirty suffix. Replacement, rewind, and host-rewrite paths intentionally remain on `HistoryUpdated` snapshots until they get typed deltas with explicit semantics.
+
+The 100k-row hot-path benchmark now exercises this typed append path directly:
+
+```text
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=history_appended metric=tui:history_appended:items count=1 last=1
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=history_appended runs=1 history_len=100000 mean_ms=15.608
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=history_appended metric=store:history:dirty_suffix_rows count=1 last=1
+```
+
+This removes full-prefix comparison and full-history event payload construction for append-shaped updates, but persistence still builds suffix payloads from the in-memory session and `TurnComplete` still carries a final snapshot. Remaining work is to make request-start, turn-complete, rewind, and checkpoint persistence use typed transactions end-to-end.
+
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |
 | --- | --- | --- | --- |
 | Session load | `load_session_snapshot` reads all `history_items` into `Vec<HistoryItem>` | resume memory and latency scale with total session size | load metadata, descriptor windows, and bounded model-history cursors separately |
-| Save decision | Dirty suffix markers, a persist-worker SQLite connection cache, and DB row hashes avoid reopen and unchanged-prefix writes, but hot paths still construct suffix payloads from in-memory snapshots | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
+| Save decision | Dirty suffix markers, a persist-worker SQLite connection cache, append-shaped engine deltas, and DB row hashes avoid reopen, unchanged-prefix writes, and append snapshot scans, but hot paths still construct suffix payloads from in-memory snapshots | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
 | Save payload | History and transcript descriptor suffixes are saved together in one SQLite transaction | blob externalization and snapshot construction are still snapshot-shaped | explicit append/replace transactions over dirty rows and objects |
 | Provider dispatch | Interactive `StartTurnPayload.history` uses `ModelHistorySource::Store`; engine reads the requested range from `session.db` | explicit Lua/test/debug callers can still request full model-visible history | keep materialization only for explicit APIs, and prefer store-backed message reads for runtime hooks |
 | Transcript document owner | `TranscriptDocument` owns store identity, descriptor loading policy, sparse descriptor ranges, and render cache, but still delegates most row/index state to eager `Transcript`/`TranscriptProjection` | document ownership is real but not yet sparse enough for arbitrary large-session navigation | move virtual row index, folds, anchors, and payload hydration under `TranscriptDocument` |

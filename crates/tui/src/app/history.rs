@@ -603,6 +603,37 @@ impl TuiApp {
         self.publish_history_delta("set");
     }
 
+    pub(crate) fn append_engine_history_items(
+        &mut self,
+        first_index: usize,
+        items: Vec<HistoryItem>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+
+        smelt_perf::perf::record_value("tui:history_appended:items", items.len() as u64);
+        smelt_perf::perf::record_value("tui:history_appended:first_index", first_index as u64);
+
+        let already_present = self.core.session.checkpoint.is_none()
+            && first_index <= self.core.session.history.len()
+            && self.core.session.history[first_index..].starts_with(&items);
+
+        if already_present {
+            smelt_perf::perf::record_value("tui:history_appended:already_present", 1);
+        } else {
+            let dirty_from = self.core.session.history.len();
+            self.core.session.history.extend(items.iter().cloned());
+            self.mark_history_dirty_from(dirty_from);
+        }
+
+        for item in &items {
+            self.commit_pending_history_append(item);
+        }
+        self.sync_session_snapshot();
+        self.publish_history_delta("append");
+    }
+
     pub(crate) fn publish_history_delta(&mut self, kind: &str) {
         if matches!(kind, "cleared" | "rewound" | "loaded" | "forked") {
             self.bump_epoch("history_epoch");

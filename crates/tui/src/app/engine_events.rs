@@ -323,6 +323,17 @@ impl TuiApp {
                 self.lua.fire_ask_callback(id, message.as_ref(), error);
                 SessionControl::Continue
             }
+            EngineEvent::HistoryAppended {
+                turn_id: id,
+                first_index,
+                items,
+            } => {
+                if id == turn_id {
+                    self.append_engine_history_items(first_index, items);
+                    self.save_session();
+                }
+                SessionControl::Continue
+            }
             EngineEvent::HistoryUpdated {
                 turn_id: id,
                 first_changed_index,

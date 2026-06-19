@@ -310,8 +310,18 @@ pub enum EngineEvent {
         error: Option<EngineAskError>,
     },
 
+    /// Append-only committed history delta. This is the bounded hot path for
+    /// normal user, assistant, and note appends; replacements and rewinds still
+    /// use `HistoryUpdated` snapshots until they get typed deltas of their own.
+    HistoryAppended {
+        turn_id: u64,
+        /// Public history index where `items` begin in the engine's model-visible history.
+        first_index: usize,
+        items: Vec<crate::history::HistoryItem>,
+    },
+
     /// Atomic snapshot of the engine's committed history. Fires after each
-    /// step that mutates `Vec<HistoryItem>`. By construction every
+    /// non-append step that mutates `Vec<HistoryItem>`. By construction every
     /// `HistoryItem::Assistant` carries paired `ToolInvocation`s for the
     /// tool_calls it emitted - there is no in-flight state to worry about.
     HistoryUpdated {
