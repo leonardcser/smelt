@@ -249,7 +249,7 @@ pub(crate) fn save_session_history_suffix_in_transaction(
 
     let state_changed = session_state_changed(current_state.as_ref(), &suffix.state);
     let side_tables_changed = match &suffix.side_tables {
-        Some(tables) => replace_snapshot_table_suffixes_if_changed(
+        Some(tables) => replace_side_table_suffixes_if_changed(
             conn,
             tables.start_idx as u64,
             &tables.turn_metas,
@@ -315,7 +315,7 @@ pub(crate) fn save_session_state_and_side_table_suffixes_in_transaction(
         )));
     }
 
-    let side_tables_changed = replace_snapshot_table_suffixes_if_changed(
+    let side_tables_changed = replace_side_table_suffixes_if_changed(
         conn,
         side_tables.start_idx as u64,
         &side_tables.turn_metas,
@@ -390,7 +390,7 @@ fn replace_snapshot_tables_if_changed(
     snapshot: &SessionSnapshot,
 ) -> Result<bool> {
     let snapshot_start = snapshot.history_start_idx.min(snapshot.history_len) as u64;
-    replace_snapshot_table_suffixes_if_changed(
+    replace_side_table_suffixes_if_changed(
         conn,
         snapshot_start,
         &snapshot.turn_metas,
@@ -399,7 +399,7 @@ fn replace_snapshot_tables_if_changed(
     )
 }
 
-fn replace_snapshot_table_suffixes_if_changed(
+fn replace_side_table_suffixes_if_changed(
     conn: &Connection,
     snapshot_start: u64,
     turn_metas: &[(u64, Value)],
@@ -411,14 +411,14 @@ fn replace_snapshot_table_suffixes_if_changed(
     let accounting = snapshot_rows_json_from(accounting_snapshots, snapshot_start)?;
 
     let mut changed =
-        sync_snapshot_table_suffix(conn, SnapshotTable::TurnMetas, snapshot_start, &turn_metas)?;
-    changed |= sync_snapshot_table_suffix(
+        sync_side_table_suffix(conn, SnapshotTable::TurnMetas, snapshot_start, &turn_metas)?;
+    changed |= sync_side_table_suffix(
         conn,
         SnapshotTable::MetadataSnapshots,
         snapshot_start,
         &metadata,
     )?;
-    changed |= sync_snapshot_table_suffix(
+    changed |= sync_side_table_suffix(
         conn,
         SnapshotTable::AccountingSnapshots,
         snapshot_start,
@@ -494,15 +494,15 @@ impl SnapshotTable {
     }
 }
 
-fn sync_snapshot_table_suffix(
+fn sync_side_table_suffix(
     conn: &Connection,
     table: SnapshotTable,
     start_idx: u64,
     rows: &[(u64, String)],
 ) -> Result<bool> {
-    let _perf = perf::begin("store:session:sync_snapshot_table_suffix");
+    let _perf = perf::begin("store:session:sync_side_table_suffix");
     perf::record_value(
-        "store:session:dirty_suffix_snapshot_rows",
+        "store:session:dirty_suffix_side_table_rows",
         rows.len() as u64,
     );
     let existing = read_snapshot_rows_json_from(conn, table, start_idx)?;
@@ -530,9 +530,9 @@ fn sync_snapshot_table_suffix(
             params![checked_i64(*idx, table.idx_col())?, value],
         )?;
     }
-    perf::record_value("store:session:snapshot_rows_deleted", deleted as u64);
+    perf::record_value("store:session:side_table_rows_deleted", deleted as u64);
     perf::record_value(
-        "store:session:snapshot_rows_inserted",
+        "store:session:side_table_rows_inserted",
         rows[common..].len() as u64,
     );
     Ok(true)
@@ -551,7 +551,7 @@ fn read_snapshot_rows_json_from(
     let rows = rows
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(crate::error::StoreError::from)?;
-    perf::record_value("store:session:snapshot_rows_read", rows.len() as u64);
+    perf::record_value("store:session:side_table_rows_read", rows.len() as u64);
     Ok(rows)
 }
 
