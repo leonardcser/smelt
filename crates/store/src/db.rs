@@ -16,7 +16,9 @@ use crate::meta::{self, SessionMeta, SessionState, WriterLease};
 use crate::object::{self, ObjectMeta, StoredObject};
 use crate::request_audit::{self, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary};
 use crate::schema;
-use crate::session_snapshot::{self, SessionHistorySuffix, SessionSaveReport, SessionSnapshot};
+use crate::session_snapshot::{
+    self, SessionHistorySuffix, SessionSaveReport, SessionSnapshot, SessionSnapshotTableSuffixes,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenMode {
@@ -362,6 +364,27 @@ impl SessionDb {
                 self.object_compression,
             )?;
             Ok(report)
+        })
+    }
+
+    pub fn save_session_state_and_snapshot_table_suffixes_as_writer(
+        &self,
+        state: &SessionState,
+        snapshot_tables: &SessionSnapshotTableSuffixes,
+    ) -> Result<SessionSaveReport> {
+        let lease = self.current_process_writer_lease()?;
+        let expected_revision = self
+            .session_state()?
+            .as_ref()
+            .map_or(0, |state| state.revision);
+        self.immediate_transaction(|conn| {
+            session_snapshot::save_session_state_and_snapshot_table_suffixes_in_transaction(
+                conn,
+                state,
+                snapshot_tables,
+                Some(expected_revision),
+                Some(&lease),
+            )
         })
     }
 

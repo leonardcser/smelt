@@ -346,6 +346,25 @@ TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=store:session:dirt
 
 This makes the next turn-completion target narrower: persistence is again the dominant remaining cost, but it is roughly 5ms of session-save preparation plus roughly 5ms of async write/flush at 100k rows, not a hidden full-Lua-history scan.
 
+### Turn completion metadata-only persistence
+
+Successful completion now uses a typed metadata-only save when the store is already initialized, no history suffix is dirty, transcript descriptors are already persisted, no descriptor suffix is dirty, and there are no pending blobs. This path updates session state and snapshot tables in one SQLite transaction, verifies the stored history length still matches the in-memory session length, and does not call the history-suffix or transcript-descriptor save paths.
+
+At 100k rows, the hot-path benchmark confirms completion does no history or descriptor work and scans only the prediction tail in Lua:
+
+```text
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=turn_complete runs=1 history_len=100000 mean_ms=8.508
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=turn_complete metric=session:save count=1 last_us=7
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=turn_complete metric=store:session:save_metadata_transaction count=1 last_us=99
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=turn_complete metric=persist:write_metadata count=1 last_us=8185
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=persist:write:metadata_only count=1 last=1
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=persist:write:history_items count=1 last=0
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=store:session:dirty_suffix_history_rows count=1 last=0
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=lua:session:conversation_rows_scanned count=1 last=16
+```
+
+The remaining completion cost is no longer snapshot construction or SQLite suffix work. It is the async metadata write/flush boundary, including sidecar metadata maintenance, so further gains should come from making metadata/index maintenance typed and amortized rather than re-entering generic session-save machinery.
+
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |

@@ -26,8 +26,16 @@ pub(crate) struct PersistRequest {
     pub(crate) descriptor_records: Vec<TranscriptBlockRecord>,
 }
 
+pub(crate) struct PersistMetadataRequest {
+    pub(crate) session_id: String,
+    pub(crate) session_dir: PathBuf,
+    pub(crate) state: smelt_store::SessionState,
+    pub(crate) snapshot_tables: smelt_store::SessionSnapshotTableSuffixes,
+}
+
 enum Cmd {
     Save(Box<PersistRequest>),
+    SaveMetadata(Box<PersistMetadataRequest>),
     Flush(Sender<()>),
 }
 
@@ -61,6 +69,12 @@ impl Persister {
     pub(crate) fn save(&self, req: PersistRequest) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Cmd::Save(Box::new(req)));
+        }
+    }
+
+    pub(crate) fn save_metadata(&self, req: PersistMetadataRequest) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Cmd::SaveMetadata(Box::new(req)));
         }
     }
 
@@ -121,6 +135,13 @@ fn worker_loop(rx: Receiver<Cmd>, errors: Sender<PersistError>) {
             Cmd::Save(req) => {
                 report_error(write(&req, &mut db_cache), &req.session_id, &errors);
             }
+            Cmd::SaveMetadata(req) => {
+                report_error(
+                    write_metadata(&req, &mut db_cache),
+                    &req.session_id,
+                    &errors,
+                );
+            }
             Cmd::Flush(done) => {
                 let _ = done.send(());
             }
@@ -135,6 +156,18 @@ fn report_error(result: Result<(), String>, session_id: &str, errors: &Sender<Pe
             message,
         });
     }
+}
+
+fn record_save_report(save_report: &smelt_store::SessionSaveReport) {
+    smelt_perf::perf::record_value("persist:write:history_deleted", save_report.history_deleted);
+    smelt_perf::perf::record_value(
+        "persist:write:history_inserted",
+        save_report.history_inserted,
+    );
+    smelt_perf::perf::record_value(
+        "persist:write:history_unchanged",
+        save_report.history_unchanged,
+    );
 }
 
 fn write(req: &PersistRequest, db_cache: &mut PersistDbCache) -> Result<(), String> {
@@ -172,15 +205,7 @@ fn write(req: &PersistRequest, db_cache: &mut PersistDbCache) -> Result<(), Stri
             &descriptor_rows,
         )
         .map_err(|err| format!("save session database: {err}"))?;
-    smelt_perf::perf::record_value("persist:write:history_deleted", save_report.history_deleted);
-    smelt_perf::perf::record_value(
-        "persist:write:history_inserted",
-        save_report.history_inserted,
-    );
-    smelt_perf::perf::record_value(
-        "persist:write:history_unchanged",
-        save_report.history_unchanged,
-    );
+    record_save_report(&save_report);
     smelt_perf::perf::record_value(
         "persist:write:descriptor_start_idx",
         req.descriptor_start_idx as u64,
@@ -189,6 +214,30 @@ fn write(req: &PersistRequest, db_cache: &mut PersistDbCache) -> Result<(), Stri
         "persist:write:descriptor_records",
         req.descriptor_records.len() as u64,
     );
+    db.write_meta_sidecar(req.session_dir.join("meta.json"))
+        .map_err(|err| format!("write session metadata: {err}"))?;
+    Ok(())
+}
+
+fn write_metadata(
+    req: &PersistMetadataRequest,
+    db_cache: &mut PersistDbCache,
+) -> Result<(), String> {
+    let _perf = smelt_perf::perf::begin("persist:write_metadata");
+    smelt_perf::perf::record_value("persist:write:history_items", 0);
+    smelt_perf::perf::record_value("persist:write:blobs", 0);
+    smelt_perf::perf::record_value("persist:write:descriptor_records", 0);
+    smelt_perf::perf::record_value("persist:write:metadata_only", 1);
+    std::fs::create_dir_all(&req.session_dir)
+        .map_err(|err| format!("create session directory: {err}"))?;
+    let db_path = req.session_dir.join("session.db");
+    let db = db_cache
+        .db(&db_path)
+        .map_err(|err| format!("open session database: {err}"))?;
+    let save_report = db
+        .save_session_state_and_snapshot_table_suffixes_as_writer(&req.state, &req.snapshot_tables)
+        .map_err(|err| format!("save session metadata: {err}"))?;
+    record_save_report(&save_report);
     db.write_meta_sidecar(req.session_dir.join("meta.json"))
         .map_err(|err| format!("write session metadata: {err}"))?;
     Ok(())

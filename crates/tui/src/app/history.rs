@@ -1093,13 +1093,55 @@ impl TuiApp {
             return;
         }
         self.update_session_persist_metadata();
+        let transcript_history = self.transcript.history();
+        let no_history_work = self.persisted_store_ready && self.dirty_history_from.is_none();
+        let no_descriptor_work = self.transcript_descriptors_persisted
+            && transcript_history.descriptor_dirty_from().is_none();
+        if self.session_dirty && no_history_work && no_descriptor_work && blobs.is_empty() {
+            let session = &self.core.session;
+            let state = match session::store_state_from_session(session, session.history.len()) {
+                Ok(state) => state,
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                    return;
+                }
+            };
+            let snapshot_tables = match session::store_snapshot_table_suffixes_from_session(
+                session,
+                session.history.len(),
+            ) {
+                Ok(tables) => tables,
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                    return;
+                }
+            };
+            let session_id = session.id.clone();
+            let session_dir = session::dir_for(session);
+            if let Ok(mut guard) = self.shared_session.lock() {
+                *guard = Some(crate::app::SharedSessionState {
+                    id: session_id.clone(),
+                    has_messages: !session.history.is_empty(),
+                });
+            }
+            smelt_perf::perf::record_value("session:save:metadata_only", 1);
+            self.persister
+                .save_metadata(crate::persist::PersistMetadataRequest {
+                    session_id,
+                    session_dir,
+                    state,
+                    snapshot_tables,
+                });
+            self.session_dirty = false;
+            self.dirty_history_from = None;
+            return;
+        }
         let history_start_idx = if self.persisted_store_ready {
             self.dirty_history_from
                 .unwrap_or(self.core.session.history.len())
         } else {
             0
         };
-        let transcript_history = self.transcript.history();
         let descriptor_order_dirty = if self.transcript_descriptors_persisted {
             transcript_history.descriptor_dirty_from().or_else(|| {
                 self.dirty_history_from.and_then(|idx| {

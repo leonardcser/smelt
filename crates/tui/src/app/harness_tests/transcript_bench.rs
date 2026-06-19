@@ -1212,6 +1212,24 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         "lua:session:conversation_rows_returned",
         16,
     );
+    assert_eq!(
+        perf_duration_max(&snapshot, "store:session:save_history_suffix_transaction"),
+        0,
+        "{} used the history-suffix save path on metadata-only turn completion",
+        sample.operation
+    );
+    assert_eq!(
+        perf_duration_max(&snapshot, "store:transcript:replace_descriptor_suffix"),
+        0,
+        "{} touched transcript descriptors on metadata-only turn completion",
+        sample.operation
+    );
+    assert_eq!(
+        perf_value_max(&snapshot, "persist:write:metadata_only"),
+        1,
+        "{} did not use the metadata-only persist path",
+        sample.operation
+    );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
     assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)

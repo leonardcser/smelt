@@ -282,6 +282,72 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     Ok(report)
 }
 
+pub(crate) fn save_session_state_and_snapshot_table_suffixes_in_transaction(
+    conn: &Connection,
+    state: &SessionState,
+    snapshot_tables: &SessionSnapshotTableSuffixes,
+    expected_revision: Option<u64>,
+    writer_lease: Option<&WriterLease>,
+) -> Result<SessionSaveReport> {
+    let _perf = perf::begin("store:session:save_metadata_transaction");
+    perf::record_value("store:session:dirty_suffix_history_rows", 0);
+    perf::record_value(
+        "store:session:snapshot_total_history_rows",
+        state.history_len,
+    );
+    if let Some(lease) = writer_lease {
+        meta::acquire_writer_lease(conn, lease, 30 * 60)?;
+    }
+    let current_state = meta::session_state(conn)?;
+    if let Some(expected_revision) = expected_revision {
+        let current_revision = current_state.as_ref().map_or(0, |state| state.revision);
+        if current_revision != expected_revision {
+            return Err(StoreError::Integrity(format!(
+                "session revision changed: expected {expected_revision}, found {current_revision}"
+            )));
+        }
+    }
+
+    let current_len = current_state
+        .as_ref()
+        .map_or(0, |state| state.history_len as usize);
+    if current_len as u64 != state.history_len {
+        return Err(StoreError::Integrity(format!(
+            "metadata-only save history length changed: stored {current_len}, next {}",
+            state.history_len
+        )));
+    }
+
+    let snapshot_tables_changed = replace_snapshot_table_suffixes_if_changed(
+        conn,
+        snapshot_tables.start_idx as u64,
+        &snapshot_tables.turn_metas,
+        &snapshot_tables.metadata_snapshots,
+        &snapshot_tables.accounting_snapshots,
+    )?;
+    let state_changed = session_state_changed(current_state.as_ref(), state);
+    let changed = state_changed || snapshot_tables_changed;
+    let mut state = state.clone();
+    state.revision = if changed {
+        current_state.as_ref().map_or(1, |state| state.revision + 1)
+    } else {
+        current_state
+            .as_ref()
+            .map_or(state.revision, |state| state.revision)
+    };
+    meta::upsert_session_state(conn, &state)?;
+
+    let report = SessionSaveReport {
+        history_deleted: 0,
+        history_inserted: 0,
+        history_unchanged: current_len as u64,
+        revision: state.revision,
+        changed,
+    };
+    record_session_save_report(&report);
+    Ok(report)
+}
+
 fn record_session_save_report(report: &SessionSaveReport) {
     perf::record_value("store:session:history_rows_deleted", report.history_deleted);
     perf::record_value(
