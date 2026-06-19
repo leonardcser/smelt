@@ -461,21 +461,19 @@ The benchmark suite has become a useful regression guard. Consolidate repeated a
 
 Do not add new benchmark scaffolding that papers over old architecture. If a benchmark exposes a fallback that is not legacy, debug, or explicit export/repair behavior, prefer deleting the fallback or moving it behind the correct document/store owner.
 
-## Current Violation Map
+## Final Hot-Path Audit
 
-| Area | Current code | Violation | Final direction |
-| --- | --- | --- | --- |
-| Session load | `load_session_snapshot` reads all `history_items` into `Vec<HistoryItem>` | resume memory and latency scale with total session size | load metadata, descriptor windows, and bounded model-history cursors separately |
-| Save decision | Dirty suffix markers, a persist-worker SQLite connection cache, append-shaped engine deltas, optional turn-complete snapshots, deferred completion metadata, and DB row hashes avoid reopen, unchanged-prefix writes, append snapshot scans, and successful completion commits in the engine-event hot path, but hot paths still construct suffix payloads from in-memory snapshots | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
-| Save payload | History and transcript descriptor suffixes are saved together in one SQLite transaction | blob externalization and snapshot construction are still snapshot-shaped | explicit append/replace transactions over dirty rows and objects |
-| Provider dispatch | Interactive `StartTurnPayload.history` uses `ModelHistorySource::Store`; engine reads the requested range from `session.db`, and prediction now uses bounded `smelt.session.conversation({ limit })` | explicit Lua/test/debug callers can still request full model-visible or conversation history | keep full materialization only for explicit APIs, and use bounded/store-backed message reads for runtime hooks |
-| Transcript document owner | `TranscriptDocument` owns store identity, descriptor loading policy, sparse descriptor ranges, and render cache, but still delegates most row/index state to eager `Transcript`/`TranscriptProjection` | document ownership is real but not yet sparse enough for arbitrary large-session navigation | move virtual row index, folds, anchors, and payload hydration under `TranscriptDocument` |
-| Transcript resume | tail resume loads bounded descriptor windows, while full resume still can load every descriptor and full session history | normal display resume can still scale with total transcript/session | open `TranscriptDocument` from metadata and sparse descriptor windows without full history or full descriptor hydration |
-| Search storage | transcript search uses indexed SQLite candidate terms plus exact refinement | generic non-transcript document search can still scan display rows | keep transcript candidate paging; add document-level indexed search APIs for other document kinds |
-| Search runtime | transcript search asks SQLite for candidate blocks before local display refinement | fallback scan paths remain for buffer documents | document-level search API with indexed implementations and bounded refinement |
-| Generic document search | buffer fallback search can materialize row windows from row zero to total rows | full display-row scan for non-transcript documents | `BufferDisplayDocument` remains bounded to buffer fallback; indexed document implementations replace broader host scans |
-| Projection cache | `build_rows`, `full_rows`, and projection-owned row vectors remain reachable for full-text consumers | easy accidental full materialization | remove from hot APIs; explicit export/debug command can stream instead |
-| Schema | migration version exists but DB format has not shipped; same-baseline repair exists only to recover local databases created by earlier iterations of this unreleased plan | carrying broad compatibility migrations would add complexity, but readonly resume and preview paths must not fail on same-version schema drift | keep repair at explicit storage/session-open boundaries, then continue reshaping schema in place until release |
+The final cleanup pass keeps the original violation map as resolved criteria rather than active blockers. Remaining broad APIs are intentionally limited to compatibility, import/export/repair, diagnostics, or tests.
+
+| Area | Final status | Remaining allowed scope |
+| --- | --- | --- |
+| Session load | Normal preview/resume repairs or migrates the session DB, reads metadata, and opens bounded descriptor windows instead of loading full semantic history. | Explicit semantic session load remains for compatibility bridges, rewind/fork-style operations that still request a full `Session`, diagnostics, and tests. |
+| Save decision and payload | Hot TUI persistence uses typed dirty-suffix, metadata, descriptor, and request/accounting writes; successful turn completion defers metadata so the engine-event hot path does not commit SQLite. | `SessionSnapshot` remains for import/export/legacy core save boundaries and store-level tests. |
+| Provider dispatch | Interactive dispatch uses `ModelHistorySource::Store` and bounded conversation/runtime hook reads. | Explicit Lua/test/debug callers may still request full model-visible or conversation history. |
+| Transcript document owner and resume | `TranscriptDocument` owns store identity, descriptor loading policy, sparse descriptor ranges, render cache, row materialization, sparse search/copy/fold/action behavior, and bounded tail resume. | Compatibility preview/open fallbacks may rebuild from a full session only when sparse SQLite transcript records are unavailable, and are `COMPAT`-tagged plus instrumented. |
+| Search storage and runtime | Transcript search uses SQLite candidate paging plus bounded exact display refinement; after-append search inspects dirty candidates only. | Buffer/non-transcript fallback search remains scoped to non-transcript buffer documents. |
+| Projection cache and full rows | Render, resize, search, copy, navigation, and preview use bounded materialization. Full row vector APIs are not the normal transcript hot-path shape. | Full row builds remain reachable for explicit whole-transcript text consumers, diagnostics, focused tests, or narrow compatibility surfaces. |
+| Schema | Same-version schema repair is isolated at storage/session-open boundaries so local databases from earlier unreleased branch iterations remain readable. | `COMPAT(branch-sqlite-schema-shape-repair)` documents the temporary repair and removal point. |
 
 ## Current Seams to Promote or Delete
 
@@ -1147,17 +1145,16 @@ Acceptance:
 - There is one canonical load/save/render/audit path.
 - Any remaining compatibility or repair path is explicitly named, instrumented, and excluded from normal hot paths.
 
-### Worthwhile deferred work that remains in scope
+### Formerly deferred work resolved or intentionally retained
 
-These items are not distractions. They are deferred only because they depend on the document owner and store boundaries being stable first.
+These items were deferred from the original broad plan until the document owner and store boundaries were stable. They have now either been completed by Phases 4-7 and the post-completion follow-ups, or intentionally retained as narrow non-hot-path surfaces.
 
-- Indexed transcript search beyond the current candidate paging if measurements show `instr` or existing indexed terms are insufficient.
-- A complete `DocumentViewExecutor` and `StaticRowsDocument` test suite for viewer semantics.
-- `BufferDocument` for readonly buffers, so buffer viewers do not become a second semantic path.
-- Typed incremental persistence transactions that bypass `SessionSnapshot` construction in hot paths.
-- Normal resume metadata-only open with lazy history and transcript document loading.
-- Hard asymptotic benchmark gates, including 100 MiB, 500 MiB, and 1 GiB class smoke coverage.
-- Deleting old host callback paths only after the document path covers transcript, readonly buffers, search, copy, folds, anchors, and actions.
+- Indexed transcript search is implemented through SQLite candidate paging plus exact display refinement. Further index changes are performance follow-up only if new measurements justify them.
+- `DocumentViewExecutor`, `DocumentViewState`, `StaticRowsDocument`, and readonly buffer document coverage are part of the completed document-view phase.
+- Hot persistence uses typed dirty-suffix and metadata transactions; remaining `SessionSnapshot` APIs are import/export/legacy/test boundaries.
+- Normal resume uses metadata and sparse descriptor-window loading; explicit full semantic load remains only for compatibility or operations that deliberately request it.
+- Hard asymptotic benchmark gates cover resume, render, search, copy, navigation, save/request, provider history, and 500 MiB smoke coverage.
+- Old host callback and full-load paths are deleted, demoted, or retained only as `COMPAT`-tracked compatibility, diagnostic, export/repair, or test surfaces.
 
 ## Validation Gates
 
@@ -1378,8 +1375,8 @@ Principle: keep the document/view separation and storage-boundary compatibility 
 
 Phases:
 
-1. Add 500 MiB benchmark knobs for search and resume so large-session runs do not duplicate warmup data by default. Status: complete for search and resume fixture scale. `--scale-500mb` and `--no-warmup` now exercise 500 MiB search/resume targets without doubling data generation. A 500 MiB search run with an out-of-`/tmp` temp dir reached 524,290,206 bytes and 6,413,965 rows. The current measured search bottlenecks are candidate layout and exact display refinement, not full index construction; rare search measured 525.031 ms, common submit 179.758 ms, next 100 matches 615.217 ms, and after-append search 604.984 ms. The true resume benchmark now writes a descriptor-backed SQLite fixture directly instead of building a full in-memory session/transcript as setup. A 500 MiB descriptor-backed resume run generated 524,288,000 bytes across 128,000 descriptors in 15.165 s of setup, then tail-loaded 80 descriptors from the 128,000-descriptor store in 0.860 ms and rendered the tail in 1.557 ms. The tail path recorded no full-session history or descriptor reads.
-2. Run the 500 MiB benchmarks and identify measured bottlenecks in store search, descriptor loading, document materialization, save/request paths, and provider history reads. Status: in progress. Search at 500 MiB still points at candidate layout, exact display refinement, common-term driver counts, and after-append render-plan/row-index rebuilds; descriptor-backed tail resume is already bounded by loaded descriptors rather than total session size.
-3. Replace bottleneck algorithms with bounded or indexed operations. Text search should page through indexed candidates in document order instead of materializing all matching blocks before applying origin/limit.
-4. Validate that hot paths stay bounded by rows/descriptors touched, and that wall-time changes are explained by named benchmark metrics.
-5. Reflect and clean up abstractions that became unnecessary after the large-session path is correct.
+1. Add 500 MiB benchmark knobs for search and resume so large-session runs do not duplicate warmup data by default. Status: complete for search and resume fixture scale. `--scale-500mb` and `--no-warmup` now exercise 500 MiB search/resume targets without doubling data generation. A 500 MiB search run with an out-of-`/tmp` temp dir reached 524,290,206 bytes and 6,413,965 rows. The descriptor-backed resume fixture writes SQLite records directly instead of building a full in-memory session/transcript as setup.
+2. Run the 500 MiB benchmarks and identify measured bottlenecks in store search, descriptor loading, document materialization, save/request paths, and provider history reads. Status: complete. The final recheck shows descriptor-backed tail resume loads 80 descriptors from a 500 MiB store in under 1 ms and renders the tail in about 1.5 ms, with no full-session history or descriptor reads. The 500 MiB search/view benchmark covers resize, theme updates, copy, navigation, rare search, common search submission, repeated next-match navigation, and after-append search; the remaining measured work is bounded candidate paging, local exact display refinement, or dirty-suffix handling rather than whole-session layout or scans.
+3. Replace bottleneck algorithms with bounded or indexed operations. Status: complete for the user-facing hot paths in this plan. Search pages through SQLite candidates and refines exact display rows locally; after-append search reuses the render plan and inspects only the dirty candidate; descriptor-backed resume uses bounded tail slices.
+4. Validate that hot paths stay bounded by rows/descriptors touched, and that wall-time changes are explained by named benchmark metrics. Status: complete for this branch. Resume, render, search, copy, navigation, save/request, and provider-history benchmarks emit the relevant store/session/transcript counters and gate the asymptotic hot-path invariants.
+5. Reflect and clean up abstractions that became unnecessary after the large-session path is correct. Status: complete for the worthwhile cleanup found during the final pass. Obsolete non-legacy hot-path fallbacks were audited; remaining full-load or full-row APIs are retained only for explicit compatibility, import/export/repair, diagnostics, or tests, with compatibility paths instrumented and `COMPAT`-tracked.
