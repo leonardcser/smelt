@@ -411,14 +411,9 @@ impl TuiApp {
         let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
         let candidate_backed = sqlite_candidates.available;
         let candidate_blocks = sqlite_candidates.block_indices;
-<<<<<<< HEAD
         if candidate_backed {
             self.activate_transcript_search_candidate_window(&candidate_blocks, origin, direction);
         }
-||||||| parent of 7087f318 (fix(search): scan wrapped transcript matches first)
-        let (key, candidates, scanned_len) = {
-=======
->>>>>>> 7087f318 (fix(search): scan wrapped transcript matches first)
         let (key, candidates, scanned_len, indexed_total_rows) = {
             let candidate_blocks_slice = candidate_backed.then_some(candidate_blocks.as_slice());
             let index = self.ensure_transcript_candidate_index(candidate_blocks_slice)?;
@@ -440,13 +435,7 @@ impl TuiApp {
         let width = self.transcript_width() as u16;
         let total_rows = self
             .transcript
-<<<<<<< HEAD
             .approximate_scrollbar_total_rows(&self.lua, width)
-||||||| parent of 7087f318 (fix(search): scan wrapped transcript matches first)
-        let total_rows = self.transcript.estimated_total_rows(&self.lua, width);
-=======
-            .estimated_total_rows(&self.lua, width)
->>>>>>> 7087f318 (fix(search): scan wrapped transcript matches first)
             .max(indexed_total_rows);
         Some(TranscriptSearchSession {
             key,
@@ -575,7 +564,6 @@ impl TuiApp {
                     }
                     _ => None,
                 }?;
-<<<<<<< HEAD
                 let wrap_bound =
                     self.transcript_search_bound_for_origin(session, wrap_origin, direction);
                 self.scan_transcript_candidates_until_match(
@@ -586,20 +574,6 @@ impl TuiApp {
                     direction,
                 )
                 .or_else(|| self.cached_transcript_match(session, wrap_bound, direction))
-||||||| parent of 7087f318 (fix(search): scan wrapped transcript matches first)
-                self.cached_transcript_match(session, wrap_origin, direction)
-                    .or_else(|| {
-                        self.scan_transcript_candidates_until_match(
-                            session,
-                            query,
-                            wrap_origin,
-                            direction,
-                        )
-                    })
-=======
-                self.scan_transcript_candidates_until_match(session, query, wrap_origin, direction)
-                    .or_else(|| self.cached_transcript_match(session, wrap_origin, direction))
->>>>>>> 7087f318 (fix(search): scan wrapped transcript matches first)
             }
         }?;
         session.current = Some(current);
