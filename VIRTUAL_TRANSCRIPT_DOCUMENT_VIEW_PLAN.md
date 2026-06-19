@@ -97,6 +97,9 @@ Relevant completed changes that shape the remaining plan:
 - `41639f7c refactor(edit): narrow buffer display document adapter` clarified that buffer display adapters are not transcript ownership.
 - `4c7fc1c4 refactor(transcript): promote document owner` made `TranscriptDocument` the long-lived TUI owner, renamed the borrowed adapter to `TranscriptDisplayDocument`, and moved transcript render cache ownership under the document.
 - `c4304828 refactor(transcript): attach store identity to document`, `3df39b8d refactor(transcript): keep loaded store backing`, and `a4dc0541 refactor(transcript): own descriptor loading policy` attached `session_dir` and descriptor-window metadata to loaded transcript documents, added document-owned descriptor range reads, preserved store identity through full and tail SQLite transcript loads, and moved descriptor load policy out of `app/history.rs`.
+- `a3a01376 fix(store): repair same-version session schemas` and `e2d5c111 fix(session): repair db before transcript preview` repair same-baseline SQLite schemas at explicit session-open boundaries before metadata, resume, or preview paths read them. This keeps in-plan schema drift out of readonly hot paths after the first repair and fixes sessions that appeared in `/resume` but showed as missing.
+- `7087f318 fix(search): scan wrapped transcript matches first` keeps reverse transcript search wrap bounded by the indexed row extent and scans from the wrapped origin before reusing cached matches.
+- `c10d3534 test(agent): update history delta snapshots` records the expected append/delta event shape after the history virtualization work.
 - Resume/deferred load now can ask `TranscriptDocument` to reload descriptor windows from its store backing before falling back to rebuilding from the semantic session. That fallback is still a repair/import behavior that needs to leave hot paths.
 
 Current seams that still violate the final constraints:
@@ -472,7 +475,7 @@ Do not add new benchmark scaffolding that papers over old architecture. If a ben
 | Search runtime | transcript search asks SQLite for candidate blocks before local display refinement | fallback scan paths remain for buffer documents | document-level search API with indexed implementations and bounded refinement |
 | Generic document search | buffer fallback search can materialize row windows from row zero to total rows | full display-row scan for non-transcript documents | `BufferDisplayDocument` remains bounded to buffer fallback; indexed document implementations replace broader host scans |
 | Projection cache | `build_rows`, `full_rows`, and projection-owned row vectors remain reachable for full-text consumers | easy accidental full materialization | remove from hot APIs; explicit export/debug command can stream instead |
-| Schema | migration version exists but DB format has not shipped | carrying compatibility migrations would add complexity | reset/reshape schema freely before release; optimize for final query/write patterns |
+| Schema | migration version exists but DB format has not shipped; same-baseline repair exists only to recover local databases created by earlier iterations of this unreleased plan | carrying broad compatibility migrations would add complexity, but readonly resume and preview paths must not fail on same-version schema drift | keep repair at explicit storage/session-open boundaries, then continue reshaping schema in place until release |
 
 ## Current Seams to Promote or Delete
 
