@@ -268,11 +268,21 @@ pub(crate) fn write_meta_sidecar(
     conn: &Connection,
     path: impl AsRef<Path>,
 ) -> Result<Option<SessionMeta>> {
-    let Some(meta) = session_meta(conn)? else {
-        return Ok(None);
+    let meta = {
+        let _perf = smelt_perf::perf::begin("store:session:meta_sidecar_query");
+        let Some(meta) = session_meta(conn)? else {
+            return Ok(None);
+        };
+        meta
     };
-    let bytes = serde_json::to_vec_pretty(&meta)?;
-    fs::write(path, bytes)?;
+    let bytes = {
+        let _perf = smelt_perf::perf::begin("store:session:meta_sidecar_encode");
+        serde_json::to_vec_pretty(&meta)?
+    };
+    {
+        let _perf = smelt_perf::perf::begin("store:session:meta_sidecar_write");
+        fs::write(path, bytes)?;
+    }
     Ok(Some(meta))
 }
 

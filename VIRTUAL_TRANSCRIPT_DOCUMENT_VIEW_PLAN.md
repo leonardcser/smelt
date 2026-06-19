@@ -363,14 +363,35 @@ TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=store:session:dirt
 TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=lua:session:conversation_rows_scanned count=1 last=16
 ```
 
-The remaining completion cost is no longer snapshot construction or SQLite suffix work. It is the async metadata write/flush boundary, including sidecar metadata maintenance, so further gains should come from making metadata/index maintenance typed and amortized rather than re-entering generic session-save machinery.
+The remaining completion cost is no longer snapshot construction or SQLite suffix work. Instrumentation showed the remaining wall time was SQLite transaction commit, not sidecar JSON or metadata queries:
+
+```text
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=turn_complete metric=persist:write_metadata count=1 last_us=4925
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=turn_complete metric=store:db:transaction_commit count=1 last_us=4622
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=turn_complete metric=store:session:meta_sidecar_write count=1 last_us=52
+```
+
+### Deferred completion metadata
+
+Successful turn completion now treats turn metadata, token/accounting snapshots, and updated timestamps as low-priority metadata once committed history is already durable. `finish_turn` records them in memory and schedules the normal save point instead of committing a metadata transaction inside the engine-event handler. Cancelled and errored turns still save immediately because they can carry repair state.
+
+At 100k rows, the hot-path benchmark now gates that successful completion does not call `save_session`, does not queue a metadata write, and does not commit SQLite in the engine-event hot path:
+
+```text
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=turn_complete runs=1 history_len=100000 mean_ms=0.343
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=turn_complete metric=tui:finish_turn count=1 last_us=322
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=turn_complete metric=tui:finish_turn:pump_lua count=1 last_us=113
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=lua:session:conversation_rows_scanned count=1 last=16
+```
+
+The metadata-only transaction remains as the deferred save implementation, but successful completion no longer puts commit latency on the turn-end interaction path.
 
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |
 | --- | --- | --- | --- |
 | Session load | `load_session_snapshot` reads all `history_items` into `Vec<HistoryItem>` | resume memory and latency scale with total session size | load metadata, descriptor windows, and bounded model-history cursors separately |
-| Save decision | Dirty suffix markers, a persist-worker SQLite connection cache, append-shaped engine deltas, optional turn-complete snapshots, and DB row hashes avoid reopen, unchanged-prefix writes, append snapshot scans, and successful completion snapshots, but hot paths still construct suffix payloads from in-memory snapshots | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
+| Save decision | Dirty suffix markers, a persist-worker SQLite connection cache, append-shaped engine deltas, optional turn-complete snapshots, deferred completion metadata, and DB row hashes avoid reopen, unchanged-prefix writes, append snapshot scans, and successful completion commits in the engine-event hot path, but hot paths still construct suffix payloads from in-memory snapshots | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
 | Save payload | History and transcript descriptor suffixes are saved together in one SQLite transaction | blob externalization and snapshot construction are still snapshot-shaped | explicit append/replace transactions over dirty rows and objects |
 | Provider dispatch | Interactive `StartTurnPayload.history` uses `ModelHistorySource::Store`; engine reads the requested range from `session.db`, and prediction now uses bounded `smelt.session.conversation({ limit })` | explicit Lua/test/debug callers can still request full model-visible or conversation history | keep full materialization only for explicit APIs, and use bounded/store-backed message reads for runtime hooks |
 | Transcript document owner | `TranscriptDocument` owns store identity, descriptor loading policy, sparse descriptor ranges, and render cache, but still delegates most row/index state to eager `Transcript`/`TranscriptProjection` | document ownership is real but not yet sparse enough for arbitrary large-session navigation | move virtual row index, folds, anchors, and payload hydration under `TranscriptDocument` |

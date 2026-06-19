@@ -626,7 +626,11 @@ impl TuiApp {
             let _perf = smelt_perf::perf::begin("tui:finish_turn:snapshot_context");
             self.snapshot_context();
         }
-        self.save_session();
+        if matches!(end, TurnEnd::Complete) {
+            self.schedule_session_save();
+        } else {
+            self.save_session();
+        }
         start_queued
     }
 

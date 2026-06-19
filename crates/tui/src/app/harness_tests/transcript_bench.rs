@@ -1212,26 +1212,30 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         "lua:session:conversation_rows_returned",
         16,
     );
-    assert_eq!(
-        perf_duration_max(&snapshot, "store:session:save_history_suffix_transaction"),
-        0,
-        "{} used the history-suffix save path on metadata-only turn completion",
+    assert!(
+        app.app.session_save_pending,
+        "{} did not defer completion metadata for the next save point",
         sample.operation
     );
     assert_eq!(
-        perf_duration_max(&snapshot, "store:transcript:replace_descriptor_suffix"),
+        perf_duration_max(&snapshot, "session:save"),
         0,
-        "{} touched transcript descriptors on metadata-only turn completion",
+        "{} saved low-priority completion metadata in the engine-event hot path",
         sample.operation
     );
     assert_eq!(
-        perf_value_max(&snapshot, "persist:write:metadata_only"),
-        1,
-        "{} did not use the metadata-only persist path",
+        perf_duration_max(&snapshot, "persist:write_metadata"),
+        0,
+        "{} wrote low-priority completion metadata in the engine-event hot path",
+        sample.operation
+    );
+    assert_eq!(
+        perf_duration_max(&snapshot, "store:db:transaction_commit"),
+        0,
+        "{} committed low-priority completion metadata in the engine-event hot path",
         sample.operation
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
-    assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
 }
 

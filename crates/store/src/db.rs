@@ -117,11 +117,17 @@ impl SessionDb {
     }
 
     fn immediate_transaction<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        {
+            let _perf = smelt_perf::perf::begin("store:db:transaction_begin");
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        }
         let result = f(&self.conn);
         match result {
             Ok(value) => {
-                self.conn.execute_batch("COMMIT")?;
+                {
+                    let _perf = smelt_perf::perf::begin("store:db:transaction_commit");
+                    self.conn.execute_batch("COMMIT")?;
+                }
                 Ok(value)
             }
             Err(err) => {
