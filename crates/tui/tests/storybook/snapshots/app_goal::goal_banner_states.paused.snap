@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- PAUSED migrate parser state handling without regressing stream…
+ PAUSED Parser migration · Step 2/5, wiring parser state
 
  Please keep working toward the parser migration.
 

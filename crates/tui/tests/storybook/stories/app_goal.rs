@@ -8,7 +8,8 @@ app_story!(goal_banner_states, |ctx| {
     ctx.run_lua(
         r#"
             local goal = require("smelt.goal")
-            assert(goal.create("migrate parser state handling without regressing streaming edits", { auto_continue = true }))
+            assert(goal.create("migrate parser state handling without regressing streaming edits", { auto_continue = true, summary = "Parser migration" }))
+            assert(goal.update_status({ progress = "Step 2/5, wiring parser state" }))
         "#,
     );
     ctx.assert_snapshot_named("active_auto");

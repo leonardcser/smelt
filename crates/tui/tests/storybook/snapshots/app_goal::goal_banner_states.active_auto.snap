@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- GOAL migrate parser state handling without regressing st… auto
+ GOAL Parser migration · Step 2/5, wiring parser state     auto
 
  Please keep working toward the parser migration.
 

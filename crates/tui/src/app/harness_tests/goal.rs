@@ -135,13 +135,13 @@ fn lua_goal_banner_prefers_live_progress() {
         r#"
             local goal = require("smelt.goal")
             assert(goal.create("continue implementing the full goal progress plan", { auto_continue = true, summary = "Goal progress UI" }))
-            assert(goal.update_status({ progress = "Phase 3/7" }))
+            assert(goal.update_status({ progress = "Step 3/7, wiring status banner" }))
         "#,
     ));
 
     let frame = app.render_to_frame();
     assert!(
-        frame.rows[0].contains(" GOAL Goal progress UI · Phase 3/7"),
+        frame.rows[0].contains(" GOAL Goal progress UI · Step 3/7, wiring status banner"),
         "frame:\n{}",
         frame.text()
     );

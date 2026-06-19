@@ -163,9 +163,9 @@ local function context_text(goal)
     "Goal instructions:",
     "- Keep future work aligned with this objective unless the user says otherwise.",
     "- Use get_goal to inspect the current goal state.",
-    "- Call update_goal_progress only for durable, user-facing progress, such as a plan phase or milestone.",
-    "- Do not use progress for current activity; if no meaningful long-term progress label applies, leave it unset.",
-    "- Do not call update_goal_progress for routine substeps or individual tool calls.",
+    "- Progress is durable stage status, not live activity.",
+    "- Use update_goal_progress only for meaningful user-facing steps, sprints, phases, milestones, or validation passes.",
+    "- Leave progress unset when no durable stage label applies.",
     "- At the end, call update_goal only if the goal is done or genuinely blocked.",
     "- Do not mark the goal done until current evidence proves the requested outcome is complete.",
   }, "\n")
@@ -200,9 +200,9 @@ local function continuation_prompt(goal)
     "",
     "## Instructions",
     "- Pick the next concrete step and execute it.",
-    "- Call update_goal_progress only for durable, user-facing progress, such as a plan phase or milestone.",
-    "- Do not use progress for current activity; if no meaningful long-term progress label applies, leave it unset.",
-    "- Do not call update_goal_progress for routine substeps or individual tool calls.",
+    "- Update goal progress only when entering a meaningful user-facing step, sprint, phase, milestone, or validation pass.",
+    "- Progress labels may include a brief stage description, such as 'Step 2/5, implementing parser changes'.",
+    "- Do not update progress for routine substeps, individual tool calls, or moment-to-moment activity.",
     "- Preserve the original scope; do not redefine success around the work already done.",
     "- Before marking the goal done, verify the current state against every explicit requirement, artifact, command, test, and deliverable in the objective.",
     "- Treat incomplete, indirect, weak, or missing evidence as not done; gather stronger evidence or keep working.",
@@ -599,15 +599,15 @@ local function register_tools()
 
   smelt.tools.register({
     name = "update_goal_progress",
-    description = "Update the durable goal progress shown in the top goal bar. Use only for user-facing phases or milestones, not the current activity. Prefer leaving progress unset when no meaningful long-term progress label applies. Do not use for routine substeps, individual tool calls, done, or blocked.",
+    description = "Update the durable goal progress shown in the top goal bar. Use only for user-facing stages such as steps, sprints, phases, milestones, or validation passes. Labels may include a brief description of that stage, but must not report moment-to-moment activity. Prefer leaving progress unset when no meaningful long-term progress label applies. Do not use for routine substeps, individual tool calls, done, or blocked.",
     parameters = {
       type = "object",
       properties = {
         progress = {
           type = "object",
-          description = "Durable user-facing progress. Use label for plan phases or milestones; use current/total or percent only when grounded in the goal or an explicit plan. Do not report current activity.",
+          description = "Durable user-facing progress. Use label for named steps, sprints, phases, milestones, or validation passes; use current/total or percent only when grounded in the goal or an explicit plan. The label may include a brief description of that stage, but not moment-to-moment activity.",
           properties = {
-            label = { type = "string", description = "Durable progress label, such as 'Phase 3/7', '4/12', 'Design review', or 'Validation'. Not the current activity." },
+            label = { type = "string", description = "Durable progress label, such as 'Step 2/5, implementing validation', 'Sprint 1/3, stabilizing imports', '75%, validating regressions', or 'Review, simplifying changes'. Not moment-to-moment activity." },
             current = { type = "number", description = "Optional numeric current progress." },
             total = { type = "number", description = "Optional numeric total progress." },
             percent = { type = "number", description = "Optional percent complete. Do not invent percentages." },
