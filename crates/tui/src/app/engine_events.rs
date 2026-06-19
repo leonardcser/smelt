@@ -42,6 +42,7 @@ impl TuiApp {
     /// Shared by the production main loop, the test harness, and the
     /// scenario replay binary so all three drive identical state.
     pub fn dispatch_engine_event(&mut self, ev: EngineEvent) -> bool {
+        let _perf = smelt_perf::perf::begin("tui:dispatch_engine_event");
         // Engine ask callbacks can call UiHost Lua APIs such as transcript updates.
         crate::lua::with_app_ptr(self, |app| app.dispatch_engine_event_inner(ev))
     }

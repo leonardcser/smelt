@@ -160,6 +160,91 @@ fn history_items_to_lua(lua: &Lua, items: &[protocol::HistoryItem]) -> LuaResult
     Ok(tbl)
 }
 
+fn push_conversation_history_item(
+    lua: &Lua,
+    out: &mlua::Table,
+    idx: &mut usize,
+    item: &protocol::HistoryItem,
+) -> LuaResult<bool> {
+    match item {
+        protocol::HistoryItem::User { content, .. } => {
+            let row = lua.create_table()?;
+            row.set("role", "user")?;
+            row.set("content", content.text_content())?;
+            out.set(*idx, row)?;
+            *idx += 1;
+            Ok(true)
+        }
+        protocol::HistoryItem::Assistant(step) => {
+            let Some(content) = &step.content else {
+                return Ok(false);
+            };
+            let row = lua.create_table()?;
+            row.set("role", "assistant")?;
+            row.set("content", content.text_content())?;
+            out.set(*idx, row)?;
+            *idx += 1;
+            Ok(true)
+        }
+        protocol::HistoryItem::System { .. } | protocol::HistoryItem::Note(_) => Ok(false),
+    }
+}
+
+fn conversation_to_lua(
+    lua: &Lua,
+    history: &[protocol::HistoryItem],
+    limit: Option<usize>,
+) -> LuaResult<mlua::Table> {
+    let _perf = smelt_perf::perf::begin("lua:session:conversation");
+    let out = lua.create_table()?;
+    let mut idx = 1;
+    let Some(limit) = limit.filter(|limit| *limit > 0) else {
+        for item in history {
+            push_conversation_history_item(lua, &out, &mut idx, item)?;
+        }
+        smelt_perf::perf::record_value(
+            "lua:session:conversation_rows_scanned",
+            history.len() as u64,
+        );
+        smelt_perf::perf::record_value(
+            "lua:session:conversation_rows_returned",
+            idx.saturating_sub(1) as u64,
+        );
+        return Ok(out);
+    };
+
+    let mut start = history.len();
+    let mut kept = 0usize;
+    for (item_idx, item) in history.iter().enumerate().rev() {
+        if matches!(
+            item,
+            protocol::HistoryItem::User { .. }
+                | protocol::HistoryItem::Assistant(protocol::AssistantStep {
+                    content: Some(_),
+                    ..
+                })
+        ) {
+            kept += 1;
+            start = item_idx;
+            if kept >= limit {
+                break;
+            }
+        }
+    }
+    smelt_perf::perf::record_value(
+        "lua:session:conversation_rows_scanned",
+        history.len().saturating_sub(start) as u64,
+    );
+    for item in &history[start..] {
+        push_conversation_history_item(lua, &out, &mut idx, item)?;
+    }
+    smelt_perf::perf::record_value(
+        "lua:session:conversation_rows_returned",
+        idx.saturating_sub(1) as u64,
+    );
+    Ok(out)
+}
+
 pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     let m = LuaMod::under(
         lua,
@@ -570,35 +655,18 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
     )?;
     m.fn_(
         "conversation",
-        "Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.",
-        &[],
-        |lua, ()| -> LuaResult<mlua::Table> {
-            let history = crate::lua::try_with_app(|app| app.core.session.history.clone())
-                .unwrap_or_default();
-            let out = lua.create_table()?;
-            let mut idx = 1;
-            for item in history {
-                match item {
-                    protocol::HistoryItem::User { content, .. } => {
-                        let row = lua.create_table()?;
-                        row.set("role", "user")?;
-                        row.set("content", content.text_content())?;
-                        out.set(idx, row)?;
-                        idx += 1;
-                    }
-                    protocol::HistoryItem::Assistant(step) => {
-                        if let Some(content) = step.content {
-                            let row = lua.create_table()?;
-                            row.set("role", "assistant")?;
-                            row.set("content", content.text_content())?;
-                            out.set(idx, row)?;
-                            idx += 1;
-                        }
-                    }
-                    protocol::HistoryItem::System { .. } | protocol::HistoryItem::Note(_) => {}
-                }
+        "Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Pass `{ limit = n }` to read only the latest n conversation rows without materializing the full session. Read-only; intended for lightweight auxiliary prompts such as input prediction.",
+        &["opts"],
+        |lua, opts: Option<mlua::Table>| -> LuaResult<mlua::Table> {
+            let limit = opts
+                .as_ref()
+                .and_then(|opts| opts.get::<Option<usize>>("limit").ok().flatten());
+            match crate::lua::try_with_app(|app| {
+                conversation_to_lua(lua, &app.core.session.history, limit)
+            }) {
+                Some(result) => result,
+                None => lua.create_table(),
             }
-            Ok(out)
         },
     )?;
     m.fn_(

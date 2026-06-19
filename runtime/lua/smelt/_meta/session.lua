@@ -25,8 +25,8 @@ session.context_tokens = nil
 ---@type fun(): integer?
 session.context_window = nil
 
---- Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Read-only; intended for lightweight auxiliary prompts such as input prediction.
----@type fun(): table
+--- Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results. Rows are `{ role = 'user'|'assistant', content }`. Pass `{ limit = n }` to read only the latest n conversation rows without materializing the full session. Read-only; intended for lightweight auxiliary prompts such as input prediction.
+---@type fun(opts: table?): table
 session.conversation = nil
 
 --- Cumulative session cost in USD across every model call this session has made.

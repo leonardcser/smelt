@@ -1200,6 +1200,18 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         "tui:set_history:dirty_from_hint",
         0,
     );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "lua:session:conversation_rows_scanned",
+        16,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "lua:session:conversation_rows_returned",
+        16,
+    );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
     assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
@@ -1267,7 +1279,7 @@ fn run_provider_history_hot_path(
 fn print_hot_path_perf(operation: &str, snapshot: &smelt_perf::perf::Snapshot) {
     for row in snapshot.durations.iter().filter(|row| {
         [
-            "session:", "persist:", "store:", "engine:", "tui:", "bench:",
+            "session:", "persist:", "store:", "engine:", "tui:", "lua:", "bench:",
         ]
         .iter()
         .any(|prefix| row.label.starts_with(prefix))
@@ -1279,7 +1291,7 @@ fn print_hot_path_perf(operation: &str, snapshot: &smelt_perf::perf::Snapshot) {
     }
     for row in snapshot.values.iter().filter(|row| {
         [
-            "session:", "persist:", "store:", "engine:", "tui:", "bench:",
+            "session:", "persist:", "store:", "engine:", "tui:", "lua:", "bench:",
         ]
         .iter()
         .any(|prefix| row.label.starts_with(prefix))

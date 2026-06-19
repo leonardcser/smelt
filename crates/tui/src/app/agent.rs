@@ -523,6 +523,7 @@ impl TuiApp {
     }
 
     pub(crate) fn finish_turn(&mut self, end: crate::app::TurnEnd) -> bool {
+        let _perf = smelt_perf::perf::begin("tui:finish_turn");
         use crate::app::TurnEnd;
 
         self.sleep_inhibit.release();
@@ -553,41 +554,50 @@ impl TuiApp {
                 continuation_token,
             }),
         );
-        self.pump_lua();
-        self.flush_streaming_thinking();
-        self.flush_streaming_text();
-        self.clear_tool_drafts();
-        self.finish_transcript_turn();
+        {
+            let _perf = smelt_perf::perf::begin("tui:finish_turn:pump_lua");
+            self.pump_lua();
+        }
+        {
+            let _perf = smelt_perf::perf::begin("tui:finish_turn:flush_streams");
+            self.flush_streaming_thinking();
+            self.flush_streaming_text();
+            self.clear_tool_drafts();
+            self.finish_transcript_turn();
+        }
         self.sync_reasoning_effort_applied();
 
-        let (meta, start_queued) = match end {
-            TurnEnd::Complete => {
-                let start_queued = !self.queued_inputs.is_empty() && !self.busy_stack.is_busy();
-                let meta = if start_queued {
-                    self.working
-                        .finish_and_continue(TurnOutcome::Done, TurnPhase::Working)
-                } else {
-                    self.working.finish(TurnOutcome::Done)
-                };
-                self.clear_prompt_prediction();
-                (meta, start_queued)
-            }
-            TurnEnd::Cancelled => {
-                self.pending_history_appends.retain(|pending| {
-                    pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
-                });
-                let meta = self.working.finish(TurnOutcome::Interrupted);
-                self.drain_queued_inputs_into_prompt();
-                self.restore_session_metadata_after_rewind(self.core.session.history.len());
-                (meta, false)
-            }
-            TurnEnd::Errored => {
-                self.pending_history_appends.retain(|pending| {
-                    pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
-                });
-                let meta = self.working.finish(TurnOutcome::Interrupted);
-                // On error the queue is preserved so the user can resubmit.
-                (meta, false)
+        let (meta, start_queued) = {
+            let _perf = smelt_perf::perf::begin("tui:finish_turn:working_finish");
+            match end {
+                TurnEnd::Complete => {
+                    let start_queued = !self.queued_inputs.is_empty() && !self.busy_stack.is_busy();
+                    let meta = if start_queued {
+                        self.working
+                            .finish_and_continue(TurnOutcome::Done, TurnPhase::Working)
+                    } else {
+                        self.working.finish(TurnOutcome::Done)
+                    };
+                    self.clear_prompt_prediction();
+                    (meta, start_queued)
+                }
+                TurnEnd::Cancelled => {
+                    self.pending_history_appends.retain(|pending| {
+                        pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
+                    });
+                    let meta = self.working.finish(TurnOutcome::Interrupted);
+                    self.drain_queued_inputs_into_prompt();
+                    self.restore_session_metadata_after_rewind(self.core.session.history.len());
+                    (meta, false)
+                }
+                TurnEnd::Errored => {
+                    self.pending_history_appends.retain(|pending| {
+                        pending.lifecycle() == PendingHistoryLifecycle::SessionScoped
+                    });
+                    let meta = self.working.finish(TurnOutcome::Interrupted);
+                    // On error the queue is preserved so the user can resubmit.
+                    (meta, false)
+                }
             }
         };
 
@@ -612,7 +622,10 @@ impl TuiApp {
         if matches!(end, TurnEnd::Complete) {
             self.apply_pending_history_appends_for_request();
         }
-        self.snapshot_context();
+        {
+            let _perf = smelt_perf::perf::begin("tui:finish_turn:snapshot_context");
+            self.snapshot_context();
+        }
         self.save_session();
         start_queued
     }
@@ -1569,6 +1582,45 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(first_content, "previous user message");
         assert!(!contains_marker);
+    }
+
+    #[test]
+    fn lua_conversation_limit_returns_recent_rows() {
+        let mut app = crate::app::test_harness::TestApp::builder().build();
+        app.app.core.session.history = vec![
+            HistoryItem::user(Content::text("first user")),
+            HistoryItem::note(protocol::HistoryNote::named_context("hidden", "note")),
+            protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("first assistant")),
+                None,
+                Vec::new(),
+            )),
+            HistoryItem::user(Content::text("second user")),
+            protocol::HistoryItem::Assistant(protocol::AssistantStep::terminal(
+                Some(Content::text("second assistant")),
+                None,
+                Vec::new(),
+            )),
+        ];
+
+        let (count, first, second): (i64, String, String) = {
+            let _guard = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .lua
+                .lua
+                .load(
+                    r#"
+                    local rows = smelt.session.conversation({ limit = 2 })
+                    return #rows, rows[1] and rows[1].content or "", rows[2] and rows[2].content or ""
+                    "#,
+                )
+                .eval()
+                .expect("conversation limit query succeeds")
+        };
+
+        assert_eq!(count, 2);
+        assert_eq!(first, "second user");
+        assert_eq!(second, "second assistant");
     }
 
     #[tokio::test]

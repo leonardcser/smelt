@@ -1488,7 +1488,7 @@ Current session metadata, turn list, message snapshots, rewind, and persisted se
   Latest non-background provider-reported active-context token count, or `nil` before the first usage report.
 - `smelt.session.context_window` :: `fun(): integer?`
   Configured context-window size in tokens for the active model.
-- `smelt.session.conversation` :: `fun(): table`
+- `smelt.session.conversation` :: `fun(opts: table?): table`
   Return user and assistant text from semantic history, excluding system messages, internal notes, and tool results.
 - `smelt.session.cost` :: `fun(): number`
   Cumulative session cost in USD across every model call this session has made.

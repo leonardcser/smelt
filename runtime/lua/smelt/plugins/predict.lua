@@ -46,7 +46,7 @@ smelt.events.on("turn_end", function(payload)
     return
   end
 
-  local history = smelt.session.conversation()
+  local history = smelt.session.conversation({ limit = 16 })
 
   local user_msgs = {}
   local last_assistant = nil
