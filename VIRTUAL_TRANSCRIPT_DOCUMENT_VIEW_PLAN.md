@@ -475,6 +475,44 @@ The final cleanup pass keeps the original violation map as resolved criteria rat
 | Projection cache and full rows | Render, resize, search, copy, navigation, and preview use bounded materialization. Full row vector APIs are not the normal transcript hot-path shape. | Full row builds remain reachable for explicit whole-transcript text consumers, diagnostics, focused tests, or narrow compatibility surfaces. |
 | Schema | Same-version schema repair is isolated at storage/session-open boundaries so local databases from earlier unreleased branch iterations remain readable. | `COMPAT(branch-sqlite-schema-shape-repair)` documents the temporary repair and removal point. |
 
+## Final Simplification Refactor Plan
+
+Decision: do the broad cleanup now, but keep it disciplined. The goal is simpler ownership and fewer regression traps, not speculative optimization.
+
+Problem to solve: the measured hot paths are bounded, but the code still exposes old eager-session and eager-row seams. Those seams make it easy for future changes to accidentally reintroduce full transcript/session materialization, and they keep app, window, session, store, and transcript code sharing responsibilities that should belong to one owner.
+
+Desired end state:
+
+- `TranscriptDocument` is the only production owner for transcript row indexing, sparse descriptor loading, payload hydration, exact materialization, search/copy/fold/action behavior, and render-cache policy.
+- App and window code ask document/view abstractions for semantic operations instead of coordinating transcript ranges, cursor snapping, descriptor windows, and backing-buffer text directly.
+- Full session and full transcript materialization remain only behind explicit import/export/repair/diagnostic/test APIs, with names that make the cost obvious.
+- Compatibility fallbacks are storage-boundary decisions where possible; UI paths should not silently rebuild a normal display transcript from `Session.history` when SQLite descriptor records are available.
+- Store-facing writes expose typed deltas at the call sites that still construct broad snapshots for normal runtime operations.
+
+Phases:
+
+1. **Inventory and classify remaining broad seams.** Audit every production caller of full session loads, full descriptor reads, full row builds, backing-buffer document semantics, and snapshot-shaped saves. Classify each as delete, move behind `TranscriptDocument`, rename as explicit expensive API, or keep as compatibility/export/diagnostic/test.
+2. **Collapse transcript semantics into `TranscriptDocument`.** Move remaining app-side transcript range coordination, cursor/anchor exactification, search refinement, copy/yank exactification, fold/action lookup, and descriptor-window decisions behind document methods.
+3. **Demote full-row and full-session APIs.** Remove production access to full row vectors and full semantic session load where a sparse document/store-backed path exists. Rename retained APIs so whole-session or whole-transcript cost is explicit.
+4. **Narrow compatibility fallbacks.** Keep legacy import/migration support, but ensure normal preview/resume/render/search/save paths do not choose full-load fallbacks unless the store-backed descriptor path is genuinely unavailable. Every remaining fallback must be `COMPAT`-tracked and perf-instrumented.
+5. **Tighten persistence call sites.** Replace any remaining normal-runtime broad snapshot construction with typed delta helpers where that simplifies code or removes accidental full-history access. Leave import/export/test snapshot APIs intact.
+6. **Revalidate and simplify tests.** Add or adjust tests around the new ownership boundary, then rerun formatting, clippy, workspace tests, and the relevant transcript hot-path benchmarks.
+
+Acceptance:
+
+- Normal resume, preview, render, navigation, resize, search, copy/yank, folds, actions, live append, save, and provider dispatch cannot reach full session or full transcript materialization except through explicitly named compatibility or diagnostic paths.
+- App/window code no longer needs transcript-specific semantic branches that duplicate `DisplayDocument` or `TranscriptDocument` behavior.
+- Retained expensive APIs have names and tests that make their scope explicit.
+- Compatibility debt remains documented in `docs/compat.md` and excluded from normal hot paths by tests or benchmark counters.
+- The final code is smaller or has clearly simpler ownership; if a proposed slice only moves complexity without deleting or isolating a seam, skip it.
+
+Non-goals:
+
+- Do not remove legacy importers needed for the migration window.
+- Do not chase wall-time micro-optimizations unless a benchmark exposes an asymptotic or ownership problem.
+- Do not introduce temporary abstractions whose only planned future is deletion.
+- Do not rewrite storage or UI layers from scratch; make incremental deletions and ownership moves that remain validated after each slice.
+
 ## Current Seams to Promote or Delete
 
 ### Promote
