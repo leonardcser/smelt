@@ -81,6 +81,23 @@ function smelt.tools.call(name, args, parent_call_id)
   end)
 end
 
+--- Format a path for a tool summary. During argument streaming, paths that may
+--- collapse to the current working directory or home directory return an empty
+--- string; once final, all paths use `smelt.path.display`.
+---@type fun(path: string, ctx?: { final: boolean }, opts?: { prefix: string?, suffix: string? }): string
+function smelt.tools.path_summary(path, ctx, opts)
+  path = path or ""
+  opts = opts or {}
+  local shown
+  if ctx == nil or ctx.final then
+    shown = smelt.path.display(path)
+  else
+    shown = smelt.path.display_streaming(path)
+  end
+  if shown == "" then return "" end
+  return (opts.prefix or "") .. shown .. (opts.suffix or "")
+end
+
 -- Attach an outer watchdog to a tool definition. This is intentionally
 -- separate from the tool's own timeout handling: builtins use a small grace
 -- period so their domain-specific timeout result wins before the watchdog fires.

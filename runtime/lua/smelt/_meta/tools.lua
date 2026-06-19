@@ -30,6 +30,13 @@ tools.list = nil
 ---@type fun(name: string, mw: table): smelt.Reg
 tools.middleware = nil
 
+--- Format a path for a tool summary. During argument streaming, paths that may
+--- collapse to the current working directory or home directory return an empty
+--- string; once final, all paths use `smelt.path.display`.
+---@see smelt.path.display
+---@type fun(path: string, ctx?: { final: boolean }, opts?: { prefix: string?, suffix: string? }): string
+tools.path_summary = nil
+
 --- Register a plugin tool. See `smelt.tools.ToolDef` for every supported field; only `name` and `execute` are required. Returns a `Reg` whose `:remove()` unregisters the tool.
 ---@see smelt.tools.ToolDef
 ---@type fun(def: smelt.tools.ToolDef): smelt.Reg

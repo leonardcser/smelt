@@ -46,6 +46,16 @@ Register middleware for tool `name`. Pass `""` (empty string) as `name` to match
 
 Hooks fire in registration order; an earlier hook's replacement is visible to later hooks. Returns a `Reg` whose `:remove()` drops this middleware.
 
+## `smelt.tools.path_summary`
+
+```lua
+fun(path: string, ctx?: { final: boolean }, opts?: { prefix: string?, suffix: string? }): string
+```
+
+Format a path for a tool summary. During argument streaming, paths that may
+collapse to the current working directory or home directory return an empty
+string; once final, all paths use `smelt.path.display`.
+
 ## `smelt.tools.register`
 
 ```lua

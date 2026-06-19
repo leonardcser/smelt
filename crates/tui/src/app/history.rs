@@ -24,7 +24,16 @@ impl<'a> ToolSummaryResolver<'a> {
         name: &str,
         args: &HashMap<String, serde_json::Value>,
     ) -> protocol::StyledLines {
-        let summary = self.lua.tool_summary(name, args);
+        self.resolve_with_context(name, args, true)
+    }
+
+    pub(crate) fn resolve_with_context(
+        &self,
+        name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        final_args: bool,
+    ) -> protocol::StyledLines {
+        let summary = self.lua.tool_summary_with_context(name, args, final_args);
         if !summary.is_empty() || self.lua.has_tool(name) {
             return summary;
         }

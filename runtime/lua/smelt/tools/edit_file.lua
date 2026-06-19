@@ -146,8 +146,8 @@ smelt.tools.register({
     },
     required = { "file_path", "old_string", "new_string" },
   },
-  summary = function(args)
-    return smelt.path.display(args.file_path or "")
+  summary = function(args, ctx)
+    return smelt.tools.path_summary(args.file_path or "", ctx)
   end,
   preflight = function(args)
     local path = args.file_path or ""

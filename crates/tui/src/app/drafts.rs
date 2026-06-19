@@ -327,8 +327,8 @@ impl TuiApp {
     fn render_tool_draft(&mut self, snapshot: ToolDraftSnapshot) {
         let name = snapshot.tool_name.unwrap_or_else(|| "tool".to_string());
         let args = snapshot.args;
-        let summary =
-            crate::app::history::ToolSummaryResolver::new(&self.lua).resolve(&name, &args);
+        let summary = crate::app::history::ToolSummaryResolver::new(&self.lua)
+            .resolve_with_context(&name, &args, snapshot.finished);
         self.parser.upsert_tool_draft(
             self.transcript.history_mut(),
             ToolDraftUpdate {

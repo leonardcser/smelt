@@ -2,13 +2,13 @@
 
 local transcript_defaults = require("smelt.transcript.defaults")
 
-local function describe(args)
+local function describe(args, ctx)
   local pattern = args.pattern or ""
   local path = args.path or ""
   if path == "" then
     return pattern
   end
-  return pattern .. " in " .. smelt.path.display(path)
+  return smelt.tools.path_summary(path, ctx, { prefix = pattern .. " in " })
 end
 
 local function glob_collapsed_detail(block)
@@ -53,8 +53,8 @@ smelt.tools.register(smelt.tools._with_watchdog({
     },
     required = { "pattern" },
   },
-  summary = function(args)
-    return describe(args)
+  summary = function(args, ctx)
+    return describe(args, ctx)
   end,
   paths_for_workspace = function(args)
     local p = args.path or ""

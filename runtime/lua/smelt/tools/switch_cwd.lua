@@ -23,8 +23,8 @@ smelt.tools.register({
     },
     required = { "path" },
   },
-  summary = function(args)
-    return trim(args.path or "")
+  summary = function(args, ctx)
+    return smelt.tools.path_summary(trim(args.path or ""), ctx)
   end,
   execute = function(args)
     local path = trim(args.path or "")

@@ -1434,6 +1434,35 @@ mod tests {
     }
 
     #[test]
+    fn tool_summary_receives_final_context() {
+        let rt = LuaRuntime::new();
+        rt.lua
+            .load(
+                r#"
+                smelt.tools.register({
+                  name = "summary_context",
+                  description = "",
+                  parameters = { type = "object", properties = {} },
+                  summary = function(args, ctx) return ctx.final and "final" or "draft" end,
+                  execute = function() return "" end,
+                })
+                "#,
+            )
+            .exec()
+            .unwrap();
+        let args = std::collections::HashMap::new();
+        assert_eq!(
+            rt.tool_summary_with_context("summary_context", &args, false)
+                .as_plain_text(),
+            "draft"
+        );
+        assert_eq!(
+            rt.tool_summary("summary_context", &args).as_plain_text(),
+            "final"
+        );
+    }
+
+    #[test]
     fn dialog_open_outside_task_errors() {
         // Calling `smelt.dialog.open` outside a yieldable coroutine
         // (the runtime file's first guard) must raise. With plugins

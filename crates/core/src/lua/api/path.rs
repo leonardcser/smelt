@@ -103,7 +103,14 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         "display",
         "Return a user-friendly rendering of `p` for UI display (e.g. with the home dir abbreviated to `~`).",
         &["p"],
-        |_, p: String| Ok(crate::tools::display_path(&p)),
+        |_, p: String| Ok(crate::path_display::display_path(&p)),
+    )?;
+
+    m.fn_(
+        "display_streaming",
+        "Return a user-friendly rendering of a possibly partial path for streaming tool summaries. Absolute paths that may still collapse to the current working directory or home directory return an empty string until enough path has arrived.",
+        &["p"],
+        |_, p: String| Ok(crate::path_display::display_path_streaming(&p)),
     )?;
 
     m.fn_(

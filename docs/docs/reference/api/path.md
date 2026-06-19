@@ -46,6 +46,14 @@ fun(p: string): string
 
 Return a user-friendly rendering of `p` for UI display (e.g. with the home dir abbreviated to `~`).
 
+## `smelt.path.display_streaming`
+
+```lua
+fun(p: string): string
+```
+
+Return a user-friendly rendering of a possibly partial path for streaming tool summaries. Absolute paths that may still collapse to the current working directory or home directory return an empty string until enough path has arrived.
+
 ## `smelt.path.expand`
 
 ```lua

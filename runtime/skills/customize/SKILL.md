@@ -914,6 +914,8 @@ Pure path arithmetic: normalize, join, relative, expand, display, etc.
   Return the absolute path to smelt's user config directory.
 - `smelt.path.display` :: `fun(p: string): string`
   Return a user-friendly rendering of `p` for UI display (e.g. with the home dir abbreviated to `~`).
+- `smelt.path.display_streaming` :: `fun(p: string): string`
+  Return a user-friendly rendering of a possibly partial path for streaming tool summaries.
 - `smelt.path.expand` :: `fun(p: string): string`
   Expand config-path syntax in `p`: leading `~`, `$VAR`, and `${VAR}`.
 - `smelt.path.extension` :: `fun(p: string): string?`
@@ -1085,6 +1087,8 @@ Register, unregister, and resolve plugin tools for the engine.
   Return the names of every registered plugin tool, sorted.
 - `smelt.tools.middleware` :: `fun(name: string, mw: table): smelt.Reg`
   Register middleware for tool `name`.
+- `smelt.tools.path_summary` :: `fun(path: string, ctx?: { final: boolean }, opts?: { prefix: string?, suffix: string? }): string`
+  Format a path for a tool summary.
 - `smelt.tools.register` :: `fun(def: smelt.tools.ToolDef): smelt.Reg`
   Register a plugin tool.
 - `smelt.tools.resolve` :: `fun(request_id: integer, call_id: string, result: table): nil`

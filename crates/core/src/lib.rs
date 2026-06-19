@@ -28,6 +28,7 @@ pub mod messages;
 pub mod notebook;
 pub mod output_limit;
 pub mod path;
+pub mod path_display;
 pub(crate) mod paused_timer;
 pub mod permissions;
 pub mod process;

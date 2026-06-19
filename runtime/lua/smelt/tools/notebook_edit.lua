@@ -82,8 +82,8 @@ smelt.tools.register({
     },
     required = { "notebook_path" },
   },
-  summary = function(args)
-    return smelt.path.display(args.notebook_path or "")
+  summary = function(args, ctx)
+    return smelt.tools.path_summary(args.notebook_path or "", ctx)
   end,
   preflight = function(args)
     local path = args.notebook_path or ""

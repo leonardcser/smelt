@@ -27,6 +27,10 @@ path.config_dir = nil
 ---@type fun(p: string): string
 path.display = nil
 
+--- Return a user-friendly rendering of a possibly partial path for streaming tool summaries. Absolute paths that may still collapse to the current working directory or home directory return an empty string until enough path has arrived.
+---@type fun(p: string): string
+path.display_streaming = nil
+
 --- Expand config-path syntax in `p`: leading `~`, `$VAR`, and `${VAR}`. Does not invoke a shell, expand globs, or canonicalize symlinks.
 ---@type fun(p: string): string
 path.expand = nil

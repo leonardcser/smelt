@@ -78,9 +78,9 @@ local function range_display(args, content)
   return ":" .. tostring(offset) .. "-" .. tostring(offset + limit - 1)
 end
 
-function smelt.tools.read_file_summary(args, content)
+function smelt.tools.read_file_summary(args, content, ctx)
   args = args or {}
-  return smelt.path.display(args.file_path or "") .. range_display(args, content)
+  return smelt.tools.path_summary(args.file_path or "", ctx, { suffix = range_display(args, content) })
 end
 
 transcript_defaults.__tool_body_renderers.read_file = function(block, ctx)
@@ -120,8 +120,8 @@ smelt.tools.register(smelt.tools._with_watchdog({
     },
     required = { "file_path" },
   },
-  summary = function(args)
-    return smelt.tools.read_file_summary(args or {})
+  summary = function(args, ctx)
+    return smelt.tools.read_file_summary(args or {}, nil, ctx)
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""

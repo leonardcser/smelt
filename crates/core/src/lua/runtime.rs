@@ -1454,6 +1454,15 @@ impl LuaRuntime {
         tool_name: &str,
         args: &HashMap<String, serde_json::Value>,
     ) -> protocol::StyledLines {
+        self.tool_summary_with_context(tool_name, args, true)
+    }
+
+    pub fn tool_summary_with_context(
+        &self,
+        tool_name: &str,
+        args: &HashMap<String, serde_json::Value>,
+        final_args: bool,
+    ) -> protocol::StyledLines {
         let meta = match self
             .lua
             .named_registry_value::<mlua::Table>(&format!("__pt_meta_{tool_name}"))
@@ -1472,8 +1481,21 @@ impl LuaRuntime {
                 return protocol::StyledLines::empty();
             }
         };
+        let ctx_table = match self.lua.create_table() {
+            Ok(t) => {
+                if let Err(e) = t.set("final", final_args) {
+                    self.record_error(format!("tool summary: build context: {e}"));
+                    return protocol::StyledLines::empty();
+                }
+                t
+            }
+            Err(e) => {
+                self.record_error(format!("tool summary: build context: {e}"));
+                return protocol::StyledLines::empty();
+            }
+        };
         let _perf = smelt_perf::perf::begin("lua:tool");
-        match func.call::<mlua::Value>(args_table) {
+        match func.call::<mlua::Value>((args_table, ctx_table)) {
             Ok(v) => match crate::lua::styled_lines_from_lua(v, "tool summary") {
                 Ok(lines) => lines,
                 Err(e) => {

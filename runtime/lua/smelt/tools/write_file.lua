@@ -37,8 +37,8 @@ smelt.tools.register({
     },
     required = { "file_path", "content" },
   },
-  summary = function(args)
-    return smelt.path.display(args.file_path or "")
+  summary = function(args, ctx)
+    return smelt.tools.path_summary(args.file_path or "", ctx)
   end,
   paths_for_workspace = function(args)
     local p = args.file_path or ""
