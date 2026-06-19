@@ -413,6 +413,51 @@ TRANSCRIPT_SEARCH_PERF_VALUE label=after_append metric=search:transcript:dirty_c
 TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:render_plan count=1 last_us=2
 ```
 
+## Cleanup Recommendations After the 500 MiB Pass
+
+The 500 MiB benchmarks now show the main user-facing hot paths are bounded enough for this phase. The next worthwhile work is simplification and consolidation, not micro-optimizing the measured paths.
+
+### Keep legacy migration support
+
+Legacy session code should stay for the planned two-release migration window. Its purpose is only to let users load or migrate old sessions into the new storage shape. Do not spend this cleanup pass removing legacy readers, importers, exporters, or migration status surfaces.
+
+The cleanup rule is narrower: compatibility code must stay quarantined at storage and migration boundaries. It should not define the normal resume, search, render, save, or document-view architecture. New compatibility code should not be introduced unless it is strictly for pre-existing on-disk formats, and any such code must use the repo's `COMPAT(<id>)` convention with an entry in `docs/compat.md`.
+
+### Remove obsolete non-legacy paths
+
+Prioritize deleting or narrowing old architecture paths that are no longer needed by the measured large-session flows:
+
+- full transcript/session materialization reachable from normal resume, render, search, save, navigation, copy, or resize paths;
+- transcript APIs that expose full row vectors or full display buffers outside explicit export, repair, diagnostic, or test code;
+- production fallbacks that rebuild display transcript state from `Session.history` when the store-backed descriptor path is available;
+- generic display-row scan helpers that can accidentally become the transcript search path again;
+- duplicate caches or fingerprints whose only purpose was to make the old eager model tolerable.
+
+When reviewing a candidate path, classify it as one of: legacy migration/import/export, explicit debug or test, or obsolete production fallback. Keep the first two when justified; delete or narrow the third.
+
+### Consolidate transcript document ownership
+
+Continue moving transcript behavior behind `TranscriptDocument` so app and window code stop coordinating transcript history, descriptor windows, row projection, store access, search refinement, and copy/yank exactification directly. The desired direction is that `TranscriptDocument` owns sparse descriptor loading, render cache policy, row-index state, payload hydration policy, search candidate refinement, and exact row materialization.
+
+This should reduce `TRANSCRIPT_WIN` branches, app-side cursor snapping, host-side transcript row lookup, and any window mode that implies a materialized slice of a larger transcript document.
+
+### Typed persistence deltas
+
+The persistence hot paths are no longer the dominant measured user-facing cost, but the architecture still has snapshot-shaped seams. Future cleanup should replace remaining generic session snapshot plumbing with typed transactions for append, rewind/delete, checkpoint, turn metadata, accounting, descriptor suffixes, and object/blob writes. The goal is to make the exact delta explicit before it reaches persistence, rather than building a broad session snapshot and discovering that only a suffix changed.
+
+### Benchmark invariant cleanup
+
+The benchmark suite has become a useful regression guard. Consolidate repeated assertions into named invariants so future failures explain the violated contract directly, for example:
+
+- no full-session reads in hot paths;
+- bounded descriptor window on resume;
+- no SQLite commit in successful turn-complete engine-event handling;
+- bounded transcript search candidate pages;
+- copy/yank work proportional to selected rows;
+- after-append search reuses render plans and inspects only dirty candidates.
+
+Do not add new benchmark scaffolding that papers over old architecture. If a benchmark exposes a fallback that is not legacy, debug, or explicit export/repair behavior, prefer deleting the fallback or moving it behind the correct document/store owner.
+
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |
