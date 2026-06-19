@@ -1095,13 +1095,15 @@ impl TranscriptProjection {
                 .into_iter()
                 .filter(|spec| self.default_view_policy.group_enabled(&spec.name))
                 .collect();
-            self.render_plan = RenderPlan::for_history_with_groups(
+            let prune_required = self.render_plan.refresh_for_history_with_groups(
                 history,
                 &groups,
                 group_generation,
                 group_cache_key,
             );
-            self.presentation.prune(self.render_plan.ids());
+            if prune_required {
+                self.presentation.prune(self.render_plan.ids());
+            }
         }
     }
 

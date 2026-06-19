@@ -816,6 +816,9 @@ pub struct BlockHistory {
     pub finished_blocks: Vec<BlockId>,
     /// Bumped on every mutation; used by `TranscriptSnapshot` to detect staleness.
     generation: u64,
+    /// Bumped only when transcript order changes, so projections can reuse
+    /// block-to-node structure across content and sidecar updates.
+    order_generation: u64,
     /// Earliest transcript order index whose persisted descriptor may be stale.
     descriptor_dirty_from: Option<usize>,
 }
@@ -833,6 +836,7 @@ impl BlockHistory {
             origins: HashMap::new(),
             finished_blocks: Vec::new(),
             generation: 0,
+            order_generation: 0,
             descriptor_dirty_from: None,
         }
     }
@@ -841,13 +845,22 @@ impl BlockHistory {
         self.generation
     }
 
+    pub fn order_generation(&self) -> u64 {
+        self.order_generation
+    }
+
     pub(crate) fn bump_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
 
+    pub(crate) fn bump_order_generation(&mut self) {
+        self.bump_generation();
+        self.order_generation = self.order_generation.wrapping_add(1);
+    }
+
     /// Marks externally-mutated history as changed so snapshots and projections rebuild.
     pub fn mark_changed(&mut self) {
-        self.bump_generation();
+        self.bump_order_generation();
         self.mark_descriptor_dirty_from(0);
     }
 
@@ -1085,7 +1098,7 @@ impl BlockHistory {
         if let Some(origin) = origin {
             self.origins.insert(id, origin);
         }
-        self.bump_generation();
+        self.bump_order_generation();
         self.mark_descriptor_dirty_from(order_index);
         id
     }
@@ -1125,7 +1138,7 @@ impl BlockHistory {
         if let Some(origin) = origin {
             self.origins.insert(id, origin);
         }
-        self.bump_generation();
+        self.bump_order_generation();
         self.mark_descriptor_dirty_from(order_index);
         id
     }
@@ -1197,7 +1210,7 @@ impl BlockHistory {
             self.tool_display_hashes.remove(&call_id);
         }
         let block = self.entries.remove(&id).map(BlockEntry::into_materialized);
-        self.bump_generation();
+        self.bump_order_generation();
         self.mark_descriptor_dirty_from(idx);
         block
     }
@@ -1224,7 +1237,7 @@ impl BlockHistory {
             self.statuses.remove(&id);
             self.origins.remove(&id);
         }
-        self.bump_generation();
+        self.bump_order_generation();
         self.mark_descriptor_dirty_from(first_removed);
     }
 
@@ -1332,7 +1345,7 @@ impl BlockHistory {
         self.content_hashes.remove(&id);
         self.statuses.remove(&id);
         self.origins.remove(&id);
-        self.bump_generation();
+        self.bump_order_generation();
         if let Some(idx) = dirty_idx {
             self.mark_descriptor_dirty_from(idx);
         }
@@ -1348,7 +1361,7 @@ impl BlockHistory {
         self.tool_display_hashes.clear();
         self.statuses.clear();
         self.origins.clear();
-        self.bump_generation();
+        self.bump_order_generation();
         self.mark_descriptor_dirty_from(0);
     }
 
@@ -1398,7 +1411,7 @@ impl BlockHistory {
             self.statuses.remove(&id);
             self.origins.remove(&id);
         }
-        self.bump_generation();
+        self.bump_order_generation();
         self.mark_descriptor_dirty_from(idx);
         self.gc_tool_states();
     }

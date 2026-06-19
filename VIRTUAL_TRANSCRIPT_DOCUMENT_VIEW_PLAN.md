@@ -134,6 +134,81 @@ Interpretation:
 - Preview is comparatively better because it tail-loads a bounded descriptor window. That is the direction all viewing paths should follow.
 - The current benchmark does not yet measure search latency, provider-history rows read, SQLite row counts, or bytes hydrated per operation. The benchmark itself must be extended before implementation claims success.
 
+## 500 MiB Benchmark Checkpoints
+
+These runs use the dedicated large-session benchmark knobs with `TMPDIR=/home/dev/tmp` so SQLite and temp files stay off the small `/tmp` tmpfs.
+
+### Descriptor-backed resume
+
+Command:
+
+```text
+TMPDIR=/home/dev/tmp SMELT_TRANSCRIPT_RESUME_BENCH_BYTES=524288000 \
+  cargo test -p smelt-tui --release --lib transcript_true_resume_benchmark_suite -- \
+  --ignored --nocapture --test-threads=1
+```
+
+Result:
+
+```text
+TRANSCRIPT_TRUE_RESUME_SAMPLE mode=descriptor_backed target_bytes=524288000 generated_bytes=524288000 descriptors=128000 rows=7551997 setup_ms=15164.961 tail_load_ms=0.860 tail_render_ms=1.557
+TRANSCRIPT_TRUE_RESUME_JSON {"type":"resume_summary","mode":"descriptor_backed","target_bytes":524288000,"generated_bytes":524288000,"descriptors":128000,"rows":7551997,"setup_ms":15164.961,"tail_load_ms":0.860,"tail_render_ms":1.557}
+```
+
+The fixture now writes the descriptor-backed SQLite state directly. The timed resume path loaded only the tail descriptor window (`descriptor_slice_requested=80`, `descriptors_loaded=80`) and did not rebuild full in-memory history.
+
+### Transcript search before append-path render-plan reuse
+
+Command:
+
+```text
+TMPDIR=/home/dev/tmp SMELT_TRANSCRIPT_BENCH_SEARCH=1 \
+  SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES=524288000 \
+  SMELT_TRANSCRIPT_BENCH_NO_WARMUP=1 SMELT_TRANSCRIPT_BENCH_RUNS=1 \
+  cargo test -p smelt-tui --release --lib transcript_layout_search_benchmark_suite -- \
+  --ignored --nocapture --test-threads=1
+```
+
+Baseline after store-backed candidate paging:
+
+```text
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 rare_ms=525.031 common_submit_ms=179.758 next100_ms=615.217 after_append_ms=604.984
+TRANSCRIPT_SEARCH_BENCH_JSON {"type":"search_summary","runs":1,"bytes":524290206,"rows":6413965,"rare_mean_ms":525.031,"rare_stddev_ms":0.000,"common_submit_mean_ms":179.758,"common_submit_stddev_ms":0.000,"next100_mean_ms":615.217,"next100_stddev_ms":0.000,"after_append_mean_ms":604.984,"after_append_stddev_ms":0.000}
+```
+
+Store candidate scans were bounded (`search_candidate_rows_scanned=512` for rare/common searches), but after appending one matching row the search path still rebuilt full render-plan nodes and row-index state:
+
+```text
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:render_plan count=1 last_us=365199
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:render_plan:build_nodes count=1 last_us=306621
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:prepare_row_index count=6 total_us=424167 p95_us=424137
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=search:transcript:candidate_layout count=1 last_us=135052
+```
+
+### Transcript search after append-path render-plan reuse
+
+Render plans now distinguish content generation from transcript order generation and extend append-only plans in place. Grouped plans rebuild only the suffix that could merge with the appended run; pure appends update the plan fingerprint incrementally instead of hashing every node.
+
+Result:
+
+```text
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 rare_ms=144.308 common_submit_ms=156.722 next100_ms=331.318 after_append_ms=170.674
+TRANSCRIPT_SEARCH_BENCH_JSON {"type":"search_summary","runs":1,"bytes":524290206,"rows":6413965,"rare_mean_ms":144.308,"rare_stddev_ms":0.000,"common_submit_mean_ms":156.722,"common_submit_stddev_ms":0.000,"next100_mean_ms":331.318,"next100_stddev_ms":0.000,"after_append_mean_ms":170.674,"after_append_stddev_ms":0.000}
+```
+
+The measured append search bottleneck moved out of full render-plan construction:
+
+```text
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:render_plan count=1 last_us=2
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:render_plan:append_nodes count=1 last_us=1
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:render_plan:fingerprint_append count=1 last_us=0
+TRANSCRIPT_SEARCH_PERF_VALUE label=after_append metric=transcript:render_plan:reused count=1 last=1
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:prepare_row_index count=6 total_us=40075 p95_us=40049
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=search:transcript:candidate_layout count=1 last_us=99766
+```
+
+Remaining work: candidate layout still prepares an index for the full loaded render plan and should move toward a sparse block-to-row lookup owned by the transcript document, not by a full in-memory projection.
+
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |

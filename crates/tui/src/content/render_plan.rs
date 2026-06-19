@@ -337,6 +337,8 @@ impl TranscriptPresentationState {
 #[derive(Clone, Debug)]
 pub(crate) struct RenderPlan {
     pub(crate) history_generation: u64,
+    pub(crate) history_order_generation: u64,
+    history_order_len: usize,
     pub(crate) group_generation: u64,
     pub(crate) group_cache_key: Option<u64>,
     pub(crate) nodes: Vec<RenderNode>,
@@ -349,6 +351,8 @@ impl RenderPlan {
     pub(crate) fn empty() -> Self {
         Self {
             history_generation: 0,
+            history_order_generation: 0,
+            history_order_len: 0,
             group_generation: 0,
             group_cache_key: None,
             nodes: Vec::new(),
@@ -358,6 +362,7 @@ impl RenderPlan {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn for_history_with_groups(
         history: &BlockHistory,
         groups: &[TranscriptGroupSpec],
@@ -365,6 +370,35 @@ impl RenderPlan {
         group_cache_key: Option<u64>,
     ) -> Self {
         let _perf = smelt_perf::perf::begin("transcript:render_plan");
+        Self::build_for_history_with_groups(history, groups, group_generation, group_cache_key)
+    }
+
+    pub(crate) fn refresh_for_history_with_groups(
+        &mut self,
+        history: &BlockHistory,
+        groups: &[TranscriptGroupSpec],
+        group_generation: u64,
+        group_cache_key: Option<u64>,
+    ) -> bool {
+        let _perf = smelt_perf::perf::begin("transcript:render_plan");
+        if let Some(prune_required) =
+            self.try_refresh_incremental(history, groups, group_generation, group_cache_key)
+        {
+            smelt_perf::perf::record_value("transcript:render_plan:reused", 1);
+            return prune_required;
+        }
+        smelt_perf::perf::record_value("transcript:render_plan:reused", 0);
+        *self =
+            Self::build_for_history_with_groups(history, groups, group_generation, group_cache_key);
+        true
+    }
+
+    fn build_for_history_with_groups(
+        history: &BlockHistory,
+        groups: &[TranscriptGroupSpec],
+        group_generation: u64,
+        group_cache_key: Option<u64>,
+    ) -> Self {
         let nodes = {
             let _perf = smelt_perf::perf::begin("transcript:render_plan:build_nodes");
             build_nodes(history, groups)
@@ -399,6 +433,8 @@ impl RenderPlan {
         };
         Self {
             history_generation: history.generation(),
+            history_order_generation: history.order_generation(),
+            history_order_len: history.order.len(),
             group_generation,
             group_cache_key,
             nodes,
@@ -406,6 +442,141 @@ impl RenderPlan {
             index_by_block_id,
             fingerprint,
         }
+    }
+
+    fn try_refresh_incremental(
+        &mut self,
+        history: &BlockHistory,
+        groups: &[TranscriptGroupSpec],
+        group_generation: u64,
+        group_cache_key: Option<u64>,
+    ) -> Option<bool> {
+        if groups.is_empty()
+            && self
+                .nodes
+                .iter()
+                .any(|node| matches!(node, RenderNode::Group { .. }))
+        {
+            return None;
+        }
+        if groups.is_empty() && history.order_generation() == self.history_order_generation {
+            if self.history_order_len != history.order.len() {
+                return None;
+            }
+            self.history_generation = history.generation();
+            self.group_generation = group_generation;
+            self.group_cache_key = group_cache_key;
+            self.refresh_fingerprint(history);
+            return Some(false);
+        }
+        if !groups.is_empty()
+            && (self.group_generation != group_generation
+                || self.group_cache_key != group_cache_key)
+        {
+            return None;
+        }
+        let old_order_len = self.history_order_len;
+        if old_order_len > history.order.len()
+            || history
+                .descriptor_dirty_from()
+                .is_none_or(|idx| idx < old_order_len)
+        {
+            return None;
+        }
+        let rebuild_from_block = if groups.is_empty() {
+            old_order_len
+        } else {
+            group_append_recompute_start(history, groups, old_order_len)
+        };
+        let truncate_from_node = if rebuild_from_block == old_order_len {
+            self.nodes.len()
+        } else {
+            let id = history.order.get(rebuild_from_block).copied()?;
+            self.index_for_block(id)?
+        };
+        let old_fingerprint = self.fingerprint;
+        let old_node_len = self.nodes.len();
+        let pure_append = truncate_from_node == old_node_len && rebuild_from_block == old_order_len;
+        let prune_required = truncate_from_node < old_node_len;
+        self.truncate_from(truncate_from_node);
+        {
+            let _perf = smelt_perf::perf::begin("transcript:render_plan:append_nodes");
+            for node in build_nodes_from(history, groups, rebuild_from_block) {
+                self.push_node(node);
+            }
+        }
+        self.history_generation = history.generation();
+        self.history_order_generation = history.order_generation();
+        self.history_order_len = history.order.len();
+        self.group_generation = group_generation;
+        self.group_cache_key = group_cache_key;
+        if pure_append {
+            self.extend_fingerprint(history, old_fingerprint, old_order_len, old_node_len);
+        } else {
+            self.refresh_fingerprint(history);
+        }
+        Some(prune_required)
+    }
+
+    fn push_node(&mut self, node: RenderNode) {
+        let index = self.nodes.len();
+        self.index_by_id.insert(node.id(), index);
+        match &node {
+            RenderNode::Block { id, .. } => {
+                self.index_by_block_id.insert(*id, index);
+            }
+            RenderNode::Group { child_ids, .. } => {
+                for id in child_ids {
+                    self.index_by_block_id.insert(*id, index);
+                }
+            }
+        }
+        self.nodes.push(node);
+    }
+
+    fn truncate_from(&mut self, index: usize) {
+        for node in self.nodes.drain(index..) {
+            self.index_by_id.remove(&node.id());
+            match node {
+                RenderNode::Block { id, .. } => {
+                    self.index_by_block_id.remove(&id);
+                }
+                RenderNode::Group { child_ids, .. } => {
+                    for id in child_ids {
+                        self.index_by_block_id.remove(&id);
+                    }
+                }
+            }
+        }
+    }
+
+    fn refresh_fingerprint(&mut self, history: &BlockHistory) {
+        let _perf = smelt_perf::perf::begin("transcript:render_plan:fingerprint");
+        self.fingerprint = render_plan_fingerprint(
+            history,
+            &self.nodes,
+            self.group_generation,
+            self.group_cache_key,
+        );
+    }
+
+    fn extend_fingerprint(
+        &mut self,
+        history: &BlockHistory,
+        old_fingerprint: u64,
+        old_order_len: usize,
+        old_node_len: usize,
+    ) {
+        let _perf = smelt_perf::perf::begin("transcript:render_plan:fingerprint_append");
+        self.fingerprint = append_render_plan_fingerprint(
+            history,
+            old_fingerprint,
+            old_order_len,
+            self.history_order_len,
+            &self.nodes[old_node_len..],
+            self.group_generation,
+            self.group_cache_key,
+        );
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -573,6 +744,29 @@ fn render_plan_fingerprint(
     hasher.finish()
 }
 
+fn append_render_plan_fingerprint(
+    history: &BlockHistory,
+    previous_fingerprint: u64,
+    previous_order_len: usize,
+    order_len: usize,
+    appended_nodes: &[RenderNode],
+    group_generation: u64,
+    group_cache_key: Option<u64>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    previous_fingerprint.hash(&mut hasher);
+    previous_order_len.hash(&mut hasher);
+    order_len.hash(&mut hasher);
+    group_generation.hash(&mut hasher);
+    group_cache_key.hash(&mut hasher);
+    appended_nodes.len().hash(&mut hasher);
+    for node in appended_nodes {
+        node.id().hash(&mut hasher);
+        node_fingerprint(history, node).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 #[derive(serde::Serialize)]
 struct GroupIdKey<'a> {
     name: &'a str,
@@ -594,18 +788,27 @@ struct GroupContentKey<'a> {
 }
 
 fn build_nodes(history: &BlockHistory, groups: &[TranscriptGroupSpec]) -> Vec<RenderNode> {
+    build_nodes_from(history, groups, 0)
+}
+
+fn build_nodes_from(
+    history: &BlockHistory,
+    groups: &[TranscriptGroupSpec],
+    start: usize,
+) -> Vec<RenderNode> {
     if groups.is_empty() {
         return history
             .order
             .iter()
             .copied()
             .enumerate()
+            .skip(start)
             .map(|(block_index, id)| RenderNode::Block { id, block_index })
             .collect();
     }
 
     let mut nodes = Vec::new();
-    let mut index = 0usize;
+    let mut index = start;
     while index < history.order.len() {
         let Some((spec, bucket, end)) = matching_group_run(history, groups, index) else {
             nodes.push(RenderNode::Block {
@@ -633,6 +836,35 @@ fn build_nodes(history: &BlockHistory, groups: &[TranscriptGroupSpec]) -> Vec<Re
         index = end;
     }
     nodes
+}
+
+fn group_append_recompute_start(
+    history: &BlockHistory,
+    groups: &[TranscriptGroupSpec],
+    old_order_len: usize,
+) -> usize {
+    if old_order_len == 0 || old_order_len >= history.order.len() {
+        return old_order_len;
+    }
+    let mut start = old_order_len;
+    while start > 0 && can_share_group_run(history, groups, start - 1, start) {
+        start -= 1;
+    }
+    start
+}
+
+fn can_share_group_run(
+    history: &BlockHistory,
+    groups: &[TranscriptGroupSpec],
+    left: usize,
+    right: usize,
+) -> bool {
+    groups.iter().any(|spec| {
+        selector_matches(history, spec, left)
+            && selector_matches(history, spec, right)
+            && group_bucket(history, spec, left).unwrap_or_else(|| spec.name.clone())
+                == group_bucket(history, spec, right).unwrap_or_else(|| spec.name.clone())
+    })
 }
 
 fn matching_group_run<'a>(
@@ -984,6 +1216,156 @@ mod tests {
         assert!(matches!(
             plan.nodes.as_slice(),
             [RenderNode::Group { name, child_range, .. }] if name == "low-min" && child_range == &(0..2)
+        ));
+    }
+
+    #[test]
+    fn ungrouped_plan_extends_for_append_without_pruning() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(Block::Text {
+            content: "first".into(),
+        });
+        transcript.push(Block::Text {
+            content: "second".into(),
+        });
+        transcript.history.clear_descriptor_dirty();
+        let mut plan = RenderPlan::for_history_with_groups(&transcript.history, &[], 0, None);
+        let initial_order_generation = plan.history_order_generation;
+
+        transcript.push(Block::Text {
+            content: "third".into(),
+        });
+        let appended = *transcript.history.order.last().unwrap();
+        let prune_required =
+            plan.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+
+        assert!(!prune_required);
+        assert_ne!(plan.history_order_generation, initial_order_generation);
+        assert_eq!(plan.len(), 3);
+        assert_eq!(plan.index_for_block(appended), Some(2));
+        assert!(matches!(
+            plan.nodes[2],
+            RenderNode::Block {
+                id,
+                block_index: 2
+            } if id == appended
+        ));
+    }
+
+    #[test]
+    fn ungrouped_plan_reuses_structure_for_content_update() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(Block::Text {
+            content: "first".into(),
+        });
+        let id = *transcript.history.order.last().unwrap();
+        transcript.push(Block::Text {
+            content: "second".into(),
+        });
+        let mut plan = RenderPlan::for_history_with_groups(&transcript.history, &[], 0, None);
+        let initial_order_generation = plan.history_order_generation;
+        let initial_fingerprint = plan.fingerprint;
+
+        transcript.history.rewrite(
+            id,
+            Block::Text {
+                content: "changed".into(),
+            },
+        );
+        let prune_required =
+            plan.refresh_for_history_with_groups(&transcript.history, &[], 0, None);
+
+        assert!(!prune_required);
+        assert_eq!(plan.history_order_generation, initial_order_generation);
+        assert_eq!(plan.len(), 2);
+        assert_ne!(plan.fingerprint, initial_fingerprint);
+        assert_eq!(plan.index_for_block(id), Some(0));
+    }
+
+    #[test]
+    fn grouped_plan_rebuilds_on_append() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(Block::Text {
+            content: "first".into(),
+        });
+        transcript.push(Block::Text {
+            content: "second".into(),
+        });
+        let spec = TranscriptGroupSpec {
+            name: "assistant-blocks".into(),
+            cache_key: None,
+            priority: 0,
+            registration_order: 0,
+            min: 2,
+            default_view: None,
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("assistant".into()),
+                name: None,
+                terminal: None,
+                fields: Vec::new(),
+            },
+            bucket: None,
+        };
+        let mut plan = RenderPlan::for_history_with_groups(
+            &transcript.history,
+            std::slice::from_ref(&spec),
+            1,
+            None,
+        );
+
+        transcript.push(Block::Text {
+            content: "third".into(),
+        });
+        let prune_required =
+            plan.refresh_for_history_with_groups(&transcript.history, &[spec], 1, None);
+
+        assert!(prune_required);
+        assert!(
+            matches!(plan.nodes.as_slice(), [RenderNode::Group { child_range, .. }] if child_range == &(0..3))
+        );
+    }
+
+    #[test]
+    fn disabling_groups_rebuilds_grouped_plan_as_blocks() {
+        let mut transcript = smelt_core::content::transcript::Transcript::new();
+        transcript.push(Block::Text {
+            content: "first".into(),
+        });
+        transcript.push(Block::Text {
+            content: "second".into(),
+        });
+        let spec = TranscriptGroupSpec {
+            name: "assistant-blocks".into(),
+            cache_key: None,
+            priority: 0,
+            registration_order: 0,
+            min: 2,
+            default_view: None,
+            selector: smelt_core::lua::TranscriptGroupSelector {
+                kind: Some("assistant".into()),
+                name: None,
+                terminal: None,
+                fields: Vec::new(),
+            },
+            bucket: None,
+        };
+        let mut plan = RenderPlan::for_history_with_groups(
+            &transcript.history,
+            std::slice::from_ref(&spec),
+            1,
+            None,
+        );
+
+        let prune_required =
+            plan.refresh_for_history_with_groups(&transcript.history, &[], 2, None);
+
+        assert!(prune_required);
+        assert!(matches!(
+            plan.nodes.as_slice(),
+            [
+                RenderNode::Block { block_index: 0, .. },
+                RenderNode::Block { block_index: 1, .. }
+            ]
         ));
     }
 
