@@ -1044,3 +1044,15 @@ Acceptance:
 - No benchmarked hot save/request path performs full session history reads, clones, serialization, fingerprinting, or sidecar rewrites.
 
 Status: complete. `cargo xtask bench-transcript-layout --runs 1 --workloads tiny_blocks_1mib --skip-nav --save-request --save-request-history 256` now emits `TRANSCRIPT_HOT_PATH_BENCH_SAMPLE` and JSON rows for no-op save, one-row request append, engine `HistoryUpdated`, rewind/delete suffix, and provider history read. The 256-row release sample measured no-op save at 0.016 ms with no dirty rows, request append at 0.969 ms with one dirty history row and one descriptor row, `HistoryUpdated` at 1.027 ms with one dirty history row, rewind/delete suffix at 0.999 ms with two deleted history rows and no rewritten suffix rows, and provider history read at 0.278 ms with 32 range-read rows. The benchmark asserts the robust asymptotic counters by default and leaves wall time advisory through the emitted summaries.
+
+## 500 MB Session Optimization Plan
+
+Principle: keep the document/view separation and storage-boundary compatibility from this plan. Optimize by removing full-session algorithms and wrong abstractions, not by shaving local instructions off paths that should not run at 500 MB scale.
+
+Phases:
+
+1. Add 500 MiB benchmark knobs for search and resume so large-session runs do not duplicate warmup data by default. Status: in progress. `--scale-500mb` and `--no-warmup` now exercise 500 MiB search/resume targets without doubling data generation. A 500 MiB search run with an out-of-`/tmp` temp dir reached 524,290,206 bytes and 6,413,965 rows. The current measured search bottlenecks are candidate layout and exact display refinement, not full index construction; rare search measured 525.031 ms, common submit 179.758 ms, next 100 matches 615.217 ms, and after-append search 604.984 ms. The existing true resume benchmark still uses a full pre-save transcript build and did not finish within 10 minutes at 500 MiB, so a scalable descriptor-backed resume fixture is the next benchmark fix.
+2. Run the 500 MiB benchmarks and identify measured bottlenecks in store search, descriptor loading, document materialization, save/request paths, and provider history reads.
+3. Replace bottleneck algorithms with bounded or indexed operations. Text search should page through indexed candidates in document order instead of materializing all matching blocks before applying origin/limit.
+4. Validate that hot paths stay bounded by rows/descriptors touched, and that wall-time changes are explained by named benchmark metrics.
+5. Reflect and clean up abstractions that became unnecessary after the large-session path is correct.

@@ -11,6 +11,7 @@ pub fn run(args: Vec<String>) {
     let mut resume_bytes: Option<String> = None;
     let mut hot_path = false;
     let mut hot_path_history: Option<String> = None;
+    let mut no_warmup = false;
 
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -49,6 +50,14 @@ pub fn run(args: Vec<String>) {
                 }));
             }
             "--save-request" => hot_path = true,
+            "--scale-500mb" => {
+                search = true;
+                resume = true;
+                no_warmup = true;
+                search_bytes = Some((500usize * 1024 * 1024).to_string());
+                resume_bytes = Some((500usize * 1024 * 1024).to_string());
+            }
+            "--no-warmup" => no_warmup = true,
             "--save-request-history" => {
                 let value = iter.next().unwrap_or_else(|| {
                     eprintln!("bench-transcript-layout: --save-request-history requires a value");
@@ -101,6 +110,9 @@ pub fn run(args: Vec<String>) {
     if let Some(bytes) = search_bytes {
         cmd.env("SMELT_TRANSCRIPT_BENCH_SEARCH_BYTES", bytes);
     }
+    if no_warmup {
+        cmd.env("SMELT_TRANSCRIPT_BENCH_NO_WARMUP", "1");
+    }
     if hot_path {
         cmd.env("SMELT_TRANSCRIPT_HOT_PATH", "1");
     }
@@ -152,7 +164,7 @@ pub fn run(args: Vec<String>) {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--save-request] [--save-request-history N] [--debug]");
+    eprintln!("usage: cargo xtask bench-transcript-layout [--runs N] [--workloads CSV] [--skip-nav] [--search] [--search-bytes N] [--resume] [--resume-bytes N] [--save-request] [--save-request-history N] [--scale-500mb] [--no-warmup] [--debug]");
     eprintln!();
     eprintln!("Runs the ignored transcript layout benchmark suite and prints mean±stddev tables.");
     eprintln!("Default profile is --release and default runs is 5.");
@@ -167,4 +179,6 @@ fn print_usage() {
     eprintln!(
         "--save-request-history N sets its generated hot-path history length; default is 1024."
     );
+    eprintln!("--scale-500mb enables 500 MiB search/resume benchmark targets and disables warmup.");
+    eprintln!("--no-warmup skips benchmark warmup samples for large-session runs.");
 }

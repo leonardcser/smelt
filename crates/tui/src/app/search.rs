@@ -1,5 +1,5 @@
 use crate::app::transcript_search::{
-    previous_search_position, TranscriptSearchIndex, TranscriptSearchSession,
+    previous_search_position, TranscriptSearchIndex, TranscriptSearchSession, TranscriptSearchStore,
 };
 use crate::app::TuiApp;
 use crate::smelt_edit::{
@@ -101,6 +101,7 @@ impl SearchSession {
 pub(crate) struct SearchState {
     pub(crate) session: Option<SearchSession>,
     pub(super) transcript_index: Option<TranscriptSearchIndex>,
+    pub(super) transcript_store: Option<TranscriptSearchStore>,
 }
 
 impl TuiApp {

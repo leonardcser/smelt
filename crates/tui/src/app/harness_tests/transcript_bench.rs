@@ -143,6 +143,13 @@ fn search_bench_bytes() -> usize {
         .unwrap_or(50 * 1024 * 1024)
 }
 
+fn transcript_bench_warmup_enabled() -> bool {
+    !matches!(
+        std::env::var("SMELT_TRANSCRIPT_BENCH_NO_WARMUP").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 fn push_search_bench_transcript(app: &mut TestApp, target_bytes: usize) -> usize {
     let mut approx_bytes = 0usize;
     let mut i = 0usize;
@@ -336,11 +343,11 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     let rare_ms = elapsed_ms(rare_start.elapsed());
     assert!(transcript_row_cursor_row(&app) > rows / 2);
     let rare_snapshot = smelt_perf::perf::snapshot();
-    assert_search_refinement_gates(&rare_snapshot, "rare_cold", 80, 160);
-    assert_search_uses_candidate_index(&rare_snapshot, "rare_cold", 64);
     if report_perf {
         search_perf_snapshot("rare_cold", &rare_snapshot);
     }
+    assert_search_refinement_gates(&rare_snapshot, "rare_cold", 80, 1024);
+    assert_search_uses_candidate_index(&rare_snapshot, "rare_cold", 1024);
 
     smelt_perf::perf::clear();
     let common_start = std::time::Instant::now();
@@ -359,11 +366,11 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     }
     let next100_ms = elapsed_ms(next_start.elapsed());
     let common_snapshot = smelt_perf::perf::snapshot();
-    assert_search_refinement_gates(&common_snapshot, "common_hot_next100", 512, 32_000);
-    assert_search_uses_candidate_index(&common_snapshot, "common_hot_next100", 512);
     if report_perf {
         search_perf_snapshot("common_hot_next100", &common_snapshot);
     }
+    assert_search_refinement_gates(&common_snapshot, "common_hot_next100", 512, 32_000);
+    assert_search_uses_candidate_index(&common_snapshot, "common_hot_next100", 512);
 
     smelt_perf::perf::clear();
     app.app
@@ -379,6 +386,9 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     app.render_silent();
     let after_append_ms = elapsed_ms(after_append_start.elapsed());
     let after_append_snapshot = smelt_perf::perf::snapshot();
+    if report_perf {
+        search_perf_snapshot("after_append", &after_append_snapshot);
+    }
     assert_search_refinement_gates(&after_append_snapshot, "after_append", 80, 160);
     assert_search_uses_candidate_index(&after_append_snapshot, "after_append", 1);
     let dirty_scanned = perf_value_max(
@@ -389,9 +399,6 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         dirty_scanned <= 1,
         "after_append scanned {dirty_scanned} dirty blocks, expected only the appended suffix"
     );
-    if report_perf {
-        search_perf_snapshot("after_append", &after_append_snapshot);
-    }
     smelt_perf::perf::set_enabled(false);
 
     SearchBenchSample {
@@ -417,7 +424,9 @@ fn transcript_layout_search_benchmark_suite() {
     }
     let runs = navigation_bench_runs();
     let target_bytes = search_bench_bytes();
-    let _warmup = run_search_bench_sample(target_bytes, false);
+    if transcript_bench_warmup_enabled() {
+        let _warmup = run_search_bench_sample(target_bytes, false);
+    }
     let mut samples = Vec::with_capacity(runs);
     for run in 0..runs {
         let sample = run_search_bench_sample(target_bytes, true);

@@ -26,6 +26,11 @@ pub(super) struct TranscriptSearchIndex {
     trigrams: HashMap<u32, Vec<usize>>,
 }
 
+pub(super) struct TranscriptSearchStore {
+    session_id: String,
+    db: smelt_store::SessionDb,
+}
+
 #[derive(Clone, Debug)]
 struct TranscriptSearchEntry {
     first_row: RowIndex,
@@ -217,6 +222,21 @@ impl TuiApp {
         out
     }
 
+    fn transcript_search_store(&mut self) -> Option<&smelt_store::SessionDb> {
+        let session_id = self.core.session.id.clone();
+        if self
+            .search
+            .transcript_store
+            .as_ref()
+            .is_none_or(|store| store.session_id != session_id)
+        {
+            let db_path = smelt_core::session::dir_for(&self.core.session).join("session.db");
+            let db = smelt_store::SessionDb::open_read_only(db_path).ok()?;
+            self.search.transcript_store = Some(TranscriptSearchStore { session_id, db });
+        }
+        self.search.transcript_store.as_ref().map(|store| &store.db)
+    }
+
     fn sqlite_transcript_candidate_blocks(
         &mut self,
         query: &str,
@@ -234,41 +254,42 @@ impl TuiApp {
                 matches!(direction, SearchDirection::Forward),
             )
             .map(|id| id.get());
-        let db_path = smelt_core::session::dir_for(&self.core.session).join("session.db");
         let store_direction = match direction {
             SearchDirection::Forward => smelt_store::TranscriptSearchDirection::Forward,
             SearchDirection::Backward => smelt_store::TranscriptSearchDirection::Backward,
         };
         let limit = SEARCH_TRANSCRIPT_PREFETCH_ENTRIES * 8;
-        let sqlite_candidates = smelt_store::SessionDb::open_read_only(db_path)
-            .ok()
-            .and_then(|db| {
-                let mut page = db
-                    .search_transcript_candidate_page(query, origin_block, store_direction, limit)
+        let descriptors_persisted = self.transcript_descriptors_persisted;
+        let sqlite_candidates = self.transcript_search_store().and_then(|db| {
+            let mut page = db
+                .search_transcript_candidate_page(query, origin_block, store_direction, limit)
+                .ok()?;
+            if origin_block.is_some() && page.len() < limit {
+                let wrapped = db
+                    .search_transcript_candidate_page(
+                        query,
+                        None,
+                        store_direction,
+                        limit - page.len(),
+                    )
                     .ok()?;
-                if origin_block.is_some() && page.len() < limit {
-                    let wrapped = db
-                        .search_transcript_candidate_page(
-                            query,
-                            None,
-                            store_direction,
-                            limit - page.len(),
-                        )
-                        .ok()?;
-                    for candidate in wrapped {
-                        if !page
-                            .iter()
-                            .any(|seen| seen.block_idx == candidate.block_idx)
-                        {
-                            page.push(candidate);
-                        }
+                for candidate in wrapped {
+                    if !page
+                        .iter()
+                        .any(|seen| seen.block_idx == candidate.block_idx)
+                    {
+                        page.push(candidate);
                     }
                 }
-                if page.is_empty() && db.transcript_descriptor_count().ok() == Some(0) {
-                    return None;
-                }
-                Some(page)
-            });
+            }
+            if page.is_empty()
+                && !descriptors_persisted
+                && db.transcript_descriptor_count().ok() == Some(0)
+            {
+                return None;
+            }
+            Some(page)
+        });
         let mut block_indices = Vec::new();
         let sqlite_available = sqlite_candidates.is_some();
         if let Some(candidates) = sqlite_candidates {

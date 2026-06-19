@@ -704,77 +704,49 @@ pub(crate) fn search_transcript_candidate_page(
         perf::record_value("store:transcript:search_candidates_loaded", 0);
         return Ok(Vec::new());
     }
-    let term_count = terms.len();
-    let placeholders = std::iter::repeat_n("?", terms.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let order = match direction {
-        TranscriptSearchDirection::Forward => "ASC",
-        TranscriptSearchDirection::Backward => "DESC",
-    };
-    let origin_filter = match (origin_block_idx, direction) {
-        (Some(_), TranscriptSearchDirection::Forward) => "AND s.block_idx >= ?",
-        (Some(_), TranscriptSearchDirection::Backward) => "AND s.block_idx <= ?",
-        (None, _) => "",
-    };
-    let sql = format!(
-        "WITH matched(block_idx) AS (
-             SELECT block_idx
-             FROM transcript_search_terms
-             WHERE term IN ({placeholders})
-             GROUP BY block_idx
-             HAVING COUNT(*) = ?
-         )
-         SELECT s.block_idx, s.history_idx, s.text
-         FROM matched m
-         JOIN transcript_search s ON s.block_idx = m.block_idx
-         WHERE 1 = 1 {origin_filter}
-         ORDER BY s.block_idx {order}
-         LIMIT ? OFFSET ?"
-    );
-    let base_values = {
-        let mut values = terms.into_iter().map(SqlValue::from).collect::<Vec<_>>();
-        values.push(SqlValue::from(term_count as i64));
-        if let Some(origin) = origin_block_idx {
-            values.push(SqlValue::from(checked_i64(origin, "origin_block_idx")?));
-        }
-        values
-    };
+
+    let driver = search_driver_term(conn, &terms)?;
+    let other_terms = terms
+        .iter()
+        .filter(|term| *term != &driver)
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let page_size = if limit == usize::MAX {
         1024usize
     } else {
         limit.max(64)
     };
-    let mut stmt = conn.prepare(&sql)?;
     let mut out = Vec::new();
-    let mut offset = 0usize;
+    let mut bound = origin_block_idx;
+    let mut inclusive = origin_block_idx.is_some();
     let mut scanned = 0usize;
+    let mut batches = 0usize;
+
     loop {
-        let mut values = base_values.clone();
-        values.push(SqlValue::from(checked_i64(
-            page_size as u64,
-            "search_candidate_page_size",
-        )?));
-        values.push(SqlValue::from(checked_i64(
-            offset as u64,
-            "search_candidate_offset",
-        )?));
-        let rows = stmt.query_map(params_from_iter(values), |row| {
-            Ok((
-                row.get::<_, i64>(0)? as u64,
-                row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut fetched = 0usize;
-        for row in rows {
-            fetched += 1;
-            scanned = scanned.saturating_add(1);
-            let (block_idx, history_idx, text) = row?;
-            if text.contains(query) {
+        let batch = search_transcript_candidate_batch(
+            conn,
+            TranscriptCandidateBatchQuery {
+                driver: &driver,
+                other_terms: &other_terms,
+                bound,
+                inclusive,
+                direction,
+                page_size,
+            },
+        )?;
+        batches = batches.saturating_add(1);
+        let fetched = batch.len();
+        if fetched == 0 {
+            break;
+        }
+        scanned = scanned.saturating_add(fetched);
+        bound = batch.last().map(|row| row.block_idx);
+        inclusive = false;
+        for row in batch {
+            if row.text.contains(query) {
                 out.push(TranscriptSearchCandidate {
-                    block_idx,
-                    history_idx,
+                    block_idx: row.block_idx,
+                    history_idx: row.history_idx,
                 });
                 if out.len() >= limit {
                     break;
@@ -784,17 +756,127 @@ pub(crate) fn search_transcript_candidate_page(
         if out.len() >= limit || fetched < page_size {
             break;
         }
-        offset = offset.saturating_add(fetched);
     }
+
     if matches!(direction, TranscriptSearchDirection::Backward) {
         out.reverse();
     }
+    perf::record_value("store:transcript:search_candidate_batches", batches as u64);
     perf::record_value(
         "store:transcript:search_candidate_rows_scanned",
         scanned as u64,
     );
     perf::record_value(
         "store:transcript:search_candidates_loaded",
+        out.len() as u64,
+    );
+    Ok(out)
+}
+
+#[derive(Debug)]
+struct TranscriptCandidateRow {
+    block_idx: u64,
+    history_idx: Option<u64>,
+    text: String,
+}
+
+fn search_driver_term(conn: &Connection, terms: &[String]) -> Result<String> {
+    if terms.len() == 1 {
+        perf::record_value("store:transcript:search_driver_terms", 1);
+        return Ok(terms[0].clone());
+    }
+    let _perf = perf::begin("store:transcript:search_driver_term");
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM transcript_search_terms WHERE term = ?1")?;
+    let mut best: Option<(String, u64)> = None;
+    for term in terms {
+        let postings = stmt.query_row([term], |row| row.get::<_, i64>(0))?.max(0) as u64;
+        if best
+            .as_ref()
+            .is_none_or(|(_, best_postings)| postings < *best_postings)
+        {
+            best = Some((term.clone(), postings));
+        }
+    }
+    let (term, postings) = best.expect("search terms are non-empty");
+    perf::record_value("store:transcript:search_driver_terms", terms.len() as u64);
+    perf::record_value("store:transcript:search_driver_postings", postings);
+    Ok(term)
+}
+
+struct TranscriptCandidateBatchQuery<'a> {
+    driver: &'a str,
+    other_terms: &'a [&'a str],
+    bound: Option<u64>,
+    inclusive: bool,
+    direction: TranscriptSearchDirection,
+    page_size: usize,
+}
+
+fn search_transcript_candidate_batch(
+    conn: &Connection,
+    query: TranscriptCandidateBatchQuery<'_>,
+) -> Result<Vec<TranscriptCandidateRow>> {
+    let order = match query.direction {
+        TranscriptSearchDirection::Forward => "ASC",
+        TranscriptSearchDirection::Backward => "DESC",
+    };
+    let bound_filter = match (query.bound, query.inclusive, query.direction) {
+        (Some(_), true, TranscriptSearchDirection::Forward) => "AND d.block_idx >= ?",
+        (Some(_), false, TranscriptSearchDirection::Forward) => "AND d.block_idx > ?",
+        (Some(_), true, TranscriptSearchDirection::Backward) => "AND d.block_idx <= ?",
+        (Some(_), false, TranscriptSearchDirection::Backward) => "AND d.block_idx < ?",
+        (None, _, _) => "",
+    };
+    let exists_filters = query
+        .other_terms
+        .iter()
+        .map(|_| {
+            "AND EXISTS (
+                SELECT 1 FROM transcript_search_terms t
+                WHERE t.term = ? AND t.block_idx = d.block_idx
+            )"
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let sql = format!(
+        "SELECT s.block_idx, s.history_idx, s.text
+         FROM transcript_search_terms d
+         JOIN transcript_search s ON s.block_idx = d.block_idx
+         WHERE d.term = ? {bound_filter} {exists_filters}
+         ORDER BY d.block_idx {order}
+         LIMIT ?"
+    );
+    let mut values =
+        Vec::with_capacity(2 + query.other_terms.len() + usize::from(query.bound.is_some()));
+    values.push(SqlValue::from(query.driver.to_string()));
+    if let Some(bound) = query.bound {
+        values.push(SqlValue::from(checked_i64(
+            bound,
+            "search_candidate_bound",
+        )?));
+    }
+    values.extend(
+        query
+            .other_terms
+            .iter()
+            .map(|term| SqlValue::from((*term).to_string())),
+    );
+    values.push(SqlValue::from(checked_i64(
+        query.page_size as u64,
+        "search_candidate_page_size",
+    )?));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values), |row| {
+        Ok(TranscriptCandidateRow {
+            block_idx: row.get::<_, i64>(0)? as u64,
+            history_idx: row.get::<_, Option<i64>>(1)?.map(|idx| idx as u64),
+            text: row.get(2)?,
+        })
+    })?;
+    let out = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    perf::record_value(
+        "store:transcript:search_candidate_batch_rows",
         out.len() as u64,
     );
     Ok(out)
