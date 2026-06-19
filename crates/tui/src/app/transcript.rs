@@ -1076,7 +1076,7 @@ impl TranscriptDocument {
         let mut matches = Vec::new();
         for (offset, row) in display.rows.iter().enumerate() {
             let row_index = start.saturating_add(offset as RowIndex);
-            matches.extend(crate::app::search::display_row_matches(
+            matches.extend(crate::smelt_edit::display_row_matches(
                 row, row_index, query,
             ));
         }

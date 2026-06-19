@@ -316,12 +316,6 @@ fn first_backward_match(
     None
 }
 
-fn row_match_is_selectable(row: &DisplayRow, byte_col: usize, end_col: usize) -> bool {
-    row.selectable_ranges
-        .iter()
-        .any(|range| range.start <= byte_col && end_col <= range.end)
-}
-
 pub(crate) fn scan_document_row_window<D: DisplayDocument + ?Sized>(
     document: &mut D,
     query: &str,
@@ -354,21 +348,37 @@ fn collect_display_matches(
 ) {
     for (offset, row) in rows.iter().enumerate() {
         let row_index = start.saturating_add(offset as RowIndex);
-        for (byte_col, _) in row.text.match_indices(query) {
+        matches.extend(display_row_matches(row, row_index, query));
+    }
+}
+
+pub fn row_match_is_selectable(row: &DisplayRow, byte_col: usize, end_col: usize) -> bool {
+    row.selectable_ranges
+        .iter()
+        .any(|range| range.start <= byte_col && end_col <= range.end)
+}
+
+pub fn display_row_matches<'a>(
+    row: &'a DisplayRow,
+    row_index: RowIndex,
+    query: &'a str,
+) -> impl Iterator<Item = DocRange> + 'a {
+    row.text
+        .match_indices(query)
+        .filter_map(move |(byte_col, _)| {
             let end_col = byte_col + query.len();
-            if row_match_is_selectable(row, byte_col, end_col) {
-                matches.push(DocRange {
-                    start: DocPosition {
-                        row: row_index,
-                        byte_col,
-                    },
-                    end: DocPosition {
-                        row: row_index,
-                        byte_col: end_col,
-                    },
-                });
-            }
-        }
+            row_match_is_selectable(row, byte_col, end_col)
+                .then(|| doc_range_for_match(row_index, byte_col, end_col))
+        })
+}
+
+pub fn doc_range_for_match(row: RowIndex, byte_col: usize, end_col: usize) -> DocRange {
+    DocRange {
+        start: DocPosition { row, byte_col },
+        end: DocPosition {
+            row,
+            byte_col: end_col,
+        },
     }
 }
 

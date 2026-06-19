@@ -68,8 +68,9 @@ pub use overlay::{
     ResizeConfig, ResizeEdges,
 };
 pub use row::{
-    row_to_usize, BufferDocument, DisplayAction, DisplayDocument, DisplayRow, DisplayRows,
-    DisplaySnapshot, DocPosition, DocRange, DocumentHandle, MaterializeRequest, MaterializedRows,
+    display_row_matches, doc_range_for_match, row_match_is_selectable, row_to_usize,
+    BufferDocument, DisplayAction, DisplayDocument, DisplayRow, DisplayRows, DisplaySnapshot,
+    DocPosition, DocRange, DocumentHandle, MaterializeRequest, MaterializedRows,
     PreparedWindowRequest, RowBreak, RowIndex, StaticRowsDocument, TextRange,
 };
 pub use vim::VimMode;

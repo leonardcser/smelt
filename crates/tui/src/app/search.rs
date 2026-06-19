@@ -422,40 +422,6 @@ impl TuiApp {
     }
 }
 
-pub(super) fn row_match_is_selectable(
-    row: &crate::smelt_edit::DisplayRow,
-    byte_col: usize,
-    end_col: usize,
-) -> bool {
-    row.selectable_ranges
-        .iter()
-        .any(|range| range.start <= byte_col && end_col <= range.end)
-}
-
-pub(crate) fn display_row_matches<'a>(
-    row: &'a DisplayRow,
-    row_index: RowIndex,
-    query: &'a str,
-) -> impl Iterator<Item = DocRange> + 'a {
-    row.text
-        .match_indices(query)
-        .filter_map(move |(byte_col, _)| {
-            let end_col = byte_col + query.len();
-            row_match_is_selectable(row, byte_col, end_col)
-                .then(|| doc_range_for_match(row_index, byte_col, end_col))
-        })
-}
-
-pub(super) fn doc_range_for_match(row: RowIndex, byte_col: usize, end_col: usize) -> DocRange {
-    DocRange {
-        start: DocPosition { row, byte_col },
-        end: DocPosition {
-            row,
-            byte_col: end_col,
-        },
-    }
-}
-
 fn visible_buffer_matches(
     win: &Window,
     buf: &Buffer,
@@ -480,7 +446,11 @@ fn visible_buffer_matches(
             line.clone(),
             crate::smelt_edit::selectable_byte_ranges_for_line(line, &buf.highlights_at(local_row)),
         );
-        matches.extend(display_row_matches(&row, absolute_row, query));
+        matches.extend(crate::smelt_edit::display_row_matches(
+            &row,
+            absolute_row,
+            query,
+        ));
     }
     matches
 }
