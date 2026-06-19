@@ -266,12 +266,48 @@ TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:prepare_row
 TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=store:transcript:search_candidates count=2 total_us=3552 p95_us=1928
 ```
 
+### Save/request persistence hot paths after persist-worker connection reuse
+
+The save/request benchmark now verifies that request append, engine `HistoryUpdated`, and rewind suffix saves reuse the persist worker's open read-write SQLite connection after the initial session write. Before this change, every hot suffix save reopened and re-migrated the same database. On the default 1024-row fixture that made request append, history update, and rewind each spent about 16 to 17 ms mostly outside the actual suffix transaction:
+
+```text
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=request_append runs=1 history_len=1024 mean_ms=15.977
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=history_updated runs=1 history_len=1024 mean_ms=16.908
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=rewind_delete_suffix runs=1 history_len=1024 mean_ms=17.386
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=request_append metric=store:db:open_read_write count=1 last_us=4794
+```
+
+Keeping the worker's current `SessionDb` open removes that fixed reopen/migration cost and leaves the measured writes dominated by the exact suffix transaction:
+
+```text
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=request_append runs=1 history_len=1024 mean_ms=0.860
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=history_updated runs=1 history_len=1024 mean_ms=0.820
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=rewind_delete_suffix runs=1 history_len=1024 mean_ms=0.850
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=request_append metric=store:db:cached_read_write count=1 last=1
+TRANSCRIPT_HOT_PATH_PERF_DURATION operation=request_append metric=store:session:save_history_suffix_transaction count=1 last_us=220
+```
+
+At 100k history rows, the same benchmark remains bounded to one dirty history row for append/update, two deleted rows for rewind, no full-session reads, no read-write DB reopen during the hot save, and a 32-row provider-history read when checkpointed:
+
+```text
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=request_append runs=1 history_len=100000 mean_ms=12.429
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=history_updated runs=1 history_len=100000 mean_ms=16.543
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=rewind_delete_suffix runs=1 history_len=100000 mean_ms=30.050
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=provider_history_read runs=1 history_len=100000 mean_ms=0.236
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=request_append metric=persist:write:history_items count=1 last=1
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=history_updated metric=store:session:dirty_suffix_history_rows count=1 last=1
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=rewind_delete_suffix metric=store:session:history_rows_deleted count=1 last=2
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=provider_history_read metric=store:history:read_range_rows count=1 last=32
+```
+
+The remaining 100k-row wall time is now mostly main-thread full-history snapshot handling in engine `HistoryUpdated`/rewind paths and flush scheduling, not SQLite suffix I/O. The final direction is still typed engine history deltas and typed persistence transactions, but the measured persistence worker bottleneck is removed.
+
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |
 | --- | --- | --- | --- |
 | Session load | `load_session_snapshot` reads all `history_items` into `Vec<HistoryItem>` | resume memory and latency scale with total session size | load metadata, descriptor windows, and bounded model-history cursors separately |
-| Save decision | Dirty suffix markers and DB row hashes avoid unchanged-prefix writes, but hot paths still build `SessionSnapshot` suffix payloads | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
+| Save decision | Dirty suffix markers, a persist-worker SQLite connection cache, and DB row hashes avoid reopen and unchanged-prefix writes, but hot paths still construct suffix payloads from in-memory snapshots | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
 | Save payload | History and transcript descriptor suffixes are saved together in one SQLite transaction | blob externalization and snapshot construction are still snapshot-shaped | explicit append/replace transactions over dirty rows and objects |
 | Provider dispatch | Interactive `StartTurnPayload.history` uses `ModelHistorySource::Store`; engine reads the requested range from `session.db` | explicit Lua/test/debug callers can still request full model-visible history | keep materialization only for explicit APIs, and prefer store-backed message reads for runtime hooks |
 | Transcript document owner | `TranscriptDocument` owns store identity, descriptor loading policy, sparse descriptor ranges, and render cache, but still delegates most row/index state to eager `Transcript`/`TranscriptProjection` | document ownership is real but not yet sparse enough for arbitrary large-session navigation | move virtual row index, folds, anchors, and payload hydration under `TranscriptDocument` |

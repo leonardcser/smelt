@@ -1580,6 +1580,15 @@ mod checkpoint_tests {
             .unwrap_or(0)
     }
 
+    fn perf_duration_max(label: &str) -> u64 {
+        smelt_perf::perf::snapshot()
+            .durations
+            .into_iter()
+            .find(|row| row.label == label)
+            .map(|row| row.max_us)
+            .unwrap_or(0)
+    }
+
     fn assert_perf_value_absent(label: &str) {
         let value = perf_value_max(label);
         assert_eq!(value, 0, "{label} recorded {value}, expected no samples");
@@ -1590,6 +1599,19 @@ mod checkpoint_tests {
         assert!(
             value <= max,
             "{label} recorded max {value}, expected <= {max}"
+        );
+    }
+
+    fn assert_cached_persist_db() {
+        assert_eq!(
+            perf_duration_max("store:db:open_read_write"),
+            0,
+            "hot suffix save should reuse the persist worker database connection"
+        );
+        assert_eq!(
+            perf_value_max("store:db:cached_read_write"),
+            1,
+            "hot suffix save did not reuse the persist worker database connection"
         );
     }
 
@@ -1832,6 +1854,7 @@ mod checkpoint_tests {
         assert_perf_value_at_most("persist:write:descriptor_records", 1);
         assert_perf_value_at_most("store:transcript:dirty_descriptor_suffix_rows", 1);
         assert_perf_value_at_most("store:transcript:descriptor_db_rows_inserted", 1);
+        assert_cached_persist_db();
         assert_no_full_store_reads();
     }
 
@@ -1855,6 +1878,7 @@ mod checkpoint_tests {
         assert_perf_value_at_most("store:history:dirty_suffix_rows", 1);
         assert_perf_value_at_most("store:session:history_rows_inserted", 1);
         assert_perf_value_at_most("store:session:history_rows_deleted", 0);
+        assert_cached_persist_db();
         assert_no_full_store_reads();
     }
 

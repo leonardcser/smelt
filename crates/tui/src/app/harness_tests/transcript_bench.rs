@@ -822,6 +822,7 @@ struct HotPathCounters {
     descriptor_inserted: u64,
     descriptor_deleted: u64,
     read_range_rows: u64,
+    cached_read_write_db: u64,
 }
 
 impl HotPathCounters {
@@ -846,6 +847,7 @@ impl HotPathCounters {
                 "store:transcript:descriptor_db_rows_deleted",
             ),
             read_range_rows: perf_value_max(snapshot, "store:history:read_range_rows"),
+            cached_read_write_db: perf_value_max(snapshot, "store:db:cached_read_write"),
         }
     }
 }
@@ -972,6 +974,19 @@ fn assert_hot_path_at_most(
     );
 }
 
+fn assert_cached_persist_db(snapshot: &smelt_perf::perf::Snapshot, operation: &str) {
+    let open_us = perf_duration_max(snapshot, "store:db:open_read_write");
+    assert_eq!(
+        open_us, 0,
+        "{operation} reopened the session database in {open_us}us instead of reusing the persist worker connection"
+    );
+    assert_eq!(
+        perf_value_max(snapshot, "store:db:cached_read_write"),
+        1,
+        "{operation} did not reuse the persist worker database connection"
+    );
+}
+
 fn capture_hot_path_sample(
     operation: &'static str,
     history_len: usize,
@@ -1093,6 +1108,7 @@ fn run_request_append_hot_path(history_len: usize) -> (HotPathSample, smelt_perf
         1,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
 }
 
@@ -1128,6 +1144,7 @@ fn run_history_updated_hot_path(history_len: usize) -> (HotPathSample, smelt_per
         1,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
 }
 
@@ -1159,6 +1176,7 @@ fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         expected_deleted,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
 }
 
@@ -1219,7 +1237,7 @@ fn print_hot_path_perf(operation: &str, snapshot: &smelt_perf::perf::Snapshot) {
 fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
     let c = sample.counters;
     eprintln!(
-        "TRANSCRIPT_HOT_PATH_BENCH_SAMPLE run={} operation={} history_len={} ms={:.3} history_suffix_rows={} history_inserted={} history_deleted={} descriptor_suffix_rows={} descriptor_inserted={} descriptor_deleted={} read_range_rows={}",
+        "TRANSCRIPT_HOT_PATH_BENCH_SAMPLE run={} operation={} history_len={} ms={:.3} history_suffix_rows={} history_inserted={} history_deleted={} descriptor_suffix_rows={} descriptor_inserted={} descriptor_deleted={} read_range_rows={} cached_read_write_db={}",
         run,
         sample.operation,
         sample.history_len,
@@ -1231,9 +1249,10 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
         c.descriptor_inserted,
         c.descriptor_deleted,
         c.read_range_rows,
+        c.cached_read_write_db,
     );
     eprintln!(
-        "TRANSCRIPT_HOT_PATH_BENCH_JSON {{\"type\":\"hot_path_sample\",\"run\":{},\"operation\":\"{}\",\"history_len\":{},\"ms\":{:.3},\"history_suffix_rows\":{},\"history_inserted\":{},\"history_deleted\":{},\"descriptor_suffix_rows\":{},\"descriptor_inserted\":{},\"descriptor_deleted\":{},\"read_range_rows\":{}}}",
+        "TRANSCRIPT_HOT_PATH_BENCH_JSON {{\"type\":\"hot_path_sample\",\"run\":{},\"operation\":\"{}\",\"history_len\":{},\"ms\":{:.3},\"history_suffix_rows\":{},\"history_inserted\":{},\"history_deleted\":{},\"descriptor_suffix_rows\":{},\"descriptor_inserted\":{},\"descriptor_deleted\":{},\"read_range_rows\":{},\"cached_read_write_db\":{}}}",
         run,
         sample.operation,
         sample.history_len,
@@ -1245,6 +1264,7 @@ fn print_hot_path_sample(run: usize, sample: &HotPathSample) {
         c.descriptor_inserted,
         c.descriptor_deleted,
         c.read_range_rows,
+        c.cached_read_write_db,
     );
 }
 

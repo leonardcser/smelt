@@ -7,7 +7,7 @@
 
 use crate::content::transcript_search_text::descriptor_search_text;
 use smelt_core::{BlockOrigin, TranscriptBlockRecord};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
@@ -95,11 +95,31 @@ impl Drop for Persister {
     }
 }
 
+struct PersistDbCache {
+    current: Option<(PathBuf, smelt_store::SessionDb)>,
+}
+
+impl PersistDbCache {
+    fn db(&mut self, path: &Path) -> Result<&smelt_store::SessionDb, smelt_store::StoreError> {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|(current_path, _)| current_path == path)
+        {
+            smelt_perf::perf::record_value("store:db:cached_read_write", 1);
+        } else {
+            self.current = Some((path.to_path_buf(), smelt_store::SessionDb::open(path)?));
+        }
+        Ok(&self.current.as_ref().expect("database cache populated").1)
+    }
+}
+
 fn worker_loop(rx: Receiver<Cmd>, errors: Sender<PersistError>) {
+    let mut db_cache = PersistDbCache { current: None };
     while let Ok(cmd) = rx.recv() {
         match cmd {
             Cmd::Save(req) => {
-                report_error(write(&req), &req.session_id, &errors);
+                report_error(write(&req, &mut db_cache), &req.session_id, &errors);
             }
             Cmd::Flush(done) => {
                 let _ = done.send(());
@@ -117,7 +137,7 @@ fn report_error(result: Result<(), String>, session_id: &str, errors: &Sender<Pe
     }
 }
 
-fn write(req: &PersistRequest) -> Result<(), String> {
+fn write(req: &PersistRequest, db_cache: &mut PersistDbCache) -> Result<(), String> {
     let _perf = smelt_perf::perf::begin("persist:write");
     smelt_perf::perf::record_value(
         "persist:write:history_items",
@@ -132,7 +152,9 @@ fn write(req: &PersistRequest) -> Result<(), String> {
     if !url_to_blob.is_empty() {
         smelt_core::session::externalize_blobs(&mut history_suffix.history, &url_to_blob);
     }
-    let db = smelt_store::SessionDb::open(req.session_dir.join("session.db"))
+    let db_path = req.session_dir.join("session.db");
+    let db = db_cache
+        .db(&db_path)
         .map_err(|err| format!("open session database: {err}"))?;
     let descriptor_rows = req
         .descriptor_records
