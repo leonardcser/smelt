@@ -135,14 +135,24 @@ fn migrate_session_dir_to_db_inner(
 ) -> SessionMigrationResult<SessionMigrationOutcome> {
     crate::session::cleanup_stale_import_temp_files(dir_path);
 
-    if dir_path.join("session.db").is_file() {
-        let _ = smelt_store::SessionDb::open(dir_path.join("session.db"));
+    let db_path = dir_path.join("session.db");
+    let has_split = dir_path.join("history.jsonl").is_file();
+    let has_legacy = dir_path.join("session.json").is_file();
+
+    if db_path.is_file() {
+        match smelt_store::SessionDb::open(&db_path) {
+            Ok(_) => {}
+            Err(err) if has_split || has_legacy => {
+                return Err(SessionMigrationError::OpenDatabase {
+                    message: err.to_string(),
+                });
+            }
+            Err(_) => {}
+        }
         crate::session::cleanup_migrated_legacy_artifacts(dir_path);
         return Ok(SessionMigrationOutcome::Skipped);
     }
 
-    let has_split = dir_path.join("history.jsonl").is_file();
-    let has_legacy = dir_path.join("session.json").is_file();
     if !has_split && !has_legacy {
         return Ok(SessionMigrationOutcome::Skipped);
     }
@@ -340,14 +350,7 @@ fn db_for_export(id_or_prefix: &str) -> SessionMigrationResult<smelt_store::Sess
         }
     })?;
     let dir = crate::session::sessions_dir().join(&id);
-    if !dir.join("session.db").is_file() {
-        match migrate_session_dir_to_db(&dir)? {
-            SessionMigrationOutcome::Migrated => {}
-            SessionMigrationOutcome::Skipped => {
-                return Err(SessionMigrationError::MissingDatabase { id });
-            }
-        }
-    }
+    ensure_session_db(&dir)?;
     smelt_store::SessionDb::open_read_only(dir.join("session.db")).map_err(|err| {
         SessionMigrationError::OpenDatabase {
             message: err.to_string(),
@@ -390,4 +393,30 @@ pub(crate) fn migration_status_for_dir(dir_path: &Path) -> Option<SessionMigrati
 #[cfg(test)]
 pub(crate) fn max_migration_failure_logs() -> usize {
     MAX_MIGRATION_FAILURE_LOGS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_invalid_db_with_legacy_sidecars_is_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("session.db"), b"not sqlite").unwrap();
+        fs::write(dir.path().join("history.jsonl"), b"{}").unwrap();
+
+        let err = migrate_session_dir_to_db(dir.path()).unwrap_err();
+        assert!(matches!(err, SessionMigrationError::OpenDatabase { .. }));
+        assert!(read_migration_status(dir.path()).is_some());
+    }
+
+    #[test]
+    fn existing_invalid_db_without_legacy_sidecars_still_skips() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("session.db"), b"not sqlite").unwrap();
+
+        let outcome = migrate_session_dir_to_db(dir.path()).unwrap();
+        assert_eq!(outcome, SessionMigrationOutcome::Skipped);
+        assert!(read_migration_status(dir.path()).is_none());
+    }
 }

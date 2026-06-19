@@ -1,4 +1,5 @@
 use rusqlite::Connection;
+use std::sync::OnceLock;
 
 use crate::error::{Result, StoreError};
 
@@ -21,14 +22,13 @@ pub(crate) fn migrate(conn: &mut Connection, app_version: &str) -> Result<()> {
 
 pub(crate) fn validate_read_only_schema(conn: &Connection) -> Result<()> {
     let version = user_version(conn)?;
-    if version == SCHEMA_VERSION {
-        Ok(())
-    } else {
-        Err(StoreError::UnsupportedSchema {
+    if version != SCHEMA_VERSION {
+        return Err(StoreError::UnsupportedSchema {
             found: version,
             expected: SCHEMA_VERSION,
-        })
+        });
     }
+    validate_schema_shape(conn)
 }
 
 pub(crate) fn user_version(conn: &Connection) -> Result<i32> {
@@ -55,109 +55,273 @@ fn migrate_inner(conn: &Connection, app_version: &str) -> Result<()> {
 }
 
 fn ensure_schema_shape(conn: &Connection) -> Result<()> {
-    // Version 1 is the plan baseline; keep same-version databases aligned with
-    // the current in-tree table shape before creating indexes that reference
-    // newly introduced columns.
+    // COMPAT(branch-sqlite-schema-shape-repair): version 1 is the plan baseline,
+    // but local databases from earlier iterations of this unreleased branch may
+    // have the same user_version with older table shapes.
     ensure_schema_columns(conn)?;
     conn.execute_batch(SCHEMA)?;
     Ok(())
 }
 
 fn ensure_schema_columns(conn: &Connection) -> Result<()> {
-    add_column_if_missing(conn, "session_state", "first_user_message TEXT")?;
-    add_column_if_missing(conn, "session_state", "reasoning_effort TEXT")?;
-    add_column_if_missing(conn, "session_state", "parent_id TEXT")?;
-    add_column_if_missing(conn, "session_state", "context_tokens INTEGER")?;
-    add_column_if_missing(conn, "session_state", "context_tokens_history_len INTEGER")?;
-    add_column_if_missing(conn, "session_state", "display_context_tokens INTEGER")?;
-    add_column_if_missing(
-        conn,
-        "session_state",
-        "session_cost_usd REAL NOT NULL DEFAULT 0",
-    )?;
-
-    add_column_if_missing(conn, "history_items", "model_visible_hash TEXT")?;
-    add_column_if_missing(conn, "history_items", "search_text TEXT")?;
-    add_column_if_missing(
-        conn,
-        "history_items",
-        "created_at INTEGER NOT NULL DEFAULT 0",
-    )?;
-
-    add_column_if_missing(conn, "transcript_blocks", "content_hash TEXT")?;
-    add_column_if_missing(conn, "transcript_blocks", "sidecar_hash TEXT")?;
-    add_column_if_missing(
-        conn,
-        "transcript_blocks",
-        "estimated_text_bytes INTEGER NOT NULL DEFAULT 0",
-    )?;
-    add_column_if_missing(conn, "transcript_blocks", "estimated_rows INTEGER")?;
-    add_column_if_missing(conn, "transcript_blocks", "preview_text TEXT")?;
-    add_column_if_missing(conn, "transcript_blocks", "search_text TEXT")?;
-    add_column_if_missing(conn, "transcript_blocks", "descriptor_json TEXT")?;
-    add_column_if_missing(conn, "transcript_blocks", "origin_json TEXT")?;
-    add_column_if_missing(conn, "transcript_blocks", "tool_state_json TEXT")?;
-
-    add_column_if_missing(conn, "objects", "kind TEXT NOT NULL DEFAULT 'unknown'")?;
-    add_column_if_missing(conn, "objects", "codec TEXT NOT NULL DEFAULT 'none'")?;
-    add_column_if_missing(conn, "objects", "raw_size INTEGER NOT NULL DEFAULT 0")?;
-    add_column_if_missing(conn, "objects", "stored_size INTEGER NOT NULL DEFAULT 0")?;
-    add_column_if_missing(conn, "objects", "created_at INTEGER NOT NULL DEFAULT 0")?;
-
-    add_column_if_missing(
-        conn,
-        "request_attempts",
-        "background INTEGER NOT NULL DEFAULT 0",
-    )?;
-    add_column_if_missing(
-        conn,
-        "request_attempts",
-        "raw_body_size INTEGER NOT NULL DEFAULT 0",
-    )?;
-    add_column_if_missing(conn, "request_attempts", "kind TEXT")?;
-    add_column_if_missing(conn, "request_attempts", "api_base TEXT")?;
-    add_column_if_missing(conn, "request_attempts", "url TEXT")?;
-    add_column_if_missing(conn, "request_attempts", "http_status INTEGER")?;
-    add_column_if_missing(conn, "request_attempts", "prompt_cache_key TEXT")?;
-    add_column_if_missing(
-        conn,
-        "request_attempts",
-        "stream INTEGER NOT NULL DEFAULT 0",
-    )?;
-    add_column_if_missing(
-        conn,
-        "request_attempts",
-        "attempt INTEGER NOT NULL DEFAULT 1",
-    )?;
-    add_column_if_missing(conn, "request_attempts", "response_summary TEXT")?;
-
-    add_column_if_missing(conn, "request_stats", "context_tokens INTEGER")?;
-    add_column_if_missing(conn, "request_stats", "cache_write_tokens INTEGER")?;
-    add_column_if_missing(conn, "request_stats", "tokens_per_sec REAL")?;
-
-    add_column_if_missing(
-        conn,
-        "metadata_snapshots",
-        "created_at INTEGER NOT NULL DEFAULT 0",
-    )?;
-    add_column_if_missing(
-        conn,
-        "accounting_snapshots",
-        "created_at INTEGER NOT NULL DEFAULT 0",
-    )?;
-    add_column_if_missing(conn, "transcript_search", "history_idx INTEGER")?;
+    for column in SAME_VERSION_REPAIR_COLUMNS {
+        add_column_if_missing(conn, column.table, column.definition)?;
+    }
     Ok(())
 }
 
+fn validate_schema_shape(conn: &Connection) -> Result<()> {
+    for table in canonical_schema_shape()? {
+        if !table_exists(conn, &table.name)? {
+            return Err(StoreError::Integrity(format!(
+                "sqlite schema missing table {}",
+                table.name
+            )));
+        }
+        for column in &table.columns {
+            if !column_exists(conn, &table.name, column)? {
+                return Err(StoreError::Integrity(format!(
+                    "sqlite schema missing column {}.{column}",
+                    table.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+struct RepairColumn {
+    table: &'static str,
+    definition: &'static str,
+}
+
+struct SchemaTable {
+    name: String,
+    columns: Vec<String>,
+}
+
+const SAME_VERSION_REPAIR_COLUMNS: &[RepairColumn] = &[
+    RepairColumn {
+        table: "session_state",
+        definition: "first_user_message TEXT",
+    },
+    RepairColumn {
+        table: "session_state",
+        definition: "reasoning_effort TEXT",
+    },
+    RepairColumn {
+        table: "session_state",
+        definition: "parent_id TEXT",
+    },
+    RepairColumn {
+        table: "session_state",
+        definition: "context_tokens INTEGER",
+    },
+    RepairColumn {
+        table: "session_state",
+        definition: "context_tokens_history_len INTEGER",
+    },
+    RepairColumn {
+        table: "session_state",
+        definition: "display_context_tokens INTEGER",
+    },
+    RepairColumn {
+        table: "session_state",
+        definition: "session_cost_usd REAL NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "history_items",
+        definition: "model_visible_hash TEXT",
+    },
+    RepairColumn {
+        table: "history_items",
+        definition: "search_text TEXT",
+    },
+    RepairColumn {
+        table: "history_items",
+        definition: "created_at INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "content_hash TEXT",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "sidecar_hash TEXT",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "estimated_text_bytes INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "estimated_rows INTEGER",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "preview_text TEXT",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "search_text TEXT",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "descriptor_json TEXT",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "origin_json TEXT",
+    },
+    RepairColumn {
+        table: "transcript_blocks",
+        definition: "tool_state_json TEXT",
+    },
+    RepairColumn {
+        table: "objects",
+        definition: "kind TEXT NOT NULL DEFAULT 'unknown'",
+    },
+    RepairColumn {
+        table: "objects",
+        definition: "codec TEXT NOT NULL DEFAULT 'none'",
+    },
+    RepairColumn {
+        table: "objects",
+        definition: "raw_size INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "objects",
+        definition: "stored_size INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "objects",
+        definition: "created_at INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "background INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "raw_body_size INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "kind TEXT",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "api_base TEXT",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "url TEXT",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "http_status INTEGER",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "prompt_cache_key TEXT",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "stream INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "attempt INTEGER NOT NULL DEFAULT 1",
+    },
+    RepairColumn {
+        table: "request_attempts",
+        definition: "response_summary TEXT",
+    },
+    RepairColumn {
+        table: "request_stats",
+        definition: "context_tokens INTEGER",
+    },
+    RepairColumn {
+        table: "request_stats",
+        definition: "cache_write_tokens INTEGER",
+    },
+    RepairColumn {
+        table: "request_stats",
+        definition: "tokens_per_sec REAL",
+    },
+    RepairColumn {
+        table: "metadata_snapshots",
+        definition: "created_at INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "accounting_snapshots",
+        definition: "created_at INTEGER NOT NULL DEFAULT 0",
+    },
+    RepairColumn {
+        table: "transcript_search",
+        definition: "history_idx INTEGER",
+    },
+];
+
+fn canonical_schema_shape() -> Result<&'static [SchemaTable]> {
+    static SHAPE: OnceLock<std::result::Result<Vec<SchemaTable>, String>> = OnceLock::new();
+    match SHAPE.get_or_init(load_canonical_schema_shape) {
+        Ok(shape) => Ok(shape.as_slice()),
+        Err(message) => Err(StoreError::Integrity(message.clone())),
+    }
+}
+
+fn load_canonical_schema_shape() -> std::result::Result<Vec<SchemaTable>, String> {
+    let conn = Connection::open_in_memory().map_err(|err| err.to_string())?;
+    conn.execute_batch(SCHEMA).map_err(|err| err.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .map_err(|err| err.to_string())?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| err.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    let mut tables = Vec::new();
+    for name in names {
+        let mut columns = Vec::new();
+        let mut info = conn
+            .prepare(&format!("PRAGMA table_info({name})"))
+            .map_err(|err| err.to_string())?;
+        let mut rows = info.query([]).map_err(|err| err.to_string())?;
+        while let Some(row) = rows.next().map_err(|err| err.to_string())? {
+            columns.push(row.get(1).map_err(|err| err.to_string())?);
+        }
+        tables.push(SchemaTable { name, columns });
+    }
+    Ok(tables)
+}
+
+fn column_name(column_def: &str) -> Option<&str> {
+    column_def.split_whitespace().next()
+}
+
 fn add_column_if_missing(conn: &Connection, table: &str, column_def: &str) -> Result<()> {
-    let Some(column) = column_def.split_whitespace().next() else {
+    let Some(column) = column_name(column_def) else {
         return Ok(());
     };
     if !table_exists(conn, table)? || column_exists(conn, table, column)? {
         return Ok(());
     }
+    let column_def = alter_column_def(column_def);
     conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column_def}"), [])?;
     Ok(())
+}
+
+fn alter_column_def(column_def: &str) -> std::borrow::Cow<'_, str> {
+    if column_def.contains("DEFAULT (unixepoch())") {
+        return std::borrow::Cow::Owned(column_def.replace("DEFAULT (unixepoch())", "DEFAULT 0"));
+    }
+    std::borrow::Cow::Borrowed(column_def)
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
@@ -396,6 +560,14 @@ mod tests {
                 1, 'old-session', 'Old Session', 'old-session', '/tmp',
                 'normal', 'model', '{}', NULL, 7, 2, 1000, 2000
             );
+            CREATE TABLE history_items (
+                idx INTEGER PRIMARY KEY,
+                kind TEXT NOT NULL,
+                json TEXT NOT NULL,
+                hash TEXT NOT NULL
+            );
+            INSERT INTO history_items (idx, kind, json, hash)
+            VALUES (0, 'user', '{}', 'hash');
             PRAGMA user_version = 1;
             "#,
         )
@@ -427,5 +599,43 @@ mod tests {
             .unwrap();
         assert_eq!(id, "old-session");
         assert_eq!(cost, 0.0);
+        let created_at: i64 = conn
+            .query_row(
+                "SELECT created_at FROM history_items WHERE idx = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(created_at, 0);
+        validate_read_only_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn read_only_validation_rejects_same_version_wrong_shape() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE store_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE TABLE session_state (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                id TEXT NOT NULL UNIQUE,
+                title TEXT,
+                slug TEXT
+            );
+            PRAGMA user_version = 1;
+            "#,
+        )
+        .unwrap();
+
+        let err = validate_read_only_schema(&conn).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("sqlite schema missing table accounting_snapshots"),
+            "{err}"
+        );
     }
 }

@@ -1494,11 +1494,20 @@ pub fn load(id_or_prefix: &str) -> Option<Session> {
 
 pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
     let _perf = smelt_perf::perf::begin("session:load_meta");
+    load_meta_for_prepared_dir(prepare_session_dir_for_read(id_or_prefix)?)
+}
+
+pub fn prepare_session_dir_for_read(id_or_prefix: &str) -> Option<PathBuf> {
     let id = resolve_prefix(id_or_prefix)?;
     let dir = dir_for_id(&id);
     if let Err(err) = crate::session_migration::ensure_session_db(&dir) {
         log_session_migration_error(&dir, &err);
+        return None;
     }
+    Some(dir)
+}
+
+pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
     load_meta_for_dir(dir)
 }
 
@@ -1636,7 +1645,7 @@ pub(crate) fn cleanup_migrated_legacy_artifacts(dir_path: &Path) -> usize {
     let Ok(db) = smelt_store::SessionDb::open_read_only(&db_path) else {
         return 0;
     };
-    let Ok(Some(_)) = db.load_session_snapshot() else {
+    let Ok(Some(_)) = db.session_state() else {
         return 0;
     };
     drop(db);

@@ -118,8 +118,7 @@ pub(crate) fn load_transcript_from_sqlite_id(
     width: u16,
     viewport_rows: u16,
 ) -> Option<crate::app::transcript::LoadedTranscript> {
-    let session_dir = session::dir_for_id(id);
-    let _ = session::ensure_session_db(&session_dir);
+    let session_dir = session::prepare_session_dir_for_read(id)?;
     load_transcript_tail_from_sqlite_dir(session_dir, width, viewport_rows)
 }
 
@@ -129,7 +128,7 @@ fn load_transcript_from_sqlite_dir(
     crate::app::transcript::LoadedTranscript::from_sqlite_dir(session_dir)
 }
 
-fn load_transcript_tail_from_sqlite_dir(
+pub(crate) fn load_transcript_tail_from_sqlite_dir(
     session_dir: PathBuf,
     width: u16,
     viewport_rows: u16,

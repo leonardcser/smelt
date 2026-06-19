@@ -3,6 +3,16 @@
 Compatibility code we intend to remove while Smelt is alpha. Mark matching code
 with `COMPAT(<id>)`.
 
+## branch-sqlite-schema-shape-repair
+
+- Remove after: transcript virtualization branch-local databases have either been repaired/reimported or the branch lands with a real schema migration boundary
+- Why: recover local `session.db` files created by earlier iterations of the unreleased transcript virtualization branch that used `user_version = 1` with older table shapes
+- Code:
+  - `crates/store/src/schema.rs`: same-version schema shape repair before running canonical `SCHEMA`
+- Tests:
+  - `migrate_repairs_in_place_version_one_session_state_schema`
+  - `read_only_validation_rejects_same_version_wrong_shape`
+
 ## session-v1-messages
 
 - Remove after: two alpha releases after session schema v2 ships
