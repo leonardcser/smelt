@@ -1,5 +1,6 @@
 mod setup;
 mod startup;
+mod upgrade;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use crossterm::ExecutableCommand;
@@ -126,10 +127,26 @@ enum ColorMode {
 enum Commands {
     /// Manage provider authentication (add providers, Codex or Copilot login/logout)
     Auth,
+    /// Print configuration templates
+    Config(ConfigArgs),
     /// Export canonical session data as JSONL
     Export(ExportArgs),
     /// Start the local session/request inspector web UI
     Inspect(InspectArgs),
+    /// Upgrade smelt from GitHub releases or main
+    Upgrade(upgrade::UpgradeArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ConfigCommand {
+    /// Print the default init.lua template to stdout
+    Default,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -226,6 +243,12 @@ async fn run_inspect_command(args: InspectArgs) {
     server.stop().await;
 }
 
+fn run_config_command(args: ConfigArgs) {
+    match args.command {
+        ConfigCommand::Default => setup::print_default_config(),
+    }
+}
+
 fn run_export_command(args: ExportArgs) {
     let result = match args.command {
         ExportCommand::History(args) => export_jsonl(args, |session, out| {
@@ -318,12 +341,20 @@ async fn main() {
                 setup::run_auth_command().await;
                 return;
             }
+            Commands::Config(config_args) => {
+                run_config_command(config_args);
+                return;
+            }
             Commands::Export(export_args) => {
                 run_export_command(export_args);
                 return;
             }
             Commands::Inspect(inspect_args) => {
                 run_inspect_command(inspect_args).await;
+                return;
+            }
+            Commands::Upgrade(upgrade_args) => {
+                upgrade::run_upgrade_command(upgrade_args).await;
                 return;
             }
         }

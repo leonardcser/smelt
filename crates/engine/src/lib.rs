@@ -52,15 +52,6 @@ pub enum SystemPromptBehavior {
     Autonomous,
 }
 
-impl SystemPromptBehavior {
-    fn as_template_value(self) -> &'static str {
-        match self {
-            SystemPromptBehavior::Interactive => "interactive",
-            SystemPromptBehavior::Autonomous => "autonomous",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SystemPromptCapabilities {
     pub tool_calling: bool,
@@ -109,20 +100,7 @@ pub fn assemble_system_prompt(
 }
 
 fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
-    let template_src = include_str!("prompts/system.txt");
-    let env = minijinja::Environment::new();
-    let template = env
-        .template_from_str(template_src)
-        .expect("system prompt template should parse");
-
-    let rendered = template
-        .render(minijinja::context! {
-            behavior => ctx.behavior.as_template_value(),
-            tools_enabled => ctx.capabilities.tool_calling,
-            skills_section => ctx.skills_section.unwrap_or(""),
-            extra_instructions => ctx.extra_instructions.unwrap_or(""),
-        })
-        .expect("system prompt template should render");
+    let rendered = render_builtin_prompt_template(include_str!("prompts/system.txt"), ctx);
 
     let mut result = collapse_blank_lines(&rendered);
     for section in [ctx.skills_section, ctx.extra_instructions]
@@ -137,6 +115,46 @@ fn render_system_prompt(ctx: &PromptContext<'_>) -> String {
         result.push_str(section);
     }
     result
+}
+
+fn render_builtin_prompt_template(template: &str, ctx: &PromptContext<'_>) -> String {
+    struct Frame {
+        condition: bool,
+    }
+
+    let mut out = String::with_capacity(template.len());
+    let mut stack: Vec<Frame> = Vec::new();
+
+    for line in template.lines() {
+        let trimmed = line.trim();
+        match trimmed {
+            "{% if tools_enabled %}" => {
+                stack.push(Frame {
+                    condition: ctx.capabilities.tool_calling,
+                });
+            }
+            "{% if behavior == \"autonomous\" %}" => {
+                stack.push(Frame {
+                    condition: ctx.behavior == SystemPromptBehavior::Autonomous,
+                });
+            }
+            "{% else %}" => {
+                if let Some(frame) = stack.last_mut() {
+                    frame.condition = !frame.condition;
+                }
+            }
+            "{% endif %}" => {
+                stack.pop();
+            }
+            _ if stack.iter().all(|frame| frame.condition) => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+
+    out
 }
 
 fn collapse_blank_lines(text: &str) -> String {
@@ -155,6 +173,40 @@ fn collapse_blank_lines(text: &str) -> String {
         }
     }
     result.trim().to_string()
+}
+
+#[cfg(test)]
+mod system_prompt_tests {
+    use super::*;
+
+    fn prompt(behavior: SystemPromptBehavior, tool_calling: bool) -> String {
+        build_system_prompt(
+            behavior,
+            SystemPromptCapabilities::from_tool_calling(tool_calling),
+            Some("Extra instructions."),
+            Some("# Skills\nLoaded skill."),
+        )
+    }
+
+    #[test]
+    fn interactive_prompt_renders_collaborator_behavior_and_tools() {
+        let rendered = prompt(SystemPromptBehavior::Interactive, true);
+        assert!(rendered.contains("# Tools"));
+        assert!(rendered.contains("You and the user are collaborators"));
+        assert!(!rendered.contains("You are running autonomously"));
+        assert!(rendered.contains("# Skills\nLoaded skill."));
+        assert!(rendered.ends_with("Extra instructions."));
+        assert!(!rendered.contains("{%"));
+    }
+
+    #[test]
+    fn autonomous_prompt_can_omit_tools() {
+        let rendered = prompt(SystemPromptBehavior::Autonomous, false);
+        assert!(!rendered.contains("# Tools"));
+        assert!(rendered.contains("You are running autonomously"));
+        assert!(!rendered.contains("You and the user are collaborators"));
+        assert!(!rendered.contains("{%"));
+    }
 }
 
 #[derive(Clone)]

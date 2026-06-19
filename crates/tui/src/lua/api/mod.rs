@@ -48,9 +48,9 @@ pub(crate) const API_VERSION: &str = "1";
 /// user-facing identity string consumed by the banner, `/version`,
 /// `/upgrade`, and `--version`.
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub(crate) const BUILD_SHA: &str = env!("SMELT_BUILD_SHA");
+pub const BUILD_SHA: &str = env!("SMELT_BUILD_SHA");
 pub(crate) const BUILD_DATE: &str = env!("SMELT_BUILD_DATE");
-pub(crate) const BUILD_TARGET: &str = env!("SMELT_TARGET");
+pub const BUILD_TARGET: &str = env!("SMELT_TARGET");
 pub(crate) const BUILD_TAG: &str = env!("SMELT_BUILD_TAG");
 pub(crate) const BUILD_COMMITS: &str = env!("SMELT_BUILD_COMMITS");
 pub(crate) const BUILD_DIRTY: &str = env!("SMELT_BUILD_DIRTY");

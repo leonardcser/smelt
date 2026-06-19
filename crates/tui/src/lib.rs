@@ -47,7 +47,7 @@ pub mod instructions;
 pub(crate) mod keymap;
 pub(crate) mod line_input;
 pub mod lua;
-pub use lua::DISPLAY;
+pub use lua::{BUILD_SHA, BUILD_TARGET, DISPLAY};
 pub use smelt_core::mcp;
 pub use smelt_core::permissions;
 pub(crate) mod metrics;

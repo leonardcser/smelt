@@ -51,13 +51,13 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Run lints
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings
 
       - name: Build
         run: cargo build --workspace
 
       - name: Run tests with coverage floor
-        run: cargo llvm-cov nextest --workspace --fail-under-lines 65
+        run: cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 65
 
       - name: Check Lua API docs are in sync
         run: |

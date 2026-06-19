@@ -30,13 +30,13 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Run lints
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings
 
       - name: Build
         run: cargo build --workspace
 
       - name: Run tests
-        run: cargo nextest run --workspace
+        run: cargo nextest run --workspace --features smelt-tui/harness
 
   build:
     name: Build (${{ matrix.target }})
@@ -80,11 +80,11 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --bin smelt --target ${{ matrix.target }}
+        run: cargo build --profile dist --bin smelt --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
-          cd target/${{ matrix.target }}/release
+          cd target/${{ matrix.target }}/dist
           tar czf ../../../${{ matrix.artifact }} smelt
           cd ../../..
 

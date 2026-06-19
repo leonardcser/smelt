@@ -5,9 +5,9 @@ your own `init.lua`) to try them out. `plugin.lua` is a standalone module to
 place under `~/.config/smelt/lua/` and require from `init.lua`;
 `per_project.lua` is intended as example content for `<repo>/.smelt/init.lua`.
 
-- **config.lua**: register OpenAI-compatible and OpenAI providers, an MCP
-  server, toggle a few `smelt.settings`, and define per-mode permission rules
-  with `smelt.permissions.set_rules`.
+- **config.lua**: the default `init.lua` template printed by
+  `smelt config default`: built-in settings set to their default values, with
+  commented provider, MCP, permission, model preference, and theme examples.
 - **per_project.lua**: example content for a trusted `.smelt/init.lua`: project
   settings, permission rules, and a project-specific slash command.
 - **plugin.lua**: a small hot-reload-friendly plugin module: registers a slash

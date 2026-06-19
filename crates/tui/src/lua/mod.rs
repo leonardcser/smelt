@@ -5,7 +5,7 @@
 
 pub(crate) mod api;
 pub(crate) use api::vim::LuaVimMode;
-pub use api::DISPLAY;
+pub use api::{BUILD_SHA, BUILD_TARGET, DISPLAY};
 pub mod app_ref;
 pub(crate) mod paint;
 pub(crate) mod parse;

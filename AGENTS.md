@@ -4,20 +4,26 @@
 # build
 cargo build
 
-# test (requires `cargo install cargo-nextest` — much faster and quieter than `cargo test`)
-set -o pipefail; cargo nextest run --workspace 2>&1 | tail -120
+# fast optimized local build
+cargo build --profile release-fast --bin smelt
+
+# distribution release build
+cargo build --profile dist --bin smelt
+
+# test (requires `cargo install cargo-nextest` — much faster and quieter than `cargo test`; enables smelt-tui's harness feature for storybook/test helpers)
+set -o pipefail; cargo nextest run --workspace --features smelt-tui/harness 2>&1 | tail -120
 
 # targeted cargo test fallback: keep output bounded; rerun narrower tests if tail omits context
-set -o pipefail; cargo test -p smelt-tui double_esc 2>&1 | tail -120
+set -o pipefail; cargo test -p smelt-tui --features harness double_esc 2>&1 | tail -120
 
 # format and lint
-set -o pipefail; cargo fmt && cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -120
+set -o pipefail; cargo fmt && cargo clippy --workspace --all-targets --features smelt-tui/harness -- -D warnings 2>&1 | tail -120
 
-# coverage / CI-equivalent test gate (requires `cargo install cargo-llvm-cov`)
-set -o pipefail; cargo llvm-cov nextest --workspace --fail-under-lines 65 2>&1 | tail -120
+# coverage / CI-equivalent test gate (requires `cargo install cargo-llvm-cov`; enables smelt-tui's harness feature for storybook/test helpers)
+set -o pipefail; cargo llvm-cov nextest --workspace --features smelt-tui/harness --fail-under-lines 65 2>&1 | tail -120
 
 # quick coverage summary (does not enforce CI's coverage floor)
-set -o pipefail; cargo llvm-cov nextest --workspace --summary-only 2>&1 | tail -120
+set -o pipefail; cargo llvm-cov nextest --workspace --features smelt-tui/harness --summary-only 2>&1 | tail -120
 
 # regenerate Lua API stubs + reference docs (commit the result)
 set -o pipefail; cargo xtask gen-lua-docs 2>&1 | tail -120

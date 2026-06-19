@@ -21,7 +21,6 @@ thiserror = "2"
 futures-util = { workspace = true }
 rand = "0.10"
 keyring = "3"
-minijinja = "2"
 regex = "1"
 
 [features]

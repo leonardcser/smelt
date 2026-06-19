@@ -3,7 +3,10 @@
 ```
 smelt [MESSAGE]
 smelt auth
+smelt config default
 smelt inspect [--session <ID_OR_PREFIX>] [--port <PORT>] [--open | --no-open]
+smelt upgrade [--channel stable|unstable]
+smelt upgrade check [--channel stable|unstable]
 ```
 
 When a message is provided, it auto-submits on startup. Running with no
@@ -15,10 +18,13 @@ with `smelt.remember(...)`.
 
 ## Subcommands
 
-| Subcommand      | Description                                                                                         |
-| --------------- | --------------------------------------------------------------------------------------------------- |
-| `smelt auth`    | Provider picker for login/logout flows and API-key provider snippets                                |
-| `smelt inspect` | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
+| Subcommand             | Description                                                                                         |
+| ---------------------- | --------------------------------------------------------------------------------------------------- |
+| `smelt auth`           | Provider picker for login/logout flows and API-key provider snippets                                |
+| `smelt config default` | Print a default `init.lua` template with built-in setting values and commented examples              |
+| `smelt inspect`        | Start the local session/request inspector web UI; useful for debugging sessions and provider traces |
+| `smelt upgrade`        | Check for and install the newest smelt build                                                        |
+| `smelt upgrade check`  | Check for updates without installing                                                               |
 
 `smelt inspect` options:
 
@@ -28,6 +34,15 @@ with `smelt.remember(...)`.
 | `--port <PORT>`      | Fixed loopback port to bind instead of an ephemeral port            |
 | `--open`             | Force opening a browser even when GUI auto-detection is unavailable |
 | `--no-open`          | Do not open a browser; only print the URL                           |
+
+`smelt upgrade` options:
+
+| Flag                  | Description                                                             |
+| --------------------- | ----------------------------------------------------------------------- |
+| `--channel stable`    | Use the newest tagged GitHub release and prebuilt artifact (default)    |
+| `--channel unstable`  | Use `main` and install with `cargo install --git ... --branch main`     |
+
+`smelt upgrade check` accepts the same `--channel` flag and never installs.
 
 ## Connection
 

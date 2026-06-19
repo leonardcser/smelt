@@ -24,7 +24,7 @@ futures-core = "0.3"
 futures-util = { version = "0.3", default-features = false }
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "rustls"] }
 
 # Serde
 serde = { version = "1", features = ["derive"] }
@@ -80,13 +80,30 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "si
 clap = { version = "4", features = ["derive"] }
 crossterm = { workspace = true }
 reqwest = { workspace = true }
+serde = { workspace = true }
 libc = { workspace = true }
-dialoguer = "0.12"
 
 [profile.release]
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Faster optimized local builds for smoke-testing performance without paying
+# release LTO cost. Not used for published artifacts.
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+
+# Maximum-optimization profile for packaged release artifacts. This costs more
+# compile time than `release`, but produces a smaller binary and gives LLVM the
+# most room to optimize cross-crate hot paths.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
 
 # Release-optimized build with symbols preserved, for CPU sampling profilers
 # like `samply`. Build with `cargo build --profile bench-cpu`, then run
