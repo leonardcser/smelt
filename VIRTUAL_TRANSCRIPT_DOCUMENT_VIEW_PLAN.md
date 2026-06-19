@@ -211,13 +211,13 @@ At this checkpoint, candidate layout still prepared an index for the full loaded
 
 ### Transcript search and view operations after bounded row-index reuse
 
-The search benchmark now also times terminal width resize, terminal height resize, theme color mutation, and an 8-row midpoint copy/yank at the same 500 MiB scale. Candidate-layout hashing no longer walks every measured node; it keys off row/projection generations, renderer identity, presentation generation, width, node count, and total rows. Prefix row invalidation now starts at the first changed node instead of recomputing from row zero. Width resize preserves the current node order as an approximate index, invalidates exact heights for the new width, and exactifies only the anchor and visible nodes. Full exact APIs still remeasure every block after a width change and revisiting a previously measured width can hydrate the cached exact row index. Common-match search navigation now prefetches relative to the current match instead of scanning another batch on every `n`, and SQLite driver-term selection uses capped posting counts so common terms do not force full posting-list counts before candidate paging.
+The search benchmark now also times terminal width resize, terminal height resize, theme color mutation, an 8-row midpoint copy/yank, nearby half-page movement, and top/bottom jumps at the same 500 MiB scale. Candidate-layout hashing no longer walks every measured node; it keys off row/projection generations, renderer identity, presentation generation, width, node count, and total rows. Prefix row invalidation now starts at the first changed node instead of recomputing from row zero. Width resize preserves the current node order as an approximate index, invalidates exact heights for the new width, and exactifies only the anchor and visible nodes. Full exact APIs still remeasure every block after a width change and revisiting a previously measured width can hydrate the cached exact row index. Common-match search navigation now prefetches relative to the current match instead of scanning another batch on every `n`, and SQLite driver-term selection uses capped posting counts so common terms do not force full posting-list counts before candidate paging.
 
 Result:
 
 ```text
-TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=4.256 height_resize_ms=3.109 theme_color_ms=2.788 rare_ms=20.541 common_submit_ms=6.271 next100_ms=44.346 after_append_ms=13.990
-TRANSCRIPT_SEARCH_BENCH_JSON {"type":"search_summary","runs":1,"bytes":524290206,"rows":6413965,"width_resize_mean_ms":4.256,"width_resize_stddev_ms":0.000,"height_resize_mean_ms":3.109,"height_resize_stddev_ms":0.000,"theme_color_mean_ms":2.788,"theme_color_stddev_ms":0.000,"rare_mean_ms":20.541,"rare_stddev_ms":0.000,"common_submit_mean_ms":6.271,"common_submit_stddev_ms":0.000,"next100_mean_ms":44.346,"next100_stddev_ms":0.000,"after_append_mean_ms":13.990,"after_append_stddev_ms":0.000}
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=3.795 height_resize_ms=2.791 theme_color_ms=2.492 copy_mid_ms=0.282 nav_ctrl_d20_ms=15.828 nav_ctrl_u20_ms=17.869 nav_gg_ms=0.450 nav_G_ms=2.944 rare_ms=20.206 common_submit_ms=6.088 next100_ms=43.949 after_append_ms=12.323
+TRANSCRIPT_SEARCH_BENCH_JSON {"type":"search_summary","runs":1,"bytes":524290206,"rows":6413965,"width_resize_mean_ms":3.795,"width_resize_stddev_ms":0.000,"height_resize_mean_ms":2.791,"height_resize_stddev_ms":0.000,"theme_color_mean_ms":2.492,"theme_color_stddev_ms":0.000,"copy_mid_mean_ms":0.282,"copy_mid_stddev_ms":0.000,"nav_ctrl_d20_mean_ms":15.828,"nav_ctrl_d20_stddev_ms":0.000,"nav_ctrl_u20_mean_ms":17.869,"nav_ctrl_u20_stddev_ms":0.000,"nav_gg_mean_ms":0.450,"nav_gg_stddev_ms":0.000,"nav_G_mean_ms":2.944,"nav_G_stddev_ms":0.000,"rare_mean_ms":20.206,"rare_stddev_ms":0.000,"common_submit_mean_ms":6.088,"common_submit_stddev_ms":0.000,"next100_mean_ms":43.949,"next100_stddev_ms":0.000,"after_append_mean_ms":12.323,"after_append_stddev_ms":0.000}
 ```
 
 The newly measured resize/theme hot paths are bounded to visible work:
@@ -235,15 +235,20 @@ TRANSCRIPT_SEARCH_PERF_VALUE label=common_hot_next100 metric=search:transcript:s
 TRANSCRIPT_SEARCH_PERF_DURATION label=common_hot_next100 metric=store:transcript:search_driver_term count=1 total_us=452
 ```
 
-The copy coverage verifies the copy/yank invariant directly. A follow-up 500 MiB run with `copy_mid_ms` included copied 8 rows near the middle of a 6.4M-row transcript in 0.509 ms, exactified 8 rows, materialized 8 rows from 2 blocks, reused the existing row index, and did not record any full-session reads:
+Nearby document movement and top/bottom jumps are also bounded to viewport-sized materialization. In the 500 MiB run above, twenty half-page moves down and up stayed under 18 ms each while materializing fewer than 750 rows total across repeated renders, and `gg`/`G` materialized only 40 rows:
 
 ```text
-TRANSCRIPT_SEARCH_PERF_DURATION label=copy_mid_rows metric=transcript:copy_range count=1 total_us=336
-TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:exactified_rows count=1 last=8 total=8
-TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:collect_nodes_range:rows count=1 last=8 total=8
-TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:collect_nodes_range:blocks count=1 last=2 total=2
-TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:prepare_row_index:reused_index count=1 last=1 total=1
-TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=16.707 height_resize_ms=4.414 theme_color_ms=3.043 copy_mid_ms=0.509 rare_ms=21.320 common_submit_ms=6.884 next100_ms=51.762 after_append_ms=17.639
+TRANSCRIPT_SEARCH_PERF_VALUE label=nav_ctrl_d20 metric=transcript:collect_nodes_range:rows count=32 total=644 p95=52 max=52
+TRANSCRIPT_SEARCH_PERF_VALUE label=nav_ctrl_u20 metric=transcript:collect_nodes_range:rows count=34 total=748 p95=52 max=52
+TRANSCRIPT_SEARCH_PERF_VALUE label=nav_gg metric=transcript:collect_nodes_range:rows count=2 total=40 p95=39 max=39
+TRANSCRIPT_SEARCH_PERF_VALUE label=nav_G metric=transcript:collect_nodes_range:rows count=2 total=40 p95=39 max=39
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 nav_ctrl_d20_ms=15.828 nav_ctrl_u20_ms=17.869 nav_gg_ms=0.450 nav_G_ms=2.944
+```
+
+The copy coverage verifies the copy/yank invariant directly. The same 500 MiB run copied 8 rows near the middle of a 6.4M-row transcript in 0.282 ms. The benchmark gate asserts no full-session reads, row-index reuse, no full row-index rebuild, and exactified/materialized rows bounded by the selected rows:
+
+```text
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 copy_mid_ms=0.282
 ```
 
 Copy is therefore bounded by selected display rows in this scenario. The remaining copy-related architecture work is ownership cleanup, not a current measured 500 MiB bottleneck.

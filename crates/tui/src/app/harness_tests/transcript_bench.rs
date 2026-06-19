@@ -323,6 +323,10 @@ struct SearchBenchSample {
     height_resize_ms: f64,
     theme_color_ms: f64,
     copy_mid_ms: f64,
+    nav_ctrl_d20_ms: f64,
+    nav_ctrl_u20_ms: f64,
+    nav_gg_ms: f64,
+    nav_g_ms: f64,
     rare_ms: f64,
     common_submit_ms: f64,
     next100_ms: f64,
@@ -480,6 +484,48 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         8,
     );
 
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+    let nav_ctrl_d20_ms =
+        measure_transcript_view_operation(&mut app, "nav_ctrl_d20", report_perf, |app| {
+            for _ in 0..20 {
+                app.press_mod(KeyCode::Char('d'), KeyModifiers::CONTROL);
+                app.render_silent();
+            }
+        });
+    assert!(transcript_row_cursor_row(&app) > 0);
+
+    app.type_char('G');
+    app.render_silent();
+    let nav_ctrl_u20_ms =
+        measure_transcript_view_operation(&mut app, "nav_ctrl_u20", report_perf, |app| {
+            for _ in 0..20 {
+                app.press_mod(KeyCode::Char('u'), KeyModifiers::CONTROL);
+                app.render_silent();
+            }
+        });
+    assert!(transcript_row_cursor_row(&app) < rows.saturating_sub(1));
+
+    let nav_gg_ms = measure_transcript_view_operation(&mut app, "nav_gg", report_perf, |app| {
+        app.type_char('g');
+        app.type_char('g');
+    });
+    assert_eq!(transcript_row_cursor_row(&app), 0);
+
+    let nav_g_ms = measure_transcript_view_operation(&mut app, "nav_G", report_perf, |app| {
+        app.type_char('G');
+    });
+    let row = transcript_row_cursor_row(&app);
+    assert!(
+        row > rows.saturating_sub(1024),
+        "G landed on row {row} of {rows}, expected tail region"
+    );
+
+    app.type_char('g');
+    app.type_char('g');
+    app.render_silent();
+
     smelt_perf::perf::clear();
     let rare_start = std::time::Instant::now();
     app.app.submit_search(
@@ -561,6 +607,10 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         height_resize_ms,
         theme_color_ms,
         copy_mid_ms,
+        nav_ctrl_d20_ms,
+        nav_ctrl_u20_ms,
+        nav_gg_ms,
+        nav_g_ms,
         rare_ms,
         common_submit_ms,
         next100_ms,
@@ -588,7 +638,7 @@ fn transcript_layout_search_benchmark_suite() {
     for run in 0..runs {
         let sample = run_search_bench_sample(target_bytes, true);
         eprintln!(
-            "TRANSCRIPT_SEARCH_BENCH_SAMPLE run={} bytes={} rows={} width_resize_ms={:.3} height_resize_ms={:.3} theme_color_ms={:.3} copy_mid_ms={:.3} rare_ms={:.3} common_submit_ms={:.3} next100_ms={:.3} after_append_ms={:.3}",
+            "TRANSCRIPT_SEARCH_BENCH_SAMPLE run={} bytes={} rows={} width_resize_ms={:.3} height_resize_ms={:.3} theme_color_ms={:.3} copy_mid_ms={:.3} nav_ctrl_d20_ms={:.3} nav_ctrl_u20_ms={:.3} nav_gg_ms={:.3} nav_G_ms={:.3} rare_ms={:.3} common_submit_ms={:.3} next100_ms={:.3} after_append_ms={:.3}",
             run + 1,
             sample.bytes,
             sample.rows,
@@ -596,6 +646,10 @@ fn transcript_layout_search_benchmark_suite() {
             sample.height_resize_ms,
             sample.theme_color_ms,
             sample.copy_mid_ms,
+            sample.nav_ctrl_d20_ms,
+            sample.nav_ctrl_u20_ms,
+            sample.nav_gg_ms,
+            sample.nav_g_ms,
             sample.rare_ms,
             sample.common_submit_ms,
             sample.next100_ms,
@@ -627,6 +681,30 @@ fn transcript_layout_search_benchmark_suite() {
             .map(|sample| sample.copy_mid_ms)
             .collect::<Vec<_>>(),
     );
+    let nav_ctrl_d20 = NavStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.nav_ctrl_d20_ms)
+            .collect::<Vec<_>>(),
+    );
+    let nav_ctrl_u20 = NavStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.nav_ctrl_u20_ms)
+            .collect::<Vec<_>>(),
+    );
+    let nav_gg = NavStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.nav_gg_ms)
+            .collect::<Vec<_>>(),
+    );
+    let nav_g = NavStats::from(
+        &samples
+            .iter()
+            .map(|sample| sample.nav_g_ms)
+            .collect::<Vec<_>>(),
+    );
     let rare = NavStats::from(
         &samples
             .iter()
@@ -652,7 +730,7 @@ fn transcript_layout_search_benchmark_suite() {
             .collect::<Vec<_>>(),
     );
     eprintln!(
-        "TRANSCRIPT_SEARCH_BENCH_SUMMARY runs={} bytes={} rows={} width_resize_mean_ms={:.3} width_resize_stddev_ms={:.3} height_resize_mean_ms={:.3} height_resize_stddev_ms={:.3} theme_color_mean_ms={:.3} theme_color_stddev_ms={:.3} copy_mid_mean_ms={:.3} copy_mid_stddev_ms={:.3} rare_mean_ms={:.3} rare_stddev_ms={:.3} common_submit_mean_ms={:.3} common_submit_stddev_ms={:.3} next100_mean_ms={:.3} next100_stddev_ms={:.3} after_append_mean_ms={:.3} after_append_stddev_ms={:.3}",
+        "TRANSCRIPT_SEARCH_BENCH_SUMMARY runs={} bytes={} rows={} width_resize_mean_ms={:.3} width_resize_stddev_ms={:.3} height_resize_mean_ms={:.3} height_resize_stddev_ms={:.3} theme_color_mean_ms={:.3} theme_color_stddev_ms={:.3} copy_mid_mean_ms={:.3} copy_mid_stddev_ms={:.3} nav_ctrl_d20_mean_ms={:.3} nav_ctrl_d20_stddev_ms={:.3} nav_ctrl_u20_mean_ms={:.3} nav_ctrl_u20_stddev_ms={:.3} nav_gg_mean_ms={:.3} nav_gg_stddev_ms={:.3} nav_G_mean_ms={:.3} nav_G_stddev_ms={:.3} rare_mean_ms={:.3} rare_stddev_ms={:.3} common_submit_mean_ms={:.3} common_submit_stddev_ms={:.3} next100_mean_ms={:.3} next100_stddev_ms={:.3} after_append_mean_ms={:.3} after_append_stddev_ms={:.3}",
         samples.len(),
         samples[0].bytes,
         samples[0].rows,
@@ -664,6 +742,14 @@ fn transcript_layout_search_benchmark_suite() {
         theme_color.stddev,
         copy_mid.mean,
         copy_mid.stddev,
+        nav_ctrl_d20.mean,
+        nav_ctrl_d20.stddev,
+        nav_ctrl_u20.mean,
+        nav_ctrl_u20.stddev,
+        nav_gg.mean,
+        nav_gg.stddev,
+        nav_g.mean,
+        nav_g.stddev,
         rare.mean,
         rare.stddev,
         common.mean,
@@ -674,7 +760,7 @@ fn transcript_layout_search_benchmark_suite() {
         after_append.stddev,
     );
     eprintln!(
-        "TRANSCRIPT_SEARCH_BENCH_JSON {{\"type\":\"search_summary\",\"runs\":{},\"bytes\":{},\"rows\":{},\"width_resize_mean_ms\":{:.3},\"width_resize_stddev_ms\":{:.3},\"height_resize_mean_ms\":{:.3},\"height_resize_stddev_ms\":{:.3},\"theme_color_mean_ms\":{:.3},\"theme_color_stddev_ms\":{:.3},\"copy_mid_mean_ms\":{:.3},\"copy_mid_stddev_ms\":{:.3},\"rare_mean_ms\":{:.3},\"rare_stddev_ms\":{:.3},\"common_submit_mean_ms\":{:.3},\"common_submit_stddev_ms\":{:.3},\"next100_mean_ms\":{:.3},\"next100_stddev_ms\":{:.3},\"after_append_mean_ms\":{:.3},\"after_append_stddev_ms\":{:.3}}}",
+        "TRANSCRIPT_SEARCH_BENCH_JSON {{\"type\":\"search_summary\",\"runs\":{},\"bytes\":{},\"rows\":{},\"width_resize_mean_ms\":{:.3},\"width_resize_stddev_ms\":{:.3},\"height_resize_mean_ms\":{:.3},\"height_resize_stddev_ms\":{:.3},\"theme_color_mean_ms\":{:.3},\"theme_color_stddev_ms\":{:.3},\"copy_mid_mean_ms\":{:.3},\"copy_mid_stddev_ms\":{:.3},\"nav_ctrl_d20_mean_ms\":{:.3},\"nav_ctrl_d20_stddev_ms\":{:.3},\"nav_ctrl_u20_mean_ms\":{:.3},\"nav_ctrl_u20_stddev_ms\":{:.3},\"nav_gg_mean_ms\":{:.3},\"nav_gg_stddev_ms\":{:.3},\"nav_G_mean_ms\":{:.3},\"nav_G_stddev_ms\":{:.3},\"rare_mean_ms\":{:.3},\"rare_stddev_ms\":{:.3},\"common_submit_mean_ms\":{:.3},\"common_submit_stddev_ms\":{:.3},\"next100_mean_ms\":{:.3},\"next100_stddev_ms\":{:.3},\"after_append_mean_ms\":{:.3},\"after_append_stddev_ms\":{:.3}}}",
         samples.len(),
         samples[0].bytes,
         samples[0].rows,
@@ -686,6 +772,14 @@ fn transcript_layout_search_benchmark_suite() {
         theme_color.stddev,
         copy_mid.mean,
         copy_mid.stddev,
+        nav_ctrl_d20.mean,
+        nav_ctrl_d20.stddev,
+        nav_ctrl_u20.mean,
+        nav_ctrl_u20.stddev,
+        nav_gg.mean,
+        nav_gg.stddev,
+        nav_g.mean,
+        nav_g.stddev,
         rare.mean,
         rare.stddev,
         common.mean,
