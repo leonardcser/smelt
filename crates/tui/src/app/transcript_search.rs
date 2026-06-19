@@ -489,7 +489,7 @@ impl TuiApp {
         }?;
         session.current = Some(current);
         let range = session.matches.get(current).copied()?;
-        self.prefetch_transcript_matches(session, query, range, direction);
+        self.prefetch_transcript_matches(session, query, current, range, direction);
         session.current = session
             .matches
             .iter()
@@ -535,13 +535,12 @@ impl TuiApp {
         &mut self,
         session: &mut TranscriptSearchSession,
         query: &str,
+        current: usize,
         range: DocRange,
         direction: SearchDirection,
     ) {
-        let target_matches = session
-            .matches
-            .len()
-            .saturating_add(SEARCH_TRANSCRIPT_PREFETCH_MATCHES);
+        let target_matches =
+            transcript_prefetch_target_len(session.matches.len(), current, direction);
         let mut scanned_entries = 0usize;
         let origin = match direction {
             SearchDirection::Forward => range.end,
@@ -649,6 +648,21 @@ fn merge_doc_ranges(matches: &mut Vec<DocRange>, ranges: impl IntoIterator<Item 
     matches.dedup();
 }
 
+fn transcript_prefetch_target_len(
+    cached_matches: usize,
+    current: usize,
+    direction: SearchDirection,
+) -> usize {
+    match direction {
+        SearchDirection::Forward => current
+            .saturating_add(1)
+            .saturating_add(SEARCH_TRANSCRIPT_PREFETCH_MATCHES),
+        SearchDirection::Backward => {
+            cached_matches.saturating_add(SEARCH_TRANSCRIPT_PREFETCH_MATCHES)
+        }
+    }
+}
+
 pub(super) fn previous_search_position(pos: DocPosition) -> DocPosition {
     if pos.byte_col == 0 {
         DocPosition {
@@ -712,6 +726,26 @@ mod tests {
             block_entries,
             trigrams,
         }
+    }
+
+    #[test]
+    fn forward_prefetch_targets_matches_ahead_of_current_match() {
+        assert_eq!(
+            transcript_prefetch_target_len(1_000, 10, SearchDirection::Forward),
+            10 + 1 + SEARCH_TRANSCRIPT_PREFETCH_MATCHES
+        );
+        assert_eq!(
+            transcript_prefetch_target_len(1_000, 900, SearchDirection::Forward),
+            900 + 1 + SEARCH_TRANSCRIPT_PREFETCH_MATCHES
+        );
+    }
+
+    #[test]
+    fn backward_prefetch_keeps_existing_batch_growth() {
+        assert_eq!(
+            transcript_prefetch_target_len(32, 10, SearchDirection::Backward),
+            32 + SEARCH_TRANSCRIPT_PREFETCH_MATCHES
+        );
     }
 
     #[test]

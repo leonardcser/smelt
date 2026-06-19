@@ -211,13 +211,13 @@ At this checkpoint, candidate layout still prepared an index for the full loaded
 
 ### Transcript search and view operations after bounded row-index reuse
 
-The search benchmark now also times terminal width resize, terminal height resize, and theme color mutation at the same 500 MiB scale. Candidate-layout hashing no longer walks every measured node; it keys off row/projection generations, renderer identity, presentation generation, width, node count, and total rows. Prefix row invalidation now starts at the first changed node instead of recomputing from row zero. Width resize preserves the current node order as an approximate index, invalidates exact heights for the new width, and exactifies only the anchor and visible nodes. Full exact APIs still remeasure every block after a width change and revisiting a previously measured width can hydrate the cached exact row index.
+The search benchmark now also times terminal width resize, terminal height resize, and theme color mutation at the same 500 MiB scale. Candidate-layout hashing no longer walks every measured node; it keys off row/projection generations, renderer identity, presentation generation, width, node count, and total rows. Prefix row invalidation now starts at the first changed node instead of recomputing from row zero. Width resize preserves the current node order as an approximate index, invalidates exact heights for the new width, and exactifies only the anchor and visible nodes. Full exact APIs still remeasure every block after a width change and revisiting a previously measured width can hydrate the cached exact row index. Common-match search navigation now prefetches relative to the current match instead of scanning another batch on every `n`, and SQLite driver-term selection uses capped posting counts so common terms do not force full posting-list counts before candidate paging.
 
 Result:
 
 ```text
-TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=3.779 height_resize_ms=2.816 theme_color_ms=2.641 rare_ms=20.083 common_submit_ms=49.505 next100_ms=287.474 after_append_ms=37.799
-TRANSCRIPT_SEARCH_BENCH_JSON {"type":"search_summary","runs":1,"bytes":524290206,"rows":6413965,"width_resize_mean_ms":3.779,"width_resize_stddev_ms":0.000,"height_resize_mean_ms":2.816,"height_resize_stddev_ms":0.000,"theme_color_mean_ms":2.641,"theme_color_stddev_ms":0.000,"rare_mean_ms":20.083,"rare_stddev_ms":0.000,"common_submit_mean_ms":49.505,"common_submit_stddev_ms":0.000,"next100_mean_ms":287.474,"next100_stddev_ms":0.000,"after_append_mean_ms":37.799,"after_append_stddev_ms":0.000}
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=4.256 height_resize_ms=3.109 theme_color_ms=2.788 rare_ms=20.541 common_submit_ms=6.271 next100_ms=44.346 after_append_ms=13.990
+TRANSCRIPT_SEARCH_BENCH_JSON {"type":"search_summary","runs":1,"bytes":524290206,"rows":6413965,"width_resize_mean_ms":4.256,"width_resize_stddev_ms":0.000,"height_resize_mean_ms":3.109,"height_resize_stddev_ms":0.000,"theme_color_mean_ms":2.788,"theme_color_stddev_ms":0.000,"rare_mean_ms":20.541,"rare_stddev_ms":0.000,"common_submit_mean_ms":6.271,"common_submit_stddev_ms":0.000,"next100_mean_ms":44.346,"next100_stddev_ms":0.000,"after_append_mean_ms":13.990,"after_append_stddev_ms":0.000}
 ```
 
 The newly measured resize/theme hot paths are bounded to visible work:
@@ -230,15 +230,18 @@ TRANSCRIPT_SEARCH_PERF_DURATION label=resize_height metric=transcript:prepare_ro
 TRANSCRIPT_SEARCH_PERF_VALUE label=resize_height metric=transcript:collect_nodes_range:rows count=1 last=63
 TRANSCRIPT_SEARCH_PERF_DURATION label=theme_color metric=transcript:prepare_row_index count=2 total_us=3 p95_us=2
 TRANSCRIPT_SEARCH_PERF_VALUE label=theme_color metric=transcript:collect_nodes_range:rows count=1 last=63
+TRANSCRIPT_SEARCH_PERF_DURATION label=common_hot_next100 metric=search:transcript:scan_candidate count=16 total_us=3675 p95_us=328
+TRANSCRIPT_SEARCH_PERF_VALUE label=common_hot_next100 metric=search:transcript:scanned_entries count=16 total=16
+TRANSCRIPT_SEARCH_PERF_DURATION label=common_hot_next100 metric=store:transcript:search_driver_term count=1 total_us=452
 ```
 
-The append search bottleneck is now mostly outside transcript layout/indexing: render plan reuse is still hit, candidate layout is 12 us, append row-index sync is bounded to the new suffix plus local prefix update, and the remaining 500 MiB append time is dominated by SQLite candidate lookup and the visible repaint.
+The append search bottleneck is now mostly outside transcript layout/indexing: render plan reuse is still hit, candidate layout is 10 us, append row-index sync is bounded to the new suffix plus local prefix update, and SQLite candidate lookup is capped to page-sized work.
 
 ```text
 TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:render_plan count=1 last_us=2
-TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=search:transcript:candidate_layout count=1 last_us=12
-TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:prepare_row_index count=6 total_us=7411 p95_us=7396
-TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=store:transcript:search_candidates count=2 total_us=26610 p95_us=13678
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=search:transcript:candidate_layout count=1 last_us=10
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:prepare_row_index count=6 total_us=6679 p95_us=6664
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=store:transcript:search_candidates count=2 total_us=3552 p95_us=1928
 ```
 
 ## Current Violation Map

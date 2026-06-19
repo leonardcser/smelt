@@ -131,6 +131,8 @@ impl TranscriptDescriptorSlice {
     }
 }
 
+const SEARCH_DRIVER_TERM_POSTING_CAP: u64 = 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptSearchCandidate {
     pub block_idx: u64,
@@ -786,10 +788,20 @@ fn search_driver_term(conn: &Connection, terms: &[String]) -> Result<String> {
         return Ok(terms[0].clone());
     }
     let _perf = perf::begin("store:transcript:search_driver_term");
-    let mut stmt = conn.prepare("SELECT COUNT(*) FROM transcript_search_terms WHERE term = ?1")?;
+    let cap = checked_i64(
+        SEARCH_DRIVER_TERM_POSTING_CAP,
+        "search_driver_term_posting_cap",
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT COUNT(*) FROM (
+             SELECT 1 FROM transcript_search_terms WHERE term = ?1 LIMIT ?2
+         )",
+    )?;
     let mut best: Option<(String, u64)> = None;
     for term in terms {
-        let postings = stmt.query_row([term], |row| row.get::<_, i64>(0))?.max(0) as u64;
+        let postings = stmt
+            .query_row(params![term, cap], |row| row.get::<_, i64>(0))?
+            .max(0) as u64;
         if best
             .as_ref()
             .is_none_or(|(_, best_postings)| postings < *best_postings)
@@ -799,6 +811,10 @@ fn search_driver_term(conn: &Connection, terms: &[String]) -> Result<String> {
     }
     let (term, postings) = best.expect("search terms are non-empty");
     perf::record_value("store:transcript:search_driver_terms", terms.len() as u64);
+    perf::record_value(
+        "store:transcript:search_driver_posting_cap",
+        SEARCH_DRIVER_TERM_POSTING_CAP,
+    );
     perf::record_value("store:transcript:search_driver_postings", postings);
     Ok(term)
 }

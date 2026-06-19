@@ -446,6 +446,11 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
     }
     assert_search_refinement_gates(&common_snapshot, "common_hot_next100", 512, 32_000);
     assert_search_uses_candidate_index(&common_snapshot, "common_hot_next100", 512);
+    let scanned_entries = perf_value_total(&common_snapshot, "search:transcript:scanned_entries");
+    assert!(
+        scanned_entries <= 64,
+        "common_hot_next100 scanned {scanned_entries} entries; cached next navigation should not rescan every press"
+    );
 
     smelt_perf::perf::clear();
     app.app
