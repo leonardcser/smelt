@@ -351,7 +351,7 @@ local function banner_row(goal, width)
           bytes_start = 0,
           bytes_end = #row,
           style = { hl_group = label_group },
-          selectable = false,
+          selectable = true,
         },
       },
     }
@@ -368,13 +368,13 @@ local function banner_row(goal, width)
       bytes_start = 0,
       bytes_end = #row,
       style = { hl_group = "SmeltGoalBanner" },
-      selectable = false,
+      selectable = true,
     },
     {
       bytes_start = 0,
       bytes_end = label_end,
       style = { hl_group = label_group },
-      selectable = false,
+      selectable = true,
     },
   }
   if mode ~= "" then
@@ -382,7 +382,7 @@ local function banner_row(goal, width)
       bytes_start = #row - #mode,
       bytes_end = #row,
       style = { hl_group = "SmeltGoalBannerMode" },
-      selectable = false,
+      selectable = true,
     }
   end
   return {

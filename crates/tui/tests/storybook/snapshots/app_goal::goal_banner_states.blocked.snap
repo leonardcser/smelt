@@ -2,7 +2,7 @@
 source: crates/tui/tests/storybook/app_ctx.rs
 expression: frame.text()
 ---
- BLOCKED waiting for parser fixture approval
+ BLOCKED waiting for parser fixture approval · migrate parser s…
 
  Please keep working toward the parser migration.
 

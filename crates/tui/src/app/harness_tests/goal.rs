@@ -35,6 +35,35 @@ fn lua_goal_renders_top_banner_not_statusline() {
 }
 
 #[test]
+fn lua_goal_banner_is_fully_selectable() {
+    let mut app = TestApp::builder().build();
+    app.set_terminal_size(48, 16);
+
+    assert!(app.run_lua(
+        r#"
+            local goal = require("smelt.goal")
+            assert(goal.create("copy every cell in the top bar", { auto_continue = false }))
+        "#,
+    ));
+    app.render_silent();
+
+    let win_id = app
+        .app
+        .ui
+        .named_win("smelt.headerline")
+        .expect("headerline window");
+    let buf_id = app.app.ui.win(win_id).expect("headerline win").buf;
+    let buf = app.app.ui.buf(buf_id).expect("headerline buffer");
+    let spans = buf.highlights_at(0);
+
+    assert!(!spans.is_empty(), "banner should be highlighted");
+    assert!(
+        spans.iter().all(|span| span.meta.selectable),
+        "every banner highlight should stay selectable: {spans:?}"
+    );
+}
+
+#[test]
 fn lua_goal_state_writes_nested_session_updates_immediately() {
     let mut app = TestApp::builder().build();
     let session_id = app.app.core.session.id.clone();
