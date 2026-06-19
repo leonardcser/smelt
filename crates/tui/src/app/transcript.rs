@@ -1055,6 +1055,58 @@ impl TranscriptDocument {
             .map(|row| row.saturating_add(offset))
     }
 
+    fn position_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        position: crate::smelt_edit::DocPosition,
+    ) -> TranscriptPositionAnchor {
+        TranscriptPositionAnchor {
+            anchor: self.row_anchor_at_row(lua, width, position.row),
+            position,
+        }
+    }
+
+    fn range_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        range: crate::smelt_edit::DocRange,
+    ) -> TranscriptRangeAnchor {
+        TranscriptRangeAnchor {
+            start: self.position_anchor(lua, width, range.start),
+            end: self.position_anchor(lua, width, range.end),
+        }
+    }
+
+    fn resolve_position_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        anchor: TranscriptPositionAnchor,
+    ) -> crate::smelt_edit::DocPosition {
+        let row = anchor
+            .anchor
+            .and_then(|anchor| self.row_for_anchor(lua, width, anchor))
+            .unwrap_or(anchor.position.row);
+        crate::smelt_edit::DocPosition {
+            row,
+            byte_col: anchor.position.byte_col,
+        }
+    }
+
+    fn resolve_range_anchor(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        anchor: TranscriptRangeAnchor,
+    ) -> crate::smelt_edit::DocRange {
+        crate::smelt_edit::DocRange {
+            start: self.resolve_position_anchor(lua, width, anchor.start),
+            end: self.resolve_position_anchor(lua, width, anchor.end),
+        }
+    }
+
     pub(crate) fn block_node_before_or_at_row(
         &mut self,
         lua: &LuaRuntime,
@@ -1944,56 +1996,6 @@ impl TuiApp {
         self.transcript.build_rows(&self.lua, tw, &theme)
     }
 
-    fn transcript_position_anchor(
-        &mut self,
-        width: u16,
-        position: crate::smelt_edit::DocPosition,
-    ) -> TranscriptPositionAnchor {
-        TranscriptPositionAnchor {
-            anchor: self
-                .transcript
-                .row_anchor_at_row(&self.lua, width, position.row),
-            position,
-        }
-    }
-
-    fn transcript_range_anchor(
-        &mut self,
-        width: u16,
-        range: crate::smelt_edit::DocRange,
-    ) -> TranscriptRangeAnchor {
-        TranscriptRangeAnchor {
-            start: self.transcript_position_anchor(width, range.start),
-            end: self.transcript_position_anchor(width, range.end),
-        }
-    }
-
-    fn resolve_transcript_position_anchor(
-        &mut self,
-        width: u16,
-        anchor: TranscriptPositionAnchor,
-    ) -> crate::smelt_edit::DocPosition {
-        let row = anchor
-            .anchor
-            .and_then(|anchor| self.transcript.row_for_anchor(&self.lua, width, anchor))
-            .unwrap_or(anchor.position.row);
-        crate::smelt_edit::DocPosition {
-            row,
-            byte_col: anchor.position.byte_col,
-        }
-    }
-
-    fn resolve_transcript_range_anchor(
-        &mut self,
-        width: u16,
-        anchor: TranscriptRangeAnchor,
-    ) -> crate::smelt_edit::DocRange {
-        crate::smelt_edit::DocRange {
-            start: self.resolve_transcript_position_anchor(width, anchor.start),
-            end: self.resolve_transcript_position_anchor(width, anchor.end),
-        }
-    }
-
     fn capture_transcript_view_anchors(&mut self, width: u16) -> TranscriptViewAnchors {
         let (following_tail, scroll_top, cursor, selection_anchor, drag_endpoint) = {
             let win = self.transcript_win();
@@ -2017,11 +2019,12 @@ impl TuiApp {
                     .and_then(|index| transcript.matches.get(index).copied()),
                 crate::app::search::SearchBackend::Full { .. } => None,
             })
-            .map(|range| self.transcript_range_anchor(width, range));
+            .map(|range| self.transcript.range_anchor(&self.lua, width, range));
         TranscriptViewAnchors {
             following_tail,
             scroll_top: (!following_tail).then(|| {
-                self.transcript_position_anchor(
+                self.transcript.position_anchor(
+                    &self.lua,
                     width,
                     crate::smelt_edit::DocPosition {
                         row: scroll_top,
@@ -2029,31 +2032,37 @@ impl TuiApp {
                     },
                 )
             }),
-            cursor: Some(self.transcript_position_anchor(width, cursor)),
+            cursor: Some(self.transcript.position_anchor(&self.lua, width, cursor)),
             selection_anchor: selection_anchor
-                .map(|position| self.transcript_position_anchor(width, position)),
+                .map(|position| self.transcript.position_anchor(&self.lua, width, position)),
             drag_endpoint: drag_endpoint
-                .map(|position| self.transcript_position_anchor(width, position)),
+                .map(|position| self.transcript.position_anchor(&self.lua, width, position)),
             search_current,
         }
     }
 
     fn restore_transcript_view_anchors(&mut self, width: u16, anchors: TranscriptViewAnchors) {
-        let scroll_top = anchors
-            .scroll_top
-            .map(|anchor| self.resolve_transcript_position_anchor(width, anchor).row);
-        let cursor = anchors
-            .cursor
-            .map(|anchor| self.resolve_transcript_position_anchor(width, anchor));
-        let selection_anchor = anchors
-            .selection_anchor
-            .map(|anchor| self.resolve_transcript_position_anchor(width, anchor));
-        let drag_endpoint = anchors
-            .drag_endpoint
-            .map(|anchor| self.resolve_transcript_position_anchor(width, anchor));
-        let search_current = anchors
-            .search_current
-            .map(|anchor| self.resolve_transcript_range_anchor(width, anchor));
+        let scroll_top = anchors.scroll_top.map(|anchor| {
+            self.transcript
+                .resolve_position_anchor(&self.lua, width, anchor)
+                .row
+        });
+        let cursor = anchors.cursor.map(|anchor| {
+            self.transcript
+                .resolve_position_anchor(&self.lua, width, anchor)
+        });
+        let selection_anchor = anchors.selection_anchor.map(|anchor| {
+            self.transcript
+                .resolve_position_anchor(&self.lua, width, anchor)
+        });
+        let drag_endpoint = anchors.drag_endpoint.map(|anchor| {
+            self.transcript
+                .resolve_position_anchor(&self.lua, width, anchor)
+        });
+        let search_current = anchors.search_current.map(|anchor| {
+            self.transcript
+                .resolve_range_anchor(&self.lua, width, anchor)
+        });
 
         if let Some(win) = self.ui.win_mut(self.well_known.transcript) {
             if !anchors.following_tail {
