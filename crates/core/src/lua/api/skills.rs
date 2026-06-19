@@ -9,7 +9,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         lua,
         smelt,
         "skills",
-        "List and load skill content from the SkillLoader populated at startup.",
+        "List and load skill content from the SkillLoader populated at startup. Markdown custom commands can opt into skill discovery with `agent_skill: true` (or `agent-skill: true`) in their frontmatter; the skill name is the command file stem. Loaded command skills are static context: slash-command arguments are not included, and shell output markers are not evaluated.",
         Tier::Host,
     )?;
     m.fn_(

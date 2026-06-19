@@ -66,8 +66,8 @@ land while an agent turn is running or a modal dialog is open are deferred to
 the next quiet window. Prompt inputs such as `AGENTS.md`, `SKILL.md`,
 `--system-prompt` files, and markdown custom-command registration still require
 manual `/reload`. Existing markdown custom commands read their file body on each
-invocation, so content edits do not need reload unless you add, remove, or rename
-the command file.
+invocation, so content edits do not need reload unless you add, remove, or
+rename the command file.
 
 ### Surviving reload smoothly
 
@@ -196,16 +196,16 @@ whose `:remove()` drops the subscription. The full lists are the
 [`_types.lua`](https://github.com/leonardcser/smelt/blob/main/runtime/lua/smelt/_meta/_types.lua);
 common ones:
 
-| Name              | Payload                          | When                           |
-| ----------------- | -------------------------------- | ------------------------------ |
-| `session_started` | none                             | A session has been loaded      |
-| `turn_start`      | none                             | The agent dispatched a turn    |
-| `turn_end`        | `{ cancelled }`                  | Turn complete or interrupted   |
-| `tool_start`      | `{ tool, args }`                 | A tool call began              |
-| `tool_end`        | `{ tool, is_error, elapsed_ms }` | A tool call finished           |
-| `agent_mode`      | `"normal"`, `"plan"`, `"apply"`, `"yolo"` | Agent mode changed |
-| `input_submit`    | submitted text                   | User submitted a message       |
-| `shutdown`        | none                             | App is about to quit           |
+| Name              | Payload                                   | When                         |
+| ----------------- | ----------------------------------------- | ---------------------------- |
+| `session_started` | none                                      | A session has been loaded    |
+| `turn_start`      | none                                      | The agent dispatched a turn  |
+| `turn_end`        | `{ cancelled }`                           | Turn complete or interrupted |
+| `tool_start`      | `{ tool, args }`                          | A tool call began            |
+| `tool_end`        | `{ tool, is_error, elapsed_ms }`          | A tool call finished         |
+| `agent_mode`      | `"normal"`, `"plan"`, `"apply"`, `"yolo"` | Agent mode changed           |
+| `input_submit`    | submitted text                            | User submitted a message     |
+| `shutdown`        | none                                      | App is about to quit         |
 
 ```lua
 smelt.events.on("turn_end", function(payload)
@@ -657,5 +657,5 @@ labels. The IDE shows them in autocomplete and rejects typos. Closed aliases
 require canonical names only: `smelt.vim.set_mode("normal")` works,
 `smelt.vim.set_mode("n")` does not (short forms `"n"`, `"i"`, `"v"`, `"V"`, and
 PascalCase variants like `"Insert"` are not accepted). Open aliases (e.g.
-[`smelt.signal.Name`](../reference/api/types.md#smeltsignalname)) keep accepting any
-string and just expose well-known names as completion hints.
+[`smelt.signal.Name`](../reference/api/types.md#smeltsignalname)) keep accepting
+any string and just expose well-known names as completion hints.

@@ -74,6 +74,7 @@ All fields are optional:
 | `min_p`            | Min-p sampling                                                                                            |
 | `repeat_penalty`   | Repetition penalty                                                                                        |
 | `reasoning_effort` | Thinking depth: `off`/`low`/`medium`/`high`/`max`                                                         |
+| `agent_skill`      | When true, expose this command as a loadable [skill](api/skills.md)                                       |
 | `tools`            | `allow`/`ask`/`deny` lists for tool permissions                                                           |
 | `bash`             | `allow`/`ask`/`deny` glob patterns for bash                                                               |
 | `web_fetch`        | `allow`/`ask`/`deny` glob patterns for URLs                                                               |

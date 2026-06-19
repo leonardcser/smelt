@@ -496,7 +496,7 @@
 ---@field on_select? fun(item: smelt.prompt.PickerItem): nil Fires on every cursor move.
 ---@field on_enter? fun(item: smelt.prompt.PickerItem, idx: integer): nil Persistent-mode accept handler.
 ---@field rank? fun(items: table[], query: string, original: smelt.prompt.PickerItem[]): integer[] Custom filter/ranker. `items` are stamped picker rows; return 1-based row indices in display order.
----@field on_dismiss? fun(): nil Fires on Esc.
+---@field on_dismiss? fun(): nil Fires on Esc/Ctrl-C.
 
 --- Spec accepted by `smelt.provider.register`.
 ---@class smelt.provider.Config

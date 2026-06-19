@@ -24,7 +24,7 @@ picker.new = nil
 --- Open a floating picker over `opts.items` and yield until the user
 --- accepts or dismisses. `opts` is forwarded to `smelt.picker.new` for
 --- placement / styling; up/down/ctrl-j/k/p/n navigate, Enter resolves,
---- Esc dismisses. Returns `{ index, item }` on accept or `nil` on
+--- Esc/Ctrl-C dismisses. Returns `{ index, item }` on accept or `nil` on
 --- dismiss. Must run inside a `smelt.spawn` (or tool execute) frame.
 ---@see smelt.picker.new
 ---@type fun(opts: smelt.picker.NewOpts): smelt.picker.OpenResult?

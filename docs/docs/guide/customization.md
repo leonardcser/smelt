@@ -183,6 +183,9 @@ Recent commits for style reference:
 Type `/commit` and the agent receives the evaluated prompt with shell outputs
 inlined. Arguments are appended: `/commit fix typos`.
 
+To also expose a command as reusable agent context, see the
+[`smelt.skills` reference](../reference/api/skills.md).
+
 See [Custom Commands](../reference/commands.md#custom-commands) for all
 frontmatter fields and template syntax.
 
