@@ -1140,6 +1140,7 @@ impl TuiApp {
                 descriptor_records,
             } => (descriptor_start_idx, descriptor_records, true),
             crate::app::transcript::TranscriptDescriptorSaveSuffix::NeedsFullRebuild => {
+                smelt_perf::perf::record_value("session:save:descriptor_sparse_full_rebuild", 1);
                 let transcript = build_transcript_from_session(&self.lua, &self.core.session);
                 self.transcript.replace_transcript(transcript);
                 self.transcript_descriptors_persisted = false;
@@ -1707,6 +1708,7 @@ mod checkpoint_tests {
             "store:transcript:search_blob_full",
             "store:transcript:read_descriptors_full",
             "store:transcript:descriptors_full_loaded",
+            "session:save:descriptor_sparse_full_rebuild",
             "transcript:build_from_session:history_items",
         ] {
             assert_perf_value_absent(label);
