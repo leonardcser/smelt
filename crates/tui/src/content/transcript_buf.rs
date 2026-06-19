@@ -6488,38 +6488,70 @@ mod tests {
             .collect()
     }
 
-    fn push_session_resume_fixture(
-        session: &mut smelt_core::session::Session,
-        target_bytes: usize,
-    ) {
-        let mut approx_bytes = 0usize;
-        let mut i = 0usize;
-        while approx_bytes < target_bytes {
-            let user = format!(
-                "resume benchmark prompt {i}: {}",
-                "please inspect the previous output and continue exactly ".repeat(8)
-            );
-            approx_bytes += user.len();
-            session
-                .history
-                .push(protocol::HistoryItem::user(protocol::Content::text(user)));
+    const RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES: usize = 4 * 1024;
+    const RESUME_DESCRIPTOR_WRITE_CHUNK: usize = 2048;
 
-            let assistant = format!(
-                "# Resume benchmark response {i}\n\n{}\n\n```rust\nfn resume_bench_{i}() -> usize {{ {} }}\n```\n\n{}",
-                "This paragraph has enough markdown and wrapping pressure to exercise transcript rebuild and layout measurement. ".repeat(18),
-                "1 + ".repeat(32) + "0",
-                "- exact rows must survive cache hydration\n".repeat(24),
-            );
-            approx_bytes += assistant.len();
-            session.history.push(protocol::HistoryItem::assistant(
-                protocol::AssistantStep::terminal(
-                    Some(protocol::Content::text(assistant)),
-                    None,
-                    Vec::new(),
-                ),
-            ));
-            i += 1;
+    fn resume_descriptor_content(block_idx: usize) -> String {
+        let mut content = format!("# Resume benchmark response {block_idx}\n\n");
+        let paragraph = "This descriptor-backed resume fixture stores full transcript text in SQLite without building a full in-memory transcript first. It keeps enough markdown and wrapping pressure to exercise tail hydration and rendering.\n";
+        while content.len() < RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES {
+            content.push_str(paragraph);
         }
+        content.truncate(RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES);
+        content
+    }
+
+    fn resume_descriptor_record(
+        block_idx: usize,
+        content: String,
+    ) -> smelt_store::TranscriptDescriptorRecord {
+        let descriptor = smelt_core::transcript_model::TranscriptBlockDescriptor::Text {
+            content: content.clone(),
+        };
+        smelt_store::TranscriptDescriptorRecord {
+            block_idx: block_idx as u64,
+            history_idx: None,
+            kind: descriptor.kind().to_string(),
+            tool_call_id: None,
+            tool_name: None,
+            content_hash: (block_idx as u64).saturating_add(1).to_string(),
+            estimated_text_bytes: content.len() as u64,
+            preview_text: format!("resume benchmark response {block_idx}"),
+            search_text: format!("resume benchmark block {block_idx}"),
+            descriptor_json: serde_json::to_string(&descriptor)
+                .expect("serialize resume descriptor"),
+            origin_json: None,
+            tool_state_json: None,
+        }
+    }
+
+    fn write_descriptor_backed_resume_fixture(
+        session_id: &str,
+        target_bytes: usize,
+    ) -> (usize, usize, f64) {
+        let setup_start = std::time::Instant::now();
+        let session_dir = smelt_core::session::dir_for_id(session_id);
+        let _ = std::fs::remove_dir_all(&session_dir);
+        std::fs::create_dir_all(&session_dir).expect("create descriptor resume fixture dir");
+        let db = smelt_store::SessionDb::open(session_dir.join("session.db"))
+            .expect("open descriptor resume fixture db");
+        let target_bytes = target_bytes.max(RESUME_DESCRIPTOR_BLOCK_TEXT_BYTES);
+        let mut generated_bytes = 0usize;
+        let mut descriptor_count = 0usize;
+        while generated_bytes < target_bytes {
+            let mut records = Vec::with_capacity(RESUME_DESCRIPTOR_WRITE_CHUNK);
+            while generated_bytes < target_bytes && records.len() < RESUME_DESCRIPTOR_WRITE_CHUNK {
+                let content = resume_descriptor_content(descriptor_count);
+                generated_bytes = generated_bytes.saturating_add(content.len());
+                records.push(resume_descriptor_record(descriptor_count, content));
+                descriptor_count += 1;
+            }
+            let start_descriptor_idx = descriptor_count.saturating_sub(records.len());
+            db.replace_transcript_descriptor_suffix(start_descriptor_idx, &records)
+                .expect("write descriptor resume fixture chunk");
+        }
+        let setup_ms = elapsed_ms(setup_start.elapsed());
+        (descriptor_count, generated_bytes, setup_ms)
     }
 
     fn run_true_resume_bench_sample(target_bytes: usize) {
@@ -6527,40 +6559,18 @@ mod tests {
         smelt_perf::perf::set_enabled(true);
         let lua = crate::lua::LuaRuntime::new();
         let theme = Theme::default();
-        let mut session = smelt_core::session::Session::new(0, std::env::current_dir().unwrap());
-        session.id = format!("transcript-resume-bench-{}", smelt_core::session::now_ms());
-        push_session_resume_fixture(&mut session, target_bytes);
-        let history_items = session.history.len();
-
-        let build_start = std::time::Instant::now();
-        let mut transcript = crate::app::history::build_transcript_from_session(&lua, &session);
-        let build_ms = elapsed_ms(build_start.elapsed());
-        let mut projection = TranscriptProjection::new();
-        let mut buf = Buffer::new(crate::smelt_edit::BufId(91), Default::default());
-        let first_start = std::time::Instant::now();
-        let first = project_with_lua(
-            &mut projection,
-            &lua,
-            &mut buf,
-            &mut transcript.history,
-            100,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
+        let session_id = format!(
+            "transcript-resume-bench-{}-{}",
+            smelt_core::session::now_ms(),
+            std::process::id()
         );
-        let first_ms = elapsed_ms(first_start.elapsed());
-        let descriptor_records = transcript.history.descriptor_records();
-        smelt_core::session::save_with_blobs(&session, &std::collections::HashMap::new());
-        crate::persist::write_transcript_descriptors(
-            &smelt_core::session::dir_for(&session),
-            &descriptor_records,
-        )
-        .expect("write benchmark transcript descriptors");
+        let (descriptor_count, generated_bytes, setup_ms) =
+            write_descriptor_backed_resume_fixture(&session_id, target_bytes);
 
         smelt_perf::perf::clear();
         let tail_load_start = std::time::Instant::now();
         let tail_resumed =
-            crate::app::history::load_transcript_from_sqlite_id(&session.id, 100, 40)
+            crate::app::history::load_transcript_from_sqlite_id(&session_id, 100, 40)
                 .expect("tail-load benchmark transcript descriptors");
         let mut tail_document =
             crate::app::transcript::TranscriptDocument::from_loaded_transcript(tail_resumed);
@@ -6579,80 +6589,34 @@ mod tests {
         assert!(tail_rows.total_rows > 0);
         let tail_snapshot = smelt_perf::perf::snapshot();
         print_resume_perf_snapshot(&tail_snapshot);
-        assert_resume_tail_perf_gates(&tail_snapshot, history_items);
-
-        let descriptor_load_start = std::time::Instant::now();
-        let descriptor_resumed = crate::app::history::load_transcript_from_sqlite(&session)
-            .expect("load benchmark transcript descriptors");
-        let mut descriptor_document =
-            crate::app::transcript::TranscriptDocument::from_loaded_transcript(descriptor_resumed);
-        let descriptor_load_ms = elapsed_ms(descriptor_load_start.elapsed());
-        let mut descriptor_buf = Buffer::new(crate::smelt_edit::BufId(93), Default::default());
-        let descriptor_render_start = std::time::Instant::now();
-        let descriptor_plan = descriptor_document.plan_projection_measured(
-            &lua,
-            100,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
+        assert_resume_tail_perf_gates(&tail_snapshot, descriptor_count);
+        assert_eq!(
+            perf_value_max(&tail_snapshot, "transcript:sqlite:descriptor_total"),
+            descriptor_count as u64,
+            "display-only resume did not observe the descriptor-backed fixture size"
         );
-        let descriptor_rows =
-            descriptor_document.project_planned(&lua, &mut descriptor_buf, &theme, descriptor_plan);
-        let descriptor_render_ms = elapsed_ms(descriptor_render_start.elapsed());
-        assert_eq!(descriptor_rows.total_rows, first.total_rows);
 
-        let load_start = std::time::Instant::now();
-        let loaded = smelt_core::session::load(&session.id).expect("load benchmark session");
-        let load_ms = elapsed_ms(load_start.elapsed());
-        let rebuild_start = std::time::Instant::now();
-        let mut resumed = crate::app::history::build_transcript_from_session(&lua, &loaded);
-        let rebuild_ms = elapsed_ms(rebuild_start.elapsed());
-        let mut resumed_projection = TranscriptProjection::new();
-        let mut resumed_buf = Buffer::new(crate::smelt_edit::BufId(92), Default::default());
-        let render_start = std::time::Instant::now();
-        let resumed_rows = project_with_lua(
-            &mut resumed_projection,
-            &lua,
-            &mut resumed_buf,
-            &mut resumed.history,
-            100,
-            &theme,
-            ScrollTarget::visible_tail(),
-            40,
-        );
-        let render_ms = elapsed_ms(render_start.elapsed());
-        assert_eq!(resumed_rows.total_rows, first.total_rows);
-        smelt_core::session::delete(&session.id);
+        smelt_core::session::delete(&session_id);
         smelt_perf::perf::set_enabled(false);
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_SAMPLE target_bytes={} history_items={} rows={} build_ms={:.3} first_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3} descriptor_load_ms={:.3} descriptor_render_ms={:.3} legacy_load_ms={:.3} legacy_rebuild_ms={:.3} legacy_render_ms={:.3}",
+            "TRANSCRIPT_TRUE_RESUME_SAMPLE mode=descriptor_backed target_bytes={} generated_bytes={} descriptors={} rows={} setup_ms={:.3} tail_load_ms={:.3} tail_render_ms={:.3}",
             target_bytes,
-            history_items,
-            first.total_rows,
-            build_ms,
-            first_ms,
+            generated_bytes,
+            descriptor_count,
+            tail_rows.total_rows,
+            setup_ms,
             tail_load_ms,
             tail_render_ms,
-            descriptor_load_ms,
-            descriptor_render_ms,
-            load_ms,
-            rebuild_ms,
-            render_ms,
         );
         eprintln!(
-            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"target_bytes\":{},\"history_items\":{},\"rows\":{},\"build_ms\":{:.3},\"first_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3},\"descriptor_load_ms\":{:.3},\"descriptor_render_ms\":{:.3},\"legacy_load_ms\":{:.3},\"legacy_rebuild_ms\":{:.3},\"legacy_render_ms\":{:.3}}}",
+            "TRANSCRIPT_TRUE_RESUME_JSON {{\"type\":\"resume_summary\",\"mode\":\"descriptor_backed\",\"target_bytes\":{},\"generated_bytes\":{},\"descriptors\":{},\"rows\":{},\"setup_ms\":{:.3},\"tail_load_ms\":{:.3},\"tail_render_ms\":{:.3}}}",
             target_bytes,
-            history_items,
-            first.total_rows,
-            build_ms,
-            first_ms,
+            generated_bytes,
+            descriptor_count,
+            tail_rows.total_rows,
+            setup_ms,
             tail_load_ms,
             tail_render_ms,
-            descriptor_load_ms,
-            descriptor_render_ms,
-            load_ms,
-            rebuild_ms,
-            render_ms,
         );
     }
     fn assert_projection_bench_gates(counters: TranscriptProjectionCounters, label: &str) {

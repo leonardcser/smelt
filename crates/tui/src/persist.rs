@@ -194,14 +194,6 @@ fn write_blobs(
 }
 
 #[cfg(test)]
-pub(crate) fn write_transcript_descriptors(
-    session_dir: &std::path::Path,
-    records: &[TranscriptBlockRecord],
-) -> Result<(), smelt_store::StoreError> {
-    write_transcript_descriptor_suffix(session_dir, 0, records)
-}
-
-#[cfg(test)]
 pub(crate) fn write_transcript_descriptor_suffix(
     session_dir: &std::path::Path,
     start_descriptor_idx: usize,
