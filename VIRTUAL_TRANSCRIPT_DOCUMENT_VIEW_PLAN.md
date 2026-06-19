@@ -216,8 +216,8 @@ The search benchmark now also times terminal width resize, terminal height resiz
 Result:
 
 ```text
-TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=3.795 height_resize_ms=2.791 theme_color_ms=2.492 copy_mid_ms=0.282 nav_ctrl_d20_ms=15.828 nav_ctrl_u20_ms=17.869 nav_gg_ms=0.450 nav_G_ms=2.944 rare_ms=20.206 common_submit_ms=6.088 next100_ms=43.949 after_append_ms=12.323
-TRANSCRIPT_SEARCH_BENCH_JSON {"type":"search_summary","runs":1,"bytes":524290206,"rows":6413965,"width_resize_mean_ms":3.795,"width_resize_stddev_ms":0.000,"height_resize_mean_ms":2.791,"height_resize_stddev_ms":0.000,"theme_color_mean_ms":2.492,"theme_color_stddev_ms":0.000,"copy_mid_mean_ms":0.282,"copy_mid_stddev_ms":0.000,"nav_ctrl_d20_mean_ms":15.828,"nav_ctrl_d20_stddev_ms":0.000,"nav_ctrl_u20_mean_ms":17.869,"nav_ctrl_u20_stddev_ms":0.000,"nav_gg_mean_ms":0.450,"nav_gg_stddev_ms":0.000,"nav_G_mean_ms":2.944,"nav_G_stddev_ms":0.000,"rare_mean_ms":20.206,"rare_stddev_ms":0.000,"common_submit_mean_ms":6.088,"common_submit_stddev_ms":0.000,"next100_mean_ms":43.949,"next100_stddev_ms":0.000,"after_append_mean_ms":12.323,"after_append_stddev_ms":0.000}
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=5.060 height_resize_ms=3.356 theme_color_ms=3.075 copy_mid_ms=0.464 nav_ctrl_d20_ms=21.259 nav_ctrl_u20_ms=24.282 nav_gg_ms=0.578 nav_G_ms=4.262 rare_ms=27.971 common_submit_ms=7.538 next100_ms=59.071 after_append_ms=14.898
+TRANSCRIPT_SEARCH_BENCH_JSON {"type":"search_summary","runs":1,"bytes":524290206,"rows":6413965,"width_resize_mean_ms":5.060,"width_resize_stddev_ms":0.000,"height_resize_mean_ms":3.356,"height_resize_stddev_ms":0.000,"theme_color_mean_ms":3.075,"theme_color_stddev_ms":0.000,"copy_mid_mean_ms":0.464,"copy_mid_stddev_ms":0.000,"nav_ctrl_d20_mean_ms":21.259,"nav_ctrl_d20_stddev_ms":0.000,"nav_ctrl_u20_mean_ms":24.282,"nav_ctrl_u20_stddev_ms":0.000,"nav_gg_mean_ms":0.578,"nav_gg_stddev_ms":0.000,"nav_G_mean_ms":4.262,"nav_G_stddev_ms":0.000,"rare_mean_ms":27.971,"rare_stddev_ms":0.000,"common_submit_mean_ms":7.538,"common_submit_stddev_ms":0.000,"next100_mean_ms":59.071,"next100_stddev_ms":0.000,"after_append_mean_ms":14.898,"after_append_stddev_ms":0.000}
 ```
 
 The newly measured resize/theme hot paths are bounded to visible work:
@@ -235,20 +235,24 @@ TRANSCRIPT_SEARCH_PERF_VALUE label=common_hot_next100 metric=search:transcript:s
 TRANSCRIPT_SEARCH_PERF_DURATION label=common_hot_next100 metric=store:transcript:search_driver_term count=1 total_us=452
 ```
 
-Nearby document movement and top/bottom jumps are also bounded to viewport-sized materialization. In the 500 MiB run above, twenty half-page moves down and up stayed under 18 ms each while materializing fewer than 750 rows total across repeated renders, and `gg`/`G` materialized only 40 rows:
+Nearby document movement and top/bottom jumps are also bounded to viewport-sized materialization. In the 500 MiB run above, twenty half-page moves down and up materialized fewer than 750 rows total across repeated renders, and `gg`/`G` materialized only 40 rows. The benchmark now also asserts exact `G` semantics against the current document snapshot after the timed operation, rather than accepting a broad tail-region landing.
 
 ```text
 TRANSCRIPT_SEARCH_PERF_VALUE label=nav_ctrl_d20 metric=transcript:collect_nodes_range:rows count=32 total=644 p95=52 max=52
 TRANSCRIPT_SEARCH_PERF_VALUE label=nav_ctrl_u20 metric=transcript:collect_nodes_range:rows count=34 total=748 p95=52 max=52
 TRANSCRIPT_SEARCH_PERF_VALUE label=nav_gg metric=transcript:collect_nodes_range:rows count=2 total=40 p95=39 max=39
 TRANSCRIPT_SEARCH_PERF_VALUE label=nav_G metric=transcript:collect_nodes_range:rows count=2 total=40 p95=39 max=39
-TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 nav_ctrl_d20_ms=15.828 nav_ctrl_u20_ms=17.869 nav_gg_ms=0.450 nav_G_ms=2.944
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 nav_ctrl_d20_ms=21.259 nav_ctrl_u20_ms=24.282 nav_gg_ms=0.578 nav_G_ms=4.262
 ```
 
-The copy coverage verifies the copy/yank invariant directly. The same 500 MiB run copied 8 rows near the middle of a 6.4M-row transcript in 0.282 ms. The benchmark gate asserts no full-session reads, row-index reuse, no full row-index rebuild, and exactified/materialized rows bounded by the selected rows:
+The copy coverage verifies the copy/yank invariant directly. The same 500 MiB run copied 8 rows near the middle of a 6.4M-row transcript in 0.464 ms. The benchmark gate asserts no full-session reads, row-index reuse, no full row-index rebuild, and exactified/materialized rows bounded by the selected rows:
 
 ```text
-TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 copy_mid_ms=0.282
+TRANSCRIPT_SEARCH_PERF_DURATION label=copy_mid_rows metric=transcript:copy_range count=1 total_us=457
+TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:exactified_rows count=1 last=8 total=8
+TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:collect_nodes_range:rows count=1 last=8 total=8
+TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:collect_nodes_range:blocks count=1 last=2 total=2
+TRANSCRIPT_SEARCH_PERF_VALUE label=copy_mid_rows metric=transcript:prepare_row_index:reused_index count=1 last=1 total=1
 ```
 
 Copy is therefore bounded by selected display rows in this scenario. The remaining copy-related architecture work is ownership cleanup, not a current measured 500 MiB bottleneck.

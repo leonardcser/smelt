@@ -333,6 +333,23 @@ struct SearchBenchSample {
     after_append_ms: f64,
 }
 
+fn search_bench_metric_values(sample: &SearchBenchSample) -> [(&'static str, f64); 12] {
+    [
+        ("width_resize", sample.width_resize_ms),
+        ("height_resize", sample.height_resize_ms),
+        ("theme_color", sample.theme_color_ms),
+        ("copy_mid", sample.copy_mid_ms),
+        ("nav_ctrl_d20", sample.nav_ctrl_d20_ms),
+        ("nav_ctrl_u20", sample.nav_ctrl_u20_ms),
+        ("nav_gg", sample.nav_gg_ms),
+        ("nav_G", sample.nav_g_ms),
+        ("rare", sample.rare_ms),
+        ("common_submit", sample.common_submit_ms),
+        ("next100", sample.next100_ms),
+        ("after_append", sample.after_append_ms),
+    ]
+}
+
 fn assert_view_operation_gates(snapshot: &smelt_perf::perf::Snapshot, label: &str) {
     assert_no_full_search_hot_path_reads(snapshot, label);
     let materialized_rows = perf_value_total(snapshot, "transcript:collect_nodes_range:rows");
@@ -517,9 +534,11 @@ fn run_search_bench_sample(target_bytes: usize, report_perf: bool) -> SearchBenc
         app.type_char('G');
     });
     let row = transcript_row_cursor_row(&app);
-    assert!(
-        row > rows.saturating_sub(1024),
-        "G landed on row {row} of {rows}, expected tail region"
+    let total_rows_after_g = app.app.transcript_total_rows();
+    assert_eq!(
+        row,
+        total_rows_after_g.saturating_sub(1),
+        "G should land on the final transcript row"
     );
 
     app.type_char('g');
@@ -637,157 +656,65 @@ fn transcript_layout_search_benchmark_suite() {
     let mut samples = Vec::with_capacity(runs);
     for run in 0..runs {
         let sample = run_search_bench_sample(target_bytes, true);
+        let metric_text = search_bench_metric_values(&sample)
+            .into_iter()
+            .map(|(label, value)| format!("{label}_ms={value:.3}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         eprintln!(
-            "TRANSCRIPT_SEARCH_BENCH_SAMPLE run={} bytes={} rows={} width_resize_ms={:.3} height_resize_ms={:.3} theme_color_ms={:.3} copy_mid_ms={:.3} nav_ctrl_d20_ms={:.3} nav_ctrl_u20_ms={:.3} nav_gg_ms={:.3} nav_G_ms={:.3} rare_ms={:.3} common_submit_ms={:.3} next100_ms={:.3} after_append_ms={:.3}",
+            "TRANSCRIPT_SEARCH_BENCH_SAMPLE run={} bytes={} rows={} {}",
             run + 1,
             sample.bytes,
             sample.rows,
-            sample.width_resize_ms,
-            sample.height_resize_ms,
-            sample.theme_color_ms,
-            sample.copy_mid_ms,
-            sample.nav_ctrl_d20_ms,
-            sample.nav_ctrl_u20_ms,
-            sample.nav_gg_ms,
-            sample.nav_g_ms,
-            sample.rare_ms,
-            sample.common_submit_ms,
-            sample.next100_ms,
-            sample.after_append_ms,
+            metric_text,
         );
         samples.push(sample);
     }
-    let width_resize = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.width_resize_ms)
-            .collect::<Vec<_>>(),
-    );
-    let height_resize = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.height_resize_ms)
-            .collect::<Vec<_>>(),
-    );
-    let theme_color = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.theme_color_ms)
-            .collect::<Vec<_>>(),
-    );
-    let copy_mid = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.copy_mid_ms)
-            .collect::<Vec<_>>(),
-    );
-    let nav_ctrl_d20 = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.nav_ctrl_d20_ms)
-            .collect::<Vec<_>>(),
-    );
-    let nav_ctrl_u20 = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.nav_ctrl_u20_ms)
-            .collect::<Vec<_>>(),
-    );
-    let nav_gg = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.nav_gg_ms)
-            .collect::<Vec<_>>(),
-    );
-    let nav_g = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.nav_g_ms)
-            .collect::<Vec<_>>(),
-    );
-    let rare = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.rare_ms)
-            .collect::<Vec<_>>(),
-    );
-    let common = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.common_submit_ms)
-            .collect::<Vec<_>>(),
-    );
-    let next = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.next100_ms)
-            .collect::<Vec<_>>(),
-    );
-    let after_append = NavStats::from(
-        &samples
-            .iter()
-            .map(|sample| sample.after_append_ms)
-            .collect::<Vec<_>>(),
-    );
+
+    let metric_stats = search_bench_metric_values(&samples[0])
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, _))| {
+            let values = samples
+                .iter()
+                .map(|sample| search_bench_metric_values(sample)[index].1)
+                .collect::<Vec<_>>();
+            (label, NavStats::from(&values))
+        })
+        .collect::<Vec<_>>();
+    let summary_metrics = metric_stats
+        .iter()
+        .flat_map(|(label, stats)| {
+            [
+                format!("{label}_mean_ms={:.3}", stats.mean),
+                format!("{label}_stddev_ms={:.3}", stats.stddev),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     eprintln!(
-        "TRANSCRIPT_SEARCH_BENCH_SUMMARY runs={} bytes={} rows={} width_resize_mean_ms={:.3} width_resize_stddev_ms={:.3} height_resize_mean_ms={:.3} height_resize_stddev_ms={:.3} theme_color_mean_ms={:.3} theme_color_stddev_ms={:.3} copy_mid_mean_ms={:.3} copy_mid_stddev_ms={:.3} nav_ctrl_d20_mean_ms={:.3} nav_ctrl_d20_stddev_ms={:.3} nav_ctrl_u20_mean_ms={:.3} nav_ctrl_u20_stddev_ms={:.3} nav_gg_mean_ms={:.3} nav_gg_stddev_ms={:.3} nav_G_mean_ms={:.3} nav_G_stddev_ms={:.3} rare_mean_ms={:.3} rare_stddev_ms={:.3} common_submit_mean_ms={:.3} common_submit_stddev_ms={:.3} next100_mean_ms={:.3} next100_stddev_ms={:.3} after_append_mean_ms={:.3} after_append_stddev_ms={:.3}",
+        "TRANSCRIPT_SEARCH_BENCH_SUMMARY runs={} bytes={} rows={} {}",
         samples.len(),
         samples[0].bytes,
         samples[0].rows,
-        width_resize.mean,
-        width_resize.stddev,
-        height_resize.mean,
-        height_resize.stddev,
-        theme_color.mean,
-        theme_color.stddev,
-        copy_mid.mean,
-        copy_mid.stddev,
-        nav_ctrl_d20.mean,
-        nav_ctrl_d20.stddev,
-        nav_ctrl_u20.mean,
-        nav_ctrl_u20.stddev,
-        nav_gg.mean,
-        nav_gg.stddev,
-        nav_g.mean,
-        nav_g.stddev,
-        rare.mean,
-        rare.stddev,
-        common.mean,
-        common.stddev,
-        next.mean,
-        next.stddev,
-        after_append.mean,
-        after_append.stddev,
+        summary_metrics,
     );
+    let json_metrics = metric_stats
+        .iter()
+        .flat_map(|(label, stats)| {
+            [
+                format!("\"{label}_mean_ms\":{:.3}", stats.mean),
+                format!("\"{label}_stddev_ms\":{:.3}", stats.stddev),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     eprintln!(
-        "TRANSCRIPT_SEARCH_BENCH_JSON {{\"type\":\"search_summary\",\"runs\":{},\"bytes\":{},\"rows\":{},\"width_resize_mean_ms\":{:.3},\"width_resize_stddev_ms\":{:.3},\"height_resize_mean_ms\":{:.3},\"height_resize_stddev_ms\":{:.3},\"theme_color_mean_ms\":{:.3},\"theme_color_stddev_ms\":{:.3},\"copy_mid_mean_ms\":{:.3},\"copy_mid_stddev_ms\":{:.3},\"nav_ctrl_d20_mean_ms\":{:.3},\"nav_ctrl_d20_stddev_ms\":{:.3},\"nav_ctrl_u20_mean_ms\":{:.3},\"nav_ctrl_u20_stddev_ms\":{:.3},\"nav_gg_mean_ms\":{:.3},\"nav_gg_stddev_ms\":{:.3},\"nav_G_mean_ms\":{:.3},\"nav_G_stddev_ms\":{:.3},\"rare_mean_ms\":{:.3},\"rare_stddev_ms\":{:.3},\"common_submit_mean_ms\":{:.3},\"common_submit_stddev_ms\":{:.3},\"next100_mean_ms\":{:.3},\"next100_stddev_ms\":{:.3},\"after_append_mean_ms\":{:.3},\"after_append_stddev_ms\":{:.3}}}",
+        "TRANSCRIPT_SEARCH_BENCH_JSON {{\"type\":\"search_summary\",\"runs\":{},\"bytes\":{},\"rows\":{},{}}}",
         samples.len(),
         samples[0].bytes,
         samples[0].rows,
-        width_resize.mean,
-        width_resize.stddev,
-        height_resize.mean,
-        height_resize.stddev,
-        theme_color.mean,
-        theme_color.stddev,
-        copy_mid.mean,
-        copy_mid.stddev,
-        nav_ctrl_d20.mean,
-        nav_ctrl_d20.stddev,
-        nav_ctrl_u20.mean,
-        nav_ctrl_u20.stddev,
-        nav_gg.mean,
-        nav_gg.stddev,
-        nav_g.mean,
-        nav_g.stddev,
-        rare.mean,
-        rare.stddev,
-        common.mean,
-        common.stddev,
-        next.mean,
-        next.stddev,
-        after_append.mean,
-        after_append.stddev,
+        json_metrics,
     );
 }
 
