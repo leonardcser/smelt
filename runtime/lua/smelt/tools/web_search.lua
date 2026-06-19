@@ -8,6 +8,14 @@ local function urlencode(s)
   )
 end
 
+local function is_duckduckgo_challenge(status, body)
+  if not body then return false end
+  return (status == 202 and body:find("anomaly", 1, true) ~= nil)
+    or body:find("anomaly-modal", 1, true) ~= nil
+    or body:find("anomaly.js", 1, true) ~= nil
+    or body:find("Unfortunately, bots use DuckDuckGo too.", 1, true) ~= nil
+end
+
 smelt.tools.register({
   name = "web_search",
   description = "Search the web using DuckDuckGo. Returns a list of results with titles, URLs, and descriptions.",
@@ -53,11 +61,15 @@ smelt.tools.register({
     if not resp then
       return { content = "Search failed: " .. (err or "no response"), is_error = true }
     end
-    if resp.status < 200 or resp.status >= 300 then
+    local body = resp.body or ""
+    if is_duckduckgo_challenge(resp.status, body) then
+      return { content = "Search failed: DuckDuckGo returned an anti-bot challenge", is_error = true }
+    end
+    if resp.status ~= 200 then
       return { content = "Search failed: HTTP " .. resp.status, is_error = true }
     end
 
-    local results = smelt.html.parse_ddg_results(resp.body or "")
+    local results = smelt.html.parse_ddg_results(body)
     if #results == 0 then
       return "No results found"
     end

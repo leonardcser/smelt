@@ -7,6 +7,7 @@ const SESSION_LUA: &str = include_str!("../../../runtime/lua/smelt/session.lua")
 const BANNER_LUA: &str = include_str!("../../../runtime/lua/smelt/banner.lua");
 const BANNER_PLUGIN_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/banner.lua");
 const WEB_FETCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_fetch.lua");
+const WEB_SEARCH_LUA: &str = include_str!("../../../runtime/lua/smelt/tools/web_search.lua");
 const TRANSCRIPT_DEFAULTS_LUA: &str =
     include_str!("../../../runtime/lua/smelt/transcript/defaults.lua");
 const SCROLL_PILLS_LUA: &str = include_str!("../../../runtime/lua/smelt/plugins/scroll_pills.lua");
@@ -231,6 +232,57 @@ fn web_fetch_renderer_uses_shared_llm_markdown() {
     assert_eq!(child_kind, "markdown");
     assert!(dim);
     assert_eq!(rows, 7);
+}
+
+#[test]
+fn web_search_reports_duckduckgo_challenge_as_error() {
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        smelt = {
+          tools = {
+            register = function(tool) smelt.__registered_tool = tool end,
+          },
+          http = {
+            cache = {
+              read = function() return nil end,
+              write = function() error("challenge responses must not be cached") end,
+            },
+            random_user_agent = function() return "test-agent" end,
+            get = function()
+              return {
+                status = 202,
+                body = '<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>',
+              }
+            end,
+          },
+          html = {
+            parse_ddg_results = function()
+              error("challenge pages must not be parsed as search results")
+            end,
+          },
+        }
+        "#,
+    )
+    .exec()
+    .expect("install fake smelt api");
+    lua.load(WEB_SEARCH_LUA).exec().expect("load web_search");
+
+    let (content, is_error): (String, bool) = lua
+        .load(
+            r#"
+            local result = smelt.__registered_tool.execute({ query = "current news today" })
+            return result.content, result.is_error
+            "#,
+        )
+        .eval()
+        .expect("execute web_search");
+
+    assert!(is_error);
+    assert_eq!(
+        content,
+        "Search failed: DuckDuckGo returned an anti-bot challenge"
+    );
 }
 
 #[test]
