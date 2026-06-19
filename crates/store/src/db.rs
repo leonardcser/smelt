@@ -17,7 +17,7 @@ use crate::object::{self, ObjectMeta, StoredObject};
 use crate::request_audit::{self, RequestAuditPayloads, RequestAuditQuery, RequestAuditSummary};
 use crate::schema;
 use crate::session_snapshot::{
-    self, SessionHistorySuffix, SessionSaveReport, SessionSnapshot, SessionSnapshotTableSuffixes,
+    self, SessionHistorySuffix, SessionSaveReport, SessionSideTableSuffixes, SessionSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -373,10 +373,10 @@ impl SessionDb {
         })
     }
 
-    pub fn save_session_state_and_snapshot_table_suffixes_as_writer(
+    pub fn save_session_state_and_side_table_suffixes_as_writer(
         &self,
         state: &SessionState,
-        snapshot_tables: &SessionSnapshotTableSuffixes,
+        side_tables: &SessionSideTableSuffixes,
     ) -> Result<SessionSaveReport> {
         let lease = self.current_process_writer_lease()?;
         let expected_revision = self
@@ -384,10 +384,10 @@ impl SessionDb {
             .as_ref()
             .map_or(0, |state| state.revision);
         self.immediate_transaction(|conn| {
-            session_snapshot::save_session_state_and_snapshot_table_suffixes_in_transaction(
+            session_snapshot::save_session_state_and_side_table_suffixes_in_transaction(
                 conn,
                 state,
-                snapshot_tables,
+                side_tables,
                 Some(expected_revision),
                 Some(&lease),
             )
@@ -553,7 +553,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::session_snapshot::SessionSnapshotTableSuffixes;
+    use crate::session_snapshot::SessionSideTableSuffixes;
     use crate::{
         benchmark_zstd_compression, ObjectCodec, RequestAuditOrder, DEFAULT_ZSTD_LEVEL,
         DEFAULT_ZSTD_MIN_SAVINGS_PERCENT,
@@ -653,7 +653,7 @@ mod tests {
             history_start_idx: 2,
             history_len: 3,
             history: vec![appended.clone()],
-            snapshot_tables: None,
+            side_tables: None,
         };
         let appended_descriptor = transcript_record_with_history(2, 2, "new-user", "new user");
         let report = db
@@ -719,7 +719,7 @@ mod tests {
             history_start_idx: 2,
             history_len: 3,
             history: vec![appended],
-            snapshot_tables: Some(SessionSnapshotTableSuffixes {
+            side_tables: Some(SessionSideTableSuffixes {
                 start_idx: 2,
                 turn_metas: Vec::new(),
                 metadata_snapshots: vec![(3, appended_metadata.clone())],

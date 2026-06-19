@@ -1091,7 +1091,7 @@ impl TuiApp {
                     return;
                 }
             };
-            let snapshot_tables = match session::store_snapshot_table_suffixes_from_session(
+            let side_tables = match session::store_side_table_suffixes_from_session(
                 session,
                 session.history.len(),
             ) {
@@ -1115,7 +1115,7 @@ impl TuiApp {
                     session_id,
                     session_dir,
                     state,
-                    snapshot_tables,
+                    side_tables,
                 });
             self.session_dirty = false;
             self.dirty_history_from = None;
@@ -1165,22 +1165,20 @@ impl TuiApp {
                 return;
             }
         };
-        let snapshot_tables = match session::store_snapshot_table_suffixes_from_session(
-            session,
-            history_suffix_start,
-        ) {
-            Ok(tables) => tables,
-            Err(err) => {
-                self.notify_error_sticky(format!("failed to prepare session save: {err}"));
-                return;
-            }
-        };
+        let side_tables =
+            match session::store_side_table_suffixes_from_session(session, history_suffix_start) {
+                Ok(tables) => tables,
+                Err(err) => {
+                    self.notify_error_sticky(format!("failed to prepare session save: {err}"));
+                    return;
+                }
+            };
         let suffix = smelt_store::SessionHistorySuffix {
             state,
             history_start_idx: history_suffix_start,
             history_len: session.history.len(),
             history: session.history[history_suffix_start..].to_vec(),
-            snapshot_tables: Some(snapshot_tables),
+            side_tables: Some(side_tables),
         };
         let session_id = session.id.clone();
         let session_dir = session::dir_for(session);
@@ -1463,7 +1461,7 @@ impl TuiApp {
         history_start_idx: usize,
         history_len: usize,
         history: Vec<HistoryItem>,
-        snapshot_tables: Option<smelt_store::SessionSnapshotTableSuffixes>,
+        side_tables: Option<smelt_store::SessionSideTableSuffixes>,
         descriptor_start_idx: usize,
         descriptor_records: Vec<smelt_core::TranscriptBlockRecord>,
     ) -> bool {
@@ -1482,7 +1480,7 @@ impl TuiApp {
             history_start_idx,
             history_len,
             history,
-            snapshot_tables,
+            side_tables,
         };
         let session_id = session.id.clone();
         let session_dir = session::dir_for(session);
@@ -1595,7 +1593,7 @@ impl TuiApp {
         let history_len = history_index.saturating_add(1);
         let descriptor_count = descriptor_records.len();
         let had_descriptor_total = self.transcript.descriptor_total_count().is_some();
-        let snapshot_tables = match session::store_snapshot_table_suffixes_from_session(
+        let side_tables = match session::store_side_table_suffixes_from_session(
             &self.core.session,
             history_index,
         ) {
@@ -1614,7 +1612,7 @@ impl TuiApp {
             history_index,
             history_len,
             vec![item],
-            Some(snapshot_tables),
+            Some(side_tables),
             descriptor_start_idx,
             descriptor_records,
         );

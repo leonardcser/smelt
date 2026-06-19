@@ -28,5 +28,5 @@ pub use request_audit::{
 };
 pub use schema::SCHEMA_VERSION;
 pub use session_snapshot::{
-    SessionHistorySuffix, SessionSaveReport, SessionSnapshot, SessionSnapshotTableSuffixes,
+    SessionHistorySuffix, SessionSaveReport, SessionSideTableSuffixes, SessionSnapshot,
 };

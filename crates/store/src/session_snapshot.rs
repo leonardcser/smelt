@@ -32,11 +32,11 @@ pub struct SessionHistorySuffix {
     pub history_start_idx: usize,
     pub history_len: usize,
     pub history: Vec<HistoryItem>,
-    pub snapshot_tables: Option<SessionSnapshotTableSuffixes>,
+    pub side_tables: Option<SessionSideTableSuffixes>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SessionSnapshotTableSuffixes {
+pub struct SessionSideTableSuffixes {
     pub start_idx: usize,
     pub turn_metas: Vec<(u64, Value)>,
     pub metadata_snapshots: Vec<(u64, Value)>,
@@ -92,7 +92,7 @@ pub(crate) fn save_session_snapshot_in_transaction(
         snapshot.history.len() as u64,
     );
     perf::record_value(
-        "store:session:snapshot_total_history_rows",
+        "store:session:total_history_rows",
         snapshot.history_len as u64,
     );
     if let Some(lease) = writer_lease {
@@ -208,7 +208,7 @@ pub(crate) fn save_session_history_suffix_in_transaction(
         suffix.history.len() as u64,
     );
     perf::record_value(
-        "store:session:snapshot_total_history_rows",
+        "store:session:total_history_rows",
         suffix.history_len as u64,
     );
     if let Some(lease) = writer_lease {
@@ -248,7 +248,7 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     }
 
     let state_changed = session_state_changed(current_state.as_ref(), &suffix.state);
-    let snapshot_tables_changed = match &suffix.snapshot_tables {
+    let side_tables_changed = match &suffix.side_tables {
         Some(tables) => replace_snapshot_table_suffixes_if_changed(
             conn,
             tables.start_idx as u64,
@@ -259,7 +259,7 @@ pub(crate) fn save_session_history_suffix_in_transaction(
         None => false,
     };
     let changed =
-        history_deleted > 0 || history_inserted > 0 || state_changed || snapshot_tables_changed;
+        history_deleted > 0 || history_inserted > 0 || state_changed || side_tables_changed;
     let mut state = suffix.state.clone();
     state.history_len = suffix.history_len as u64;
     state.revision = if changed {
@@ -282,19 +282,16 @@ pub(crate) fn save_session_history_suffix_in_transaction(
     Ok(report)
 }
 
-pub(crate) fn save_session_state_and_snapshot_table_suffixes_in_transaction(
+pub(crate) fn save_session_state_and_side_table_suffixes_in_transaction(
     conn: &Connection,
     state: &SessionState,
-    snapshot_tables: &SessionSnapshotTableSuffixes,
+    side_tables: &SessionSideTableSuffixes,
     expected_revision: Option<u64>,
     writer_lease: Option<&WriterLease>,
 ) -> Result<SessionSaveReport> {
     let _perf = perf::begin("store:session:save_metadata_transaction");
     perf::record_value("store:session:dirty_suffix_history_rows", 0);
-    perf::record_value(
-        "store:session:snapshot_total_history_rows",
-        state.history_len,
-    );
+    perf::record_value("store:session:total_history_rows", state.history_len);
     if let Some(lease) = writer_lease {
         meta::acquire_writer_lease(conn, lease, 30 * 60)?;
     }
@@ -318,15 +315,15 @@ pub(crate) fn save_session_state_and_snapshot_table_suffixes_in_transaction(
         )));
     }
 
-    let snapshot_tables_changed = replace_snapshot_table_suffixes_if_changed(
+    let side_tables_changed = replace_snapshot_table_suffixes_if_changed(
         conn,
-        snapshot_tables.start_idx as u64,
-        &snapshot_tables.turn_metas,
-        &snapshot_tables.metadata_snapshots,
-        &snapshot_tables.accounting_snapshots,
+        side_tables.start_idx as u64,
+        &side_tables.turn_metas,
+        &side_tables.metadata_snapshots,
+        &side_tables.accounting_snapshots,
     )?;
     let state_changed = session_state_changed(current_state.as_ref(), state);
-    let changed = state_changed || snapshot_tables_changed;
+    let changed = state_changed || side_tables_changed;
     let mut state = state.clone();
     state.revision = if changed {
         current_state.as_ref().map_or(1, |state| state.revision + 1)

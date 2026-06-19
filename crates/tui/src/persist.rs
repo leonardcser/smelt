@@ -30,7 +30,7 @@ pub(crate) struct PersistMetadataRequest {
     pub(crate) session_id: String,
     pub(crate) session_dir: PathBuf,
     pub(crate) state: smelt_store::SessionState,
-    pub(crate) snapshot_tables: smelt_store::SessionSnapshotTableSuffixes,
+    pub(crate) side_tables: smelt_store::SessionSideTableSuffixes,
 }
 
 enum Cmd {
@@ -235,7 +235,7 @@ fn write_metadata(
         .db(&db_path)
         .map_err(|err| format!("open session database: {err}"))?;
     let save_report = db
-        .save_session_state_and_snapshot_table_suffixes_as_writer(&req.state, &req.snapshot_tables)
+        .save_session_state_and_side_table_suffixes_as_writer(&req.state, &req.side_tables)
         .map_err(|err| format!("save session metadata: {err}"))?;
     record_save_report(&save_report);
     db.write_meta_sidecar(req.session_dir.join("meta.json"))
