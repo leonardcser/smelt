@@ -39,6 +39,9 @@ Type `/` to open the command picker with fuzzy search.
 | `/upgrade [check]`        | Install the newest smelt build (or refresh the cache with `check`)   |
 | `/exit`, `/quit`          | Exit (also `:q`, `:qa`, `:wq`, `:wqa`)                               |
 
+Goal auto-continue runs only while idle. Queued user messages run first; if the
+same goal remains active afterward, auto-continue resumes.
+
 ## Shell Escape
 
 Prefix with `!` to run a shell command directly, without going through the

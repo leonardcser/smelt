@@ -26,7 +26,7 @@ While the agent is responding, `Enter` queues your prompt to run next.
 `Ctrl+Enter` or `Ctrl+Q` steers the response currently in progress. Press
 `Enter` on an empty prompt to send the next queued message immediately, or `Esc`
 to bring queued messages back into the prompt for editing. A second `Esc`
-cancels the running turn.
+cancels the running turn. Queued user messages run before goal auto-continue.
 
 ### Terminal setup
 
