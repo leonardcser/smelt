@@ -38,17 +38,16 @@ smelt.tools.register({
       return cached
     end
 
-    local body = "q=" .. urlencode(query) .. "&kl=us-en"
-    local resp, err = smelt.http.post("https://html.duckduckgo.com/html/", body, {
+    local encoded_query = urlencode(query)
+    local url = "https://html.duckduckgo.com/html/?q=" .. encoded_query .. "&kl=us-en"
+    local resp, err = smelt.http.get(url, {
       timeout_secs = 20,
       max_redirects = 10,
       headers = {
         ["User-Agent"] = smelt.http.random_user_agent(),
-        ["Content-Type"] = "application/x-www-form-urlencoded",
         ["Accept"] = "text/html",
         ["Accept-Language"] = "en-US,en;q=0.9",
         ["Referer"] = "https://html.duckduckgo.com/html/",
-        ["Origin"] = "https://html.duckduckgo.com",
       },
     })
     if not resp then
