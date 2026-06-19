@@ -696,6 +696,72 @@ impl TranscriptDocument {
             .collect()
     }
 
+    fn block_snapshots_from_layout(
+        &self,
+        layout: impl Iterator<
+            Item = (
+                BlockId,
+                crate::smelt_edit::RowIndex,
+                crate::smelt_edit::RowIndex,
+            ),
+        >,
+    ) -> Vec<TranscriptBlockSnapshot> {
+        let mut out = Vec::new();
+        let history = self.history();
+        for (block_id, first_row, rows) in layout {
+            let Some(idx) = history.order.iter().position(|id| *id == block_id) else {
+                continue;
+            };
+            let Some(block) = history.block(block_id) else {
+                continue;
+            };
+            out.push((
+                idx,
+                transcript_block_role(block),
+                first_row,
+                rows,
+                transcript_block_first_line(block),
+            ));
+        }
+        out
+    }
+
+    pub(crate) fn visible_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
+        self.block_snapshots_from_layout(self.visible_block_layout())
+    }
+
+    pub(crate) fn materialize_block_snapshots(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+    ) -> Vec<TranscriptBlockSnapshot> {
+        let layout = self.materialize_block_layout(lua, width);
+        self.block_snapshots_from_layout(layout.into_iter())
+    }
+
+    pub(crate) fn block_snapshot_before_or_at_row(
+        &mut self,
+        lua: &LuaRuntime,
+        width: u16,
+        row: crate::smelt_edit::RowIndex,
+        role: Option<&str>,
+    ) -> Option<TranscriptBlockSnapshot> {
+        let node = self.block_node_before_or_at_row(lua, width, row, |history, id| {
+            role.is_none_or(|role| transcript_history_role(history, id) == role)
+                && !transcript_raw_first_line(history, id).is_empty()
+        })?;
+        let block_id = node.id.as_block_id()?;
+        let history = self.history();
+        let idx = history.order.iter().position(|id| *id == block_id)?;
+        Some((
+            idx,
+            transcript_history_role(history, block_id),
+            node.first_row,
+            node.rows,
+            transcript_raw_first_line(history, block_id),
+        ))
+    }
+
     pub(crate) fn materialize_search_layout(
         &mut self,
         lua: &LuaRuntime,
@@ -2223,40 +2289,14 @@ impl TuiApp {
     /// the caller as needed). Returns empty when no projection has run yet
     /// (i.e. before the first frame).
     pub(crate) fn visible_transcript_block_snapshots(&self) -> Vec<TranscriptBlockSnapshot> {
-        self.transcript_block_snapshots_from_layout(self.transcript.visible_block_layout())
+        self.transcript.visible_block_snapshots()
     }
 
     pub(crate) fn transcript_block_snapshots(&mut self) -> Vec<TranscriptBlockSnapshot> {
         self.sync_transcript_renderer_generation();
-        let tw = self.transcript_width() as u16;
-        let layout = self.transcript.materialize_block_layout(&self.lua, tw);
-        self.transcript_block_snapshots_from_layout(layout.into_iter())
-    }
-
-    fn transcript_block_snapshots_from_layout(
-        &self,
-        layout: impl Iterator<
-            Item = (
-                BlockId,
-                crate::smelt_edit::RowIndex,
-                crate::smelt_edit::RowIndex,
-            ),
-        >,
-    ) -> Vec<TranscriptBlockSnapshot> {
-        let mut out = Vec::new();
-        let history = self.transcript.history();
-        for (block_id, first_row, rows) in layout {
-            let Some(idx) = history.order.iter().position(|id| *id == block_id) else {
-                continue;
-            };
-            let Some(block) = history.block(block_id) else {
-                continue;
-            };
-            let role = transcript_block_role(block);
-            let first_line = transcript_block_first_line(block);
-            out.push((idx, role, first_row, rows, first_line));
-        }
-        out
+        let width = self.transcript_width() as u16;
+        self.transcript
+            .materialize_block_snapshots(&self.lua, width)
     }
 
     pub(crate) fn transcript_block_at_row(
@@ -2278,22 +2318,8 @@ impl TuiApp {
     ) -> Option<TranscriptBlockSnapshot> {
         self.sync_transcript_renderer_generation();
         let width = self.transcript_width() as u16;
-        let node =
-            self.transcript
-                .block_node_before_or_at_row(&self.lua, width, row, |history, id| {
-                    role.is_none_or(|role| transcript_history_role(history, id) == role)
-                        && !transcript_raw_first_line(history, id).is_empty()
-                })?;
-        let block_id = node.id.as_block_id()?;
-        let history = self.transcript.history();
-        let idx = history.order.iter().position(|id| *id == block_id)?;
-        Some((
-            idx,
-            transcript_history_role(history, block_id),
-            node.first_row,
-            node.rows,
-            transcript_raw_first_line(history, block_id),
-        ))
+        self.transcript
+            .block_snapshot_before_or_at_row(&self.lua, width, row, role)
     }
 
     pub(crate) fn finish_transcript_turn(&mut self) {
