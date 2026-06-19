@@ -814,7 +814,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
                         } else {
                             // COMPAT(legacy-session-full-load-fallbacks): preview uses a full legacy load only when sparse SQLite transcript records are unavailable.
                             smelt_perf::perf::record_value("compat:session:preview_full_fallback", 1);
-                            if let Some(session) = smelt_core::session::load(&id) {
+                            if let Some(session) = smelt_core::session::load_full(&id) {
                                 let cache_key = format!("{}:{}", session.id, session.updated_at_ms);
                                 if cached_key.as_deref() != Some(cache_key.as_str()) {
                                     cached_view = app.resume_preview_cache.take(&cache_key);

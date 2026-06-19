@@ -69,7 +69,7 @@ impl LoadedTranscript {
 
     pub(crate) fn from_sqlite_dir(session_dir: PathBuf) -> Option<Self> {
         let store = SqliteTranscriptStore::open_read_only(&session_dir).ok()?;
-        let rows = store.read_descriptor_records().ok()?;
+        let rows = store.read_all_descriptor_records_expensive().ok()?;
         Self::from_full_descriptor_rows(rows, session_dir)
     }
 
@@ -156,10 +156,10 @@ impl SqliteTranscriptStore {
         Ok(Self { db })
     }
 
-    fn read_descriptor_records(
+    fn read_all_descriptor_records_expensive(
         &self,
     ) -> smelt_store::Result<Vec<smelt_store::TranscriptDescriptorRecord>> {
-        self.db.read_transcript_descriptor_records()
+        self.db.read_all_transcript_descriptor_records()
     }
 
     fn read_tail_descriptor_slice_for_rows(
@@ -1932,10 +1932,12 @@ impl TuiApp {
         !self.transcript.is_empty()
     }
 
-    /// Full transcript as one string per display row. Result is cached as an
-    /// `Arc<Vec<String>>` until the transcript, width, renderer, or presentation changes.
-    pub(crate) fn full_transcript_display_text(&mut self) -> Arc<Vec<String>> {
-        let _perf = smelt_perf::perf::begin("transcript:materialize_rows_full");
+    /// Explicit full transcript materialization for APIs/tests that request the
+    /// whole post-render display text. Do not use for normal viewport rendering.
+    pub(crate) fn materialize_full_transcript_display_rows_expensive(
+        &mut self,
+    ) -> Arc<Vec<String>> {
+        let _perf = smelt_perf::perf::begin("transcript:materialize_rows_full:explicit");
         self.sync_transcript_renderer_generation();
         let tw = self.transcript_width() as u16;
         let theme = self.ui.theme().clone();

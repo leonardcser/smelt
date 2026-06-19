@@ -1002,7 +1002,7 @@ impl TuiApp {
         };
         // COMPAT(transcript-deferred-full-descriptor-bridge): semantic operations that need the full session still load it after display-only resume.
         smelt_perf::perf::record_value("compat:session:deferred_load_full", 1);
-        if let Some(loaded) = session::load(&deferred.id) {
+        if let Some(loaded) = session::load_full(&deferred.id) {
             self.install_loaded_session(loaded);
             self.prune_rewindable_session_state(self.core.session.history.len());
             if !block_history_covers_history(self.transcript.history(), &self.core.session) {
@@ -1847,7 +1847,7 @@ mod checkpoint_tests {
             ]
         );
         let descriptors = db
-            .read_transcript_descriptor_records()
+            .read_all_transcript_descriptor_records()
             .expect("read transcript descriptors");
         assert!(descriptors
             .iter()
@@ -1902,7 +1902,7 @@ mod checkpoint_tests {
             ]
         );
         let descriptors = db
-            .read_transcript_descriptor_records()
+            .read_all_transcript_descriptor_records()
             .expect("read transcript descriptors");
         assert!(descriptors
             .iter()
@@ -2019,7 +2019,7 @@ mod checkpoint_tests {
             smelt_store::SessionDb::open_read_only(session::dir_for_id(&id).join("session.db"))
                 .expect("open session db");
         let snapshot = db
-            .load_session_snapshot()
+            .load_full_session_snapshot()
             .expect("load snapshot")
             .expect("snapshot");
         assert_eq!(snapshot.history, vec![user("new user")]);
@@ -2059,7 +2059,7 @@ mod checkpoint_tests {
             Vec::<HistoryItem>::new()
         );
         assert!(db
-            .read_transcript_descriptor_records()
+            .read_all_transcript_descriptor_records()
             .expect("read descriptors")
             .is_empty());
         assert_eq!(

@@ -394,7 +394,7 @@ impl SessionDb {
         })
     }
 
-    pub fn load_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {
+    pub fn load_full_session_snapshot(&self) -> Result<Option<SessionSnapshot>> {
         session_snapshot::load_session_snapshot(&self.conn)
     }
 
@@ -428,7 +428,9 @@ impl SessionDb {
         history::transcript_descriptor_dense_extent(&self.conn)
     }
 
-    pub fn read_transcript_descriptor_records(&self) -> Result<Vec<TranscriptDescriptorRecord>> {
+    pub fn read_all_transcript_descriptor_records(
+        &self,
+    ) -> Result<Vec<TranscriptDescriptorRecord>> {
         history::read_transcript_descriptor_records(&self.conn)
     }
 
@@ -591,7 +593,7 @@ mod tests {
         db.replace_transcript_descriptor_suffix(1, &replacement)
             .unwrap();
 
-        let records = db.read_transcript_descriptor_records().unwrap();
+        let records = db.read_all_transcript_descriptor_records().unwrap();
         assert_eq!(records.len(), 3);
         assert_eq!(records[0], initial[0]);
         assert_eq!(records[1], replacement[0]);
@@ -606,7 +608,7 @@ mod tests {
         );
 
         db.replace_transcript_descriptor_suffix(2, &[]).unwrap();
-        let records = db.read_transcript_descriptor_records().unwrap();
+        let records = db.read_all_transcript_descriptor_records().unwrap();
         assert_eq!(records, vec![initial[0].clone(), replacement[0].clone()]);
         assert_eq!(
             db.search_transcript_candidates("updated two").unwrap(),
@@ -674,7 +676,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            db.read_transcript_descriptor_records().unwrap(),
+            db.read_all_transcript_descriptor_records().unwrap(),
             vec![
                 initial_descriptors[0].clone(),
                 initial_descriptors[1].clone(),
@@ -728,7 +730,7 @@ mod tests {
             .unwrap();
 
         let snapshot = db
-            .load_session_snapshot()
+            .load_full_session_snapshot()
             .unwrap()
             .expect("session snapshot");
         assert_eq!(
@@ -875,7 +877,7 @@ mod tests {
         db.replace_transcript_descriptor_records(&[record]).unwrap();
 
         let full: serde_json::Value = serde_json::from_str(
-            &db.read_transcript_descriptor_records().unwrap()[0].descriptor_json,
+            &db.read_all_transcript_descriptor_records().unwrap()[0].descriptor_json,
         )
         .unwrap();
         assert_eq!(
@@ -1138,7 +1140,11 @@ mod tests {
         assert_eq!(append.history_inserted, 1);
         assert_eq!(append.history_deleted, 0);
         assert_eq!(
-            db.load_session_snapshot().unwrap().unwrap().history.len(),
+            db.load_full_session_snapshot()
+                .unwrap()
+                .unwrap()
+                .history
+                .len(),
             2
         );
         assert_eq!(db.search_blob().unwrap(), "first\nuser\nsecond\nuser\n");
@@ -1212,11 +1218,14 @@ mod tests {
         )
         .unwrap_err();
 
-        let loaded = db.load_session_snapshot().unwrap().unwrap();
+        let loaded = db.load_full_session_snapshot().unwrap().unwrap();
         assert_eq!(loaded.history, vec![first]);
         assert_eq!(loaded.state.history_len, 1);
         assert_eq!(db.search_blob().unwrap(), "first descriptor\n");
-        assert_eq!(db.read_transcript_descriptor_records().unwrap().len(), 1);
+        assert_eq!(
+            db.read_all_transcript_descriptor_records().unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -1308,7 +1317,11 @@ mod tests {
         assert_eq!(append.history_inserted, 1);
         assert_eq!(db.search_blob().unwrap(), "first detailed\nsecond\nuser\n");
         assert_eq!(
-            db.load_session_snapshot().unwrap().unwrap().history.len(),
+            db.load_full_session_snapshot()
+                .unwrap()
+                .unwrap()
+                .history
+                .len(),
             2
         );
     }
@@ -1419,7 +1432,7 @@ mod tests {
         ])
         .unwrap();
 
-        let rows = db.read_transcript_descriptor_records().unwrap();
+        let rows = db.read_all_transcript_descriptor_records().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(db.search_blob().unwrap(), "alpha\nneedle output\n");

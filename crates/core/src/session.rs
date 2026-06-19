@@ -1482,14 +1482,17 @@ pub fn atomic_write(path: &std::path::Path, contents: &[u8], ts: u64) {
     }
 }
 
-/// Load by exact ID or unique prefix (git-style short ID).
-pub fn load(id_or_prefix: &str) -> Option<Session> {
-    let _perf = smelt_perf::perf::begin("session:load");
+/// Load the full semantic session by exact ID or unique prefix (git-style short ID).
+///
+/// This materializes all history rows and should stay out of normal resume,
+/// preview, render, search, save, and provider-dispatch hot paths.
+pub fn load_full(id_or_prefix: &str) -> Option<Session> {
+    let _perf = smelt_perf::perf::begin("session:load_full");
     let id = {
-        let _perf = smelt_perf::perf::begin("session:load:resolve");
+        let _perf = smelt_perf::perf::begin("session:load_full:resolve");
         resolve_prefix(id_or_prefix)?
     };
-    load_exact(&id)
+    load_full_exact(&id)
 }
 
 pub fn load_meta(id_or_prefix: &str) -> Option<SessionMeta> {
@@ -1511,8 +1514,8 @@ pub fn load_meta_for_prepared_dir(dir: PathBuf) -> Option<SessionMeta> {
     load_meta_for_dir(dir)
 }
 
-fn load_exact(id: &str) -> Option<Session> {
-    let _perf = smelt_perf::perf::begin("session:load:exact");
+fn load_full_exact(id: &str) -> Option<Session> {
+    let _perf = smelt_perf::perf::begin("session:load_full:exact");
     load_session_files(&sessions_dir().join(id))
 }
 
@@ -1539,12 +1542,12 @@ fn internalize_session_blobs(dir_path: &std::path::Path, mut session: Session) -
     let blob_dir = dir_path.join("blobs");
     if blob_dir.is_dir() {
         let blob_to_url = {
-            let _perf = smelt_perf::perf::begin("session:load:read_blobs");
+            let _perf = smelt_perf::perf::begin("session:load_full:read_blobs");
             crate::attachment::AttachmentStore::load_blobs(&blob_dir)
         };
-        smelt_perf::perf::record_value("session:load:blobs", blob_to_url.len() as u64);
+        smelt_perf::perf::record_value("session:load_full:blobs", blob_to_url.len() as u64);
         if !blob_to_url.is_empty() {
-            let _perf = smelt_perf::perf::begin("session:load:internalize_blobs");
+            let _perf = smelt_perf::perf::begin("session:load_full:internalize_blobs");
             internalize_blobs(&mut session.history, &blob_to_url);
         }
     }
@@ -1557,7 +1560,7 @@ fn load_db_session(dir_path: &std::path::Path) -> Option<Session> {
         return None;
     }
     let db = smelt_store::SessionDb::open(&db_path).ok()?;
-    let mut snapshot = db.load_session_snapshot().ok()??;
+    let mut snapshot = db.load_full_session_snapshot().ok()??;
     let history = std::mem::take(&mut snapshot.history);
     Some(session_from_store_snapshot(snapshot, history))
 }
@@ -1810,7 +1813,7 @@ pub(crate) fn read_jsonl_session(
 ) -> crate::session_migration::SessionMigrationResult<Session> {
     let meta_path = dir_path.join("meta.json");
     let meta_contents = {
-        let _perf = smelt_perf::perf::begin("session:load:read_meta_json");
+        let _perf = smelt_perf::perf::begin("session:load_full:read_meta_json");
         fs::read_to_string(&meta_path).map_err(|err| match err.kind() {
             std::io::ErrorKind::NotFound => {
                 crate::session_migration::SessionMigrationError::MissingFile {
@@ -1823,9 +1826,12 @@ pub(crate) fn read_jsonl_session(
             },
         })?
     };
-    smelt_perf::perf::record_value("session:load:meta_json_bytes", meta_contents.len() as u64);
+    smelt_perf::perf::record_value(
+        "session:load_full:meta_json_bytes",
+        meta_contents.len() as u64,
+    );
     let meta: SessionJsonlMeta = {
-        let _perf = smelt_perf::perf::begin("session:load:parse_meta_json");
+        let _perf = smelt_perf::perf::begin("session:load_full:parse_meta_json");
         serde_json::from_str(&meta_contents).map_err(|err| {
             crate::session_migration::SessionMigrationError::ParseJson {
                 path: meta_path.clone(),
@@ -1844,7 +1850,7 @@ pub(crate) fn read_jsonl_session(
 
     let history_path = dir_path.join("history.jsonl");
     let history_file = {
-        let _perf = smelt_perf::perf::begin("session:load:open_history_jsonl");
+        let _perf = smelt_perf::perf::begin("session:load_full:open_history_jsonl");
         fs::File::open(&history_path).map_err(|err| match err.kind() {
             std::io::ErrorKind::NotFound => {
                 crate::session_migration::SessionMigrationError::MissingFile {
@@ -1858,9 +1864,9 @@ pub(crate) fn read_jsonl_session(
         })?
     };
     let history_len = history_file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-    smelt_perf::perf::record_value("session:load:history_jsonl_bytes", history_len);
+    smelt_perf::perf::record_value("session:load_full:history_jsonl_bytes", history_len);
     let history = {
-        let _perf = smelt_perf::perf::begin("session:load:parse_history_jsonl");
+        let _perf = smelt_perf::perf::begin("session:load_full:parse_history_jsonl");
         let reader = std::io::BufReader::new(history_file);
         let mut history = Vec::new();
         for (idx, line) in reader.lines().enumerate() {
@@ -1883,7 +1889,7 @@ pub(crate) fn read_jsonl_session(
         }
         history
     };
-    smelt_perf::perf::record_value("session:load:history_items", history.len() as u64);
+    smelt_perf::perf::record_value("session:load_full:history_items", history.len() as u64);
     Ok(meta.into_session(history))
 }
 
@@ -1894,7 +1900,7 @@ pub(crate) fn read_legacy_json_session(
 ) -> crate::session_migration::SessionMigrationResult<Session> {
     let session_path = dir_path.join("session.json");
     let contents = {
-        let _perf = smelt_perf::perf::begin("session:load:read_json");
+        let _perf = smelt_perf::perf::begin("session:load_full:read_json");
         fs::read_to_string(&session_path).map_err(|err| match err.kind() {
             std::io::ErrorKind::NotFound => {
                 crate::session_migration::SessionMigrationError::MissingFile {
@@ -1907,9 +1913,9 @@ pub(crate) fn read_legacy_json_session(
             },
         })?
     };
-    smelt_perf::perf::record_value("session:load:json_bytes", contents.len() as u64);
+    smelt_perf::perf::record_value("session:load_full:json_bytes", contents.len() as u64);
     let session: Session = {
-        let _perf = smelt_perf::perf::begin("session:load:parse_json");
+        let _perf = smelt_perf::perf::begin("session:load_full:parse_json");
         serde_json::from_str(&contents).map_err(|err| {
             crate::session_migration::SessionMigrationError::ParseJson {
                 path: session_path,
@@ -1917,7 +1923,10 @@ pub(crate) fn read_legacy_json_session(
             }
         })?
     };
-    smelt_perf::perf::record_value("session:load:history_items", session.history.len() as u64);
+    smelt_perf::perf::record_value(
+        "session:load_full:history_items",
+        session.history.len() as u64,
+    );
     Ok(session)
 }
 
@@ -1925,7 +1934,7 @@ pub(crate) fn read_legacy_json_session(
 // soon as they are opened, then write current sidecars. Legacy artifacts are
 // removed by the migration cleanup once canonical SQLite is readable.
 pub(crate) fn migrate_legacy_json_session(dir_path: &Path, session: &Session) {
-    let _perf = smelt_perf::perf::begin("session:load:migrate_sqlite");
+    let _perf = smelt_perf::perf::begin("session:load_full:migrate_sqlite");
     write_generated_sidecars(dir_path, session);
     cleanup_migrated_legacy_artifacts(dir_path);
 }

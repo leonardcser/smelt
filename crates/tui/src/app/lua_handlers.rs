@@ -323,7 +323,7 @@ impl TuiApp {
             let Some(history_len) = meta.history_len else {
                 // COMPAT(legacy-session-full-load-fallbacks): sessions without SQLite history metadata still need monolithic load until legacy session imports are retired.
                 smelt_perf::perf::record_value("compat:session:load_full_fallback", 1);
-                if let Some(loaded) = smelt_core::session::load(id) {
+                if let Some(loaded) = smelt_core::session::load_full(id) {
                     self.load_session(loaded);
                     self.restore_screen();
                     self.finish_transcript_turn();
@@ -361,7 +361,7 @@ impl TuiApp {
         }
         // COMPAT(legacy-session-full-load-fallbacks): if the sparse SQLite transcript path is unavailable, fall back to legacy full session open.
         smelt_perf::perf::record_value("compat:session:load_full_fallback", 1);
-        if let Some(loaded) = smelt_core::session::load(id) {
+        if let Some(loaded) = smelt_core::session::load_full(id) {
             self.load_session(loaded);
             self.restore_screen();
             self.finish_transcript_turn();

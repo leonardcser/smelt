@@ -280,7 +280,7 @@ pub(super) fn register(lua: &Lua, smelt: &mlua::Table) -> LuaResult<()> {
         &[],
         |_, ()| -> LuaResult<String> {
             Ok(crate::lua::try_with_app(|app| {
-                app.full_transcript_display_text().join("\n")
+                app.materialize_full_transcript_display_rows_expensive().join("\n")
             })
             .unwrap_or_default())
         },

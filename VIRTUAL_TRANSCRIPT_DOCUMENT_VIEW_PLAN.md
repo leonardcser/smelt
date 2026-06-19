@@ -491,12 +491,26 @@ Desired end state:
 
 Phases:
 
+Each phase ends with a mandatory reflection gate: load the `reflect` skill, run it against the phase changes and remaining plan, and address every resulting finding that is actually worth doing before starting the next phase. If a finding is intentionally not done, record the reason in the plan or final summary.
+
 1. **Inventory and classify remaining broad seams.** Audit every production caller of full session loads, full descriptor reads, full row builds, backing-buffer document semantics, and snapshot-shaped saves. Classify each as delete, move behind `TranscriptDocument`, rename as explicit expensive API, or keep as compatibility/export/diagnostic/test.
 2. **Collapse transcript semantics into `TranscriptDocument`.** Move remaining app-side transcript range coordination, cursor/anchor exactification, search refinement, copy/yank exactification, fold/action lookup, and descriptor-window decisions behind document methods.
 3. **Demote full-row and full-session APIs.** Remove production access to full row vectors and full semantic session load where a sparse document/store-backed path exists. Rename retained APIs so whole-session or whole-transcript cost is explicit.
 4. **Narrow compatibility fallbacks.** Keep legacy import/migration support, but ensure normal preview/resume/render/search/save paths do not choose full-load fallbacks unless the store-backed descriptor path is genuinely unavailable. Every remaining fallback must be `COMPAT`-tracked and perf-instrumented.
 5. **Tighten persistence call sites.** Replace any remaining normal-runtime broad snapshot construction with typed delta helpers where that simplifies code or removes accidental full-history access. Leave import/export/test snapshot APIs intact.
-6. **Revalidate and simplify tests.** Add or adjust tests around the new ownership boundary, then rerun formatting, clippy, workspace tests, and the relevant transcript hot-path benchmarks.
+6. **Revalidate and simplify tests.** Add or adjust tests around the new ownership boundary, then rerun formatting, clippy, workspace tests, and the relevant transcript hot-path benchmarks. Finish with one final `reflect` pass and do all worthwhile findings before marking the rewrite complete.
+
+Phase 1 inventory:
+
+| Seam | Current classification | Next action |
+| --- | --- | --- |
+| Full semantic session load | Kept as explicit expensive API for compatibility bridges, inspect detail, tests, and operations that deliberately need a full `Session`. | Phase 1 renamed neutral callers to `load_full` and full-load perf labels to `session:load_full:*`; Phase 4 decides whether any UI fallback can be moved closer to storage/migration. |
+| Full store snapshot read | Kept for full semantic session reconstruction and store tests. | Phase 1 exposes it as `load_full_session_snapshot`; do not use from normal resume/preview/render/search/save/dispatch. |
+| Full transcript descriptor read | Kept for full descriptor repair/deferred-bridge logic and store/TUI tests. | Phase 1 exposes it as `read_all_transcript_descriptor_records` / `read_all_descriptor_records_expensive`; prefer slice/tail reads for production document paths. |
+| Full transcript display text | Kept for explicit Lua `smelt.transcript.text()` and renderer tests. | Phase 1 exposes it as `materialize_full_transcript_display_rows_expensive`; do not use for viewport render/cache. |
+| Compatibility display rebuilds from `Session.history` | Kept temporarily for legacy or partially migrated sessions. | Phase 4 narrows availability and keeps `COMPAT` instrumentation. |
+| App-side transcript semantic coordination | Active refactor target. `TuiApp` still coordinates anchors, fold snapshots, selectable snapping, block layout snapshots, and mouse/copy state using `TranscriptDocument` plus transcript-window state. | Phase 2 moves the useful pieces behind `TranscriptDocument` or shared document-view APIs without rewriting unrelated window focus/render plumbing. |
+| Snapshot-shaped normal save helpers | Mostly demoted from hot TUI paths, but core full-session save APIs still construct `SessionSnapshot`. | Phase 5 audits whether remaining normal-runtime callers can use typed deltas without making import/export/test paths worse. |
 
 Acceptance:
 
