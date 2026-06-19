@@ -316,12 +316,18 @@ pub enum EngineEvent {
     /// tool_calls it emitted - there is no in-flight state to worry about.
     HistoryUpdated {
         turn_id: u64,
+        /// First public history index that may differ from the previous UI snapshot.
+        /// Consumers can treat the prefix below this index as unchanged without
+        /// comparing every row in large sessions.
+        first_changed_index: usize,
         history: Vec<crate::history::HistoryItem>,
     },
 
     /// The agent turn completed (successfully or after cancellation).
     TurnComplete {
         turn_id: u64,
+        /// First public history index that may differ from the previous UI snapshot.
+        first_changed_index: usize,
         history: Vec<crate::history::HistoryItem>,
         meta: Option<TurnMeta>,
     },

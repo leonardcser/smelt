@@ -554,7 +554,11 @@ impl TuiApp {
         }
     }
 
-    pub(crate) fn set_history(&mut self, history: Vec<HistoryItem>) {
+    pub(crate) fn set_history_from(
+        &mut self,
+        history: Vec<HistoryItem>,
+        first_changed_index: Option<usize>,
+    ) {
         let applied_items: Vec<HistoryItem> = self
             .pending_history_appends
             .iter()
@@ -565,14 +569,29 @@ impl TuiApp {
                     .cloned()
             })
             .collect();
-        let dirty_from = self
-            .core
-            .session
-            .history
-            .iter()
-            .zip(history.iter())
-            .take_while(|(left, right)| left == right)
-            .count();
+        let dirty_from =
+            match first_changed_index.filter(|_| self.core.session.checkpoint.is_none()) {
+                Some(idx) => {
+                    smelt_perf::perf::record_value("tui:set_history:dirty_from_hint", idx as u64);
+                    idx.min(history.len())
+                }
+                None => {
+                    let _perf = smelt_perf::perf::begin("tui:set_history:dirty_prefix_compare");
+                    let dirty_from = self
+                        .core
+                        .session
+                        .history
+                        .iter()
+                        .zip(history.iter())
+                        .take_while(|(left, right)| left == right)
+                        .count();
+                    smelt_perf::perf::record_value(
+                        "tui:set_history:dirty_prefix_compared",
+                        dirty_from as u64,
+                    );
+                    dirty_from
+                }
+            };
         self.mark_history_dirty_from(dirty_from);
         self.core
             .session
@@ -1867,7 +1886,7 @@ mod checkpoint_tests {
 
         smelt_perf::perf::clear();
         smelt_perf::perf::set_enabled(true);
-        app.app.set_history(updated);
+        app.app.set_history_from(updated, None);
         app.app.save_session();
         app.app.flush_persist();
         smelt_perf::perf::set_enabled(false);

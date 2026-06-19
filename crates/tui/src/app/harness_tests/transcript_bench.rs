@@ -1121,6 +1121,7 @@ fn run_history_updated_hot_path(history_len: usize) -> (HotPathSample, smelt_per
         app.app
             .dispatch_engine_event(protocol::EngineEvent::HistoryUpdated {
                 turn_id: 1,
+                first_changed_index: history_len,
                 history: updated,
             });
         app.app.flush_persist();
@@ -1142,6 +1143,12 @@ fn run_history_updated_hot_path(history_len: usize) -> (HotPathSample, smelt_per
         sample.operation,
         "store:history:dirty_suffix_rows",
         1,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "tui:set_history:dirty_prefix_compared",
+        0,
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
     assert_cached_persist_db(&snapshot, sample.operation);

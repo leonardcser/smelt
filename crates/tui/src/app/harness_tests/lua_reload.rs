@@ -419,6 +419,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
     }));
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
         turn_id: 1,
+        first_changed_index: 0,
         history: completed_history.clone(),
         meta: None,
     }));
@@ -430,6 +431,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
     app.start_turn(2);
     app.feed_one(SourceEvent::Engine(EngineEvent::HistoryUpdated {
         turn_id: 2,
+        first_changed_index: 1,
         history: in_flight_history,
     }));
 
@@ -2087,6 +2089,7 @@ fn scheduled_reload_runs_after_turn_is_idle() {
 
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
         turn_id: 1,
+        first_changed_index: 0,
         history: vec![],
         meta: None,
     }));

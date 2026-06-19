@@ -1529,6 +1529,7 @@ mod tests {
         app.feed_one(crate::app::test_harness::SourceEvent::Engine(
             protocol::EngineEvent::HistoryUpdated {
                 turn_id,
+                first_changed_index: 0,
                 history: vec![
                     HistoryItem::user(Content::text("previous user message")),
                     HistoryItem::note(current_note.clone()),

@@ -128,6 +128,7 @@ pub(crate) async fn engine_task(
                             tools,
                             permission_overrides,
                             pending_history_items: Vec::new(),
+                            next_history_changed_from: 0,
                             session_id,
                             session_dir,
                             started_at: config.clock.instant_now(),
@@ -732,6 +733,7 @@ struct Turn<'a> {
     tools: Vec<protocol::ToolDef>,
     permission_overrides: Option<protocol::PermissionOverrides>,
     pending_history_items: Vec<HistoryItem>,
+    next_history_changed_from: usize,
     /// Stable per-session identifier sent as OpenAI's `prompt_cache_key`
     /// to anchor cache routing across all turns in this session.
     session_id: String,
@@ -759,6 +761,23 @@ enum PrepareRequestOutcome {
 impl<'a> Turn<'a> {
     fn emit(&self, event: EngineEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    fn public_history_len(&self) -> usize {
+        self.history.len().saturating_sub(
+            self.history
+                .first()
+                .is_some_and(|item| matches!(item, HistoryItem::System { .. }))
+                as usize,
+        )
+    }
+
+    fn mark_history_changed_from(&mut self, public_idx: usize) {
+        self.next_history_changed_from = self.next_history_changed_from.min(public_idx);
+    }
+
+    fn mark_append_history_changed(&mut self) {
+        self.mark_history_changed_from(self.public_history_len());
     }
 
     /// True for commands that inject or remove user messages from the
@@ -860,6 +879,7 @@ impl<'a> Turn<'a> {
         } else {
             display
         };
+        self.mark_append_history_changed();
         self.history.push(HistoryItem::User { content, display });
     }
 
@@ -875,6 +895,7 @@ impl<'a> Turn<'a> {
         if let HistoryItem::User { display: slot, .. } = &mut item {
             *slot = display;
         }
+        self.mark_append_history_changed();
         self.history.push(item);
     }
 
@@ -891,6 +912,7 @@ impl<'a> Turn<'a> {
                 }
             }
         }
+        self.mark_append_history_changed();
         self.history.push(HistoryItem::Assistant(step));
     }
 
@@ -924,15 +946,18 @@ impl<'a> Turn<'a> {
     /// leading system item). Callers can rely on the invariant: every
     /// `HistoryItem::Assistant` in the emitted vec carries its full set of
     /// paired `ToolInvocation`s.
-    fn emit_messages_snapshot(&self) {
+    fn emit_messages_snapshot(&mut self) {
         let items: Vec<HistoryItem> = self
             .history
             .iter()
             .filter(|i| !matches!(i, HistoryItem::System { .. }))
             .cloned()
             .collect();
+        let first_changed_index = self.next_history_changed_from.min(items.len());
+        self.next_history_changed_from = items.len();
         self.emit(EngineEvent::HistoryUpdated {
             turn_id: self.turn_id,
+            first_changed_index,
             history: items,
         });
     }
@@ -948,6 +973,7 @@ impl<'a> Turn<'a> {
                     return;
                 }
                 if protocol::replace_context_note(&mut self.history, &append.item, name) {
+                    self.mark_history_changed_from(0);
                     self.emit_messages_snapshot();
                     return;
                 }
@@ -959,6 +985,7 @@ impl<'a> Turn<'a> {
                     return;
                 }
                 if protocol::remove_context_note(&mut self.history, name) {
+                    self.mark_history_changed_from(0);
                     self.emit_messages_snapshot();
                 }
                 return;
@@ -981,8 +1008,10 @@ impl<'a> Turn<'a> {
                 return;
             }
             if last_note_kind(&self.history) == Some(protocol::HistoryNoteKind::ModeChange) {
+                let changed_from = self.public_history_len().saturating_sub(1);
                 let result = protocol::apply_history_append(&mut self.history, &append);
                 if result != protocol::HistoryAppendResult::Unchanged {
+                    self.mark_history_changed_from(changed_from);
                     self.emit_messages_snapshot();
                 }
                 return;
@@ -993,6 +1022,7 @@ impl<'a> Turn<'a> {
                 return;
             }
             if protocol::replace_last_note_kind(&mut self.history, &append.item, kind) {
+                self.mark_history_changed_from(0);
                 self.emit_messages_snapshot();
                 return;
             }
@@ -1006,6 +1036,7 @@ impl<'a> Turn<'a> {
             return;
         }
         let items = std::mem::take(&mut self.pending_history_items);
+        self.mark_append_history_changed();
         self.history.extend(items);
         self.emit_messages_snapshot();
     }
@@ -1035,8 +1066,11 @@ impl<'a> Turn<'a> {
             .into_iter()
             .filter(|i| !matches!(i, HistoryItem::System { .. }))
             .collect();
+        let first_changed_index = self.next_history_changed_from.min(items.len());
+        self.next_history_changed_from = items.len();
         self.emit(EngineEvent::TurnComplete {
             turn_id: self.turn_id,
+            first_changed_index,
             history: items,
             meta: Some(meta),
         });
@@ -1180,6 +1214,7 @@ impl<'a> Turn<'a> {
                         .iter()
                         .rposition(|i| matches!(i, HistoryItem::User { .. }))
                     {
+                        self.mark_history_changed_from(pos.saturating_sub(1));
                         self.history.remove(pos);
                     }
                 }
@@ -1222,6 +1257,7 @@ impl<'a> Turn<'a> {
                 self.push_turn_content(content, self.display.clone());
             }
             protocol::StartTurnInput::Note { note } => {
+                self.mark_append_history_changed();
                 self.history.push(HistoryItem::note(note));
             }
             protocol::StartTurnInput::User { .. } => {}
@@ -1233,6 +1269,7 @@ impl<'a> Turn<'a> {
         self.history = Vec::with_capacity(history.len() + 2);
         self.history.push(HistoryItem::system(&self.system_prompt));
         self.history.extend(history);
+        self.next_history_changed_from = self.public_history_len();
         self.push_current_turn_input(input);
         self.emit_messages_snapshot();
 
@@ -2717,6 +2754,7 @@ mod tests {
             tools: Vec::new(),
             permission_overrides: None,
             pending_history_items: Vec::new(),
+            next_history_changed_from: 0,
             session_id: "s".into(),
             session_dir: std::path::PathBuf::from("/tmp/s"),
             started_at: Instant::now(),
@@ -2787,13 +2825,17 @@ mod tests {
             }
         }
 
+        let prior = HistoryItem::User {
+            content: Content::text("prior"),
+            display: None,
+        };
         handle.send(UiCommand::StartTurn(Box::new(protocol::StartTurnPayload {
             turn_id: 1,
             input: protocol::StartTurnInput::note(note.clone()),
             mode: AgentMode::normal(),
             model: "m".into(),
             reasoning_effort: ReasoningEffort::Off,
-            history: protocol::ModelHistorySource::items(Vec::new()),
+            history: protocol::ModelHistorySource::items(vec![prior.clone()]),
             api_base: None,
             api_key: None,
             session_id: "s".into(),
@@ -2809,8 +2851,13 @@ mod tests {
                 .await
                 .expect("history snapshot")
             {
-                Some(EngineEvent::HistoryUpdated { history, .. }) => {
-                    assert_eq!(history, vec![HistoryItem::note(note)]);
+                Some(EngineEvent::HistoryUpdated {
+                    history,
+                    first_changed_index,
+                    ..
+                }) => {
+                    assert_eq!(history, vec![prior.clone(), HistoryItem::note(note)]);
+                    assert_eq!(first_changed_index, 1);
                     break;
                 }
                 Some(_) => continue,

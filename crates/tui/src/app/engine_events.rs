@@ -325,23 +325,25 @@ impl TuiApp {
             }
             EngineEvent::HistoryUpdated {
                 turn_id: id,
+                first_changed_index,
                 history,
             } => {
                 if id == turn_id {
-                    self.set_history(history);
+                    self.set_history_from(history, Some(first_changed_index));
                     self.save_session();
                 }
                 SessionControl::Continue
             }
             EngineEvent::TurnComplete {
                 turn_id: id,
+                first_changed_index,
                 history,
                 meta,
             } => {
                 if id != turn_id {
                     return SessionControl::Continue;
                 }
-                self.set_history(history);
+                self.set_history_from(history, Some(first_changed_index));
                 let payload = meta.clone().unwrap_or(protocol::TurnMeta {
                     elapsed_ms: 0,
                     avg_tps: None,
@@ -428,9 +430,13 @@ impl TuiApp {
         match ev {
             // Stale history snapshots from cancelled/completed turns would overwrite a freshly cleared history.
             EngineEvent::HistoryUpdated { .. } => {}
-            EngineEvent::TurnComplete { history, .. } if !history.is_empty() => {
+            EngineEvent::TurnComplete {
+                history,
+                first_changed_index,
+                ..
+            } if !history.is_empty() => {
                 // Persist final messages from a cancelled turn without rebuilding the screen.
-                self.set_history(history);
+                self.set_history_from(history, Some(first_changed_index));
                 self.save_session();
             }
             EngineEvent::EngineAskDelta { id, delta } => {

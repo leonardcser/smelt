@@ -75,6 +75,7 @@ fn turn_complete_still_chains_queued_turn() {
 
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
         turn_id: 1,
+        first_changed_index: 0,
         history: Vec::new(),
         meta: None,
     }));

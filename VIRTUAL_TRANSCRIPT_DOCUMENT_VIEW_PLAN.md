@@ -302,6 +302,20 @@ TRANSCRIPT_HOT_PATH_PERF_VALUE operation=provider_history_read metric=store:hist
 
 The remaining 100k-row wall time is now mostly main-thread full-history snapshot handling in engine `HistoryUpdated`/rewind paths and flush scheduling, not SQLite suffix I/O. The final direction is still typed engine history deltas and typed persistence transactions, but the measured persistence worker bottleneck is removed.
 
+### Engine history snapshots after dirty-prefix hints
+
+Engine history snapshots now carry the first public history index that may differ from the previous UI snapshot. The TUI uses that hint for non-checkpointed sessions, so append-shaped `HistoryUpdated` and `TurnComplete` events can mark the dirty suffix directly instead of comparing every unchanged `HistoryItem` in the snapshot prefix. Checkpointed sessions still fall back to comparison because checkpoint summary merging changes the index mapping.
+
+At 100k history rows the hot-path benchmark confirms the UI no longer performs a full prefix comparison for append-shaped `HistoryUpdated`, while the persisted history suffix remains one row:
+
+```text
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=history_updated metric=tui:set_history:dirty_from_hint count=1 last=100000
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=history_updated runs=1 history_len=100000 mean_ms=20.171
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=history_updated metric=store:history:dirty_suffix_rows count=1 last=1
+```
+
+This is a bounded-work checkpoint, not the final protocol shape. `HistoryUpdated` still carries a full snapshot, so request/turn completion can still allocate and clone total history. The final direction remains typed append, replace, rewind, and checkpoint events that let both TUI and persistence apply bounded SQLite transactions without constructing full-session vectors.
+
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |

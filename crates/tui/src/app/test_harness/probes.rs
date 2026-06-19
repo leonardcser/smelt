@@ -301,6 +301,7 @@ impl TestApp {
                 };
                 self.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
                     turn_id,
+                    first_changed_index: 0,
                     history,
                     meta: None,
                 }));
