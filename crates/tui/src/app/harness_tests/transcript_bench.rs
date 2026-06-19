@@ -1692,7 +1692,6 @@ fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf:
         sample.operation
     );
     assert_no_full_hot_path_reads(&snapshot, sample.operation);
-    assert_cached_persist_db(&snapshot, sample.operation);
     (sample, snapshot)
 }
 

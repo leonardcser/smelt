@@ -142,10 +142,7 @@ impl TestApp {
         let _g = crate::lua::install_app_ptr(&mut self.app);
         self.app.core.signals.emit_dyn(
             "turn_end",
-            std::rc::Rc::new(smelt_core::signals::TurnEnd {
-                cancelled: false,
-                continuation_token: None,
-            }),
+            std::rc::Rc::new(smelt_core::signals::TurnEnd { cancelled: false }),
         );
         self.app.pump_lua();
     }
