@@ -370,19 +370,29 @@ impl TuiApp {
         let sqlite_candidates = self.sqlite_transcript_candidate_blocks(query, origin, direction);
         let candidate_backed = sqlite_candidates.available;
         let candidate_blocks = sqlite_candidates.block_indices;
-        let (key, candidates, scanned_len) = {
+        let (key, candidates, scanned_len, indexed_total_rows) = {
             let candidate_blocks_slice = candidate_backed.then_some(candidate_blocks.as_slice());
             let index = self.ensure_transcript_candidate_index(candidate_blocks_slice)?;
             let preferred = candidate_backed.then_some(candidate_blocks.as_slice());
+            let indexed_total_rows = index
+                .entries
+                .iter()
+                .map(|entry| entry.first_row.saturating_add(entry.rows))
+                .max()
+                .unwrap_or(0);
             (
                 index.key,
                 index.candidate_entries(query, preferred),
                 index.entries.len(),
+                indexed_total_rows,
             )
         };
         smelt_perf::perf::record_value("search:transcript:candidates", candidates.len() as u64);
         let width = self.transcript_width() as u16;
-        let total_rows = self.transcript.estimated_total_rows(&self.lua, width);
+        let total_rows = self
+            .transcript
+            .estimated_total_rows(&self.lua, width)
+            .max(indexed_total_rows);
         Some(TranscriptSearchSession {
             key,
             total_rows,
@@ -476,15 +486,8 @@ impl TuiApp {
                     }
                     _ => None,
                 }?;
-                self.cached_transcript_match(session, wrap_origin, direction)
-                    .or_else(|| {
-                        self.scan_transcript_candidates_until_match(
-                            session,
-                            query,
-                            wrap_origin,
-                            direction,
-                        )
-                    })
+                self.scan_transcript_candidates_until_match(session, query, wrap_origin, direction)
+                    .or_else(|| self.cached_transcript_match(session, wrap_origin, direction))
             }
         }?;
         session.current = Some(current);
