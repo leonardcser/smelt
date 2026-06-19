@@ -179,11 +179,19 @@ async fn mid_turn_messages_snapshot_never_contains_orphan_tool_call() {
                 }
                 all_snapshots.push(("HistoryUpdated", history));
             }
-            Ok(Some(EngineEvent::TurnComplete { history, .. })) => {
-                if let Some(orphans) = snapshot_has_orphan(&history) {
-                    bad_snapshots.push(("TurnComplete", history.clone(), orphans));
+            Ok(Some(EngineEvent::HistoryAppended { items, .. })) => {
+                if let Some(orphans) = snapshot_has_orphan(&items) {
+                    bad_snapshots.push(("HistoryAppended", items.clone(), orphans));
                 }
-                all_snapshots.push(("TurnComplete", history));
+                all_snapshots.push(("HistoryAppended", items));
+            }
+            Ok(Some(EngineEvent::TurnComplete { history, .. })) => {
+                if let Some(history) = history {
+                    if let Some(orphans) = snapshot_has_orphan(&history) {
+                        bad_snapshots.push(("TurnComplete", history.clone(), orphans));
+                    }
+                    all_snapshots.push(("TurnComplete", history));
+                }
                 break;
             }
             Ok(Some(_)) => continue,

@@ -420,7 +420,7 @@ fn lua_session_context_tokens_stays_visible_while_turn_history_is_ahead_of_basel
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
-        history: completed_history.clone(),
+        history: Some(completed_history.clone()),
         meta: None,
     }));
     assert_eq!(app.app.core.session.current_context_tokens(), Some(123));
@@ -2090,7 +2090,7 @@ fn scheduled_reload_runs_after_turn_is_idle() {
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
-        history: vec![],
+        history: None,
         meta: None,
     }));
 

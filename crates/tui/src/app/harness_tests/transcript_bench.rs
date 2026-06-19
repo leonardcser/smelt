@@ -1156,6 +1156,55 @@ fn run_history_appended_hot_path(
     (sample, snapshot)
 }
 
+fn run_turn_complete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
+    let mut app = saved_hot_path_app("turn-complete", history_len, None);
+    app.start_turn(1);
+    let meta = protocol::TurnMeta {
+        elapsed_ms: 1,
+        avg_tps: None,
+        display_tps: None,
+        interrupted: false,
+        tool_elapsed: std::collections::HashMap::new(),
+    };
+    let (sample, snapshot) = capture_hot_path_sample("turn_complete", history_len, || {
+        app.app
+            .dispatch_engine_event(protocol::EngineEvent::TurnComplete {
+                turn_id: 1,
+                first_changed_index: history_len,
+                history: None,
+                meta: Some(meta),
+            });
+        app.app.flush_persist();
+    });
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "persist:write:history_items",
+        0,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "store:session:dirty_suffix_history_rows",
+        0,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "tui:set_history:dirty_prefix_compared",
+        0,
+    );
+    assert_hot_path_at_most(
+        &snapshot,
+        sample.operation,
+        "tui:set_history:dirty_from_hint",
+        0,
+    );
+    assert_no_full_hot_path_reads(&snapshot, sample.operation);
+    assert_cached_persist_db(&snapshot, sample.operation);
+    (sample, snapshot)
+}
+
 fn run_rewind_delete_hot_path(history_len: usize) -> (HotPathSample, smelt_perf::perf::Snapshot) {
     let mut app = saved_hot_path_app("rewind-delete", history_len, None);
     let rewind_block = history_len.saturating_sub(2);
@@ -1292,6 +1341,7 @@ fn transcript_layout_hot_path_benchmark_suite() {
             run_noop_save_hot_path(history_len),
             run_request_append_hot_path(history_len),
             run_history_appended_hot_path(history_len),
+            run_turn_complete_hot_path(history_len),
             run_rewind_delete_hot_path(history_len),
             run_provider_history_hot_path(history_len),
         ] {
@@ -1305,6 +1355,7 @@ fn transcript_layout_hot_path_benchmark_suite() {
         "noop_save",
         "request_append",
         "history_appended",
+        "turn_complete",
         "rewind_delete_suffix",
         "provider_history_read",
     ] {

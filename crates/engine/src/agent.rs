@@ -1088,16 +1088,22 @@ impl<'a> Turn<'a> {
 
     fn emit_turn_complete(&mut self, interrupted: bool) {
         let meta = self.build_meta(interrupted);
-        let items: Vec<HistoryItem> = std::mem::take(&mut self.history)
-            .into_iter()
-            .filter(|i| !matches!(i, HistoryItem::System { .. }))
-            .collect();
-        let first_changed_index = self.next_history_changed_from.min(items.len());
-        self.next_history_changed_from = items.len();
+        let (first_changed_index, history) = if interrupted {
+            let items: Vec<HistoryItem> = std::mem::take(&mut self.history)
+                .into_iter()
+                .filter(|i| !matches!(i, HistoryItem::System { .. }))
+                .collect();
+            let first_changed_index = self.next_history_changed_from.min(items.len());
+            self.next_history_changed_from = items.len();
+            (first_changed_index, Some(items))
+        } else {
+            self.history.clear();
+            (self.next_history_changed_from, None)
+        };
         self.emit(EngineEvent::TurnComplete {
             turn_id: self.turn_id,
             first_changed_index,
-            history: items,
+            history,
             meta: Some(meta),
         });
     }

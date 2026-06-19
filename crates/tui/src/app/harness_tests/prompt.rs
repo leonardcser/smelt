@@ -40,7 +40,7 @@ fn queued_turn_preserves_work_elapsed() {
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
-        history: Vec::new(),
+        history: None,
         meta: None,
     }));
     let after = app.app.working.elapsed().expect("queued turn elapsed");
@@ -492,7 +492,7 @@ fn typing_after_turn_complete_keeps_prompt_cursor_coherent() {
     app.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
         turn_id: 1,
         first_changed_index: 0,
-        history: vec![],
+        history: None,
         meta: None,
     }));
     app.render_silent();

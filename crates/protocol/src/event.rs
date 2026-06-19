@@ -338,7 +338,11 @@ pub enum EngineEvent {
         turn_id: u64,
         /// First public history index that may differ from the previous UI snapshot.
         first_changed_index: usize,
-        history: Vec<crate::history::HistoryItem>,
+        /// Final public history snapshot when completion must repair or persist
+        /// state that may have missed prior deltas. Normal append-only turns use
+        /// `HistoryAppended` and leave this absent.
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        history: Option<Vec<crate::history::HistoryItem>>,
         meta: Option<TurnMeta>,
     },
 

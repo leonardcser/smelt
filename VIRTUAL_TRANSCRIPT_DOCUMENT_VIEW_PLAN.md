@@ -328,14 +328,28 @@ TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=history_appended runs=1 history_len=
 TRANSCRIPT_HOT_PATH_PERF_VALUE operation=history_appended metric=store:history:dirty_suffix_rows count=1 last=1
 ```
 
-This removes full-prefix comparison and full-history event payload construction for append-shaped updates, but persistence still builds suffix payloads from the in-memory session and `TurnComplete` still carries a final snapshot. Remaining work is to make request-start, turn-complete, rewind, and checkpoint persistence use typed transactions end-to-end.
+This removes full-prefix comparison and full-history event payload construction for append-shaped updates, but persistence still builds suffix payloads from the in-memory session. Remaining work is to make request-start, rewind, and checkpoint persistence use typed transactions end-to-end.
+
+### Turn completion without final snapshots
+
+Successful append-only turns now complete with `TurnComplete { history: None }` because all committed history has already arrived through `HistoryAppended`. Cancelled or interrupted turns can still include a repair snapshot. The hot-path benchmark now exercises completion separately and gates that it performs no history writes and no history snapshot merge in the TUI.
+
+At 100k rows, completion avoids full event payload construction and history diffing, but the benchmark exposed a remaining non-SQLite completion cost outside the printed persistence durations:
+
+```text
+TRANSCRIPT_HOT_PATH_BENCH_SUMMARY operation=turn_complete runs=1 history_len=100000 mean_ms=62.656
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=persist:write:history_items count=1 last=0
+TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=store:session:dirty_suffix_history_rows count=1 last=0
+```
+
+This makes turn completion the next persistence/session hot-path target: metadata/context snapshotting and save scheduling still operate through `save_session()` rather than a typed turn-meta/context transaction.
 
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |
 | --- | --- | --- | --- |
 | Session load | `load_session_snapshot` reads all `history_items` into `Vec<HistoryItem>` | resume memory and latency scale with total session size | load metadata, descriptor windows, and bounded model-history cursors separately |
-| Save decision | Dirty suffix markers, a persist-worker SQLite connection cache, append-shaped engine deltas, and DB row hashes avoid reopen, unchanged-prefix writes, and append snapshot scans, but hot paths still construct suffix payloads from in-memory snapshots | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
+| Save decision | Dirty suffix markers, a persist-worker SQLite connection cache, append-shaped engine deltas, optional turn-complete snapshots, and DB row hashes avoid reopen, unchanged-prefix writes, append snapshot scans, and successful completion snapshots, but hot paths still construct suffix payloads from in-memory snapshots | request-start/tool-loop durability can still allocate more than the exact typed delta | typed transactions for appended history, descriptor suffix, title/meta, checkpoint, turn meta, and accounting deltas |
 | Save payload | History and transcript descriptor suffixes are saved together in one SQLite transaction | blob externalization and snapshot construction are still snapshot-shaped | explicit append/replace transactions over dirty rows and objects |
 | Provider dispatch | Interactive `StartTurnPayload.history` uses `ModelHistorySource::Store`; engine reads the requested range from `session.db` | explicit Lua/test/debug callers can still request full model-visible history | keep materialization only for explicit APIs, and prefer store-backed message reads for runtime hooks |
 | Transcript document owner | `TranscriptDocument` owns store identity, descriptor loading policy, sparse descriptor ranges, and render cache, but still delegates most row/index state to eager `Transcript`/`TranscriptProjection` | document ownership is real but not yet sparse enough for arbitrary large-session navigation | move virtual row index, folds, anchors, and payload hydration under `TranscriptDocument` |

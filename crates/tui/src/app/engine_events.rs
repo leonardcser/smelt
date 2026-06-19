@@ -354,7 +354,9 @@ impl TuiApp {
                 if id != turn_id {
                     return SessionControl::Continue;
                 }
-                self.set_history_from(history, Some(first_changed_index));
+                if let Some(history) = history {
+                    self.set_history_from(history, Some(first_changed_index));
+                }
                 let payload = meta.clone().unwrap_or(protocol::TurnMeta {
                     elapsed_ms: 0,
                     avg_tps: None,
@@ -442,7 +444,7 @@ impl TuiApp {
             // Stale history snapshots from cancelled/completed turns would overwrite a freshly cleared history.
             EngineEvent::HistoryUpdated { .. } => {}
             EngineEvent::TurnComplete {
-                history,
+                history: Some(history),
                 first_changed_index,
                 ..
             } if !history.is_empty() => {

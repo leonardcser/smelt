@@ -302,7 +302,7 @@ impl TestApp {
                 self.feed_one(SourceEvent::Engine(EngineEvent::TurnComplete {
                     turn_id,
                     first_changed_index: 0,
-                    history,
+                    history: (!history.is_empty()).then_some(history),
                     meta: None,
                 }));
                 if prediction_probe {
