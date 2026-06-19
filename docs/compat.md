@@ -61,17 +61,17 @@ with `COMPAT(<id>)`.
 - Remove after: SQLite session metadata, history, and transcript descriptors are required for all supported saved sessions
 - Why: explicit open/preview paths still need to display old or partially migrated sessions that lack sparse transcript records or history length metadata
 - Code:
-  - `crates/tui/src/app/lua_handlers.rs`: fallback in `load_session_by_id`
-  - `crates/tui/src/lua/api/session.rs`: fallback in `smelt.session.render_preview_into`
-  - `crates/tui/src/app/history.rs`: fallback transcript rebuild in `rebuild_screen_from_history`
+  - `crates/tui/src/app/lua_handlers.rs`: fallback in `load_session_by_id`, counted by `compat:session:load_full_fallback`
+  - `crates/tui/src/lua/api/session.rs`: fallback in `smelt.session.render_preview_into`, counted by `compat:session:preview_full_fallback`
+  - `crates/tui/src/app/history.rs`: fallback transcript rebuild in `rebuild_screen_from_history`, counted by `compat:session:rebuild_transcript_full_fallback`
 
 ## transcript-deferred-full-descriptor-bridge
 
-- Remove after: normal session resume opens metadata and sparse transcript windows without `session::load` / `load_session_snapshot`
+- Remove after: normal session resume opens metadata and sparse transcript windows without `load_full` / `load_full_session_snapshot`
 - Why: deferred load currently validates the display transcript against a fully materialized semantic session, so it may need a full descriptor merge as a temporary repair bridge
 - Code:
   - `crates/tui/src/app/transcript.rs`: `legacy_merge_full_descriptor_slice_for_deferred_load`
-  - `crates/tui/src/app/history.rs`: deferred session load fallback
+  - `crates/tui/src/app/history.rs`: deferred session load fallback, counted by `compat:session:deferred_load_full`
 
 ## openai-reasoning-summary-shape
 

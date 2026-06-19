@@ -1190,6 +1190,10 @@ mod tests {
             "store:transcript:search_blob_full",
             "store:transcript:read_descriptors_full",
             "store:transcript:descriptors_full_loaded",
+            "compat:session:load_full_fallback",
+            "compat:session:preview_full_fallback",
+            "compat:session:rebuild_transcript_full_fallback",
+            "compat:session:deferred_load_full",
             "transcript:build_from_session:history_items",
         ] {
             assert_perf_value_absent(snapshot, label);

@@ -1708,6 +1708,10 @@ mod checkpoint_tests {
             "store:transcript:search_blob_full",
             "store:transcript:read_descriptors_full",
             "store:transcript:descriptors_full_loaded",
+            "compat:session:load_full_fallback",
+            "compat:session:preview_full_fallback",
+            "compat:session:rebuild_transcript_full_fallback",
+            "compat:session:deferred_load_full",
             "session:save:descriptor_sparse_full_rebuild",
             "transcript:build_from_session:history_items",
         ] {
@@ -1956,6 +1960,37 @@ mod checkpoint_tests {
             descriptors.last().and_then(|row| row.history_idx),
             Some(OLD_HISTORY_LEN as u64)
         );
+    }
+
+    #[test]
+    fn normal_preview_and_open_avoid_compat_full_load_fallbacks() {
+        let mut app = large_saved_session_app("normal-preview-open-compat-gate", 256);
+
+        smelt_perf::perf::clear();
+        smelt_perf::perf::set_enabled(true);
+        {
+            let _guard = crate::lua::install_app_ptr(&mut app.app);
+            app.app
+                .lua
+                .lua
+                .load(
+                    r#"
+                    local buf = smelt.buf.new({})
+                    local out = smelt.session.render_preview_into(
+                        "normal-preview-open-compat-gate",
+                        { buf = buf, width = 80, height = 12 }
+                    )
+                    assert(out ~= nil and out.total_rows > 0)
+                    "#,
+                )
+                .exec()
+                .expect("render sparse session preview");
+        }
+        app.app
+            .load_session_by_id("normal-preview-open-compat-gate");
+        smelt_perf::perf::set_enabled(false);
+
+        assert_no_full_store_reads();
     }
 
     #[test]
