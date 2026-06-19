@@ -94,15 +94,16 @@ local function render_compact_group_list(group, label)
   local children = defaults.group_children(group)
   local max = math.min(#children, GROUP_LIST_MAX)
   local lines = {}
-  for i = 1, max do
+  local start = math.max(1, #children - max + 1)
+  if start > 1 then
+    lines[#lines + 1] = { { text = "… " .. tostring(start - 1) .. " above", dim = true, selectable = false } }
+  end
+  for i = start, #children do
     local child = children[i]
     local span = { text = tostring(label(child)) }
     local hl = child_status_hl(child)
     if hl == "ErrorMsg" then span.hl = hl end
     lines[#lines + 1] = { span }
-  end
-  if #children > max then
-    lines[#lines + 1] = { { text = "… " .. tostring(#children - max) .. " more", dim = true, selectable = false } }
   end
   if #lines == 0 then return layout.empty() end
   return layout.gutter(layout.runs(lines), { text = "  " })

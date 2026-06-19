@@ -3678,6 +3678,38 @@ mod tests {
     }
 
     #[test]
+    fn built_in_tool_group_collapsed_list_shows_tail() {
+        let lua = test_lua();
+        install_read_file_renderer(&lua);
+        let mut transcript = Transcript::new();
+        for i in 1..=6 {
+            let path = format!("file-{i}.rs");
+            push_named_tool(
+                &mut transcript,
+                &format!("read-{i}"),
+                "read_file",
+                &path,
+                ToolStatus::Ok,
+                tool_args(&[("file_path", &path)]),
+            );
+        }
+        let theme = Theme::default();
+        let mut projection = TranscriptProjection::new();
+
+        let rows = projection.build_rows(&lua, &mut transcript.history, 80, &theme);
+
+        assert!(rows.iter().any(|line| line == "* read_file ×6"));
+        assert!(rows.iter().any(|line| line == "  … 1 above"));
+        assert!(!rows.iter().any(|line| line == "  file-1.rs"));
+        for i in 2..=6 {
+            assert!(
+                rows.iter().any(|line| line == &format!("  file-{i}.rs")),
+                "rows: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
     fn grouped_children_remain_in_semantic_block_layout() {
         let lua = test_lua();
         install_read_file_renderer(&lua);
