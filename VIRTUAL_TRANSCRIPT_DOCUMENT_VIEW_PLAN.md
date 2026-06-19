@@ -386,6 +386,33 @@ TRANSCRIPT_HOT_PATH_PERF_VALUE operation=turn_complete metric=lua:session:conver
 
 The metadata-only transaction remains as the deferred save implementation, but successful completion no longer puts commit latency on the turn-end interaction path.
 
+### Final 500 MiB recheck
+
+After the persistence hot-path work, the 500 MiB descriptor-backed resume benchmark still loads only the tail descriptor window and keeps tail rendering bounded:
+
+```text
+TRANSCRIPT_TRUE_RESUME_SAMPLE mode=descriptor_backed target_bytes=524288000 generated_bytes=524288000 descriptors=128000 rows=7551997 setup_ms=16059.491 tail_load_ms=0.784 tail_render_ms=1.521
+TRANSCRIPT_RESUME_PERF_VALUE metric=store:transcript:descriptor_slice_requested count=1 last=80
+TRANSCRIPT_RESUME_PERF_VALUE metric=store:transcript:descriptors_loaded count=1 last=80
+```
+
+The 500 MiB search/view benchmark now covers resize, theme updates, copy, navigation, rare search, common search submission, repeated next-match navigation, and after-append search at the same scale:
+
+```text
+TRANSCRIPT_SEARCH_BENCH_SAMPLE run=1 bytes=524290206 rows=6413965 width_resize_ms=3.976 height_resize_ms=3.020 theme_color_ms=2.784 copy_mid_ms=0.283 nav_ctrl_d20_ms=16.802 nav_ctrl_u20_ms=18.449 nav_gg_ms=0.472 nav_G_ms=3.157 rare_ms=20.400 common_submit_ms=6.341 next100_ms=44.915 after_append_ms=12.571
+```
+
+The latest search run confirms the remaining search cost is bounded candidate/page work rather than whole-session layout or scans. Rare search scanned 512 SQLite candidate rows and exactified 390 display rows; common next-match navigation loaded one 512-candidate page, then scanned 16 entries and exactified 321 rows across 100 next operations. Append search reused the render plan and inspected only the dirty candidate:
+
+```text
+TRANSCRIPT_SEARCH_PERF_VALUE label=rare_cold metric=store:transcript:search_candidate_rows_scanned count=1 last=512
+TRANSCRIPT_SEARCH_PERF_VALUE label=rare_cold metric=transcript:exactified_rows count=65 total=390
+TRANSCRIPT_SEARCH_PERF_VALUE label=common_hot_next100 metric=search:transcript:scanned_entries count=16 total=16
+TRANSCRIPT_SEARCH_PERF_VALUE label=common_hot_next100 metric=transcript:exactified_rows count=16 total=321
+TRANSCRIPT_SEARCH_PERF_VALUE label=after_append metric=search:transcript:dirty_candidate_blocks count=1 last=1
+TRANSCRIPT_SEARCH_PERF_DURATION label=after_append metric=transcript:render_plan count=1 last_us=2
+```
+
 ## Current Violation Map
 
 | Area | Current code | Violation | Final direction |
